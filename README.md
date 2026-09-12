@@ -5,7 +5,9 @@ A unified package manager interface for Linux, built with Rust and Qt/Kirigami.
 PkgDeck is built from one codebase with two frontends:
 
 - `pkgdeck` — GUI frontend using Qt/Kirigami.
-- `pkd` — CLI frontend without Qt.
+- `pkd` — terminal frontend without Qt:
+  - `pkd` opens the interactive TUI.
+  - `pkd <command>` runs a normal CLI command.
 
 Both use the shared `pkgdeck-core` Rust library.
 
@@ -13,13 +15,11 @@ Both use the shared `pkgdeck-core` Rust library.
 
 Current design mockups; implementation is in progress.
 
-### GUI — `pkgdeck`
+![PkgDeck GUI](docs/screenshots/pkgdeck-gui.png)
 
-![PkgDeck GUI](docs/screenshots/pkgdeck-gui.svg)
+![pkd TUI](docs/screenshots/pkd-tui.png)
 
-### CLI — `pkd`
-
-![pkd CLI](docs/screenshots/pkd-cli.svg)
+![pkd CLI](docs/screenshots/pkd-cli.png)
 
 ## Planned initial support
 
@@ -36,7 +36,9 @@ AppImage support will initially cover importing local Type 2 AppImages, desktop 
 ```text
 pkgdeck-core   Shared package-management logic
 pkgdeck        GUI frontend, with Qt/Kirigami
-pkd            CLI frontend, without Qt
+pkd            Terminal frontend, without Qt
+               ├── TUI
+               └── CLI
 ```
 
 ```text
@@ -49,9 +51,15 @@ pkd ─────┘
 
 Each backend exposes the operations it actually supports, such as detection, search, package details, installed packages, install, remove, update, and upgrade. Unsupported operations are reported explicitly.
 
-## CLI
+## Terminal interface
 
-Planned commands include:
+Running `pkd` without arguments opens the interactive TUI:
+
+```sh
+pkd
+```
+
+CLI commands include:
 
 ```sh
 pkd search neovim
@@ -67,13 +75,16 @@ pkd upgrade
 
 Commands will support consistent exit codes and machine-readable `--json` output where applicable.
 
+If stdin or stdout is not attached to a terminal, `pkd` without arguments must not attempt to start the TUI.
+
 ## Implementation plan
 
 ### 1. Project setup
 
 - Create a Cargo workspace containing `pkgdeck-core`, `pkgdeck`, and `pkd`.
-- Keep the core and CLI independent of Qt.
+- Keep the core and `pkd` independent of Qt.
 - Connect the GUI to Qt 6/QML and Kirigami through CXX-Qt.
+- Build the TUI with Rust terminal libraries such as Ratatui and Crossterm.
 - Pin compatible Rust, Qt, Kirigami, and CXX-Qt versions.
 - Build both executables and all package formats in GitHub Actions from the start.
 
@@ -83,15 +94,15 @@ Commands will support consistent exit codes and machine-readable `--json` output
 - Prefer documented APIs and structured output over parsing human-readable text.
 - Execute commands with argument arrays rather than shell strings.
 - Resolve package managers and user environments on the host, not inside a packaging runtime.
-- Keep both frontends unprivileged. Use polkit or existing host authorization mechanisms only for operations that require elevation.
+- Keep all frontends unprivileged. Use polkit or existing host authorization mechanisms only for operations that require elevation.
 - Never elevate Homebrew or user-scoped development tools.
-- Coordinate GUI and CLI writes with native package-manager locks.
+- Coordinate GUI, TUI, and CLI writes with native package-manager locks.
 
 For Flatpak, host package-manager execution will use [`flatpak-spawn --host`][flatpak-spawn] with the required D-Bus permission. AppImage and Snap builds must also validate their host-access and authorization paths before those operations are enabled.
 
 ### 3. First complete workflow
 
-Implement APT and Homebrew first and complete one real lifecycle through both frontends:
+Implement APT and Homebrew first and complete one real lifecycle through the shared engine:
 
 1. detect the backend;
 2. search and inspect a package;
@@ -101,17 +112,19 @@ Implement APT and Homebrew first and complete one real lifecycle through both fr
 6. remove it;
 7. verify the final state using the underlying package manager.
 
+The same lifecycle must work through the GUI and `pkd`, with both TUI and CLI paths where applicable.
+
 ### 4. Expand backend coverage
 
 Add each group only after its supported operations pass integration tests:
 
-| Order | Backends | Initial scope |
-| --- | --- | --- |
-| 1 | APT, Homebrew | Native system packages and Linux formulae. |
-| 2 | AppImage, Flatpak | Local AppImage management and Flatpak user/system installations. |
-| 3 | DNF, Pacman, Zypper, Snap | Native distro operations and Snap lifecycle management. |
-| 4 | Cargo, npm, pnpm, Bun | User-installed CLI tools. |
-| 5 | pip, pipx, uv, Composer, RubyGems | Explicit environments and isolated user-tool installations. |
+| Order | Backends                          | Initial scope                                                    |
+| ----- | --------------------------------- | ---------------------------------------------------------------- |
+| 1     | APT, Homebrew                     | Native system packages and Linux formulae.                       |
+| 2     | AppImage, Flatpak                 | Local AppImage management and Flatpak user/system installations. |
+| 3     | DNF, Pacman, Zypper, Snap         | Native distro operations and Snap lifecycle management.          |
+| 4     | Cargo, npm, pnpm, Bun             | User-installed CLI tools.                                        |
+| 5     | pip, pipx, uv, Composer, RubyGems | Explicit environments and isolated user-tool installations.      |
 
 For AppImages, manage only PkgDeck-owned files and desktop entries. Do not execute an imported AppImage merely to inspect its metadata.
 
@@ -132,21 +145,40 @@ Planned screens:
 
 Use system theme colors, dark mode, keyboard navigation, accessible labels, and virtualized lists or [`TableView`][qt-tableview].
 
-### 6. Packaging and releases
+### 6. TUI
 
-Package `pkgdeck` and `pkd` together in every distribution format. There is no separate CLI release.
+Implement the interactive terminal UI inside `pkd`.
+
+Planned views:
+
+- Search
+- Package details
+- Installed packages
+- Updates
+- Sources
+- Install/remove confirmation
+- Operation progress
+- Errors and authentication failures
+
+The TUI must remain fully usable without Qt or a graphical session and must share the same backend logic and package models as the GUI and CLI.
+
+### 7. Packaging and releases
+
+Package `pkgdeck` and `pkd` together in every distribution format. There is no separate CLI or TUI release.
 
 The planned application ID is `io.github.astrovm.PkgDeck`.
 
-| Format | GUI | CLI |
-| --- | --- | --- |
-| Flatpak | `flatpak run io.github.astrovm.PkgDeck` | `flatpak run --command=pkd io.github.astrovm.PkgDeck <arguments>` |
-| AppImage | `./PkgDeck.AppImage` | `./PkgDeck.AppImage --cli <arguments>` |
-| Snap | `pkgdeck` | `pkgdeck.pkd <arguments>` |
+| Format   | GUI                                      | Terminal interface                                                |
+| -------- | ---------------------------------------- | ----------------------------------------------------------------- |
+| Flatpak  | `flatpak run io.github.astrovm.PkgDeck` | `flatpak run --command=pkd io.github.astrovm.PkgDeck [arguments]` |
+| AppImage | `./PkgDeck.AppImage`                    | `./PkgDeck.AppImage --cli [arguments]`                            |
+| Snap     | `pkgdeck`                                | `pkgdeck.pkd [arguments]`                                         |
+
+With no terminal arguments, the `pkd` entry point opens the TUI. With a subcommand, it behaves as a normal CLI.
 
 #### Flatpak
 
-Build the Flatpak in the PkgDeck GitHub Actions workflow using the KDE runtime. Distribute it through [astrovm/flatpak][flatpak-repository], not Flathub.
+Build the Flatpak in the PkgDeck GitHub Actions workflow using the KDE runtime. Distribute it through https://github.com/astrovm/flatpak, not Flathub.
 
 Release flow:
 
@@ -184,16 +216,17 @@ Flatpak publication to `astrovm/flatpak` and Snap publication to Snapcraft must 
 
 Use real package-manager commands, synthetic versioned packages, and isolated environments.
 
-| Area | Test environment |
-| --- | --- |
-| APT, DNF, Pacman, Zypper | Separate distro containers with pinned images; VMs for privileged desktop workflows. |
-| Homebrew | Disposable non-root Linux environment using the standard Linux Homebrew prefix and a controlled test tap. |
-| Flatpak | Disposable VM with a local test repository and user/system installation tests. |
-| Snap | Ubuntu VM with `snapd`, plus tests of the Snapcraft-published package. |
-| AppImage | CI-built Type 2 fixtures; extraction-based tests in containers and FUSE launch in a VM. |
-| Development managers | Disposable users, homes, prefixes, virtual environments, and controlled test registries. |
-| GUI | Qt Quick Test plus end-to-end packaged-app tests. |
-| CLI | Tests without a display server, including terminal and non-interactive paths. |
+| Area                     | Test environment                                                                                          |
+| ------------------------ | --------------------------------------------------------------------------------------------------------- |
+| APT, DNF, Pacman, Zypper | Separate distro containers with pinned images; VMs for privileged desktop workflows.                      |
+| Homebrew                 | Disposable non-root Linux environment using the standard Linux Homebrew prefix and a controlled test tap. |
+| Flatpak                  | Disposable VM with a local test repository and user/system installation tests.                            |
+| Snap                     | Ubuntu VM with `snapd`, plus tests of the Snapcraft-published package.                                    |
+| AppImage                 | CI-built Type 2 fixtures; extraction-based tests in containers and FUSE launch in a VM.                   |
+| Development managers     | Disposable users, homes, prefixes, virtual environments, and controlled test registries.                  |
+| GUI                      | Qt Quick Test plus end-to-end packaged-app tests.                                                         |
+| TUI                      | Terminal interaction tests in a pseudo-terminal, including resize, keyboard navigation, and cancellation. |
+| CLI                      | Tests without a display server, including scripting, JSON output, exit codes, and non-interactive paths.  |
 
 For every advertised capability, verify success and failure paths and confirm state using the underlying package manager rather than only PkgDeck output.
 
@@ -201,7 +234,7 @@ For every advertised capability, verify success and failure paths and confirm st
 
 Both entry points are built together and included in each CI-produced package:
 
-- **Flatpak:** [astrovm/flatpak][flatpak-repository], served from [flatpak.4st.li][flatpak-site], not Flathub.
+- **Flatpak:** https://github.com/astrovm/flatpak, served from [flatpak.4st.li][flatpak-site], not Flathub.
 - **AppImage:** GitHub Releases.
 - **Snap:** [Snapcraft][snapcraft].
 
