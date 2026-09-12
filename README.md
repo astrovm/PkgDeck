@@ -85,7 +85,11 @@ progress. Layouts must adapt to the window or terminal. Theme colors, icons,
 available packages, and progress indicators must reflect actual platform and
 backend capabilities rather than reproduce the mockups literally.
 
-### 1. Workspace and build pipeline — implementation in progress
+### 1. Workspace and build pipeline — implemented
+
+Implemented in [PR #3](https://github.com/astrovm/PkgDeck/pull/3). The complete
+x86_64/aarch64 build, test, coverage, and package matrix passed in
+[GitHub Actions](https://github.com/astrovm/PkgDeck/actions/runs/34716667650).
 
 - Create the `pkgdeck-core`, `pkd`, and `pkgdeck` Cargo workspace.
 - Keep Qt entirely within `pkgdeck`; build `pkd` independently without Qt.
