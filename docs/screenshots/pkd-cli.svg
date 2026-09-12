@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="900" viewBox="0 0 1400 900">
+  <rect width="1400" height="900" fill="#0f141a"/>
+  <rect x="90" y="70" width="1220" height="760" rx="18" fill="#10161c" stroke="#35414d"/>
+  <rect x="90" y="70" width="1220" height="54" rx="18" fill="#182028"/>
+  <circle cx="120" cy="97" r="8" fill="#ff5f57"/>
+  <circle cx="146" cy="97" r="8" fill="#febc2e"/>
+  <circle cx="172" cy="97" r="8" fill="#28c840"/>
+  <text x="670" y="103" fill="#dce4ec" font-family="monospace" font-size="18">pkd</text>
+
+  <g font-family="monospace" font-size="22">
+    <text x="130" y="170" fill="#5ecbff">$</text>
+    <text x="158" y="170" fill="#6ce08d" font-weight="700">pkd</text>
+    <text x="210" y="170" fill="#e8eef4">search neovim</text>
+
+    <text x="130" y="220" fill="#8ca0b3">NAME</text>
+    <text x="410" y="220" fill="#8ca0b3">SOURCE</text>
+    <text x="650" y="220" fill="#8ca0b3">VERSION</text>
+    <text x="870" y="220" fill="#8ca0b3">DESCRIPTION</text>
+
+    <text x="130" y="264" fill="#e8eef4">neovim</text>
+    <text x="410" y="264" fill="#e8eef4">apt</text>
+    <text x="650" y="264" fill="#e8eef4">0.10.4</text>
+    <text x="870" y="264" fill="#e8eef4">Vim-based text editor</text>
+
+    <text x="130" y="302" fill="#e8eef4">neovim</text>
+    <text x="410" y="302" fill="#e8eef4">flatpak</text>
+    <text x="650" y="302" fill="#e8eef4">0.10.4</text>
+    <text x="870" y="302" fill="#e8eef4">Vim-based text editor</text>
+
+    <text x="130" y="340" fill="#e8eef4">neovim</text>
+    <text x="410" y="340" fill="#e8eef4">homebrew</text>
+    <text x="650" y="340" fill="#e8eef4">0.10.4</text>
+    <text x="870" y="340" fill="#e8eef4">Vim-based text editor</text>
+
+    <text x="130" y="416" fill="#5ecbff">$</text>
+    <text x="158" y="416" fill="#6ce08d" font-weight="700">pkd</text>
+    <text x="210" y="416" fill="#e8eef4">info neovim</text>
+
+    <text x="130" y="462" fill="#8ca0b3">Name</text><text x="350" y="462" fill="#e8eef4">Neovim</text>
+    <text x="130" y="500" fill="#8ca0b3">Version</text><text x="350" y="500" fill="#e8eef4">0.10.4</text>
+    <text x="130" y="538" fill="#8ca0b3">Source</text><text x="350" y="538" fill="#e8eef4">APT</text>
+    <text x="130" y="576" fill="#8ca0b3">Homepage</text><text x="350" y="576" fill="#56b6ff">https://neovim.io</text>
+
+    <text x="130" y="652" fill="#5ecbff">$</text>
+    <text x="158" y="652" fill="#6ce08d" font-weight="700">pkd</text>
+    <text x="210" y="652" fill="#e8eef4">install neovim --from apt</text>
+
+    <text x="160" y="700" fill="#aebac6">Resolving dependencies...</text>
+    <text x="160" y="738" fill="#aebac6">Installing neovim...</text>
+    <text x="160" y="776" fill="#58db7f">✓ Done</text>
+  </g>
+</svg>
