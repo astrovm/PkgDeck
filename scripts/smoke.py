@@ -51,9 +51,10 @@ def terminal(command):
                 if b"foundation." in output and not resized:
                     fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
                     os.kill(pid, signal.SIGWINCH)
-                    os.write(master, b"x")
+                    # Wake the input loop even if SIGWINCH arrived before its handler was installed.
+                    os.write(master, b" ")
                     resized = True
-                elif resized and not sent and output.count(b"\x1b[?25l") >= 2:
+                elif resized and not sent and b"\x1b[2J" in output and b"\x1b[?25l" in output.rsplit(b"\x1b[2J", 1)[1]:
                     os.write(master, key)
                     sent = True
                 done, status = os.waitpid(pid, os.WNOHANG)
@@ -66,7 +67,7 @@ def terminal(command):
                     assert before[3] & mask == after[3] & mask, "Terminal mode was not restored"
                     break
             else:
-                raise AssertionError(f"TUI did not exit: {output!r}")
+                raise AssertionError(f"TUI did not exit after {key!r} (sent={sent}): {output!r}")
         finally:
             if not reaped:
                 os.kill(pid, signal.SIGKILL)

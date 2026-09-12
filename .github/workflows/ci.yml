@@ -16,13 +16,14 @@ concurrency:
 jobs:
   terminal:
     name: Qt-free terminal (${{ matrix.runner }})
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
         runner: [ubuntu-24.04, ubuntu-24.04-arm]
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: rustup show
       - run: cargo fmt --all --check
       - run: cargo clippy --locked -p pkgdeck-core -p pkd --all-targets -- -D warnings
@@ -40,6 +41,7 @@ jobs:
 
   desktop:
     name: GUI, coverage and packages (${{ matrix.arch }})
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -61,29 +63,50 @@ jobs:
       QT_QPA_PLATFORM: offscreen
       QT_QUICK_BACKEND: software
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install build and packaging dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential cmake ninja-build lld pkg-config libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-dev libvulkan-dev libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-shape0 libxcb-xkb1 libxkbcommon-x11-0 libxcb-image0 libxcb-render-util0 libxcb-randr0 libxcb-sync1 libxcb-xfixes0 libxcb-glx0 libdbus-1-3 libfontconfig1 libfreetype6 libopengl0 libpulse0 libgssapi-krb5-2 libnss3 libasound2t64 libxcomposite1 libxdamage1 libxtst6 libwayland-cursor0 libwayland-egl1 flatpak flatpak-builder snapd squashfs-tools zsync desktop-file-utils
           rustup show
           pip install aqtinstall==3.2.1
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: sdk-cache
+        with:
+          path: |
+            build/Qt
+            build/kde
+          key: sdk-${{ matrix.arch }}-qt6.8.3-kf6.12.0-${{ hashFiles('scripts/build-kirigami.sh') }}
       - name: Install pinned Qt and Kirigami
+        if: steps.sdk-cache.outputs.cache-hit != 'true'
         run: |
           aqt install-qt '${{ matrix.qt_host }}' desktop 6.8.3 '${{ matrix.qt_arch }}' -O build/Qt -m qtshadertools qtimageformats
           export PATH="$QT_ROOT_DIR/bin:$PATH"
           export CMAKE_PREFIX_PATH="$QT_ROOT_DIR"
           scripts/build-kirigami.sh
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: steps.sdk-cache.outputs.cache-hit != 'true'
+        with:
+          path: |
+            build/Qt
+            build/kde
+          key: ${{ steps.sdk-cache.outputs.cache-primary-key }}
+      - name: Configure the SDK environment
+        run: |
           echo "$QT_ROOT_DIR/bin" >> "$GITHUB_PATH"
           echo "CMAKE_PREFIX_PATH=$PKGDECK_SDK_PREFIX:$QT_ROOT_DIR" >> "$GITHUB_ENV"
           echo "LD_LIBRARY_PATH=$PKGDECK_SDK_PREFIX/lib:$QT_ROOT_DIR/lib" >> "$GITHUB_ENV"
           echo "QML_IMPORT_PATH=$PKGDECK_SDK_PREFIX/qml:$QT_ROOT_DIR/qml" >> "$GITHUB_ENV"
-      - name: Lint and test all workspace code
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: rust-cache
+        with:
+          path: target
+          key: rust-${{ matrix.arch }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'crates/**', 'scripts/build-kirigami.sh') }}
+      - name: Lint workspace code
         run: |
           cargo fmt --all --check
           cargo clippy --workspace --all-targets --locked -- -D warnings
-          cargo test --workspace --locked
-      - name: Enforce 95 percent Rust line coverage
+      - name: Test workspace and enforce 95 percent coverage
         run: |
           cargo install cargo-llvm-cov --version 0.6.16 --locked
           mkdir -p coverage
@@ -97,6 +120,11 @@ jobs:
           python3 scripts/smoke.py gui build/AppDir/AppRun
           python3 scripts/smoke.py terminal build/AppDir/AppRun --cli
           build/AppDir/AppRun --cli --version
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: steps.rust-cache.outputs.cache-hit != 'true'
+        with:
+          path: target
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
       - name: Build and smoke-test AppImage
         env:
           APPIMAGETOOL: ${{ github.workspace }}/build/appimagetool
@@ -125,12 +153,12 @@ jobs:
           unset LD_LIBRARY_PATH QML_IMPORT_PATH
           python3 scripts/smoke.py gui build/snap-check/AppRun
           python3 scripts/smoke.py terminal build/snap-check/usr/bin/pkd
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: packages-${{ matrix.arch }}
           path: build/artifacts/*
           if-no-files-found: error
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: coverage-${{ matrix.arch }}
           path: coverage/lcov.info

@@ -13,6 +13,7 @@ case "${1:?Usage: scripts/package.sh appimage|flatpak|snap}" in
         ;;
     snap)
         case "$arch" in x86_64) snap_arch=amd64 ;; aarch64) snap_arch=arm64 ;; *) exit 1 ;; esac
+        rm -rf -- build/snap
         mkdir -p build/snap
         cp -a build/AppDir/. build/snap/
         mkdir -p build/snap/meta/gui

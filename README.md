@@ -59,7 +59,7 @@ Running `pkd` without arguments opens the interactive TUI:
 pkd
 ```
 
-CLI commands include:
+Planned CLI commands include:
 
 ```sh
 pkd search neovim

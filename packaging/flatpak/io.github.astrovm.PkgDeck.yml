@@ -14,9 +14,7 @@ modules:
     build-commands:
       - cp -a . /app/
       - mkdir -p /app/bin /app/share
-      - ln -s /app/usr/share/applications /app/share/applications
-      - ln -s /app/usr/share/icons /app/share/icons
-      - ln -s /app/usr/share/metainfo /app/share/metainfo
+      - cp -a /app/usr/share/applications /app/usr/share/icons /app/usr/share/metainfo /app/share/
       - install -m755 flatpak-pkgdeck /app/bin/pkgdeck
       - ln -s /app/usr/bin/pkd /app/bin/pkd
     sources:
