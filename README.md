@@ -254,7 +254,7 @@ through `--smoke-test`. The CI workflow is the authoritative build recipe.
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo install cargo-llvm-cov --version 0.6.16 --locked
-cargo llvm-cov --workspace --locked --fail-under-lines 95
+cargo llvm-cov --workspace --include-build-script --locked --fail-under-lines 95
 ```
 
 For local package staging, build the release workspace, run

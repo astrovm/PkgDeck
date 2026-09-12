@@ -31,3 +31,18 @@ fn kirigami_window_loads_and_exits() {
         .unwrap();
     assert!(status.success());
 }
+
+#[test]
+fn invalid_qml_module_fails_without_hanging() {
+    let status = Command::new("python3")
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../scripts/smoke.py"
+        ))
+        .args(["gui-failure", env!("CARGO_BIN_EXE_pkgdeck")])
+        .env("QT_QPA_PLATFORM", "offscreen")
+        .env("QT_QUICK_BACKEND", "software")
+        .status()
+        .unwrap();
+    assert!(status.success());
+}

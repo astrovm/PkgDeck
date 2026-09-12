@@ -11,6 +11,8 @@ import struct
 import subprocess
 import termios
 import time
+import tempfile
+from pathlib import Path
 
 
 def terminal(command):
@@ -35,6 +37,7 @@ def terminal(command):
         output = b""
         deadline = time.monotonic() + 15
         sent = False
+        resized = False
         reaped = False
         try:
             while time.monotonic() < deadline:
@@ -45,10 +48,13 @@ def terminal(command):
                     except OSError as error:
                         if error.errno != errno.EIO:
                             raise
-                if b"foundation." in output and not sent:
+                if b"foundation." in output and not resized:
                     fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
                     os.kill(pid, signal.SIGWINCH)
-                    os.write(master, b"x" + key)
+                    os.write(master, b"x")
+                    resized = True
+                elif resized and not sent and output.count(b"\x1b[?25l") >= 2:
+                    os.write(master, key)
                     sent = True
                 done, status = os.waitpid(pid, os.WNOHANG)
                 if done:
@@ -75,10 +81,21 @@ def gui(command):
     assert "failed to load" not in result.stderr.lower(), result.stderr
 
 
+def gui_failure(command):
+    with tempfile.TemporaryDirectory(prefix="pkgdeck-qml-fixture-") as directory:
+        module = Path(directory) / "org/kde/kirigami"
+        module.mkdir(parents=True)
+        (module / "qmldir").write_text("module org.kde.kirigami\nplugin pkgdeck_fixture_missing\n")
+        env = dict(os.environ, QML_IMPORT_PATH=directory + ":" + os.environ.get("QML_IMPORT_PATH", ""))
+        result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=15)
+        assert result.returncode == 1, result.stderr
+        assert "failed to load component" in result.stderr, result.stderr
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("kind", choices=("terminal", "gui"))
+    parser.add_argument("kind", choices=("terminal", "gui", "gui-failure"))
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     assert args.command
-    {"terminal": terminal, "gui": gui}[args.kind](args.command)
+    {"terminal": terminal, "gui": gui, "gui-failure": gui_failure}[args.kind](args.command)
