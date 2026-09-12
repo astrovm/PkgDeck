@@ -92,6 +92,7 @@ jobs:
           cargo build --workspace --release --locked
           python3 scripts/bundle.py
           desktop-file-validate assets/io.github.astrovm.PkgDeck.desktop
+          unset LD_LIBRARY_PATH QML_IMPORT_PATH
           python3 scripts/smoke.py gui build/AppDir/AppRun
           python3 scripts/smoke.py terminal build/AppDir/AppRun --cli
           build/AppDir/AppRun --cli --version
@@ -102,6 +103,7 @@ jobs:
           curl -fL --retry 3 'https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-${{ matrix.arch }}.AppImage' -o "$APPIMAGETOOL"
           chmod +x "$APPIMAGETOOL"
           scripts/package.sh appimage
+          unset LD_LIBRARY_PATH QML_IMPORT_PATH
           export APPIMAGE_EXTRACT_AND_RUN=1
           python3 scripts/smoke.py gui 'build/artifacts/PkgDeck-${{ matrix.arch }}.AppImage'
           python3 scripts/smoke.py terminal 'build/artifacts/PkgDeck-${{ matrix.arch }}.AppImage' --cli
@@ -119,6 +121,7 @@ jobs:
           unsquashfs -d build/snap-check build/artifacts/*.snap
           test -x build/snap-check/usr/bin/pkgdeck
           test -x build/snap-check/usr/bin/pkd
+          unset LD_LIBRARY_PATH QML_IMPORT_PATH
           python3 scripts/smoke.py gui build/snap-check/AppRun
           python3 scripts/smoke.py terminal build/snap-check/usr/bin/pkd
       - uses: actions/upload-artifact@v4

@@ -8,7 +8,9 @@ import subprocess
 
 root = Path(__file__).resolve().parents[1]
 out = root / "build/AppDir"
-out.mkdir(parents=True, exist_ok=True)
+if out.exists():
+    shutil.rmtree(out)
+out.mkdir(parents=True)
 qt = Path(os.environ["QT_ROOT_DIR"])
 kde = Path(os.environ["PKGDECK_SDK_PREFIX"])
 lib = out / "usr/lib"
@@ -17,13 +19,27 @@ for name in ("pkd", "pkgdeck"):
     dest = out / "usr/bin" / name
     dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(root / "target/release" / name, dest)
-for prefix in (qt, kde):
-    for directory in ("qml", "plugins"):
-        source = prefix / directory
+# Only deploy the QML modules and plugins used by the foundation. Their shared
+# libraries are collected below, avoiding optional database/multimedia drivers.
+for prefix, modules in ((qt, ("QtQuick", "QtQml")), (kde, ("org",))):
+    for module in modules:
+        source = prefix / "qml" / module
         if source.exists():
-            shutil.copytree(source, out / "usr" / directory, dirs_exist_ok=True)
-    for source in (prefix / "lib").glob("*.so*"):
-        shutil.copy2(source, lib / source.name)
+            shutil.copytree(source, out / "usr/qml" / module, dirs_exist_ok=True)
+for directory, patterns in {
+    "platforms": ("libqoffscreen.so", "libqminimal.so", "libqxcb.so", "libqwayland*.so"),
+    "imageformats": ("libqjpeg.so", "libqsvg.so", "libqico.so"),
+    "iconengines": ("*.so",),
+    "xcbglintegrations": ("*.so",),
+    "wayland-graphics-integration-client": ("*.so",),
+    "wayland-shell-integration": ("*.so",),
+    "platforminputcontexts": ("libcomposeplatforminputcontextplugin.so", "libibusplatforminputcontextplugin.so"),
+}.items():
+    dest = out / "usr/plugins" / directory
+    dest.mkdir(parents=True, exist_ok=True)
+    for pattern in patterns:
+        for source in (qt / "plugins" / directory).glob(pattern):
+            shutil.copy2(source, dest / source.name)
 shutil.copy2(root / "packaging/appimage/AppRun", out / "AppRun")
 (out / "AppRun").chmod(0o755)
 for suffix, directory in (("desktop", "applications"), ("metainfo.xml", "metainfo"), ("svg", "icons/hicolor/scalable/apps")):

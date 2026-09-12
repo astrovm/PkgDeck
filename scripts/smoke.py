@@ -14,6 +14,17 @@ import time
 
 
 def terminal(command):
+    # Either redirected stream must prevent TUI startup, even if the other is a TTY.
+    master, slave = pty.openpty()
+    try:
+        for stdin, stdout in ((subprocess.DEVNULL, slave), (slave, subprocess.PIPE)):
+            result = subprocess.run(command, stdin=stdin, stdout=stdout,
+                                    stderr=subprocess.PIPE, timeout=10)
+            assert result.returncode == 2, result.stderr
+            assert b"requires a terminal" in result.stderr, result.stderr
+    finally:
+        os.close(slave)
+        os.close(master)
     for key in (b"q", b"\x1b", b"\x03"):
         pid, master = pty.fork()
         if pid == 0:
