@@ -86,6 +86,7 @@ jobs:
       - name: Enforce 95 percent Rust line coverage
         run: |
           cargo install cargo-llvm-cov --version 0.6.16 --locked
+          mkdir -p coverage
           cargo llvm-cov --workspace --locked --fail-under-lines 95 --lcov --output-path coverage/lcov.info
       - name: Build and stage both executables
         run: |
