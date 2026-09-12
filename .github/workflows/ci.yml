@@ -58,7 +58,7 @@ jobs:
             qt_dir: gcc_arm64
     runs-on: ${{ matrix.runner }}
     env:
-      QT_ROOT_DIR: ${{ github.workspace }}/build/Qt/6.8.3/${{ matrix.qt_dir }}
+      QT_ROOT_DIR: ${{ github.workspace }}/build/Qt/6.11.2/${{ matrix.qt_dir }}
       PKGDECK_SDK_PREFIX: ${{ github.workspace }}/build/kde
       QT_QPA_PLATFORM: offscreen
       QT_QUICK_BACKEND: software
@@ -69,18 +69,18 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential cmake ninja-build lld pkg-config libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-dev libvulkan-dev libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-shape0 libxcb-xkb1 libxkbcommon-x11-0 libxcb-image0 libxcb-render-util0 libxcb-randr0 libxcb-sync1 libxcb-xfixes0 libxcb-glx0 libdbus-1-3 libfontconfig1 libfreetype6 libopengl0 libpulse0 libgssapi-krb5-2 libnss3 libasound2t64 libxcomposite1 libxdamage1 libxtst6 libwayland-cursor0 libwayland-egl1 flatpak flatpak-builder snapd squashfs-tools zsync desktop-file-utils
           rustup show
-          pip install aqtinstall==3.2.1
+          pip install aqtinstall==3.3.0 cmake==4.4.3
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         id: sdk-cache
         with:
           path: |
             build/Qt
             build/kde
-          key: sdk-${{ matrix.arch }}-qt6.8.3-kf6.12.0-${{ hashFiles('scripts/build-kirigami.sh') }}
+          key: sdk-${{ matrix.arch }}-qt6.11.2-kf6.30.0-${{ hashFiles('scripts/build-kirigami.sh') }}
       - name: Install pinned Qt and Kirigami
         if: steps.sdk-cache.outputs.cache-hit != 'true'
         run: |
-          aqt install-qt '${{ matrix.qt_host }}' desktop 6.8.3 '${{ matrix.qt_arch }}' -O build/Qt -m qtshadertools qtimageformats
+          aqt install-qt '${{ matrix.qt_host }}' desktop 6.11.2 '${{ matrix.qt_arch }}' -O build/Qt -m qtshadertools qtimageformats
           export PATH="$QT_ROOT_DIR/bin:$PATH"
           export CMAKE_PREFIX_PATH="$QT_ROOT_DIR"
           scripts/build-kirigami.sh
@@ -108,7 +108,7 @@ jobs:
           cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Test workspace and enforce 95 percent coverage
         run: |
-          cargo install cargo-llvm-cov --version 0.6.16 --locked
+          cargo install cargo-llvm-cov --version 0.9.1 --locked
           mkdir -p coverage
           cargo llvm-cov --workspace --include-build-script --locked --fail-under-lines 95 --lcov --output-path coverage/lcov.info
       - name: Build and stage both executables
@@ -139,7 +139,7 @@ jobs:
       - name: Build and smoke-test Flatpak
         run: |
           flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
-          flatpak install --user -y --noninteractive flathub org.kde.Platform//6.8 org.kde.Sdk//6.8
+          flatpak install --user -y --noninteractive flathub org.kde.Platform//6.11 org.kde.Sdk//6.11
           scripts/package.sh flatpak
           flatpak install --user -y --noninteractive 'build/artifacts/PkgDeck-${{ matrix.arch }}.flatpak'
           python3 scripts/smoke.py gui flatpak run --env=QT_QPA_PLATFORM=offscreen --env=QT_QUICK_BACKEND=software io.github.astrovm.PkgDeck

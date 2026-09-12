@@ -87,9 +87,9 @@ backend capabilities rather than reproduce the mockups literally.
 
 ### 1. Workspace and build pipeline — implemented
 
-Implemented in [PR #3](https://github.com/astrovm/PkgDeck/pull/3). The complete
-x86_64/aarch64 build, test, coverage, and package matrix passed in
-[GitHub Actions](https://github.com/astrovm/PkgDeck/actions/runs/34716667650).
+Implemented in [PR #3](https://github.com/astrovm/PkgDeck/pull/3).
+[GitHub Actions](https://github.com/astrovm/PkgDeck/actions/workflows/ci.yml)
+verifies the complete x86_64/aarch64 build, test, coverage, and package matrix.
 
 - Create the `pkgdeck-core`, `pkd`, and `pkgdeck` Cargo workspace.
 - Keep Qt entirely within `pkgdeck`; build `pkd` independently without Qt.
@@ -210,12 +210,15 @@ Pinned baseline:
 
 | Component | Version |
 | --- | --- |
-| Rust | 1.88.0 |
-| Qt | 6.8.3 |
-| Kirigami / Extra CMake Modules | 6.12.0 |
-| CXX-Qt | 0.8.1 |
-| CXX / CXX generator | 1.0.194 / 0.7.194 |
-| Ratatui / Crossterm | 0.29.0 / 0.28.1 |
+| Rust | 1.98.1 |
+| Qt | 6.11.2 |
+| Kirigami / Extra CMake Modules | 6.30.0 |
+| CXX-Qt | 0.10.0 |
+| CXX / CXX generator | 1.0.202 / 0.7.202 |
+| Ratatui / Crossterm | 0.30.2 / 0.29.0 |
+| Clap | 4.6.6 |
+| CMake / aqtinstall | 4.4.3 / 3.3.0 |
+| cargo-llvm-cov | 0.9.1 |
 
 `Cargo.lock` is committed. Use the pinned toolchain and `--locked` in builds.
 The CXX generator is pinned alongside CXX because they must use the same bridge ABI.
@@ -234,11 +237,11 @@ to exit. With piped input/output, no-argument execution fails with exit code 2.
 Python 3 is required for the pseudo-terminal integration tests.
 
 For the GUI, install the pinned Qt SDK (including ShaderTools and ImageFormats),
-a C++ compiler, CMake, Ninja, lld, and the platform development libraries listed
+a C++ compiler, the pinned CMake (Kirigami requires at least 3.29), Ninja, lld, and the platform development libraries listed
 in `.github/workflows/ci.yml`. Build Kirigami into a local SDK prefix:
 
 ```sh
-export QT_ROOT_DIR=/absolute/path/to/Qt/6.8.3/gcc_64
+export QT_ROOT_DIR=/absolute/path/to/Qt/6.11.2/gcc_64
 export PKGDECK_SDK_PREFIX="$PWD/build/kde"
 export PATH="$QT_ROOT_DIR/bin:$PATH"
 export CMAKE_PREFIX_PATH="$QT_ROOT_DIR"
@@ -257,7 +260,7 @@ through `--smoke-test`. The CI workflow is the authoritative build recipe.
 ```sh
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo install cargo-llvm-cov --version 0.6.16 --locked
+cargo install cargo-llvm-cov --version 0.9.1 --locked
 cargo llvm-cov --workspace --include-build-script --locked --fail-under-lines 95
 ```
 
@@ -269,7 +272,7 @@ For local package staging, build the release workspace, run
 Initial CI checks cover extracted Snap contents and entry points. Installed Snap
 confinement, privileged host operations, FUSE-based AppImage launching, release
 signing, and publication are later acceptance gates; foundation artifacts are
-not production-ready package managers. The Flatpak build uses the KDE 6.8 runtime
+not production-ready package managers. The Flatpak build uses the KDE 6.11 runtime
 and bundles the pinned Qt/Kirigami libraries; Flathub supplies runtime dependencies
 only, not PkgDeck distribution.
 
