@@ -211,6 +211,7 @@ Pinned baseline:
 | Component | Version |
 | --- | --- |
 | Rust | 1.98.1 |
+| Python (CI) | 3.14.7 |
 | Qt | 6.11.2 |
 | Kirigami / Extra CMake Modules | 6.30.0 |
 | CXX-Qt | 0.10.0 |
@@ -222,6 +223,8 @@ Pinned baseline:
 
 `Cargo.lock` is committed. Use the pinned toolchain and `--locked` in builds.
 The CXX generator is pinned alongside CXX because they must use the same bridge ABI.
+Use Python 3.14 for aqtinstall: Python 3.12 can misidentify the Qt 6.11.2 ARM
+QtTools archive as ZIP and fail extraction with aqtinstall 3.3.
 
 Build and test the terminal frontend without installing Qt:
 

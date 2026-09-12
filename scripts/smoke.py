@@ -38,6 +38,7 @@ def terminal(command):
         deadline = time.monotonic() + 15
         sent = False
         resized = False
+        input_started = False
         reaped = False
         try:
             while time.monotonic() < deadline:
@@ -48,11 +49,15 @@ def terminal(command):
                     except OSError as error:
                         if error.errno != errno.EIO:
                             raise
-                if b"foundation." in output and not resized:
-                    fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
-                    os.kill(pid, signal.SIGWINCH)
-                    # Wake the input loop even if SIGWINCH arrived before its handler was installed.
+                if b"foundation." in output and b"\x1b[?25l" in output and not input_started:
+                    # Wait for a key-driven redraw before resizing: this proves the
+                    # event reader has installed its signal handler and consumed input.
                     os.write(master, b" ")
+                    input_started = True
+                    output = b""
+                elif input_started and not resized and b"\x1b[?25l" in output:
+                    # TIOCSWINSZ sends SIGWINCH to the foreground process group.
+                    fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
                     resized = True
                 elif resized and not sent and b"\x1b[2J" in output and b"\x1b[?25l" in output.rsplit(b"\x1b[2J", 1)[1]:
                     os.write(master, key)
@@ -86,7 +91,8 @@ def gui_failure(command):
     with tempfile.TemporaryDirectory(prefix="pkgdeck-qml-fixture-") as directory:
         module = Path(directory) / "org/kde/kirigami"
         module.mkdir(parents=True)
-        (module / "qmldir").write_text("module org.kde.kirigami\nplugin pkgdeck_fixture_missing\n")
+        (module / "qmldir").write_text("module org.kde.kirigami\nApplicationWindow 1.0 Broken.qml\n")
+        (module / "Broken.qml").write_text("import QtQuick\nItem { pkgdeckMissingProperty: true }\n")
         env = dict(os.environ, QML_IMPORT_PATH=directory + ":" + os.environ.get("QML_IMPORT_PATH", ""))
         result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=15)
         assert result.returncode == 1, result.stderr
