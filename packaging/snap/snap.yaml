@@ -1,0 +1,16 @@
+name: pkgdeck
+version: '0.1.0'
+summary: Unified package manager interface for Linux
+description: |
+  GUI and terminal frontends for PkgDeck. Foundation build; package
+  management operations are not implemented yet.
+base: core24
+grade: devel
+confinement: strict
+architectures: [ARCHITECTURE]
+apps:
+  pkgdeck:
+    command: AppRun
+    plugs: [desktop, desktop-legacy, wayland, x11, opengl]
+  pkd:
+    command: usr/bin/pkd

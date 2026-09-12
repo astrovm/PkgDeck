@@ -1,0 +1,29 @@
+[workspace]
+members = ["crates/pkgdeck-core", "crates/pkd", "crates/pkgdeck"]
+default-members = ["crates/pkgdeck-core", "crates/pkd"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.98"
+license = "MIT"
+repository = "https://github.com/astrovm/PkgDeck"
+
+[workspace.dependencies]
+pkgdeck-core = { path = "crates/pkgdeck-core" }
+clap = { version = "=4.6.6", features = ["derive"] }
+crossterm = "=0.29.0"
+ratatui = "=0.30.2"
+cxx = "=1.0.202"
+cxx-qt = "=0.10.0"
+cxx-qt-lib = { version = "=0.10.0", features = ["qt_gui", "qt_qml", "qt_quickcontrols"] }
+cxx-qt-build = "=0.10.0"
+# Keep the CXX runtime and code generator on the same ABI revision.
+cxx-gen = "=0.7.202"
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+
+[workspace.lints.clippy]
+all = "warn"

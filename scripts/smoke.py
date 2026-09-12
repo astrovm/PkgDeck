@@ -1,0 +1,108 @@
+#!/usr/bin/env python3
+"""Behavioral smoke checks; uses disposable PTYs and never manages packages."""
+import argparse
+import errno
+import fcntl
+import os
+import pty
+import select
+import signal
+import struct
+import subprocess
+import termios
+import time
+import tempfile
+from pathlib import Path
+
+
+def terminal(command):
+    # Either redirected stream must prevent TUI startup, even if the other is a TTY.
+    master, slave = pty.openpty()
+    try:
+        for stdin, stdout in ((subprocess.DEVNULL, slave), (slave, subprocess.PIPE)):
+            result = subprocess.run(command, stdin=stdin, stdout=stdout,
+                                    stderr=subprocess.PIPE, timeout=10)
+            assert result.returncode == 2, result.stderr
+            assert b"requires a terminal" in result.stderr, result.stderr
+    finally:
+        os.close(slave)
+        os.close(master)
+    for key in (b"q", b"\x1b", b"\x03"):
+        pid, master = pty.fork()
+        if pid == 0:
+            fcntl.ioctl(1, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
+            os.environ["TERM"] = "xterm-256color"
+            os.execvp(command[0], command)
+        before = termios.tcgetattr(master)
+        output = b""
+        deadline = time.monotonic() + 15
+        sent = False
+        resized = False
+        input_started = False
+        reaped = False
+        try:
+            while time.monotonic() < deadline:
+                ready, _, _ = select.select([master], [], [], 0.1)
+                if ready:
+                    try:
+                        output += os.read(master, 65536)
+                    except OSError as error:
+                        if error.errno != errno.EIO:
+                            raise
+                if b"foundation." in output and b"\x1b[?25l" in output and not input_started:
+                    # Wait for a key-driven redraw before resizing: this proves the
+                    # event reader has installed its signal handler and consumed input.
+                    os.write(master, b" ")
+                    input_started = True
+                    output = b""
+                elif input_started and not resized and b"\x1b[?25l" in output:
+                    # TIOCSWINSZ sends SIGWINCH to the foreground process group.
+                    fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+                    resized = True
+                elif resized and not sent and b"\x1b[2J" in output and b"\x1b[?25l" in output.rsplit(b"\x1b[2J", 1)[1]:
+                    os.write(master, key)
+                    sent = True
+                done, status = os.waitpid(pid, os.WNOHANG)
+                if done:
+                    reaped = True
+                    assert os.waitstatus_to_exitcode(status) == 0, output
+                    assert sent and b"available" in output and b"PkgDeck" in output, output
+                    after = termios.tcgetattr(master)
+                    mask = termios.ECHO | termios.ICANON
+                    assert before[3] & mask == after[3] & mask, "Terminal mode was not restored"
+                    break
+            else:
+                raise AssertionError(f"TUI did not exit after {key!r} (sent={sent}): {output!r}")
+        finally:
+            if not reaped:
+                os.kill(pid, signal.SIGKILL)
+                os.waitpid(pid, 0)
+            os.close(master)
+
+
+def gui(command):
+    result = subprocess.run(command + ["--smoke-test"], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert "PKGDECK_GUI_READY" in result.stderr, result.stderr
+    assert "failed to load" not in result.stderr.lower(), result.stderr
+
+
+def gui_failure(command):
+    with tempfile.TemporaryDirectory(prefix="pkgdeck-qml-fixture-") as directory:
+        module = Path(directory) / "org/kde/kirigami"
+        module.mkdir(parents=True)
+        (module / "qmldir").write_text("module org.kde.kirigami\nApplicationWindow 1.0 Broken.qml\n")
+        (module / "Broken.qml").write_text("import QtQuick\nItem { pkgdeckMissingProperty: true }\n")
+        env = dict(os.environ, QML_IMPORT_PATH=directory + ":" + os.environ.get("QML_IMPORT_PATH", ""))
+        result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=15)
+        assert result.returncode == 1, result.stderr
+        assert "failed to load component" in result.stderr, result.stderr
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("kind", choices=("terminal", "gui", "gui-failure"))
+    parser.add_argument("command", nargs=argparse.REMAINDER)
+    args = parser.parse_args()
+    assert args.command
+    {"terminal": terminal, "gui": gui, "gui-failure": gui_failure}[args.kind](args.command)

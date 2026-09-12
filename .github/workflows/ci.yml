@@ -1,0 +1,171 @@
+name: CI
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  terminal:
+    name: Qt-free terminal (${{ matrix.runner }})
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14.7'
+      - run: rustup show
+      - run: cargo fmt --all --check
+      - run: cargo clippy --locked -p pkgdeck-core -p pkd --all-targets -- -D warnings
+      - run: cargo test --locked -p pkgdeck-core -p pkd
+      - run: |
+          cargo build --locked -p pkd
+          if cargo tree -p pkd | grep -E 'cxx-qt|qt-build'; then
+            echo 'Qt dependency leaked into pkd' >&2
+            exit 1
+          fi
+          if ldd target/debug/pkd | grep -i qt; then
+            echo 'pkd links Qt' >&2
+            exit 1
+          fi
+
+  desktop:
+    name: GUI, coverage and packages (${{ matrix.arch }})
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+            qt_host: linux
+            qt_arch: linux_gcc_64
+            qt_dir: gcc_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+            qt_host: linux_arm64
+            qt_arch: linux_gcc_arm64
+            qt_dir: gcc_arm64
+    runs-on: ${{ matrix.runner }}
+    env:
+      QT_ROOT_DIR: ${{ github.workspace }}/build/Qt/6.11.2/${{ matrix.qt_dir }}
+      PKGDECK_SDK_PREFIX: ${{ github.workspace }}/build/kde
+      QT_QPA_PLATFORM: offscreen
+      QT_QUICK_BACKEND: software
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14.7'
+      - name: Install build and packaging dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake ninja-build lld pkg-config libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-dev libvulkan-dev libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-shape0 libxcb-xkb1 libxkbcommon-x11-0 libxcb-image0 libxcb-render-util0 libxcb-randr0 libxcb-sync1 libxcb-xfixes0 libxcb-glx0 libdbus-1-3 libfontconfig1 libfreetype6 libopengl0 libpulse0 libgssapi-krb5-2 libnss3 libasound2t64 libxcomposite1 libxdamage1 libxtst6 libwayland-cursor0 libwayland-egl1 flatpak flatpak-builder snapd squashfs-tools zsync desktop-file-utils
+          rustup show
+          pip install aqtinstall==3.3.0 cmake==4.4.3
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: sdk-cache
+        with:
+          path: |
+            build/Qt
+            build/kde
+          key: sdk-${{ matrix.arch }}-qt6.11.2-kf6.30.0-${{ hashFiles('scripts/build-kirigami.sh') }}
+      - name: Install pinned Qt and Kirigami
+        if: steps.sdk-cache.outputs.cache-hit != 'true'
+        run: |
+          aqt install-qt '${{ matrix.qt_host }}' desktop 6.11.2 '${{ matrix.qt_arch }}' -O build/Qt -m qtshadertools qtimageformats
+          export PATH="$QT_ROOT_DIR/bin:$PATH"
+          export CMAKE_PREFIX_PATH="$QT_ROOT_DIR"
+          scripts/build-kirigami.sh
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: steps.sdk-cache.outputs.cache-hit != 'true'
+        with:
+          path: |
+            build/Qt
+            build/kde
+          key: ${{ steps.sdk-cache.outputs.cache-primary-key }}
+      - name: Configure the SDK environment
+        run: |
+          echo "$QT_ROOT_DIR/bin" >> "$GITHUB_PATH"
+          echo "CMAKE_PREFIX_PATH=$PKGDECK_SDK_PREFIX:$QT_ROOT_DIR" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$PKGDECK_SDK_PREFIX/lib:$QT_ROOT_DIR/lib" >> "$GITHUB_ENV"
+          echo "QML_IMPORT_PATH=$PKGDECK_SDK_PREFIX/qml:$QT_ROOT_DIR/qml" >> "$GITHUB_ENV"
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: rust-cache
+        with:
+          path: target
+          key: rust-${{ matrix.arch }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'crates/**', 'scripts/build-kirigami.sh') }}
+      - name: Lint workspace code
+        run: |
+          cargo fmt --all --check
+          cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Test workspace and enforce 95 percent coverage
+        run: |
+          cargo install cargo-llvm-cov --version 0.9.1 --locked
+          mkdir -p coverage
+          cargo llvm-cov --workspace --include-build-script --locked --fail-under-lines 95 --lcov --output-path coverage/lcov.info
+      - name: Build and stage both executables
+        run: |
+          cargo build --workspace --release --locked
+          python3 scripts/bundle.py
+          desktop-file-validate assets/io.github.astrovm.PkgDeck.desktop
+          unset LD_LIBRARY_PATH QML_IMPORT_PATH
+          python3 scripts/smoke.py gui build/AppDir/AppRun
+          python3 scripts/smoke.py terminal build/AppDir/AppRun --cli
+          build/AppDir/AppRun --cli --version
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: steps.rust-cache.outputs.cache-hit != 'true'
+        with:
+          path: target
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
+      - name: Build and smoke-test AppImage
+        env:
+          APPIMAGETOOL: ${{ github.workspace }}/build/appimagetool
+        run: |
+          curl -fL --retry 3 'https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-${{ matrix.arch }}.AppImage' -o "$APPIMAGETOOL"
+          chmod +x "$APPIMAGETOOL"
+          scripts/package.sh appimage
+          unset LD_LIBRARY_PATH QML_IMPORT_PATH
+          export APPIMAGE_EXTRACT_AND_RUN=1
+          python3 scripts/smoke.py gui 'build/artifacts/PkgDeck-${{ matrix.arch }}.AppImage'
+          python3 scripts/smoke.py terminal 'build/artifacts/PkgDeck-${{ matrix.arch }}.AppImage' --cli
+      - name: Build and smoke-test Flatpak
+        run: |
+          flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+          flatpak install --user -y --noninteractive flathub org.kde.Platform//6.11 org.kde.Sdk//6.11
+          scripts/package.sh flatpak
+          flatpak install --user -y --noninteractive 'build/artifacts/PkgDeck-${{ matrix.arch }}.flatpak'
+          python3 scripts/smoke.py gui flatpak run --env=QT_QPA_PLATFORM=offscreen --env=QT_QUICK_BACKEND=software io.github.astrovm.PkgDeck
+          python3 scripts/smoke.py terminal flatpak run --command=pkd io.github.astrovm.PkgDeck
+      - name: Build and inspect Snap
+        run: |
+          scripts/package.sh snap
+          unsquashfs -d build/snap-check build/artifacts/*.snap
+          test -x build/snap-check/usr/bin/pkgdeck
+          test -x build/snap-check/usr/bin/pkd
+          unset LD_LIBRARY_PATH QML_IMPORT_PATH
+          python3 scripts/smoke.py gui build/snap-check/AppRun
+          python3 scripts/smoke.py terminal build/snap-check/usr/bin/pkd
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: packages-${{ matrix.arch }}
+          path: build/artifacts/*
+          if-no-files-found: error
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-${{ matrix.arch }}
+          path: coverage/lcov.info
+          if-no-files-found: error
