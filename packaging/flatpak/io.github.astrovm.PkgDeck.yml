@@ -1,0 +1,26 @@
+app-id: io.github.astrovm.PkgDeck
+runtime: org.kde.Platform
+runtime-version: '6.8'
+sdk: org.kde.Sdk
+command: pkgdeck
+finish-args:
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+modules:
+  - name: pkgdeck
+    buildsystem: simple
+    build-commands:
+      - cp -a . /app/
+      - mkdir -p /app/bin /app/share
+      - ln -s /app/usr/share/applications /app/share/applications
+      - ln -s /app/usr/share/icons /app/share/icons
+      - ln -s /app/usr/share/metainfo /app/share/metainfo
+      - install -m755 flatpak-pkgdeck /app/bin/pkgdeck
+      - ln -s /app/usr/bin/pkd /app/bin/pkd
+    sources:
+      - type: dir
+        path: ../../build/AppDir
+      - type: file
+        path: flatpak-pkgdeck

@@ -1,0 +1,20 @@
+[package]
+name = "pkgdeck"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+pkgdeck-core.workspace = true
+cxx.workspace = true
+cxx-qt.workspace = true
+cxx-qt-lib.workspace = true
+
+[build-dependencies]
+cxx-qt-build.workspace = true
+cxx-gen.workspace = true
+
+[lints]
+workspace = true
