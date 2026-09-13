@@ -85,3 +85,16 @@ fn flatpak_doctor_does_not_enumerate_runtime_backends() {
     assert!(text.contains("Flatpak host execution is disabled"));
     assert!(!text.contains("APT:"));
 }
+
+#[test]
+fn tui_queries_sources_and_reports_unavailable_host_without_a_display() {
+    let status = Command::new("python3")
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../scripts/smoke.py"
+        ))
+        .args(["terminal-interactions", env!("CARGO_BIN_EXE_pkd")])
+        .status()
+        .unwrap();
+    assert!(status.success());
+}

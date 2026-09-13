@@ -162,7 +162,12 @@ JSON results, and explicit confirmation. See the [CLI contract](docs/cli.md).
 install → detect update → upgrade → remove. Verify final state using the real
 underlying managers in isolated environments.
 
-### 5. Interactive TUI — planned
+### 5. Interactive TUI — implemented
+
+Search, installed packages, updates, sources, exact-identity confirmations, and
+background operations are implemented. See the [TUI guide](docs/tui.md).
+PTY tests exercise interaction and terminal restoration; disposable containers
+verify the APT/Homebrew lifecycle through the TUI against native package state.
 
 - Add search, results, package details, installed packages, updates, and sources.
 - Add confirmation, progress, cancellation, errors, and authentication failures.
@@ -228,8 +233,8 @@ and Homebrew tests. VM dependencies are cached separately from test overlays.
 
 The CLI supports APT and Homebrew package operations and `pkd doctor` diagnostics.
 The core contains their adapters, the shared engine, and the host authorization
-boundary. The interactive TUI, GUI package views, other backends, and release
-publication remain later steps.
+boundary. The interactive TUI uses the same engine. GUI package views, other
+backends, and release publication remain later steps.
 
 Pinned baseline:
 
@@ -263,8 +268,9 @@ cargo run --locked -p pkd -- doctor
 cargo run --locked -p pkd
 ```
 
-The last command opens the foundation TUI in a terminal. Use `q`, Escape, or Ctrl-C
-to exit. With piped input/output, no-argument execution fails with exit code 2.
+The last command opens the package browser in a terminal. See the
+[TUI shortcuts and authorization guide](docs/tui.md). Use `q` to exit when idle.
+With piped input/output, no-argument execution fails with exit code 2.
 Python 3 is required for the pseudo-terminal integration tests.
 
 For the GUI, install the pinned Qt SDK (including ShaderTools and ImageFormats),

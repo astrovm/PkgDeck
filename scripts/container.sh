@@ -48,6 +48,6 @@ else
     # sudo grants can change only the disposable container's filesystem.
     binaries="${PKGDECK_BINARY_DIR:-${CARGO_TARGET_DIR:-$PWD/target}/debug}"
     binaries=$(realpath "$binaries")
-    run_container -v "$PWD:/mnt/pkgdeck:ro" -v "$binaries:/mnt/pkgdeck-bin:ro" "$image" \
+    run_container -e "PKGDECK_FRONTEND=${PKGDECK_FRONTEND:-cli}" -v "$PWD:/mnt/pkgdeck:ro" -v "$binaries:/mnt/pkgdeck-bin:ro" "$image" \
         python3 -u /mnt/pkgdeck/scripts/vm/container_guest.py "$@"
 fi

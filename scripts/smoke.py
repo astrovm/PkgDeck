@@ -27,7 +27,7 @@ def terminal(command):
     finally:
         os.close(slave)
         os.close(master)
-    for key in (b"q", b"\x1b", b"\x03"):
+    for key in (b"q", b"\x1b", b"\x03", None):
         pid, master = pty.fork()
         if pid == 0:
             fcntl.ioctl(1, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
@@ -49,7 +49,7 @@ def terminal(command):
                     except OSError as error:
                         if error.errno != errno.EIO:
                             raise
-                if b"foundation." in output and b"\x1b[?25l" in output and not input_started:
+                if b"Search" in output and b"\x1b[?25l" in output and not input_started:
                     # Wait for a key-driven redraw before resizing: this proves the
                     # event reader has installed its signal handler and consumed input.
                     os.write(master, b" ")
@@ -60,13 +60,16 @@ def terminal(command):
                     fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
                     resized = True
                 elif resized and not sent and b"\x1b[2J" in output and b"\x1b[?25l" in output.rsplit(b"\x1b[2J", 1)[1]:
-                    os.write(master, key)
+                    if key is None:
+                        os.kill(pid, signal.SIGTERM)
+                    else:
+                        os.write(master, key)
                     sent = True
                 done, status = os.waitpid(pid, os.WNOHANG)
                 if done:
                     reaped = True
                     assert os.waitstatus_to_exitcode(status) == 0, output
-                    assert sent and b"available" in output and b"PkgDeck" in output, output
+                    assert sent and b"Results" in output and b"PkgDeck" in output, output
                     after = termios.tcgetattr(master)
                     mask = termios.ECHO | termios.ICANON
                     assert before[3] & mask == after[3] & mask, "Terminal mode was not restored"
@@ -78,6 +81,48 @@ def terminal(command):
                 os.kill(pid, signal.SIGKILL)
                 os.waitpid(pid, 0)
             os.close(master)
+
+
+def terminal_interactions(command):
+    from tui_driver import Terminal
+    terminal = Terminal(command, {'SNAP': '/synthetic-disabled-runtime'})
+    try:
+        terminal.wait('Press /', 15)
+        terminal.send(b'4')
+        terminal.wait('Select a source', 15)
+        terminal.send(b'\x1b[B')
+        terminal.wait('> homebrew', 15)
+        terminal.send(b'/synthetic\r')
+        terminal.wait('PkgDeck - Search', 15)
+        terminal.wait('disabled', 15)
+    finally:
+        terminal.close()
+
+    # A synthetic executable exercises worker dispatch without touching a real
+    # package manager. Its state lives only in this temporary directory.
+    from tui_driver import write
+    with tempfile.TemporaryDirectory(prefix='pkgdeck-tui-') as directory:
+        brew = Path(directory) / 'brew'
+        fixture = Path(__file__).resolve().parents[1] / 'crates/pkd/tests/fixtures/brew.py'
+        brew.write_text(fixture.read_text())
+        brew.chmod(0o755)
+        invocation = ['/usr/bin/env', '-u', 'SNAP', '-u', 'FLATPAK_ID',
+                      f'HOME={directory}', f'PATH={directory}', *command, '--from', 'homebrew', '--arch', os.uname().machine]
+        for operation in ('install', 'update', 'upgrade', 'remove'):
+            write(invocation, operation, 'fixture')
+        brew.write_text("#!/usr/bin/python3\nimport time, pathlib\npathlib.Path(" + repr(str(Path(directory) / 'started')) + ").touch()\ntime.sleep(30)\n")
+        terminal = Terminal(invocation)
+        try:
+            terminal.wait('Press /', 15)
+            terminal.send(b'/fixture\r')
+            deadline = time.monotonic() + 10
+            while not (Path(directory) / 'started').exists():
+                assert time.monotonic() < deadline
+                time.sleep(0.02)
+            terminal.send(b'\x1b')
+            terminal.wait('cancelled', 15)
+        finally:
+            terminal.close()
 
 
 def gui(command):
@@ -101,8 +146,8 @@ def gui_failure(command):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("kind", choices=("terminal", "gui", "gui-failure"))
+    parser.add_argument("kind", choices=("terminal", "terminal-interactions", "gui", "gui-failure"))
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     assert args.command
-    {"terminal": terminal, "gui": gui, "gui-failure": gui_failure}[args.kind](args.command)
+    {"terminal": terminal, "terminal-interactions": terminal_interactions, "gui": gui, "gui-failure": gui_failure}[args.kind](args.command)

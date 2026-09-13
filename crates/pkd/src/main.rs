@@ -3,8 +3,7 @@ use std::io::{self, IsTerminal};
 use clap::Parser;
 mod cli;
 use cli::{Args, Commands};
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
-use ratatui::widgets::{Block, Paragraph, Wrap};
+mod tui;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
@@ -48,33 +47,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(2);
     }
     let mut terminal = ratatui::init();
-    let result = run(&mut terminal);
+    let result = tui::run(&mut terminal, &args);
     ratatui::restore();
     result?;
     Ok(())
-}
-
-fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
-    loop {
-        terminal.draw(|frame| {
-            frame.render_widget(
-                Paragraph::new(format!(
-                    "{}\n\nPress q or Esc to quit.",
-                    pkgdeck_core::FOUNDATION_MESSAGE
-                ))
-                .block(Block::bordered().title("PkgDeck"))
-                .wrap(Wrap { trim: true }),
-                frame.area(),
-            );
-        })?;
-        if let Event::Key(key) = event::read()? {
-            if key.kind == KeyEventKind::Press
-                && (matches!(key.code, KeyCode::Char('q') | KeyCode::Esc)
-                    || (key.code == KeyCode::Char('c')
-                        && key.modifiers.contains(KeyModifiers::CONTROL)))
-            {
-                return Ok(());
-            }
-        }
-    }
 }
