@@ -43,20 +43,49 @@ jobs:
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         id: vm-cache
         with:
-          path: build/host-vm/base.img
-          key: ubuntu-host-vm-26.04-20260823-8196be9d
+          path: build/host-vm
+          key: ubuntu-host-vm-26.04-20260823-${{ hashFiles('scripts/vm/prepare.py') }}
       - name: Verify native lifecycle and authorization
         run: scripts/verify.sh vm
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: success() && steps.vm-cache.outputs.cache-hit != 'true'
         with:
-          path: build/host-vm/base.img
+          path: build/host-vm
           key: ${{ steps.vm-cache.outputs.cache-primary-key }}
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: host-vm-logs
-          path: build/host-vm/*.log
+          path: |
+            build/host-vm/logs
+            build/verification
+
+  containers:
+    name: Rootless Podman (${{ matrix.runner }})
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    env:
+      PKGDECK_STAGE_TIMEOUT: 35m
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install rootless container tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y podman
+          podman info
+      - name: Verify development image and native package lifecycles
+        run: |
+          scripts/verify.sh full --engine podman
+          scripts/verify.sh containers --engine podman
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: container-verification-${{ matrix.runner }}
+          path: build/verification
 
   desktop:
     name: GUI, coverage and packages (${{ matrix.arch }})

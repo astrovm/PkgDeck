@@ -3,19 +3,22 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 mode=${1:-fast}
 if (($#)); then shift; fi
-if [[ "$mode" == --help ]]; then
-    echo 'Usage: scripts/verify.sh [fast|full|vm]'
-    exit 0
-fi
-if (($#)) || [[ ! "$mode" =~ ^(fast|full|vm)$ ]]; then
-    echo 'Usage: scripts/verify.sh [fast|full|vm]' >&2
+usage='Usage: scripts/verify.sh [fast|full|vm|containers] [--engine native|podman]'
+if [[ "$mode" == --help ]]; then echo "$usage"; exit 0; fi
+engine=native
+if [[ "${1:-}" == --engine && $# == 2 ]]; then engine=$2; shift 2; fi
+if (($#)) || [[ ! "$mode" =~ ^(fast|full|vm|containers)$ ]] || [[ ! "$engine" =~ ^(native|podman)$ ]] || [[ "$mode" == vm && "$engine" == podman ]]; then
+    echo "$usage" >&2
     exit 2
 fi
-for tool in cargo python3 timeout tee; do
+prerequisites=(timeout tee)
+if [[ "$engine" == native ]]; then prerequisites+=(cargo python3); fi
+for tool in "${prerequisites[@]}"; do
     command -v "$tool" >/dev/null || { echo "Missing prerequisite: $tool" >&2; exit 1; }
 done
-log_dir="${PKGDECK_LOG_ROOT:-$PWD/build/verification}/$(date -u +%Y%m%dT%H%M%SZ)-$$-$mode"
-mkdir -p "$log_dir"
+log_root="${PKGDECK_LOG_ROOT:-$PWD/build/verification}"
+mkdir -p "$log_root"
+log_dir=$(mktemp -d "$log_root/$(date -u +%Y%m%dT%H%M%SZ)-$mode-XXXXXX")
 ln -sfn "$(basename "$log_dir")" "$(dirname "$log_dir")/latest"
 printf 'Verification logs: %s\n' "$log_dir"
 stage() {
@@ -29,6 +32,21 @@ stage() {
         exit "$code"
     fi
 }
+if [[ "$mode" == containers ]]; then
+    if [[ "$engine" == podman ]]; then
+        stage build-cli scripts/container.sh development --build-cli
+        PKGDECK_BINARY_DIR=$(scripts/container.sh development --binary-dir)
+        export PKGDECK_BINARY_DIR
+    else
+        stage build-cli cargo build --locked -p pkd
+    fi
+    stage container-lifecycles scripts/container.sh lifecycle
+    exit 0
+fi
+if [[ "$engine" == podman ]]; then
+    stage container-$mode scripts/container.sh development "$mode"
+    exit 0
+fi
 if [[ "$mode" == vm ]]; then
     stage build-probe cargo build --locked -p pkgdeck-core --example apt-probe
     stage build-cli cargo build --locked -p pkd

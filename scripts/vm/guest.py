@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """Runs only inside scripts/test-host-vm.py's disposable VM."""
 import fcntl
-import hashlib
 import os
 from pathlib import Path
 import subprocess
 
 
 def run(*args, **kwargs):
-    return subprocess.run(args, check=True, text=True, **kwargs)
+    print("FIXTURE", *args, flush=True)
+    return subprocess.run(args, check=True, text=True, timeout=120, **kwargs)
 
 
 def probe(user, authorization, action, expected=None):
     result = subprocess.run([
-        'runuser', '-u', user, '--', '/mnt/pkgdeck/target/debug/examples/apt-probe',
+        'runuser', '-u', user, '--', '/mnt/pkgdeck-bin/examples/apt-probe',
         authorization, action, 'pkgdeck-fixture',
     ], capture_output=True, text=True, timeout=40)
     if expected:
@@ -27,11 +27,10 @@ def main():
     assert Path('/etc/pkgdeck-disposable-vm').read_text().strip() == 'host-execution-test'
     assert os.getuid() == 0
     run('systemctl', 'stop', 'apt-daily.timer', 'apt-daily-upgrade.timer', 'apt-daily.service', 'apt-daily-upgrade.service')
-    run('apt-get', 'update', '-qq')
-    run('apt-get', 'install', '-y', 'pkexec', 'polkitd', 'sudo', 'python3-apt')
+    assert Path('/etc/pkgdeck-prepared').is_file(), 'Prepare the reusable VM dependencies first'
     for user in ['pkgdeck-test', 'pkgdeck-denied']:
         run('useradd', '-m', user)
-    doctor = run('runuser', '-u', 'pkgdeck-test', '--', '/mnt/pkgdeck/target/debug/pkd', 'doctor', capture_output=True)
+    doctor = run('runuser', '-u', 'pkgdeck-test', '--', '/mnt/pkgdeck-bin/pkd', 'doctor', capture_output=True)
     assert 'Runtime: Native' in doctor.stdout and 'Host architecture: x86_64' in doctor.stdout, doctor.stdout
     assert 'APT: /usr/bin/apt-get' in doctor.stdout, doctor.stdout
     print('PASS native host architecture and APT detection', flush=True)
@@ -47,21 +46,8 @@ def main():
         }
     });\n''')
     run('systemctl', 'restart', 'polkit')
-    package = Path('/tmp/pkgdeck-package')
-    (package / 'DEBIAN').mkdir(parents=True)
-    (package / 'usr/share/pkgdeck-fixture').mkdir(parents=True)
-    (package / 'usr/share/pkgdeck-fixture/version').write_text('1.0\n')
-    control = 'Package: pkgdeck-fixture\nVersion: 1.0\nArchitecture: all\nMaintainer: Synthetic <fixture@example.invalid>\nDescription: Disposable host execution fixture\n'
-    (package / 'DEBIAN/control').write_text(control)
-    repo = Path('/opt/pkgdeck-fixture-repo')
-    repo.mkdir()
-    deb = repo / 'pkgdeck-fixture_1.0_all.deb'
-    run('dpkg-deb', '--build', '--root-owner-group', str(package), str(deb))
-    data = deb.read_bytes()
-    (repo / 'Packages').write_text(control + f'Filename: {deb.name}\nSize: {len(data)}\nSHA256: {hashlib.sha256(data).hexdigest()}\n\n')
-    source = Path('/etc/apt/sources.list.d/pkgdeck-fixture.list')
-    source.write_text(f'deb [trusted=yes] file:{repo} ./\n')
-    run('apt-get', 'update', '-qq', '-o', f'Dir::Etc::sourcelist={source}', '-o', 'Dir::Etc::sourceparts=-')
+    import lifecycle
+    lifecycle.apt_fixture()
     probe('root', 'sudo', 'install', 'unprivileged user')
     probe('pkgdeck-denied', 'sudo', 'install', 'authorization denied')
     probe('pkgdeck-denied', 'polkit', 'install', 'authorization denied')
@@ -77,7 +63,6 @@ def main():
         assert not Path('/usr/share/pkgdeck-fixture/version').exists()
         result = subprocess.run(['dpkg-query', '-W', '-f=${db:Status-Status}', 'pkgdeck-fixture'], capture_output=True, text=True)
         assert result.stdout != 'installed', result
-    import lifecycle
     lifecycle.apt()
     lifecycle.homebrew()
     print('PKGDECK_HOST_VM_PASS', flush=True)

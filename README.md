@@ -222,6 +222,9 @@ Start with `scripts/verify.sh fast`. Run `scripts/setup-dev.sh` once to prepare
 the persistent SDK, then `scripts/verify.sh full` for workspace coverage and release
 builds. `scripts/verify.sh vm` runs isolated native acceptance checks. Local work
 and CI use these same scripts; see [development tooling](docs/development.md).
+Use `scripts/verify.sh full --engine podman` for the pinned rootless build
+environment and `scripts/verify.sh containers --engine podman` for disposable APT
+and Homebrew tests. VM dependencies are cached separately from test overlays.
 
 The CLI supports APT and Homebrew package operations and `pkd doctor` diagnostics.
 The core contains their adapters, the shared engine, and the host authorization

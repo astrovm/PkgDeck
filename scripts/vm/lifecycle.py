@@ -1,14 +1,15 @@
-"""Synthetic versioned lifecycle acceptance tests, imported only by the VM guest."""
+"""Shared synthetic lifecycles for disposable VM and Podman guests."""
 import hashlib
 import io
 import json
 from pathlib import Path
 import subprocess
 import tarfile
-import urllib.request
 
 
 def run(*args, **kwargs):
+    print("LIFECYCLE", *args, flush=True)
+    kwargs.setdefault("timeout", 240)
     try:
         return subprocess.run(args, check=True, text=True, **kwargs)
     except subprocess.CalledProcessError as error:
@@ -20,11 +21,29 @@ def cli(source, *args):
     user = 'pkgdeck-test' if source == 'apt' else 'linuxbrew'
     result = run('runuser', '-u', user, '--', 'env',
                  'PATH=/home/linuxbrew/.linuxbrew/bin:/usr/bin:/bin',
-                 '/mnt/pkgdeck/target/debug/pkd', '--json', '--yes', '--from', source,
+                 '/mnt/pkgdeck-bin/pkd', '--json', '--yes', '--from', source,
                  *args, capture_output=True, timeout=240)
     value = json.loads(result.stdout)
     assert value['schema_version'] == 1 and value['exit_code'] == 0, value
     return value['data']
+
+
+def apt_fixture():
+    package = Path('/tmp/pkgdeck-package')
+    (package / 'DEBIAN').mkdir(parents=True)
+    (package / 'usr/share/pkgdeck-fixture').mkdir(parents=True)
+    (package / 'usr/share/pkgdeck-fixture/version').write_text('1.0\n')
+    control = 'Package: pkgdeck-fixture\nVersion: 1.0\nArchitecture: all\nMaintainer: Synthetic <fixture@example.invalid>\nDescription: Disposable host execution fixture\n'
+    (package / 'DEBIAN/control').write_text(control)
+    repo = Path('/opt/pkgdeck-fixture-repo')
+    repo.mkdir()
+    deb = repo / 'pkgdeck-fixture_1.0_all.deb'
+    run('dpkg-deb', '--build', '--root-owner-group', str(package), str(deb))
+    data = deb.read_bytes()
+    (repo / 'Packages').write_text(control + f'Filename: {deb.name}\nSize: {len(data)}\nSHA256: {hashlib.sha256(data).hexdigest()}\n\n')
+    source = Path('/etc/apt/sources.list.d/pkgdeck-fixture.list')
+    source.write_text(f'deb [trusted=yes] file:{repo} ./\n')
+    run('apt-get', 'update', '-qq', '-o', f'Dir::Etc::sourcelist={source}', '-o', 'Dir::Etc::sourceparts=-')
 
 
 def apt():
@@ -63,26 +82,8 @@ def brew(*args):
 
 
 def homebrew():
-    run('apt-get', 'install', '-y', 'build-essential', 'git', 'curl', 'file', 'procps', 'ca-certificates')
-    run('useradd', '-m', 'linuxbrew')
+    assert Path('/etc/pkgdeck-prepared').is_file(), 'Missing prepared dependencies'
     prefix = Path('/home/linuxbrew/.linuxbrew')
-    checkout = prefix / 'Homebrew'
-    checkout.mkdir(parents=True)
-    # Fixed tool release; all installation and trust changes stay inside this guest.
-    archive = Path('/tmp/brew.tar.gz')
-    urllib.request.urlretrieve('https://github.com/Homebrew/brew/archive/refs/tags/6.0.22.tar.gz', archive)
-    run('tar', '-xzf', str(archive), '--strip-components=1', '-C', str(checkout))
-    (prefix / 'bin').mkdir()
-    (prefix / 'bin/brew').symlink_to('../Homebrew/bin/brew')
-    run('git', '-C', str(checkout), 'init', '-b', 'stable')
-    run('git', '-C', str(checkout), 'add', '.')
-    run('git', '-C', str(checkout), '-c', 'user.name=Synthetic', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'Pinned Homebrew 6.0.22 fixture')
-    run('git', '-C', str(checkout), 'tag', '6.0.22')
-    run('git', '-C', str(checkout), 'branch', 'main')
-    run('git', 'clone', '--bare', str(checkout), '/opt/brew-origin.git')
-    run('git', '-C', str(checkout), 'remote', 'add', 'origin', '/opt/brew-origin.git')
-    run('git', '-C', str(checkout), 'fetch', 'origin')
-    run('chown', '-R', 'linuxbrew:linuxbrew', '/home/linuxbrew', '/opt/brew-origin.git')
     tap = Path('/opt/fixture-tap')
     (tap / 'Formula').mkdir(parents=True)
     run('git', '-c', f'safe.directory={tap}', '-C', str(tap), 'init', '-b', 'main')
