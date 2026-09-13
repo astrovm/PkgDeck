@@ -41,6 +41,7 @@ if [[ "$mode" == containers ]]; then
         stage build-cli cargo build --locked -p pkd
     fi
     stage container-lifecycles scripts/container.sh lifecycle
+    stage tui-lifecycles env PKGDECK_FRONTEND=tui scripts/container.sh lifecycle
     exit 0
 fi
 if [[ "$engine" == podman ]]; then

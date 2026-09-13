@@ -2,6 +2,8 @@
 import hashlib
 import io
 import json
+import os
+import sys
 from pathlib import Path
 import subprocess
 import tarfile
@@ -28,6 +30,18 @@ def cli(source, *args):
     return value['data']
 
 
+def write(source, operation, name=''):
+    if os.environ.get('PKGDECK_FRONTEND') != 'tui':
+        return cli(source, operation, *([name] if name else []))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from tui_driver import write as tui_write
+    user = 'pkgdeck-test' if source == 'apt' else 'linuxbrew'
+    print('TUI', source, operation, name, flush=True)
+    tui_write(['runuser', '-u', user, '--', 'env',
+               'PATH=/home/linuxbrew/.linuxbrew/bin:/usr/bin:/bin',
+               '/mnt/pkgdeck-bin/pkd', '--from', source], operation, name)
+
+
 def apt_fixture():
     package = Path('/tmp/pkgdeck-package')
     (package / 'DEBIAN').mkdir(parents=True)
@@ -51,7 +65,7 @@ def apt():
     assert cli('apt', 'sources')['sources'][0]['availability'] == {'Ok': 'available'}
     assert any(p['id']['name'] == name for p in cli('apt', 'search', name)['packages'])
     assert cli('apt', 'info', name)['package']['candidate_version'] == '1.0'
-    cli('apt', 'install', name)
+    write('apt', 'install', name)
     assert run('dpkg-query', '-W', '-f=${Version}', name, capture_output=True).stdout == '1.0'
     package = Path('/tmp/pkgdeck-package')
     control = (package / 'DEBIAN/control').read_text().replace('Version: 1.0', 'Version: 2.0')
@@ -62,16 +76,16 @@ def apt():
     run('dpkg-deb', '--build', '--root-owner-group', str(package), str(deb))
     data = deb.read_bytes()
     (repo / 'Packages').write_text(control + f'Filename: {deb.name}\nSize: {len(data)}\nSHA256: {hashlib.sha256(data).hexdigest()}\n\n')
-    cli('apt', 'update')
+    write('apt', 'update')
     package = next(p for p in cli('apt', 'list')['packages'] if p['id']['name'] == name)
     assert package['installed_version'] == '1.0' and package['candidate_version'] == '2.0' and package['update'] == 'available', package
-    cli('apt', 'upgrade', name)
+    write('apt', 'upgrade', name)
     assert run('dpkg-query', '-W', '-f=${Version}', name, capture_output=True).stdout == '2.0'
     assert Path('/usr/share/pkgdeck-fixture/version').read_text() == '2.0\n'
-    cli('apt', 'remove', name)
+    write('apt', 'remove', name)
     assert not Path('/usr/share/pkgdeck-fixture/version').exists()
     assert not any(p['id']['name'] == name for p in cli('apt', 'list')['packages'])
-    print('PASS CLI APT detect/search/details/install/update/upgrade/remove 1.0 → 2.0', flush=True)
+    print('PASS package lifecycle APT detect/search/details/install/update/upgrade/remove 1.0 → 2.0', flush=True)
 
 
 def brew(*args):
@@ -118,19 +132,19 @@ end
     assert cli('homebrew', 'sources')['sources'][0]['availability'] == {'Ok': 'available'}
     assert any(p['id']['name'] == name for p in cli('homebrew', 'search', 'pkgdeck-fixture')['packages'])
     assert cli('homebrew', 'info', name)['package']['candidate_version'] == '1.0'
-    cli('homebrew', 'install', name)
+    write('homebrew', 'install', name)
     assert json.loads(brew('info', '--json=v2', name).stdout)['formulae'][0]['installed'][0]['version'] == '1.0'
     version('2.0')
     run('chown', '-R', 'linuxbrew:linuxbrew', str(tap))
-    cli('homebrew', 'update')
+    write('homebrew', 'update')
     package = next(p for p in cli('homebrew', 'list')['packages'] if p['id']['name'] == name)
     assert package['installed_version'] == '1.0' and package['candidate_version'] == '2.0' and package['update'] == 'available', package
-    cli('homebrew', 'upgrade', name)
+    write('homebrew', 'upgrade', name)
     installed = json.loads(brew('info', '--json=v2', name).stdout)['formulae'][0]['installed']
     assert {'1.0', '2.0'}.issubset({item['version'] for item in installed}), installed
     assert cli('homebrew', 'info', name)['package']['installed_version'] == '2.0'
     assert run(str(prefix / 'bin/pkgdeck-fixture'), capture_output=True).stdout == '2.0\n'
-    cli('homebrew', 'remove', name)
+    write('homebrew', 'remove', name)
     assert not (prefix / 'bin/pkgdeck-fixture').exists()
     assert json.loads(brew('info', '--json=v2', name).stdout)['formulae'][0]['installed'] == []
-    print('PASS CLI Homebrew detect/search/details/install/update/upgrade/remove 1.0 → 2.0', flush=True)
+    print('PASS package lifecycle Homebrew detect/search/details/install/update/upgrade/remove 1.0 → 2.0', flush=True)
