@@ -28,19 +28,7 @@ jobs:
         with:
           python-version: '3.14.7'
       - run: rustup show
-      - run: cargo fmt --all --check
-      - run: cargo clippy --locked -p pkgdeck-core -p pkd --all-targets -- -D warnings
-      - run: cargo test --locked -p pkgdeck-core -p pkd
-      - run: |
-          cargo build --locked -p pkd
-          if cargo tree -p pkd | grep -E 'cxx-qt|qt-build'; then
-            echo 'Qt dependency leaked into pkd' >&2
-            exit 1
-          fi
-          if ldd target/debug/pkd | grep -i qt; then
-            echo 'pkd links Qt' >&2
-            exit 1
-          fi
+      - run: scripts/verify.sh fast
 
   host-vm:
     name: APT and Homebrew lifecycles in disposable VM (x86_64)
@@ -57,11 +45,8 @@ jobs:
         with:
           path: build/host-vm/base.img
           key: ubuntu-host-vm-26.04-20260823-8196be9d
-      - run: |
-          cargo build --locked -p pkgdeck-core --example apt-probe
-          cargo build --locked -p pkd
-      - name: Test authorization, locks, and versioned APT/Homebrew lifecycles
-        run: python3 scripts/test-host-vm.py
+      - name: Verify native lifecycle and authorization
+        run: scripts/verify.sh vm
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: success() && steps.vm-cache.outputs.cache-hit != 'true'
         with:
@@ -92,8 +77,7 @@ jobs:
             qt_dir: gcc_arm64
     runs-on: ${{ matrix.runner }}
     env:
-      QT_ROOT_DIR: ${{ github.workspace }}/build/Qt/6.11.2/${{ matrix.qt_dir }}
-      PKGDECK_SDK_PREFIX: ${{ github.workspace }}/build/kde
+      PKGDECK_CACHE_DIR: ${{ github.workspace }}/build/dev-cache
       QT_QPA_PLATFORM: offscreen
       QT_QUICK_BACKEND: software
     steps:
@@ -106,51 +90,30 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential cmake ninja-build lld pkg-config libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-dev libvulkan-dev libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-shape0 libxcb-xkb1 libxkbcommon-x11-0 libxcb-image0 libxcb-render-util0 libxcb-randr0 libxcb-sync1 libxcb-xfixes0 libxcb-glx0 libdbus-1-3 libfontconfig1 libfreetype6 libopengl0 libpulse0 libgssapi-krb5-2 libnss3 libasound2t64 libxcomposite1 libxdamage1 libxtst6 libwayland-cursor0 libwayland-egl1 flatpak flatpak-builder snapd squashfs-tools zsync desktop-file-utils
           rustup show
-          pip install aqtinstall==3.3.0 cmake==4.4.3
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         id: sdk-cache
         with:
           path: |
-            build/Qt
-            build/kde
-          key: sdk-${{ matrix.arch }}-qt6.11.2-kf6.30.0-${{ hashFiles('scripts/build-kirigami.sh') }}
-      - name: Install pinned Qt and Kirigami
-        if: steps.sdk-cache.outputs.cache-hit != 'true'
-        run: |
-          aqt install-qt '${{ matrix.qt_host }}' desktop 6.11.2 '${{ matrix.qt_arch }}' -O build/Qt -m qtshadertools qtimageformats
-          export PATH="$QT_ROOT_DIR/bin:$PATH"
-          export CMAKE_PREFIX_PATH="$QT_ROOT_DIR"
-          scripts/build-kirigami.sh
+            build/dev-cache
+          key: sdk-${{ matrix.arch }}-qt6.11.2-kf6.30.0-${{ hashFiles('scripts/setup-dev.sh', 'scripts/build-kirigami.sh', 'scripts/sdk.sha256') }}
+      - name: Prepare pinned development tools
+        run: scripts/setup-dev.sh
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: steps.sdk-cache.outputs.cache-hit != 'true'
         with:
           path: |
-            build/Qt
-            build/kde
+            build/dev-cache
           key: ${{ steps.sdk-cache.outputs.cache-primary-key }}
-      - name: Configure the SDK environment
-        run: |
-          echo "$QT_ROOT_DIR/bin" >> "$GITHUB_PATH"
-          echo "CMAKE_PREFIX_PATH=$PKGDECK_SDK_PREFIX:$QT_ROOT_DIR" >> "$GITHUB_ENV"
-          echo "LD_LIBRARY_PATH=$PKGDECK_SDK_PREFIX/lib:$QT_ROOT_DIR/lib" >> "$GITHUB_ENV"
-          echo "QML_IMPORT_PATH=$PKGDECK_SDK_PREFIX/qml:$QT_ROOT_DIR/qml" >> "$GITHUB_ENV"
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         id: rust-cache
         with:
           path: target
           key: rust-${{ matrix.arch }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'crates/**', 'scripts/build-kirigami.sh') }}
-      - name: Lint workspace code
-        run: |
-          cargo fmt --all --check
-          cargo clippy --workspace --all-targets --locked -- -D warnings
-      - name: Test workspace and enforce 95 percent coverage
-        run: |
-          cargo install cargo-llvm-cov --version 0.9.1 --locked
-          mkdir -p coverage
-          cargo llvm-cov --workspace --include-build-script --locked --fail-under-lines 95 --lcov --output-path coverage/lcov.info
+      - name: Verify workspace, coverage, and release builds
+        run: scripts/verify.sh full
       - name: Build and stage both executables
         run: |
-          cargo build --workspace --release --locked
+          source scripts/dev-env.sh
           python3 scripts/bundle.py
           desktop-file-validate assets/io.github.astrovm.PkgDeck.desktop
           unset LD_LIBRARY_PATH QML_IMPORT_PATH
