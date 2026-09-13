@@ -5,13 +5,13 @@ use crate::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(serde::Serialize, Clone, Debug, Eq, PartialEq)]
 pub struct BackendFailure {
     pub backend: String,
     pub error: EngineError,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(serde::Serialize, Clone, Debug, Eq, PartialEq)]
 pub enum EngineError {
     UnknownBackend(String),
     DuplicateBackend(String),
@@ -120,14 +120,14 @@ pub trait Backend: Send {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(serde::Serialize, Clone, Debug, Eq, PartialEq)]
 pub struct Source {
     pub backend: String,
     pub capabilities: Vec<Capability>,
     pub availability: Result<Availability, EngineError>,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(serde::Serialize, Clone, Debug, Default, Eq, PartialEq)]
 pub struct PackageReport {
     pub packages: Vec<Package>,
     pub failures: Vec<BackendFailure>,
@@ -172,7 +172,7 @@ impl PackageReport {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(serde::Serialize, Clone, Debug, Eq, PartialEq)]
 pub enum Event {
     /// Dispatch started, including availability/capability checks; not proof of a write.
     Started(Operation),

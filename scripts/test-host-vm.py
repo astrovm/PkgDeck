@@ -50,6 +50,7 @@ runcmd:
         results_path = cache / 'results.log'
         with log_path.open('w') as log:
             command = ['qemu-system-x86_64', '-accel', 'kvm' if os.access('/dev/kvm', os.R_OK | os.W_OK) else 'tcg',
+                '-cpu', 'host' if os.access('/dev/kvm', os.R_OK | os.W_OK) else 'max',
                 '-m', '2048', '-smp', '2', '-display', 'none', '-monitor', 'none', '-serial', 'stdio', '-no-reboot',
                 '-drive', f'file={disk},format=qcow2,if=virtio', '-drive', f'file={seed},media=cdrom,readonly=on',
                 '-virtfs', f'local,path={ROOT},mount_tag=pkgdeck,security_model=none,readonly=on',

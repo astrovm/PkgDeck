@@ -40,7 +40,7 @@ impl Runtime {
 }
 
 /// A snapshot of the invoking user's environment, stripped of packaging/runtime injection.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Host {
     pub runtime: Runtime,
     env: BTreeMap<OsString, OsString>,
@@ -183,7 +183,49 @@ impl Host {
         process::run(self.command(executable, args)?, limits, cancel, false)
     }
 
-    /// APT-only authorization prototype. Frontends expose no write command yet.
+    /// Homebrew always runs as the invoking user, with automatic unrelated work disabled.
+    pub fn brew(
+        &self,
+        args: &[OsString],
+        cancel: &Cancellation,
+        write: bool,
+    ) -> Result<Completion, ExecutionError> {
+        self.enabled()?;
+        if write && rustix::process::geteuid().is_root() {
+            return Err(ExecutionError::Invalid(
+                "run the frontend as an unprivileged user".into(),
+            ));
+        }
+        let path = self
+            .resolve("brew")?
+            .ok_or_else(|| ExecutionError::Disabled("Homebrew not found".into()))?;
+        let mut command = self.command(&path, args)?;
+        for name in [
+            "HOMEBREW_NO_AUTO_UPDATE",
+            "HOMEBREW_NO_INSTALL_CLEANUP",
+            "HOMEBREW_NO_ANALYTICS",
+            "HOMEBREW_NO_ENV_HINTS",
+            "HOMEBREW_NO_COLOR",
+        ] {
+            command.env(name, "1");
+        }
+        let result = process::run(
+            command,
+            Limits {
+                timeout: std::time::Duration::from_secs(120),
+                output_bytes: 32 * 1024 * 1024,
+            },
+            cancel,
+            write,
+        )?;
+        if result.code == Some(0) {
+            Ok(result)
+        } else {
+            Err(ExecutionError::Failed(result))
+        }
+    }
+
+    /// APT-only authorization boundary.
     /// User-scoped tools never enter this path, and the frontend itself must not be root.
     pub fn apt(
         &self,
@@ -232,19 +274,45 @@ impl Authorization {
 
 #[derive(Debug)]
 pub enum AptAction {
+    Refresh,
+    Upgrade(String),
     Install(String),
     Remove(String),
 }
 
 impl AptAction {
     pub fn arguments(&self) -> Result<Vec<OsString>, ExecutionError> {
+        if matches!(self, Self::Refresh) {
+            return Ok([
+                "--assume-yes",
+                "-o",
+                "DPkg::Lock::Timeout=0",
+                "-o",
+                "APT::Update::Error-Mode=any",
+                "update",
+            ]
+            .map(OsString::from)
+            .to_vec());
+        }
         let (operation, package) = match self {
+            Self::Refresh => unreachable!(),
+            Self::Upgrade(package) => ("install", package),
             Self::Install(package) => ("install", package),
             Self::Remove(package) => ("remove", package),
         };
-        if package.len() < 2
-            || !package.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
-            || !package
+        let name = package
+            .split_once(':')
+            .map_or(package.as_str(), |(name, _)| name);
+        let arch_valid = package.split_once(':').is_none_or(|(_, arch)| {
+            !arch.is_empty()
+                && arch
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        });
+        if !arch_valid
+            || name.len() < 2
+            || !name.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
+            || !name
                 .bytes()
                 .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"+.-".contains(&b))
         {
@@ -255,6 +323,9 @@ impl AptAction {
         let mut args = vec!["--assume-yes", "-o", "DPkg::Lock::Timeout=0"];
         if operation == "install" {
             args.push("--no-remove");
+        }
+        if matches!(self, Self::Upgrade(_)) {
+            args.push("--only-upgrade");
         }
         args.extend(["--", operation, package]);
         Ok(args.into_iter().map(OsString::from).collect())

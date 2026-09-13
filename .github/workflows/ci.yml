@@ -43,7 +43,7 @@ jobs:
           fi
 
   host-vm:
-    name: APT authorization in disposable VM (x86_64)
+    name: APT and Homebrew lifecycles in disposable VM (x86_64)
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
@@ -60,7 +60,7 @@ jobs:
       - run: |
           cargo build --locked -p pkgdeck-core --example apt-probe
           cargo build --locked -p pkd
-      - name: Test authorization, APT locks, and synthetic install/remove
+      - name: Test authorization, locks, and versioned APT/Homebrew lifecycles
         run: python3 scripts/test-host-vm.py
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: success() && steps.vm-cache.outputs.cache-hit != 'true'

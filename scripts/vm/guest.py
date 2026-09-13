@@ -28,7 +28,7 @@ def main():
     assert os.getuid() == 0
     run('systemctl', 'stop', 'apt-daily.timer', 'apt-daily-upgrade.timer', 'apt-daily.service', 'apt-daily-upgrade.service')
     run('apt-get', 'update', '-qq')
-    run('apt-get', 'install', '-y', 'pkexec', 'polkitd', 'sudo')
+    run('apt-get', 'install', '-y', 'pkexec', 'polkitd', 'sudo', 'python3-apt')
     for user in ['pkgdeck-test', 'pkgdeck-denied']:
         run('useradd', '-m', user)
     doctor = run('runuser', '-u', 'pkgdeck-test', '--', '/mnt/pkgdeck/target/debug/pkd', 'doctor', capture_output=True)
@@ -77,6 +77,9 @@ def main():
         assert not Path('/usr/share/pkgdeck-fixture/version').exists()
         result = subprocess.run(['dpkg-query', '-W', '-f=${db:Status-Status}', 'pkgdeck-fixture'], capture_output=True, text=True)
         assert result.stdout != 'installed', result
+    import lifecycle
+    lifecycle.apt()
+    lifecycle.homebrew()
     print('PKGDECK_HOST_VM_PASS', flush=True)
 
 
