@@ -1,6 +1,7 @@
 #!/bin/sh
 set -eu
 appdir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+export APPDIR="$appdir"
 if [ "${1:-}" = "--cli" ]; then
     shift
     exec "$appdir/usr/bin/pkd" "$@"

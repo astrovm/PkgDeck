@@ -47,3 +47,41 @@ fn tui_renders_resizes_and_restores_terminal_on_exit() {
         .unwrap();
     assert!(status.success());
 }
+
+#[test]
+fn doctor_is_noninteractive_and_reports_sandbox_capabilities() {
+    let output = pkd()
+        .arg("doctor")
+        .env("SNAP", "/synthetic-snap")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(text.contains("Runtime: Snap"));
+    assert!(text.contains("disabled"));
+    let output = pkd()
+        .arg("doctor")
+        .env_remove("SNAP")
+        .env_remove("FLATPAK_ID")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(text.contains("APT:"));
+    assert!(text.contains("Homebrew:"));
+}
+
+#[test]
+fn flatpak_doctor_does_not_enumerate_runtime_backends() {
+    let output = pkd()
+        .arg("doctor")
+        .env_remove("SNAP")
+        .env("FLATPAK_ID", "synthetic.fixture")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(text.contains("Flatpak host execution is disabled"));
+    assert!(!text.contains("APT:"));
+}

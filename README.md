@@ -103,7 +103,12 @@ verifies the complete x86_64/aarch64 build, test, coverage, and package matrix.
 **Acceptance:** CI builds both entry points and all three formats for both
 architectures, and the terminal build has no Qt dependency.
 
-### 2. Host execution and authorization — planned
+### 2. Host execution and authorization — implemented
+
+The shared host boundary and `pkd doctor` are implemented. Native/AppImage host
+reads are enabled; Flatpak and Snap host operations are explicitly disabled.
+The APT authorization prototype passes synthetic tests and a disposable Ubuntu
+x86_64 VM test. See [execution behavior and format gates](docs/host-execution.md).
 
 - Define native, Flatpak, AppImage, and Snap host execution paths. Resolve package
   managers and user environments on the host, outside packaging runtimes.
@@ -203,8 +208,9 @@ no local or manually prepared release builds.
 
 ## Development
 
-The foundation contains application shells only. Package commands, backend
-execution, the complete interfaces, and release publication belong to later steps.
+The frontends contain application shells plus read-only `pkd doctor` diagnostics.
+The core has host execution and a VM-tested APT authorization prototype. Package
+commands, the complete interfaces, and release publication belong to later steps.
 
 Pinned baseline:
 
@@ -232,6 +238,7 @@ Build and test the terminal frontend without installing Qt:
 cargo build --locked -p pkd
 cargo test --locked -p pkgdeck-core -p pkd
 cargo run --locked -p pkd -- --help
+cargo run --locked -p pkd -- doctor
 cargo run --locked -p pkd
 ```
 
