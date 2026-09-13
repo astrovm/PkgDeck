@@ -257,7 +257,7 @@ fn apt_requests_cannot_inject_options_paths_or_other_backends() {
         "fixture;id",
         "Fixture",
         "fixture=1",
-        "fixture:amd64",
+        "fixture:--amd64:",
     ] {
         assert!(matches!(
             AptAction::Install(package.into()).arguments(),
@@ -354,4 +354,20 @@ fn diagnostics_are_actionable() {
     assert!(ExecutionError::LockBusy
         .to_string()
         .contains("never remove lock"));
+}
+
+#[test]
+fn apt_refresh_upgrade_and_multiarch_keep_native_safety_options() {
+    let refresh = AptAction::Refresh.arguments().unwrap();
+    assert!(refresh.contains(&"APT::Update::Error-Mode=any".into()));
+    assert_eq!(refresh.last().unwrap(), "update");
+    let upgrade = AptAction::Upgrade("synthetic-fixture:amd64".into())
+        .arguments()
+        .unwrap();
+    assert!(upgrade.contains(&"--only-upgrade".into()));
+    assert!(upgrade.contains(&"--no-remove".into()));
+    assert_eq!(upgrade.last().unwrap(), "synthetic-fixture:amd64");
+    for name in ["fixture:", "fixture:amd64:foreign", "fixture:../amd64"] {
+        assert!(AptAction::Install(name.into()).arguments().is_err());
+    }
 }

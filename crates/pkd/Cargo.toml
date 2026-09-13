@@ -7,6 +7,9 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+signal-hook.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 pkgdeck-core.workspace = true
 clap.workspace = true
 crossterm.workspace = true

@@ -11,6 +11,9 @@ license = "MIT"
 repository = "https://github.com/astrovm/PkgDeck"
 
 [workspace.dependencies]
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+signal-hook = "=0.4.4"
 rustix = { version = "=1.1.4", features = ["fs", "process"] }
 pkgdeck-core = { path = "crates/pkgdeck-core" }
 clap = { version = "=4.6.6", features = ["derive"] }

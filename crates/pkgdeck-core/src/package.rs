@@ -1,14 +1,15 @@
 //! Frontend-independent package identities and metadata. Versions are backend-defined.
 use std::path::PathBuf;
 
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+#[serde(rename_all = "snake_case")]
 pub enum Scope {
     System,
     User { uid: u32 },
     Environment { path: PathBuf },
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct PackageId {
     pub backend: String,
     pub name: String,
@@ -16,14 +17,15 @@ pub struct PackageId {
     pub scope: Scope,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
 pub enum UpdateAvailability {
     Unknown,
     Current,
     Available,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq)]
 pub struct Package {
     pub id: PackageId,
     pub display_name: String,
@@ -34,7 +36,7 @@ pub struct Package {
     pub update: UpdateAvailability,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq)]
 pub struct PackageDetails {
     pub package: Package,
     pub description: String,
@@ -42,7 +44,8 @@ pub struct PackageDetails {
     pub dependencies: Vec<String>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
 pub enum Capability {
     Search,
     Details,
@@ -53,13 +56,15 @@ pub enum Capability {
     Upgrade,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
 pub enum Availability {
     Available,
     Unavailable(String),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
 pub enum Operation {
     /// Refresh metadata only; never upgrades installed packages.
     Refresh {
@@ -87,19 +92,20 @@ impl Operation {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
 pub enum Progress {
     Message(String),
     Transfer { completed: u64, total: Option<u64> },
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default, Eq, PartialEq)]
 pub struct OperationOutcome {
     /// A native write completed after cancellation was requested; it was not rolled back.
     pub cancellation_deferred: bool,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq)]
 pub struct Selector {
     /// Exact backend package identifier, not its display name or a fuzzy search term.
     pub name: String,

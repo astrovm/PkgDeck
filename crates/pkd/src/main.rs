@@ -1,25 +1,14 @@
 use std::io::{self, IsTerminal};
 
-use clap::{Parser, Subcommand};
+use clap::Parser;
+mod cli;
+use cli::{Args, Commands};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::widgets::{Block, Paragraph, Wrap};
 
-#[derive(Parser)]
-#[command(version = pkgdeck_core::VERSION, about = "PkgDeck terminal interface (foundation build)")]
-struct Args {
-    #[command(subcommand)]
-    command: Option<Commands>,
-}
-
-#[derive(Subcommand)]
-enum Commands {
-    /// Report host execution availability and detected package-manager executables.
-    Doctor,
-}
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
-    if let Some(Commands::Doctor) = args.command {
+    if matches!(args.command, Some(Commands::Doctor)) && !args.json {
         let host = pkgdeck_core::host::Host::current();
         println!("Runtime: {:?}", host.runtime);
         if let Some(reason) = host.runtime.disabled_reason() {
@@ -46,8 +35,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
             }
         }
-        println!("Package operations are not exposed by the frontends yet. pip requires an explicitly selected virtual environment.");
+        println!("APT and Homebrew commands are available; pip requires an explicitly selected virtual environment.");
         return Ok(());
+    }
+    if args.command.is_some() {
+        std::process::exit(cli::run(&args).into());
     }
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         eprintln!(

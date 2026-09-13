@@ -12,6 +12,10 @@ use std::time::{Duration, Instant};
 #[derive(Clone, Debug, Default)]
 pub struct Cancellation(Arc<AtomicBool>);
 impl Cancellation {
+    /// Shared signal flag; handlers only request cancellation.
+    pub fn flag(&self) -> Arc<AtomicBool> {
+        self.0.clone()
+    }
     pub fn cancel(&self) {
         self.0.store(true, Ordering::Relaxed);
     }
@@ -34,18 +38,24 @@ impl Default for Limits {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(serde::Serialize, Clone, Debug, Eq, PartialEq)]
 pub struct Completion {
     pub code: Option<i32>,
     pub signal: Option<i32>,
+    #[serde(serialize_with = "serialize_output")]
     pub stdout: Vec<u8>,
+    #[serde(serialize_with = "serialize_output")]
     pub stderr: Vec<u8>,
     pub truncated: bool,
     /// Cancellation during a write is deferred until the native manager exits.
     pub cancellation_deferred: bool,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+fn serialize_output<S: serde::Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(&String::from_utf8_lossy(bytes))
+}
+
+#[derive(serde::Serialize, Clone, Debug, Eq, PartialEq)]
 pub enum ExecutionError {
     Disabled(String),
     Invalid(String),

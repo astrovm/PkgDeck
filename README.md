@@ -59,13 +59,13 @@ Running `pkd` without arguments opens the interactive TUI:
 pkd
 ```
 
-Planned CLI commands include:
+APT and Linux Homebrew CLI commands are implemented:
 
 ```sh
 pkd search neovim
 pkd info neovim
 pkd install neovim
-pkd install neovim --from flatpak
+pkd install neovim --from homebrew
 pkd remove neovim
 pkd list
 pkd sources
@@ -73,7 +73,9 @@ pkd update
 pkd upgrade
 ```
 
-Commands will support consistent exit codes and machine-readable `--json` output where applicable.
+Commands support machine-readable `--json` output. Writes require `--yes` in
+non-interactive or JSON mode. See the [CLI contract](docs/cli.md) for source
+selection, authorization, exit codes, prerequisites, and examples.
 
 If stdin or stdout is not attached to a terminal, `pkd` without arguments must not attempt to start the TUI.
 
@@ -142,7 +144,11 @@ the full engine lifecycle. See the [shared engine contract](docs/shared-engine.m
 **Acceptance:** synthetic backends exercise discovery, selection, operations,
 partial failures, and progress without frontend-specific package-manager logic.
 
-### 4. APT and Homebrew lifecycle through the CLI — planned
+### 4. APT and Homebrew lifecycle through the CLI — implemented
+
+APT and Homebrew adapters now use the shared engine and host boundary. The CLI
+provides all eight lifecycle capabilities, exact source/architecture selection,
+JSON results, and explicit confirmation. See the [CLI contract](docs/cli.md).
 
 - Implement detection, search, details, installed listing, refresh, install,
   upgrade, and removal for APT and Linux Homebrew formulae.
@@ -212,10 +218,10 @@ no local or manually prepared release builds.
 
 ## Development
 
-The frontends contain application shells plus read-only `pkd doctor` diagnostics.
-The core has the shared package engine, host execution, and a VM-tested APT
-authorization prototype. Real backend adapters, package commands, the complete
-interfaces, and release publication belong to later steps.
+The CLI supports APT and Homebrew package operations and `pkd doctor` diagnostics.
+The core contains their adapters, the shared engine, and the host authorization
+boundary. The interactive TUI, GUI package views, other backends, and release
+publication remain later steps.
 
 Pinned baseline:
 
@@ -229,6 +235,8 @@ Pinned baseline:
 | CXX / CXX generator | 1.0.202 / 0.7.202 |
 | Ratatui / Crossterm | 0.30.2 / 0.29.0 |
 | Clap | 4.6.6 |
+| Serde / serde_json | 1.0.229 / 1.0.151 |
+| signal-hook (CLI) | 0.4.4 |
 | CMake / aqtinstall | 4.4.3 / 3.3.0 |
 | cargo-llvm-cov | 0.9.1 |
 

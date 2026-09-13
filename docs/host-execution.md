@@ -8,10 +8,10 @@ until an explicit virtual environment can be selected.
 
 ## Format capabilities
 
-| Format | Host reads/detection | Authorized APT prototype | Validation |
+| Format | Host reads/detection | APT / Homebrew writes | Validation |
 | --- | --- | --- | --- |
-| Native | Enabled | Core API and development probe only | Synthetic process tests; real sudo/polkit and APT in a disposable Ubuntu x86_64 VM |
-| AppImage | Enabled, outside the bundle | Same native boundary; no frontend write command | Extract-and-run AppImage doctor probe, GUI and terminal smoke tests; environment-isolation tests |
+| Native | Enabled | Enabled through the core and CLI | Synthetic process tests; real sudo/polkit and APT in a disposable Ubuntu x86_64 VM |
+| AppImage | Enabled, outside the bundle | Enabled through the same native boundary | Extract-and-run AppImage doctor probe, GUI and terminal smoke tests; environment-isolation tests |
 | Flatpak | **Disabled** | **Disabled** | Runtime detection fails closed before executable lookup or spawning; no host D-Bus permission is shipped |
 | Snap | **Disabled** | **Disabled** | Strict confinement remains the packaging default; runtime detection fails closed |
 
@@ -44,11 +44,11 @@ AppRun sets APPDIR for both entry points, including extracted launches.
 
 User tools resolve from the invoking user's PATH and retain that user's HOME and
 XDG user directories. The only authorized write API is a typed APT request for a
-validated Debian package name. Homebrew and development tools have no elevation
+validated Debian package name and optional architecture, or metadata refresh. Homebrew and development tools have no elevation
 route. Frontends must stay unprivileged; the APT API rejects a root caller.
 
 Authorized commands use a fixed system PATH, excluding user tool directories.
-The prototype invokes the fixed `/usr/bin/apt-get` path via either:
+The adapter invokes the fixed `/usr/bin/apt-get` path via either:
 
 - `/usr/bin/pkexec --disable-internal-agent`, using an existing polkit agent/policy;
 - `/usr/bin/sudo -n --`, requiring an existing grant and never prompting.
@@ -63,8 +63,9 @@ see the [pkexec manual](https://polkit.pages.freedesktop.org/polkit/pkexec.1.htm
 
 APT owns its normal dpkg/frontend locks. Requests use `DPkg::Lock::Timeout=0` so
 contention is reported immediately. PkgDeck neither creates a competing lock
-scheme nor removes native lock files. The install prototype uses `--no-remove`;
-APT handles dependencies and transactions. This is not the final confirmation UI.
+scheme nor removes native lock files. Install and upgrade use `--no-remove`;
+APT handles dependencies and transactions. CLI confirmation is documented in the
+[CLI contract](cli.md).
 
 Read commands have a deadline and bounded stdout/stderr capture (128 KiB per
 stream by default). Excess output is drained and marked truncated. Cancellation
@@ -108,6 +109,10 @@ disposable overlay, and shares the checkout read-only. All package and policy
 changes occur inside the guest. It checks native backend detection, rejection of root frontends, denial for an unauthorized user, native
 lock contention, and installation/removal of `pkgdeck-fixture` through both sudo
 and polkit. `dpkg-query` and a fixture-owned file verify the resulting state.
+The guest also exercises CLI versioned APT and Homebrew lifecycles through
+install, refresh, update detection, upgrade, and removal, checking native state.
+Homebrew uses a controlled tap and the standard Linux prefix as an unprivileged
+user. The VM CPU exposes SSSE3, required by Homebrew on x86_64.
 The overlay is deleted when the test finishes, including failures; logs remain in
 `build/host-vm/`. The development `apt-probe` executable is never packaged.
 

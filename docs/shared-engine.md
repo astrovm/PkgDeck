@@ -3,7 +3,8 @@
 Step 3 adds the package model and backend contract to `pkgdeck-core`, with no Qt,
 CLI parsing, or new dependencies. The engine is synchronous and owns `Send`
 backends; frontends should run it on a worker and consume its typed results/events.
-Real APT and Homebrew adapters and public package commands belong to step 4.
+Step 4 adds real APT/Homebrew adapters and public package commands; see the
+[CLI contract](cli.md).
 
 ## Identity and metadata
 
