@@ -177,7 +177,12 @@ verify the APT/Homebrew lifecycle through the TUI against native package state.
 **Acceptance:** the APT/Homebrew lifecycle works without Qt or a graphical session;
 pseudo-terminal tests cover keyboard navigation, resize, and terminal restoration.
 
-### 6. GUI — planned
+### 6. GUI — implemented
+
+The Qt/Kirigami browser now uses an asynchronous CXX-Qt facade over the shared
+engine. It provides source-aware package actions, persistent settings, responsive
+views, and safe cancellation. See the [GUI guide](docs/gui.md) for shortcuts,
+authorization, and Qt Quick/private-display/packaged-bundle verification.
 
 - Connect the engine through a thin CXX-Qt bridge with asynchronous operations.
 - Build sidebar navigation, search/results, selection-linked details, and
@@ -233,8 +238,8 @@ and Homebrew tests. VM dependencies are cached separately from test overlays.
 
 The CLI supports APT and Homebrew package operations and `pkd doctor` diagnostics.
 The core contains their adapters, the shared engine, and the host authorization
-boundary. The interactive TUI uses the same engine. GUI package views, other
-backends, and release publication remain later steps.
+boundary. Both the interactive TUI and GUI use the same engine. Additional
+backends and release publication remain later steps.
 
 Pinned baseline:
 

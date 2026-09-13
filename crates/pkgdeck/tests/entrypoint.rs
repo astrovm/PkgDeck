@@ -1,5 +1,5 @@
 // Link the Qt dependency required by this package's generated QML initializer.
-use cxx_qt_lib as _;
+use pkgdeck as _;
 use std::process::Command;
 
 #[test]
@@ -42,6 +42,31 @@ fn invalid_qml_module_fails_without_hanging() {
         .args(["gui-failure", env!("CARGO_BIN_EXE_pkgdeck")])
         .env("QT_QPA_PLATFORM", "offscreen")
         .env("QT_QUICK_BACKEND", "software")
+        .status()
+        .unwrap();
+    assert!(status.success());
+}
+
+#[test]
+fn quick_controls_search_confirm_resize_and_cancel() {
+    let status = Command::new("python3")
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../scripts/test-gui-qml.py"
+        ))
+        .status()
+        .unwrap();
+    assert!(status.success());
+}
+
+#[test]
+fn real_window_completes_synthetic_lifecycle() {
+    let status = Command::new("python3")
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../scripts/gui_driver.py"
+        ))
+        .arg(env!("CARGO_BIN_EXE_pkgdeck"))
         .status()
         .unwrap();
     assert!(status.success());

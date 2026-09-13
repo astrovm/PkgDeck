@@ -117,7 +117,7 @@ jobs:
       - name: Install build and packaging dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake ninja-build lld pkg-config libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-dev libvulkan-dev libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-shape0 libxcb-xkb1 libxkbcommon-x11-0 libxcb-image0 libxcb-render-util0 libxcb-randr0 libxcb-sync1 libxcb-xfixes0 libxcb-glx0 libdbus-1-3 libfontconfig1 libfreetype6 libopengl0 libpulse0 libgssapi-krb5-2 libnss3 libasound2t64 libxcomposite1 libxdamage1 libxtst6 libwayland-cursor0 libwayland-egl1 flatpak flatpak-builder snapd squashfs-tools zsync desktop-file-utils
+          sudo apt-get install -y build-essential cmake ninja-build lld pkg-config libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-dev libvulkan-dev libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-shape0 libxcb-xkb1 libxkbcommon-x11-0 libxcb-image0 libxcb-render-util0 libxcb-randr0 libxcb-sync1 libxcb-xfixes0 libxcb-glx0 libdbus-1-3 libfontconfig1 libfreetype6 libopengl0 libpulse0 libgssapi-krb5-2 libnss3 libasound2t64 libxcomposite1 libxdamage1 libxtst6 libwayland-cursor0 libwayland-egl1 flatpak flatpak-builder snapd squashfs-tools zsync desktop-file-utils podman xvfb xdotool fonts-dejavu-core
           rustup show
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         id: sdk-cache
@@ -150,6 +150,8 @@ jobs:
           python3 scripts/smoke.py terminal build/AppDir/AppRun --cli
           build/AppDir/AppRun --cli --version
           build/AppDir/AppRun --cli doctor
+      - name: Verify staged GUI native lifecycles in isolation
+        run: PKGDECK_FRONTEND=gui PKGDECK_BINARY_DIR="$PWD/build/AppDir/usr/bin" scripts/container.sh lifecycle
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: steps.rust-cache.outputs.cache-hit != 'true'
         with:

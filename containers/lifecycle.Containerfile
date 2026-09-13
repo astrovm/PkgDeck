@@ -4,3 +4,4 @@ RUN apt-get update && apt-get install -y --no-install-recommends python3 ca-cert
     && printf 'container\n' > /etc/pkgdeck-disposable-container
 COPY scripts/vm/prepare.py /opt/pkgdeck/prepare.py
 RUN python3 -u /opt/pkgdeck/prepare.py --container
+RUN apt-get update && apt-get install -y --no-install-recommends xvfb xdotool fonts-dejavu-core libgl1 libegl1 libopengl0 && rm -rf /var/lib/apt/lists/*

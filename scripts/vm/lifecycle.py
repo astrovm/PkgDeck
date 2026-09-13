@@ -31,11 +31,19 @@ def cli(source, *args):
 
 
 def write(source, operation, name=''):
-    if os.environ.get('PKGDECK_FRONTEND') != 'tui':
+    if os.environ.get('PKGDECK_FRONTEND') not in ('tui', 'gui'):
         return cli(source, operation, *([name] if name else []))
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from tui_driver import write as tui_write
     user = 'pkgdeck-test' if source == 'apt' else 'linuxbrew'
+    if os.environ.get('PKGDECK_FRONTEND') == 'gui':
+        from gui_driver import desktop
+        print('GUI', source, operation, name, flush=True)
+        with desktop(['runuser', '-u', user, '--', 'env', '-u', 'XDG_CONFIG_HOME',
+                      'PATH=/home/linuxbrew/.linuxbrew/bin:/usr/bin:/bin',
+                      '/mnt/pkgdeck-app/AppRun', '--from', source, '--auth', 'sudo']) as gui:
+            gui.write(operation, name)
+        return
     print('TUI', source, operation, name, flush=True)
     tui_write(['runuser', '-u', user, '--', 'env',
                'PATH=/home/linuxbrew/.linuxbrew/bin:/usr/bin:/bin',

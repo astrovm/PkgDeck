@@ -48,6 +48,12 @@ else
     # sudo grants can change only the disposable container's filesystem.
     binaries="${PKGDECK_BINARY_DIR:-${CARGO_TARGET_DIR:-$PWD/target}/debug}"
     binaries=$(realpath "$binaries")
-    run_container -e "PKGDECK_FRONTEND=${PKGDECK_FRONTEND:-cli}" -v "$PWD:/mnt/pkgdeck:ro" -v "$binaries:/mnt/pkgdeck-bin:ro" "$image" \
+    gui_mount=()
+    if [[ "${PKGDECK_FRONTEND:-cli}" == gui ]]; then
+        appdir=$(realpath "${PKGDECK_APPDIR:-$PWD/build/AppDir}")
+        [[ -x "$appdir/AppRun" ]] || { echo 'Stage the GUI with scripts/bundle.py first.' >&2; exit 1; }
+        gui_mount=(-v "$appdir:/mnt/pkgdeck-app:ro")
+    fi
+    run_container "${gui_mount[@]}" -e "PKGDECK_FRONTEND=${PKGDECK_FRONTEND:-cli}" -v "$PWD:/mnt/pkgdeck:ro" -v "$binaries:/mnt/pkgdeck-bin:ro" "$image" \
         python3 -u /mnt/pkgdeck/scripts/vm/container_guest.py "$@"
 fi
