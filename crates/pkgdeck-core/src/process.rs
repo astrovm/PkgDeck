@@ -34,7 +34,7 @@ impl Default for Limits {
     }
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Completion {
     pub code: Option<i32>,
     pub signal: Option<i32>,
@@ -45,7 +45,7 @@ pub struct Completion {
     pub cancellation_deferred: bool,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ExecutionError {
     Disabled(String),
     Invalid(String),
