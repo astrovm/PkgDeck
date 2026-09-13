@@ -113,8 +113,10 @@ The guest also exercises CLI versioned APT and Homebrew lifecycles through
 install, refresh, update detection, upgrade, and removal, checking native state.
 Homebrew uses a controlled tap and the standard Linux prefix as an unprivileged
 user. The VM CPU exposes SSSE3, required by Homebrew on x86_64.
-The overlay is deleted when the test finishes, including failures; logs remain in
-`build/host-vm/`. The development `apt-probe` executable is never packaged.
+Dependencies are prepared once in a verified cached VM image. Every test uses a
+fresh overlay, which is deleted on completion or failure. Logs stream live and
+remain in `build/host-vm/logs/`. See [prepared guests and Podman](development.md#prepared-qemu-guests)
+for cache invalidation and the faster container lifecycle checks. The development `apt-probe` executable is never packaged.
 
 The VM test runs in a separate x86_64 CI job. Synthetic boundary tests run on both
 native CI architectures. Real ARM authorization, installed Flatpak/Snap host
