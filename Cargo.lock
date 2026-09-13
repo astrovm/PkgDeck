@@ -1243,6 +1243,9 @@ dependencies = [
 [[package]]
 name = "pkgdeck-core"
 version = "0.1.0"
+dependencies = [
+ "rustix",
+]
 
 [[package]]
 name = "portable-atomic"
