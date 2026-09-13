@@ -4,11 +4,16 @@ set -euo pipefail
 : "${PKGDECK_SDK_PREFIX:?Set PKGDECK_SDK_PREFIX to the install directory}"
 work="${PKGDECK_BUILD_ROOT:-$PWD/build/sdk}"
 mkdir -p "$work"
+checksums=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/sdk.sha256
 for project in extra-cmake-modules kirigami; do
     archive="$work/$project-6.30.0.tar.xz"
-    curl --fail --location --retry 3 "https://download.kde.org/stable/frameworks/6.30/$project-6.30.0.tar.xz" -o "$archive"
-    curl --fail --location --retry 3 "https://download.kde.org/stable/frameworks/6.30/$project-6.30.0.tar.xz.sha256" -o "$archive.sha256"
-    (cd "$work" && sha256sum --check "$project-6.30.0.tar.xz.sha256")
+    expected=$(awk -v name="$project-6.30.0.tar.xz" '$2 == name { print $1 }' "$checksums")
+    [[ -n "$expected" ]] || { echo "Missing pinned checksum for $project" >&2; exit 1; }
+    if [[ ! -f "$archive" ]] || ! printf '%s  %s\n' "$expected" "$archive" | sha256sum --check --status; then
+        curl --fail --location --retry 3 "https://download.kde.org/stable/frameworks/6.30/$project-6.30.0.tar.xz" -o "$archive.part"
+        printf '%s  %s\n' "$expected" "$archive.part" | sha256sum --check
+        mv "$archive.part" "$archive"
+    fi
     tar -xf "$archive" -C "$work"
     cmake -S "$work/$project-6.30.0" -B "$work/$project-build" -G Ninja \
         -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$PKGDECK_SDK_PREFIX" \

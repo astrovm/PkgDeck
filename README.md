@@ -218,6 +218,11 @@ no local or manually prepared release builds.
 
 ## Development
 
+Start with `scripts/verify.sh fast`. Run `scripts/setup-dev.sh` once to prepare
+the persistent SDK, then `scripts/verify.sh full` for workspace coverage and release
+builds. `scripts/verify.sh vm` runs isolated native acceptance checks. Local work
+and CI use these same scripts; see [development tooling](docs/development.md).
+
 The CLI supports APT and Homebrew package operations and `pkd doctor` diagnostics.
 The core contains their adapters, the shared engine, and the host authorization
 boundary. The interactive TUI, GUI package views, other backends, and release
