@@ -19,9 +19,9 @@ for name in ("pkd", "pkgdeck"):
     dest = out / "usr/bin" / name
     dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(root / "target/release" / name, dest)
-# Only deploy the QML modules and plugins used by the foundation. Their shared
+# Only deploy the QML modules and plugins used by the application. Their shared
 # libraries are collected below, avoiding optional database/multimedia drivers.
-for prefix, modules in ((qt, ("QtQuick", "QtQml")), (kde, ("org",))):
+for prefix, modules in ((qt, ("QtQuick", "QtQml", "QtCore")), (kde, ("org",))):
     for module in modules:
         source = prefix / "qml" / module
         if source.exists():

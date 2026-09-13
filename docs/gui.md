@@ -1,0 +1,84 @@
+# Graphical package browser
+
+`pkgdeck` opens the Qt/Kirigami frontend. It uses the same APT/Homebrew engine and
+host authorization boundary as the terminal frontend.
+
+![Implemented GUI with a synthetic package](screenshots/pkgdeck-gui-live.png)
+
+This capture uses synthetic metadata on a private test display. Colors follow the
+platform theme.
+
+The sidebar provides Discover, Search, Installed, Updates, Sources, Settings, and
+Help/About. Discover reports actual source availability on the current computer;
+it does not invent recommendations or combine matching names across sources.
+Search submits on Enter or the Search button. Results use a virtualized ListView,
+with the selected package's description, scope, homepage, and dependencies below.
+Matching names remain separate source/architecture/scope identities.
+
+Install, Remove, Upgrade, and Refresh source operate on the selected identity.
+Each write requires confirmation, with No focused initially. Refresh changes
+source metadata only. Successful writes clear stale results; use Reload to read
+current state. Failures and partial query results remain visible in the scrollable
+status area. Native dependency changes can accompany package operations.
+
+Queries and writes execute on a Rust worker. The GUI polls a message channel and
+updates Qt properties on its own thread. It shows native progress messages and an
+indeterminate activity indicator, not an invented percentage. Cancel interrupts
+reads; an already-running native write finishes safely under its manager's lock.
+Closing a busy window requests cancellation and keeps it open until completion.
+
+Settings persist the source filter and authorization preference through Qt's
+per-user settings. The default GUI authorization uses the host polkit agent.
+Existing sudo credentials are also supported; passwords are never collected by
+PkgDeck. Homebrew remains unprivileged. `pkgdeck --from apt|homebrew --auth
+sudo|polkit` overrides the saved settings for the current session.
+
+Colors and dark mode inherit the platform theme. Text labels accompany all
+navigation actions, package text is displayed as plain text, and result selection
+uses the theme's highlighted text color. Narrow windows use a collapsible drawer,
+wrapped action buttons, and scrollable details/status.
+
+| Shortcut | Action |
+| --- | --- |
+| Ctrl+F | Open Search and focus its field |
+| Ctrl+L | Focus package/source results |
+| Up/Down | Select a result and load its details |
+| Ctrl+1 / Ctrl+3 / Ctrl+4 / Ctrl+5 | Discover / Installed / Updates / Sources |
+| Ctrl+I / Ctrl+D / Ctrl+U | Propose install / remove / upgrade |
+| Ctrl+M | Propose metadata refresh for the selected source |
+| Ctrl+R | Reload the current view |
+| Alt+Y / Alt+N in confirmation | Confirm / reject |
+| Escape during work | Request cancellation |
+| Ctrl+Q | Close, waiting safely if work is active |
+
+## Local verification
+
+`scripts/verify.sh full` runs Qt Quick tests against the actual Browser component,
+Rust worker tests, and a real-window lifecycle using a synthetic Homebrew
+executable. The real-window test creates a private Xvfb display; it does not use
+the user's display or package database. It verifies native fixture state after
+install, refresh, upgrade, and removal, and exercises resize and read cancellation.
+Qt Quick tests cover keyboard navigation, exact confirmation, source views,
+loading/errors, and closing during work. Xvfb, xdotool, and fonts are included in
+the development image and desktop CI dependencies.
+
+To check the staged release bundle against real managers:
+
+```sh
+scripts/verify.sh full
+source scripts/dev-env.sh
+python3 scripts/bundle.py
+PKGDECK_FRONTEND=gui PKGDECK_BINARY_DIR="$PWD/build/AppDir/usr/bin" \
+  scripts/container.sh lifecycle
+```
+
+This mounts AppDir read-only into a disposable rootless container, opens its GUI
+on a private display, sends keyboard actions, and verifies synthetic 1.0 → 2.0
+APT/Homebrew packages using the underlying managers. The application uses its
+bundled Qt/Kirigami libraries; host commands use the sanitized host boundary.
+Desktop CI runs this same packaged GUI check on x86_64 and aarch64.
+
+The native/AppImage execution path is enabled. Flatpak and Snap host operations
+remain explicitly disabled; their packaged GUI smoke checks do not claim a native
+package lifecycle. Polkit and manager-lock behavior retain the shared VM tests.
+Installed-format distribution validation remains a later release gate.

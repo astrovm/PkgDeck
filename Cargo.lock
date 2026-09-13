@@ -1241,6 +1241,8 @@ dependencies = [
  "cxx-qt-build",
  "cxx-qt-lib",
  "pkgdeck-core",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
