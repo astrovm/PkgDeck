@@ -123,7 +123,11 @@ x86_64 VM test. See [execution behavior and format gates](docs/host-execution.md
 **Acceptance:** each format has a tested execution path or a documented,
 explicitly disabled capability. Snap confinement is an early feasibility gate.
 
-### 3. Shared engine — planned
+### 3. Shared engine — implemented
+
+The core now has package identities, a backend contract, explicit selection,
+partial-result handling, and operation progress events. Synthetic backends verify
+the full engine lifecycle. See the [shared engine contract](docs/shared-engine.md).
 
 - Model package identity by backend, package identifier, architecture, and
   installation scope or environment.
@@ -209,8 +213,9 @@ no local or manually prepared release builds.
 ## Development
 
 The frontends contain application shells plus read-only `pkd doctor` diagnostics.
-The core has host execution and a VM-tested APT authorization prototype. Package
-commands, the complete interfaces, and release publication belong to later steps.
+The core has the shared package engine, host execution, and a VM-tested APT
+authorization prototype. Real backend adapters, package commands, the complete
+interfaces, and release publication belong to later steps.
 
 Pinned baseline:
 
