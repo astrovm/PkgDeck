@@ -7,6 +7,7 @@ fn main() {
             .qml_file("qml/Browser.qml")
             .qml_file("qml/DeckIcon.qml"),
     )
+    .qrc("resources.qrc")
     .file("src/controller.rs")
     .build();
 }

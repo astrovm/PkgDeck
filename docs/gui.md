@@ -19,6 +19,15 @@ with the selected package's description, scope, homepage, and dependencies below
 Matching names remain separate source/architecture/scope identities.
 
 Install, Remove, Upgrade, and Refresh source operate on the selected identity.
+Updates also provides **Upgrade all** (Ctrl+Shift+U), without selecting a row.
+It confirms every listed package identity, respects the selected source filter,
+and is disabled when there are no upgrades or any source query failed. The batch
+reports every result, including partial failures and cancellation. Completed
+upgrades are not rolled back; cancellation skips remaining writes once the active
+native transaction finishes. Reload reads the remaining updates.
+
+![Upgrade all with synthetic packages](screenshots/pkgdeck-updates-live.png)
+
 Each write requires confirmation, with No focused initially. Refresh changes
 source metadata only. Successful writes clear stale results; use Reload to read
 current state. Failures and partial query results remain visible in the scrollable
@@ -54,6 +63,7 @@ cache. Background polling stops when work finishes.
 | Up/Down | Select a result and load its details |
 | Ctrl+1 / Ctrl+3 / Ctrl+4 / Ctrl+5 | Discover / Installed / Updates / Sources |
 | Ctrl+I / Ctrl+D / Ctrl+U | Propose install / remove / upgrade |
+| Ctrl+Shift+U in Updates | Confirm all listed upgrades |
 | Ctrl+M | Propose metadata refresh for the selected source |
 | Ctrl+R | Reload the current view |
 | Alt+Y / Alt+N in confirmation | Confirm / reject |
@@ -62,13 +72,15 @@ cache. Background polling stops when work finishes.
 
 ## Bundled icons
 
-Navigation, package actions, source rows, and details use original vector artwork
+Navigation, package actions, source rows, details, and the sidebar heart use original vector artwork
 in `DeckIcon.qml`. CXX-Qt embeds this component in the application's Qt resources,
 so native, AppImage, Flatpak, and Snap builds carry the same icons inside the
-executable. They use the already-required Qt Quick Canvas renderer: no downloaded
-assets, icon theme, extra renderer plugin, or icon font is required. Source symbols
-are generic archive/mug illustrations, not third-party logos. The artwork follows
-the repository's MIT license.
+executable. They use the already-required Qt Quick Canvas renderer: no runtime downloads, host icon theme, or icon font is required. Source symbols
+are generic archive/mug illustrations, not third-party logos. The original artwork follows
+the repository's MIT license. The sidebar's GitHub mark is bundled from
+[GitHub Octicons](https://github.com/primer/octicons) with its MIT license;
+it uses the Qt SVG plugin already included in the packages. The sidebar links to
+https://github.com/astrovm/PkgDeck and displays “Made with ♥ by astro”.
 
 Qt Quick pixel tests render every icon in two colors with empty XDG icon-data
 directories. Packaged GUI smoke tests use the same isolated data directories.

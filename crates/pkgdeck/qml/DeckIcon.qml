@@ -9,6 +9,7 @@ Canvas {
     implicitHeight: 20
     Accessible.ignored: true // The adjacent control label carries the meaning.
     readonly property var drawings: ({
+        "heart": [[12,21,3,12,2,8,3,4,7,3,12,7,17,3,21,4,22,8,21,12,12,21]],
         "package": [[3,7,12,2,21,7,21,17,12,22,3,17,3,7,12,12,21,7], [12,12,12,22], [7,4.8,16,9.8]],
         "discover": [[4,4,10,4,10,10,4,10,4,4], [14,4,20,4,20,10,14,10,14,4], [4,14,10,14,10,20,4,20,4,14], [14,14,20,14,20,20,14,20,14,14]],
         "search": [[15,15,21,21]],
@@ -43,6 +44,7 @@ Canvas {
             ctx.moveTo(points[0], points[1]);
             for (let i = 2; i < points.length; i += 2)
                 ctx.lineTo(points[i], points[i + 1]);
+            if (name === "heart") { ctx.fillStyle = ink; ctx.fill(); }
             ctx.stroke();
         }
         if (name === "search" || name === "help" || name === "refresh") {

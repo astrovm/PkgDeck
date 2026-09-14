@@ -219,6 +219,13 @@ symbols with text labels, retaining ordinary terminal-font support and unchanged
 JSON output. See the [GUI guide](docs/gui.md#bundled-icons) and
 [terminal guide](docs/tui.md#portable-status-symbols).
 
+### Upgrade all in the GUI — implemented
+
+Updates includes an Upgrade all button and Ctrl+Shift+U shortcut. A single
+confirmation lists the exact package identities; batch results report success,
+failure, and cancellation for each package. Incomplete queries disable the action.
+The sidebar now displays “Made with ♥ by astro” and a bundled GitHub link icon.
+
 ### 7. Additional backends — planned
 
 Add each wave only after its advertised capabilities pass integration tests.

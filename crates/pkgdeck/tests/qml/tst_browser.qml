@@ -16,6 +16,7 @@ TestCase {
         property string status: "Ready"
         property string confirmation: ""
         property bool busy: false
+        property bool upgradable: false
         property string lastView: ""
         property string lastQuery: ""
         property int selection: -1
@@ -52,6 +53,7 @@ TestCase {
         id: window
         App.Browser {
             backend: fake
+            repositoryIconSource: Qt.resolvedUrl("../../assets/" + (dark ? "github-dark.svg" : "github.svg"))
         }
     }
     function initTestCase() {
@@ -64,6 +66,7 @@ TestCase {
         fake.status = "Ready";
         fake.confirmation = "";
         fake.busy = false;
+        fake.upgradable = false;
         fake.writes = 0;
         fake.cancels = 0;
         browser = createTemporaryObject(window, test);
@@ -202,6 +205,48 @@ TestCase {
             wait(30);
             verify(!grabImage(icon).equals(light), name + " should follow the palette");
         }
+    }
+    function test_upgrade_all_requires_available_updates_and_confirmation() {
+        browser.openView("Updates");
+        const button = findChild(browser, "upgradeAllButton");
+        verify(button.visible);
+        verify(!button.enabled);
+        populate();
+        fake.upgradable = true;
+        waitForRendering(browser.contentItem);
+        verify(button.enabled); // No individual selection required.
+        mouseClick(button);
+        const dialog = findChild(browser, "confirmationDialog");
+        tryCompare(dialog, "opened", true);
+        verify(fake.confirmation.indexOf("upgrade-all") === 0);
+        dialog.reject();
+        compare(fake.writes, 0);
+        mouseClick(button);
+        tryCompare(dialog, "opened", true);
+        dialog.accept();
+        compare(fake.writes, 1);
+        fake.busy = true;
+        verify(!button.enabled);
+        fake.busy = false;
+        browser.openView("Installed");
+        verify(!button.visible);
+    }
+    function test_repository_sidebar() {
+        compare(browser.repositoryUrl.toString(), "https://github.com/astrovm/PkgDeck");
+        const icon = findChild(browser, "repositoryIcon");
+        tryCompare(icon, "status", Image.Ready);
+        const link = findChild(browser, "repositoryLink");
+        verify(link.visible);
+        link.forceActiveFocus();
+        verify(link.activeFocus);
+        browser.width = 380;
+        browser.height = 500;
+        wait(30);
+        verify(!link.visible); // Attribution belongs to the sidebar, not a window footer.
+        browser.width = 1100;
+        wait(30);
+        verify(link.visible);
+        verify(link.width >= 24);
     }
     function test_close_requests_cancellation() {
         fake.busy = true;
