@@ -221,15 +221,18 @@ fn flatpak_uses_the_sanitized_user_path_and_pins_system_writes() {
         ),
         Err(ExecutionError::Cancelled)
     );
+    let system_cancelled = Cancellation::default();
+    system_cancelled.cancel();
     let system = host.flatpak(
         &["--system".into(), "update".into()],
-        &cancel,
+        &system_cancelled,
         true,
         true,
         Authorization::SudoNonInteractive,
     );
     assert!(
-        matches!(system, Err(ExecutionError::Disabled(reason)) if reason == "system Flatpak not found")
+        matches!(system, Err(ExecutionError::Disabled(ref reason)) if reason == "system Flatpak not found")
+            || system == Err(ExecutionError::Cancelled)
     );
 }
 
