@@ -247,7 +247,7 @@ Add each wave only after its advertised capabilities pass integration tests.
 | Wave | Backends | Initial scope |
 | --- | --- | --- |
 | 2 | AppImage, Flatpak | Local Type 2 imports; Flatpak user/system installations. |
-| 3 | DNF, Pacman, Zypper, Snap | Distro-specific operations and Snap lifecycle. |
+| 3 | DNF, Pacman, Zypper, Snap | Distro-specific operations and Snap lifecycle. **Implemented.** |
 | 4 | Cargo, npm, pnpm, Bun | User-installed command-line tools. |
 | 5 | pip, pipx, uv, Composer, RubyGems | Explicit environments and isolated user tools. |
 

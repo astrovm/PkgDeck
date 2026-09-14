@@ -1,4 +1,4 @@
-//! Native APT, Linux Homebrew formula, and local AppImage adapters.
+//! Native package-manager, Linux Homebrew formula, and local AppImage adapters.
 mod appimage;
 use crate::{
     engine::*,
@@ -47,6 +47,16 @@ pub trait Transport: Send {
         write: bool,
         system: bool,
     ) -> Result<Completion, ExecutionError>;
+    fn system_manager(
+        &self,
+        executable: &str,
+        args: &[OsString],
+        cancel: &Cancellation,
+        write: bool,
+    ) -> Result<Completion, ExecutionError> {
+        let _ = (args, cancel, write);
+        Err(ExecutionError::Disabled(format!("{executable} not found")))
+    }
 }
 pub struct NativeTransport {
     pub host: Host,
@@ -105,6 +115,16 @@ impl Transport for NativeTransport {
     ) -> Result<Completion, ExecutionError> {
         self.host
             .flatpak(args, cancel, write, system, self.authorization)
+    }
+    fn system_manager(
+        &self,
+        executable: &str,
+        args: &[OsString],
+        cancel: &Cancellation,
+        write: bool,
+    ) -> Result<Completion, ExecutionError> {
+        self.host
+            .system_manager(executable, args, cancel, write, self.authorization)
     }
 }
 
@@ -647,6 +667,359 @@ impl<T: Transport> Backend for Homebrew<T> {
     }
 }
 
+#[derive(Clone, Copy)]
+enum ManagerKind {
+    Dnf,
+    Pacman,
+    Zypper,
+    Snap,
+}
+
+impl ManagerKind {
+    fn id(self) -> &'static str {
+        match self {
+            Self::Dnf => "dnf",
+            Self::Pacman => "pacman",
+            Self::Zypper => "zypper",
+            Self::Snap => "snap",
+        }
+    }
+    fn executable(self) -> &'static str {
+        self.id()
+    }
+    fn read_args(self, installed: bool, query: &str) -> Vec<OsString> {
+        match (self, installed) {
+            (Self::Dnf, true) => vec![
+                "--quiet",
+                "repoquery",
+                "--latest-limit",
+                "1",
+                "--installed",
+                "--queryformat",
+                "%{name}|%{arch}|%{version}-%{release}|%{summary}\n",
+            ],
+            (Self::Dnf, false) => vec![
+                "--quiet",
+                "repoquery",
+                "--latest-limit",
+                "1",
+                "--queryformat",
+                "%{name}|%{arch}|%{version}-%{release}|%{summary}\n",
+                query,
+            ],
+            (Self::Pacman, true) => vec!["-Q"],
+            (Self::Pacman, false) => vec!["-Ss", query],
+            (Self::Zypper, true) => vec![
+                "--xmlout",
+                "search",
+                "--installed-only",
+                "--details",
+                "--type",
+                "package",
+            ],
+            (Self::Zypper, false) => vec![
+                "--xmlout",
+                "search",
+                "--details",
+                "--type",
+                "package",
+                query,
+            ],
+            (Self::Snap, true) => vec!["list"],
+            (Self::Snap, false) => vec!["find", query],
+        }
+        .into_iter()
+        .map(OsString::from)
+        .collect()
+    }
+    fn write_args(self, operation: &Operation) -> Vec<&'static str> {
+        match (self, operation) {
+            (Self::Dnf, Operation::Refresh { .. }) => vec!["-y", "makecache"],
+            (Self::Dnf, Operation::Install(_)) => vec!["-y", "install", "--"],
+            (Self::Dnf, Operation::Remove(_)) => vec!["-y", "remove", "--"],
+            (Self::Dnf, Operation::Upgrade(_)) => vec!["-y", "upgrade", "--"],
+            (Self::Pacman, Operation::Refresh { .. }) => vec!["-Sy", "--noconfirm"],
+            (Self::Pacman, Operation::Install(_)) => {
+                vec!["-S", "--noconfirm", "--needed", "--"]
+            }
+            (Self::Pacman, Operation::Remove(_)) => vec!["-Rns", "--noconfirm", "--"],
+            (Self::Pacman, Operation::Upgrade(_)) => {
+                vec!["-S", "--noconfirm", "--needed", "--"]
+            }
+            (Self::Zypper, Operation::Refresh { .. }) => vec!["--non-interactive", "refresh"],
+            (Self::Zypper, Operation::Install(_)) => vec![
+                "--non-interactive",
+                "install",
+                "--auto-agree-with-licenses",
+                "--",
+            ],
+            (Self::Zypper, Operation::Remove(_)) => vec!["--non-interactive", "remove", "--"],
+            (Self::Zypper, Operation::Upgrade(_)) => vec!["--non-interactive", "update", "--"],
+            (Self::Snap, Operation::Refresh { .. }) => vec!["refresh"],
+            (Self::Snap, Operation::Install(_)) => vec!["install"],
+            (Self::Snap, Operation::Remove(_)) => vec!["remove"],
+            (Self::Snap, Operation::Upgrade(_)) => vec!["refresh"],
+        }
+    }
+}
+
+pub struct SystemManager<T = NativeTransport> {
+    kind: ManagerKind,
+    transport: T,
+}
+pub type Dnf<T = NativeTransport> = SystemManager<T>;
+pub type Pacman<T = NativeTransport> = SystemManager<T>;
+pub type Zypper<T = NativeTransport> = SystemManager<T>;
+pub type Snap<T = NativeTransport> = SystemManager<T>;
+impl<T: Transport> SystemManager<T> {
+    fn new(kind: ManagerKind, transport: T) -> Self {
+        Self { kind, transport }
+    }
+    pub fn dnf(transport: T) -> Self {
+        Self::new(ManagerKind::Dnf, transport)
+    }
+    pub fn pacman(transport: T) -> Self {
+        Self::new(ManagerKind::Pacman, transport)
+    }
+    pub fn zypper(transport: T) -> Self {
+        Self::new(ManagerKind::Zypper, transport)
+    }
+    pub fn snap(transport: T) -> Self {
+        Self::new(ManagerKind::Snap, transport)
+    }
+    fn call(
+        &self,
+        args: Vec<OsString>,
+        cancel: &Cancellation,
+        write: bool,
+    ) -> Result<Completion, EngineError> {
+        Ok(self
+            .transport
+            .system_manager(self.kind.executable(), &args, cancel, write)?)
+    }
+    fn valid_name(&self, name: &str) -> bool {
+        !name.is_empty()
+            && !name.starts_with('-')
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._+@-".contains(&b))
+    }
+    fn package(
+        &self,
+        name: &str,
+        arch: &str,
+        version: &str,
+        summary: &str,
+    ) -> Result<Package, EngineError> {
+        if !self.valid_name(name) || arch.is_empty() || version.is_empty() {
+            return Err(invalid(self.kind.id(), "invalid package metadata"));
+        }
+        Ok(Package {
+            id: PackageId {
+                backend: self.kind.id().into(),
+                name: name.into(),
+                architecture: arch.into(),
+                scope: Scope::System,
+            },
+            display_name: name.into(),
+            summary: summary.into(),
+            installed_version: None,
+            candidate_version: Some(version.into()),
+            update: UpdateAvailability::Unknown,
+        })
+    }
+    fn parse(&self, value: Vec<u8>, installed: bool) -> Result<Vec<Package>, EngineError> {
+        let text = String::from_utf8(value).map_err(|e| invalid(self.kind.id(), e))?;
+        let mut packages = Vec::new();
+        match self.kind {
+            ManagerKind::Dnf => {
+                for line in text.lines().filter(|line| !line.is_empty()) {
+                    let fields: Vec<_> = line.splitn(4, '|').collect();
+                    if fields.len() != 4 {
+                        return Err(invalid("dnf", "invalid repoquery metadata"));
+                    }
+                    let mut package = self.package(fields[0], fields[1], fields[2], fields[3])?;
+                    if installed {
+                        package.installed_version = Some(fields[2].into());
+                        package.update = UpdateAvailability::Current;
+                    }
+                    packages.push(package);
+                }
+            }
+            ManagerKind::Pacman => {
+                let mut lines = text.lines().peekable();
+                while let Some(line) = lines.next() {
+                    if line.trim().is_empty() {
+                        continue;
+                    }
+                    let header = line.split_whitespace().collect::<Vec<_>>();
+                    let (name, version) = if installed {
+                        (header.first().copied(), header.get(1).copied())
+                    } else {
+                        (
+                            header
+                                .first()
+                                .and_then(|n| n.split_once('/').map(|(_, n)| n)),
+                            header.get(1).copied(),
+                        )
+                    };
+                    let (Some(name), Some(version)) = (name, version) else {
+                        return Err(invalid("pacman", "invalid package metadata"));
+                    };
+                    let summary = if installed {
+                        "Installed package"
+                    } else {
+                        lines.next().map(str::trim).unwrap_or("")
+                    };
+                    let mut package =
+                        self.package(name, std::env::consts::ARCH, version, summary)?;
+                    if installed {
+                        package.installed_version = Some(version.into());
+                        package.update = UpdateAvailability::Current;
+                    }
+                    packages.push(package);
+                }
+            }
+            ManagerKind::Zypper => {
+                for entry in text.split("<solvable ").skip(1) {
+                    let attr = |key: &str| {
+                        entry
+                            .split_once(&format!("{key}=\""))
+                            .and_then(|(_, tail)| tail.split_once('"'))
+                            .map(|(value, _)| value)
+                    };
+                    let (Some(name), Some(version), Some(arch)) =
+                        (attr("name"), attr("edition"), attr("arch"))
+                    else {
+                        return Err(invalid("zypper", "invalid XML metadata"));
+                    };
+                    let mut package =
+                        self.package(name, arch, version, attr("summary").unwrap_or(""))?;
+                    if installed {
+                        package.installed_version = Some(version.into());
+                        package.update = UpdateAvailability::Current;
+                    }
+                    packages.push(package);
+                }
+            }
+            ManagerKind::Snap => {
+                for line in text.lines().skip(1).filter(|line| !line.trim().is_empty()) {
+                    let fields = line.split_whitespace().collect::<Vec<_>>();
+                    if fields.len() < 2 {
+                        return Err(invalid("snap", "invalid list metadata"));
+                    }
+                    let mut package =
+                        self.package(fields[0], std::env::consts::ARCH, fields[1], "Snap package")?;
+                    if installed {
+                        package.installed_version = Some(fields[1].into());
+                        package.update = UpdateAvailability::Current;
+                    }
+                    packages.push(package);
+                }
+            }
+        }
+        Ok(packages)
+    }
+    fn query(
+        &self,
+        installed: bool,
+        query: &str,
+        cancel: &Cancellation,
+    ) -> Result<Vec<Package>, EngineError> {
+        if !installed && !self.valid_name(query) {
+            return Err(invalid(self.kind.id(), "invalid package query"));
+        }
+        let args = self.kind.read_args(installed, query);
+        self.parse(
+            bytes(self.kind.id(), self.call(args, cancel, false)?)?,
+            installed,
+        )
+    }
+    fn target(&self, id: &PackageId) -> Result<String, EngineError> {
+        if id.backend != self.kind.id() || id.scope != Scope::System || !self.valid_name(&id.name) {
+            return Err(invalid(
+                self.kind.id(),
+                "foreign or invalid package identity",
+            ));
+        }
+        Ok(id.name.clone())
+    }
+}
+impl<T: Transport> Backend for SystemManager<T> {
+    fn id(&self) -> &str {
+        self.kind.id()
+    }
+    fn capabilities(&self) -> &[Capability] {
+        CAPABILITIES
+    }
+    fn detect(&mut self, cancel: &Cancellation) -> Result<Availability, EngineError> {
+        match self.query(true, "", cancel) {
+            Ok(_) => Ok(Availability::Available),
+            Err(EngineError::Execution(ExecutionError::Disabled(reason))) => {
+                Ok(Availability::Unavailable(reason))
+            }
+            Err(error) => Err(error),
+        }
+    }
+    fn search(&mut self, query: &str, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
+        self.query(false, query, cancel)
+    }
+    fn installed(&mut self, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
+        self.query(true, "", cancel)
+    }
+    fn details(
+        &mut self,
+        id: &PackageId,
+        cancel: &Cancellation,
+    ) -> Result<PackageDetails, EngineError> {
+        let name = self.target(id)?;
+        let package = self
+            .query(false, &name, cancel)?
+            .into_iter()
+            .find(|package| package.id == *id)
+            .ok_or(EngineError::NotFound)?;
+        Ok(PackageDetails {
+            description: package.summary.clone(),
+            homepage: None,
+            dependencies: vec![],
+            package,
+        })
+    }
+    fn execute(
+        &mut self,
+        operation: &Operation,
+        cancel: &Cancellation,
+        progress: &mut dyn FnMut(Progress),
+    ) -> Result<OperationOutcome, EngineError> {
+        if operation.backend() != self.kind.id() {
+            return Err(invalid(self.kind.id(), "foreign operation"));
+        }
+        let name = match operation {
+            Operation::Refresh { .. } => None,
+            Operation::Install(id) | Operation::Remove(id) | Operation::Upgrade(id) => {
+                Some(self.target(id)?)
+            }
+        };
+        let mut args: Vec<OsString> = self
+            .kind
+            .write_args(operation)
+            .into_iter()
+            .map(OsString::from)
+            .collect();
+        if let Some(name) = name {
+            args.push(name.into());
+        }
+        progress(Progress::Message(format!(
+            "Running {} with non-interactive authorization; cancellation waits for completion.",
+            self.kind.id()
+        )));
+        let result = self.call(args, cancel, true)?;
+        Ok(OperationOutcome {
+            cancellation_deferred: result.cancellation_deferred,
+        })
+    }
+}
+
 /// Missing optional managers are omitted from automatic queries, but explicit selections
 /// and source discovery retain their unavailability. Detection failures are never hidden.
 pub fn native_engine(
@@ -655,7 +1028,12 @@ pub fn native_engine(
     authorization: Authorization,
     cancel: &Cancellation,
 ) -> Result<Engine, EngineError> {
-    if source.is_some_and(|s| s != "apt" && s != "homebrew" && s != "appimage" && s != "flatpak") {
+    if source.is_some_and(|s| {
+        ![
+            "apt", "dnf", "pacman", "zypper", "snap", "homebrew", "appimage", "flatpak",
+        ]
+        .contains(&s)
+    }) {
         return Err(EngineError::UnknownBackend(source.unwrap().into()));
     }
     let mut engine = Engine::default();
@@ -686,6 +1064,27 @@ pub fn native_engine(
             || !matches!(brew.detect(cancel), Ok(Availability::Unavailable(_))))
     {
         engine.register(brew)?;
+    }
+    for backend in ["dnf", "pacman", "zypper", "snap"] {
+        if source.is_none_or(|source| source == backend) {
+            let transport = NativeTransport {
+                host: Host::current(),
+                authorization,
+            };
+            let mut manager = match backend {
+                "dnf" => SystemManager::dnf(transport),
+                "pacman" => SystemManager::pacman(transport),
+                "zypper" => SystemManager::zypper(transport),
+                "snap" => SystemManager::snap(transport),
+                _ => unreachable!(),
+            };
+            if discover
+                || source.is_some()
+                || !matches!(manager.detect(cancel), Ok(Availability::Unavailable(_)))
+            {
+                engine.register(manager)?;
+            }
+        }
     }
     if source.is_none_or(|s| s == "appimage") {
         engine.register(AppImage::native())?;

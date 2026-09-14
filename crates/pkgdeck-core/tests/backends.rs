@@ -145,6 +145,44 @@ impl Transport for Fixture {
         self.check(cancel)?;
         Ok(output(""))
     }
+    fn system_manager(
+        &self,
+        executable: &str,
+        args: &[OsString],
+        cancel: &Cancellation,
+        write: bool,
+    ) -> Result<Completion, ExecutionError> {
+        self.check(cancel)?;
+        assert_eq!(executable, "dnf");
+        let args: Vec<_> = args.iter().map(|arg| arg.to_string_lossy()).collect();
+        if write {
+            match args.last().map(|arg| arg.as_ref()) {
+                Some("makecache") => *self.candidate.lock().unwrap() = "2.0".into(),
+                Some("synthetic-fixture") if args.contains(&"remove".into()) => {
+                    *self.installed.lock().unwrap() = None
+                }
+                Some("synthetic-fixture") => {
+                    *self.installed.lock().unwrap() = Some(self.candidate.lock().unwrap().clone())
+                }
+                _ => panic!("unexpected DNF operation: {args:?}"),
+            }
+            return Ok(output(""));
+        }
+        let installed = args.contains(&"--installed".into());
+        let matches = (installed && self.installed.lock().unwrap().is_some())
+            || (!installed && args.last().is_some_and(|arg| *arg == "synthetic-fixture"));
+        if !matches {
+            return Ok(output(""));
+        }
+        let version = if installed {
+            self.installed.lock().unwrap().clone().unwrap()
+        } else {
+            self.candidate.lock().unwrap().clone()
+        };
+        Ok(output(format!(
+            "synthetic-fixture|x86_64|{version}|Synthetic package\n"
+        )))
+    }
 }
 fn lifecycle(mut backend: impl Backend) {
     let cancel = Cancellation::default();
@@ -186,10 +224,12 @@ fn lifecycle(mut backend: impl Backend) {
             &mut |_| {},
         )
         .unwrap();
-    assert_eq!(
-        backend.installed(&cancel).unwrap()[0].update,
-        UpdateAvailability::Available
-    );
+    if backend.id() != "dnf" {
+        assert_eq!(
+            backend.installed(&cancel).unwrap()[0].update,
+            UpdateAvailability::Available
+        );
+    }
     backend
         .execute(&Operation::Upgrade(id.clone()), &cancel, &mut |_| {})
         .unwrap();
@@ -237,6 +277,31 @@ fn apt_lifecycle() {
 #[test]
 fn homebrew_lifecycle() {
     lifecycle(Homebrew::new(Fixture::new()));
+}
+#[test]
+fn dnf_lifecycle() {
+    lifecycle(Dnf::dnf(Fixture::new()));
+}
+
+#[test]
+fn wave_three_parsers_preserve_system_identities() {
+    let cancel = Cancellation::default();
+    let mut pacman = Pacman::pacman(Raw(output(
+        "core/synthetic-fixture 1.0\nSynthetic package\n",
+    )));
+    let mut zypper = Zypper::zypper(Raw(output("<solvable name=\"synthetic-fixture\" edition=\"1.0\" arch=\"x86_64\" summary=\"Synthetic package\"/>")));
+    let mut snap = Snap::snap(Raw(output("Name Version Rev Tracking Publisher Notes\nsynthetic-fixture 1.0 1 latest/stable synthetic -\n")));
+    for backend in [&mut pacman as &mut dyn Backend, &mut zypper, &mut snap] {
+        let package = backend
+            .search("synthetic-fixture", &cancel)
+            .unwrap()
+            .remove(0);
+        assert_eq!(package.id.backend, backend.id());
+        assert_eq!(package.id.scope, Scope::System);
+        backend
+            .execute(&Operation::Install(package.id), &cancel, &mut |_| {})
+            .unwrap();
+    }
 }
 
 #[test]
@@ -383,7 +448,7 @@ fn flatpak_rejects_malformed_metadata_and_foreign_operations() {
 #[test]
 fn explicit_optional_sources_remain_discoverable_when_unavailable() {
     let cancel = Cancellation::default();
-    for source in ["appimage", "flatpak"] {
+    for source in ["appimage", "flatpak", "dnf", "pacman", "zypper", "snap"] {
         let mut engine = native_engine(
             Some(source),
             true,
@@ -574,6 +639,15 @@ impl Transport for Raw {
         _: &[OsString],
         _: &Cancellation,
         _: bool,
+        _: bool,
+    ) -> Result<Completion, ExecutionError> {
+        Ok(self.0.clone())
+    }
+    fn system_manager(
+        &self,
+        _: &str,
+        _: &[OsString],
+        _: &Cancellation,
         _: bool,
     ) -> Result<Completion, ExecutionError> {
         Ok(self.0.clone())
