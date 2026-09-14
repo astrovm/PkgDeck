@@ -69,6 +69,8 @@ Controls.ApplicationWindow {
         }
     }
 
+    property url repositoryIconSource: root.dark ? "qrc:/pkgdeck/github-dark.svg" : "qrc:/pkgdeck/github.svg"
+    readonly property url repositoryUrl: "https://github.com/astrovm/PkgDeck"
     width: 1100
     height: 760
     minimumWidth: 360
@@ -162,13 +164,7 @@ Controls.ApplicationWindow {
                     color: root.ink
                     Layout.topMargin: 12
                 }
-                Controls.Label {
-                    text: "YOUR PACKAGE WORKSPACE"
-                    font.pixelSize: 10
-                    font.letterSpacing: 1
-                    color: root.muted
-                    Layout.bottomMargin: 26
-                }
+                Item { Layout.preferredHeight: 24 }
                 Repeater {
                     model: ["Discover", "Search", "Installed", "Updates", "Sources", "Settings", "Help / About"]
                     delegate: ActionButton {
@@ -183,12 +179,36 @@ Controls.ApplicationWindow {
                     }
                 }
                 Item { Layout.fillHeight: true }
-                Controls.Label {
-                    text: "APT + Homebrew\nNative packages. One place."
-                    color: root.muted
-                    font.pixelSize: 12
-                    lineHeight: 1.5
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 4
+                    Controls.Label { text: "Made with"; color: root.muted; font.pixelSize: 11 }
+                    DeckIcon { name: "heart"; ink: "#e34b5f"; Layout.preferredWidth: 14; Layout.preferredHeight: 14 }
+                    Controls.Label { text: "by astro"; color: root.muted; font.pixelSize: 11 }
+                    Controls.ToolButton {
+                        objectName: "repositoryLink"
+                        implicitWidth: 28
+                        implicitHeight: 28
+                        Accessible.name: "Open PkgDeck on GitHub"
+                        Controls.ToolTip.visible: hovered
+                        Controls.ToolTip.text: root.repositoryUrl
+                        onClicked: Qt.openUrlExternally(root.repositoryUrl)
+                        background: Rectangle {
+                            radius: 5
+                            color: parent.hovered ? root.selection : "transparent"
+                            border.color: parent.activeFocus ? root.accent : "transparent"
+                        }
+                        contentItem: Image {
+                            objectName: "repositoryIcon"
+                            source: root.repositoryIconSource
+                            sourceSize.width: 18
+                            sourceSize.height: 18
+                            fillMode: Image.PreserveAspectFit
+                            Accessible.ignored: true
+                        }
+                    }
                 }
+
             }
         }
         ColumnLayout {
@@ -260,7 +280,7 @@ Controls.ApplicationWindow {
             }
             Controls.Label {
                 visible: root.currentView === "Discover"
-                text: "Find your next tool. Search packages, or select a source below to see what is available."
+                text: "Search packages or select a source to inspect its availability."
                 textFormat: Text.PlainText
                 wrapMode: Text.WordWrap
                 Layout.fillWidth: true
@@ -505,6 +525,15 @@ Controls.ApplicationWindow {
                 spacing: 8
                 visible: ["Search", "Installed", "Updates", "Sources", "Discover"].indexOf(root.currentView) >= 0
                 ActionButton {
+                    objectName: "upgradeAllButton"
+                    visible: root.currentView === "Updates"
+                    text: "Upgrade all"
+                    symbol: "updates"
+                    primary: true
+                    enabled: !backend.busy && backend.upgradable
+                    onClicked: root.propose("upgrade-all")
+                }
+                ActionButton {
                     objectName: "installButton"
                     visible: root.selected !== null && root.selected.kind === "package" && !root.selected.installed
                     text: "Install"
@@ -674,6 +703,11 @@ Controls.ApplicationWindow {
         sequence: "Ctrl+U"
         enabled: !backend.busy
         onActivated: root.propose("upgrade")
+    }
+    Shortcut {
+        sequence: "Ctrl+Shift+U"
+        enabled: root.currentView === "Updates" && !backend.busy && backend.upgradable
+        onActivated: root.propose("upgrade-all")
     }
     Shortcut {
         sequence: "Ctrl+M"

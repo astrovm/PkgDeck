@@ -20,6 +20,7 @@ pub mod ffi {
         #[qproperty(QString, status)]
         #[qproperty(QString, confirmation)]
         #[qproperty(bool, busy)]
+        #[qproperty(bool, upgradable)]
         type PackageController = super::Controller;
         #[qinvokable]
         fn load(
@@ -47,12 +48,14 @@ enum Job {
     Load(String, String),
     Details(PackageId),
     Write(Operation),
+    UpgradeAll(Vec<Operation>),
 }
 enum Payload {
     Packages(PackageReport),
     Sources(Vec<Source>),
     Details(Box<PackageDetails>),
     Written(OperationOutcome),
+    Batch(String),
 }
 enum Reply {
     Progress(String),
@@ -80,6 +83,36 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
         Job::Details(id) => engine
             .details(&id, cancel)
             .map(|d| Payload::Details(Box::new(d))),
+        Job::UpgradeAll(operations) => {
+            let results = engine.execute_batch(&operations, cancel, &mut |event| {
+                if let Event::Progress {
+                    operation,
+                    progress: Progress::Message(message),
+                } = event
+                {
+                    send(Reply::Progress(format!(
+                        "{}: {message}",
+                        operation_label(&operation)
+                    )));
+                }
+            });
+            let completed = results.iter().filter(|r| r.is_ok()).count();
+            let mut status = format!(
+                "Completed {completed} of {} upgrades. Reload to see current package state.",
+                operations.len()
+            );
+            for (operation, result) in operations.iter().zip(results) {
+                let outcome = match result {
+                    Ok(outcome) if outcome.cancellation_deferred => {
+                        "Completed after cancellation; changes were not rolled back.".into()
+                    }
+                    Ok(_) => "Completed".into(),
+                    Err(error) => error.to_string(),
+                };
+                status.push_str(&format!("\n{}: {outcome}", operation_label(operation)));
+            }
+            Ok(Payload::Batch(status))
+        }
         Job::Write(op) => engine
             .execute(&op, cancel, &mut |event| {
                 if let Event::Progress { progress, .. } = event {
@@ -116,10 +149,12 @@ pub struct Controller {
     status: QString,
     confirmation: QString,
     busy: bool,
+    upgradable: bool,
+    updates_view: bool,
     packages: Vec<Package>,
     detail_cache: BTreeMap<PackageId, QString>,
     sources: Vec<Source>,
-    pending: Option<Operation>,
+    pending: Option<Job>,
     source: Option<String>,
     sudo: bool,
     worker: Option<Worker>,
@@ -132,6 +167,8 @@ impl Default for Controller {
             status: "Choose a view or search for a package.".into(),
             confirmation: QString::default(),
             busy: false,
+            upgradable: false,
+            updates_view: false,
             packages: vec![],
             detail_cache: BTreeMap::new(),
             sources: vec![],
@@ -141,6 +178,14 @@ impl Default for Controller {
             worker: None,
         }
     }
+}
+fn upgrade_plan(packages: &[Package]) -> Vec<Operation> {
+    let ids: std::collections::BTreeSet<_> = packages
+        .iter()
+        .filter(|p| p.installed_version.is_some() && p.update == UpdateAvailability::Available)
+        .map(|p| p.id.clone())
+        .collect();
+    ids.into_iter().map(Operation::Upgrade).collect()
 }
 fn encoded(value: impl serde::Serialize) -> QString {
     serde_json::to_string(&value)
@@ -242,6 +287,8 @@ impl ffi::PackageController {
             self.set_status("Unknown source.".into());
             return;
         }
+        self.as_mut().set_upgradable(false);
+        self.as_mut().rust_mut().updates_view = view == "Updates";
         self.as_mut().rust_mut().source = (!source.is_empty()).then_some(source);
         self.as_mut().rust_mut().sudo = sudo;
         self.as_mut().rust_mut().detail_cache.clear();
@@ -284,6 +331,20 @@ impl ffi::PackageController {
             return;
         }
         let action = action.to_string();
+        if action == "upgrade-all" {
+            if !self.upgradable {
+                return;
+            }
+            let operations = upgrade_plan(&self.rust().packages);
+            let labels = operations
+                .iter()
+                .map(operation_label)
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            self.as_mut().set_confirmation(format!("Upgrade all {} listed packages?\n\n{labels}\n\nNative dependency changes may follow. Successful upgrades are not rolled back if another fails. Continue?", operations.len()).as_str().into());
+            self.rust_mut().pending = Some(Job::UpgradeAll(operations));
+            return;
+        }
         let operation = usize::try_from(index).ok().and_then(|i| {
             if action == "refresh" {
                 self.rust()
@@ -326,7 +387,7 @@ impl ffi::PackageController {
         } else {
             self.as_mut().set_confirmation(QString::default());
         }
-        self.rust_mut().pending = operation;
+        self.rust_mut().pending = operation.map(Job::Write);
     }
     pub fn confirm(mut self: Pin<&mut Self>, approved: bool) {
         if self.rust().worker.is_some() {
@@ -336,7 +397,7 @@ impl ffi::PackageController {
         self.as_mut().set_confirmation(QString::default());
         if approved {
             if let Some(op) = pending {
-                self.start(Job::Write(op));
+                self.start(op);
             }
         }
     }
@@ -352,6 +413,10 @@ impl ffi::PackageController {
         match result {
             Err(e) => self.set_status(e.to_string().as_str().into()),
             Ok(Payload::Packages(report)) => {
+                let upgradable = self.rust().updates_view
+                    && report.failures.is_empty()
+                    && !upgrade_plan(&report.packages).is_empty();
+                self.as_mut().set_upgradable(upgradable);
                 let rows: Vec<_> = report.packages.iter().map(package_row).collect();
                 let status = if report.failures.is_empty() {
                     format!("{} packages", rows.len())
@@ -388,7 +453,15 @@ impl ffi::PackageController {
                 self.as_mut().set_details(data);
                 self.set_status("Package details loaded.".into());
             }
+            Ok(Payload::Batch(status)) => {
+                // Clear the entire snapshot even on partial failure: any native write may
+                // have changed dependencies belonging to another listed package.
+                self.as_mut()
+                    .apply(Ok(Payload::Written(OperationOutcome::default())));
+                self.set_status(status.as_str().into());
+            }
             Ok(Payload::Written(outcome)) => {
+                self.as_mut().set_upgradable(false);
                 self.as_mut().rust_mut().detail_cache.clear();
                 self.as_mut().rust_mut().packages.clear();
                 self.as_mut().rust_mut().sources.clear();
@@ -509,6 +582,22 @@ mod tests {
         assert!(encoded(package_row(&package))
             .to_string()
             .contains("synthetic"));
+        let mut other = package.clone();
+        other.id.backend = "other-source".into();
+        let mut current = package.clone();
+        current.update = UpdateAvailability::Current;
+        let mut uninstalled = package.clone();
+        uninstalled.installed_version = None;
+        let plan = upgrade_plan(&[
+            package.clone(),
+            package.clone(),
+            other.clone(),
+            current,
+            uninstalled,
+        ]);
+        assert_eq!(plan.len(), 2);
+        assert!(plan.contains(&Operation::Upgrade(id.clone())));
+        assert!(plan.contains(&Operation::Upgrade(other.id)));
         for fail in [false, true] {
             let mut engine = Engine::default();
             engine
@@ -524,6 +613,10 @@ mod tests {
                 Job::Load("Discover".into(), "".into()),
                 Job::Details(id.clone()),
                 Job::Write(Operation::Upgrade(id.clone())),
+                Job::UpgradeAll(vec![
+                    Operation::Upgrade(id.clone()),
+                    Operation::Upgrade(id.clone()),
+                ]),
             ] {
                 let mut replies = vec![];
                 execute(
@@ -538,6 +631,15 @@ mod tests {
                     }
                     Reply::Done(Ok(Payload::Sources(sources))) => {
                         assert_eq!(sources[0].backend, "fixture")
+                    }
+                    Reply::Done(Ok(Payload::Batch(status))) => {
+                        assert!(status.contains(if fail {
+                            "Completed 0 of 2"
+                        } else {
+                            "Completed 1 of 2"
+                        }));
+                        assert!(status.contains("synthetic"));
+                        assert!(status.contains(if fail { "authorization" } else { "cancel" }));
                     }
                     Reply::Done(Ok(Payload::Written(outcome))) => {
                         assert!(outcome.cancellation_deferred)

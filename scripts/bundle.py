@@ -76,3 +76,5 @@ while queue:
 licenses = out / "usr/share/licenses/pkgdeck"
 licenses.mkdir(parents=True, exist_ok=True)
 shutil.copy2(root / "LICENSE", licenses / "LICENSE")
+
+shutil.copy2(root / "crates/pkgdeck/assets/OCTICONS-LICENSE", licenses / "OCTICONS-LICENSE")

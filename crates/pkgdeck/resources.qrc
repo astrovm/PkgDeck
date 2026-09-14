@@ -1,0 +1,5 @@
+<RCC><qresource prefix="/pkgdeck">
+  <file alias="github.svg">assets/github.svg</file>
+  <file alias="github-dark.svg">assets/github-dark.svg</file>
+  <file alias="OCTICONS-LICENSE">assets/OCTICONS-LICENSE</file>
+</qresource></RCC>

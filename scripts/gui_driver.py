@@ -152,6 +152,46 @@ def synthetic(command):
             gui.key('Escape')
 
 
+def synthetic_batch(command):
+    import json
+    for mode in ('success', 'fail', 'slow', 'query-fails'):
+        with tempfile.TemporaryDirectory(prefix='pkgdeck-batch-fixture-') as directory:
+            fixture = Path(directory)
+            state_path = fixture / 'state.json'
+            initial = {'fixture-a': '1', 'fixture-b': '1', 'fixture-current': '2'}
+            state_path.write_text(json.dumps(initial))
+            brew = fixture / 'brew'
+            brew.write_text((Path(__file__).resolve().parents[1] / 'crates/pkd/tests/fixtures/brew_batch.py').read_text())
+            brew.chmod(0o755)
+            if mode != 'success': (fixture / mode).touch()
+            invocation = ['/usr/bin/env', '-u', 'SNAP', '-u', 'FLATPAK_ID', *command, '--from', 'homebrew', '--auth', 'sudo']
+            with desktop(invocation, dict(HOME=directory, PATH=directory)) as gui:
+                gui.key('ctrl+4')
+                gui.key('ctrl+shift+u')
+                gui.key('alt+n')
+                assert json.loads(state_path.read_text()) == initial
+                assert not (fixture / 'attempts').exists()
+                gui.key('ctrl+shift+u')
+                if mode == 'slow':
+                    gui.xdo('key', '--clearmodifiers', 'alt+y')
+                    deadline = time.monotonic() + 10
+                    while not (fixture / 'started').exists():
+                        assert time.monotonic() < deadline, gui.logs()
+                        time.sleep(0.02)
+                    gui.key('Escape')
+                else:
+                    gui.key('alt+y')
+                expected = dict(initial)
+                if mode != 'query-fails': expected['fixture-a'] = '2'
+                if mode == 'success': expected['fixture-b'] = '2'
+                assert json.loads(state_path.read_text()) == expected, (mode, gui.logs())
+                if mode != 'query-fails':
+                    attempts = (fixture / 'attempts').read_text().splitlines()
+                    assert attempts == (['fixture-a'] if mode == 'slow' else ['fixture-a', 'fixture-b']), attempts
+                gui.key('ctrl+r')
+
+
 if __name__ == '__main__':
     import sys
     synthetic(sys.argv[1:])
+    synthetic_batch(sys.argv[1:])
