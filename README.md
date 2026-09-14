@@ -13,7 +13,8 @@ Both use the shared `pkgdeck-core` Rust library.
 
 ## Preview
 
-Current design mockups; implementation is in progress.
+Soft design references (including planned backends). See the [implemented GUI](docs/gui.md)
+and [terminal guide](docs/tui.md) for the current interface and supported behavior.
 
 ![PkgDeck GUI](docs/screenshots/pkgdeck-gui.png)
 
@@ -194,6 +195,20 @@ authorization, and Qt Quick/private-display/packaged-bundle verification.
 
 **Acceptance:** GUI users complete the same APT/Homebrew lifecycle, verified with
 Qt Quick tests and packaged-app end-to-end tests.
+
+### Frontend polish — implemented
+
+The GUI, TUI, and CLI now share the references' results-first layout and clear
+source identity. The GUI adds light/dark/system appearance, contextual actions,
+and compact navigation. The TUI adds styled tables and readable operation
+confirmations. Human CLI output uses aligned tables and labeled details; `--json`
+retains its versioned contract. Terminal color is omitted when output is piped or
+`NO_COLOR` is set (CLI).
+
+GUI detail snapshots avoid repeated native queries and are invalidated on reload
+or writes. The TUI no longer redraws continuously while idle. Local checks cover
+keyboard flows, narrow layouts, cache reuse/invalidation, human output, and the
+existing synthetic/native lifecycle suites.
 
 ### 7. Additional backends — planned
 

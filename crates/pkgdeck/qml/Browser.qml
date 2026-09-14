@@ -4,16 +4,59 @@ import QtQuick.Layouts
 import QtCore
 import org.kde.kirigami as Kirigami
 
-Kirigami.ApplicationWindow {
+Controls.ApplicationWindow {
     id: root
     required property var backend
     property string currentView: "Discover"
-    property var items: JSON.parse(backend.rows || "[]")
+    property string resultView: "Discover"
+    property var items: currentView === resultView ? JSON.parse(backend.rows || "[]") : []
     property var detail: JSON.parse(backend.details || "{}")
     property bool closePending: false
     property var selected: results.currentIndex >= 0 && results.currentIndex < items.length ? items[results.currentIndex] : null
     property string source: argument("--from", preferences.source)
     property bool useSudo: argument("--auth", preferences.authorization) === "sudo"
+    readonly property bool compact: width < 760
+    readonly property bool dark: preferences.appearance === 1 || (preferences.appearance === 0 && Qt.styleHints.colorScheme === Qt.Dark)
+    readonly property color canvas: dark ? "#111820" : "#f3f5f8"
+    readonly property color surface: dark ? "#1b2531" : "#ffffff"
+    readonly property color ink: dark ? "#ecf1f8" : "#1c2b3e"
+    readonly property color muted: dark ? "#a2b1c4" : "#57677e"
+    readonly property color line: dark ? "#334153" : "#dce3ec"
+    readonly property color accent: dark ? "#80b6ff" : "#245fc6"
+    readonly property color selection: dark ? "#283e59" : "#e8f0ff"
+    color: canvas
+    font.family: "sans-serif"
+    font.pixelSize: 14
+    palette.window: canvas
+    palette.base: surface
+    palette.text: ink
+    palette.windowText: ink
+    palette.buttonText: ink
+    palette.button: surface
+    palette.highlight: accent
+    palette.highlightedText: dark ? "#111820" : "#ffffff"
+
+    component ActionButton: Controls.Button {
+        id: control
+        property bool primary: false
+        property bool navigation: false
+        implicitHeight: 38
+        horizontalPadding: 16
+        opacity: enabled ? 1 : 0.45
+        background: Rectangle {
+            radius: 7
+            color: control.primary && control.enabled ? root.accent : (control.hovered ? root.selection : root.surface)
+            border.color: control.activeFocus ? root.accent : (control.navigation ? "transparent" : root.line)
+            border.width: control.activeFocus ? 2 : 1
+        }
+        contentItem: Text {
+            text: control.text
+            font: control.font
+            color: control.primary && control.enabled ? (root.dark ? "#111820" : "#ffffff") : root.ink
+            horizontalAlignment: Text.AlignHCenter
+            verticalAlignment: Text.AlignVCenter
+        }
+    }
     width: 1100
     height: 760
     minimumWidth: 360
@@ -35,6 +78,7 @@ Kirigami.ApplicationWindow {
             reload();
     }
     function reload() {
+        resultView = currentView;
         results.currentIndex = -1;
         backend.load(currentView, search.text, source, useSudo);
     }
@@ -50,6 +94,7 @@ Kirigami.ApplicationWindow {
     Settings {
         id: preferences
         category: "Browser"
+        property int appearance: 0
         property string source: ""
         property string authorization: "polkit"
     }
@@ -86,65 +131,89 @@ Kirigami.ApplicationWindow {
     }
     Component.onCompleted: reload()
 
-    globalDrawer: Kirigami.GlobalDrawer {
-        title: "PkgDeck"
-        titleIcon: "system-software-install"
-        isMenu: false
-        modal: root.width < 800
-        drawerOpen: !modal
-        actions: [
-            Kirigami.Action {
-                text: "Discover"
-                icon.name: "applications-all"
-                enabled: !backend.busy
-                onTriggered: root.openView("Discover")
-            },
-            Kirigami.Action {
-                text: "Search"
-                icon.name: "edit-find"
-                enabled: !backend.busy
-                onTriggered: root.openView("Search")
-            },
-            Kirigami.Action {
-                text: "Installed"
-                icon.name: "package-installed-updated"
-                enabled: !backend.busy
-                onTriggered: root.openView("Installed")
-            },
-            Kirigami.Action {
-                text: "Updates"
-                icon.name: "system-software-update"
-                enabled: !backend.busy
-                onTriggered: root.openView("Updates")
-            },
-            Kirigami.Action {
-                text: "Sources"
-                icon.name: "network-server"
-                enabled: !backend.busy
-                onTriggered: root.openView("Sources")
-            },
-            Kirigami.Action {
-                text: "Settings"
-                icon.name: "settings-configure"
-                enabled: !backend.busy
-                onTriggered: root.openView("Settings")
-            },
-            Kirigami.Action {
-                text: "Help / About"
-                icon.name: "help-about"
-                enabled: !backend.busy
-                onTriggered: root.openView("Help / About")
+    RowLayout {
+        anchors.fill: parent
+        spacing: 0
+        Rectangle {
+            Layout.fillHeight: true
+            Layout.preferredWidth: 196
+            visible: !root.compact
+            color: root.surface
+            ColumnLayout {
+                anchors.fill: parent
+                anchors.margins: 16
+                spacing: 8
+                Controls.Label {
+                    text: "PkgDeck"
+                    font.pixelSize: 25
+                    font.bold: true
+                    color: root.ink
+                    Layout.topMargin: 12
+                }
+                Controls.Label {
+                    text: "YOUR PACKAGE WORKSPACE"
+                    font.pixelSize: 10
+                    font.letterSpacing: 1
+                    color: root.muted
+                    Layout.bottomMargin: 26
+                }
+                Repeater {
+                    model: ["Discover", "Search", "Installed", "Updates", "Sources", "Settings", "Help / About"]
+                    delegate: ActionButton {
+                        required property string modelData
+                        Layout.fillWidth: true
+                        text: modelData
+                        enabled: !backend.busy
+                        navigation: true
+                        primary: root.currentView === modelData
+                        onClicked: root.openView(modelData)
+                    }
+                }
+                Item { Layout.fillHeight: true }
+                Controls.Label {
+                    text: "APT + Homebrew\nNative packages. One place."
+                    color: root.muted
+                    font.pixelSize: 12
+                    lineHeight: 1.5
+                }
             }
-        ]
-    }
-    pageStack.initialPage: Kirigami.Page {
-        title: root.currentView
+        }
         ColumnLayout {
-            anchors.fill: parent
-            spacing: Kirigami.Units.smallSpacing
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            Layout.margins: root.compact ? 12 : 28
+            spacing: 14
             RowLayout {
                 Layout.fillWidth: true
-                visible: root.currentView === "Search"
+                Controls.ComboBox {
+                    visible: root.compact
+                    model: ["Discover", "Search", "Installed", "Updates", "Sources", "Settings", "Help / About"]
+                    currentIndex: model.indexOf(root.currentView)
+                    enabled: !backend.busy
+                    onActivated: root.openView(currentText)
+                    Accessible.name: "Navigation"
+                    Layout.fillWidth: true
+                }
+                Kirigami.Heading {
+                    visible: !root.compact
+                    text: root.currentView
+                    color: root.ink
+                    level: 1
+                    font.pointSize: 21
+                    font.bold: true
+                    Layout.fillWidth: true
+                }
+                Controls.Label {
+                    visible: !root.compact
+                    text: root.source ? root.source.toUpperCase() : "ALL SOURCES"
+                    color: root.muted
+                    font.pixelSize: 11
+                    font.letterSpacing: 1
+                }
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                visible: ["Search", "Discover"].indexOf(root.currentView) >= 0
                 Controls.TextField {
                     id: search
                     objectName: "searchField"
@@ -153,17 +222,31 @@ Kirigami.ApplicationWindow {
                     Accessible.name: "Search packages"
                     enabled: !backend.busy
                     selectByMouse: true
-                    onAccepted: root.reload()
+                    implicitHeight: 44
+                    color: root.ink
+                    placeholderTextColor: root.muted
+                    leftPadding: 14
+                    background: Rectangle {
+                        color: root.surface
+                        radius: 8
+                        border.color: search.activeFocus ? root.accent : root.line
+                        border.width: search.activeFocus ? 2 : 1
+                    }
+                    onAccepted: {
+                        root.currentView = "Search";
+                        root.reload();
+                    }
                 }
-                Controls.Button {
+                ActionButton {
                     text: "Search"
+                    primary: true
                     enabled: !backend.busy && search.text.trim().length > 0
-                    onClicked: root.reload()
+                    onClicked: { root.currentView = "Search"; root.reload(); }
                 }
             }
             Controls.Label {
                 visible: root.currentView === "Discover"
-                text: "Explore the package sources available on this computer. Select a source to inspect its capabilities, or use Search to find packages."
+                text: "Find your next tool. Search packages, or select a source below to see what is available."
                 textFormat: Text.PlainText
                 wrapMode: Text.WordWrap
                 Layout.fillWidth: true
@@ -171,6 +254,14 @@ Kirigami.ApplicationWindow {
             ColumnLayout {
                 visible: root.currentView === "Settings"
                 Layout.fillWidth: true
+                Controls.Label { text: "Appearance" }
+                Controls.ComboBox {
+                    objectName: "appearanceSetting"
+                    model: ["System", "Dark", "Light"]
+                    currentIndex: preferences.appearance
+                    onActivated: preferences.appearance = currentIndex
+                    Accessible.name: "Appearance"
+                }
                 Controls.Label {
                     text: "Package source"
                 }
@@ -200,7 +291,7 @@ Kirigami.ApplicationWindow {
                 Controls.Label {
                     Layout.fillWidth: true
                     wrapMode: Text.WordWrap
-                    text: "Polkit uses your host's authentication agent. Sudo requires an existing grant; passwords are never collected here. Homebrew always runs unprivileged. Colors and dark mode follow your system theme."
+                    text: "Polkit uses your host's authentication agent. Sudo requires an existing grant; passwords are never collected here. Homebrew always runs unprivileged. Choose the appearance below, or follow your system theme."
                 }
             }
             Controls.Label {
@@ -210,119 +301,208 @@ Kirigami.ApplicationWindow {
                 text: "PkgDeck 0.1.0\nA unified package interface for Linux.\n\nCtrl+F: search • Ctrl+1: Discover • Ctrl+3: Installed • Ctrl+4: Updates • Ctrl+5: Sources\nCtrl+L: focus results • Up/Down: select • Ctrl+I: install • Ctrl+D: remove • Ctrl+U: upgrade • Ctrl+M: refresh source • Ctrl+R: reload\nEscape: cancel current work\n\nRefresh updates source metadata; Upgrade changes an installed package. Writes require confirmation and may change native dependencies. Cancellation waits for a native write already running.\n\nAPT and Homebrew are supported. Flatpak and Snap host operations remain disabled."
                 textFormat: Text.PlainText
             }
-            Controls.ScrollView {
+            Rectangle {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
+                Layout.minimumHeight: 130
                 visible: root.currentView !== "Settings" && root.currentView !== "Help / About"
-                ListView {
-                    id: results
-                    objectName: "packageResults"
-                    model: root.items
-                    clip: true
-                    reuseItems: true
-                    currentIndex: -1
-                    keyNavigationEnabled: false
-                    activeFocusOnTab: true
-                    Keys.onDownPressed: root.choose(Math.min(count - 1, currentIndex + 1))
-                    Keys.onUpPressed: root.choose(Math.max(0, currentIndex - 1))
-                    delegate: Controls.ItemDelegate {
-                        id: packageRow
-                        required property var modelData
-                        required property int index
-                        width: ListView.view.width
-                        highlighted: results.currentIndex === index
-                        enabled: !backend.busy
-                        Accessible.name: modelData.name + ", " + modelData.source + ", " + (modelData.summary || "")
-                        onClicked: {
-                            results.forceActiveFocus();
-                            root.choose(index);
+                color: root.surface
+                radius: 10
+                border.color: results.activeFocus ? root.accent : root.line
+                ColumnLayout {
+                    anchors.fill: parent
+                    anchors.margins: 1
+                    spacing: 0
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Layout.margins: 14
+                        Controls.Label {
+                            text: root.items.length + (root.currentView === "Sources" || root.currentView === "Discover" ? (root.items.length === 1 ? " source" : " sources") : (root.items.length === 1 ? " package" : " packages"))
+                            color: root.muted
+                            font.pixelSize: 12
+                            Layout.fillWidth: true
                         }
-                        contentItem: ColumnLayout {
-                            RowLayout {
-                                Controls.Label {
-                                    color: packageRow.highlighted ? Kirigami.Theme.highlightedTextColor : Kirigami.Theme.textColor
-                                    text: modelData.name
-                                    textFormat: Text.PlainText
-                                    font.bold: true
-                                    elide: Text.ElideRight
-                                    Layout.fillWidth: true
-                                }
-                                Controls.Label {
-                                    color: packageRow.highlighted ? Kirigami.Theme.highlightedTextColor : Kirigami.Theme.textColor
-                                    text: modelData.source
-                                    textFormat: Text.PlainText
-                                }
-                            }
-                            Controls.Label {
-                                color: packageRow.highlighted ? Kirigami.Theme.highlightedTextColor : Kirigami.Theme.textColor
-                                visible: modelData.kind === "package"
-                                text: (modelData.installed || "Not installed") + " → " + (modelData.candidate || "Unknown") + "   " + (modelData.architecture || "")
-                                textFormat: Text.PlainText
-                                elide: Text.ElideRight
-                                Layout.fillWidth: true
-                            }
-                            Controls.Label {
-                                color: packageRow.highlighted ? Kirigami.Theme.highlightedTextColor : Kirigami.Theme.textColor
-                                text: modelData.summary || ""
-                                textFormat: Text.PlainText
-                                elide: Text.ElideRight
-                                Layout.fillWidth: true
-                            }
-                        }
+                        Controls.Label { text: "↑ ↓ Select"; color: root.muted; font.pixelSize: 12 }
                     }
-                    Controls.Label {
-                        anchors.centerIn: parent
-                        width: parent.width - 20
-                        horizontalAlignment: Text.AlignHCenter
-                        wrapMode: Text.WordWrap
-                        visible: results.count === 0 && !backend.busy
-                        text: root.currentView === "Search" ? "Enter a search to find packages. No results are currently loaded." : "No results. Check the status below for unavailable sources or errors."
+                    Rectangle { Layout.fillWidth: true; height: 1; color: root.line }
+                    RowLayout {
+                        visible: !root.compact
+                        spacing: 14
+                        Layout.fillWidth: true
+                        Layout.leftMargin: 16
+                        Layout.rightMargin: 16
+                        Layout.topMargin: 10
+                        Layout.bottomMargin: 10
+                        Controls.Label { text: "NAME / SOURCE"; color: root.muted; font.pixelSize: 11; Layout.preferredWidth: 202 }
+                        Controls.Label { text: "VERSION"; color: root.muted; font.pixelSize: 11; Layout.preferredWidth: 150 }
+                        Controls.Label { text: "SUMMARY"; color: root.muted; font.pixelSize: 11; Layout.fillWidth: true }
+                    }
+                    ListView {
+                        id: results
+                        objectName: "packageResults"
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        model: root.items
+                        clip: true
+                        reuseItems: true
+                        currentIndex: -1
+                        onCountChanged: currentIndex = -1
+                        keyNavigationEnabled: false
+                        activeFocusOnTab: true
+                        Controls.ScrollBar.vertical: Controls.ScrollBar {}
+                        Keys.onDownPressed: root.choose(Math.min(count - 1, currentIndex + 1))
+                        Keys.onUpPressed: root.choose(Math.max(0, currentIndex - 1))
+                        delegate: Controls.ItemDelegate {
+                            id: packageRow
+                            required property var modelData
+                            required property int index
+                            width: ListView.view.width
+                            height: root.compact ? 78 : 56
+                            leftPadding: 16
+                            rightPadding: 16
+                            highlighted: results.currentIndex === index
+                            enabled: !backend.busy
+                            Accessible.name: modelData.name + ", " + modelData.source + ", " + (modelData.summary || "")
+                            onClicked: { results.forceActiveFocus(); root.choose(index); }
+                            background: Rectangle {
+                                color: packageRow.highlighted ? root.selection : (packageRow.hovered ? root.canvas : "transparent")
+                                Rectangle { width: 3; height: parent.height; visible: packageRow.highlighted; color: root.accent }
+                                Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: root.line; opacity: 0.5 }
+                            }
+                            contentItem: RowLayout {
+                                spacing: 14
+                                ColumnLayout {
+                                    spacing: 4
+                                    Layout.preferredWidth: root.compact ? -1 : 202
+                                    Layout.fillWidth: root.compact
+                                    Controls.Label {
+                                        text: modelData.name
+                                        color: root.ink
+                                        font.bold: true
+                                        textFormat: Text.PlainText
+                                        elide: Text.ElideRight
+                                        Layout.fillWidth: true
+                                    }
+                                    Controls.Label {
+                                        text: modelData.source.toUpperCase() + (modelData.architecture ? " · " + modelData.architecture : "")
+                                        color: root.muted
+                                        font.pixelSize: 11
+                                        elide: Text.ElideRight
+                                        Layout.fillWidth: true
+                                    }
+                                    Controls.Label {
+                                        visible: root.compact
+                                        text: modelData.summary || ""
+                                        color: root.muted
+                                        textFormat: Text.PlainText
+                                        elide: Text.ElideRight
+                                        Layout.fillWidth: true
+                                    }
+                                }
+                                Controls.Label {
+                                    Layout.preferredWidth: root.compact ? 100 : 150
+                                    text: modelData.kind === "source" ? (modelData.available ? "Available" : "Unavailable") : (modelData.installed ? modelData.installed + (modelData.update === "available" ? " → " + modelData.candidate : " · installed") : modelData.candidate || "Unknown")
+                                    color: modelData.update === "available" ? root.accent : root.muted
+                                    textFormat: Text.PlainText
+                                    elide: Text.ElideRight
+                                    font.pixelSize: 12
+                                }
+                                Controls.Label {
+                                    visible: !root.compact
+                                    Layout.fillWidth: true
+                                    text: modelData.summary || ""
+                                    color: root.muted
+                                    textFormat: Text.PlainText
+                                    elide: Text.ElideRight
+                                }
+                            }
+                        }
+                        Controls.Label {
+                            anchors.centerIn: parent
+                            width: parent.width - 32
+                            horizontalAlignment: Text.AlignHCenter
+                            wrapMode: Text.WordWrap
+                            color: root.muted
+                            visible: results.count === 0
+                            text: backend.busy ? "Loading packages…" : root.currentView === "Search" ? "Search by name or description.\nIf nothing matches, try a shorter search or another source." : "No results to show.\nCheck source availability or reload to try again."
+                        }
                     }
                 }
             }
-            Controls.ScrollView {
-                visible: root.selected !== null
+            Rectangle {
+                visible: root.selected !== null && ["Search", "Installed", "Updates", "Sources", "Discover"].indexOf(root.currentView) >= 0
                 Layout.fillWidth: true
-                Layout.preferredHeight: Math.min(root.height * 0.28, 240)
-                Controls.TextArea {
-                    objectName: "packageDetails"
-                    readOnly: true
-                    selectByMouse: true
-                    wrapMode: TextEdit.Wrap
-                    textFormat: TextEdit.PlainText
-                    text: root.detail.package ? root.detail.package.name + "\n" + "Scope: " + (root.detail.package.scope_label || "Unknown") + "\n" + (root.detail.description || "") + "\nHomepage: " + (root.detail.homepage || "Unavailable") + "\nDependencies: " + (root.detail.dependencies || []).join(", ") : (root.detail.source || "") + "\n" + (root.detail.availability || "") + "\n" + (root.detail.capabilities || []).join(", ")
-                    Accessible.name: "Selected package or source details"
+                Layout.preferredHeight: Math.min(root.height * 0.27, 180)
+                color: root.surface
+                radius: 10
+                border.color: root.line
+                ColumnLayout {
+                    anchors.fill: parent
+                    anchors.margins: 16
+                    spacing: 6
+                    Controls.Label {
+                        text: root.selected ? root.selected.name : ""
+                        textFormat: Text.PlainText
+                        color: root.ink
+                        font.pixelSize: root.compact ? 18 : 22
+                        font.bold: true
+                        elide: Text.ElideRight
+                        Layout.fillWidth: true
+                    }
+                    Controls.ScrollView {
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        Controls.TextArea {
+                            objectName: "packageDetails"
+                            readOnly: true
+                            selectByMouse: true
+                            color: root.muted
+                            padding: 0
+                            background: null
+                            wrapMode: TextEdit.Wrap
+                            textFormat: TextEdit.PlainText
+                            text: root.detail.package ? (root.detail.description || "") + "\n\nScope: " + (root.detail.package.scope_label || "Unknown") + "   ·   Homepage: " + (root.detail.homepage || "Unavailable") + "\nDependencies: " + ((root.detail.dependencies || []).join(", ") || "None listed") : (root.detail.availability || "") + "\n\nCapabilities: " + (root.detail.capabilities || []).join(", ")
+                            Accessible.name: "Selected package or source details"
+                        }
+                    }
                 }
             }
             Flow {
                 Layout.fillWidth: true
-                spacing: Kirigami.Units.smallSpacing
+                spacing: 8
                 visible: ["Search", "Installed", "Updates", "Sources", "Discover"].indexOf(root.currentView) >= 0
-                Controls.Button {
+                ActionButton {
                     objectName: "installButton"
+                    visible: root.selected !== null && root.selected.kind === "package" && !root.selected.installed
                     text: "Install"
+                    primary: true
                     enabled: !backend.busy && root.selected !== null && root.selected.kind === "package" && !root.selected.installed
                     onClicked: root.propose("install")
                 }
-                Controls.Button {
+                ActionButton {
                     objectName: "removeButton"
+                    visible: root.selected !== null && !!root.selected.installed
                     text: "Remove"
                     enabled: !backend.busy && root.selected !== null && !!root.selected.installed
                     onClicked: root.propose("remove")
                 }
-                Controls.Button {
+                ActionButton {
                     objectName: "upgradeButton"
+                    visible: root.selected !== null && root.selected.update === "available"
                     text: "Upgrade"
+                    primary: true
                     enabled: !backend.busy && root.selected !== null && root.selected.update === "available"
                     onClicked: root.propose("upgrade")
                 }
-                Controls.Button {
+                ActionButton {
                     objectName: "refreshButton"
+                    visible: root.selected !== null && root.selected.kind === "source"
                     text: "Refresh source"
+                    primary: true
                     enabled: !backend.busy && root.selected !== null && root.selected.kind === "source" && root.selected.available
                     onClicked: root.propose("refresh")
                 }
-                Controls.Button {
+                ActionButton {
                     text: "Reload"
                     enabled: !backend.busy
                     onClicked: root.reload()
@@ -338,9 +518,13 @@ Kirigami.ApplicationWindow {
                 }
                 Controls.ScrollView {
                     Layout.fillWidth: true
-                    Layout.preferredHeight: 72
+                    Layout.preferredHeight: root.compact ? 42 : 44
                     Controls.TextArea {
                         objectName: "operationStatus"
+                        color: root.muted
+                        background: null
+                        font.pixelSize: 12
+                        padding: 0
                         text: backend.status
                         readOnly: true
                         selectByMouse: true
@@ -349,7 +533,7 @@ Kirigami.ApplicationWindow {
                         Accessible.name: "Operation status"
                     }
                 }
-                Controls.Button {
+                ActionButton {
                     text: "Cancel"
                     visible: backend.busy
                     onClicked: backend.cancel()
@@ -360,10 +544,11 @@ Kirigami.ApplicationWindow {
     Controls.Dialog {
         id: confirmation
         objectName: "confirmationDialog"
-        parent: root.overlay
+        parent: Controls.Overlay.overlay
         anchors.centerIn: parent
         width: Math.min(root.width - 32, 600)
-        height: Math.min(root.height - 32, 420)
+        height: Math.min(root.height - 32, 340)
+        background: Rectangle { color: root.surface; radius: 12; border.color: root.line }
         title: "Confirm package operation"
         modal: true
         standardButtons: Controls.Dialog.Yes | Controls.Dialog.No

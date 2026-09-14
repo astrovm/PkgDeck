@@ -1,0 +1,260 @@
+//! Human presentation shared by the command-line and terminal interfaces.
+use pkgdeck_core::package::{Operation, Scope};
+use ratatui::text::Span;
+use serde_json::Value;
+
+pub fn clean(text: &str) -> String {
+    text.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
+}
+pub fn scope(scope: &Scope) -> String {
+    match scope {
+        Scope::System => "System".into(),
+        Scope::User { uid } => format!("User {uid}"),
+        Scope::Environment { path } => path.display().to_string(),
+    }
+}
+pub fn operation(op: &Operation) -> String {
+    let (verb, id) = match op {
+        Operation::Refresh { backend } => {
+            return format!("Refresh metadata from {}", clean(backend))
+        }
+        Operation::Install(id) => ("Install", id),
+        Operation::Remove(id) => ("Remove", id),
+        Operation::Upgrade(id) => ("Upgrade", id),
+    };
+    format!(
+        "{verb} {}\n  Source: {} · Architecture: {} · Scope: {}",
+        clean(&id.name),
+        clean(&id.backend),
+        clean(&id.architecture),
+        clean(&scope(&id.scope))
+    )
+}
+fn value(value: &Value) -> String {
+    match value {
+        Value::String(s) => clean(s),
+        Value::Null => "Unavailable".into(),
+        Value::Array(items) => items.iter().map(self::value).collect::<Vec<_>>().join(", "),
+        Value::Object(fields) if fields.len() == 1 && fields.contains_key("Ok") => {
+            self::value(&fields["Ok"])
+        }
+        Value::Object(fields) => fields
+            .iter()
+            .map(|(k, v)| format!("{}: {}", clean(k), self::value(v)))
+            .collect::<Vec<_>>()
+            .join("; "),
+        other => other.to_string(),
+    }
+}
+fn cell(text: &str, width: usize) -> String {
+    let text = clean(text);
+    let mut output = String::new();
+    let clipped = Span::raw(&text).width() > width;
+    let limit = width.saturating_sub(usize::from(clipped));
+    for c in text.chars() {
+        if Span::raw(format!("{output}{c}")).width() > limit {
+            break;
+        }
+        output.push(c);
+    }
+    if clipped && width > 0 {
+        output.push('…');
+    }
+    let padding = width.saturating_sub(Span::raw(&output).width());
+    format!("{output}{}", " ".repeat(padding))
+}
+fn table(headers: &[&str], rows: &[Vec<String>], width: usize) -> String {
+    // Drop trailing columns on narrow terminals; full metadata remains in `info`/JSON.
+    let columns = if width < 60 {
+        2
+    } else if width < 90 {
+        3
+    } else {
+        headers.len()
+    }
+    .min(headers.len());
+    let available = width.saturating_sub(2 * (columns - 1));
+    let shares = match columns {
+        2 => vec![65, 35],
+        3 => vec![34, 26, 40],
+        _ => vec![24, 14, 18, 44],
+    };
+    let mut widths: Vec<_> = shares.iter().map(|share| available * share / 100).collect();
+    widths[columns - 1] += available - widths.iter().sum::<usize>();
+    let line = |cells: &[String]| {
+        cells
+            .iter()
+            .zip(&widths)
+            .map(|(text, w)| cell(text, *w))
+            .collect::<Vec<_>>()
+            .join("  ")
+            .trim_end()
+            .to_string()
+    };
+    let mut result = line(&headers.iter().map(|s| (*s).into()).collect::<Vec<_>>());
+    result.push('\n');
+    result.push_str(&"─".repeat(width));
+    for row in rows {
+        result.push('\n');
+        result.push_str(&line(row));
+    }
+    result
+}
+pub fn human(data: &Value, width: usize, color: bool) -> String {
+    let width = width.clamp(24, 160);
+    let heading = if color {
+        "\x1b[1;34mPkgDeck\x1b[0m"
+    } else {
+        "PkgDeck"
+    };
+    let mut output = format!("{heading}\n\n");
+    if let Some(packages) = data["packages"].as_array() {
+        let rows = packages
+            .iter()
+            .map(|p| {
+                vec![
+                    value(&p["id"]["name"]),
+                    value(&p["id"]["backend"]),
+                    value(&p["candidate_version"]),
+                    value(&p["summary"]),
+                ]
+            })
+            .collect::<Vec<_>>();
+        output.push_str(&table(
+            &["NAME", "SOURCE", "VERSION", "SUMMARY"],
+            &rows,
+            width,
+        ));
+        output.push_str(&format!(
+            "\n\n{} packages · Use pkd info <name> for details.",
+            rows.len()
+        ));
+        if let Some(failures) = data["failures"].as_array() {
+            for failure in failures {
+                output.push_str(&format!("\nSource failed: {}", value(failure)));
+            }
+        }
+    } else if data.get("package").is_some() {
+        let p = &data["package"];
+        output.push_str(&format!(
+            "{}\n{}\n\n",
+            value(&p["id"]["name"]),
+            value(&data["description"])
+        ));
+        for (label, field) in [
+            ("Source", &p["id"]["backend"]),
+            ("Architecture", &p["id"]["architecture"]),
+            ("Scope", &p["id"]["scope"]),
+            ("Installed", &p["installed_version"]),
+            ("Candidate", &p["candidate_version"]),
+            ("Update", &p["update"]),
+            ("Homepage", &data["homepage"]),
+            ("Dependencies", &data["dependencies"]),
+        ] {
+            output.push_str(&format!("{label:>12}  {}\n", value(field)));
+        }
+    } else if let Some(sources) = data["sources"].as_array() {
+        let rows = sources
+            .iter()
+            .map(|s| {
+                vec![
+                    value(&s["backend"]),
+                    value(&s["availability"]),
+                    value(&s["capabilities"]),
+                ]
+            })
+            .collect::<Vec<_>>();
+        output.push_str(&table(
+            &["SOURCE", "AVAILABILITY", "CAPABILITIES"],
+            &rows,
+            width,
+        ));
+    } else if let Some(operations) = data["operations"].as_array() {
+        if operations.is_empty() {
+            output.push_str("Nothing to do. No package changes are needed.");
+        }
+        for item in operations {
+            let op: Operation =
+                serde_json::from_value(item["operation"].clone()).expect("typed operation");
+            output.push_str(&operation(&op));
+            if let Some(error) = item["result"].get("Err") {
+                output.push_str(&format!("\n  Failed: {}\n", value(error)));
+            } else {
+                output.push_str("\n  Completed");
+                if item["result"]["Ok"]["cancellation_deferred"] == true {
+                    output.push_str(" after cancellation; native changes were not rolled back");
+                }
+                output.push('\n');
+            }
+        }
+    } else {
+        output.push_str(&format!(
+            "Error: {}",
+            value(data.get("message").unwrap_or(&data["error"]))
+        ));
+    }
+    output.trim_end().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn tables_fit_narrow_unicode_terminals_and_strip_control_sequences() {
+        let data = json!({"packages":[{"id":{"name":"工具-package-with-a-long-name", "backend":"fixture"}, "candidate_version":"2", "summary":"hello\u{001b}[31m\nworld"}],"failures":[]});
+        for width in [24, 60, 100] {
+            let output = human(&data, width, false);
+            assert!(!output.contains('\u{001b}'));
+            for line in output.lines().skip(2).take(3) {
+                assert!(Span::raw(line).width() <= width);
+            }
+            assert!(output.contains("fixture"));
+        }
+        assert!(human(&data, 100, true).starts_with("\x1b[1;34mPkgDeck\x1b[0m"));
+        assert_eq!(cell("a", 0), "");
+    }
+    #[test]
+    fn details_failures_and_operations_are_readable() {
+        let id = json!({"name":"synthetic", "backend":"fixture", "architecture":"all", "scope":"system"});
+        assert!(human(
+            &json!({"package":{"id":id}, "description":"Test", "dependencies":["library"]}),
+            80,
+            false
+        )
+        .contains("Dependencies  library"));
+        assert!(human(&json!({"sources":[{"backend":"fixture","availability":{"Ok":"available"},"capabilities":["search"]}]}), 100, false).contains("available"));
+        assert!(human(
+            &json!({"packages":[],"failures":[{"backend":"fixture","error":"offline"}]}),
+            80,
+            false
+        )
+        .contains("Source failed:"));
+        let ops = json!({"operations":[{"operation":{"install":id},"result":{"Ok":{"cancellation_deferred":true}}},{"operation":{"remove":id},"result":{"Err":"denied"}},{"operation":{"upgrade":id},"result":{"Ok":{}}},{"operation":{"refresh":{"backend":"fixture"}},"result":{"Ok":{}}}]});
+        let output = human(&ops, 80, false);
+        for expected in [
+            "Install synthetic",
+            "Remove synthetic",
+            "Upgrade synthetic",
+            "Refresh metadata",
+            "Failed: denied",
+            "after cancellation",
+            "Scope: System",
+        ] {
+            assert!(output.contains(expected));
+        }
+        assert!(human(&json!({"operations":[]}), 80, false).contains("Nothing to do"));
+        assert!(human(&json!({"error":"declined"}), 80, false).contains("Error: declined"));
+        assert!(human(&json!({"message":"Retry", "error":1}), 80, false).contains("Retry"));
+        assert_eq!(value(&json!(2)), "2");
+        assert_eq!(scope(&Scope::User { uid: 42 }), "User 42");
+        assert_eq!(
+            scope(&Scope::Environment {
+                path: "/synthetic".into()
+            }),
+            "/synthetic"
+        );
+    }
+}

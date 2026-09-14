@@ -20,6 +20,8 @@ if args == ['--prefix']:
 elif args == ['formulae']:
     print('fixture')
 elif args[0] == 'info':
+    with (home / 'queries.log').open('a') as log:
+        log.write('info\n')
     formula = dict(full_name='fixture', desc='Synthetic fixture', homepage='',
                    versions={'stable': state['candidate']}, revision=0,
                    installed=[{'version': state['installed']}] if state['installed'] else [],

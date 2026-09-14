@@ -3,7 +3,7 @@ use cxx_qt::CxxQtType;
 use cxx_qt_lib::QString;
 use pkgdeck_core::{engine::*, host::Authorization, package::*, process::Cancellation};
 use serde_json::{json, Value};
-use std::{pin::Pin, sync::mpsc, thread};
+use std::{collections::BTreeMap, pin::Pin, sync::mpsc, thread};
 
 // CXX-Qt generates the FFI boundary; application code below uses safe Rust.
 #[cxx_qt::bridge]
@@ -117,6 +117,7 @@ pub struct Controller {
     confirmation: QString,
     busy: bool,
     packages: Vec<Package>,
+    detail_cache: BTreeMap<PackageId, QString>,
     sources: Vec<Source>,
     pending: Option<Operation>,
     source: Option<String>,
@@ -132,6 +133,7 @@ impl Default for Controller {
             confirmation: QString::default(),
             busy: false,
             packages: vec![],
+            detail_cache: BTreeMap::new(),
             sources: vec![],
             pending: None,
             source: None,
@@ -242,6 +244,7 @@ impl ffi::PackageController {
         }
         self.as_mut().rust_mut().source = (!source.is_empty()).then_some(source);
         self.as_mut().rust_mut().sudo = sudo;
+        self.as_mut().rust_mut().detail_cache.clear();
         self.as_mut().rust_mut().packages.clear();
         self.as_mut().rust_mut().sources.clear();
         self.as_mut().rust_mut().pending = None;
@@ -259,6 +262,11 @@ impl ffi::PackageController {
             .and_then(|i| self.rust().packages.get(i))
             .cloned()
         {
+            if let Some(details) = self.rust().detail_cache.get(&package.id).cloned() {
+                self.as_mut().set_details(details);
+                self.set_status("Package details loaded.".into());
+                return;
+            }
             self.as_mut().set_details(encoded(
                 json!({"package": package_row(&package), "description": package.summary}),
             ));
@@ -366,10 +374,22 @@ impl ffi::PackageController {
                 self.set_status("Source availability checked. Select a source for details.".into());
             }
             Ok(Payload::Details(details)) => {
-                self.as_mut().set_details(encoded(json!({"package": package_row(&details.package), "description": details.description, "homepage": details.homepage, "dependencies": details.dependencies})));
+                let data = encoded(
+                    json!({"package": package_row(&details.package), "description": details.description, "homepage": details.homepage, "dependencies": details.dependencies}),
+                );
+                // Bound memory use for large searches; reload and writes invalidate this snapshot.
+                if self.rust().detail_cache.len() >= 128 {
+                    self.as_mut().rust_mut().detail_cache.clear();
+                }
+                self.as_mut()
+                    .rust_mut()
+                    .detail_cache
+                    .insert(details.package.id.clone(), data.clone());
+                self.as_mut().set_details(data);
                 self.set_status("Package details loaded.".into());
             }
             Ok(Payload::Written(outcome)) => {
+                self.as_mut().rust_mut().detail_cache.clear();
                 self.as_mut().rust_mut().packages.clear();
                 self.as_mut().rust_mut().sources.clear();
                 self.as_mut().set_rows("[]".into());

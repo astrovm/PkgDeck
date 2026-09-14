@@ -137,7 +137,7 @@ def gui_failure(command):
     with tempfile.TemporaryDirectory(prefix="pkgdeck-qml-fixture-") as directory:
         module = Path(directory) / "org/kde/kirigami"
         module.mkdir(parents=True)
-        (module / "qmldir").write_text("module org.kde.kirigami\nApplicationWindow 1.0 Broken.qml\n")
+        (module / "qmldir").write_text("module org.kde.kirigami\nHeading 1.0 Broken.qml\n")
         (module / "Broken.qml").write_text("import QtQuick\nItem { pkgdeckMissingProperty: true }\n")
         env = dict(os.environ, QML_IMPORT_PATH=directory + ":" + os.environ.get("QML_IMPORT_PATH", ""))
         result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=15)

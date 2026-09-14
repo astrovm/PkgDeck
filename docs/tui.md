@@ -28,12 +28,16 @@ shows the exact identity. Every write requires confirmation, including when
 `--yes` was supplied. Native dependency changes may accompany the requested
 operation. Refreshing metadata never upgrades packages.
 
-The results table stays above selection-linked details. Text labels require no
+The results table stays above selection-linked details. Wide terminals include a
+summary column; narrower terminals prioritize identity and versions. Rounded
+borders, colored headings, and a distinct selected row follow the soft reference. Text labels require no
 icon font. Smaller terminals show fewer rows and shorter details; scrolling and
 expanded status keep longer content accessible. Package metadata control
 characters are replaced before display.
 
-Queries and writes run on a worker thread. Native progress messages appear in the
+The terminal redraws only after input, resize, or a backend update, avoiding
+rebuilding package rows during idle polling. Queries and writes run on a worker
+thread. Native progress messages appear in the
 status area; there is no invented percentage. Escape requests cancellation.
 Reads can stop, while a native write already running finishes under its manager's
 lock. The UI remains open until completion and reports deferred cancellation.
@@ -48,6 +52,19 @@ host-configured authorization. A missing grant is reported as authorization
 denied; the TUI never reads passwords. `pkd --auth polkit` uses a configured host
 polkit agent, which may require a graphical session. Homebrew stays unprivileged.
 See [the host contract](host-execution.md) for sandbox restrictions.
+
+## Captures
+
+Actual terminal output with synthetic package metadata:
+
+![Interactive TUI](screenshots/pkd-tui-live.png)
+
+![Human CLI search](screenshots/pkd-cli-live.png)
+
+Human CLI output uses aligned tables, labeled package details, and explicit
+operation results. Piped output contains no color escapes; `NO_COLOR` also
+disables color. Narrow terminals omit trailing columns; use `info` for complete
+metadata or `--json` for the unchanged machine-readable contract.
 
 ## Verification
 

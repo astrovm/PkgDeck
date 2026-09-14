@@ -119,12 +119,14 @@ TestCase {
         keyClick(Qt.Key_Down);
         compare(fake.selection, 0);
         verify(findChild(browser, "installButton").enabled);
+        waitForRendering(browser.contentItem);
         mouseClick(findChild(browser, "installButton"));
         const dialog = findChild(browser, "confirmationDialog");
         tryCompare(dialog, "opened", true);
         compare(fake.writes, 0);
         dialog.reject();
         compare(fake.writes, 0);
+        waitForRendering(browser.contentItem);
         mouseClick(findChild(browser, "installButton"));
         tryCompare(dialog, "opened", true);
         keyClick(Qt.Key_Y, Qt.AltModifier);
@@ -157,9 +159,27 @@ TestCase {
         browser.height = 500;
         wait(30);
         verify(findChild(browser, "packageResults").width <= 380);
+        verify(findChild(browser, "packageResults").height >= 78);
         verify(findChild(browser, "operationStatus").width > 0);
         browser.width = 1100;
         browser.height = 760;
+    }
+    function test_appearance_and_search_does_not_relabel_old_results() {
+        browser.openView("Installed");
+        populate();
+        compare(browser.items.length, 2);
+        browser.openView("Search");
+        compare(browser.items.length, 0);
+        browser.openView("Settings");
+        const appearance = findChild(browser, "appearanceSetting");
+        appearance.currentIndex = 2;
+        appearance.activated(2);
+        compare(browser.dark, false);
+        appearance.currentIndex = 1;
+        appearance.activated(1);
+        compare(browser.dark, true);
+        appearance.currentIndex = 0;
+        appearance.activated(0);
     }
     function test_close_requests_cancellation() {
         fake.busy = true;
