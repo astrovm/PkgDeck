@@ -434,7 +434,11 @@ impl ffi::PackageController {
                     && report.failures.is_empty()
                     && !upgrade_plan(&report.packages).is_empty();
                 self.as_mut().set_upgradable(upgradable);
-                let rows: Vec<_> = report.packages.iter().map(package_row).collect();
+                let mut rows: Vec<_> = report.packages.iter().map(package_row).collect();
+                rows.extend(report.failures.iter().map(|failure| {
+                    json!({"kind": "failure", "name": failure.backend, "source": failure.backend,
+                        "summary": failure.error.to_string(), "available": false})
+                }));
                 let status = if report.failures.is_empty() {
                     format!("{} packages", rows.len())
                 } else {

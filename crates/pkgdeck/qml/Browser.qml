@@ -395,7 +395,7 @@ Controls.ApplicationWindow {
                             leftPadding: 16
                             rightPadding: 16
                             highlighted: results.currentIndex === index
-                            enabled: !backend.busy
+                            enabled: !backend.busy && modelData.kind !== "failure"
                             Accessible.name: modelData.name + ", " + modelData.source + ", " + (modelData.summary || "")
                             onClicked: { results.forceActiveFocus(); root.choose(index); }
                             background: Rectangle {
@@ -445,8 +445,8 @@ Controls.ApplicationWindow {
                                 }
                                 Controls.Label {
                                     Layout.preferredWidth: root.compact ? 100 : 150
-                                    text: modelData.kind === "source" ? (modelData.available ? "Available" : "Unavailable") : (modelData.installed ? modelData.installed + (modelData.update === "available" ? " → " + modelData.candidate : " · installed") : modelData.candidate || "Unknown")
-                                    color: modelData.update === "available" ? root.accent : root.muted
+                                    text: modelData.kind === "failure" ? "Failed" : (modelData.kind === "source" ? (modelData.available ? "Available" : "Unavailable") : (modelData.installed ? modelData.installed + (modelData.update === "available" ? " → " + modelData.candidate : " · installed") : modelData.candidate || "Unknown"))
+                                    color: modelData.kind === "failure" ? "#e87979" : (modelData.update === "available" ? root.accent : root.muted)
                                     textFormat: Text.PlainText
                                     elide: Text.ElideRight
                                     font.pixelSize: 12
