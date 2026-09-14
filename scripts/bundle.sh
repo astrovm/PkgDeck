@@ -4,6 +4,21 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 out=build/AppDir
 rm -rf -- "$out"
 mkdir -p "$out/usr/"{bin,lib,qml,plugins}
+case "$(uname -m)" in
+    x86_64)
+        updater_url='https://github.com/AppImageCommunity/AppImageUpdate/releases/download/2.0.0-alpha-1-20251018/appimageupdatetool-x86_64.AppImage'
+        updater_sha256='d976cdac667b03dee8cb23fb95ef74b042c406c5cbab3ff294d2b16efeaff84f'
+        ;;
+    aarch64)
+        updater_url='https://github.com/AppImageCommunity/AppImageUpdate/releases/download/2.0.0-alpha-1-20251018/appimageupdatetool-aarch64.AppImage'
+        updater_sha256='7aaf89dd4cf66ebd940d416c67e1c240c57a139cee38d9c0ed3bb9387bc435b0'
+        ;;
+    *) echo "Unsupported AppImage updater architecture: $(uname -m)" >&2; exit 1 ;;
+esac
+mkdir -p "$out/usr/lib/pkgdeck"
+curl -fL --retry 3 "$updater_url" -o "$out/usr/lib/pkgdeck/appimageupdatetool.AppImage"
+printf '%s  %s\n' "$updater_sha256" "$out/usr/lib/pkgdeck/appimageupdatetool.AppImage" | sha256sum --check --status
+chmod +x "$out/usr/lib/pkgdeck/appimageupdatetool.AppImage"
 scripts/build-apt.sh "${CARGO_TARGET_DIR:-target}/release"
 cp "${CARGO_TARGET_DIR:-target}/release/"{pkd,pkgdeck,pkgdeck-apt-query} "$out/usr/bin/"
 for module in QtQuick QtQml QtCore org; do cp -a "$QT_QML_DIR/$module" "$out/usr/qml/"; done
