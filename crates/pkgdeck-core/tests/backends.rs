@@ -180,7 +180,7 @@ impl Transport for Fixture {
             self.candidate.lock().unwrap().clone()
         };
         Ok(output(format!(
-            "synthetic-fixture\tx86_64\t{version}\tSynthetic package\n"
+            "synthetic-fixture|x86_64|{version}|Synthetic package\n"
         )))
     }
 }

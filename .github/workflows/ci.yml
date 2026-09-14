@@ -117,7 +117,7 @@ jobs:
       - name: Install rootless container tooling
         run: sudo apt-get update && sudo apt-get install -y podman
       - name: Build CLI
-        run: cargo build --locked -p pkd
+        run: cargo build --locked -p pkd && install -m 755 target/debug/pkd /tmp/pkgdeck-pkd
       - name: Exercise actual package manager
         run: scripts/tests/native-manager.sh ${{ matrix.backend }} "$PWD/target/debug/pkd"
 
@@ -139,7 +139,7 @@ jobs:
         run: |
           sudo useradd -m pkgdeck-test
           echo 'pkgdeck-test ALL=(root) NOPASSWD: /usr/bin/snap' | sudo tee /etc/sudoers.d/pkgdeck-snap
-          run() { sudo -u pkgdeck-test "$PWD/target/debug/pkd" --json --yes --auth sudo --from snap "$@"; }
+          run() { sudo -u pkgdeck-test /tmp/pkgdeck-pkd --json --yes --auth sudo --from snap "$@"; }
           success() { run "$@" | grep -q '"exit_code":0'; }
           success sources
           success search hello-world
