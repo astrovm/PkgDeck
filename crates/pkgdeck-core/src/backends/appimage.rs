@@ -131,6 +131,43 @@ impl AppImage {
             .find_map(|line| line.strip_prefix(key).map(str::to_owned))
             .filter(|value| !value.is_empty())
     }
+    /// Return the executable from an `Exec=` value when it is an absolute path.
+    /// Desktop entry field codes are deliberately ignored after the executable.
+    fn exec_path(value: &str) -> Option<PathBuf> {
+        let value = value.trim_start();
+        let executable = if let Some(value) = value.strip_prefix('"') {
+            let mut escaped = false;
+            let mut end = None;
+            for (index, character) in value.char_indices() {
+                if escaped {
+                    escaped = false;
+                } else if character == '\\' {
+                    escaped = true;
+                } else if character == '"' {
+                    end = Some(index);
+                    break;
+                }
+            }
+            let end = end?;
+            value[..end].replace("\\\\", "\\").replace("\\\"", "\"")
+        } else {
+            value.split_whitespace().next()?.into()
+        };
+        let path = PathBuf::from(executable);
+        path.is_absolute().then_some(path)
+    }
+    fn desktop_appimage_path(contents: &str) -> Option<PathBuf> {
+        Self::desktop_value(contents, "TryExec=")
+            .and_then(|value| {
+                let path = PathBuf::from(&value);
+                path.is_absolute()
+                    .then_some(path)
+                    .or_else(|| Self::exec_path(&value))
+            })
+            .or_else(|| {
+                Self::desktop_value(contents, "Exec=").and_then(|value| Self::exec_path(&value))
+            })
+    }
     fn external_entries(&self) -> Result<Vec<(Package, PathBuf)>, EngineError> {
         let entries = match fs::read_dir(&self.applications) {
             Ok(entries) => entries,
@@ -143,8 +180,7 @@ impl AppImage {
             .filter_map(|entry| {
                 let desktop = entry.path();
                 let contents = fs::read_to_string(&desktop).ok()?;
-                let source = Self::desktop_value(&contents, "TryExec=")?;
-                let path = PathBuf::from(source);
+                let path = Self::desktop_appimage_path(&contents)?;
                 let canonical = fs::canonicalize(path).ok()?;
                 let metadata = fs::metadata(&canonical).ok()?;
                 if !canonical.is_absolute()
@@ -510,7 +546,7 @@ mod tests {
         fs::write(
             &desktop,
             format!(
-                "[Desktop Entry]\nType=Application\nName=Audacity Portable\nTryExec={}\nX-AppImage-Version=4.0\n",
+                "[Desktop Entry]\nType=Application\nName=Audacity Portable\nExec=\"{}\" %U\nX-AppImage-Version=4.0\n",
                 external.display()
             ),
         )
