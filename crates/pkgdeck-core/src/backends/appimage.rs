@@ -801,4 +801,58 @@ mod tests {
             .is_empty());
         fs::remove_dir_all(base).unwrap();
     }
+
+    #[test]
+    fn reports_appimage_interface_and_invalid_storage_paths() {
+        let base = std::env::temp_dir().join(format!(
+            "pkgdeck-appimage-interface-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let aarch64 = base.join("aarch64.AppImage");
+        type2(&aarch64);
+        let mut bytes = fs::read(&aarch64).unwrap();
+        bytes[18..20].copy_from_slice(&183_u16.to_le_bytes());
+        fs::write(&aarch64, bytes).unwrap();
+        assert_eq!(AppImage::type2(&aarch64).unwrap(), "aarch64");
+        assert_eq!(
+            AppImage::desktop_appimage_path("TryExec=/opt/Audacity.AppImage\nExec=audacity"),
+            Some(PathBuf::from("/opt/Audacity.AppImage"))
+        );
+
+        let root = base.join("owned");
+        let applications = base.join("applications");
+        let uid = rustix::process::getuid().as_raw();
+        let mut backend = AppImage::new(root.clone(), applications.clone(), uid);
+        assert_eq!(backend.id(), "appimage");
+        assert!(backend.capabilities().contains(&Capability::Upgrade));
+        assert_eq!(
+            backend.detect(&Cancellation::default()),
+            Ok(Availability::Available)
+        );
+        let foreign = PackageId {
+            backend: "other".into(),
+            name: aarch64.display().to_string(),
+            architecture: "aarch64".into(),
+            scope: Scope::Environment { path: root.clone() },
+            remote: None,
+        };
+        assert!(backend
+            .execute(
+                &Operation::Install(foreign),
+                &Cancellation::default(),
+                &mut |_| {}
+            )
+            .is_err());
+
+        fs::write(&root, "not a directory").unwrap();
+        assert!(backend.installed(&Cancellation::default()).is_err());
+        fs::remove_file(&root).unwrap();
+        fs::write(&applications, "not a directory").unwrap();
+        assert!(backend
+            .search("anything", &Cancellation::default())
+            .is_err());
+        fs::remove_dir_all(base).unwrap();
+    }
 }
