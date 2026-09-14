@@ -1,4 +1,8 @@
-use crate::{engine::*, package::*, process::Cancellation};
+use crate::{
+    engine::*,
+    package::*,
+    process::{self, Cancellation, ExecutionError, Limits},
+};
 use sha2::{Digest, Sha256};
 use std::{
     fs,
@@ -13,6 +17,7 @@ const CAPABILITIES: &[Capability] = &[
     Capability::Installed,
     Capability::Install,
     Capability::Remove,
+    Capability::Upgrade,
 ];
 
 /// Imports only Type 2 AppImages into PkgDeck-owned storage. Metadata inspection
@@ -208,6 +213,51 @@ impl AppImage {
             .join(format!("pkgdeck-{}.desktop", &name[8..72]));
         fs::write(entry, format!("[Desktop Entry]\nType=Application\nName=Imported AppImage\nExec=\"{}\" %U\nTerminal=false\n", destination.display())).map_err(|e| Self::invalid(e.to_string()))
     }
+    fn updater() -> Result<PathBuf, EngineError> {
+        let executable = std::env::current_exe().map_err(|e| Self::invalid(e.to_string()))?;
+        let helper = executable
+            .parent()
+            .and_then(Path::parent)
+            .map(|root| root.join("lib/pkgdeck/appimageupdatetool.AppImage"))
+            .ok_or_else(|| Self::invalid("cannot locate bundled AppImage updater"))?;
+        helper
+            .is_file()
+            .then_some(helper)
+            .ok_or_else(|| Self::invalid("bundled AppImage updater is unavailable"))
+    }
+    fn update(&self, id: &PackageId, cancel: &Cancellation) -> Result<(), EngineError> {
+        let target = if Self::managed_name(&id.name) && id.scope == self.scope() {
+            self.root.join(&id.name)
+        } else {
+            self.external_entries()?
+                .into_iter()
+                .find(|(package, _)| package.id == *id)
+                .map(|(_, _)| PathBuf::from(&id.name))
+                .ok_or(EngineError::NotFound)?
+        };
+        let mut command = std::process::Command::new(Self::updater()?);
+        command.args([
+            "--appimage-extract-and-run",
+            "--overwrite",
+            "--remove-old",
+            "--",
+        ]);
+        command.arg(target);
+        let result = process::run(
+            command,
+            Limits {
+                timeout: std::time::Duration::from_secs(600),
+                output_bytes: 32 * 1024 * 1024,
+            },
+            cancel,
+            true,
+        )?;
+        if result.code == Some(0) {
+            Ok(())
+        } else {
+            Err(ExecutionError::Failed(result).into())
+        }
+    }
 }
 
 impl Backend for AppImage {
@@ -273,7 +323,7 @@ impl Backend for AppImage {
     fn execute(
         &mut self,
         operation: &Operation,
-        _: &Cancellation,
+        cancel: &Cancellation,
         progress: &mut dyn FnMut(Progress),
     ) -> Result<OperationOutcome, EngineError> {
         match operation {
@@ -312,6 +362,12 @@ impl Backend for AppImage {
                 )));
                 fs::remove_file(&id.name).map_err(|e| Self::invalid(e.to_string()))?;
                 fs::remove_file(desktop).map_err(|e| Self::invalid(e.to_string()))?;
+            }
+            Operation::Upgrade(id) if id.backend == "appimage" => {
+                progress(Progress::Message(
+                    "Updating AppImage with its embedded update information.".into(),
+                ));
+                self.update(id, cancel)?;
             }
             _ => return Err(Self::invalid("foreign or unsupported AppImage operation")),
         }
