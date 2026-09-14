@@ -423,6 +423,9 @@ fn apt_refresh_upgrade_and_multiarch_keep_native_safety_options() {
     assert!(upgrade.contains(&"--only-upgrade".into()));
     assert!(upgrade.contains(&"--no-remove".into()));
     assert_eq!(upgrade.last().unwrap(), "synthetic-fixture:amd64");
+    let upgrade_all = AptAction::UpgradeAll.arguments().unwrap();
+    assert_eq!(upgrade_all.last().unwrap(), "upgrade");
+    assert!(!upgrade_all.contains(&"--only-upgrade".into()));
     for name in ["fixture:", "fixture:amd64:foreign", "fixture:../amd64"] {
         assert!(AptAction::Install(name.into()).arguments().is_err());
     }

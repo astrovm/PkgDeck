@@ -318,6 +318,13 @@ impl<T: Transport> Backend for Flatpak<T> {
             Operation::Install(id) => (id, "install"),
             Operation::Remove(id) => (id, "uninstall"),
             Operation::Upgrade(id) => (id, "update"),
+            Operation::UpgradeAll { backend } if backend == "flatpak" => {
+                for (system, scope) in [(false, "--user"), (true, "--system")] {
+                    self.call(&[scope, "update", "--noninteractive"], cancel, true, system)?;
+                }
+                progress(Progress::Message("Updated Flatpak packages.".into()));
+                return Ok(OperationOutcome::default());
+            }
             _ => return Err(invalid("flatpak", "foreign operation")),
         };
         let (system, scope) = self.target(id)?;
@@ -439,6 +446,7 @@ impl<T: Transport> Backend for Apt<T> {
             Operation::Install(id) => AptAction::Install(self.target(id)?),
             Operation::Remove(id) => AptAction::Remove(self.target(id)?),
             Operation::Upgrade(id) => AptAction::Upgrade(self.target(id)?),
+            Operation::UpgradeAll { backend } if backend == "apt" => AptAction::UpgradeAll,
             _ => return Err(invalid("apt", "foreign operation")),
         };
         progress(Progress::Message(
@@ -655,6 +663,9 @@ impl<T: Transport> Backend for Homebrew<T> {
                 vec!["uninstall", "--formula", "--force", "--", self.target(id)?]
             }
             Operation::Upgrade(id) => vec!["upgrade", "--formula", "--", self.target(id)?],
+            Operation::UpgradeAll { backend } if backend == "homebrew" => {
+                vec!["upgrade", "--formula"]
+            }
             _ => return Err(invalid("homebrew", "foreign operation")),
         };
         progress(Progress::Message(
@@ -738,6 +749,7 @@ impl ManagerKind {
             (Self::Dnf, Operation::Install(_)) => vec!["-y", "install", "--"],
             (Self::Dnf, Operation::Remove(_)) => vec!["-y", "remove", "--"],
             (Self::Dnf, Operation::Upgrade(_)) => vec!["-y", "upgrade", "--"],
+            (Self::Dnf, Operation::UpgradeAll { .. }) => vec!["-y", "upgrade"],
             (Self::Pacman, Operation::Refresh { .. }) => vec!["-Sy", "--noconfirm"],
             (Self::Pacman, Operation::Install(_)) => {
                 vec!["-S", "--noconfirm", "--needed", "--"]
@@ -746,6 +758,7 @@ impl ManagerKind {
             (Self::Pacman, Operation::Upgrade(_)) => {
                 vec!["-S", "--noconfirm", "--needed", "--"]
             }
+            (Self::Pacman, Operation::UpgradeAll { .. }) => vec!["-Su", "--noconfirm"],
             (Self::Zypper, Operation::Refresh { .. }) => vec!["--non-interactive", "refresh"],
             (Self::Zypper, Operation::Install(_)) => vec![
                 "--non-interactive",
@@ -755,10 +768,12 @@ impl ManagerKind {
             ],
             (Self::Zypper, Operation::Remove(_)) => vec!["--non-interactive", "remove", "--"],
             (Self::Zypper, Operation::Upgrade(_)) => vec!["--non-interactive", "update", "--"],
+            (Self::Zypper, Operation::UpgradeAll { .. }) => vec!["--non-interactive", "update"],
             (Self::Snap, Operation::Refresh { .. }) => vec!["refresh"],
             (Self::Snap, Operation::Install(_)) => vec!["install"],
             (Self::Snap, Operation::Remove(_)) => vec!["remove"],
             (Self::Snap, Operation::Upgrade(_)) => vec!["refresh"],
+            (Self::Snap, Operation::UpgradeAll { .. }) => vec!["refresh"],
         }
     }
 }
@@ -999,6 +1014,7 @@ impl<T: Transport> Backend for SystemManager<T> {
             Operation::Install(id) | Operation::Remove(id) | Operation::Upgrade(id) => {
                 Some(self.target(id)?)
             }
+            Operation::UpgradeAll { .. } => None,
         };
         let mut args: Vec<OsString> = self
             .kind

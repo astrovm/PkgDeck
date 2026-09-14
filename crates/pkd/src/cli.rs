@@ -174,14 +174,25 @@ pub fn dispatch(
                 if !report.failures.is_empty() {
                     return Err(EngineError::Incomplete(report.failures));
                 }
+                if args.arch.is_some() {
+                    return Ok(report
+                        .packages
+                        .into_iter()
+                        .filter(|p| {
+                            p.update == UpdateAvailability::Available
+                                && args.arch.as_ref().is_some_and(|a| a == &p.id.architecture)
+                        })
+                        .map(|p| Operation::Upgrade(p.id))
+                        .collect());
+                }
                 Ok(report
                     .packages
                     .into_iter()
-                    .filter(|p| {
-                        p.update == UpdateAvailability::Available
-                            && args.arch.as_ref().is_none_or(|a| a == &p.id.architecture)
-                    })
-                    .map(|p| Operation::Upgrade(p.id))
+                    .filter(|p| p.update == UpdateAvailability::Available)
+                    .map(|p| p.id.backend)
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .map(|backend| Operation::UpgradeAll { backend })
                     .collect())
             }
             Commands::Install { names }
@@ -435,6 +446,10 @@ mod tests {
         assert_eq!(
             call(&mut engine, &["--arch", "foreign", "upgrade"], true).0["operations"],
             json!([])
+        );
+        assert_eq!(
+            call(&mut engine, &["upgrade"], true).0["operations"][0]["operation"],
+            json!({"upgrade_all":{"backend":"apt"}})
         );
         let args = Args::parse_from(["pkd", "--auth", "polkit", "sources"]);
         assert!(matches!(

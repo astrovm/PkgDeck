@@ -166,6 +166,15 @@ impl Backend for Synthetic {
                 package.installed_version = package.candidate_version.clone();
                 package.update = UpdateAvailability::Current;
             }
+            Operation::UpgradeAll { backend } => {
+                if backend != self.id() {
+                    return Err(EngineError::NotFound);
+                }
+                for package in self.packages.values_mut() {
+                    package.installed_version = package.candidate_version.clone();
+                    package.update = UpdateAvailability::Current;
+                }
+            }
             Operation::Remove(id) => {
                 let package = self.packages.get_mut(id).ok_or(EngineError::NotFound)?;
                 package.installed_version = None;

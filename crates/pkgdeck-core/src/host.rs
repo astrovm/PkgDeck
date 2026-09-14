@@ -374,6 +374,7 @@ impl Authorization {
 pub enum AptAction {
     Refresh,
     Upgrade(String),
+    UpgradeAll,
     Install(String),
     Remove(String),
 }
@@ -392,9 +393,15 @@ impl AptAction {
             .map(OsString::from)
             .to_vec());
         }
+        if matches!(self, Self::UpgradeAll) {
+            return Ok(["--assume-yes", "-o", "DPkg::Lock::Timeout=0", "upgrade"]
+                .map(OsString::from)
+                .to_vec());
+        }
         let (operation, package) = match self {
             Self::Refresh => unreachable!(),
             Self::Upgrade(package) => ("install", package),
+            Self::UpgradeAll => unreachable!(),
             Self::Install(package) => ("install", package),
             Self::Remove(package) => ("remove", package),
         };

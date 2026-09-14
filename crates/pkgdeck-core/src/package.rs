@@ -73,12 +73,16 @@ pub enum Operation {
     Install(PackageId),
     Remove(PackageId),
     Upgrade(PackageId),
+    /// Upgrade every package managed by one backend in a single transaction.
+    UpgradeAll {
+        backend: String,
+    },
 }
 
 impl Operation {
     pub fn backend(&self) -> &str {
         match self {
-            Self::Refresh { backend } => backend,
+            Self::Refresh { backend } | Self::UpgradeAll { backend } => backend,
             Self::Install(id) | Self::Remove(id) | Self::Upgrade(id) => &id.backend,
         }
     }
@@ -87,7 +91,7 @@ impl Operation {
             Self::Refresh { .. } => Capability::Refresh,
             Self::Install(_) => Capability::Install,
             Self::Remove(_) => Capability::Remove,
-            Self::Upgrade(_) => Capability::Upgrade,
+            Self::Upgrade(_) | Self::UpgradeAll { .. } => Capability::Upgrade,
         }
     }
 }

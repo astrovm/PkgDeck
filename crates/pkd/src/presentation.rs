@@ -30,6 +30,9 @@ pub fn operation(op: &Operation) -> String {
         Operation::Refresh { backend } => {
             return format!("Refresh metadata from {}", clean(backend))
         }
+        Operation::UpgradeAll { backend } => {
+            return format!("Upgrade all packages from {}", clean(backend))
+        }
         Operation::Install(id) => ("Install", id),
         Operation::Remove(id) => ("Remove", id),
         Operation::Upgrade(id) => ("Upgrade", id),
