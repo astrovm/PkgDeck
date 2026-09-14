@@ -12,7 +12,7 @@ if (($#)) || [[ ! "$mode" =~ ^(fast|full|vm|containers)$ ]] || [[ ! "$engine" =~
     exit 2
 fi
 prerequisites=(timeout tee)
-if [[ "$engine" == native ]]; then prerequisites+=(cargo python3); fi
+if [[ "$engine" == native ]]; then prerequisites+=(cargo jq); fi
 for tool in "${prerequisites[@]}"; do
     command -v "$tool" >/dev/null || { echo "Missing prerequisite: $tool" >&2; exit 1; }
 done
@@ -36,31 +36,36 @@ if [[ "$mode" == containers ]]; then
     if [[ "$engine" == podman ]]; then
         stage build-cli scripts/container.sh development --build-cli
         PKGDECK_BINARY_DIR=$(scripts/container.sh development --binary-dir)
+        PKGDECK_TOOLS_BINARY="$PKGDECK_BINARY_DIR/pkgdeck-tools"
+        export PKGDECK_TOOLS_BINARY
         export PKGDECK_BINARY_DIR
     else
-        stage build-cli cargo build --locked -p pkd
+        stage build-cli cargo build --locked -p pkd -p pkgdeck-tools
     fi
     stage container-lifecycles scripts/container.sh lifecycle
     stage tui-lifecycles env PKGDECK_FRONTEND=tui scripts/container.sh lifecycle
     exit 0
 fi
 if [[ "$engine" == podman ]]; then
-    stage container-$mode scripts/container.sh development "$mode"
+    stage "container-$mode" scripts/container.sh development "$mode"
     exit 0
 fi
 if [[ "$mode" == vm ]]; then
     stage build-probe cargo build --locked -p pkgdeck-core --example apt-probe
-    stage build-cli cargo build --locked -p pkd
-    stage vm python3 -u scripts/test-host-vm.py
+    stage build-cli cargo build --locked -p pkd -p pkgdeck-tools
+    stage vm scripts/test-host-vm.sh
     exit 0
 fi
 stage format cargo fmt --all --check
-stage infrastructure python3 -m unittest discover -s scripts/tests -v
+stage infrastructure scripts/tests/infrastructure.sh
+stage no-python scripts/check-no-python.sh
+stage apt-helper scripts/build-apt.sh
+stage apt-metadata scripts/tests/apt-metadata.sh
 if [[ "$mode" == fast ]]; then
     stage lint cargo clippy --locked -p pkgdeck-core -p pkd --all-targets -- -D warnings
     stage tests cargo test --locked -p pkgdeck-core -p pkd
-    stage build cargo build --locked -p pkd
-    stage qt-free python3 scripts/check-qt-free.py
+    stage build cargo build --locked -p pkd -p pkgdeck-tools
+    stage qt-free scripts/check-qt-free.sh
 else
     source scripts/dev-env.sh
     [[ -x "$QT_ROOT_DIR/bin/qtpaths" ]] && [[ $("$QT_ROOT_DIR/bin/qtpaths" --qt-version) == 6.11.2 ]] && [[ -f "$PKGDECK_SDK_PREFIX/lib/cmake/KF6Kirigami/KF6KirigamiConfig.cmake" ]] || {
@@ -72,6 +77,6 @@ else
     export QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=software
     stage lint cargo clippy --workspace --all-targets --locked -- -D warnings
     mkdir -p coverage
-    stage coverage cargo llvm-cov --workspace --include-build-script --locked --fail-under-lines 95 --lcov --output-path coverage/lcov.info
+    stage coverage cargo llvm-cov --workspace --include-build-script --ignore-filename-regex pkgdeck-tools --locked --fail-under-lines 95 --lcov --output-path coverage/lcov.info
     stage release cargo build --workspace --release --locked
 fi

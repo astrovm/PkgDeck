@@ -6,7 +6,7 @@ impl Fixture {
         let path = std::env::temp_dir().join(format!("pkgdeck-cli-{}", std::process::id()));
         fs::create_dir_all(&path).unwrap();
         let brew = path.join("brew");
-        fs::write(&brew, include_str!("fixtures/brew.py")).unwrap();
+        fs::write(&brew, include_str!("fixtures/brew.sh")).unwrap();
         fs::set_permissions(brew, fs::Permissions::from_mode(0o755)).unwrap();
         Self(path)
     }

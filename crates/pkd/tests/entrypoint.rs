@@ -37,15 +37,7 @@ fn non_interactive_and_unsupported_commands_fail_clearly() {
 
 #[test]
 fn tui_renders_resizes_and_restores_terminal_on_exit() {
-    let status = Command::new("python3")
-        .arg(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../scripts/smoke.py"
-        ))
-        .args(["terminal", env!("CARGO_BIN_EXE_pkd")])
-        .status()
-        .unwrap();
-    assert!(status.success());
+    pkgdeck_tools::terminal(&[env!("CARGO_BIN_EXE_pkd").into()]);
 }
 
 #[test]
@@ -88,13 +80,5 @@ fn flatpak_doctor_does_not_enumerate_runtime_backends() {
 
 #[test]
 fn tui_queries_sources_and_reports_unavailable_host_without_a_display() {
-    let status = Command::new("python3")
-        .arg(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../scripts/smoke.py"
-        ))
-        .args(["terminal-interactions", env!("CARGO_BIN_EXE_pkd")])
-        .status()
-        .unwrap();
-    assert!(status.success());
+    pkgdeck_tools::terminal_interactions(&[env!("CARGO_BIN_EXE_pkd").into()]);
 }

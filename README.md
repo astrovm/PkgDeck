@@ -226,6 +226,20 @@ confirmation lists the exact package identities; batch results report success,
 failure, and cancellation for each package. Incomplete queries disable the action.
 The sidebar now displays “Made with ♥ by astro” and a bundled GitHub link icon.
 
+### Remove project Python dependencies — implemented
+
+- A separate native APT reader uses libapt-pkg for candidate policy and metadata.
+  Packages include the helper, its library dependencies, and license notices.
+- Rust acceptance drivers cover terminal interaction, GUI behavior, and package
+  smoke tests. Shell scripts handle staging and disposable guest provisioning.
+- Qt and CMake install directly from archives with committed SHA-256 pins for
+  x86_64 and aarch64; SDK setup no longer creates a language environment.
+- Local verification checks APT metadata, script behavior, frontend tests,
+  application coverage, and rejects reintroduced Python entrypoints.
+
+Native APT searches scan compressed indexes in file-offset order to avoid repeated
+decompression. See [development and verification](docs/development.md#native-tooling).
+
 ### 7. Additional backends — planned
 
 Add each wave only after its advertised capabilities pass integration tests.
@@ -277,7 +291,6 @@ Pinned baseline:
 | Component | Version |
 | --- | --- |
 | Rust | 1.98.1 |
-| Python (CI) | 3.14.7 |
 | Qt | 6.11.2 |
 | Kirigami / Extra CMake Modules | 6.30.0 |
 | CXX-Qt | 0.10.0 |
@@ -286,18 +299,21 @@ Pinned baseline:
 | Clap | 4.6.6 |
 | Serde / serde_json | 1.0.229 / 1.0.151 |
 | signal-hook (CLI) | 0.4.4 |
-| CMake / aqtinstall | 4.4.3 / 3.3.0 |
+| CMake | 4.4.3 |
 | cargo-llvm-cov | 0.9.1 |
 
 `Cargo.lock` is committed. Use the pinned toolchain and `--locked` in builds.
 The CXX generator is pinned alongside CXX because they must use the same bridge ABI.
-Use Python 3.14 for aqtinstall: Python 3.12 can misidentify the Qt 6.11.2 ARM
-QtTools archive as ZIP and fail extraction with aqtinstall 3.3.
+Qt and CMake are downloaded directly from upstream and checked against committed
+SHA-256 pins. Project runtime, build scripts, and tests do not require Python.
+The operating system and independently installed package managers may have their
+own dependencies.
 
 Build and test the terminal frontend without installing Qt:
 
 ```sh
 cargo build --locked -p pkd
+scripts/build-apt.sh # Requires the distribution's libapt-pkg-dev package
 cargo test --locked -p pkgdeck-core -p pkd
 cargo run --locked -p pkd -- --help
 cargo run --locked -p pkd -- doctor
@@ -307,7 +323,8 @@ cargo run --locked -p pkd
 The last command opens the package browser in a terminal. See the
 [TUI shortcuts and authorization guide](docs/tui.md). Use `q` to exit when idle.
 With piped input/output, no-argument execution fails with exit code 2.
-Python 3 is required for the pseudo-terminal integration tests.
+Pseudo-terminal tests use the Rust acceptance driver and synthetic shell fixtures;
+install jq for the fixtures.
 
 For the GUI, install the pinned Qt SDK (including ShaderTools and ImageFormats),
 a C++ compiler, the pinned CMake (Kirigami requires at least 3.29), Ninja, lld, and the platform development libraries listed
@@ -334,11 +351,11 @@ through `--smoke-test`. The CI workflow is the authoritative build recipe.
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo install cargo-llvm-cov --version 0.9.1 --locked
-cargo llvm-cov --workspace --include-build-script --locked --fail-under-lines 95
+cargo llvm-cov --workspace --include-build-script --ignore-filename-regex pkgdeck-tools --locked --fail-under-lines 95
 ```
 
 For local package staging, build the release workspace, run
-`python3 scripts/bundle.py`, then `scripts/package.sh appimage`, `flatpak`, or
+`scripts/bundle.sh`, then `scripts/package.sh appimage`, `flatpak`, or
 `snap` with the corresponding tools/runtime installed. The AppImage path requires
 `APPIMAGETOOL` pointing to appimagetool 1.9.1. All formats contain both executables.
 

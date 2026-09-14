@@ -20,3 +20,6 @@ cxx-gen.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies.pkgdeck-tools]
+path = "../pkgdeck-tools"

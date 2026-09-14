@@ -13,6 +13,8 @@ modules:
     buildsystem: simple
     build-commands:
       - cp -a . /app/
+      # Use the declared Platform's GLib family, avoiding the build host's glibc ABI.
+      - rm -f /app/usr/lib/libglib-2.0.so* /app/usr/lib/libgobject-2.0.so* /app/usr/lib/libgmodule-2.0.so* /app/usr/lib/libgthread-2.0.so* /app/usr/lib/libgio-2.0.so*
       - mkdir -p /app/bin /app/share
       - cp -a /app/usr/share/applications /app/usr/share/icons /app/usr/share/metainfo /app/share/
       - install -m755 flatpak-pkgdeck /app/bin/pkgdeck

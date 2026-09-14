@@ -11,7 +11,7 @@ pkgdeck_env() {
     export PKGDECK_CACHE_DIR="${PKGDECK_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/pkgdeck/$arch}"
     export QT_ROOT_DIR="${QT_ROOT_DIR:-$PKGDECK_CACHE_DIR/Qt/6.11.2/$qt_dir}"
     export PKGDECK_SDK_PREFIX="${PKGDECK_SDK_PREFIX:-$PKGDECK_CACHE_DIR/kde-6.30.0}"
-    export PATH="$PKGDECK_CACHE_DIR/tools/bin:$PKGDECK_CACHE_DIR/python/bin:$QT_ROOT_DIR/bin:$PATH"
+    export PATH="$PKGDECK_CACHE_DIR/tools/bin:$PKGDECK_CACHE_DIR/cmake-4.4.3-linux-$arch/bin:$QT_ROOT_DIR/bin:$PATH"
     if ! command -v ld.lld >/dev/null; then
         for linker in /usr/lib/llvm-*/bin/ld.lld; do
             if [[ -x "$linker" ]]; then export PATH="${linker%/*}:$PATH"; break; fi

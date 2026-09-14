@@ -22,21 +22,20 @@ VM details also remain in `build/host-vm/`. No verification mode publishes relea
 `setup-dev.sh` uses a persistent per-architecture cache at
 `${XDG_CACHE_HOME:-$HOME/.cache}/pkgdeck/<architecture>`. Set `PKGDECK_CACHE_DIR`
 to choose another location, for example `build/dev-cache` in CI. Keep this path
-stable: the Python environment and some generated SDK configuration use absolute
+stable: some generated SDK configuration uses absolute
 paths. Concurrent setup processes share a cache lock.
 
-The setup installs Qt 6.11.2, Kirigami/ECM 6.30.0, aqtinstall 3.3.0, CMake 4.4.3,
+The setup installs Qt 6.11.2, Kirigami/ECM 6.30.0, CMake 4.4.3,
 and cargo-llvm-cov 0.9.1 without replacing system packages or global Cargo tools.
 Rust uses the repository's `rust-toolchain.toml`. KDE source archives are checked
-against committed SHA-256 hashes in `scripts/sdk.sha256`; Qt downloads use aqt's
-upstream archive verification, and Cargo verifies registry package checksums.
-Python dependencies use pinned top-level versions and pip's normal transport
-verification; they are not a fully hashed transitive Python lockfile.
+against committed SHA-256 hashes in `scripts/sdk.sha256`, along with the CMake
+binary archives. Qt archive hashes and URLs for both architectures are committed
+in `scripts/qt-archives.tsv`. Downloads are verified before extraction; Cargo
+verifies registry package checksums.
 
-Prerequisites are Python **3.14** with venv support, rustup/Cargo, a C++ compiler,
-Ninja, pkg-config, LLD, curl, tar, flock, and the Qt development/runtime system
-libraries listed in `.github/workflows/ci.yml`. Python 3.14 is required because
-older Python versions can misidentify the QtTools archives. The bootstrap reports
+Prerequisites are rustup/Cargo, a C++ compiler, `libapt-pkg-dev`, jq,
+Ninja, pkg-config, LLD, curl, tar, libarchive (`bsdtar`), flock, and the Qt development/runtime
+system libraries listed in `.github/workflows/ci.yml`. The bootstrap reports
 missing command prerequisites before downloading. It does not install host OS
 packages or grant authorization.
 
@@ -117,7 +116,7 @@ scripts/verify.sh vm  # Reuses the prepared base; creates another fresh test ove
 The preparation stage installs system dependencies and the checksum-verified
 Homebrew tool once. It does not install test packages or create the privileged test
 user. Its cache key includes the pinned Ubuntu cloud image checksum and
-`scripts/vm/prepare.py`; changing lifecycle assertions does not invalidate setup.
+`scripts/vm/prepare.sh`; changing lifecycle assertions does not invalidate setup.
 Prepared images have a SHA-256 sidecar checked before reuse. A failed preparation
 never becomes a valid cache entry. A cache lock serializes runs using the same base.
 
@@ -133,3 +132,24 @@ QEMU retains the real sudo/polkit, APT lock, and full-system checks. Podman cove
 faster backend lifecycles; it does not claim desktop authorization, installed
 Flatpak/Snap bridges, FUSE, or a real display session. The current QEMU fixture is
 x86_64 only. No preparation or test script is intended to run directly on the host.
+
+## Native tooling
+
+`cargo xtask` runs the Rust acceptance drivers (`terminal`, `terminal-interactions`,
+`gui`, `gui-failure`, `gui-lifecycle`, and `qml`). Build it once with
+`cargo build -p pkgdeck-tools`; `scripts/xtask.sh` invokes that binary for package
+checks. GUI drivers use private Xvfb servers and temporary settings directories.
+The 95% coverage gate continues to measure application Rust code and its build
+script; test drivers are excluded. Their behavior is exercised by the frontend
+acceptance tests and disposable guest lifecycles.
+
+`scripts/build-apt.sh` builds the separate GPL-2.0-or-later APT reader using the
+host's `libapt-pkg-dev` package. Its sibling placement keeps APT out of frontend
+link dependencies. `scripts/bundle.sh` includes its library closure and license
+notices, so users do not need to install development headers or language bindings.
+The installed host still supplies the native package manager and authorization
+agents used for transactions.
+
+`scripts/check-no-python.sh` rejects project-owned Python scripts and interpreter
+invocations. This does not constrain dependencies of the host OS, cloud-init,
+Qt's upstream SDK, or independently installed package managers.

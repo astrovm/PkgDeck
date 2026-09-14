@@ -98,11 +98,12 @@ Source discovery reports unavailable managers as data; detection errors return 1
 
 ## Native metadata contracts and validation
 
-APT metadata comes from host `/usr/bin/python3` and its `python3-apt` module using
-[python-apt's package API](https://apt-team.pages.debian.net/python-apt/library/apt.package.html).
-Install that prerequisite through the native distribution tools if detection
-reports it missing. All APT writes use the fixed `/usr/bin/apt-get` authorization
-boundary; the Python helper only reads metadata.
+APT metadata comes from the companion `pkgdeck-apt-query` executable through
+libapt-pkg's read-only cache and native candidate policy. Packages include the
+helper and its shared-library dependencies. Source builds use `scripts/build-apt.sh`
+with the distribution's `libapt-pkg-dev` package. Keep the helper beside the
+frontend binaries. All APT writes use the fixed `/usr/bin/apt-get` authorization
+boundary; the helper only reads metadata and never requests elevated privileges.
 
 Homebrew formula metadata uses `brew formulae` and `brew info --json=v2 --formula`
 from the [Homebrew command interface](https://docs.brew.sh/Manpage). Casks are
