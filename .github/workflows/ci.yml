@@ -2,7 +2,6 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [main]
     tags: ['v*']
   workflow_dispatch:
 
@@ -20,7 +19,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+        runner: [ubuntu-26.04, ubuntu-26.04-arm]
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -30,7 +29,7 @@ jobs:
 
   host-vm:
     name: APT and Homebrew lifecycles in disposable VM (x86_64)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -64,7 +63,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+        runner: [ubuntu-26.04, ubuntu-26.04-arm]
     runs-on: ${{ matrix.runner }}
     env:
       PKGDECK_STAGE_TIMEOUT: 35m
@@ -92,12 +91,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: ubuntu-24.04
+          - runner: ubuntu-26.04
             arch: x86_64
             qt_host: linux
             qt_arch: linux_gcc_64
             qt_dir: gcc_64
-          - runner: ubuntu-24.04-arm
+          - runner: ubuntu-26.04-arm
             arch: aarch64
             qt_host: linux_arm64
             qt_arch: linux_gcc_arm64
