@@ -105,7 +105,11 @@ impl AppImage {
             summary: format!("PkgDeck-managed local Type 2 AppImage ({digest})"),
             installed_version: Some(digest.into()),
             candidate_version: Some(digest.into()),
-            update: UpdateAvailability::Current,
+            update: if Self::updater().is_ok() {
+                UpdateAvailability::Available
+            } else {
+                UpdateAvailability::Current
+            },
         })
     }
     fn installed_packages(&self) -> Result<Vec<Package>, EngineError> {
@@ -168,7 +172,11 @@ impl AppImage {
                         summary: "Externally managed local Type 2 AppImage".into(),
                         installed_version: Some(version.clone()),
                         candidate_version: Some(version),
-                        update: UpdateAvailability::Current,
+                        update: if Self::updater().is_ok() {
+                            UpdateAvailability::Available
+                        } else {
+                            UpdateAvailability::Current
+                        },
                     },
                     desktop,
                 ))
@@ -368,6 +376,11 @@ impl Backend for AppImage {
                     "Updating AppImage with its embedded update information.".into(),
                 ));
                 self.update(id, cancel)?;
+            }
+            Operation::UpgradeAll { backend } if backend == "appimage" => {
+                for package in self.installed_packages()? {
+                    self.update(&package.id, cancel)?;
+                }
             }
             _ => return Err(Self::invalid("foreign or unsupported AppImage operation")),
         }
