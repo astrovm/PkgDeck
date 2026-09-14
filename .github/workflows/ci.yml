@@ -172,10 +172,10 @@ jobs:
           'build/artifacts/PkgDeck-${{ matrix.arch }}.AppImage' --cli doctor
       - name: Build and smoke-test Flatpak
         run: |
-          flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
-          flatpak install --user -y --noninteractive flathub org.kde.Platform//6.11 org.kde.Sdk//6.11
+          sudo flatpak remote-add --system --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+          sudo flatpak install --system -y --noninteractive flathub org.kde.Platform//6.11 org.kde.Sdk//6.11
           scripts/package.sh flatpak
-          flatpak install --user -y --noninteractive 'build/artifacts/PkgDeck-${{ matrix.arch }}.flatpak'
+          sudo flatpak install --system -y --noninteractive 'build/artifacts/PkgDeck-${{ matrix.arch }}.flatpak'
           scripts/xtask.sh gui flatpak run --env=QT_QPA_PLATFORM=offscreen --env=QT_QUICK_BACKEND=software io.github.astrovm.PkgDeck
           scripts/xtask.sh terminal flatpak run --command=pkd io.github.astrovm.PkgDeck
       - name: Build and inspect Snap
