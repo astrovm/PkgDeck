@@ -6,11 +6,7 @@ use crate::{
     process::*,
 };
 use serde::Deserialize;
-use std::{
-    ffi::OsString,
-    path::{Path, PathBuf},
-    time::Duration,
-};
+use std::{ffi::OsString, path::PathBuf, time::Duration};
 
 const CAPABILITIES: &[Capability] = &[
     Capability::Search,
@@ -58,16 +54,12 @@ impl Transport for NativeTransport {
         if self.host.resolve("apt-get")?.is_none() {
             return Err(ExecutionError::Disabled("APT not found".into()));
         }
+        let executable = std::env::current_exe()
+            .map_err(|e| ExecutionError::Io(e.to_string()))?
+            .with_file_name("pkgdeck-apt-query");
         let result = self.host.read(
-            Path::new("/usr/bin/python3"),
-            &[
-                "-I".into(),
-                "-c".into(),
-                include_str!("apt_query.py").into(),
-                mode.into(),
-                query.into(),
-                arch.into(),
-            ],
+            &executable,
+            &[mode.into(), query.into(), arch.into()],
             Limits {
                 timeout: Duration::from_secs(120),
                 output_bytes: 32 * 1024 * 1024,

@@ -2,7 +2,7 @@ FROM docker.io/library/rust:1.98.1-slim@sha256:ce84a5edd80c5f91e05c5533b1e53eb1d
 FROM docker.io/library/ubuntu:26.04@sha256:513c074113a871b51a8d16ab445c88779d6452d937a164fb5cc479f32668a41d
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential ninja-build lld pkg-config curl ca-certificates git python3 python3-venv \
+    build-essential ninja-build lld pkg-config curl ca-certificates git libapt-pkg-dev jq libarchive-tools cmake \
     libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-dev libvulkan-dev \
     libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-shape0 libxcb-xkb1 \
     libxkbcommon-x11-0 libxcb-image0 libxcb-render-util0 libxcb-randr0 libxcb-sync1 \
@@ -15,7 +15,7 @@ COPY --from=rust /usr/local/cargo/bin/ /usr/local/bin/
 ENV RUSTUP_HOME=/opt/rustup PKGDECK_CACHE_DIR=/opt/pkgdeck-sdk
 WORKDIR /opt/bootstrap
 COPY rust-toolchain.toml ./
-COPY scripts/setup-dev.sh scripts/dev-env.sh scripts/build-kirigami.sh scripts/sdk.sha256 ./scripts/
+COPY scripts/setup-dev.sh scripts/dev-env.sh scripts/build-kirigami.sh scripts/install-sdk.sh scripts/qt-archives.tsv scripts/sdk.sha256 ./scripts/
 RUN scripts/setup-dev.sh && rm -rf /opt/pkgdeck-sdk/sdk-build \
     && dpkg-query -W > /opt/pkgdeck-os-packages.txt
 RUN apt-get update && apt-get install -y --no-install-recommends xvfb xdotool fonts-dejavu-core && rm -rf /var/lib/apt/lists/*

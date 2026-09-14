@@ -223,8 +223,8 @@ mod tests {
             std::thread::sleep(Duration::from_millis(30));
             other.cancel();
         });
-        let mut command = Command::new("/usr/bin/python3");
-        command.args(["-c", "import time; time.sleep(0.1); print('committed')"]);
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "sleep 0.1; printf 'committed\n'"]);
         let result = run(
             command,
             Limits {

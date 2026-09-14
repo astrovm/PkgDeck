@@ -101,7 +101,7 @@ otherwise QEMU uses software emulation:
 ```sh
 cargo build --locked -p pkgdeck-core --example apt-probe
 cargo build --locked -p pkd
-python3 scripts/test-host-vm.py
+scripts/test-host-vm.sh
 ```
 
 The launcher verifies the SHA-256 of a dated Ubuntu 26.04 cloud image, creates a

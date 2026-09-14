@@ -20,14 +20,14 @@ fn env(values: &[(&str, &str)]) -> BTreeMap<OsString, OsString> {
 fn host() -> Host {
     Host::new(Runtime::Native, env(&[("PATH", "/usr/bin:/bin")]))
 }
-fn python(script: &str) -> Vec<OsString> {
+fn shell(script: &str) -> Vec<OsString> {
     vec!["-c".into(), script.into()]
 }
 fn read(script: &str) -> Completion {
     host()
         .read(
-            Path::new("/usr/bin/python3"),
-            &python(script),
+            Path::new("/bin/sh"),
+            &shell(script),
             Limits::default(),
             &Cancellation::default(),
         )
@@ -150,7 +150,7 @@ fn host_environment_and_arguments_are_isolated_from_packaging() {
             ("LANG", "invalid"),
         ]),
     );
-    let result=h.read(Path::new("/usr/bin/python3"),&["-c".into(),"import os,sys; print(os.environ['HOME']); print(os.environ['LC_ALL']); print(os.getcwd()); print(sys.argv[1]); assert not any(k in os.environ for k in ['LD_LIBRARY_PATH','LD_PRELOAD','PYTHONPATH','APT_CONFIG','QT_PLUGIN_PATH'])".into(),"$(touch /tmp/DO_NOT_EXECUTE); echo fixture".into()],Limits::default(),&Cancellation::default()).unwrap();
+    let result=h.read(Path::new("/bin/sh"),&["-c".into(),r#"printf '%s\n' "$HOME" "$LC_ALL" "$PWD" "$1"; test -z "${LD_LIBRARY_PATH+x}${LD_PRELOAD+x}${PYTHONPATH+x}${APT_CONFIG+x}${QT_PLUGIN_PATH+x}""#.into(),"fixture".into(),"$(touch /tmp/DO_NOT_EXECUTE); echo fixture".into()],Limits::default(),&Cancellation::default()).unwrap();
     assert_eq!(
         String::from_utf8(result.stdout).unwrap(),
         "/tmp/synthetic-home\nC\n/\n$(touch /tmp/DO_NOT_EXECUTE); echo fixture\n"
@@ -181,9 +181,9 @@ fn host_environment_and_arguments_are_isolated_from_packaging() {
 fn output_is_drained_capped_and_exit_status_preserved() {
     let result = host()
         .read(
-            Path::new("/usr/bin/python3"),
-            &python(
-                "import os; os.write(1,b'x'*300000); os.write(2,b'y'*300000); raise SystemExit(7)",
+            Path::new("/bin/sh"),
+            &shell(
+                r"head -c 300000 /dev/zero | tr '\000' x; head -c 300000 /dev/zero | tr '\000' y >&2; exit 7",
             ),
             Limits {
                 output_bytes: 1024,
@@ -196,14 +196,11 @@ fn output_is_drained_capped_and_exit_status_preserved() {
     assert!(result.truncated);
     assert_eq!(result.stdout, vec![b'x'; 1024]);
     assert_eq!(result.stderr, vec![b'y'; 1024]);
-    let result = read("import os,signal; os.kill(os.getpid(),signal.SIGTERM)");
+    let result = read("kill -TERM $$");
     assert_eq!(result.signal, Some(15));
     assert_eq!(result.code, None);
     // A descendant retaining the output pipe must not hang the supervisor.
-    assert_eq!(
-        read("import os,time; pid=os.fork(); time.sleep(0.2) if pid==0 else None").code,
-        Some(0)
-    );
+    assert_eq!(read("sleep 0.2 &").code, Some(0));
 }
 
 #[test]
@@ -214,8 +211,8 @@ fn reads_time_out_and_cancel_without_waiting_for_descendants() {
     };
     assert_eq!(
         host().read(
-            Path::new("/usr/bin/python3"),
-            &python("import os,time; os.fork(); time.sleep(30)"),
+            Path::new("/bin/sh"),
+            &shell("sleep 30 & wait"),
             limits,
             &Cancellation::default()
         ),
@@ -237,8 +234,8 @@ fn reads_time_out_and_cancel_without_waiting_for_descendants() {
     });
     assert_eq!(
         host().read(
-            Path::new("/usr/bin/python3"),
-            &python("import time; time.sleep(30)"),
+            Path::new("/bin/sh"),
+            &shell("exec sleep 30"),
             Limits::default(),
             &cancel
         ),

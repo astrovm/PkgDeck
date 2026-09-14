@@ -5,8 +5,8 @@ command -v podman >/dev/null || { echo 'Podman is required for --engine podman.'
 [[ $(podman info --format '{{.Host.Security.Rootless}}') == true ]] || { echo 'Run Podman as an unprivileged user.' >&2; exit 1; }
 kind=${1:?Expected development or lifecycle}; shift
 case "$kind" in
-    development) recipe=containers/development.Containerfile; inputs=("$recipe" rust-toolchain.toml scripts/setup-dev.sh scripts/dev-env.sh scripts/build-kirigami.sh scripts/sdk.sha256) ;;
-    lifecycle) recipe=containers/lifecycle.Containerfile; inputs=("$recipe" scripts/vm/prepare.py) ;;
+    development) recipe=containers/development.Containerfile; inputs=("$recipe" rust-toolchain.toml scripts/setup-dev.sh scripts/dev-env.sh scripts/build-kirigami.sh scripts/install-sdk.sh scripts/qt-archives.tsv scripts/sdk.sha256) ;;
+    lifecycle) recipe=containers/lifecycle.Containerfile; inputs=("$recipe" scripts/vm/prepare.sh) ;;
     *) echo "Unknown container kind: $kind" >&2; exit 2 ;;
 esac
 key=$(cat "${inputs[@]}" | sha256sum | cut -c1-16)
@@ -37,7 +37,7 @@ if [[ "$kind" == development ]]; then
     mkdir -p "$cache/cargo" "$cache/target"
     if [[ "${1:-}" == --binary-dir ]]; then printf '%s/target/debug\n' "$cache"; exit 0; fi
     command=(scripts/verify.sh "$@")
-    if [[ "${1:-}" == --build-cli ]]; then command=(cargo build --locked -p pkd); fi
+    if [[ "${1:-}" == --build-cli ]]; then command=(cargo build --locked -p pkd -p pkgdeck-tools); fi
     # No host HOME, credentials, daemon sockets, or package database is mounted.
     run_container --userns=keep-id \
         -v "$PWD:/workspace:rw" -v "$cache/cargo:/cache/cargo:rw" \
@@ -51,9 +51,11 @@ else
     gui_mount=()
     if [[ "${PKGDECK_FRONTEND:-cli}" == gui ]]; then
         appdir=$(realpath "${PKGDECK_APPDIR:-$PWD/build/AppDir}")
-        [[ -x "$appdir/AppRun" ]] || { echo 'Stage the GUI with scripts/bundle.py first.' >&2; exit 1; }
+        [[ -x "$appdir/AppRun" ]] || { echo 'Stage the GUI with scripts/bundle.sh first.' >&2; exit 1; }
         gui_mount=(-v "$appdir:/mnt/pkgdeck-app:ro")
     fi
+    tools_binary=$(realpath "${PKGDECK_TOOLS_BINARY:-${CARGO_TARGET_DIR:-target}/debug/pkgdeck-tools}")
+    gui_mount+=(-v "$tools_binary:/mnt/pkgdeck-tools:ro")
     run_container "${gui_mount[@]}" -e "PKGDECK_FRONTEND=${PKGDECK_FRONTEND:-cli}" -v "$PWD:/mnt/pkgdeck:ro" -v "$binaries:/mnt/pkgdeck-bin:ro" "$image" \
-        python3 -u /mnt/pkgdeck/scripts/vm/container_guest.py "$@"
+        bash /mnt/pkgdeck/scripts/vm/guest.sh --container "$@"
 fi

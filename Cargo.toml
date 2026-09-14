@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/pkgdeck-core", "crates/pkd", "crates/pkgdeck"]
+members = ["crates/pkgdeck-core", "crates/pkd", "crates/pkgdeck", "crates/pkgdeck-tools"]
 default-members = ["crates/pkgdeck-core", "crates/pkd"]
 resolver = "2"
 

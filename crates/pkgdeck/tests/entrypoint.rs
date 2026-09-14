@@ -19,55 +19,20 @@ fn version_does_not_require_a_display() {
 
 #[test]
 fn package_window_loads_and_exits() {
-    let status = Command::new("python3")
-        .arg(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../scripts/smoke.py"
-        ))
-        .args(["gui", env!("CARGO_BIN_EXE_pkgdeck")])
-        .env("QT_QPA_PLATFORM", "offscreen")
-        .env("QT_QUICK_BACKEND", "software")
-        .status()
-        .unwrap();
-    assert!(status.success());
+    pkgdeck_tools::gui(&[env!("CARGO_BIN_EXE_pkgdeck").into()], false);
 }
 
 #[test]
 fn invalid_qml_module_fails_without_hanging() {
-    let status = Command::new("python3")
-        .arg(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../scripts/smoke.py"
-        ))
-        .args(["gui-failure", env!("CARGO_BIN_EXE_pkgdeck")])
-        .env("QT_QPA_PLATFORM", "offscreen")
-        .env("QT_QUICK_BACKEND", "software")
-        .status()
-        .unwrap();
-    assert!(status.success());
+    pkgdeck_tools::gui(&[env!("CARGO_BIN_EXE_pkgdeck").into()], true);
 }
 
 #[test]
 fn quick_controls_search_confirm_resize_and_cancel() {
-    let status = Command::new("python3")
-        .arg(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../scripts/test-gui-qml.py"
-        ))
-        .status()
-        .unwrap();
-    assert!(status.success());
+    pkgdeck_tools::qml();
 }
 
 #[test]
 fn real_window_completes_synthetic_lifecycle() {
-    let status = Command::new("python3")
-        .arg(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../scripts/gui_driver.py"
-        ))
-        .arg(env!("CARGO_BIN_EXE_pkgdeck"))
-        .status()
-        .unwrap();
-    assert!(status.success());
+    pkgdeck_tools::gui_lifecycle(&[env!("CARGO_BIN_EXE_pkgdeck").into()]);
 }

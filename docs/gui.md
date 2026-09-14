@@ -103,7 +103,7 @@ To check the staged release bundle against real managers:
 ```sh
 scripts/verify.sh full
 source scripts/dev-env.sh
-python3 scripts/bundle.py
+scripts/bundle.sh
 PKGDECK_FRONTEND=gui PKGDECK_BINARY_DIR="$PWD/build/AppDir/usr/bin" \
   scripts/container.sh lifecycle
 ```
