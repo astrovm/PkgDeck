@@ -820,6 +820,12 @@ mod tests {
             AppImage::desktop_appimage_path("TryExec=/opt/Audacity.AppImage\nExec=audacity"),
             Some(PathBuf::from("/opt/Audacity.AppImage"))
         );
+        assert_eq!(
+            AppImage::desktop_appimage_path(
+                "TryExec=gearlever\nExec=\"/opt/Audacity Portable.AppImage\" %U"
+            ),
+            Some(PathBuf::from("/opt/Audacity Portable.AppImage"))
+        );
 
         let root = base.join("owned");
         let applications = base.join("applications");
