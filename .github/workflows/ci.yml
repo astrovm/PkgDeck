@@ -117,7 +117,7 @@ jobs:
       - name: Install rootless container tooling
         run: sudo apt-get update && sudo apt-get install -y podman
       - name: Build CLI
-        run: cargo build --locked -p pkd && install -m 755 target/debug/pkd /tmp/pkgdeck-pkd
+        run: cargo build --locked -p pkd
       - name: Exercise actual package manager
         run: scripts/tests/native-manager.sh ${{ matrix.backend }} "$PWD/target/debug/pkd"
 
@@ -134,7 +134,7 @@ jobs:
           sudo systemctl enable --now snapd.socket
           sudo snap wait system seed.loaded
       - name: Build CLI
-        run: cargo build --locked -p pkd
+        run: cargo build --locked -p pkd && install -m 755 target/debug/pkd /tmp/pkgdeck-pkd
       - name: Exercise actual Snap lifecycle
         run: |
           sudo useradd -m pkgdeck-test
