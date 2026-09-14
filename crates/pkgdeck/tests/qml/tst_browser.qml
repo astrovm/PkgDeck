@@ -181,6 +181,28 @@ TestCase {
         appearance.currentIndex = 0;
         appearance.activated(0);
     }
+    Component {
+        id: vectorIcon
+        App.DeckIcon { width: 48; height: 48; z: 100 }
+    }
+    function test_bundled_vectors_render_without_an_icon_font() {
+        const icon = createTemporaryObject(vectorIcon, browser.contentItem);
+        verify(icon !== null);
+        icon.ink = "transparent";
+        wait(30);
+        const blank = grabImage(icon);
+        for (const name of Object.keys(icon.drawings)) {
+            icon.name = name;
+            icon.ink = "#ffffff";
+            wait(30);
+            verify(icon.available);
+            verify(!grabImage(icon).equals(blank), name + " should paint a bundled vector");
+            const light = grabImage(icon);
+            icon.ink = "#102030";
+            wait(30);
+            verify(!grabImage(icon).equals(light), name + " should follow the palette");
+        }
+    }
     function test_close_requests_cancellation() {
         fake.busy = true;
         browser.close();

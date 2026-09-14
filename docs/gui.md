@@ -60,6 +60,21 @@ cache. Background polling stops when work finishes.
 | Escape during work | Request cancellation |
 | Ctrl+Q | Close, waiting safely if work is active |
 
+## Bundled icons
+
+Navigation, package actions, source rows, and details use original vector artwork
+in `DeckIcon.qml`. CXX-Qt embeds this component in the application's Qt resources,
+so native, AppImage, Flatpak, and Snap builds carry the same icons inside the
+executable. They use the already-required Qt Quick Canvas renderer: no downloaded
+assets, icon theme, extra renderer plugin, or icon font is required. Source symbols
+are generic archive/mug illustrations, not third-party logos. The artwork follows
+the repository's MIT license.
+
+Qt Quick pixel tests render every icon in two colors with empty XDG icon-data
+directories. Packaged GUI smoke tests use the same isolated data directories.
+Icons follow the light/dark palette and disabled states. Text labels remain the
+accessible names; decorative icons are ignored by accessibility tools.
+
 ## Local verification
 
 `scripts/verify.sh full` runs Qt Quick tests against the actual Browser component,

@@ -40,6 +40,8 @@ Controls.ApplicationWindow {
         id: control
         property bool primary: false
         property bool navigation: false
+        property string symbol: "package"
+        Accessible.name: text
         implicitHeight: 38
         horizontalPadding: 16
         opacity: enabled ? 1 : 0.45
@@ -49,14 +51,24 @@ Controls.ApplicationWindow {
             border.color: control.activeFocus ? root.accent : (control.navigation ? "transparent" : root.line)
             border.width: control.activeFocus ? 2 : 1
         }
-        contentItem: Text {
-            text: control.text
-            font: control.font
-            color: control.primary && control.enabled ? (root.dark ? "#111820" : "#ffffff") : root.ink
-            horizontalAlignment: Text.AlignHCenter
-            verticalAlignment: Text.AlignVCenter
+        contentItem: RowLayout {
+            spacing: 8
+            DeckIcon {
+                name: control.symbol
+                ink: control.primary && control.enabled ? (root.dark ? "#111820" : "#ffffff") : root.ink
+                Layout.preferredWidth: 18
+                Layout.preferredHeight: 18
+            }
+            Text {
+                text: control.text
+                font: control.font
+                color: control.primary && control.enabled ? (root.dark ? "#111820" : "#ffffff") : root.ink
+                Layout.fillWidth: control.navigation
+                verticalAlignment: Text.AlignVCenter
+            }
         }
     }
+
     width: 1100
     height: 760
     minimumWidth: 360
@@ -163,6 +175,7 @@ Controls.ApplicationWindow {
                         required property string modelData
                         Layout.fillWidth: true
                         text: modelData
+                        symbol: ({"Discover":"discover", "Search":"search", "Installed":"installed", "Updates":"updates", "Sources":"sources", "Settings":"settings", "Help / About":"help"})[modelData]
                         enabled: !backend.busy
                         navigation: true
                         primary: root.currentView === modelData
@@ -239,6 +252,7 @@ Controls.ApplicationWindow {
                 }
                 ActionButton {
                     text: "Search"
+                    symbol: "search"
                     primary: true
                     enabled: !backend.busy && search.text.trim().length > 0
                     onClicked: { root.currentView = "Search"; root.reload(); }
@@ -383,12 +397,22 @@ Controls.ApplicationWindow {
                                         elide: Text.ElideRight
                                         Layout.fillWidth: true
                                     }
-                                    Controls.Label {
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 6
+                                        DeckIcon {
+                                            name: modelData.source
+                                            ink: root.muted
+                                            Layout.preferredWidth: 14
+                                            Layout.preferredHeight: 14
+                                        }
+                                        Controls.Label {
                                         text: modelData.source.toUpperCase() + (modelData.architecture ? " · " + modelData.architecture : "")
                                         color: root.muted
                                         font.pixelSize: 11
                                         elide: Text.ElideRight
                                         Layout.fillWidth: true
+                                        }
                                     }
                                     Controls.Label {
                                         visible: root.compact
@@ -440,7 +464,15 @@ Controls.ApplicationWindow {
                     anchors.fill: parent
                     anchors.margins: 16
                     spacing: 6
-                    Controls.Label {
+                    RowLayout {
+                        Layout.fillWidth: true
+                        DeckIcon {
+                            name: root.selected && root.selected.kind === "source" ? root.selected.source : "package"
+                            ink: root.accent
+                            Layout.preferredWidth: 24
+                            Layout.preferredHeight: 24
+                        }
+                        Controls.Label {
                         text: root.selected ? root.selected.name : ""
                         textFormat: Text.PlainText
                         color: root.ink
@@ -448,6 +480,7 @@ Controls.ApplicationWindow {
                         font.bold: true
                         elide: Text.ElideRight
                         Layout.fillWidth: true
+                        }
                     }
                     Controls.ScrollView {
                         Layout.fillWidth: true
@@ -475,6 +508,7 @@ Controls.ApplicationWindow {
                     objectName: "installButton"
                     visible: root.selected !== null && root.selected.kind === "package" && !root.selected.installed
                     text: "Install"
+                    symbol: "install"
                     primary: true
                     enabled: !backend.busy && root.selected !== null && root.selected.kind === "package" && !root.selected.installed
                     onClicked: root.propose("install")
@@ -483,6 +517,7 @@ Controls.ApplicationWindow {
                     objectName: "removeButton"
                     visible: root.selected !== null && !!root.selected.installed
                     text: "Remove"
+                    symbol: "remove"
                     enabled: !backend.busy && root.selected !== null && !!root.selected.installed
                     onClicked: root.propose("remove")
                 }
@@ -490,6 +525,7 @@ Controls.ApplicationWindow {
                     objectName: "upgradeButton"
                     visible: root.selected !== null && root.selected.update === "available"
                     text: "Upgrade"
+                    symbol: "updates"
                     primary: true
                     enabled: !backend.busy && root.selected !== null && root.selected.update === "available"
                     onClicked: root.propose("upgrade")
@@ -498,18 +534,28 @@ Controls.ApplicationWindow {
                     objectName: "refreshButton"
                     visible: root.selected !== null && root.selected.kind === "source"
                     text: "Refresh source"
+                    symbol: "refresh"
                     primary: true
                     enabled: !backend.busy && root.selected !== null && root.selected.kind === "source" && root.selected.available
                     onClicked: root.propose("refresh")
                 }
                 ActionButton {
                     text: "Reload"
+                    symbol: "refresh"
                     enabled: !backend.busy
                     onClicked: root.reload()
                 }
             }
             RowLayout {
                 Layout.fillWidth: true
+                DeckIcon {
+                    name: "help"
+                    ink: root.muted
+                    visible: !backend.busy
+                    Layout.alignment: Qt.AlignTop
+                    Layout.preferredWidth: 18
+                    Layout.preferredHeight: 18
+                }
                 Controls.BusyIndicator {
                     running: backend.busy
                     visible: running
@@ -535,6 +581,7 @@ Controls.ApplicationWindow {
                 }
                 ActionButton {
                     text: "Cancel"
+                    symbol: "cancel"
                     visible: backend.busy
                     onClicked: backend.cancel()
                 }
