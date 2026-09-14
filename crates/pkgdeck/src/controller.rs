@@ -663,9 +663,9 @@ mod tests {
                     }
                     Reply::Done(Ok(Payload::Batch(status))) => {
                         assert!(status.contains(if fail {
-                            "Completed 0 of 2"
+                            "Completed 0 of 1"
                         } else {
-                            "Completed 1 of 2"
+                            "Completed 1 of 1"
                         }));
                         assert!(status.contains("synthetic"));
                         assert!(status.contains(if fail { "authorization" } else { "cancel" }));
