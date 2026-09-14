@@ -496,6 +496,27 @@ mod tests {
     }
 
     #[test]
+    fn desktop_exec_paths_accept_quoted_and_plain_appimages() {
+        assert_eq!(
+            AppImage::exec_path("\"/home/user/Apps/Audacity.AppImage\" %U"),
+            Some(PathBuf::from("/home/user/Apps/Audacity.AppImage"))
+        );
+        assert_eq!(
+            AppImage::exec_path("/home/user/Apps/Audacity.AppImage --verbose"),
+            Some(PathBuf::from("/home/user/Apps/Audacity.AppImage"))
+        );
+        assert_eq!(
+            AppImage::exec_path("\"/home/user/Apps/Audacity\\\"Edition.AppImage\""),
+            Some(PathBuf::from("/home/user/Apps/Audacity\"Edition.AppImage"))
+        );
+        assert_eq!(AppImage::exec_path("Audacity.AppImage"), None);
+        assert_eq!(
+            AppImage::exec_path("\"/home/user/Apps/Audacity.AppImage"),
+            None
+        );
+    }
+
+    #[test]
     fn local_search_details_and_validation_are_explicit() {
         let base = std::env::temp_dir().join(format!(
             "pkgdeck-appimage-coverage-test-{}",
