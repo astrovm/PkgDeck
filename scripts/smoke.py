@@ -127,7 +127,7 @@ def terminal_interactions(command):
 
 def gui(command):
     with tempfile.TemporaryDirectory(prefix="pkgdeck-gui-smoke-") as directory:
-        result = subprocess.run(command + ["--smoke-test"], env=dict(os.environ, XDG_CONFIG_HOME=directory, SNAP="/synthetic-disabled-runtime"), capture_output=True, text=True, timeout=30)
+        result = subprocess.run(command + ["--smoke-test"], env=dict(os.environ, XDG_CONFIG_HOME=directory, XDG_DATA_HOME=directory, XDG_DATA_DIRS=directory, SNAP="/synthetic-disabled-runtime"), capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stderr
     assert "PKGDECK_GUI_READY" in result.stderr, result.stderr
     assert "failed to load" not in result.stderr.lower(), result.stderr

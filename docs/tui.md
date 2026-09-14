@@ -53,6 +53,14 @@ denied; the TUI never reads passwords. `pkd --auth polkit` uses a configured hos
 polkit agent, which may require a graphical session. Homebrew stays unprivileged.
 See [the host contract](host-execution.md) for sandbox restrictions.
 
+## Portable status symbols
+
+Package rows use `[ ]` for not installed, `[x]` for installed, and `[^]` for an
+available update. CLI results use `[OK]` for completion and `[!]` for errors.
+The TUI also marks navigation and active work. These are ordinary ASCII characters;
+no Nerd Font, icon font installation, or terminal configuration is required.
+Labels remain visible, colors are optional, and JSON output contains no decorations.
+
 ## Captures
 
 Actual terminal output with synthetic package metadata:

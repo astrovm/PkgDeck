@@ -8,6 +8,16 @@ pub fn clean(text: &str) -> String {
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect()
 }
+/// ASCII markers remain legible with stock terminal fonts, including NO_COLOR.
+pub fn package_marker(installed: bool, update: bool) -> &'static str {
+    if update {
+        "[^]"
+    } else if installed {
+        "[x]"
+    } else {
+        "[ ]"
+    }
+}
 pub fn scope(scope: &Scope) -> String {
     match scope {
         Scope::System => "System".into(),
@@ -115,7 +125,14 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
             .iter()
             .map(|p| {
                 vec![
-                    value(&p["id"]["name"]),
+                    format!(
+                        "{} {}",
+                        package_marker(
+                            !p["installed_version"].is_null(),
+                            p["update"] == "available"
+                        ),
+                        value(&p["id"]["name"])
+                    ),
                     value(&p["id"]["backend"]),
                     value(&p["candidate_version"]),
                     value(&p["summary"]),
@@ -128,12 +145,12 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
             width,
         ));
         output.push_str(&format!(
-            "\n\n{} packages · Use pkd info <name> for details.",
+            "\n\n{} packages · Use pkd info <name> for details.\n[ ] Not installed   [x] Installed   [^] Update available",
             rows.len()
         ));
         if let Some(failures) = data["failures"].as_array() {
             for failure in failures {
-                output.push_str(&format!("\nSource failed: {}", value(failure)));
+                output.push_str(&format!("\n[!] Source failed: {}", value(failure)));
             }
         }
     } else if data.get("package").is_some() {
@@ -180,9 +197,9 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
                 serde_json::from_value(item["operation"].clone()).expect("typed operation");
             output.push_str(&operation(&op));
             if let Some(error) = item["result"].get("Err") {
-                output.push_str(&format!("\n  Failed: {}\n", value(error)));
+                output.push_str(&format!("\n  [!] Failed: {}\n", value(error)));
             } else {
-                output.push_str("\n  Completed");
+                output.push_str("\n  [OK] Completed");
                 if item["result"]["Ok"]["cancellation_deferred"] == true {
                     output.push_str(" after cancellation; native changes were not rolled back");
                 }
@@ -191,7 +208,7 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
         }
     } else {
         output.push_str(&format!(
-            "Error: {}",
+            "[!] Error: {}",
             value(data.get("message").unwrap_or(&data["error"]))
         ));
     }
@@ -215,6 +232,20 @@ mod tests {
         }
         assert!(human(&data, 100, true).starts_with("\x1b[1;34mPkgDeck\x1b[0m"));
         assert_eq!(cell("a", 0), "");
+    }
+    #[test]
+    fn package_states_have_portable_markers() {
+        assert_eq!(package_marker(false, false), "[ ]");
+        assert_eq!(package_marker(true, false), "[x]");
+        assert_eq!(package_marker(true, true), "[^]");
+        let output = human(
+            &json!({"packages":[{"id":{"name":"fixture","backend":"apt"},"installed_version":"1","update":"available"}]}),
+            100,
+            false,
+        );
+        assert!(output.contains("[^] fixture"));
+        assert!(output.contains("[^] Update available"));
+        assert!(!output.contains('\u{1b}'));
     }
     #[test]
     fn details_failures_and_operations_are_readable() {

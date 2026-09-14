@@ -210,6 +210,15 @@ or writes. The TUI no longer redraws continuously while idle. Local checks cover
 keyboard flows, narrow layouts, cache reuse/invalidation, human output, and the
 existing synthetic/native lifecycle suites.
 
+### Bundled iconography — implemented
+
+The GUI embeds its own vector icons for navigation, actions, package details, and
+sources. Every package carries them inside the executable; they do not depend on
+a host icon theme or icon font. The TUI and human CLI use portable ASCII state
+symbols with text labels, retaining ordinary terminal-font support and unchanged
+JSON output. See the [GUI guide](docs/gui.md#bundled-icons) and
+[terminal guide](docs/tui.md#portable-status-symbols).
+
 ### 7. Additional backends — planned
 
 Add each wave only after its advertised capabilities pass integration tests.

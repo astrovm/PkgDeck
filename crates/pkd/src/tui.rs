@@ -327,7 +327,7 @@ impl App {
     }
     fn draw(&mut self, frame: &mut ratatui::Frame) {
         if self.confirmation.is_some() || self.expanded {
-            let text = self.confirmation.as_ref().map(|op| format!("Confirm {}\n\nNative dependency changes may follow.\nPress y to confirm, n or Esc to go back.", crate::presentation::operation(op))).unwrap_or_else(|| self.status.clone());
+            let text = self.confirmation.as_ref().map(|op| format!("Confirm {}\n\nNative dependency changes may follow.\n[!] Press y to confirm, n or Esc to go back.", crate::presentation::operation(op))).unwrap_or_else(|| self.status.clone());
             frame.render_widget(
                 Paragraph::new(readable(text))
                     .wrap(Wrap { trim: false })
@@ -353,7 +353,7 @@ impl App {
         .split(frame.area());
         frame.render_widget(
             Paragraph::new(format!(
-                "1 Search   2 Installed   3 Updates   4 Sources\n\n/ {}{}",
+                "1 / Search   2 [x] Installed   3 [^] Updates   4 [=] Sources\n\n/ {}{}",
                 self.query,
                 if self.editing { "_" } else { "" }
             ))
@@ -391,7 +391,14 @@ impl App {
                 .iter()
                 .map(|p| {
                     Row::new(vec![
-                        readable(&p.id.name),
+                        format!(
+                            "{} {}",
+                            crate::presentation::package_marker(
+                                p.installed_version.is_some(),
+                                p.update == UpdateAvailability::Available
+                            ),
+                            readable(&p.id.name)
+                        ),
                         readable(format!("{} / {}", p.id.backend, p.id.architecture)),
                         readable(format!(
                             "{} -> {}",
@@ -507,7 +514,7 @@ impl App {
         );
         let status = format!(
             "{}{}",
-            if self.busy { "Working: " } else { "" },
+            if self.busy { "[...] Working: " } else { "" },
             self.status
         );
         frame.render_widget(
