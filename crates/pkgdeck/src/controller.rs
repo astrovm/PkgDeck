@@ -667,7 +667,7 @@ mod tests {
                         } else {
                             "Completed 1 of 1"
                         }));
-                        assert!(status.contains("synthetic"));
+                        assert!(status.contains("Upgrade all packages from fixture"));
                         assert!(status.contains(if fail { "authorization" } else { "cancel" }));
                     }
                     Reply::Done(Ok(Payload::Written(outcome))) => {
