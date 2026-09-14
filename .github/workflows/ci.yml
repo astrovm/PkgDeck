@@ -2,7 +2,6 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [main]
     tags: ['v*']
   workflow_dispatch:
 
@@ -20,7 +19,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+        runner: [ubuntu-26.04, ubuntu-26.04-arm]
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -30,7 +29,7 @@ jobs:
 
   host-vm:
     name: APT and Homebrew lifecycles in disposable VM (x86_64)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -64,7 +63,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+        runner: [ubuntu-26.04, ubuntu-26.04-arm]
     runs-on: ${{ matrix.runner }}
     env:
       PKGDECK_STAGE_TIMEOUT: 35m
@@ -92,12 +91,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: ubuntu-24.04
+          - runner: ubuntu-26.04
             arch: x86_64
             qt_host: linux
             qt_arch: linux_gcc_64
             qt_dir: gcc_64
-          - runner: ubuntu-24.04-arm
+          - runner: ubuntu-26.04-arm
             arch: aarch64
             qt_host: linux_arm64
             qt_arch: linux_gcc_arm64
@@ -131,13 +130,17 @@ jobs:
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         id: rust-cache
         with:
-          path: target
-          key: rust-${{ matrix.arch }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'crates/**', 'scripts/build-kirigami.sh') }}
+          path: |
+            target
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: rust-v2-${{ matrix.arch }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml') }}
       - name: Verify workspace, coverage, and release builds
         run: scripts/verify.sh full
       - name: Build and stage both executables
         run: |
           source scripts/dev-env.sh
+          cargo build --locked -p pkgdeck-tools
           scripts/bundle.sh
           desktop-file-validate assets/io.github.astrovm.PkgDeck.desktop
           unset LD_LIBRARY_PATH QML_IMPORT_PATH
@@ -150,7 +153,10 @@ jobs:
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: steps.rust-cache.outputs.cache-hit != 'true'
         with:
-          path: target
+          path: |
+            target
+            ~/.cargo/registry
+            ~/.cargo/git
           key: ${{ steps.rust-cache.outputs.cache-primary-key }}
       - name: Build and smoke-test AppImage
         env:
@@ -166,10 +172,10 @@ jobs:
           'build/artifacts/PkgDeck-${{ matrix.arch }}.AppImage' --cli doctor
       - name: Build and smoke-test Flatpak
         run: |
-          flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
-          flatpak install --user -y --noninteractive flathub org.kde.Platform//6.11 org.kde.Sdk//6.11
+          sudo flatpak remote-add --system --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+          sudo flatpak install --system -y --noninteractive flathub org.kde.Platform//6.11 org.kde.Sdk//6.11
           scripts/package.sh flatpak
-          flatpak install --user -y --noninteractive 'build/artifacts/PkgDeck-${{ matrix.arch }}.flatpak'
+          sudo flatpak install --system -y --noninteractive 'build/artifacts/PkgDeck-${{ matrix.arch }}.flatpak'
           scripts/xtask.sh gui flatpak run --env=QT_QPA_PLATFORM=offscreen --env=QT_QUICK_BACKEND=software io.github.astrovm.PkgDeck
           scripts/xtask.sh terminal flatpak run --command=pkd io.github.astrovm.PkgDeck
       - name: Build and inspect Snap
