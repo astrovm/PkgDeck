@@ -26,6 +26,8 @@ pub struct AppImage {
     root: PathBuf,
     applications: PathBuf,
     uid: u32,
+    #[cfg(test)]
+    updater: Option<PathBuf>,
 }
 
 impl AppImage {
@@ -40,6 +42,8 @@ impl AppImage {
             root: data.join("pkgdeck/appimages"),
             applications: data.join("applications"),
             uid: rustix::process::getuid().as_raw(),
+            #[cfg(test)]
+            updater: None,
         }
     }
     #[cfg(test)]
@@ -48,7 +52,13 @@ impl AppImage {
             root,
             applications,
             uid,
+            updater: None,
         }
+    }
+    #[cfg(test)]
+    fn with_updater(mut self, updater: PathBuf) -> Self {
+        self.updater = Some(updater);
+        self
     }
     fn scope(&self) -> Scope {
         Scope::User { uid: self.uid }
@@ -105,7 +115,7 @@ impl AppImage {
             summary: format!("PkgDeck-managed local Type 2 AppImage ({digest})"),
             installed_version: Some(digest.into()),
             candidate_version: Some(digest.into()),
-            update: if Self::updater().is_ok() {
+            update: if self.updater().is_ok() {
                 UpdateAvailability::Available
             } else {
                 UpdateAvailability::Current
@@ -208,7 +218,7 @@ impl AppImage {
                         summary: "Externally managed local Type 2 AppImage".into(),
                         installed_version: Some(version.clone()),
                         candidate_version: Some(version),
-                        update: if Self::updater().is_ok() {
+                        update: if self.updater().is_ok() {
                             UpdateAvailability::Available
                         } else {
                             UpdateAvailability::Current
@@ -257,7 +267,11 @@ impl AppImage {
             .join(format!("pkgdeck-{}.desktop", &name[8..72]));
         fs::write(entry, format!("[Desktop Entry]\nType=Application\nName=Imported AppImage\nExec=\"{}\" %U\nTerminal=false\n", destination.display())).map_err(|e| Self::invalid(e.to_string()))
     }
-    fn updater() -> Result<PathBuf, EngineError> {
+    fn updater(&self) -> Result<PathBuf, EngineError> {
+        #[cfg(test)]
+        if let Some(updater) = &self.updater {
+            return Ok(updater.clone());
+        }
         let executable = std::env::current_exe().map_err(|e| Self::invalid(e.to_string()))?;
         let helper = executable
             .parent()
@@ -279,7 +293,7 @@ impl AppImage {
                 .map(|(_, _)| PathBuf::from(&id.name))
                 .ok_or(EngineError::NotFound)?
         };
-        let mut command = std::process::Command::new(Self::updater()?);
+        let mut command = std::process::Command::new(self.updater()?);
         command.args([
             "--appimage-extract-and-run",
             "--overwrite",
@@ -436,6 +450,22 @@ mod tests {
         fs::write(path, header).unwrap();
     }
 
+    fn updater(base: &Path, status: u8) -> (PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let updater = base.join("updater");
+        let calls = base.join("updater-calls");
+        fs::write(
+            &updater,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" >> {}\nexit {status}\n",
+                calls.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&updater, fs::Permissions::from_mode(0o755)).unwrap();
+        (updater, calls)
+    }
+
     #[test]
     fn imports_and_removes_only_managed_type2_files() {
         let base =
@@ -590,6 +620,84 @@ mod tests {
             .unwrap();
         assert!(!external.exists());
         assert!(!desktop.exists());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn upgrades_managed_and_external_appimages_with_the_bundled_helper() {
+        let base = std::env::temp_dir().join(format!(
+            "pkgdeck-appimage-updater-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        let applications = base.join("applications");
+        fs::create_dir_all(&applications).unwrap();
+        let (updater, calls) = updater(&base, 0);
+        let source = base.join("source.AppImage");
+        type2(&source);
+        let root = base.join("owned");
+        let mut backend = AppImage::new(
+            root.clone(),
+            applications.clone(),
+            rustix::process::getuid().as_raw(),
+        )
+        .with_updater(updater.clone());
+        let cancel = Cancellation::default();
+        let candidate = backend
+            .search(source.to_str().unwrap(), &cancel)
+            .unwrap()
+            .remove(0);
+        backend
+            .execute(&Operation::Install(candidate.id), &cancel, &mut |_| {})
+            .unwrap();
+        let managed = backend.installed(&cancel).unwrap().remove(0);
+
+        let external = base.join("external.AppImage");
+        type2(&external);
+        fs::write(
+            applications.join("external.desktop"),
+            format!("[Desktop Entry]\nExec={}\n", external.display()),
+        )
+        .unwrap();
+        let external = backend.search("external", &cancel).unwrap().remove(0);
+
+        backend
+            .execute(
+                &Operation::Upgrade(managed.id.clone()),
+                &cancel,
+                &mut |_| {},
+            )
+            .unwrap();
+        assert!(fs::read_to_string(&calls)
+            .unwrap()
+            .contains(&root.join(&managed.id.name).display().to_string()));
+        fs::write(&calls, "").unwrap();
+        backend
+            .execute(
+                &Operation::Upgrade(external.id.clone()),
+                &cancel,
+                &mut |_| {},
+            )
+            .unwrap();
+        assert!(fs::read_to_string(&calls)
+            .unwrap()
+            .contains(&external.id.name));
+        fs::write(&calls, "").unwrap();
+        backend
+            .execute(
+                &Operation::UpgradeAll {
+                    backend: "appimage".into(),
+                },
+                &cancel,
+                &mut |_| {},
+            )
+            .unwrap();
+        assert_eq!(fs::read_to_string(&calls).unwrap().lines().count(), 10);
+
+        fs::write(&updater, "#!/bin/sh\nexit 9\n").unwrap();
+        assert!(backend
+            .execute(&Operation::Upgrade(managed.id), &cancel, &mut |_| {})
+            .is_err());
         fs::remove_dir_all(base).unwrap();
     }
 
