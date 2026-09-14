@@ -323,9 +323,15 @@ mod tests {
             .search(source.to_str().unwrap(), &cancel)
             .unwrap()
             .remove(0);
-        assert_eq!(candidate.id.scope, Scope::Environment { path: root.clone() });
+        assert_eq!(
+            candidate.id.scope,
+            Scope::Environment { path: root.clone() }
+        );
         assert!(backend.search("not-present", &cancel).unwrap().is_empty());
-        assert_eq!(backend.details(&candidate.id, &cancel), Err(EngineError::NotFound));
+        assert_eq!(
+            backend.details(&candidate.id, &cancel),
+            Err(EngineError::NotFound)
+        );
         assert!(backend
             .execute(&Operation::Remove(candidate.id), &cancel, &mut |_| {})
             .is_err());
@@ -348,12 +354,26 @@ mod tests {
         let root = base.join("owned");
         let mut backend = AppImage::new(root.clone(), base.join("applications"), 1000);
         let cancel = Cancellation::default();
-        let candidate = backend.search(source.to_str().unwrap(), &cancel).unwrap().remove(0);
-        backend.execute(&Operation::Install(candidate.id.clone()), &cancel, &mut |_| {}).unwrap();
-        backend.execute(&Operation::Install(candidate.id), &cancel, &mut |_| {}).unwrap();
+        let candidate = backend
+            .search(source.to_str().unwrap(), &cancel)
+            .unwrap()
+            .remove(0);
+        backend
+            .execute(
+                &Operation::Install(candidate.id.clone()),
+                &cancel,
+                &mut |_| {},
+            )
+            .unwrap();
+        backend
+            .execute(&Operation::Install(candidate.id), &cancel, &mut |_| {})
+            .unwrap();
         let installed = backend.installed(&cancel).unwrap();
         assert_eq!(installed.len(), 1);
-        assert_eq!(backend.details(&installed[0].id, &cancel).unwrap().package, installed[0]);
+        assert_eq!(
+            backend.details(&installed[0].id, &cancel).unwrap().package,
+            installed[0]
+        );
         fs::write(root.join("foreign.AppImage"), b"ignored").unwrap();
         assert!(backend.installed(&cancel).is_err());
         fs::remove_dir_all(base).unwrap();
@@ -372,23 +392,33 @@ mod tests {
         let root = base.join("owned");
         let mut backend = AppImage::new(root.clone(), base.join("applications"), 1000);
         let cancel = Cancellation::default();
-        let mut candidate = backend.search(source.to_str().unwrap(), &cancel).unwrap().remove(0);
+        let mut candidate = backend
+            .search(source.to_str().unwrap(), &cancel)
+            .unwrap()
+            .remove(0);
         candidate.id.architecture = "aarch64".into();
-        assert!(backend.execute(&Operation::Install(candidate.id), &cancel, &mut |_| {}).is_err());
+        assert!(backend
+            .execute(&Operation::Install(candidate.id), &cancel, &mut |_| {})
+            .is_err());
         fs::create_dir_all(&root).unwrap();
         let managed_source = root.join("nested.AppImage");
         type2(&managed_source);
-        let foreign = PackageId { backend: "appimage".into(), name: managed_source.display().to_string(), architecture: "x86_64".into(), scope: Scope::Environment { path: root } };
-        assert!(backend.execute(&Operation::Install(foreign), &cancel, &mut |_| {}).is_err());
+        let foreign = PackageId {
+            backend: "appimage".into(),
+            name: managed_source.display().to_string(),
+            architecture: "x86_64".into(),
+            scope: Scope::Environment { path: root },
+        };
+        assert!(backend
+            .execute(&Operation::Install(foreign), &cancel, &mut |_| {})
+            .is_err());
         fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
     fn type2_metadata_reports_unknown_architecture_and_rejects_relative_paths() {
-        let base = std::env::temp_dir().join(format!(
-            "pkgdeck-appimage-arch-test-{}",
-            std::process::id()
-        ));
+        let base =
+            std::env::temp_dir().join(format!("pkgdeck-appimage-arch-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
         fs::create_dir_all(&base).unwrap();
         let source = base.join("external.AppImage");
@@ -398,8 +428,16 @@ mod tests {
         fs::write(&source, bytes).unwrap();
         let mut backend = AppImage::new(base.join("owned"), base.join("applications"), 1000);
         let cancel = Cancellation::default();
-        assert_eq!(backend.search(source.to_str().unwrap(), &cancel).unwrap()[0].id.architecture, "unknown");
-        assert!(backend.search("relative.AppImage", &cancel).unwrap().is_empty());
+        assert_eq!(
+            backend.search(source.to_str().unwrap(), &cancel).unwrap()[0]
+                .id
+                .architecture,
+            "unknown"
+        );
+        assert!(backend
+            .search("relative.AppImage", &cancel)
+            .unwrap()
+            .is_empty());
         fs::remove_dir_all(base).unwrap();
     }
 }

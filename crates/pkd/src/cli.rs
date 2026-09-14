@@ -481,4 +481,29 @@ mod tests {
             assert_eq!(error_code(&error), code);
         }
     }
+
+    #[test]
+    fn upgrade_all_handles_empty_and_incomplete_installed_reports() {
+        let mut empty = Engine::default();
+        empty
+            .register(Fixture {
+                backend: "apt".into(),
+                installed: false,
+                fail: None,
+            })
+            .unwrap();
+        assert_eq!(
+            call(&mut empty, &["upgrade"], true).0["operations"],
+            json!([])
+        );
+        let mut failed = Engine::default();
+        failed
+            .register(Fixture {
+                backend: "apt".into(),
+                installed: true,
+                fail: Some(ExecutionError::TimedOut.into()),
+            })
+            .unwrap();
+        assert_eq!(call(&mut failed, &["upgrade"], true).1, 1);
+    }
 }

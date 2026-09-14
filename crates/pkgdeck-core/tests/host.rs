@@ -180,10 +180,13 @@ fn host_environment_and_arguments_are_isolated_from_packaging() {
 #[test]
 fn flatpak_uses_the_sanitized_user_path_and_pins_system_writes() {
     let fixture = Fixture::new();
-    fixture.executable("flatpak");
+    symlink("/bin/true", fixture.0.join("flatpak")).unwrap();
     let host = Host::new(
         Runtime::Native,
-        env(&[("PATH", fixture.0.to_str().unwrap()), ("HOME", "/tmp/fixture-home")]),
+        env(&[
+            ("PATH", fixture.0.to_str().unwrap()),
+            ("HOME", "/tmp/fixture-home"),
+        ]),
     );
     let cancel = Cancellation::default();
     let result = host
@@ -225,7 +228,9 @@ fn flatpak_uses_the_sanitized_user_path_and_pins_system_writes() {
         true,
         Authorization::SudoNonInteractive,
     );
-    assert!(matches!(system, Err(ExecutionError::Disabled(reason)) if reason == "system Flatpak not found"));
+    assert!(
+        matches!(system, Err(ExecutionError::Disabled(reason)) if reason == "system Flatpak not found")
+    );
 }
 
 #[test]
