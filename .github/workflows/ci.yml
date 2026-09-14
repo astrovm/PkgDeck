@@ -223,6 +223,12 @@ jobs:
           scripts/xtask.sh gui 'build/artifacts/PkgDeck-${{ matrix.arch }}.AppImage'
           scripts/xtask.sh terminal 'build/artifacts/PkgDeck-${{ matrix.arch }}.AppImage' --cli
           'build/artifacts/PkgDeck-${{ matrix.arch }}.AppImage' --cli doctor
+          appimage=$PWD/build/artifacts/PkgDeck-${{ matrix.arch }}.AppImage
+          data=$PWD/build/appimage-backend-data
+          XDG_DATA_HOME="$data" "$appimage" --cli --json --yes --from appimage search "$appimage" | jq -e '.exit_code == 0'
+          XDG_DATA_HOME="$data" "$appimage" --cli --json --yes --from appimage install "$appimage" | jq -e '.exit_code == 0'
+          imported=$(XDG_DATA_HOME="$data" "$appimage" --cli --json --from appimage list | jq -r '.data.packages[0].id.name')
+          XDG_DATA_HOME="$data" "$appimage" --cli --json --yes --from appimage remove "$imported" | jq -e '.exit_code == 0'
       - name: Build and smoke-test Flatpak
         run: |
           sudo flatpak remote-add --system --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
@@ -231,6 +237,16 @@ jobs:
           sudo flatpak install --system -y --noninteractive 'build/artifacts/PkgDeck-${{ matrix.arch }}.flatpak'
           scripts/xtask.sh gui flatpak run --env=QT_QPA_PLATFORM=offscreen --env=QT_QUICK_BACKEND=software io.github.astrovm.PkgDeck
           scripts/xtask.sh terminal flatpak run --command=pkd io.github.astrovm.PkgDeck
+          sudo useradd -m pkgdeck-flatpak-test
+          echo 'pkgdeck-flatpak-test ALL=(root) NOPASSWD: /usr/bin/flatpak' | sudo tee /etc/sudoers.d/pkgdeck-flatpak
+          sudo -u pkgdeck-flatpak-test flatpak --user remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+          sudo -u pkgdeck-flatpak-test flatpak --user install -y --noninteractive flathub org.kde.kcalc
+          run_flatpak() { sudo -u pkgdeck-flatpak-test build/AppDir/usr/bin/pkd --json --yes --auth sudo --from flatpak "$@"; }
+          run_flatpak list | jq -e 'any(.data.packages[]; .id.name == "org.kde.kcalc")'
+          run_flatpak info org.kde.kcalc | jq -e '.exit_code == 0'
+          run_flatpak update | jq -e '.exit_code == 0'
+          run_flatpak remove org.kde.kcalc | jq -e '.exit_code == 0'
+          ! sudo -u pkgdeck-flatpak-test flatpak --user list --app | grep -q org.kde.kcalc
       - name: Build and inspect Snap
         run: |
           scripts/package.sh snap
