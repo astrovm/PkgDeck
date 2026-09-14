@@ -1,10 +1,12 @@
-//! Native APT and Linux Homebrew formula adapters. All subprocesses use Host.
+//! Native APT, Linux Homebrew formula, and local AppImage adapters.
+mod appimage;
 use crate::{
     engine::*,
     host::{AptAction, Authorization, Host},
     package::*,
     process::*,
 };
+pub use appimage::AppImage;
 use serde::Deserialize;
 use std::{ffi::OsString, path::PathBuf, time::Duration};
 
@@ -37,6 +39,13 @@ pub trait Transport: Send {
         args: &[OsString],
         cancel: &Cancellation,
         write: bool,
+    ) -> Result<Completion, ExecutionError>;
+    fn flatpak(
+        &self,
+        args: &[OsString],
+        cancel: &Cancellation,
+        write: bool,
+        system: bool,
     ) -> Result<Completion, ExecutionError>;
 }
 pub struct NativeTransport {
@@ -87,6 +96,16 @@ impl Transport for NativeTransport {
     ) -> Result<Completion, ExecutionError> {
         self.host.brew(args, cancel, write)
     }
+    fn flatpak(
+        &self,
+        args: &[OsString],
+        cancel: &Cancellation,
+        write: bool,
+        system: bool,
+    ) -> Result<Completion, ExecutionError> {
+        self.host
+            .flatpak(args, cancel, write, system, self.authorization)
+    }
 }
 
 pub struct Apt<T = NativeTransport>(pub T);
@@ -94,12 +113,222 @@ pub struct Homebrew<T = NativeTransport> {
     pub transport: T,
     prefix: Option<PathBuf>,
 }
+pub struct Flatpak<T = NativeTransport> {
+    transport: T,
+}
+impl<T: Transport> Flatpak<T> {
+    pub fn new(transport: T) -> Self {
+        Self { transport }
+    }
+}
 impl<T: Transport> Homebrew<T> {
     pub fn new(transport: T) -> Self {
         Self {
             transport,
             prefix: None,
         }
+    }
+}
+
+fn flatpak_id(value: &str) -> bool {
+    !value.is_empty()
+        && !value.starts_with('-')
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+}
+impl<T: Transport> Flatpak<T> {
+    fn call(
+        &self,
+        args: &[&str],
+        cancel: &Cancellation,
+        write: bool,
+        system: bool,
+    ) -> Result<Completion, EngineError> {
+        Ok(self.transport.flatpak(
+            &args.iter().map(OsString::from).collect::<Vec<_>>(),
+            cancel,
+            write,
+            system,
+        )?)
+    }
+    fn list(&self, cancel: &Cancellation, system: bool) -> Result<Vec<Package>, EngineError> {
+        let scope = if system {
+            Scope::System
+        } else {
+            Scope::User {
+                uid: rustix::process::getuid().as_raw(),
+            }
+        };
+        let prefix = if system { "--system" } else { "--user" };
+        let output = bytes(
+            "flatpak",
+            self.call(
+                &[
+                    prefix,
+                    "list",
+                    "--app",
+                    "--columns=application,arch,branch,version,description",
+                ],
+                cancel,
+                false,
+                system,
+            )?,
+        )?;
+        let text = String::from_utf8(output).map_err(|e| invalid("flatpak", e))?;
+        text.lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| {
+                let fields: Vec<_> = line.split('\t').collect();
+                if fields.len() != 5
+                    || !flatpak_id(fields[0])
+                    || !flatpak_id(fields[1])
+                    || !flatpak_id(fields[2])
+                {
+                    return Err(invalid("flatpak", "invalid list metadata"));
+                }
+                Ok(Package {
+                    id: PackageId {
+                        backend: "flatpak".into(),
+                        name: fields[0].into(),
+                        architecture: fields[1].into(),
+                        scope: scope.clone(),
+                    },
+                    display_name: fields[0].into(),
+                    summary: fields[4].into(),
+                    installed_version: Some(fields[3].into()),
+                    candidate_version: Some(fields[3].into()),
+                    update: UpdateAvailability::Unknown,
+                })
+            })
+            .collect()
+    }
+    fn target(&self, id: &PackageId) -> Result<(bool, &'static str), EngineError> {
+        if id.backend != "flatpak" || !flatpak_id(&id.name) || !flatpak_id(&id.architecture) {
+            return Err(invalid("flatpak", "foreign or invalid Flatpak identity"));
+        }
+        match id.scope {
+            Scope::System => Ok((true, "--system")),
+            Scope::User { .. } => Ok((false, "--user")),
+            _ => Err(invalid(
+                "flatpak",
+                "Flatpak packages must be user or system scoped",
+            )),
+        }
+    }
+}
+impl<T: Transport> Backend for Flatpak<T> {
+    fn id(&self) -> &str {
+        "flatpak"
+    }
+    fn capabilities(&self) -> &[Capability] {
+        CAPABILITIES
+    }
+    fn detect(&mut self, cancel: &Cancellation) -> Result<Availability, EngineError> {
+        match self.call(
+            &["--user", "remotes", "--columns=name"],
+            cancel,
+            false,
+            false,
+        ) {
+            Ok(_) => Ok(Availability::Available),
+            Err(EngineError::Execution(ExecutionError::Disabled(reason))) => {
+                Ok(Availability::Unavailable(reason))
+            }
+            Err(e) => Err(e),
+        }
+    }
+    fn search(&mut self, query: &str, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
+        if !flatpak_id(query) {
+            return Err(invalid("flatpak", "search expects an application id"));
+        }
+        Ok(self
+            .installed(cancel)?
+            .into_iter()
+            .filter(|p| p.id.name.contains(query))
+            .collect())
+    }
+    fn installed(&mut self, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
+        let mut result = self.list(cancel, false)?;
+        result.extend(self.list(cancel, true)?);
+        Ok(result)
+    }
+    fn details(
+        &mut self,
+        id: &PackageId,
+        cancel: &Cancellation,
+    ) -> Result<PackageDetails, EngineError> {
+        let package = self
+            .installed(cancel)?
+            .into_iter()
+            .find(|p| p.id == *id)
+            .ok_or(EngineError::NotFound)?;
+        Ok(PackageDetails {
+            description: package.summary.clone(),
+            homepage: None,
+            dependencies: vec![],
+            package,
+        })
+    }
+    fn execute(
+        &mut self,
+        operation: &Operation,
+        cancel: &Cancellation,
+        progress: &mut dyn FnMut(Progress),
+    ) -> Result<OperationOutcome, EngineError> {
+        let (id, verb) = match operation {
+            Operation::Refresh { backend } if backend == "flatpak" => {
+                for (system, scope) in [(false, "--user"), (true, "--system")] {
+                    self.call(
+                        &[
+                            scope,
+                            "update",
+                            "--app",
+                            "--no-deploy",
+                            "--noninteractive",
+                            "--assumeyes",
+                        ],
+                        cancel,
+                        true,
+                        system,
+                    )?;
+                }
+                return Ok(OperationOutcome::default());
+            }
+            Operation::Install(id) => (id, "install"),
+            Operation::Remove(id) => (id, "uninstall"),
+            Operation::Upgrade(id) => (id, "update"),
+            _ => return Err(invalid("flatpak", "foreign operation")),
+        };
+        let (system, scope) = self.target(id)?;
+        progress(Progress::Message(format!(
+            "Running Flatpak {verb} for {}.",
+            id.name
+        )));
+        let args = if verb == "install" {
+            vec![
+                scope,
+                verb,
+                "--app",
+                "--noninteractive",
+                "--assumeyes",
+                "flathub",
+                &id.name,
+            ]
+        } else {
+            vec![
+                scope,
+                verb,
+                "--app",
+                "--noninteractive",
+                "--assumeyes",
+                &id.name,
+            ]
+        };
+        let result = self.call(&args, cancel, true, system)?;
+        Ok(OperationOutcome {
+            cancellation_deferred: result.cancellation_deferred,
+        })
     }
 }
 fn invalid(backend: &str, reason: impl ToString) -> EngineError {
@@ -426,7 +655,7 @@ pub fn native_engine(
     authorization: Authorization,
     cancel: &Cancellation,
 ) -> Result<Engine, EngineError> {
-    if source.is_some_and(|s| s != "apt" && s != "homebrew") {
+    if source.is_some_and(|s| s != "apt" && s != "homebrew" && s != "appimage" && s != "flatpak") {
         return Err(EngineError::UnknownBackend(source.unwrap().into()));
     }
     let mut engine = Engine::default();
@@ -457,6 +686,15 @@ pub fn native_engine(
             || !matches!(brew.detect(cancel), Ok(Availability::Unavailable(_))))
     {
         engine.register(brew)?;
+    }
+    if source.is_none_or(|s| s == "appimage") {
+        engine.register(AppImage::native())?;
+    }
+    if source.is_none_or(|s| s == "flatpak") {
+        engine.register(Flatpak::new(NativeTransport {
+            host: Host::current(),
+            authorization,
+        }))?;
     }
     Ok(engine)
 }

@@ -239,13 +239,78 @@ impl Host {
                 "run the frontend as an unprivileged user".into(),
             ));
         }
-        let (program, mut args) = authorization.prefix();
-        args.extend(action.arguments()?);
-        let mut command = self.command(Path::new(program), &args)?;
-        // Root package subprocesses must never search a user-writable tool directory.
-        command.env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin");
-        let result = process::run(command, Limits::default(), cancel, true)?;
+        let result = self.privileged(
+            Path::new("/usr/bin/apt-get"),
+            &action.arguments()?,
+            authorization,
+            cancel,
+        )?;
         classify_apt(result)
+    }
+
+    /// Runs Flatpak from the invoking user's sanitized environment. System writes
+    /// use the same non-interactive authorization boundary as APT.
+    pub fn flatpak(
+        &self,
+        args: &[OsString],
+        cancel: &Cancellation,
+        write: bool,
+        system: bool,
+        authorization: Authorization,
+    ) -> Result<Completion, ExecutionError> {
+        self.enabled()?;
+        if write && rustix::process::geteuid().is_root() {
+            return Err(ExecutionError::Invalid(
+                "run the frontend as an unprivileged user".into(),
+            ));
+        }
+        let path = if write && system {
+            // System writes cross an authorization boundary. Never derive this
+            // executable from the invoking user's PATH.
+            let path = PathBuf::from("/usr/bin/flatpak");
+            if !path.is_file() {
+                return Err(ExecutionError::Disabled("system Flatpak not found".into()));
+            }
+            path
+        } else {
+            self.resolve("flatpak")?
+                .ok_or_else(|| ExecutionError::Disabled("Flatpak not found".into()))?
+        };
+        if write && system {
+            self.privileged(&path, args, authorization, cancel)
+        } else {
+            self.run(&path, args, cancel, write)
+        }
+    }
+
+    fn run(
+        &self,
+        executable: &Path,
+        args: &[OsString],
+        cancel: &Cancellation,
+        write: bool,
+    ) -> Result<Completion, ExecutionError> {
+        let command = self.command(executable, args)?;
+        let result = process::run(command, Limits::default(), cancel, write)?;
+        if result.code == Some(0) {
+            Ok(result)
+        } else {
+            Err(ExecutionError::Failed(result))
+        }
+    }
+
+    fn privileged(
+        &self,
+        executable: &Path,
+        args: &[OsString],
+        authorization: Authorization,
+        cancel: &Cancellation,
+    ) -> Result<Completion, ExecutionError> {
+        let (program, mut prefixed) = authorization.prefix(executable);
+        prefixed.extend(args.iter().cloned());
+        let mut command = self.command(Path::new(program), &prefixed)?;
+        command.env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin");
+        process::run(command, Limits::default(), cancel, true)
     }
 }
 
@@ -258,15 +323,15 @@ pub enum Authorization {
 }
 
 impl Authorization {
-    fn prefix(self) -> (&'static str, Vec<OsString>) {
+    fn prefix(self, executable: &Path) -> (&'static str, Vec<OsString>) {
         match self {
             Self::Polkit => (
                 "/usr/bin/pkexec",
-                vec!["--disable-internal-agent".into(), "/usr/bin/apt-get".into()],
+                vec!["--disable-internal-agent".into(), executable.into()],
             ),
             Self::SudoNonInteractive => (
                 "/usr/bin/sudo",
-                vec!["-n".into(), "--".into(), "/usr/bin/apt-get".into()],
+                vec!["-n".into(), "--".into(), executable.into()],
             ),
         }
     }

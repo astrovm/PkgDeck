@@ -1,4 +1,10 @@
-use pkgdeck_core::{backends::*, engine::*, host::AptAction, package::*, process::*};
+use pkgdeck_core::{
+    backends::*,
+    engine::*,
+    host::{AptAction, Authorization},
+    package::*,
+    process::*,
+};
 use serde_json::json;
 use std::{
     ffi::OsString,
@@ -129,6 +135,16 @@ impl Transport for Fixture {
             _ => panic!("unexpected metadata query"),
         }
     }
+    fn flatpak(
+        &self,
+        _: &[OsString],
+        cancel: &Cancellation,
+        _: bool,
+        _: bool,
+    ) -> Result<Completion, ExecutionError> {
+        self.check(cancel)?;
+        Ok(output(""))
+    }
 }
 fn lifecycle(mut backend: impl Backend) {
     let cancel = Cancellation::default();
@@ -222,6 +238,285 @@ fn apt_lifecycle() {
 fn homebrew_lifecycle() {
     lifecycle(Homebrew::new(Fixture::new()));
 }
+
+#[test]
+fn flatpak_lists_user_and_system_applications_without_collapsing_scope() {
+    let cancel = Cancellation::default();
+    let metadata = "io.example.User\tx86_64\tstable\t1.0\tUser app\nio.example.System\tx86_64\tstable\t2.0\tSystem app\n";
+    let mut backend = Flatpak::new(Raw(output(metadata)));
+    assert_eq!(backend.detect(&cancel), Ok(Availability::Available));
+    let packages = backend.installed(&cancel).unwrap();
+    assert_eq!(packages.len(), 4);
+    assert!(packages
+        .iter()
+        .any(|package| package.id.scope == Scope::System));
+    assert!(packages
+        .iter()
+        .any(|package| matches!(package.id.scope, Scope::User { .. })));
+    assert!(backend.search("io.example.User", &cancel).unwrap().len() == 2);
+}
+
+type FlatpakCall = (Vec<String>, bool, bool);
+
+#[derive(Clone, Default)]
+struct FlatpakFixture(Arc<Mutex<Vec<FlatpakCall>>>);
+impl Transport for FlatpakFixture {
+    fn apt_query(
+        &self,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: &Cancellation,
+    ) -> Result<Completion, ExecutionError> {
+        unreachable!()
+    }
+    fn apt_write(&self, _: AptAction, _: &Cancellation) -> Result<Completion, ExecutionError> {
+        unreachable!()
+    }
+    fn brew(
+        &self,
+        _: &[OsString],
+        _: &Cancellation,
+        _: bool,
+    ) -> Result<Completion, ExecutionError> {
+        unreachable!()
+    }
+    fn flatpak(
+        &self,
+        args: &[OsString],
+        _: &Cancellation,
+        write: bool,
+        system: bool,
+    ) -> Result<Completion, ExecutionError> {
+        let args = args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        self.0.lock().unwrap().push((args.clone(), write, system));
+        if args.contains(&"list".into()) {
+            let name = if system {
+                "io.example.System"
+            } else {
+                "io.example.User"
+            };
+            return Ok(output(format!(
+                "{name}\tx86_64\tstable\t1.0\tSynthetic app\n"
+            )));
+        }
+        Ok(output(""))
+    }
+}
+
+#[test]
+fn flatpak_operations_keep_scope_and_noninteractive_arguments() {
+    let fixture = FlatpakFixture::default();
+    let mut backend = Flatpak::new(fixture.clone());
+    let cancel = Cancellation::default();
+    let packages = backend.installed(&cancel).unwrap();
+    let user = packages
+        .iter()
+        .find(|p| matches!(p.id.scope, Scope::User { .. }))
+        .unwrap()
+        .id
+        .clone();
+    let system = packages
+        .iter()
+        .find(|p| p.id.scope == Scope::System)
+        .unwrap()
+        .id
+        .clone();
+    assert_eq!(backend.search("io.example.User", &cancel).unwrap().len(), 1);
+    assert!(backend.search("--bad", &cancel).is_err());
+    assert_eq!(backend.details(&user, &cancel).unwrap().package.id, user);
+    for operation in [
+        Operation::Install(user.clone()),
+        Operation::Remove(user),
+        Operation::Upgrade(system),
+    ] {
+        backend.execute(&operation, &cancel, &mut |_| {}).unwrap();
+    }
+    backend
+        .execute(
+            &Operation::Refresh {
+                backend: "flatpak".into(),
+            },
+            &cancel,
+            &mut |_| {},
+        )
+        .unwrap();
+    let calls = fixture.0.lock().unwrap();
+    assert!(calls
+        .iter()
+        .any(|(args, write, system)| *write && !*system && args.contains(&"flathub".into())));
+    assert!(calls.iter().any(|(args, write, system)| *write
+        && *system
+        && args.first().is_some_and(|scope| scope == "--system")));
+}
+
+#[test]
+fn flatpak_rejects_malformed_metadata_and_foreign_operations() {
+    let cancel = Cancellation::default();
+    let mut backend = Flatpak::new(Raw(output("bad\tmetadata\n")));
+    assert!(backend.installed(&cancel).is_err());
+    let foreign = PackageId {
+        backend: "flatpak".into(),
+        name: "io.example.App".into(),
+        architecture: "x86_64".into(),
+        scope: Scope::Environment {
+            path: "/synthetic".into(),
+        },
+    };
+    assert!(backend
+        .execute(&Operation::Install(foreign), &cancel, &mut |_| {})
+        .is_err());
+    assert!(backend
+        .execute(
+            &Operation::Refresh {
+                backend: "apt".into()
+            },
+            &cancel,
+            &mut |_| {}
+        )
+        .is_err());
+}
+
+#[test]
+fn explicit_optional_sources_remain_discoverable_when_unavailable() {
+    let cancel = Cancellation::default();
+    for source in ["appimage", "flatpak"] {
+        let mut engine = native_engine(
+            Some(source),
+            true,
+            Authorization::SudoNonInteractive,
+            &cancel,
+        )
+        .unwrap();
+        let sources = engine.discover(&cancel);
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].backend, source);
+    }
+}
+
+#[test]
+fn backend_validation_preserves_invalid_and_transport_failures() {
+    let cancel = Cancellation::default();
+    let fixture = Fixture::new();
+    *fixture.failure.lock().unwrap() = Some(ExecutionError::AuthorizationDenied);
+    assert_eq!(
+        Flatpak::new(fixture).detect(&cancel),
+        Err(ExecutionError::AuthorizationDenied.into())
+    );
+    let mut flatpak = Flatpak::new(Raw(output("")));
+    let foreign = PackageId {
+        backend: "apt".into(),
+        name: "io.example.App".into(),
+        architecture: "x86_64".into(),
+        scope: Scope::User { uid: 1 },
+    };
+    assert!(flatpak
+        .execute(&Operation::Install(foreign), &cancel, &mut |_| {})
+        .is_err());
+    let mut brew = Homebrew::new(Raw(output("{\"formulae\":[]}")));
+    brew.detect(&cancel).unwrap();
+    let missing = PackageId {
+        backend: "homebrew".into(),
+        name: "missing".into(),
+        architecture: std::env::consts::ARCH.into(),
+        scope: Scope::Environment {
+            path: "/synthetic".into(),
+        },
+    };
+    assert_eq!(brew.details(&missing, &cancel), Err(EngineError::NotFound));
+}
+
+#[derive(Clone)]
+struct FailingFlatpak(ExecutionError);
+impl Transport for FailingFlatpak {
+    fn apt_query(
+        &self,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: &Cancellation,
+    ) -> Result<Completion, ExecutionError> {
+        unreachable!()
+    }
+    fn apt_write(&self, _: AptAction, _: &Cancellation) -> Result<Completion, ExecutionError> {
+        unreachable!()
+    }
+    fn brew(
+        &self,
+        _: &[OsString],
+        _: &Cancellation,
+        _: bool,
+    ) -> Result<Completion, ExecutionError> {
+        unreachable!()
+    }
+    fn flatpak(
+        &self,
+        _: &[OsString],
+        _: &Cancellation,
+        _: bool,
+        _: bool,
+    ) -> Result<Completion, ExecutionError> {
+        Err(self.0.clone())
+    }
+}
+
+#[test]
+fn optional_backends_report_transport_and_metadata_failures() {
+    let cancel = Cancellation::default();
+    let error = ExecutionError::TimedOut;
+    let mut flatpak = Flatpak::new(FailingFlatpak(error.clone()));
+    assert_eq!(flatpak.installed(&cancel), Err(error.clone().into()));
+    assert_eq!(flatpak.detect(&cancel), Err(error.clone().into()));
+    assert_eq!(
+        flatpak.execute(
+            &Operation::Refresh {
+                backend: "flatpak".into()
+            },
+            &cancel,
+            &mut |_| {},
+        ),
+        Err(error.into())
+    );
+
+    #[derive(Clone)]
+    struct RelativePrefix;
+    impl Transport for RelativePrefix {
+        fn apt_query(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &Cancellation,
+        ) -> Result<Completion, ExecutionError> {
+            unreachable!()
+        }
+        fn apt_write(&self, _: AptAction, _: &Cancellation) -> Result<Completion, ExecutionError> {
+            unreachable!()
+        }
+        fn brew(
+            &self,
+            _: &[OsString],
+            _: &Cancellation,
+            _: bool,
+        ) -> Result<Completion, ExecutionError> {
+            Ok(output("relative-prefix\\n"))
+        }
+        fn flatpak(
+            &self,
+            _: &[OsString],
+            _: &Cancellation,
+            _: bool,
+            _: bool,
+        ) -> Result<Completion, ExecutionError> {
+            unreachable!()
+        }
+    }
+    let mut relative_prefix = Homebrew::new(RelativePrefix);
+    assert!(relative_prefix.detect(&cancel).is_err());
+}
 #[test]
 fn failures_preserve_native_categories() {
     for error in [
@@ -273,6 +568,15 @@ impl Transport for Raw {
         } else {
             Ok(self.0.clone())
         }
+    }
+    fn flatpak(
+        &self,
+        _: &[OsString],
+        _: &Cancellation,
+        _: bool,
+        _: bool,
+    ) -> Result<Completion, ExecutionError> {
+        Ok(self.0.clone())
     }
 }
 #[test]

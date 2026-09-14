@@ -2,6 +2,8 @@ app-id: io.github.astrovm.PkgDeck
 runtime: org.kde.Platform
 runtime-version: '6.11'
 sdk: org.kde.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
 command: pkgdeck
 finish-args:
   - --share=ipc
@@ -11,16 +13,19 @@ finish-args:
 modules:
   - name: pkgdeck
     buildsystem: simple
+    build-options:
+      append-path: /usr/lib/sdk/rust-stable/bin
+      env:
+        CARGO_HOME: /run/build/pkgdeck/cargo
+        CARGO_NET_OFFLINE: 'true'
     build-commands:
-      - cp -a . /app/
-      # Use the declared Platform's GLib family, avoiding the build host's glibc ABI.
-      - rm -f /app/usr/lib/libglib-2.0.so* /app/usr/lib/libgobject-2.0.so* /app/usr/lib/libgmodule-2.0.so* /app/usr/lib/libgthread-2.0.so* /app/usr/lib/libgio-2.0.so*
-      - mkdir -p /app/bin /app/share
-      - cp -a /app/usr/share/applications /app/usr/share/icons /app/usr/share/metainfo /app/share/
-      - install -m755 flatpak-pkgdeck /app/bin/pkgdeck
-      - ln -s /app/usr/bin/pkd /app/bin/pkd
+      - cargo build --offline --release --locked -p pkgdeck -p pkd
+      - install -Dm755 target/release/pkgdeck /app/bin/pkgdeck
+      - install -Dm755 target/release/pkd /app/bin/pkd
+      - install -Dm644 assets/io.github.astrovm.PkgDeck.desktop /app/share/applications/io.github.astrovm.PkgDeck.desktop
+      - install -Dm644 assets/io.github.astrovm.PkgDeck.metainfo.xml /app/share/metainfo/io.github.astrovm.PkgDeck.metainfo.xml
+      - install -Dm644 assets/io.github.astrovm.PkgDeck.svg /app/share/icons/hicolor/scalable/apps/io.github.astrovm.PkgDeck.svg
     sources:
       - type: dir
-        path: ../../build/AppDir
-      - type: file
-        path: flatpak-pkgdeck
+        path: ../..
+      - cargo-sources.json

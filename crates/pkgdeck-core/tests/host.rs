@@ -178,6 +178,65 @@ fn host_environment_and_arguments_are_isolated_from_packaging() {
 }
 
 #[test]
+fn flatpak_uses_the_sanitized_user_path_and_pins_system_writes() {
+    let fixture = Fixture::new();
+    symlink("/bin/true", fixture.0.join("flatpak")).unwrap();
+    let host = Host::new(
+        Runtime::Native,
+        env(&[
+            ("PATH", fixture.0.to_str().unwrap()),
+            ("HOME", "/tmp/fixture-home"),
+        ]),
+    );
+    let cancel = Cancellation::default();
+    let result = host
+        .flatpak(
+            &["--user".into(), "remotes".into()],
+            &cancel,
+            false,
+            false,
+            Authorization::SudoNonInteractive,
+        )
+        .unwrap();
+    assert_eq!(result.code, Some(0));
+    let write = host
+        .flatpak(
+            &["--user".into(), "update".into()],
+            &cancel,
+            true,
+            false,
+            Authorization::SudoNonInteractive,
+        )
+        .unwrap();
+    assert_eq!(write.code, Some(0));
+    let cancelled = Cancellation::default();
+    cancelled.cancel();
+    assert_eq!(
+        host.flatpak(
+            &["--user".into(), "list".into()],
+            &cancelled,
+            false,
+            false,
+            Authorization::SudoNonInteractive,
+        ),
+        Err(ExecutionError::Cancelled)
+    );
+    let system_cancelled = Cancellation::default();
+    system_cancelled.cancel();
+    let system = host.flatpak(
+        &["--system".into(), "update".into()],
+        &system_cancelled,
+        true,
+        true,
+        Authorization::SudoNonInteractive,
+    );
+    assert!(
+        matches!(system, Err(ExecutionError::Disabled(ref reason)) if reason == "system Flatpak not found")
+            || system == Err(ExecutionError::Cancelled)
+    );
+}
+
+#[test]
 fn output_is_drained_capped_and_exit_status_preserved() {
     let result = host()
         .read(

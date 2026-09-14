@@ -69,7 +69,7 @@ Controls.ApplicationWindow {
         }
     }
 
-    property url repositoryIconSource: root.dark ? "qrc:/pkgdeck/github-dark.svg" : "qrc:/pkgdeck/github.svg"
+    property url repositoryIconSource: root.dark ? "qrc:/pkgdeck/github-dark.png" : "qrc:/pkgdeck/github.png"
     readonly property url repositoryUrl: "https://github.com/astrovm/PkgDeck"
     width: 1100
     height: 760
@@ -301,10 +301,10 @@ Controls.ApplicationWindow {
                 }
                 Controls.ComboBox {
                     objectName: "sourceSetting"
-                    model: ["All available sources", "APT", "Homebrew"]
-                    currentIndex: ["", "apt", "homebrew"].indexOf(root.source)
+                    model: ["All available sources", "APT", "Homebrew", "AppImage", "Flatpak"]
+                    currentIndex: ["", "apt", "homebrew", "appimage", "flatpak"].indexOf(root.source)
                     onActivated: {
-                        root.source = ["", "apt", "homebrew"][currentIndex];
+                        root.source = ["", "apt", "homebrew", "appimage", "flatpak"][currentIndex];
                         preferences.source = root.source;
                     }
                     Accessible.name: "Package source"

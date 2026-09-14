@@ -19,22 +19,14 @@ VM details also remain in `build/host-vm/`. No verification mode publishes relea
 
 ## SDK and prerequisites
 
-`setup-dev.sh` uses a persistent per-architecture cache at
-`${XDG_CACHE_HOME:-$HOME/.cache}/pkgdeck/<architecture>`. Set `PKGDECK_CACHE_DIR`
-to choose another location, for example `build/dev-cache` in CI. Keep this path
-stable: some generated SDK configuration uses absolute
-paths. Concurrent setup processes share a cache lock.
+Ubuntu 26.04 supplies Qt 6.10.2, Kirigami/ECM 6.24.0, CMake 4.2.3, and Ninja
+1.13.2. `setup-dev.sh` installs only cargo-llvm-cov. Qt, KDE, CMake, and Ninja
+come from the Ubuntu package archive, so there is no local SDK cache to prepare.
 
-The setup installs Qt 6.11.2, Kirigami/ECM 6.30.0, CMake 4.4.3,
-and cargo-llvm-cov 0.9.1 without replacing system packages or global Cargo tools.
-Rust uses the repository's `rust-toolchain.toml`. KDE source archives are checked
-against committed SHA-256 hashes in `scripts/sdk.sha256`, along with the CMake
-binary archives. Qt archive hashes and URLs for both architectures are committed
-in `scripts/qt-archives.tsv`. Downloads are verified before extraction; Cargo
-verifies registry package checksums.
+Rust uses the repository's `rust-toolchain.toml`; Cargo verifies registry package checksums.
 
 Prerequisites are rustup/Cargo, a C++ compiler, `libapt-pkg-dev`, jq,
-Ninja, pkg-config, LLD, curl, tar, libarchive (`bsdtar`), flock, and the Qt development/runtime
+Ninja, pkg-config, LLD, and the Qt/KDE development/runtime
 system libraries listed in `.github/workflows/ci.yml`. The bootstrap reports
 missing command prerequisites before downloading. It does not install host OS
 packages or grant authorization.
@@ -76,8 +68,9 @@ scripts/verify.sh containers --engine podman
 `containers` builds the CLI in the development image, then runs real APT and
 Homebrew lifecycles in a separate disposable container. Without `--engine podman`,
 it builds the CLI using host Cargo before running the same isolated tests.
-The development image includes the pinned Rust and Qt/Kirigami toolchains and
-uses the exact `setup-dev.sh`/`verify.sh` recipes from native development and CI.
+The development image includes the pinned Rust toolchain and the Ubuntu Qt/Kirigami
+packages, and uses the exact `setup-dev.sh`/`verify.sh` recipes from native
+development and CI.
 Both base images are pinned to multi-architecture manifest digests. It supports
 x86_64 and aarch64; lifecycle tests use the host architecture.
 
