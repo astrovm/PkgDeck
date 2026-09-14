@@ -127,6 +127,12 @@ def synthetic(command):
         # Empty sandbox variables still count as markers; explicitly remove them.
         command = ['/usr/bin/env', '-u', 'SNAP', '-u', 'FLATPAK_ID', *command, '--from', 'homebrew', '--auth', 'sudo']
         with desktop(command, env) as gui:
+            gui.search('fixture')
+            queries = (fixture / 'queries.log').read_text()
+            gui.key('Up')  # Revisiting a selected identity uses the current snapshot.
+            assert (fixture / 'queries.log').read_text() == queries, gui.logs()
+            gui.key('ctrl+r'); gui.key('ctrl+l'); gui.key('Down')
+            assert len((fixture / 'queries.log').read_text()) > len(queries), gui.logs()
             for operation, installed in [('install', '1.0'), ('update', '1.0'), ('upgrade', '2.0'), ('remove', None)]:
                 gui.write(operation, 'fixture')
                 assert (fixture / 'state.json').exists(), (operation, gui.logs())

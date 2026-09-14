@@ -18,7 +18,7 @@ fn version_does_not_require_a_display() {
 }
 
 #[test]
-fn kirigami_window_loads_and_exits() {
+fn package_window_loads_and_exits() {
     let status = Command::new("python3")
         .arg(concat!(
             env!("CARGO_MANIFEST_DIR"),

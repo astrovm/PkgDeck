@@ -232,18 +232,21 @@ pub fn dispatch(
     )
 }
 fn emit(args: &Args, data: Value, code: u8) -> u8 {
-    let result = if args.json {
-        json!({"schema_version":1,"exit_code":code,"data":data})
-    } else {
-        data
-    };
-    // One JSON document in machine mode; readable indented records otherwise.
     let text = if args.json {
-        serde_json::to_string(&result)
+        serde_json::to_string(&json!({"schema_version":1,"exit_code":code,"data":data}))
+            .expect("serializable result")
     } else {
-        serde_json::to_string_pretty(&result)
-    }
-    .expect("serializable result");
+        let terminal = io::stdout().is_terminal();
+        let width = if terminal {
+            crossterm::terminal::size().map_or(100, |(w, _)| usize::from(w))
+        } else {
+            100
+        };
+        let color = terminal
+            && std::env::var_os("NO_COLOR").is_none()
+            && std::env::var("TERM").is_ok_and(|term| term != "dumb");
+        crate::presentation::human(&data, width, color)
+    };
     if writeln!(io::stdout().lock(), "{text}").is_err() {
         return 1;
     }
@@ -283,7 +286,9 @@ pub fn run(args: &Args) -> u8 {
         args,
         &cancel,
         &mut |operations| {
-            eprintln!("{}", serde_json::to_string_pretty(operations).unwrap());
+            for operation in operations {
+                eprintln!("{}", crate::presentation::operation(operation));
+            }
             eprint!("Approve these operations and native dependency changes? [y/N] ");
             let _ = io::stderr().flush();
             let mut answer = String::new();
@@ -295,7 +300,7 @@ pub fn run(args: &Args) -> u8 {
                 ..
             } = event
             {
-                eprintln!("{message}");
+                eprintln!("{}", crate::presentation::clean(&message));
             }
         },
     );

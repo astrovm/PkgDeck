@@ -4,7 +4,7 @@ use crossterm::event::{self, Event as Input, KeyCode, KeyEvent, KeyEventKind, Ke
 use pkgdeck_core::{engine::*, package::*, process::Cancellation};
 use ratatui::{
     layout::{Constraint, Layout},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     widgets::{Block, Paragraph, Row, Table, TableState, Wrap},
 };
 use std::{io, sync::mpsc, thread, time::Duration};
@@ -54,7 +54,13 @@ fn perform(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
         Job::Write(operation) => {
             let result = engine.execute(&operation, cancel, &mut |event| {
                 if let Event::Progress { progress, .. } = event {
-                    send(Reply::Status(format!("{progress:?}")));
+                    send(Reply::Status(match progress {
+                        Progress::Message(message) => message,
+                        Progress::Transfer { completed, total } => match total {
+                            Some(total) => format!("Transferred {completed} of {total}"),
+                            None => format!("Transferred {completed}"),
+                        },
+                    }));
                 }
             });
             match result {
@@ -154,6 +160,7 @@ impl App {
                 self.status = "Select a source; u refreshes metadata only.".into();
             }
             Reply::Details(details) => {
+                self.status = "Package details loaded.".into();
                 self.details = Some(*details);
             }
             Reply::Written => {
@@ -320,13 +327,15 @@ impl App {
     }
     fn draw(&mut self, frame: &mut ratatui::Frame) {
         if self.confirmation.is_some() || self.expanded {
-            let text = self.confirmation.as_ref().map(|op| format!("Confirm {op:#?}\n\nNative dependency changes may follow.\nPress y to confirm, n or Esc to go back.")).unwrap_or_else(|| self.status.clone());
+            let text = self.confirmation.as_ref().map(|op| format!("Confirm {}\n\nNative dependency changes may follow.\nPress y to confirm, n or Esc to go back.", crate::presentation::operation(op))).unwrap_or_else(|| self.status.clone());
             frame.render_widget(
                 Paragraph::new(readable(text))
                     .wrap(Wrap { trim: false })
                     .scroll((self.scroll, 0))
                     .block(
                         Block::bordered()
+                            .border_type(ratatui::widgets::BorderType::Rounded)
+                            .border_style(Style::default().fg(Color::Rgb(104, 151, 207)))
                             .title("Status / confirmation - PgUp/PgDn scroll, Esc back"),
                     ),
                 frame.area(),
@@ -335,7 +344,7 @@ impl App {
         }
 
         let areas = Layout::vertical([
-            Constraint::Length(3),
+            Constraint::Length(5),
             Constraint::Min(3),
             Constraint::Length(if frame.area().height >= 24 { 8 } else { 4 }),
             Constraint::Length(4),
@@ -344,11 +353,16 @@ impl App {
         .split(frame.area());
         frame.render_widget(
             Paragraph::new(format!(
-                "1 Search | 2 Installed | 3 Updates | 4 Sources    / {}{}",
+                "1 Search   2 Installed   3 Updates   4 Sources\n\n/ {}{}",
                 self.query,
                 if self.editing { "_" } else { "" }
             ))
-            .block(Block::bordered().title(format!("PkgDeck - {:?}", self.view))),
+            .block(
+                Block::bordered()
+                    .border_type(ratatui::widgets::BorderType::Rounded)
+                    .border_style(Style::default().fg(Color::Rgb(104, 151, 207)))
+                    .title(format!("PkgDeck - {:?}", self.view)),
+            ),
             areas[0],
         );
         let rows: Vec<Row> = if self.view == View::Sources {
@@ -357,8 +371,18 @@ impl App {
                 .map(|s| {
                     Row::new(vec![
                         readable(&s.backend),
-                        readable(format!("{:?}", s.availability)),
-                        readable(format!("{:?}", s.capabilities)),
+                        readable(match &s.availability {
+                            Ok(Availability::Available) => "Available".into(),
+                            Ok(Availability::Unavailable(reason)) => {
+                                format!("Unavailable: {reason}")
+                            }
+                            Err(error) => error.to_string(),
+                        }),
+                        s.capabilities
+                            .iter()
+                            .map(|c| format!("{c:?}"))
+                            .collect::<Vec<_>>()
+                            .join(", "),
                     ])
                 })
                 .collect()
@@ -374,28 +398,72 @@ impl App {
                             p.installed_version.as_deref().unwrap_or("not installed"),
                             p.candidate_version.as_deref().unwrap_or("unknown")
                         )),
+                        readable(&p.summary),
                     ])
                 })
                 .collect()
         };
         let headers = if self.view == View::Sources {
-            ["Source", "Availability", "Capabilities"]
+            vec!["Source", "Availability", "Capabilities"]
         } else {
-            ["Name", "Source / arch", "Installed -> candidate"]
+            vec!["Name", "Source / arch", "Installed -> candidate", "Summary"]
+        };
+        let wide = frame.area().width >= 100;
+        let widths = if self.view == View::Sources {
+            vec![
+                Constraint::Percentage(20),
+                Constraint::Percentage(35),
+                Constraint::Percentage(45),
+            ]
+        } else if wide {
+            vec![
+                Constraint::Percentage(25),
+                Constraint::Percentage(18),
+                Constraint::Percentage(24),
+                Constraint::Percentage(33),
+            ]
+        } else {
+            vec![
+                Constraint::Percentage(35),
+                Constraint::Percentage(25),
+                Constraint::Percentage(40),
+            ]
         };
         frame.render_stateful_widget(
-            Table::new(
-                rows,
-                [
-                    Constraint::Percentage(35),
-                    Constraint::Percentage(25),
-                    Constraint::Percentage(40),
-                ],
-            )
-            .header(Row::new(headers))
-            .block(Block::bordered().title("Results"))
-            .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED))
-            .highlight_symbol("> "),
+            Table::new(rows, widths)
+                .column_spacing(2)
+                .header(
+                    Row::new(headers).style(
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                )
+                .block(
+                    Block::bordered()
+                        .border_type(ratatui::widgets::BorderType::Rounded)
+                        .border_style(Style::default().fg(Color::Rgb(104, 151, 207)))
+                        .title(format!(
+                            " Results · {} {} ",
+                            if self.view == View::Sources {
+                                self.sources.len()
+                            } else {
+                                self.packages.len()
+                            },
+                            if self.view == View::Sources {
+                                "sources"
+                            } else {
+                                "packages"
+                            }
+                        )),
+                )
+                .row_highlight_style(
+                    Style::default()
+                        .bg(Color::Rgb(40, 62, 89))
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                )
+                .highlight_symbol("> "),
             areas[1],
             &mut self.table,
         );
@@ -407,26 +475,34 @@ impl App {
                 .unwrap_or_else(|| "No source selected.".into())
         } else if let Some(d) = &self.details {
             format!(
-                "{}\n{:?}\n{}\nHomepage: {}\nDependencies: {}",
+                "{}\nScope: {}\n{}\nHomepage: {}\nDependencies: {}",
                 d.package.id.name,
-                d.package.id.scope,
+                crate::presentation::scope(&d.package.id.scope),
                 d.description,
                 d.homepage.as_deref().unwrap_or("unavailable"),
                 d.dependencies.join(", ")
             )
         } else if let Some(p) = self.table.selected().and_then(|i| self.packages.get(i)) {
             format!(
-                "{} | {:?} | Update: {:?}\n{}\nEnter: load full details",
-                p.id.name, p.id.scope, p.update, p.summary
+                "{} | {} | Update: {:?}\n{}\nEnter: load full details",
+                p.id.name,
+                crate::presentation::scope(&p.id.scope),
+                p.update,
+                p.summary
             )
         } else {
-            "No package selected.".into()
+            "Search for a package with /, or press 2 to browse installed packages.\nUse ↑/↓ to select a result and Enter for full details.".into()
         };
         frame.render_widget(
             Paragraph::new(readable(detail))
                 .scroll((self.scroll, 0))
                 .wrap(Wrap { trim: false })
-                .block(Block::bordered().title("Package details")),
+                .block(
+                    Block::bordered()
+                        .border_type(ratatui::widgets::BorderType::Rounded)
+                        .border_style(Style::default().fg(Color::Rgb(104, 151, 207)))
+                        .title("Package details"),
+                ),
             areas[2],
         );
         let status = format!(
@@ -437,7 +513,12 @@ impl App {
         frame.render_widget(
             Paragraph::new(readable(status))
                 .wrap(Wrap { trim: false })
-                .block(Block::bordered().title("Status / confirmation")),
+                .block(
+                    Block::bordered()
+                        .border_type(ratatui::widgets::BorderType::Rounded)
+                        .border_style(Style::default().fg(Color::Rgb(104, 151, 207)))
+                        .title("Status / confirmation"),
+                ),
             areas[3],
         );
         frame.render_widget(Paragraph::new("/ search  arrows/j/k select  Enter details  i install  d remove  g upgrade\nu refresh source  r reload  e status  PgUp/PgDn details  Esc cancel/back  q quit").wrap(Wrap { trim: false }), areas[4]);
@@ -450,6 +531,7 @@ pub fn run(terminal: &mut ratatui::DefaultTerminal, args: &Args) -> io::Result<(
     let signal = signal_hook::flag::register(signal_hook::consts::SIGTERM, shutdown.flag())?;
     let mut worker: Option<(thread::JoinHandle<()>, mpsc::Receiver<Reply>, Cancellation)> = None;
     let result = (|| {
+        let mut dirty = true;
         loop {
             if shutdown.requested() {
                 if let Some((_, _, cancel)) = &worker {
@@ -460,6 +542,7 @@ pub fn run(terminal: &mut ratatui::DefaultTerminal, args: &Args) -> io::Result<(
             }
             if let Some((handle, receive, _)) = &worker {
                 let replies: Vec<_> = receive.try_iter().collect();
+                dirty |= !replies.is_empty();
                 let complete = replies.iter().any(|r| !matches!(r, Reply::Status(_)));
                 for reply in replies {
                     app.reply(reply);
@@ -473,13 +556,19 @@ pub fn run(terminal: &mut ratatui::DefaultTerminal, args: &Args) -> io::Result<(
                         app.reply(reply);
                     }
                     app.busy = false;
+                    dirty = true;
                 }
             }
-            terminal.draw(|frame| app.draw(frame))?;
+            if dirty {
+                terminal.draw(|frame| app.draw(frame))?;
+                dirty = false;
+            }
             if !event::poll(Duration::from_millis(50))? {
                 continue;
             }
-            if let Input::Key(key) = event::read()? {
+            let input = event::read()?;
+            dirty = true; // Input and resize events invalidate the frame; idle polls do not.
+            if let Input::Key(key) = input {
                 let (quit, job) = app.key(key);
                 if quit {
                     break;

@@ -3,6 +3,7 @@ use std::io::{self, IsTerminal};
 use clap::Parser;
 mod cli;
 use cli::{Args, Commands};
+mod presentation;
 mod tui;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

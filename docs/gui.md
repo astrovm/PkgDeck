@@ -3,10 +3,13 @@
 `pkgdeck` opens the Qt/Kirigami frontend. It uses the same APT/Homebrew engine and
 host authorization boundary as the terminal frontend.
 
-![Implemented GUI with a synthetic package](screenshots/pkgdeck-gui-live.png)
+![Implemented GUI with synthetic packages](screenshots/pkgdeck-gui-live.png)
 
-This capture uses synthetic metadata on a private test display. Colors follow the
-platform theme.
+[Light appearance](screenshots/pkgdeck-gui-light-live.png) ·
+[Compact layout](screenshots/pkgdeck-gui-compact-live.png)
+
+This capture uses synthetic metadata on a private test display. The default
+appearance follows the system; Settings also offers explicit Dark and Light modes.
 
 The sidebar provides Discover, Search, Installed, Updates, Sources, Settings, and
 Help/About. Discover reports actual source availability on the current computer;
@@ -27,16 +30,22 @@ indeterminate activity indicator, not an invented percentage. Cancel interrupts
 reads; an already-running native write finishes safely under its manager's lock.
 Closing a busy window requests cancellation and keeps it open until completion.
 
-Settings persist the source filter and authorization preference through Qt's
+Settings persist appearance, source filter, and authorization preference through Qt's
 per-user settings. The default GUI authorization uses the host polkit agent.
 Existing sudo credentials are also supported; passwords are never collected by
 PkgDeck. Homebrew remains unprivileged. `pkgdeck --from apt|homebrew --auth
 sudo|polkit` overrides the saved settings for the current session.
 
-Colors and dark mode inherit the platform theme. Text labels accompany all
-navigation actions, package text is displayed as plain text, and result selection
-uses the theme's highlighted text color. Narrow windows use a collapsible drawer,
-wrapped action buttons, and scrollable details/status.
+The interface uses a consistent surface, border, and accent palette in both light
+and dark mode. Text labels accompany navigation, and package metadata remains
+plain text. Narrow windows replace the sidebar with a navigation selector and
+compact result rows. Only applicable package actions are shown. Details and status
+remain selectable and scrollable.
+
+Results are virtualized. Up to 128 detail records are cached for the current
+result snapshot, so revisiting a package avoids launching another native query.
+Reloading, changing the source/view query, and successful writes invalidate this
+cache. Background polling stops when work finishes.
 
 | Shortcut | Action |
 | --- | --- |
