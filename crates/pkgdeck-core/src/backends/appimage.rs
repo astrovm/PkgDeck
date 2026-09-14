@@ -3,6 +3,7 @@ use sha2::{Digest, Sha256};
 use std::{
     fs,
     io::{Read, Seek, SeekFrom},
+    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
 };
 
@@ -93,6 +94,7 @@ impl AppImage {
                 name: name.into(),
                 architecture,
                 scope: self.scope(),
+                remote: None,
             },
             display_name: "Imported AppImage".into(),
             summary: format!("PkgDeck-managed local Type 2 AppImage ({digest})"),
@@ -104,13 +106,76 @@ impl AppImage {
     fn installed_packages(&self) -> Result<Vec<Package>, EngineError> {
         let entries = match fs::read_dir(&self.root) {
             Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return self.external_packages(),
+            Err(e) => return Err(Self::invalid(e.to_string())),
+        };
+        let mut packages: Vec<_> = entries
+            .filter_map(Result::ok)
+            .map(|e| self.package(e.path()))
+            .collect::<Result<_, _>>()?;
+        packages.extend(self.external_packages()?);
+        Ok(packages)
+    }
+    fn desktop_value(contents: &str, key: &str) -> Option<String> {
+        contents
+            .lines()
+            .find_map(|line| line.strip_prefix(key).map(str::to_owned))
+            .filter(|value| !value.is_empty())
+    }
+    fn external_entries(&self) -> Result<Vec<(Package, PathBuf)>, EngineError> {
+        let entries = match fs::read_dir(&self.applications) {
+            Ok(entries) => entries,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
             Err(e) => return Err(Self::invalid(e.to_string())),
         };
-        entries
+        Ok(entries
             .filter_map(Result::ok)
-            .map(|e| self.package(e.path()))
-            .collect()
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "desktop"))
+            .filter_map(|entry| {
+                let desktop = entry.path();
+                let contents = fs::read_to_string(&desktop).ok()?;
+                let source = Self::desktop_value(&contents, "TryExec=")?;
+                let path = PathBuf::from(source);
+                let canonical = fs::canonicalize(path).ok()?;
+                let metadata = fs::metadata(&canonical).ok()?;
+                if !canonical.is_absolute()
+                    || canonical.starts_with(&self.root)
+                    || !metadata.is_file()
+                    || metadata.uid() != self.uid
+                {
+                    return None;
+                }
+                let architecture = Self::type2(&canonical).ok()?;
+                let display_name = Self::desktop_value(&contents, "Name=")
+                    .unwrap_or_else(|| "External AppImage".into());
+                let version = Self::desktop_value(&contents, "X-AppImage-Version=")
+                    .unwrap_or_else(|| "local".into());
+                Some((
+                    Package {
+                        id: PackageId {
+                            backend: "appimage".into(),
+                            name: canonical.display().to_string(),
+                            architecture,
+                            scope: self.scope(),
+                            remote: None,
+                        },
+                        display_name,
+                        summary: "Externally managed local Type 2 AppImage".into(),
+                        installed_version: Some(version.clone()),
+                        candidate_version: Some(version),
+                        update: UpdateAvailability::Current,
+                    },
+                    desktop,
+                ))
+            })
+            .collect::<Vec<_>>())
+    }
+    fn external_packages(&self) -> Result<Vec<Package>, EngineError> {
+        Ok(self
+            .external_entries()?
+            .into_iter()
+            .map(|(package, _)| package)
+            .collect())
     }
     fn import(&self, id: &PackageId) -> Result<(), EngineError> {
         if id.backend != "appimage"
@@ -171,6 +236,7 @@ impl Backend for AppImage {
                     scope: Scope::Environment {
                         path: self.root.clone(),
                     },
+                    remote: None,
                 },
                 display_name: source
                     .file_name()
@@ -183,10 +249,14 @@ impl Backend for AppImage {
                 update: UpdateAvailability::Unknown,
             }]);
         }
+        let query = query.to_ascii_lowercase();
         Ok(self
             .installed_packages()?
             .into_iter()
-            .filter(|p| p.id.name.contains(query))
+            .filter(|p| {
+                p.id.name.to_ascii_lowercase().contains(&query)
+                    || p.display_name.to_ascii_lowercase().contains(&query)
+            })
             .collect())
     }
     fn installed(&mut self, _: &Cancellation) -> Result<Vec<Package>, EngineError> {
@@ -227,6 +297,21 @@ impl Backend for AppImage {
                     self.applications
                         .join(format!("pkgdeck-{}.desktop", &id.name[8..72])),
                 );
+            }
+            Operation::Remove(id)
+                if id.backend == "appimage" && id.scope == self.scope() && id.remote.is_none() =>
+            {
+                let (package, desktop) = self
+                    .external_entries()?
+                    .into_iter()
+                    .find(|(package, _)| package.id == *id)
+                    .ok_or(EngineError::NotFound)?;
+                progress(Progress::Message(format!(
+                    "Removing external AppImage {} and its desktop entry.",
+                    package.display_name
+                )));
+                fs::remove_file(&id.name).map_err(|e| Self::invalid(e.to_string()))?;
+                fs::remove_file(desktop).map_err(|e| Self::invalid(e.to_string()))?;
             }
             _ => return Err(Self::invalid("foreign or unsupported AppImage operation")),
         }
@@ -342,6 +427,47 @@ mod tests {
     }
 
     #[test]
+    fn discovers_and_removes_user_owned_external_desktop_entries() {
+        let base = std::env::temp_dir().join(format!(
+            "pkgdeck-appimage-external-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        let applications = base.join("applications");
+        let external = base.join("Audacity.AppImage");
+        fs::create_dir_all(&applications).unwrap();
+        type2(&external);
+        let desktop = applications.join("audacity.desktop");
+        fs::write(
+            &desktop,
+            format!(
+                "[Desktop Entry]\nType=Application\nName=Audacity Portable\nTryExec={}\nX-AppImage-Version=4.0\n",
+                external.display()
+            ),
+        )
+        .unwrap();
+        let mut backend = AppImage::new(
+            base.join("owned"),
+            applications,
+            rustix::process::getuid().as_raw(),
+        );
+        let cancel = Cancellation::default();
+        let package = backend.search("audacity", &cancel).unwrap().remove(0);
+        assert_eq!(package.display_name, "Audacity Portable");
+        assert_eq!(package.installed_version.as_deref(), Some("4.0"));
+        assert_eq!(
+            backend.details(&package.id, &cancel).unwrap().package,
+            package
+        );
+        backend
+            .execute(&Operation::Remove(package.id), &cancel, &mut |_| {})
+            .unwrap();
+        assert!(!external.exists());
+        assert!(!desktop.exists());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
     fn managed_files_support_details_and_idempotent_imports() {
         let base = std::env::temp_dir().join(format!(
             "pkgdeck-appimage-managed-test-{}",
@@ -408,6 +534,7 @@ mod tests {
             name: managed_source.display().to_string(),
             architecture: "x86_64".into(),
             scope: Scope::Environment { path: root },
+            remote: None,
         };
         assert!(backend
             .execute(&Operation::Install(foreign), &cancel, &mut |_| {})

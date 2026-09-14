@@ -213,10 +213,69 @@ impl<T: Transport> Flatpak<T> {
                         name: fields[0].into(),
                         architecture: fields[1].into(),
                         scope: scope.clone(),
+                        remote: None,
                     },
                     display_name: fields[0].into(),
                     summary: fields[4].into(),
                     installed_version: Some(fields[3].into()),
+                    candidate_version: Some(fields[3].into()),
+                    update: UpdateAvailability::Unknown,
+                })
+            })
+            .collect()
+    }
+    fn search_scope(
+        &self,
+        query: &str,
+        cancel: &Cancellation,
+        system: bool,
+    ) -> Result<Vec<Package>, EngineError> {
+        let scope = if system {
+            Scope::System
+        } else {
+            Scope::User {
+                uid: rustix::process::getuid().as_raw(),
+            }
+        };
+        let prefix = if system { "--system" } else { "--user" };
+        let output = bytes(
+            "flatpak",
+            self.call(
+                &[
+                    prefix,
+                    "search",
+                    "--columns=name,description,application,version,branch,remotes",
+                    query,
+                ],
+                cancel,
+                false,
+                system,
+            )?,
+        )?;
+        String::from_utf8(output)
+            .map_err(|e| invalid("flatpak", e))?
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| {
+                let fields: Vec<_> = line.split('\t').collect();
+                let remote = fields
+                    .get(5)
+                    .and_then(|value| value.split(',').next())
+                    .filter(|value| flatpak_id(value));
+                if fields.len() != 6 || !flatpak_id(fields[2]) || remote.is_none() {
+                    return Err(invalid("flatpak", "invalid remote search metadata"));
+                }
+                Ok(Package {
+                    id: PackageId {
+                        backend: "flatpak".into(),
+                        name: fields[2].into(),
+                        architecture: std::env::consts::ARCH.into(),
+                        scope: scope.clone(),
+                        remote: remote.map(str::to_owned),
+                    },
+                    display_name: fields[0].into(),
+                    summary: fields[1].into(),
+                    installed_version: None,
                     candidate_version: Some(fields[3].into()),
                     update: UpdateAvailability::Unknown,
                 })
@@ -259,14 +318,12 @@ impl<T: Transport> Backend for Flatpak<T> {
         }
     }
     fn search(&mut self, query: &str, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
-        if !flatpak_id(query) {
-            return Err(invalid("flatpak", "search expects an application id"));
+        if query.trim().is_empty() || query.starts_with('-') {
+            return Err(invalid("flatpak", "expected a search term"));
         }
-        Ok(self
-            .installed(cancel)?
-            .into_iter()
-            .filter(|p| p.id.name.contains(query))
-            .collect())
+        let mut result = self.search_scope(query, cancel, false)?;
+        result.extend(self.search_scope(query, cancel, true)?);
+        Ok(result)
     }
     fn installed(&mut self, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
         let mut result = self.list(cancel, false)?;
@@ -278,6 +335,19 @@ impl<T: Transport> Backend for Flatpak<T> {
         id: &PackageId,
         cancel: &Cancellation,
     ) -> Result<PackageDetails, EngineError> {
+        if id.remote.is_some() {
+            return self
+                .search(id.name.as_str(), cancel)?
+                .into_iter()
+                .find(|package| package.id == *id)
+                .map(|package| PackageDetails {
+                    description: package.summary.clone(),
+                    homepage: None,
+                    dependencies: vec![],
+                    package,
+                })
+                .ok_or(EngineError::NotFound);
+        }
         let package = self
             .installed(cancel)?
             .into_iter()
@@ -339,7 +409,7 @@ impl<T: Transport> Backend for Flatpak<T> {
                 "--app",
                 "--noninteractive",
                 "--assumeyes",
-                "flathub",
+                id.remote.as_deref().unwrap_or("flathub"),
                 &id.name,
             ]
         } else {
@@ -545,6 +615,7 @@ impl<T: Transport> Homebrew<T> {
                             scope: Scope::Environment {
                                 path: prefix.clone(),
                             },
+                            remote: None,
                         },
                         display_name: f.full_name,
                         summary: f.desc.clone().unwrap_or_default(),
@@ -835,6 +906,7 @@ impl<T: Transport> SystemManager<T> {
                 name: name.into(),
                 architecture: arch.into(),
                 scope: Scope::System,
+                remote: None,
             },
             display_name: name.into(),
             summary: summary.into(),

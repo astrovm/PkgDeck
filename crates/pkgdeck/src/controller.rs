@@ -228,7 +228,7 @@ fn operation_label(operation: &Operation) -> String {
 }
 fn package_row(p: &Package) -> Value {
     json!({"name": p.id.name, "source": p.id.backend, "architecture": p.id.architecture,
-        "scope": p.id.scope, "scope_label": scope_label(&p.id.scope), "summary": p.summary, "installed": p.installed_version,
+        "remote": p.id.remote, "scope": p.id.scope, "scope_label": scope_label(&p.id.scope), "summary": p.summary, "installed": p.installed_version,
         "candidate": p.candidate_version, "update": p.update, "kind": "package"})
 }
 impl ffi::PackageController {
@@ -438,12 +438,16 @@ impl ffi::PackageController {
                 let status = if report.failures.is_empty() {
                     format!("{} packages", rows.len())
                 } else {
-                    report
-                        .failures
-                        .iter()
-                        .map(|f| format!("{}: {}", f.backend, f.error))
-                        .collect::<Vec<_>>()
-                        .join("\n")
+                    format!(
+                        "{} packages\n{}",
+                        rows.len(),
+                        report
+                            .failures
+                            .iter()
+                            .map(|f| format!("{}: {}", f.backend, f.error))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    )
                 };
                 self.as_mut().rust_mut().packages = report.packages;
                 self.as_mut().set_rows(encoded(rows));
@@ -586,6 +590,7 @@ mod tests {
             name: "synthetic".into(),
             architecture: "all".into(),
             scope: Scope::System,
+            remote: None,
         };
         let package = Package {
             id: id.clone(),

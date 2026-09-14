@@ -26,6 +26,7 @@ fn id(backend: &str) -> PackageId {
         name: "fixture-tool".into(),
         architecture: "x86_64".into(),
         scope: Scope::System,
+        remote: None,
     }
 }
 fn package(id: PackageId) -> Package {

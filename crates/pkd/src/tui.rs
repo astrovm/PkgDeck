@@ -642,6 +642,7 @@ mod tests {
                 name: "synthetic-tool".into(),
                 architecture: "all".into(),
                 scope: Scope::System,
+                remote: None,
             },
             display_name: "Synthetic".into(),
             summary: "A synthetic package".into(),

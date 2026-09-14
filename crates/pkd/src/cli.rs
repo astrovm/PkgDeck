@@ -335,6 +335,7 @@ mod tests {
                     name: "fixture".into(),
                     architecture: "all".into(),
                     scope: Scope::System,
+                    remote: None,
                 },
                 display_name: "Fixture".into(),
                 summary: "Synthetic".into(),

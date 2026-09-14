@@ -15,6 +15,9 @@ pub struct PackageId {
     pub name: String,
     pub architecture: String,
     pub scope: Scope,
+    /// Source-specific repository identity, such as a Flatpak remote.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<String>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq)]
