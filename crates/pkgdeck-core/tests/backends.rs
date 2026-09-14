@@ -249,6 +249,58 @@ fn flatpak_lists_user_and_system_applications_without_collapsing_scope() {
         .any(|package| matches!(package.id.scope, Scope::User { .. })));
     assert!(backend.search("io.example.User", &cancel).unwrap().len() == 2);
 }
+
+#[derive(Clone, Default)]
+struct FlatpakFixture(Arc<Mutex<Vec<(Vec<String>, bool, bool)>> >);
+impl Transport for FlatpakFixture {
+    fn apt_query(&self, _: &str, _: &str, _: &str, _: &Cancellation) -> Result<Completion, ExecutionError> { unreachable!() }
+    fn apt_write(&self, _: AptAction, _: &Cancellation) -> Result<Completion, ExecutionError> { unreachable!() }
+    fn brew(&self, _: &[OsString], _: &Cancellation, _: bool) -> Result<Completion, ExecutionError> { unreachable!() }
+    fn flatpak(&self, args: &[OsString], _: &Cancellation, write: bool, system: bool) -> Result<Completion, ExecutionError> {
+        let args = args.iter().map(|arg| arg.to_string_lossy().into_owned()).collect::<Vec<_>>();
+        self.0.lock().unwrap().push((args.clone(), write, system));
+        if args.contains(&"list".into()) {
+            let name = if system { "io.example.System" } else { "io.example.User" };
+            return Ok(output(format!("{name}\tx86_64\tstable\t1.0\tSynthetic app\n")));
+        }
+        Ok(output(""))
+    }
+}
+
+#[test]
+fn flatpak_operations_keep_scope_and_noninteractive_arguments() {
+    let fixture = FlatpakFixture::default();
+    let mut backend = Flatpak::new(fixture.clone());
+    let cancel = Cancellation::default();
+    let packages = backend.installed(&cancel).unwrap();
+    let user = packages.iter().find(|p| matches!(p.id.scope, Scope::User { .. })).unwrap().id.clone();
+    let system = packages.iter().find(|p| p.id.scope == Scope::System).unwrap().id.clone();
+    assert_eq!(backend.search("io.example.User", &cancel).unwrap().len(), 1);
+    assert!(backend.search("--bad", &cancel).is_err());
+    assert_eq!(backend.details(&user, &cancel).unwrap().package.id, user);
+    for operation in [Operation::Install(user.clone()), Operation::Remove(user), Operation::Upgrade(system)] {
+        backend.execute(&operation, &cancel, &mut |_| {}).unwrap();
+    }
+    backend.execute(&Operation::Refresh { backend: "flatpak".into() }, &cancel, &mut |_| {}).unwrap();
+    let calls = fixture.0.lock().unwrap();
+    assert!(calls.iter().any(|(args, write, system)| *write && !*system && args.contains(&"flathub".into())));
+    assert!(calls.iter().any(|(args, write, system)| *write && *system && args.first().is_some_and(|scope| scope == "--system")));
+}
+
+#[test]
+fn flatpak_rejects_malformed_metadata_and_foreign_operations() {
+    let cancel = Cancellation::default();
+    let mut backend = Flatpak::new(Raw(output("bad\tmetadata\n")));
+    assert!(backend.installed(&cancel).is_err());
+    let foreign = PackageId {
+        backend: "flatpak".into(),
+        name: "io.example.App".into(),
+        architecture: "x86_64".into(),
+        scope: Scope::Environment { path: "/synthetic".into() },
+    };
+    assert!(backend.execute(&Operation::Install(foreign), &cancel, &mut |_| {}).is_err());
+    assert!(backend.execute(&Operation::Refresh { backend: "apt".into() }, &cancel, &mut |_| {}).is_err());
+}
 #[test]
 fn failures_preserve_native_categories() {
     for error in [
