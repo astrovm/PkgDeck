@@ -104,6 +104,23 @@ jobs:
           name: container-verification-${{ matrix.runner }}
           path: build/verification
 
+  native-backends:
+    name: Real native backends (${{ matrix.backend }})
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [dnf, pacman, zypper]
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install rootless container tooling
+        run: sudo apt-get update && sudo apt-get install -y podman
+      - name: Build CLI
+        run: cargo build --locked -p pkd
+      - name: Exercise actual package manager
+        run: scripts/tests/native-manager.sh ${{ matrix.backend }} "$PWD/target/debug/pkd"
+
   desktop:
     name: GUI, coverage and packages (${{ matrix.arch }})
     timeout-minutes: 45
