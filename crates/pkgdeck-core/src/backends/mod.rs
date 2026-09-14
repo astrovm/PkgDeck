@@ -692,15 +692,19 @@ impl ManagerKind {
             (Self::Dnf, true) => vec![
                 "--quiet",
                 "repoquery",
+                "--latest-limit",
+                "1",
                 "--installed",
                 "--queryformat",
-                "%{name}\\t%{arch}\\t%{version}-%{release}\\t%{summary}",
+                "%{name}|%{arch}|%{version}-%{release}|%{summary}\n",
             ],
             (Self::Dnf, false) => vec![
                 "--quiet",
                 "repoquery",
+                "--latest-limit",
+                "1",
                 "--queryformat",
-                "%{name}\\t%{arch}\\t%{version}-%{release}\\t%{summary}",
+                "%{name}|%{arch}|%{version}-%{release}|%{summary}\n",
                 query,
             ],
             (Self::Pacman, true) => vec!["-Q"],
@@ -830,7 +834,7 @@ impl<T: Transport> SystemManager<T> {
         match self.kind {
             ManagerKind::Dnf => {
                 for line in text.lines().filter(|line| !line.is_empty()) {
-                    let fields: Vec<_> = line.splitn(4, '\t').collect();
+                    let fields: Vec<_> = line.splitn(4, '|').collect();
                     if fields.len() != 4 {
                         return Err(invalid("dnf", "invalid repoquery metadata"));
                     }
