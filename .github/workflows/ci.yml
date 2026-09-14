@@ -19,13 +19,33 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-26.04, ubuntu-26.04-arm]
+        include:
+          - runner: ubuntu-26.04
+            arch: x86_64
+          - runner: ubuntu-26.04-arm
+            arch: aarch64
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: sudo apt-get update && sudo apt-get install -y libapt-pkg-dev jq
       - run: rustup show
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: terminal-rust-cache
+        with:
+          path: |
+            target
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: rust-v2-${{ matrix.arch }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml') }}
       - run: scripts/verify.sh fast
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: success() && steps.terminal-rust-cache.outputs.cache-hit != 'true'
+        with:
+          path: |
+            target
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ steps.terminal-rust-cache.outputs.cache-primary-key }}
 
   host-vm:
     name: APT and Homebrew lifecycles in disposable VM (x86_64)
@@ -103,7 +123,6 @@ jobs:
             qt_dir: gcc_arm64
     runs-on: ${{ matrix.runner }}
     env:
-      PKGDECK_CACHE_DIR: ${{ github.workspace }}/build/dev-cache
       QT_QPA_PLATFORM: offscreen
       QT_QUICK_BACKEND: software
     steps:
@@ -111,22 +130,10 @@ jobs:
       - name: Install build and packaging dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential libapt-pkg-dev jq libarchive-tools cmake ninja-build lld pkg-config libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-dev libvulkan-dev libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-shape0 libxcb-xkb1 libxkbcommon-x11-0 libxcb-image0 libxcb-render-util0 libxcb-randr0 libxcb-sync1 libxcb-xfixes0 libxcb-glx0 libdbus-1-3 libfontconfig1 libfreetype6 libopengl0 libpulse0 libgssapi-krb5-2 libnss3 libasound2t64 libxcomposite1 libxdamage1 libxtst6 libwayland-cursor0 libwayland-egl1 flatpak flatpak-builder snapd squashfs-tools zsync desktop-file-utils podman xvfb xdotool fonts-dejavu-core
+          sudo apt-get install -y build-essential libapt-pkg-dev jq libarchive-tools cmake ninja-build lld pkg-config qt6-base-dev qt6-declarative-dev qt6-declarative-dev-tools qt6-tools-dev qt6-shadertools-dev qt6-wayland libkirigami-dev extra-cmake-modules libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-dev libvulkan-dev libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-shape0 libxcb-xkb1 libxkbcommon-x11-0 libxcb-image0 libxcb-render-util0 libxcb-randr0 libxcb-sync1 libxcb-xfixes0 libxcb-glx0 libdbus-1-3 libfontconfig1 libfreetype6 libopengl0 libpulse0 libgssapi-krb5-2 libnss3 libasound2t64 libxcomposite1 libxdamage1 libxtst6 libwayland-cursor0 libwayland-egl1 flatpak flatpak-builder snapd squashfs-tools zsync desktop-file-utils podman xvfb xdotool fonts-dejavu-core
           rustup show
-      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        id: sdk-cache
-        with:
-          path: |
-            build/dev-cache
-          key: sdk-${{ matrix.arch }}-qt6.11.2-kf6.30.0-${{ hashFiles('scripts/setup-dev.sh', 'scripts/build-kirigami.sh', 'scripts/install-sdk.sh', 'scripts/qt-archives.tsv', 'scripts/sdk.sha256') }}
       - name: Prepare pinned development tools
         run: scripts/setup-dev.sh
-      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        if: steps.sdk-cache.outputs.cache-hit != 'true'
-        with:
-          path: |
-            build/dev-cache
-          key: ${{ steps.sdk-cache.outputs.cache-primary-key }}
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         id: rust-cache
         with:

@@ -68,8 +68,8 @@ if [[ "$mode" == fast ]]; then
     stage qt-free scripts/check-qt-free.sh
 else
     source scripts/dev-env.sh
-    [[ -x "$QT_ROOT_DIR/bin/qtpaths" ]] && [[ $("$QT_ROOT_DIR/bin/qtpaths" --qt-version) == 6.11.2 ]] && [[ -f "$PKGDECK_SDK_PREFIX/lib/cmake/KF6Kirigami/KF6KirigamiConfig.cmake" ]] || {
-        echo 'Pinned Qt 6.11.2/Kirigami SDK missing. Run scripts/setup-dev.sh or set QT_ROOT_DIR and PKGDECK_SDK_PREFIX.' >&2; exit 1;
+    [[ $(qtpaths6 --qt-version) == 6.10.2 ]] && dpkg-query -W libkirigami-dev >/dev/null 2>&1 || {
+        echo 'Ubuntu Qt 6.10.2/Kirigami toolchain missing. Install the development prerequisites.' >&2; exit 1;
     }
     command -v cargo-llvm-cov >/dev/null && [[ $(cargo llvm-cov --version) == 'cargo-llvm-cov 0.9.1' ]] || {
         echo 'cargo-llvm-cov 0.9.1 missing. Run scripts/setup-dev.sh.' >&2; exit 1;

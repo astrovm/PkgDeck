@@ -376,14 +376,12 @@ pub fn terminal_interactions(args: &[String]) {
     let mut disabled = vec![
         "/usr/bin/env".into(),
         "SNAP=/synthetic-disabled-runtime".into(),
+        "PATH=/synthetic-empty-path".into(),
     ];
     disabled.extend_from_slice(args);
+    disabled.extend(["--from".into(), "homebrew".into()]);
     let mut t = Terminal::new(&disabled);
     t.wait("Press /");
-    t.send(b"4");
-    t.wait("Select a source");
-    t.send(b"\x1b[B");
-    t.wait("> homebrew");
     t.send(b"/synthetic\r");
     t.wait("PkgDeck - Search");
     t.wait("disabled");

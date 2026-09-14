@@ -5,7 +5,7 @@ command -v podman >/dev/null || { echo 'Podman is required for --engine podman.'
 [[ $(podman info --format '{{.Host.Security.Rootless}}') == true ]] || { echo 'Run Podman as an unprivileged user.' >&2; exit 1; }
 kind=${1:?Expected development or lifecycle}; shift
 case "$kind" in
-    development) recipe=containers/development.Containerfile; inputs=("$recipe" rust-toolchain.toml scripts/setup-dev.sh scripts/dev-env.sh scripts/build-kirigami.sh scripts/install-sdk.sh scripts/qt-archives.tsv scripts/sdk.sha256) ;;
+    development) recipe=containers/development.Containerfile; inputs=("$recipe" rust-toolchain.toml scripts/setup-dev.sh scripts/dev-env.sh) ;;
     lifecycle) recipe=containers/lifecycle.Containerfile; inputs=("$recipe" scripts/vm/prepare.sh) ;;
     *) echo "Unknown container kind: $kind" >&2; exit 2 ;;
 esac

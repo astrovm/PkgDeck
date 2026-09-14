@@ -53,7 +53,7 @@ TestCase {
         id: window
         App.Browser {
             backend: fake
-            repositoryIconSource: Qt.resolvedUrl("../../assets/" + (dark ? "github-dark.svg" : "github.svg"))
+            repositoryIconSource: Qt.resolvedUrl("../../assets/" + (dark ? "github-dark.png" : "github.png"))
         }
     }
     function initTestCase() {

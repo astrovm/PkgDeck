@@ -273,8 +273,8 @@ no local or manually prepared release builds.
 
 ## Development
 
-Start with `scripts/verify.sh fast`. Run `scripts/setup-dev.sh` once to prepare
-the persistent SDK, then `scripts/verify.sh full` for workspace coverage and release
+Start with `scripts/verify.sh fast`. Install the Ubuntu development prerequisites,
+then run `scripts/setup-dev.sh` and `scripts/verify.sh full` for workspace coverage and release
 builds. `scripts/verify.sh vm` runs isolated native acceptance checks. Local work
 and CI use these same scripts; see [development tooling](docs/development.md).
 Use `scripts/verify.sh full --engine podman` for the pinned rootless build
@@ -291,21 +291,20 @@ Pinned baseline:
 | Component | Version |
 | --- | --- |
 | Rust | 1.98.1 |
-| Qt | 6.11.2 |
-| Kirigami / Extra CMake Modules | 6.30.0 |
+| Qt | 6.10.2 |
+| Kirigami / Extra CMake Modules | 6.24.0 |
 | CXX-Qt | 0.10.0 |
 | CXX / CXX generator | 1.0.202 / 0.7.202 |
 | Ratatui / Crossterm | 0.30.2 / 0.29.0 |
 | Clap | 4.6.6 |
 | Serde / serde_json | 1.0.229 / 1.0.151 |
 | signal-hook (CLI) | 0.4.4 |
-| CMake | 4.4.3 |
+| CMake | 4.2.3 |
 | cargo-llvm-cov | 0.9.1 |
 
 `Cargo.lock` is committed. Use the pinned toolchain and `--locked` in builds.
 The CXX generator is pinned alongside CXX because they must use the same bridge ABI.
-Qt and CMake are downloaded directly from upstream and checked against committed
-SHA-256 pins. Project runtime, build scripts, and tests do not require Python.
+Qt, KDE, CMake, and Ninja come from Ubuntu 26.04 packages. Project runtime, build scripts, and tests do not require Python.
 The operating system and independently installed package managers may have their
 own dependencies.
 
@@ -326,18 +325,11 @@ With piped input/output, no-argument execution fails with exit code 2.
 Pseudo-terminal tests use the Rust acceptance driver and synthetic shell fixtures;
 install jq for the fixtures.
 
-For the GUI, install the pinned Qt SDK (including ShaderTools and ImageFormats),
-a C++ compiler, the pinned CMake (Kirigami requires at least 3.29), Ninja, lld, and the platform development libraries listed
-in `.github/workflows/ci.yml`. Build Kirigami into a local SDK prefix:
+For the GUI, install the Ubuntu 26.04 Qt/KDE development packages, a C++ compiler, CMake, Ninja, and LLD:
 
 ```sh
-export QT_ROOT_DIR=/absolute/path/to/Qt/6.11.2/gcc_64
-export PKGDECK_SDK_PREFIX="$PWD/build/kde"
-export PATH="$QT_ROOT_DIR/bin:$PATH"
-export CMAKE_PREFIX_PATH="$QT_ROOT_DIR"
-scripts/build-kirigami.sh
-export LD_LIBRARY_PATH="$PKGDECK_SDK_PREFIX/lib:$QT_ROOT_DIR/lib"
-export QML_IMPORT_PATH="$PKGDECK_SDK_PREFIX/qml:$QT_ROOT_DIR/qml"
+sudo apt-get install qt6-base-dev qt6-declarative-dev qt6-declarative-dev-tools qt6-tools-dev qt6-shadertools-dev qt6-wayland libkirigami-dev extra-cmake-modules
+source scripts/dev-env.sh
 cargo build --workspace --locked
 cargo test --workspace --locked
 cargo run --locked -p pkgdeck

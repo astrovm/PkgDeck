@@ -264,9 +264,18 @@ impl Host {
                 "run the frontend as an unprivileged user".into(),
             ));
         }
-        let path = self
-            .resolve("flatpak")?
-            .ok_or_else(|| ExecutionError::Disabled("Flatpak not found".into()))?;
+        let path = if write && system {
+            // System writes cross an authorization boundary. Never derive this
+            // executable from the invoking user's PATH.
+            let path = PathBuf::from("/usr/bin/flatpak");
+            if !path.is_file() {
+                return Err(ExecutionError::Disabled("system Flatpak not found".into()));
+            }
+            path
+        } else {
+            self.resolve("flatpak")?
+                .ok_or_else(|| ExecutionError::Disabled("Flatpak not found".into()))?
+        };
         if write && system {
             self.privileged(&path, args, authorization, cancel)
         } else {
