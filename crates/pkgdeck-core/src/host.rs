@@ -283,6 +283,39 @@ impl Host {
         }
     }
 
+    /// Runs a distro package manager. Writes always use a fixed system path before
+    /// entering the authorization boundary, never an executable found in PATH.
+    pub fn system_manager(
+        &self,
+        executable: &str,
+        args: &[OsString],
+        cancel: &Cancellation,
+        write: bool,
+        authorization: Authorization,
+    ) -> Result<Completion, ExecutionError> {
+        self.enabled()?;
+        if write && rustix::process::geteuid().is_root() {
+            return Err(ExecutionError::Invalid(
+                "run the frontend as an unprivileged user".into(),
+            ));
+        }
+        let path = if write {
+            let path = PathBuf::from("/usr/bin").join(executable);
+            if !path.is_file() {
+                return Err(ExecutionError::Disabled(format!("{executable} not found")));
+            }
+            path
+        } else {
+            self.resolve(executable)?
+                .ok_or_else(|| ExecutionError::Disabled(format!("{executable} not found")))?
+        };
+        if write {
+            self.privileged(&path, args, authorization, cancel)
+        } else {
+            self.run(&path, args, cancel, false)
+        }
+    }
+
     fn run(
         &self,
         executable: &Path,

@@ -283,7 +283,11 @@ impl ffi::PackageController {
         {
             return;
         }
-        if !["", "apt", "homebrew", "appimage", "flatpak"].contains(&source.as_str()) {
+        if ![
+            "", "apt", "dnf", "pacman", "zypper", "snap", "homebrew", "appimage", "flatpak",
+        ]
+        .contains(&source.as_str())
+        {
             self.set_status("Unknown source.".into());
             return;
         }
