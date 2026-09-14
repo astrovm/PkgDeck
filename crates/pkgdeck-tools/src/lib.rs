@@ -660,22 +660,15 @@ pub fn gui_lifecycle(args: &[String]) {
             gui.key("alt+y");
         }
         let mut expected = initial;
-        if mode != "query-fails" {
+        if matches!(mode, "success" | "slow") {
             expected["fixture-a"] = json!("2");
-        }
-        if mode == "success" {
             expected["fixture-b"] = json!("2");
         }
         assert_eq!(state(&dir.0), expected, "mode {mode}: {}", gui.logs());
-        if mode != "query-fails" {
-            assert_eq!(
-                fs::read_to_string(dir.0.join("attempts")).unwrap(),
-                if mode == "slow" {
-                    "fixture-a\n"
-                } else {
-                    "fixture-a\nfixture-b\n"
-                }
-            );
+        if matches!(mode, "success" | "slow") {
+            assert_eq!(fs::read_to_string(dir.0.join("attempts")).unwrap(), "all\n");
+        } else {
+            assert!(!dir.0.join("attempts").exists());
         }
         gui.key("ctrl+r");
         gui.close();

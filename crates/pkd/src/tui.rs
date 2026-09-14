@@ -642,6 +642,7 @@ mod tests {
                 name: "synthetic-tool".into(),
                 architecture: "all".into(),
                 scope: Scope::System,
+                remote: None,
             },
             display_name: "Synthetic".into(),
             summary: "A synthetic package".into(),
@@ -708,7 +709,7 @@ mod tests {
             }
             progress(Progress::Message("Native fixture operation".into()));
             match op {
-                Operation::Install(_) | Operation::Upgrade(_) => {
+                Operation::Install(_) | Operation::Upgrade(_) | Operation::UpgradeAll { .. } => {
                     self.package.installed_version = self.package.candidate_version.clone();
                     self.package.update = UpdateAvailability::Current;
                 }

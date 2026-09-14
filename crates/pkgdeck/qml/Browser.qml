@@ -332,7 +332,7 @@ Controls.ApplicationWindow {
                 visible: root.currentView === "Help / About"
                 Layout.fillWidth: true
                 wrapMode: Text.WordWrap
-                text: "PkgDeck 0.1.0\nA unified package interface for Linux.\n\nCtrl+F: search • Ctrl+1: Discover • Ctrl+3: Installed • Ctrl+4: Updates • Ctrl+5: Sources\nCtrl+L: focus results • Up/Down: select • Ctrl+I: install • Ctrl+D: remove • Ctrl+U: upgrade • Ctrl+M: refresh source • Ctrl+R: reload\nEscape: cancel current work\n\nRefresh updates source metadata; Upgrade changes an installed package. Writes require confirmation and may change native dependencies. Cancellation waits for a native write already running.\n\nAPT and Homebrew are supported. Flatpak and Snap host operations remain disabled."
+                text: "PkgDeck 0.1.0\nA unified package interface for Linux.\n\nCtrl+F: search • Ctrl+1: Discover • Ctrl+3: Installed • Ctrl+4: Updates • Ctrl+5: Sources\nCtrl+L: focus results • Up/Down: select • Ctrl+I: install • Ctrl+D: remove • Ctrl+U: upgrade • Ctrl+M: refresh source • Ctrl+R: reload\nEscape: cancel current work\n\nRefresh updates source metadata; Upgrade changes an installed package. Writes require confirmation and may change native dependencies. Cancellation waits for a native write already running.\n\nSearches show configured package sources. Check the status area for a source that is unavailable or did not respond."
                 textFormat: Text.PlainText
             }
             Rectangle {
@@ -395,7 +395,7 @@ Controls.ApplicationWindow {
                             leftPadding: 16
                             rightPadding: 16
                             highlighted: results.currentIndex === index
-                            enabled: !backend.busy
+                            enabled: !backend.busy && modelData.kind !== "failure"
                             Accessible.name: modelData.name + ", " + modelData.source + ", " + (modelData.summary || "")
                             onClicked: { results.forceActiveFocus(); root.choose(index); }
                             background: Rectangle {
@@ -427,7 +427,7 @@ Controls.ApplicationWindow {
                                             Layout.preferredHeight: 14
                                         }
                                         Controls.Label {
-                                        text: modelData.source.toUpperCase() + (modelData.architecture ? " · " + modelData.architecture : "")
+                                        text: modelData.source.toUpperCase() + (modelData.remote ? " · " + modelData.remote : "") + (modelData.architecture ? " · " + modelData.architecture : "")
                                         color: root.muted
                                         font.pixelSize: 11
                                         elide: Text.ElideRight
@@ -445,8 +445,8 @@ Controls.ApplicationWindow {
                                 }
                                 Controls.Label {
                                     Layout.preferredWidth: root.compact ? 100 : 150
-                                    text: modelData.kind === "source" ? (modelData.available ? "Available" : "Unavailable") : (modelData.installed ? modelData.installed + (modelData.update === "available" ? " → " + modelData.candidate : " · installed") : modelData.candidate || "Unknown")
-                                    color: modelData.update === "available" ? root.accent : root.muted
+                                    text: modelData.kind === "failure" ? "Failed" : (modelData.kind === "source" ? (modelData.available ? "Available" : "Unavailable") : (modelData.installed ? modelData.installed + (modelData.update === "available" ? " → " + modelData.candidate : " · installed") : modelData.candidate || "Unknown"))
+                                    color: modelData.kind === "failure" ? "#e87979" : (modelData.update === "available" ? root.accent : root.muted)
                                     textFormat: Text.PlainText
                                     elide: Text.ElideRight
                                     font.pixelSize: 12

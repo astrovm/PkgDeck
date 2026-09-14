@@ -34,6 +34,7 @@ impl Fixture {
                     name: "synthetic-fixture".into(),
                     architecture: "all".into(),
                     scope: Scope::System,
+                    remote: None,
                 },
                 display_name: "Synthetic fixture".into(),
                 summary: "Synthetic package".into(),
@@ -97,7 +98,7 @@ impl Transport for Fixture {
         self.check(cancel)?;
         match action {
             AptAction::Refresh => *self.candidate.lock().unwrap() = "2.0".into(),
-            AptAction::Install(_) | AptAction::Upgrade(_) => {
+            AptAction::Install(_) | AptAction::Upgrade(_) | AptAction::UpgradeAll => {
                 *self.installed.lock().unwrap() = Some(self.candidate.lock().unwrap().clone())
             }
             AptAction::Remove(_) => *self.installed.lock().unwrap() = None,
@@ -318,7 +319,6 @@ fn flatpak_lists_user_and_system_applications_without_collapsing_scope() {
     assert!(packages
         .iter()
         .any(|package| matches!(package.id.scope, Scope::User { .. })));
-    assert!(backend.search("io.example.User", &cancel).unwrap().len() == 2);
 }
 
 type FlatpakCall = (Vec<String>, bool, bool);
@@ -368,6 +368,11 @@ impl Transport for FlatpakFixture {
                 "{name}\tx86_64\tstable\t1.0\tSynthetic app\n"
             )));
         }
+        if args.contains(&"search".into()) {
+            return Ok(output(
+                "Synthetic app\tSynthetic description\tio.example.User\t1.0\tstable\tflathub\n",
+            ));
+        }
         Ok(output(""))
     }
 }
@@ -390,7 +395,7 @@ fn flatpak_operations_keep_scope_and_noninteractive_arguments() {
         .unwrap()
         .id
         .clone();
-    assert_eq!(backend.search("io.example.User", &cancel).unwrap().len(), 1);
+    assert_eq!(backend.search("io.example.User", &cancel).unwrap().len(), 2);
     assert!(backend.search("--bad", &cancel).is_err());
     assert_eq!(backend.details(&user, &cancel).unwrap().package.id, user);
     for operation in [
@@ -430,6 +435,7 @@ fn flatpak_rejects_malformed_metadata_and_foreign_operations() {
         scope: Scope::Environment {
             path: "/synthetic".into(),
         },
+        remote: None,
     };
     assert!(backend
         .execute(&Operation::Install(foreign), &cancel, &mut |_| {})
@@ -477,6 +483,7 @@ fn backend_validation_preserves_invalid_and_transport_failures() {
         name: "io.example.App".into(),
         architecture: "x86_64".into(),
         scope: Scope::User { uid: 1 },
+        remote: None,
     };
     assert!(flatpak
         .execute(&Operation::Install(foreign), &cancel, &mut |_| {})
@@ -490,6 +497,7 @@ fn backend_validation_preserves_invalid_and_transport_failures() {
         scope: Scope::Environment {
             path: "/synthetic".into(),
         },
+        remote: None,
     };
     assert_eq!(brew.details(&missing, &cancel), Err(EngineError::NotFound));
 }

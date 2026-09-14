@@ -15,6 +15,9 @@ pub struct PackageId {
     pub name: String,
     pub architecture: String,
     pub scope: Scope,
+    /// Source-specific repository identity, such as a Flatpak remote.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<String>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq)]
@@ -73,12 +76,16 @@ pub enum Operation {
     Install(PackageId),
     Remove(PackageId),
     Upgrade(PackageId),
+    /// Upgrade every package managed by one backend in a single transaction.
+    UpgradeAll {
+        backend: String,
+    },
 }
 
 impl Operation {
     pub fn backend(&self) -> &str {
         match self {
-            Self::Refresh { backend } => backend,
+            Self::Refresh { backend } | Self::UpgradeAll { backend } => backend,
             Self::Install(id) | Self::Remove(id) | Self::Upgrade(id) => &id.backend,
         }
     }
@@ -87,7 +94,7 @@ impl Operation {
             Self::Refresh { .. } => Capability::Refresh,
             Self::Install(_) => Capability::Install,
             Self::Remove(_) => Capability::Remove,
-            Self::Upgrade(_) => Capability::Upgrade,
+            Self::Upgrade(_) | Self::UpgradeAll { .. } => Capability::Upgrade,
         }
     }
 }
