@@ -301,10 +301,10 @@ Controls.ApplicationWindow {
                 }
                 Controls.ComboBox {
                     objectName: "sourceSetting"
-                    model: ["All available sources", "APT", "Homebrew"]
-                    currentIndex: ["", "apt", "homebrew"].indexOf(root.source)
+                    model: ["All available sources", "APT", "Homebrew", "AppImage", "Flatpak"]
+                    currentIndex: ["", "apt", "homebrew", "appimage", "flatpak"].indexOf(root.source)
                     onActivated: {
-                        root.source = ["", "apt", "homebrew"][currentIndex];
+                        root.source = ["", "apt", "homebrew", "appimage", "flatpak"][currentIndex];
                         preferences.source = root.source;
                     }
                     Accessible.name: "Package source"

@@ -35,7 +35,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
             }
         }
-        println!("APT and Homebrew commands are available; pip requires an explicitly selected virtual environment.");
+        println!("APT, Homebrew, Flatpak, and local AppImage imports are available; pip requires an explicitly selected virtual environment.");
         return Ok(());
     }
     if args.command.is_some() {

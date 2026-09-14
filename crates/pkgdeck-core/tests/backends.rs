@@ -129,6 +129,16 @@ impl Transport for Fixture {
             _ => panic!("unexpected metadata query"),
         }
     }
+    fn flatpak(
+        &self,
+        _: &[OsString],
+        cancel: &Cancellation,
+        _: bool,
+        _: bool,
+    ) -> Result<Completion, ExecutionError> {
+        self.check(cancel)?;
+        Ok(output(""))
+    }
 }
 fn lifecycle(mut backend: impl Backend) {
     let cancel = Cancellation::default();
@@ -222,6 +232,23 @@ fn apt_lifecycle() {
 fn homebrew_lifecycle() {
     lifecycle(Homebrew::new(Fixture::new()));
 }
+
+#[test]
+fn flatpak_lists_user_and_system_applications_without_collapsing_scope() {
+    let cancel = Cancellation::default();
+    let metadata = "io.example.User\tx86_64\tstable\t1.0\tUser app\nio.example.System\tx86_64\tstable\t2.0\tSystem app\n";
+    let mut backend = Flatpak::new(Raw(output(metadata)));
+    assert_eq!(backend.detect(&cancel), Ok(Availability::Available));
+    let packages = backend.installed(&cancel).unwrap();
+    assert_eq!(packages.len(), 4);
+    assert!(packages
+        .iter()
+        .any(|package| package.id.scope == Scope::System));
+    assert!(packages
+        .iter()
+        .any(|package| matches!(package.id.scope, Scope::User { .. })));
+    assert!(backend.search("io.example.User", &cancel).unwrap().len() == 2);
+}
 #[test]
 fn failures_preserve_native_categories() {
     for error in [
@@ -273,6 +300,15 @@ impl Transport for Raw {
         } else {
             Ok(self.0.clone())
         }
+    }
+    fn flatpak(
+        &self,
+        _: &[OsString],
+        _: &Cancellation,
+        _: bool,
+        _: bool,
+    ) -> Result<Completion, ExecutionError> {
+        Ok(self.0.clone())
     }
 }
 #[test]
