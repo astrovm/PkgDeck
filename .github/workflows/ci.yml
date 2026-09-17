@@ -219,9 +219,9 @@ jobs:
           curl -fL --retry 3 'https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-${{ matrix.arch }}.AppImage' -o "$APPIMAGETOOL"
           chmod +x "$APPIMAGETOOL"
           scripts/package.sh appimage
-          unsquashfs -d build/pkgdeck-appimage-check 'build/artifacts/PkgDeck-${{ matrix.arch }}.AppImage' >/dev/null
-          test -x build/pkgdeck-appimage-check/usr/lib/pkgdeck/appimageupdatetool.AppImage
-          rm -rf build/pkgdeck-appimage-check
+          'build/artifacts/PkgDeck-${{ matrix.arch }}.AppImage' --appimage-extract 'usr/lib/pkgdeck/appimageupdatetool.AppImage' >/dev/null
+          test -x 'squashfs-root/usr/lib/pkgdeck/appimageupdatetool.AppImage'
+          rm -rf squashfs-root
           unset LD_LIBRARY_PATH QML_IMPORT_PATH
           export APPIMAGE_EXTRACT_AND_RUN=1
           scripts/xtask.sh gui 'build/artifacts/PkgDeck-${{ matrix.arch }}.AppImage'
