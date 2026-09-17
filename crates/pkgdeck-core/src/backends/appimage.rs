@@ -123,16 +123,20 @@ impl AppImage {
         })
     }
     fn installed_packages(&self) -> Result<Vec<Package>, EngineError> {
-        let entries = match fs::read_dir(&self.root) {
-            Ok(entries) => entries,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return self.external_packages(),
+        let mut packages = match fs::read_dir(&self.root) {
+            Ok(entries) => entries
+                .filter_map(Result::ok)
+                .map(|e| self.package(e.path()))
+                .collect::<Result<Vec<_>, _>>()?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => vec![],
             Err(e) => return Err(Self::invalid(e.to_string())),
         };
-        let mut packages: Vec<_> = entries
-            .filter_map(Result::ok)
-            .map(|e| self.package(e.path()))
-            .collect::<Result<_, _>>()?;
         packages.extend(self.external_packages()?);
+        // One external AppImage is commonly referenced by several desktop
+        // entries (application launcher, Gear Lever entry, stale copies).
+        // Collapse them so the engine never sees duplicate identities.
+        let mut seen = std::collections::BTreeSet::new();
+        packages.retain(|package| seen.insert(package.id.clone()));
         Ok(packages)
     }
     fn desktop_value(contents: &str, key: &str) -> Option<String> {
@@ -859,6 +863,41 @@ mod tests {
         assert!(backend
             .search("anything", &Cancellation::default())
             .is_err());
+        fs::remove_dir_all(base).unwrap();
+    }
+    #[test]
+    fn duplicate_desktop_entries_collapse_to_one_identity() {
+        let base = std::env::temp_dir().join(format!(
+            "pkgdeck-appimage-duplicate-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        let applications = base.join("applications");
+        let external = base.join("Example.AppImage");
+        fs::create_dir_all(&applications).unwrap();
+        type2(&external);
+        for name in ["example.desktop", "example-copy.desktop"] {
+            fs::write(
+                applications.join(name),
+                format!(
+                    "[Desktop Entry]\nType=Application\nName=Example\nExec=\"{}\" %U\n",
+                    external.display()
+                ),
+            )
+            .unwrap();
+        }
+        let mut backend = AppImage::new(
+            base.join("owned"),
+            applications,
+            rustix::process::getuid().as_raw(),
+        );
+        let cancel = Cancellation::default();
+        let installed = backend.installed(&cancel).unwrap();
+        assert_eq!(installed.len(), 1);
+        assert_eq!(
+            backend.details(&installed[0].id, &cancel).unwrap().package,
+            installed[0]
+        );
         fs::remove_dir_all(base).unwrap();
     }
 }
