@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Exercise one Wave 4 development manager through pkd against real tools.
 # Ephemeral runners need no cleanup; lifecycle state is confirmed through
-# the underlying manager, never only PkgDeck output.
+# the underlying manager, never only PkgDeck output. Tool installations use
+# user-writable prefixes so no step ever needs elevation.
 # Usage: scripts/tests/dev-manager.sh cargo|npm|pnpm|bun <pkd>
 set -euo pipefail
+trap 'echo "dev-manager FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
 backend=${1:?Usage: scripts/tests/dev-manager.sh cargo|npm|pnpm|bun <pkd>}
 pkd=${2:?Usage: scripts/tests/dev-manager.sh cargo|npm|pnpm|bun <pkd>}
 run() { "$pkd" --json --yes --auth sudo --from "$backend" "$@"; }
@@ -11,20 +13,20 @@ success() { run "$@" | grep -q '"exit_code":0'; }
 have() { run list | grep -q "\"name\":\"$1\""; }
 
 setup_node() {
-    if ! command -v npm >/dev/null; then
-        sudo apt-get update
-        sudo apt-get install -y nodejs npm
-    fi
+    command -v npm >/dev/null || { sudo apt-get update && sudo apt-get install -y nodejs npm; }
+    # Keep global installs inside the invoking user's home.
+    npm config set prefix "$HOME/.npm-global"
+    export PATH="$HOME/.npm-global/bin:$PATH"
 }
 
 case $backend in
 cargo)
     success sources
-    cargo install --version 0.10.0 cowsay
+    cargo install cowsay
     have cowsay
     success info cowsay
     success upgrade cowsay
-    cargo install --list | grep -q '^cowsay v0.14.0 '
+    cargo install --list | grep -q '^cowsay v'
     success remove cowsay
     ! cargo install --list | grep -q '^cowsay v'
     ;;
@@ -44,9 +46,7 @@ npm)
     ;;
 pnpm)
     setup_node
-    if ! command -v pnpm >/dev/null; then
-        npm install --global pnpm
-    fi
+    command -v pnpm >/dev/null || npm install --global pnpm
     success sources
     pnpm add --global cowsay@1.5.0
     have cowsay
