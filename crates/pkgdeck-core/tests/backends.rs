@@ -765,3 +765,73 @@ fn homebrew_reports_linked_version_when_old_kegs_are_retained() {
         Some("1.0")
     );
 }
+
+#[test]
+fn flatpak_remote_search_details_and_upgrade_all() {
+    let fixture = FlatpakFixture::default();
+    let mut backend = Flatpak::new(fixture.clone());
+    let cancel = Cancellation::default();
+    let results = backend.search("io.example.User", &cancel).unwrap();
+    assert_eq!(results.len(), 2);
+    assert!(results
+        .iter()
+        .all(|p| p.id.remote.as_deref() == Some("flathub")));
+    let id = results[0].id.clone();
+    assert!(id.remote.is_some());
+    assert_eq!(backend.details(&id, &cancel).unwrap().package.id, id);
+    let mut missing = id.clone();
+    missing.name = "io.example.Missing".into();
+    assert_eq!(
+        backend.details(&missing, &cancel),
+        Err(EngineError::NotFound)
+    );
+    backend
+        .execute(
+            &Operation::UpgradeAll {
+                backend: "flatpak".into(),
+            },
+            &cancel,
+            &mut |_| {},
+        )
+        .unwrap();
+    let calls = fixture.0.lock().unwrap();
+    assert!(calls
+        .iter()
+        .any(|(args, write, system)| *write && !*system && args.contains(&"update".into())));
+    assert!(calls
+        .iter()
+        .any(|(args, write, system)| *write && *system && args.contains(&"update".into())));
+    assert!(backend
+        .execute(
+            &Operation::UpgradeAll {
+                backend: "apt".into(),
+            },
+            &cancel,
+            &mut |_| {},
+        )
+        .is_err());
+}
+
+#[test]
+fn flatpak_search_rejects_malformed_remote_metadata() {
+    let cancel = Cancellation::default();
+    for metadata in [
+        "only\tthree\tfields\n",
+        "Name\tDescription\tbad id!\t1.0\tstable\tflathub\n",
+        "Name\tDescription\tio.example.App\t1.0\tstable\t\n",
+        "Name\tDescription\tio.example.App\t1.0\tstable\t!!!\n",
+    ] {
+        let mut backend = Flatpak::new(Raw(output(metadata)));
+        assert!(backend.search("io.example.App", &cancel).is_err());
+    }
+}
+
+#[test]
+fn flatpak_detect_reports_unavailable_backend() {
+    let cancel = Cancellation::default();
+    let mut backend = Flatpak::new(FailingFlatpak(ExecutionError::Disabled("missing".into())));
+    assert_eq!(
+        backend.detect(&cancel),
+        Ok(Availability::Unavailable("missing".into()))
+    );
+}

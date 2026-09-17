@@ -430,3 +430,40 @@ fn apt_refresh_upgrade_and_multiarch_keep_native_safety_options() {
         assert!(AptAction::Install(name.into()).arguments().is_err());
     }
 }
+
+#[test]
+fn system_manager_reads_keep_snap_timeout_and_exit_status() {
+    let fixture = Fixture::new();
+    fixture.executable("snap");
+    fixture.executable("synthetic-ok");
+    let failing = fixture.0.join("synthetic-tool");
+    fs::write(&failing, "#!/bin/sh\nexit 3\n").unwrap();
+    fs::set_permissions(&failing, fs::Permissions::from_mode(0o755)).unwrap();
+    let host = Host::new(
+        Runtime::Native,
+        env(&[("PATH", fixture.0.to_str().unwrap())]),
+    );
+    let cancel = Cancellation::default();
+    for executable in ["snap", "synthetic-ok"] {
+        let ok = host
+            .system_manager(
+                executable,
+                &[],
+                &cancel,
+                false,
+                Authorization::SudoNonInteractive,
+            )
+            .unwrap();
+        assert_eq!(ok.code, Some(0));
+    }
+    assert!(matches!(
+        host.system_manager(
+            "synthetic-tool",
+            &[],
+            &cancel,
+            false,
+            Authorization::SudoNonInteractive,
+        ),
+        Err(ExecutionError::Failed(_))
+    ));
+}

@@ -400,27 +400,25 @@ pub enum AptAction {
 
 impl AptAction {
     pub fn arguments(&self) -> Result<Vec<OsString>, ExecutionError> {
-        if matches!(self, Self::Refresh) {
-            return Ok([
-                "--assume-yes",
-                "-o",
-                "DPkg::Lock::Timeout=0",
-                "-o",
-                "APT::Update::Error-Mode=any",
-                "update",
-            ]
-            .map(OsString::from)
-            .to_vec());
-        }
-        if matches!(self, Self::UpgradeAll) {
-            return Ok(["--assume-yes", "-o", "DPkg::Lock::Timeout=0", "upgrade"]
+        let (operation, package) = match self {
+            Self::Refresh => {
+                return Ok([
+                    "--assume-yes",
+                    "-o",
+                    "DPkg::Lock::Timeout=0",
+                    "-o",
+                    "APT::Update::Error-Mode=any",
+                    "update",
+                ]
                 .map(OsString::from)
                 .to_vec());
-        }
-        let (operation, package) = match self {
-            Self::Refresh => unreachable!(),
+            }
+            Self::UpgradeAll => {
+                return Ok(["--assume-yes", "-o", "DPkg::Lock::Timeout=0", "upgrade"]
+                    .map(OsString::from)
+                    .to_vec());
+            }
             Self::Upgrade(package) => ("install", package),
-            Self::UpgradeAll => unreachable!(),
             Self::Install(package) => ("install", package),
             Self::Remove(package) => ("remove", package),
         };
