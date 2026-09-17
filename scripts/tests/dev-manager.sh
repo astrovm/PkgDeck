@@ -47,6 +47,11 @@ npm)
 pnpm)
     setup_node
     command -v pnpm >/dev/null || npm install --global pnpm
+    # pnpm refuses global operations unless its bin directory is on PATH.
+    export PNPM_HOME="$HOME/.local/share/pnpm"
+    mkdir -p "$PNPM_HOME/bin"
+    export PATH="$PNPM_HOME/bin:$PATH"
+    pnpm --version
     success sources
     pnpm add --global cowsay@1.5.0
     have cowsay
@@ -64,6 +69,7 @@ bun)
         curl -fsSL https://bun.sh/install | bash
         export PATH="$HOME/.bun/bin:$PATH"
     fi
+    bun --version
     success sources
     bun add --global cowsay@1.5.0
     have cowsay
