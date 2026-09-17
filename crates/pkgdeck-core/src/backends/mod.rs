@@ -323,6 +323,18 @@ impl<T: Transport> Backend for Flatpak<T> {
         }
         let mut result = self.search_scope(query, cancel, false)?;
         result.extend(self.search_scope(query, cancel, true)?);
+        // Remote search results do not carry an installed scope: the user and
+        // system queries return the same catalog entries. Deduplicate them so
+        // a single remote application resolves unambiguously, preferring the
+        // unprivileged user scope used for installs by default.
+        let mut seen = std::collections::BTreeSet::new();
+        result.retain(|package| {
+            seen.insert((
+                package.id.name.clone(),
+                package.id.architecture.clone(),
+                package.id.remote.clone(),
+            ))
+        });
         Ok(result)
     }
     fn installed(&mut self, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {

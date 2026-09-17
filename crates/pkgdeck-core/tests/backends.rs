@@ -395,7 +395,7 @@ fn flatpak_operations_keep_scope_and_noninteractive_arguments() {
         .unwrap()
         .id
         .clone();
-    assert_eq!(backend.search("io.example.User", &cancel).unwrap().len(), 2);
+    assert_eq!(backend.search("io.example.User", &cancel).unwrap().len(), 1);
     assert!(backend.search("--bad", &cancel).is_err());
     assert_eq!(backend.details(&user, &cancel).unwrap().package.id, user);
     for operation in [
@@ -772,7 +772,10 @@ fn flatpak_remote_search_details_and_upgrade_all() {
     let mut backend = Flatpak::new(fixture.clone());
     let cancel = Cancellation::default();
     let results = backend.search("io.example.User", &cancel).unwrap();
-    assert_eq!(results.len(), 2);
+    // The user and system catalog queries return the same remote entry;
+    // it must collapse to one identity so engine selection is unambiguous.
+    assert_eq!(results.len(), 1);
+    assert!(matches!(results[0].id.scope, Scope::User { .. }));
     assert!(results
         .iter()
         .all(|p| p.id.remote.as_deref() == Some("flathub")));
@@ -834,4 +837,27 @@ fn flatpak_detect_reports_unavailable_backend() {
         backend.detect(&cancel),
         Ok(Availability::Unavailable("missing".into()))
     );
+}
+
+#[test]
+fn flatpak_remote_search_resolves_to_a_single_identity() {
+    // Mirrors `pkd --from flatpak info <app>`: engine selection must see one
+    // identity, not Ambiguous user/system duplicates, and details must follow.
+    let cancel = Cancellation::default();
+    let mut engine = Engine::default();
+    engine
+        .register(Flatpak::new(FlatpakFixture::default()))
+        .unwrap();
+    let report = engine.search("io.example.User", &cancel);
+    assert!(report.failures.is_empty());
+    let id = report
+        .select(&Selector {
+            name: "io.example.User".into(),
+            backend: Some("flatpak".into()),
+            architecture: None,
+            scope: None,
+        })
+        .unwrap();
+    assert!(id.remote.is_some());
+    assert_eq!(engine.details(&id, &cancel).unwrap().package.id, id);
 }
