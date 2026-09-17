@@ -1250,7 +1250,7 @@ struct PnpmEntry {
 
 #[derive(Deserialize)]
 struct PnpmOutdated {
-    wanted: String,
+    latest: String,
 }
 
 #[derive(Deserialize)]
@@ -1534,9 +1534,9 @@ impl<T: Transport> DevTool<T> {
         let mut details = Vec::new();
         for root in roots {
             for (name, entry) in root.dependencies {
-                let candidate = outdated.get(&name).map(|outdated| outdated.wanted.clone());
+                let candidate = outdated.get(&name).map(|outdated| outdated.latest.clone());
                 let candidate = match candidate {
-                    Some(wanted) if wanted != entry.version => Some(wanted),
+                    Some(latest) if latest != entry.version => Some(latest),
                     _ => Some(entry.version.clone()),
                 };
                 details.push(self.detail(
@@ -1609,6 +1609,61 @@ impl<T: Transport> DevTool<T> {
             DevKind::Pnpm => self.pnpm_inventory(&home, cancel),
             DevKind::Bun => self.bun_inventory(&home),
         }
+    }
+    fn upgrade(
+        &self,
+        target: &PackageId,
+        cancel: &Cancellation,
+        progress: &mut dyn FnMut(Progress),
+    ) -> Result<OperationOutcome, EngineError> {
+        // pnpm and Bun keep pinned ranges, so plain `update` would not move
+        // explicitly versioned tools. Reinstalling at `@latest` is also what
+        // the reported candidate reflects.
+        let name = self.target(target)?;
+        progress(Progress::Message(format!(
+            "Upgrading {name} as the invoking user."
+        )));
+        let result = match self.kind {
+            DevKind::Cargo => self.call(&["install", "--force", name], cancel, true)?,
+            DevKind::Npm => self.call(&["update", "--global", name], cancel, true)?,
+            DevKind::Pnpm | DevKind::Bun => {
+                let latest = format!("{name}@latest");
+                self.call(&["add", "--global", &latest], cancel, true)?
+            }
+        };
+        Ok(OperationOutcome {
+            cancellation_deferred: result.cancellation_deferred,
+        })
+    }
+    fn upgrade_all(
+        &self,
+        cancel: &Cancellation,
+        progress: &mut dyn FnMut(Progress),
+    ) -> Result<OperationOutcome, EngineError> {
+        // Cargo has no registry upgrade command; refresh every installed
+        // tool in place as the single per-backend transaction.
+        if self.kind == DevKind::Npm {
+            progress(Progress::Message(format!(
+                "Updating {} packages as the invoking user.",
+                self.kind.id()
+            )));
+            let result = self.call(&["update", "--global"], cancel, true)?;
+            return Ok(OperationOutcome {
+                cancellation_deferred: result.cancellation_deferred,
+            });
+        }
+        for package in self.inventory(cancel)? {
+            let name = &package.package.id.name;
+            if self.kind == DevKind::Cargo {
+                progress(Progress::Message(format!("Reinstalling {name}.")));
+                self.call(&["install", "--force", name], cancel, true)?;
+            } else {
+                progress(Progress::Message(format!("Upgrading {name} to latest.")));
+                let latest = format!("{name}@latest");
+                self.call(&["add", "--global", &latest], cancel, true)?;
+            }
+        }
+        Ok(OperationOutcome::default())
     }
 }
 
@@ -1695,24 +1750,6 @@ impl<T: Transport> Backend for DevTool<T> {
         if operation.backend() != id {
             return Err(invalid(id, "foreign operation"));
         }
-        // Cargo has no registry upgrade command; refresh every installed
-        // tool in place as the single per-backend transaction.
-        if self.kind == DevKind::Cargo {
-            if let Operation::UpgradeAll { .. } = operation {
-                for package in self.inventory(cancel)? {
-                    progress(Progress::Message(format!(
-                        "Reinstalling {}.",
-                        package.package.id.name
-                    )));
-                    self.call(
-                        &["install", "--force", &package.package.id.name],
-                        cancel,
-                        true,
-                    )?;
-                }
-                return Ok(OperationOutcome::default());
-            }
-        }
         let args: Vec<&str> = match operation {
             Operation::Refresh { .. } => return Err(self.unsupported(Capability::Refresh)),
             Operation::Install(target) => match self.kind {
@@ -1725,13 +1762,12 @@ impl<T: Transport> Backend for DevTool<T> {
                 DevKind::Npm => vec!["uninstall", "--global", self.target(target)?],
                 DevKind::Pnpm | DevKind::Bun => vec!["remove", "--global", self.target(target)?],
             },
-            Operation::Upgrade(target) => match self.kind {
-                DevKind::Cargo => vec!["install", "--force", self.target(target)?],
-                DevKind::Npm | DevKind::Pnpm | DevKind::Bun => {
-                    vec!["update", "--global", self.target(target)?]
-                }
-            },
-            Operation::UpgradeAll { .. } => vec!["update", "--global"],
+            Operation::Upgrade(target) => {
+                return self.upgrade(target, cancel, progress);
+            }
+            Operation::UpgradeAll { .. } => {
+                return self.upgrade_all(cancel, progress);
+            }
         };
         progress(Progress::Message(format!(
             "Running {id} as the invoking user; cancellation waits for completion."

@@ -1322,16 +1322,21 @@ fn pnpm_lifecycle() {
     let writes = fixture.writes("pnpm");
     assert!(writes.contains(&vec!["add".into(), "--global".into(), "new-tool".into()]));
     assert!(writes.contains(&vec![
-        "update".into(),
+        "add".into(),
         "--global".into(),
-        "typescript".into()
+        "typescript@latest".into()
     ]));
     assert!(writes.contains(&vec![
         "remove".into(),
         "--global".into(),
         "typescript".into()
     ]));
-    assert!(writes.contains(&vec!["update".into(), "--global".into()]));
+    assert!(writes.contains(&vec![
+        "add".into(),
+        "--global".into(),
+        "typescript@latest".into()
+    ]));
+    assert!(!writes.contains(&vec!["update".into(), "--global".into()]));
 }
 
 #[test]
@@ -1341,7 +1346,7 @@ fn pnpm_outdated_newer_reports_available() {
         root: Some("/home/test/.local/share/pnpm/global/9".into()),
         list: PNPM_LIST.into(),
         outdated: Some(
-            r#"{"typescript": {"current": "7.0.2", "wanted": "7.1.0", "latest": "8.0.0"}}"#.into(),
+            r#"{"typescript": {"current": "7.0.2", "wanted": "7.0.2", "latest": "7.1.0"}}"#.into(),
         ),
         ..DevFixture::default()
     };
@@ -1454,9 +1459,18 @@ fn bun_lifecycle() {
         .is_err());
     let writes = fixture.writes("bun");
     assert!(writes.contains(&vec!["add".into(), "--global".into(), "new-tool".into()]));
-    assert!(writes.contains(&vec!["update".into(), "--global".into(), "alpha".into()]));
+    assert!(writes.contains(&vec![
+        "add".into(),
+        "--global".into(),
+        "alpha@latest".into()
+    ]));
     assert!(writes.contains(&vec!["remove".into(), "--global".into(), "alpha".into()]));
-    assert!(writes.contains(&vec!["update".into(), "--global".into()]));
+    assert!(writes.contains(&vec![
+        "add".into(),
+        "--global".into(),
+        "alpha@latest".into()
+    ]));
+    assert!(!writes.contains(&vec!["update".into(), "--global".into()]));
     std::fs::remove_dir_all(&base).unwrap();
 }
 
