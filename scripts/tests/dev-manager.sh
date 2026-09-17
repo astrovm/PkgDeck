@@ -6,6 +6,7 @@
 # Usage: scripts/tests/dev-manager.sh cargo|npm|pnpm|bun <pkd>
 set -euo pipefail
 trap 'echo "dev-manager FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+echo "dev-manager: backend=$backend pkd=$pkd user=$(whoami) home=$HOME" 
 backend=${1:?Usage: scripts/tests/dev-manager.sh cargo|npm|pnpm|bun <pkd>}
 pkd=${2:?Usage: scripts/tests/dev-manager.sh cargo|npm|pnpm|bun <pkd>}
 run() { "$pkd" --json --yes --auth sudo --from "$backend" "$@"; }
@@ -51,6 +52,7 @@ pnpm)
     export PNPM_HOME="$HOME/.local/share/pnpm"
     mkdir -p "$PNPM_HOME/bin"
     export PATH="$PNPM_HOME/bin:$PATH"
+    command -v pnpm
     pnpm --version
     success sources
     pnpm add --global cowsay@1.5.0
@@ -66,9 +68,11 @@ pnpm)
     ;;
 bun)
     if ! command -v bun >/dev/null; then
-        curl -fsSL https://bun.sh/install | bash
+        curl -fsSL https://bun.sh/install -o /tmp/bun-install.sh \
+            && bash /tmp/bun-install.sh || npm install --global bun
         export PATH="$HOME/.bun/bin:$PATH"
     fi
+    command -v bun
     bun --version
     success sources
     bun add --global cowsay@1.5.0
