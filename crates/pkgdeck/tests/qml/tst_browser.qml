@@ -192,17 +192,17 @@ TestCase {
         const icon = createTemporaryObject(vectorIcon, browser.contentItem);
         verify(icon !== null);
         icon.ink = "transparent";
-        wait(100);
+        waitForRendering(icon);
         const blank = grabImage(icon);
         for (const name of Object.keys(icon.drawings)) {
             icon.name = name;
             icon.ink = "#ffffff";
-            wait(100);
+            waitForRendering(icon);
             verify(icon.available);
             verify(!grabImage(icon).equals(blank), name + " should paint a bundled vector");
             const light = grabImage(icon);
             icon.ink = "#102030";
-            wait(100);
+            waitForRendering(icon);
             verify(!grabImage(icon).equals(light), name + " should follow the palette");
         }
     }
