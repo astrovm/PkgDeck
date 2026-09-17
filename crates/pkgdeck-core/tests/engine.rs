@@ -26,6 +26,7 @@ fn id(backend: &str) -> PackageId {
         name: "fixture-tool".into(),
         architecture: "x86_64".into(),
         scope: Scope::System,
+        remote: None,
     }
 }
 fn package(id: PackageId) -> Package {
@@ -165,6 +166,15 @@ impl Backend for Synthetic {
                 let package = self.packages.get_mut(id).ok_or(EngineError::NotFound)?;
                 package.installed_version = package.candidate_version.clone();
                 package.update = UpdateAvailability::Current;
+            }
+            Operation::UpgradeAll { backend } => {
+                if backend != self.id() {
+                    return Err(EngineError::NotFound);
+                }
+                for package in self.packages.values_mut() {
+                    package.installed_version = package.candidate_version.clone();
+                    package.update = UpdateAvailability::Current;
+                }
             }
             Operation::Remove(id) => {
                 let package = self.packages.get_mut(id).ok_or(EngineError::NotFound)?;

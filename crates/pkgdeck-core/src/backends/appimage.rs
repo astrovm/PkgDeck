@@ -1,8 +1,13 @@
-use crate::{engine::*, package::*, process::Cancellation};
+use crate::{
+    engine::*,
+    package::*,
+    process::{self, Cancellation, ExecutionError, Limits},
+};
 use sha2::{Digest, Sha256};
 use std::{
     fs,
     io::{Read, Seek, SeekFrom},
+    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
 };
 
@@ -12,6 +17,7 @@ const CAPABILITIES: &[Capability] = &[
     Capability::Installed,
     Capability::Install,
     Capability::Remove,
+    Capability::Upgrade,
 ];
 
 /// Imports only Type 2 AppImages into PkgDeck-owned storage. Metadata inspection
@@ -20,6 +26,8 @@ pub struct AppImage {
     root: PathBuf,
     applications: PathBuf,
     uid: u32,
+    #[cfg(test)]
+    updater: Option<PathBuf>,
 }
 
 impl AppImage {
@@ -34,6 +42,8 @@ impl AppImage {
             root: data.join("pkgdeck/appimages"),
             applications: data.join("applications"),
             uid: rustix::process::getuid().as_raw(),
+            #[cfg(test)]
+            updater: None,
         }
     }
     #[cfg(test)]
@@ -42,7 +52,13 @@ impl AppImage {
             root,
             applications,
             uid,
+            updater: None,
         }
+    }
+    #[cfg(test)]
+    fn with_updater(mut self, updater: PathBuf) -> Self {
+        self.updater = Some(updater);
+        self
     }
     fn scope(&self) -> Scope {
         Scope::User { uid: self.uid }
@@ -93,24 +109,132 @@ impl AppImage {
                 name: name.into(),
                 architecture,
                 scope: self.scope(),
+                remote: None,
             },
             display_name: "Imported AppImage".into(),
             summary: format!("PkgDeck-managed local Type 2 AppImage ({digest})"),
             installed_version: Some(digest.into()),
             candidate_version: Some(digest.into()),
-            update: UpdateAvailability::Current,
+            update: if self.updater().is_ok() {
+                UpdateAvailability::Available
+            } else {
+                UpdateAvailability::Current
+            },
         })
     }
     fn installed_packages(&self) -> Result<Vec<Package>, EngineError> {
         let entries = match fs::read_dir(&self.root) {
             Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return self.external_packages(),
+            Err(e) => return Err(Self::invalid(e.to_string())),
+        };
+        let mut packages: Vec<_> = entries
+            .filter_map(Result::ok)
+            .map(|e| self.package(e.path()))
+            .collect::<Result<_, _>>()?;
+        packages.extend(self.external_packages()?);
+        Ok(packages)
+    }
+    fn desktop_value(contents: &str, key: &str) -> Option<String> {
+        contents
+            .lines()
+            .find_map(|line| line.strip_prefix(key).map(str::to_owned))
+            .filter(|value| !value.is_empty())
+    }
+    /// Return the executable from an `Exec=` value when it is an absolute path.
+    /// Desktop entry field codes are deliberately ignored after the executable.
+    fn exec_path(value: &str) -> Option<PathBuf> {
+        let value = value.trim_start();
+        let executable = if let Some(value) = value.strip_prefix('"') {
+            let mut escaped = false;
+            let mut end = None;
+            for (index, character) in value.char_indices() {
+                if escaped {
+                    escaped = false;
+                } else if character == '\\' {
+                    escaped = true;
+                } else if character == '"' {
+                    end = Some(index);
+                    break;
+                }
+            }
+            let end = end?;
+            value[..end].replace("\\\\", "\\").replace("\\\"", "\"")
+        } else {
+            value.split_whitespace().next()?.into()
+        };
+        let path = PathBuf::from(executable);
+        path.is_absolute().then_some(path)
+    }
+    fn desktop_appimage_path(contents: &str) -> Option<PathBuf> {
+        Self::desktop_value(contents, "TryExec=")
+            .and_then(|value| {
+                let path = PathBuf::from(&value);
+                path.is_absolute()
+                    .then_some(path)
+                    .or_else(|| Self::exec_path(&value))
+            })
+            .or_else(|| {
+                Self::desktop_value(contents, "Exec=").and_then(|value| Self::exec_path(&value))
+            })
+    }
+    fn external_entries(&self) -> Result<Vec<(Package, PathBuf)>, EngineError> {
+        let entries = match fs::read_dir(&self.applications) {
+            Ok(entries) => entries,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
             Err(e) => return Err(Self::invalid(e.to_string())),
         };
-        entries
+        Ok(entries
             .filter_map(Result::ok)
-            .map(|e| self.package(e.path()))
-            .collect()
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "desktop"))
+            .filter_map(|entry| {
+                let desktop = entry.path();
+                let contents = fs::read_to_string(&desktop).ok()?;
+                let path = Self::desktop_appimage_path(&contents)?;
+                let canonical = fs::canonicalize(path).ok()?;
+                let metadata = fs::metadata(&canonical).ok()?;
+                if !canonical.is_absolute()
+                    || canonical.starts_with(&self.root)
+                    || !metadata.is_file()
+                    || metadata.uid() != self.uid
+                {
+                    return None;
+                }
+                let architecture = Self::type2(&canonical).ok()?;
+                let display_name = Self::desktop_value(&contents, "Name=")
+                    .unwrap_or_else(|| "External AppImage".into());
+                let version = Self::desktop_value(&contents, "X-AppImage-Version=")
+                    .unwrap_or_else(|| "local".into());
+                Some((
+                    Package {
+                        id: PackageId {
+                            backend: "appimage".into(),
+                            name: canonical.display().to_string(),
+                            architecture,
+                            scope: self.scope(),
+                            remote: None,
+                        },
+                        display_name,
+                        summary: "Externally managed local Type 2 AppImage".into(),
+                        installed_version: Some(version.clone()),
+                        candidate_version: Some(version),
+                        update: if self.updater().is_ok() {
+                            UpdateAvailability::Available
+                        } else {
+                            UpdateAvailability::Current
+                        },
+                    },
+                    desktop,
+                ))
+            })
+            .collect::<Vec<_>>())
+    }
+    fn external_packages(&self) -> Result<Vec<Package>, EngineError> {
+        Ok(self
+            .external_entries()?
+            .into_iter()
+            .map(|(package, _)| package)
+            .collect())
     }
     fn import(&self, id: &PackageId) -> Result<(), EngineError> {
         if id.backend != "appimage"
@@ -143,6 +267,55 @@ impl AppImage {
             .join(format!("pkgdeck-{}.desktop", &name[8..72]));
         fs::write(entry, format!("[Desktop Entry]\nType=Application\nName=Imported AppImage\nExec=\"{}\" %U\nTerminal=false\n", destination.display())).map_err(|e| Self::invalid(e.to_string()))
     }
+    fn updater(&self) -> Result<PathBuf, EngineError> {
+        #[cfg(test)]
+        if let Some(updater) = &self.updater {
+            return Ok(updater.clone());
+        }
+        let executable = std::env::current_exe().map_err(|e| Self::invalid(e.to_string()))?;
+        let helper = executable
+            .parent()
+            .and_then(Path::parent)
+            .map(|root| root.join("lib/pkgdeck/appimageupdatetool.AppImage"))
+            .ok_or_else(|| Self::invalid("cannot locate bundled AppImage updater"))?;
+        helper
+            .is_file()
+            .then_some(helper)
+            .ok_or_else(|| Self::invalid("bundled AppImage updater is unavailable"))
+    }
+    fn update(&self, id: &PackageId, cancel: &Cancellation) -> Result<(), EngineError> {
+        let target = if Self::managed_name(&id.name) && id.scope == self.scope() {
+            self.root.join(&id.name)
+        } else {
+            self.external_entries()?
+                .into_iter()
+                .find(|(package, _)| package.id == *id)
+                .map(|(_, _)| PathBuf::from(&id.name))
+                .ok_or(EngineError::NotFound)?
+        };
+        let mut command = std::process::Command::new(self.updater()?);
+        command.args([
+            "--appimage-extract-and-run",
+            "--overwrite",
+            "--remove-old",
+            "--",
+        ]);
+        command.arg(target);
+        let result = process::run(
+            command,
+            Limits {
+                timeout: std::time::Duration::from_secs(600),
+                output_bytes: 32 * 1024 * 1024,
+            },
+            cancel,
+            true,
+        )?;
+        if result.code == Some(0) {
+            Ok(())
+        } else {
+            Err(ExecutionError::Failed(result).into())
+        }
+    }
 }
 
 impl Backend for AppImage {
@@ -171,6 +344,7 @@ impl Backend for AppImage {
                     scope: Scope::Environment {
                         path: self.root.clone(),
                     },
+                    remote: None,
                 },
                 display_name: source
                     .file_name()
@@ -183,10 +357,14 @@ impl Backend for AppImage {
                 update: UpdateAvailability::Unknown,
             }]);
         }
+        let query = query.to_ascii_lowercase();
         Ok(self
             .installed_packages()?
             .into_iter()
-            .filter(|p| p.id.name.contains(query))
+            .filter(|p| {
+                p.id.name.to_ascii_lowercase().contains(&query)
+                    || p.display_name.to_ascii_lowercase().contains(&query)
+            })
             .collect())
     }
     fn installed(&mut self, _: &Cancellation) -> Result<Vec<Package>, EngineError> {
@@ -203,7 +381,7 @@ impl Backend for AppImage {
     fn execute(
         &mut self,
         operation: &Operation,
-        _: &Cancellation,
+        cancel: &Cancellation,
         progress: &mut dyn FnMut(Progress),
     ) -> Result<OperationOutcome, EngineError> {
         match operation {
@@ -228,6 +406,32 @@ impl Backend for AppImage {
                         .join(format!("pkgdeck-{}.desktop", &id.name[8..72])),
                 );
             }
+            Operation::Remove(id)
+                if id.backend == "appimage" && id.scope == self.scope() && id.remote.is_none() =>
+            {
+                let (package, desktop) = self
+                    .external_entries()?
+                    .into_iter()
+                    .find(|(package, _)| package.id == *id)
+                    .ok_or(EngineError::NotFound)?;
+                progress(Progress::Message(format!(
+                    "Removing external AppImage {} and its desktop entry.",
+                    package.display_name
+                )));
+                fs::remove_file(&id.name).map_err(|e| Self::invalid(e.to_string()))?;
+                fs::remove_file(desktop).map_err(|e| Self::invalid(e.to_string()))?;
+            }
+            Operation::Upgrade(id) if id.backend == "appimage" => {
+                progress(Progress::Message(
+                    "Updating AppImage with its embedded update information.".into(),
+                ));
+                self.update(id, cancel)?;
+            }
+            Operation::UpgradeAll { backend } if backend == "appimage" => {
+                for package in self.installed_packages()? {
+                    self.update(&package.id, cancel)?;
+                }
+            }
             _ => return Err(Self::invalid("foreign or unsupported AppImage operation")),
         }
         Ok(OperationOutcome::default())
@@ -244,6 +448,22 @@ mod tests {
         header[8..11].copy_from_slice(b"AI\x02");
         header[18..20].copy_from_slice(&62_u16.to_le_bytes());
         fs::write(path, header).unwrap();
+    }
+
+    fn updater(base: &Path, status: u8) -> (PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let updater = base.join("updater");
+        let calls = base.join("updater-calls");
+        fs::write(
+            &updater,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" >> {}\nexit {status}\n",
+                calls.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&updater, fs::Permissions::from_mode(0o755)).unwrap();
+        (updater, calls)
     }
 
     #[test]
@@ -306,6 +526,27 @@ mod tests {
     }
 
     #[test]
+    fn desktop_exec_paths_accept_quoted_and_plain_appimages() {
+        assert_eq!(
+            AppImage::exec_path("\"/home/user/Apps/Audacity.AppImage\" %U"),
+            Some(PathBuf::from("/home/user/Apps/Audacity.AppImage"))
+        );
+        assert_eq!(
+            AppImage::exec_path("/home/user/Apps/Audacity.AppImage --verbose"),
+            Some(PathBuf::from("/home/user/Apps/Audacity.AppImage"))
+        );
+        assert_eq!(
+            AppImage::exec_path("\"/home/user/Apps/Audacity\\\"Edition.AppImage\""),
+            Some(PathBuf::from("/home/user/Apps/Audacity\"Edition.AppImage"))
+        );
+        assert_eq!(AppImage::exec_path("Audacity.AppImage"), None);
+        assert_eq!(
+            AppImage::exec_path("\"/home/user/Apps/Audacity.AppImage"),
+            None
+        );
+    }
+
+    #[test]
     fn local_search_details_and_validation_are_explicit() {
         let base = std::env::temp_dir().join(format!(
             "pkgdeck-appimage-coverage-test-{}",
@@ -338,6 +579,125 @@ mod tests {
         let cancelled = Cancellation::default();
         cancelled.cancel();
         assert_eq!(backend.detect(&cancelled), Err(EngineError::Cancelled));
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn discovers_and_removes_user_owned_external_desktop_entries() {
+        let base = std::env::temp_dir().join(format!(
+            "pkgdeck-appimage-external-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        let applications = base.join("applications");
+        let external = base.join("Audacity.AppImage");
+        fs::create_dir_all(&applications).unwrap();
+        type2(&external);
+        let desktop = applications.join("audacity.desktop");
+        fs::write(
+            &desktop,
+            format!(
+                "[Desktop Entry]\nType=Application\nName=Audacity Portable\nExec=\"{}\" %U\nX-AppImage-Version=4.0\n",
+                external.display()
+            ),
+        )
+        .unwrap();
+        let mut backend = AppImage::new(
+            base.join("owned"),
+            applications,
+            rustix::process::getuid().as_raw(),
+        );
+        let cancel = Cancellation::default();
+        let package = backend.search("audacity", &cancel).unwrap().remove(0);
+        assert_eq!(package.display_name, "Audacity Portable");
+        assert_eq!(package.installed_version.as_deref(), Some("4.0"));
+        assert_eq!(
+            backend.details(&package.id, &cancel).unwrap().package,
+            package
+        );
+        backend
+            .execute(&Operation::Remove(package.id), &cancel, &mut |_| {})
+            .unwrap();
+        assert!(!external.exists());
+        assert!(!desktop.exists());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn upgrades_managed_and_external_appimages_with_the_bundled_helper() {
+        let base = std::env::temp_dir().join(format!(
+            "pkgdeck-appimage-updater-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        let applications = base.join("applications");
+        fs::create_dir_all(&applications).unwrap();
+        let (updater, calls) = updater(&base, 0);
+        let source = base.join("source.AppImage");
+        type2(&source);
+        let root = base.join("owned");
+        let mut backend = AppImage::new(
+            root.clone(),
+            applications.clone(),
+            rustix::process::getuid().as_raw(),
+        )
+        .with_updater(updater.clone());
+        let cancel = Cancellation::default();
+        let candidate = backend
+            .search(source.to_str().unwrap(), &cancel)
+            .unwrap()
+            .remove(0);
+        backend
+            .execute(&Operation::Install(candidate.id), &cancel, &mut |_| {})
+            .unwrap();
+        let managed = backend.installed(&cancel).unwrap().remove(0);
+
+        let external = base.join("external.AppImage");
+        type2(&external);
+        fs::write(
+            applications.join("external.desktop"),
+            format!("[Desktop Entry]\nExec={}\n", external.display()),
+        )
+        .unwrap();
+        let external = backend.search("external", &cancel).unwrap().remove(0);
+
+        backend
+            .execute(
+                &Operation::Upgrade(managed.id.clone()),
+                &cancel,
+                &mut |_| {},
+            )
+            .unwrap();
+        assert!(fs::read_to_string(&calls)
+            .unwrap()
+            .contains(&root.join(&managed.id.name).display().to_string()));
+        fs::write(&calls, "").unwrap();
+        backend
+            .execute(
+                &Operation::Upgrade(external.id.clone()),
+                &cancel,
+                &mut |_| {},
+            )
+            .unwrap();
+        assert!(fs::read_to_string(&calls)
+            .unwrap()
+            .contains(&external.id.name));
+        fs::write(&calls, "").unwrap();
+        backend
+            .execute(
+                &Operation::UpgradeAll {
+                    backend: "appimage".into(),
+                },
+                &cancel,
+                &mut |_| {},
+            )
+            .unwrap();
+        assert_eq!(fs::read_to_string(&calls).unwrap().lines().count(), 10);
+
+        fs::write(&updater, "#!/bin/sh\nexit 9\n").unwrap();
+        assert!(backend
+            .execute(&Operation::Upgrade(managed.id), &cancel, &mut |_| {})
+            .is_err());
         fs::remove_dir_all(base).unwrap();
     }
 
@@ -408,6 +768,7 @@ mod tests {
             name: managed_source.display().to_string(),
             architecture: "x86_64".into(),
             scope: Scope::Environment { path: root },
+            remote: None,
         };
         assert!(backend
             .execute(&Operation::Install(foreign), &cancel, &mut |_| {})
@@ -438,6 +799,66 @@ mod tests {
             .search("relative.AppImage", &cancel)
             .unwrap()
             .is_empty());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn reports_appimage_interface_and_invalid_storage_paths() {
+        let base = std::env::temp_dir().join(format!(
+            "pkgdeck-appimage-interface-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let aarch64 = base.join("aarch64.AppImage");
+        type2(&aarch64);
+        let mut bytes = fs::read(&aarch64).unwrap();
+        bytes[18..20].copy_from_slice(&183_u16.to_le_bytes());
+        fs::write(&aarch64, bytes).unwrap();
+        assert_eq!(AppImage::type2(&aarch64).unwrap(), "aarch64");
+        assert_eq!(
+            AppImage::desktop_appimage_path("TryExec=/opt/Audacity.AppImage\nExec=audacity"),
+            Some(PathBuf::from("/opt/Audacity.AppImage"))
+        );
+        assert_eq!(
+            AppImage::desktop_appimage_path(
+                "TryExec=gearlever\nExec=\"/opt/Audacity Portable.AppImage\" %U"
+            ),
+            Some(PathBuf::from("/opt/Audacity Portable.AppImage"))
+        );
+
+        let root = base.join("owned");
+        let applications = base.join("applications");
+        let uid = rustix::process::getuid().as_raw();
+        let mut backend = AppImage::new(root.clone(), applications.clone(), uid);
+        assert_eq!(backend.id(), "appimage");
+        assert!(backend.capabilities().contains(&Capability::Upgrade));
+        assert_eq!(
+            backend.detect(&Cancellation::default()),
+            Ok(Availability::Available)
+        );
+        let foreign = PackageId {
+            backend: "other".into(),
+            name: aarch64.display().to_string(),
+            architecture: "aarch64".into(),
+            scope: Scope::Environment { path: root.clone() },
+            remote: None,
+        };
+        assert!(backend
+            .execute(
+                &Operation::Install(foreign),
+                &Cancellation::default(),
+                &mut |_| {}
+            )
+            .is_err());
+
+        fs::write(&root, "not a directory").unwrap();
+        assert!(backend.installed(&Cancellation::default()).is_err());
+        fs::remove_file(&root).unwrap();
+        fs::write(&applications, "not a directory").unwrap();
+        assert!(backend
+            .search("anything", &Cancellation::default())
+            .is_err());
         fs::remove_dir_all(base).unwrap();
     }
 }

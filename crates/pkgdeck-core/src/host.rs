@@ -312,7 +312,26 @@ impl Host {
         if write {
             self.privileged(&path, args, authorization, cancel)
         } else {
-            self.run(&path, args, cancel, false)
+            let timeout = if executable == "snap" {
+                std::time::Duration::from_secs(60)
+            } else {
+                Limits::default().timeout
+            };
+            let command = self.command(&path, args)?;
+            let result = process::run(
+                command,
+                Limits {
+                    timeout,
+                    ..Limits::default()
+                },
+                cancel,
+                false,
+            )?;
+            if result.code == Some(0) {
+                Ok(result)
+            } else {
+                Err(ExecutionError::Failed(result))
+            }
         }
     }
 
@@ -374,26 +393,31 @@ impl Authorization {
 pub enum AptAction {
     Refresh,
     Upgrade(String),
+    UpgradeAll,
     Install(String),
     Remove(String),
 }
 
 impl AptAction {
     pub fn arguments(&self) -> Result<Vec<OsString>, ExecutionError> {
-        if matches!(self, Self::Refresh) {
-            return Ok([
-                "--assume-yes",
-                "-o",
-                "DPkg::Lock::Timeout=0",
-                "-o",
-                "APT::Update::Error-Mode=any",
-                "update",
-            ]
-            .map(OsString::from)
-            .to_vec());
-        }
         let (operation, package) = match self {
-            Self::Refresh => unreachable!(),
+            Self::Refresh => {
+                return Ok([
+                    "--assume-yes",
+                    "-o",
+                    "DPkg::Lock::Timeout=0",
+                    "-o",
+                    "APT::Update::Error-Mode=any",
+                    "update",
+                ]
+                .map(OsString::from)
+                .to_vec());
+            }
+            Self::UpgradeAll => {
+                return Ok(["--assume-yes", "-o", "DPkg::Lock::Timeout=0", "upgrade"]
+                    .map(OsString::from)
+                    .to_vec());
+            }
             Self::Upgrade(package) => ("install", package),
             Self::Install(package) => ("install", package),
             Self::Remove(package) => ("remove", package),

@@ -213,10 +213,69 @@ impl<T: Transport> Flatpak<T> {
                         name: fields[0].into(),
                         architecture: fields[1].into(),
                         scope: scope.clone(),
+                        remote: None,
                     },
                     display_name: fields[0].into(),
                     summary: fields[4].into(),
                     installed_version: Some(fields[3].into()),
+                    candidate_version: Some(fields[3].into()),
+                    update: UpdateAvailability::Unknown,
+                })
+            })
+            .collect()
+    }
+    fn search_scope(
+        &self,
+        query: &str,
+        cancel: &Cancellation,
+        system: bool,
+    ) -> Result<Vec<Package>, EngineError> {
+        let scope = if system {
+            Scope::System
+        } else {
+            Scope::User {
+                uid: rustix::process::getuid().as_raw(),
+            }
+        };
+        let prefix = if system { "--system" } else { "--user" };
+        let output = bytes(
+            "flatpak",
+            self.call(
+                &[
+                    prefix,
+                    "search",
+                    "--columns=name,description,application,version,branch,remotes",
+                    query,
+                ],
+                cancel,
+                false,
+                system,
+            )?,
+        )?;
+        String::from_utf8(output)
+            .map_err(|e| invalid("flatpak", e))?
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| {
+                let fields: Vec<_> = line.split('\t').collect();
+                let remote = fields
+                    .get(5)
+                    .and_then(|value| value.split(',').next())
+                    .filter(|value| flatpak_id(value));
+                if fields.len() != 6 || !flatpak_id(fields[2]) || remote.is_none() {
+                    return Err(invalid("flatpak", "invalid remote search metadata"));
+                }
+                Ok(Package {
+                    id: PackageId {
+                        backend: "flatpak".into(),
+                        name: fields[2].into(),
+                        architecture: std::env::consts::ARCH.into(),
+                        scope: scope.clone(),
+                        remote: remote.map(str::to_owned),
+                    },
+                    display_name: fields[0].into(),
+                    summary: fields[1].into(),
+                    installed_version: None,
                     candidate_version: Some(fields[3].into()),
                     update: UpdateAvailability::Unknown,
                 })
@@ -259,14 +318,29 @@ impl<T: Transport> Backend for Flatpak<T> {
         }
     }
     fn search(&mut self, query: &str, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
-        if !flatpak_id(query) {
-            return Err(invalid("flatpak", "search expects an application id"));
+        if query.trim().is_empty() || query.starts_with('-') {
+            return Err(invalid("flatpak", "expected a search term"));
         }
-        Ok(self
-            .installed(cancel)?
-            .into_iter()
-            .filter(|p| p.id.name.contains(query))
-            .collect())
+        // The user catalog is the primary source; a failing system query
+        // (for example, a machine with no system remotes) must not fail
+        // the whole search when user results are available.
+        let mut result = self.search_scope(query, cancel, false)?;
+        if let Ok(system) = self.search_scope(query, cancel, true) {
+            result.extend(system);
+        }
+        // Remote search results do not carry an installed scope: the user and
+        // system queries return the same catalog entries. Deduplicate them so
+        // a single remote application resolves unambiguously, preferring the
+        // unprivileged user scope used for installs by default.
+        let mut seen = std::collections::BTreeSet::new();
+        result.retain(|package| {
+            seen.insert((
+                package.id.name.clone(),
+                package.id.architecture.clone(),
+                package.id.remote.clone(),
+            ))
+        });
+        Ok(result)
     }
     fn installed(&mut self, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
         let mut result = self.list(cancel, false)?;
@@ -278,6 +352,19 @@ impl<T: Transport> Backend for Flatpak<T> {
         id: &PackageId,
         cancel: &Cancellation,
     ) -> Result<PackageDetails, EngineError> {
+        if id.remote.is_some() {
+            return self
+                .search(id.name.as_str(), cancel)?
+                .into_iter()
+                .find(|package| package.id == *id)
+                .map(|package| PackageDetails {
+                    description: package.summary.clone(),
+                    homepage: None,
+                    dependencies: vec![],
+                    package,
+                })
+                .ok_or(EngineError::NotFound);
+        }
         let package = self
             .installed(cancel)?
             .into_iter()
@@ -318,6 +405,13 @@ impl<T: Transport> Backend for Flatpak<T> {
             Operation::Install(id) => (id, "install"),
             Operation::Remove(id) => (id, "uninstall"),
             Operation::Upgrade(id) => (id, "update"),
+            Operation::UpgradeAll { backend } if backend == "flatpak" => {
+                for (system, scope) in [(false, "--user"), (true, "--system")] {
+                    self.call(&[scope, "update", "--noninteractive"], cancel, true, system)?;
+                }
+                progress(Progress::Message("Updated Flatpak packages.".into()));
+                return Ok(OperationOutcome::default());
+            }
             _ => return Err(invalid("flatpak", "foreign operation")),
         };
         let (system, scope) = self.target(id)?;
@@ -332,7 +426,7 @@ impl<T: Transport> Backend for Flatpak<T> {
                 "--app",
                 "--noninteractive",
                 "--assumeyes",
-                "flathub",
+                id.remote.as_deref().unwrap_or("flathub"),
                 &id.name,
             ]
         } else {
@@ -439,6 +533,7 @@ impl<T: Transport> Backend for Apt<T> {
             Operation::Install(id) => AptAction::Install(self.target(id)?),
             Operation::Remove(id) => AptAction::Remove(self.target(id)?),
             Operation::Upgrade(id) => AptAction::Upgrade(self.target(id)?),
+            Operation::UpgradeAll { backend } if backend == "apt" => AptAction::UpgradeAll,
             _ => return Err(invalid("apt", "foreign operation")),
         };
         progress(Progress::Message(
@@ -537,6 +632,7 @@ impl<T: Transport> Homebrew<T> {
                             scope: Scope::Environment {
                                 path: prefix.clone(),
                             },
+                            remote: None,
                         },
                         display_name: f.full_name,
                         summary: f.desc.clone().unwrap_or_default(),
@@ -655,6 +751,9 @@ impl<T: Transport> Backend for Homebrew<T> {
                 vec!["uninstall", "--formula", "--force", "--", self.target(id)?]
             }
             Operation::Upgrade(id) => vec!["upgrade", "--formula", "--", self.target(id)?],
+            Operation::UpgradeAll { backend } if backend == "homebrew" => {
+                vec!["upgrade", "--formula"]
+            }
             _ => return Err(invalid("homebrew", "foreign operation")),
         };
         progress(Progress::Message(
@@ -738,6 +837,7 @@ impl ManagerKind {
             (Self::Dnf, Operation::Install(_)) => vec!["-y", "install", "--"],
             (Self::Dnf, Operation::Remove(_)) => vec!["-y", "remove", "--"],
             (Self::Dnf, Operation::Upgrade(_)) => vec!["-y", "upgrade", "--"],
+            (Self::Dnf, Operation::UpgradeAll { .. }) => vec!["-y", "upgrade"],
             (Self::Pacman, Operation::Refresh { .. }) => vec!["-Sy", "--noconfirm"],
             (Self::Pacman, Operation::Install(_)) => {
                 vec!["-S", "--noconfirm", "--needed", "--"]
@@ -746,6 +846,7 @@ impl ManagerKind {
             (Self::Pacman, Operation::Upgrade(_)) => {
                 vec!["-S", "--noconfirm", "--needed", "--"]
             }
+            (Self::Pacman, Operation::UpgradeAll { .. }) => vec!["-Su", "--noconfirm"],
             (Self::Zypper, Operation::Refresh { .. }) => vec!["--non-interactive", "refresh"],
             (Self::Zypper, Operation::Install(_)) => vec![
                 "--non-interactive",
@@ -755,10 +856,12 @@ impl ManagerKind {
             ],
             (Self::Zypper, Operation::Remove(_)) => vec!["--non-interactive", "remove", "--"],
             (Self::Zypper, Operation::Upgrade(_)) => vec!["--non-interactive", "update", "--"],
+            (Self::Zypper, Operation::UpgradeAll { .. }) => vec!["--non-interactive", "update"],
             (Self::Snap, Operation::Refresh { .. }) => vec!["refresh"],
             (Self::Snap, Operation::Install(_)) => vec!["install"],
             (Self::Snap, Operation::Remove(_)) => vec!["remove"],
             (Self::Snap, Operation::Upgrade(_)) => vec!["refresh"],
+            (Self::Snap, Operation::UpgradeAll { .. }) => vec!["refresh"],
         }
     }
 }
@@ -820,6 +923,7 @@ impl<T: Transport> SystemManager<T> {
                 name: name.into(),
                 architecture: arch.into(),
                 scope: Scope::System,
+                remote: None,
             },
             display_name: name.into(),
             summary: summary.into(),
@@ -999,6 +1103,7 @@ impl<T: Transport> Backend for SystemManager<T> {
             Operation::Install(id) | Operation::Remove(id) | Operation::Upgrade(id) => {
                 Some(self.target(id)?)
             }
+            Operation::UpgradeAll { .. } => None,
         };
         let mut args: Vec<OsString> = self
             .kind

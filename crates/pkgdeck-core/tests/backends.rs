@@ -34,6 +34,7 @@ impl Fixture {
                     name: "synthetic-fixture".into(),
                     architecture: "all".into(),
                     scope: Scope::System,
+                    remote: None,
                 },
                 display_name: "Synthetic fixture".into(),
                 summary: "Synthetic package".into(),
@@ -97,7 +98,7 @@ impl Transport for Fixture {
         self.check(cancel)?;
         match action {
             AptAction::Refresh => *self.candidate.lock().unwrap() = "2.0".into(),
-            AptAction::Install(_) | AptAction::Upgrade(_) => {
+            AptAction::Install(_) | AptAction::Upgrade(_) | AptAction::UpgradeAll => {
                 *self.installed.lock().unwrap() = Some(self.candidate.lock().unwrap().clone())
             }
             AptAction::Remove(_) => *self.installed.lock().unwrap() = None,
@@ -318,7 +319,6 @@ fn flatpak_lists_user_and_system_applications_without_collapsing_scope() {
     assert!(packages
         .iter()
         .any(|package| matches!(package.id.scope, Scope::User { .. })));
-    assert!(backend.search("io.example.User", &cancel).unwrap().len() == 2);
 }
 
 type FlatpakCall = (Vec<String>, bool, bool);
@@ -367,6 +367,11 @@ impl Transport for FlatpakFixture {
             return Ok(output(format!(
                 "{name}\tx86_64\tstable\t1.0\tSynthetic app\n"
             )));
+        }
+        if args.contains(&"search".into()) {
+            return Ok(output(
+                "Synthetic app\tSynthetic description\tio.example.User\t1.0\tstable\tflathub\n",
+            ));
         }
         Ok(output(""))
     }
@@ -430,6 +435,7 @@ fn flatpak_rejects_malformed_metadata_and_foreign_operations() {
         scope: Scope::Environment {
             path: "/synthetic".into(),
         },
+        remote: None,
     };
     assert!(backend
         .execute(&Operation::Install(foreign), &cancel, &mut |_| {})
@@ -477,6 +483,7 @@ fn backend_validation_preserves_invalid_and_transport_failures() {
         name: "io.example.App".into(),
         architecture: "x86_64".into(),
         scope: Scope::User { uid: 1 },
+        remote: None,
     };
     assert!(flatpak
         .execute(&Operation::Install(foreign), &cancel, &mut |_| {})
@@ -490,6 +497,7 @@ fn backend_validation_preserves_invalid_and_transport_failures() {
         scope: Scope::Environment {
             path: "/synthetic".into(),
         },
+        remote: None,
     };
     assert_eq!(brew.details(&missing, &cancel), Err(EngineError::NotFound));
 }
@@ -756,4 +764,147 @@ fn homebrew_reports_linked_version_when_old_kegs_are_retained() {
             .as_deref(),
         Some("1.0")
     );
+}
+
+#[test]
+fn flatpak_remote_search_details_and_upgrade_all() {
+    let fixture = FlatpakFixture::default();
+    let mut backend = Flatpak::new(fixture.clone());
+    let cancel = Cancellation::default();
+    let results = backend.search("io.example.User", &cancel).unwrap();
+    // The user and system catalog queries return the same remote entry;
+    // it must collapse to one identity so engine selection is unambiguous.
+    assert_eq!(results.len(), 1);
+    assert!(matches!(results[0].id.scope, Scope::User { .. }));
+    assert!(results
+        .iter()
+        .all(|p| p.id.remote.as_deref() == Some("flathub")));
+    let id = results[0].id.clone();
+    assert!(id.remote.is_some());
+    assert_eq!(backend.details(&id, &cancel).unwrap().package.id, id);
+    let mut missing = id.clone();
+    missing.name = "io.example.Missing".into();
+    assert_eq!(
+        backend.details(&missing, &cancel),
+        Err(EngineError::NotFound)
+    );
+    backend
+        .execute(
+            &Operation::UpgradeAll {
+                backend: "flatpak".into(),
+            },
+            &cancel,
+            &mut |_| {},
+        )
+        .unwrap();
+    let calls = fixture.0.lock().unwrap();
+    assert!(calls
+        .iter()
+        .any(|(args, write, system)| *write && !*system && args.contains(&"update".into())));
+    assert!(calls
+        .iter()
+        .any(|(args, write, system)| *write && *system && args.contains(&"update".into())));
+    assert!(backend
+        .execute(
+            &Operation::UpgradeAll {
+                backend: "apt".into(),
+            },
+            &cancel,
+            &mut |_| {},
+        )
+        .is_err());
+}
+
+#[test]
+fn flatpak_search_rejects_malformed_remote_metadata() {
+    let cancel = Cancellation::default();
+    for metadata in [
+        "only\tthree\tfields\n",
+        "Name\tDescription\tbad id!\t1.0\tstable\tflathub\n",
+        "Name\tDescription\tio.example.App\t1.0\tstable\t\n",
+        "Name\tDescription\tio.example.App\t1.0\tstable\t!!!\n",
+    ] {
+        let mut backend = Flatpak::new(Raw(output(metadata)));
+        assert!(backend.search("io.example.App", &cancel).is_err());
+    }
+}
+
+#[test]
+fn flatpak_detect_reports_unavailable_backend() {
+    let cancel = Cancellation::default();
+    let mut backend = Flatpak::new(FailingFlatpak(ExecutionError::Disabled("missing".into())));
+    assert_eq!(
+        backend.detect(&cancel),
+        Ok(Availability::Unavailable("missing".into()))
+    );
+}
+
+#[test]
+fn flatpak_remote_search_resolves_to_a_single_identity() {
+    // Mirrors `pkd --from flatpak info <app>`: engine selection must see one
+    // identity, not Ambiguous user/system duplicates, and details must follow.
+    let cancel = Cancellation::default();
+    let mut engine = Engine::default();
+    engine
+        .register(Flatpak::new(FlatpakFixture::default()))
+        .unwrap();
+    let report = engine.search("io.example.User", &cancel);
+    assert!(report.failures.is_empty());
+    let id = report
+        .select(&Selector {
+            name: "io.example.User".into(),
+            backend: Some("flatpak".into()),
+            architecture: None,
+            scope: None,
+        })
+        .unwrap();
+    assert!(id.remote.is_some());
+    assert_eq!(engine.details(&id, &cancel).unwrap().package.id, id);
+}
+
+#[test]
+fn flatpak_search_survives_failing_system_scope() {
+    #[derive(Clone)]
+    struct UserOnly;
+    impl Transport for UserOnly {
+        fn apt_query(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &Cancellation,
+        ) -> Result<Completion, ExecutionError> {
+            unreachable!()
+        }
+        fn apt_write(&self, _: AptAction, _: &Cancellation) -> Result<Completion, ExecutionError> {
+            unreachable!()
+        }
+        fn brew(
+            &self,
+            _: &[OsString],
+            _: &Cancellation,
+            _: bool,
+        ) -> Result<Completion, ExecutionError> {
+            unreachable!()
+        }
+        fn flatpak(
+            &self,
+            _: &[OsString],
+            _: &Cancellation,
+            _: bool,
+            system: bool,
+        ) -> Result<Completion, ExecutionError> {
+            if system {
+                return Err(ExecutionError::TimedOut);
+            }
+            Ok(output(
+                "Synthetic app\tSynthetic description\tio.example.App\t1.0\tstable\tflathub\n",
+            ))
+        }
+    }
+    let cancel = Cancellation::default();
+    let mut backend = Flatpak::new(UserOnly);
+    let results = backend.search("io.example.App", &cancel).unwrap();
+    assert_eq!(results.len(), 1);
+    assert!(matches!(results[0].id.scope, Scope::User { .. }));
 }

@@ -180,12 +180,15 @@ impl Default for Controller {
     }
 }
 fn upgrade_plan(packages: &[Package]) -> Vec<Operation> {
-    let ids: std::collections::BTreeSet<_> = packages
+    let backends: std::collections::BTreeSet<_> = packages
         .iter()
         .filter(|p| p.installed_version.is_some() && p.update == UpdateAvailability::Available)
-        .map(|p| p.id.clone())
+        .map(|p| p.id.backend.clone())
         .collect();
-    ids.into_iter().map(Operation::Upgrade).collect()
+    backends
+        .into_iter()
+        .map(|backend| Operation::UpgradeAll { backend })
+        .collect()
 }
 fn encoded(value: impl serde::Serialize) -> QString {
     serde_json::to_string(&value)
@@ -213,6 +216,7 @@ fn operation_label(operation: &Operation) -> String {
         Operation::Remove(id) => ("Remove", id),
         Operation::Upgrade(id) => ("Upgrade", id),
         Operation::Refresh { backend } => return format!("Refresh metadata for {backend}"),
+        Operation::UpgradeAll { backend } => return format!("Upgrade all packages from {backend}"),
     };
     format!(
         "{action} {}\nSource: {}\nArchitecture: {}\nScope: {}",
@@ -224,7 +228,7 @@ fn operation_label(operation: &Operation) -> String {
 }
 fn package_row(p: &Package) -> Value {
     json!({"name": p.id.name, "source": p.id.backend, "architecture": p.id.architecture,
-        "scope": p.id.scope, "scope_label": scope_label(&p.id.scope), "summary": p.summary, "installed": p.installed_version,
+        "remote": p.id.remote, "scope": p.id.scope, "scope_label": scope_label(&p.id.scope), "summary": p.summary, "installed": p.installed_version,
         "candidate": p.candidate_version, "update": p.update, "kind": "package"})
 }
 impl ffi::PackageController {
@@ -340,12 +344,21 @@ impl ffi::PackageController {
                 return;
             }
             let operations = upgrade_plan(&self.rust().packages);
+            let count = self
+                .rust()
+                .packages
+                .iter()
+                .filter(|package| {
+                    package.installed_version.is_some()
+                        && package.update == UpdateAvailability::Available
+                })
+                .count();
             let labels = operations
                 .iter()
                 .map(operation_label)
                 .collect::<Vec<_>>()
                 .join("\n\n");
-            self.as_mut().set_confirmation(format!("Upgrade all {} listed packages?\n\n{labels}\n\nNative dependency changes may follow. Successful upgrades are not rolled back if another fails. Continue?", operations.len()).as_str().into());
+            self.as_mut().set_confirmation(format!("Upgrade all {count} listed packages?\n\n{labels}\n\nEach source runs as one transaction. Native dependency changes may follow. Successful upgrades are not rolled back if another fails. Continue?").as_str().into());
             self.rust_mut().pending = Some(Job::UpgradeAll(operations));
             return;
         }
@@ -421,16 +434,24 @@ impl ffi::PackageController {
                     && report.failures.is_empty()
                     && !upgrade_plan(&report.packages).is_empty();
                 self.as_mut().set_upgradable(upgradable);
-                let rows: Vec<_> = report.packages.iter().map(package_row).collect();
+                let mut rows: Vec<_> = report.packages.iter().map(package_row).collect();
+                rows.extend(report.failures.iter().map(|failure| {
+                    json!({"kind": "failure", "name": failure.backend, "source": failure.backend,
+                        "summary": failure.error.to_string(), "available": false})
+                }));
                 let status = if report.failures.is_empty() {
                     format!("{} packages", rows.len())
                 } else {
-                    report
-                        .failures
-                        .iter()
-                        .map(|f| format!("{}: {}", f.backend, f.error))
-                        .collect::<Vec<_>>()
-                        .join("\n")
+                    format!(
+                        "{} packages\n{}",
+                        rows.len(),
+                        report
+                            .failures
+                            .iter()
+                            .map(|f| format!("{}: {}", f.backend, f.error))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    )
                 };
                 self.as_mut().rust_mut().packages = report.packages;
                 self.as_mut().set_rows(encoded(rows));
@@ -573,6 +594,7 @@ mod tests {
             name: "synthetic".into(),
             architecture: "all".into(),
             scope: Scope::System,
+            remote: None,
         };
         let package = Package {
             id: id.clone(),
@@ -600,8 +622,12 @@ mod tests {
             uninstalled,
         ]);
         assert_eq!(plan.len(), 2);
-        assert!(plan.contains(&Operation::Upgrade(id.clone())));
-        assert!(plan.contains(&Operation::Upgrade(other.id)));
+        assert!(plan.contains(&Operation::UpgradeAll {
+            backend: id.backend.clone()
+        }));
+        assert!(plan.contains(&Operation::UpgradeAll {
+            backend: other.id.backend
+        }));
         for fail in [false, true] {
             let mut engine = Engine::default();
             engine
@@ -617,10 +643,9 @@ mod tests {
                 Job::Load("Discover".into(), "".into()),
                 Job::Details(id.clone()),
                 Job::Write(Operation::Upgrade(id.clone())),
-                Job::UpgradeAll(vec![
-                    Operation::Upgrade(id.clone()),
-                    Operation::Upgrade(id.clone()),
-                ]),
+                Job::UpgradeAll(vec![Operation::UpgradeAll {
+                    backend: id.backend.clone(),
+                }]),
             ] {
                 let mut replies = vec![];
                 execute(
@@ -638,11 +663,11 @@ mod tests {
                     }
                     Reply::Done(Ok(Payload::Batch(status))) => {
                         assert!(status.contains(if fail {
-                            "Completed 0 of 2"
+                            "Completed 0 of 1"
                         } else {
-                            "Completed 1 of 2"
+                            "Completed 1 of 1"
                         }));
-                        assert!(status.contains("synthetic"));
+                        assert!(status.contains("Upgrade all packages from fixture"));
                         assert!(status.contains(if fail { "authorization" } else { "cancel" }));
                     }
                     Reply::Done(Ok(Payload::Written(outcome))) => {
