@@ -17,7 +17,7 @@ pkd upgrade neovim --from apt --yes
 pkd remove neovim --from apt --yes
 ```
 
-`--from` accepts `apt`, `dnf`, `pacman`, `zypper`, `snap`, `homebrew`, `appimage`, `flatpak`, `cargo`, `npm`, `pnpm`, or `bun`. Without it, queries cover detected managers;
+`--from` accepts `apt`, `dnf`, `pacman`, `zypper`, `snap`, `homebrew`, `appimage`, `flatpak`, `cargo`, `npm`, `pnpm`, `bun`, `pip`, `pipx`, `uv`, `composer`, or `gem`. Without it, queries cover detected managers;
 missing optional managers are omitted, while detection/query failures remain
 visible. `sources` includes unavailable managers and their reasons. Search uses
 literal case-insensitive substrings: APT names/summaries and Homebrew formula names.

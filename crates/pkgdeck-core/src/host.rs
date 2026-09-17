@@ -59,6 +59,7 @@ pub const BACKENDS: &[(&str, &str)] = &[
     ("npm", "npm"),
     ("pnpm", "pnpm"),
     ("Bun", "bun"),
+    ("pip (virtual environment)", "pip3"),
     ("pipx", "pipx"),
     ("uv", "uv"),
     ("Composer", "composer"),
@@ -80,6 +81,7 @@ impl Host {
         let mut env = BTreeMap::new();
         // No LD_*, PYTHONPATH, NODE_OPTIONS, APT_CONFIG, shell startup files,
         // Qt plugins, or sandbox XDG directories are inherited by host tools.
+        // The second list carries explicit manager homes/selections only.
         for name in [
             "HOME",
             "USER",
@@ -94,6 +96,12 @@ impl Host {
             "XDG_DATA_HOME",
             "XDG_CACHE_HOME",
             "SSH_AUTH_SOCK",
+            "VIRTUAL_ENV",
+            "PIPX_HOME",
+            "PIPX_BIN_DIR",
+            "UV_TOOL_DIR",
+            "COMPOSER_HOME",
+            "GEM_HOME",
         ] {
             if let Some(value) = source.get(&OsString::from(name)) {
                 env.insert(name.into(), value.clone());
@@ -252,6 +260,80 @@ impl Host {
             .resolve(executable)?
             .ok_or_else(|| ExecutionError::Disabled(format!("{label} not found")))?;
         let command = self.command(&path, args)?;
+        let result = process::run(
+            command,
+            Limits {
+                timeout: std::time::Duration::from_secs(300),
+                output_bytes: 32 * 1024 * 1024,
+            },
+            cancel,
+            write,
+        )?;
+        if result.code == Some(0) {
+            Ok(result)
+        } else {
+            Err(ExecutionError::Failed(result))
+        }
+    }
+
+    /// pip inside an explicitly selected virtual environment. `venv` must be
+    /// the environment root; `<venv>/bin/python -m pip` is the only entry
+    /// point so system pip is never touched. User-scoped like `dev_tool`.
+    /// The interpreter symlink is deliberately never resolved: venv discovery
+    /// uses `argv[0]`'s directory, and resolving it would escape into the
+    /// base interpreter's site packages. A `pyvenv.cfg` marker is required.
+    pub fn venv_pip(
+        &self,
+        venv: &Path,
+        args: &[OsString],
+        cancel: &Cancellation,
+        write: bool,
+    ) -> Result<Completion, ExecutionError> {
+        self.enabled()?;
+        if write && rustix::process::geteuid().is_root() {
+            return Err(ExecutionError::Invalid(
+                "run the frontend as an unprivileged user".into(),
+            ));
+        }
+        if !venv.is_absolute() {
+            return Err(ExecutionError::Invalid(
+                "virtual environment path must be absolute".into(),
+            ));
+        }
+        let python = venv.join("bin/python");
+        let meta = fs::symlink_metadata(&python).map_err(|_| {
+            ExecutionError::Disabled("pip virtual environment not found".to_string())
+        })?;
+        if !meta.file_type().is_symlink() && !meta.is_file() {
+            return Err(ExecutionError::Disabled(
+                "pip virtual environment not found".to_string(),
+            ));
+        }
+        if fs::metadata(venv.join("pyvenv.cfg"))
+            .map(|marker| !marker.is_file())
+            .unwrap_or(true)
+        {
+            return Err(ExecutionError::Disabled(
+                "pip virtual environment not found".to_string(),
+            ));
+        }
+        if self
+            .excluded
+            .as_ref()
+            .is_some_and(|root| venv.starts_with(root) || python.starts_with(root))
+        {
+            return Err(ExecutionError::Disabled(
+                "pip virtual environment not found".to_string(),
+            ));
+        }
+        if rustix::fs::access(&python, rustix::fs::Access::EXEC_OK).is_err() {
+            return Err(ExecutionError::Disabled(
+                "pip virtual environment not found".to_string(),
+            ));
+        }
+        let mut full = vec![OsString::from("-m"), OsString::from("pip")];
+        full.extend(args.iter().cloned());
+        let command = self.command(&python, &full)?;
         let result = process::run(
             command,
             Limits {

@@ -51,8 +51,9 @@ pub trait Transport: Send {
     fn env(&self, _name: &str) -> Option<OsString> {
         None
     }
-    /// Run a user-scoped development tool (`cargo`, `npm`, `pnpm`, `bun`).
-    /// Fixtures override this one seam for every development manager.
+    /// Run a user-scoped development tool (`cargo`, `npm`, `pnpm`, `bun`,
+    /// `pipx`, `uv`, `composer`, `gem`). Fixtures override this one seam for
+    /// every development manager except venv-pinned `pip` (see `venv_pip`).
     fn dev_tool(
         &self,
         executable: &str,
@@ -61,6 +62,18 @@ pub trait Transport: Send {
         _write: bool,
     ) -> Result<Completion, ExecutionError> {
         Err(ExecutionError::Disabled(format!("{executable} not found")))
+    }
+    /// Run `<venv>/bin/python -m pip` for an explicitly selected virtual
+    /// environment. Fixtures override this seam for `pip` tests.
+    fn venv_pip(
+        &self,
+        venv: &std::path::Path,
+        _args: &[OsString],
+        _cancel: &Cancellation,
+        _write: bool,
+    ) -> Result<Completion, ExecutionError> {
+        let _ = venv;
+        Err(ExecutionError::Disabled("pip not found".into()))
     }
     fn system_manager(
         &self,
@@ -146,9 +159,22 @@ impl Transport for NativeTransport {
             "npm" => "npm",
             "pnpm" => "pnpm",
             "bun" => "Bun",
+            "pipx" => "pipx",
+            "uv" => "uv",
+            "composer" => "Composer",
+            "gem" => "RubyGems",
             other => other,
         };
         self.host.dev_tool(executable, label, args, cancel, write)
+    }
+    fn venv_pip(
+        &self,
+        venv: &std::path::Path,
+        args: &[OsString],
+        cancel: &Cancellation,
+        write: bool,
+    ) -> Result<Completion, ExecutionError> {
+        self.host.venv_pip(venv, args, cancel, write)
     }
     fn system_manager(
         &self,
@@ -1172,14 +1198,21 @@ const DEV_CAPABILITIES: &[Capability] = &[
     Capability::Upgrade,
 ];
 
-/// User-installed command-line tools (Wave 4). These managers run only as the
-/// invoking user and never cross a privilege boundary.
+/// User-installed command-line tools (Waves 4-5). These managers run only as
+/// the invoking user and never cross a privilege boundary. `pip` is pinned to
+/// an explicitly selected virtual environment; the rest use one user-scoped
+/// home each.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DevKind {
     Cargo,
     Npm,
     Pnpm,
     Bun,
+    Pip,
+    Pipx,
+    Uv,
+    Composer,
+    Gem,
 }
 
 impl DevKind {
@@ -1189,10 +1222,29 @@ impl DevKind {
             Self::Npm => "npm",
             Self::Pnpm => "pnpm",
             Self::Bun => "bun",
+            Self::Pip => "pip",
+            Self::Pipx => "pipx",
+            Self::Uv => "uv",
+            Self::Composer => "composer",
+            Self::Gem => "gem",
         }
     }
     fn executable(self) -> &'static str {
-        self.id()
+        match self {
+            Self::Composer => "composer",
+            Self::Gem => "gem",
+            _ => self.id(),
+        }
+    }
+    /// Per-manager package-name policy. Anything resembling an option, path,
+    /// URL, version specifier, or whitespace is rejected before any manager runs.
+    fn valid_name(self, name: &str) -> bool {
+        match self {
+            Self::Cargo | Self::Npm | Self::Pnpm | Self::Bun => dev_name(name),
+            Self::Pip | Self::Pipx | Self::Uv => python_name(name),
+            Self::Composer => composer_name(name),
+            Self::Gem => gem_name(name),
+        }
     }
 }
 
@@ -1263,6 +1315,125 @@ struct BunManifest {
     homepage: Option<String>,
 }
 
+/// PEP 508 bare project names for `pip`/`pipx`/`uv`: no options, paths,
+/// URLs, extras, or version specifiers.
+fn python_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 214
+        && !name.starts_with('-')
+        && !name.ends_with(['-', '_', '.'])
+        && name.starts_with(|c: char| c.is_ascii_alphanumeric())
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+        && !name.contains('/')
+}
+
+/// Composer `vendor/package` names, both parts lowercase alphanumerics with
+/// `.`, `-`, `_` separators.
+fn composer_name(name: &str) -> bool {
+    fn part(part: &str) -> bool {
+        !part.is_empty()
+            && part.len() <= 214
+            && part.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
+            && part.ends_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
+            && part
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"._-".contains(&b))
+    }
+    match name.split_once('/') {
+        Some((vendor, package)) => {
+            !name.starts_with('-')
+                && !name.contains("//")
+                && part(vendor)
+                && part(package)
+                && name.len() <= 214
+        }
+        None => false,
+    }
+}
+
+/// RubyGems bare gem names.
+fn gem_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 214
+        && name.starts_with(|c: char| c.is_ascii_alphanumeric())
+        && !name.starts_with('-')
+        && !name.ends_with(['-', '_', '.'])
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+}
+
+#[derive(Deserialize)]
+struct PipEntry {
+    name: String,
+    version: String,
+}
+
+#[derive(Deserialize)]
+struct PipOutdated {
+    name: String,
+    latest_version: String,
+}
+
+#[derive(Deserialize)]
+struct PipxList {
+    #[serde(default)]
+    venvs: std::collections::BTreeMap<String, PipxVenv>,
+}
+
+#[derive(Deserialize)]
+struct PipxVenv {
+    metadata: PipxMetadata,
+}
+
+#[derive(Deserialize)]
+struct PipxMetadata {
+    main_package: PipxMain,
+}
+
+#[derive(Deserialize)]
+struct PipxMain {
+    package: String,
+    package_version: String,
+}
+
+#[derive(Deserialize)]
+struct PipxOutdatedList {
+    data: PipxOutdatedData,
+}
+
+#[derive(Deserialize)]
+struct PipxOutdatedData {
+    #[serde(default)]
+    packages: Vec<PipxOutdated>,
+}
+
+#[derive(Deserialize)]
+struct PipxOutdated {
+    package: String,
+    latest_version: String,
+}
+
+#[derive(Deserialize)]
+struct ComposerShow {
+    #[serde(default)]
+    installed: Vec<ComposerPackage>,
+}
+
+#[derive(Deserialize)]
+struct ComposerPackage {
+    name: String,
+    version: String,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    homepage: Option<String>,
+    #[serde(default)]
+    latest: Option<String>,
+}
+
 pub struct DevTool<T = NativeTransport> {
     kind: DevKind,
     transport: T,
@@ -1272,6 +1443,11 @@ pub type Cargo<T = NativeTransport> = DevTool<T>;
 pub type Npm<T = NativeTransport> = DevTool<T>;
 pub type Pnpm<T = NativeTransport> = DevTool<T>;
 pub type Bun<T = NativeTransport> = DevTool<T>;
+pub type Pip<T = NativeTransport> = DevTool<T>;
+pub type Pipx<T = NativeTransport> = DevTool<T>;
+pub type Uv<T = NativeTransport> = DevTool<T>;
+pub type Composer<T = NativeTransport> = DevTool<T>;
+pub type Gem<T = NativeTransport> = DevTool<T>;
 
 impl<T> DevTool<T> {
     fn new(kind: DevKind, transport: T) -> Self {
@@ -1293,6 +1469,21 @@ impl<T> DevTool<T> {
     pub fn bun(transport: T) -> Self {
         Self::new(DevKind::Bun, transport)
     }
+    pub fn pip(transport: T) -> Self {
+        Self::new(DevKind::Pip, transport)
+    }
+    pub fn pipx(transport: T) -> Self {
+        Self::new(DevKind::Pipx, transport)
+    }
+    pub fn uv(transport: T) -> Self {
+        Self::new(DevKind::Uv, transport)
+    }
+    pub fn composer(transport: T) -> Self {
+        Self::new(DevKind::Composer, transport)
+    }
+    pub fn gem(transport: T) -> Self {
+        Self::new(DevKind::Gem, transport)
+    }
 }
 
 impl<T: Transport> DevTool<T> {
@@ -1309,8 +1500,9 @@ impl<T: Transport> DevTool<T> {
             write,
         )
     }
-    /// Resolve the manager home used as the package scope. npm and pnpm
-    /// report it; Cargo and Bun derive it from the sanitized `HOME`.
+    /// Resolve the manager home used as the package scope. npm, pnpm, uv,
+    /// Composer, and gem report it; Cargo, Bun, and pipx derive it from the
+    /// sanitized environment; `pip` requires an explicitly selected `VIRTUAL_ENV`.
     fn home(&self, cancel: &Cancellation) -> Result<PathBuf, ExecutionError> {
         match self.kind {
             DevKind::Cargo | DevKind::Bun => {
@@ -1324,6 +1516,104 @@ impl<T: Transport> DevTool<T> {
                     ".bun/install/global"
                 });
                 Ok(path)
+            }
+            DevKind::Pip => {
+                let venv = self.transport.env("VIRTUAL_ENV").ok_or_else(|| {
+                    ExecutionError::Disabled(
+                        "pip requires an explicitly selected virtual environment".to_string(),
+                    )
+                })?;
+                let path = PathBuf::from(venv);
+                if !path.is_absolute() {
+                    return Err(ExecutionError::Invalid(
+                        "virtual environment path must be absolute".into(),
+                    ));
+                }
+                Ok(path)
+            }
+            DevKind::Pipx => {
+                if let Some(dir) = self.transport.env("PIPX_HOME") {
+                    let path = PathBuf::from(dir);
+                    if !path.is_absolute() {
+                        return Err(ExecutionError::Invalid("pipx home must be absolute".into()));
+                    }
+                    return Ok(path);
+                }
+                let home = self
+                    .transport
+                    .env("HOME")
+                    .ok_or_else(|| ExecutionError::Disabled("pipx home not found".to_string()))?;
+                Ok(PathBuf::from(home).join(".local/share/pipx"))
+            }
+            DevKind::Uv => {
+                if let Some(dir) = self.transport.env("UV_TOOL_DIR") {
+                    let path = PathBuf::from(dir);
+                    if !path.is_absolute() {
+                        return Err(ExecutionError::Invalid(
+                            "uv tool directory must be absolute".into(),
+                        ));
+                    }
+                    return Ok(path);
+                }
+                let output = self.call(&["tool", "dir"], cancel, false)?;
+                let path = PathBuf::from(
+                    String::from_utf8(output.stdout)
+                        .map_err(|e| ExecutionError::Invalid(e.to_string()))?
+                        .trim(),
+                );
+                if !path.is_absolute() {
+                    return Err(ExecutionError::Invalid(
+                        "uv tool directory must be absolute".into(),
+                    ));
+                }
+                Ok(path)
+            }
+            DevKind::Composer => {
+                if let Some(dir) = self.transport.env("COMPOSER_HOME") {
+                    let path = PathBuf::from(dir);
+                    if !path.is_absolute() {
+                        return Err(ExecutionError::Invalid(
+                            "Composer home must be absolute".into(),
+                        ));
+                    }
+                    return Ok(path);
+                }
+                let output = self.call(&["config", "--global", "home"], cancel, false)?;
+                let text = String::from_utf8(output.stdout)
+                    .map_err(|e| ExecutionError::Invalid(e.to_string()))?;
+                let line = text.lines().map(str::trim).rfind(|line| !line.is_empty());
+                match line.map(PathBuf::from) {
+                    Some(path) if path.is_absolute() => Ok(path),
+                    _ => Err(ExecutionError::Invalid(
+                        "Composer home must be absolute".into(),
+                    )),
+                }
+            }
+            DevKind::Gem => {
+                if let Some(dir) = self.transport.env("GEM_HOME") {
+                    let path = PathBuf::from(dir);
+                    if !path.is_absolute() {
+                        return Err(ExecutionError::Invalid(
+                            "RubyGems home must be absolute".into(),
+                        ));
+                    }
+                    return Ok(path);
+                }
+                let output = self.call(&["env"], cancel, false)?;
+                let text = String::from_utf8(output.stdout)
+                    .map_err(|e| ExecutionError::Invalid(e.to_string()))?;
+                for line in text.lines() {
+                    if let Some(dir) = line.trim().strip_prefix("- USER INSTALLATION DIRECTORY:") {
+                        let path = PathBuf::from(dir.trim());
+                        if path.is_absolute() {
+                            return Ok(path);
+                        }
+                        break;
+                    }
+                }
+                Err(ExecutionError::Invalid(
+                    "RubyGems user directory must be absolute".into(),
+                ))
             }
             DevKind::Npm | DevKind::Pnpm => {
                 let output = self.call(&["root", "--global"], cancel, false)?;
@@ -1364,10 +1654,24 @@ impl<T: Transport> DevTool<T> {
             Err(error) => Err(error.into()),
         }
     }
+    fn pip_call(
+        &self,
+        venv: &std::path::Path,
+        args: &[&str],
+        cancel: &Cancellation,
+        write: bool,
+    ) -> Result<Completion, ExecutionError> {
+        self.transport.venv_pip(
+            venv,
+            &args.iter().map(OsString::from).collect::<Vec<_>>(),
+            cancel,
+            write,
+        )
+    }
     fn target<'a>(&self, id: &'a PackageId) -> Result<&'a str, EngineError> {
         if id.backend != self.kind.id()
             || id.architecture != std::env::consts::ARCH
-            || !dev_name(&id.name)
+            || !self.kind.valid_name(&id.name)
             || self
                 .home
                 .as_ref()
@@ -1389,7 +1693,7 @@ impl<T: Transport> DevTool<T> {
         installed: String,
         candidate: Option<String>,
     ) -> Result<PackageDetails, EngineError> {
-        if !dev_name(&name) {
+        if !self.kind.valid_name(&name) {
             return Err(invalid(
                 self.kind.id(),
                 "foreign identity or invalid package name",
@@ -1598,6 +1902,335 @@ impl<T: Transport> DevTool<T> {
         }
         Ok(details)
     }
+    fn pip_inventory(
+        &self,
+        home: &std::path::Path,
+        cancel: &Cancellation,
+    ) -> Result<Vec<PackageDetails>, EngineError> {
+        let id = self.kind.id();
+        let output = bytes(
+            id,
+            self.pip_call(home, &["list", "--format=json"], cancel, false)?,
+        )?;
+        let entries: Vec<PipEntry> = serde_json::from_slice(&output).map_err(|e| invalid(id, e))?;
+        let outdated: std::collections::BTreeMap<String, String> = match self.pip_call(
+            home,
+            &["list", "--outdated", "--format=json"],
+            cancel,
+            false,
+        ) {
+            Ok(result) => serde_json::from_slice(&bytes(id, result)?)
+                .map(|entries: Vec<PipOutdated>| {
+                    entries
+                        .into_iter()
+                        .map(|entry| (entry.name, entry.latest_version))
+                        .collect()
+                })
+                .map_err(|e| invalid(id, e))?,
+            // Registry metadata may be unreachable; installed state stays.
+            Err(_) => std::collections::BTreeMap::new(),
+        };
+        entries
+            .into_iter()
+            // The installer itself is never managed: upgrading pip from
+            // inside pip breaks its own output pipe and risks the venv.
+            .filter(|entry| {
+                !matches!(
+                    entry.name.to_ascii_lowercase().as_str(),
+                    "pip" | "setuptools" | "wheel" | "distribute"
+                )
+            })
+            .map(|entry| {
+                let candidate = outdated.get(&entry.name).cloned().or_else(|| {
+                    // Installed state without newer metadata stays current.
+                    Some(entry.version.clone())
+                });
+                self.detail(
+                    home,
+                    entry.name,
+                    format!("Python package installed in {}", home.display()),
+                    None,
+                    entry.version,
+                    candidate,
+                )
+            })
+            .collect()
+    }
+    fn pipx_inventory(
+        &self,
+        home: &std::path::Path,
+        cancel: &Cancellation,
+    ) -> Result<Vec<PackageDetails>, EngineError> {
+        let id = self.kind.id();
+        let output = bytes(id, self.call(&["list", "--json"], cancel, false)?)?;
+        let list: PipxList = serde_json::from_slice(&output).map_err(|e| invalid(id, e))?;
+        let outdated: std::collections::BTreeMap<String, String> =
+            match self.call(&["list", "--outdated", "--json"], cancel, false) {
+                Ok(result) => serde_json::from_slice(&bytes(id, result)?)
+                    .map(|list: PipxOutdatedList| {
+                        list.data
+                            .packages
+                            .into_iter()
+                            .map(|entry| (entry.package, entry.latest_version))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                Err(_) => std::collections::BTreeMap::new(),
+            };
+        list.venvs
+            .into_values()
+            .map(|venv| {
+                let main = venv.metadata.main_package;
+                let candidate = outdated
+                    .get(&main.package)
+                    .cloned()
+                    .unwrap_or_else(|| main.package_version.clone());
+                self.detail(
+                    home,
+                    main.package,
+                    "Isolated Python application installed with pipx".into(),
+                    None,
+                    main.package_version,
+                    Some(candidate),
+                )
+            })
+            .collect()
+    }
+    /// Parse one `uv tool list [--outdated]` line: `name vversion` with an
+    /// optional `[latest: version]` suffix. Executable continuation lines
+    /// (`- name`) carry no version and are skipped by the caller via `None`;
+    /// anything else without a version is not a tool entry.
+    fn uv_entry(line: &str) -> Option<(String, String, Option<String>)> {
+        let line = line.trim();
+        if line.is_empty() || line == "-" || line.starts_with("- ") {
+            return None;
+        }
+        let (name, rest) = line.split_once(' ')?;
+        let rest = rest.trim();
+        let (version, latest) = match rest.split_once("[latest:") {
+            Some((version, latest)) => {
+                let latest = latest.strip_suffix(']')?.trim();
+                (version.trim(), Some(latest.to_string()))
+            }
+            None => (rest, None),
+        };
+        let version = version.strip_prefix('v')?;
+        if version.is_empty() || version.chars().any(char::is_whitespace) {
+            return None;
+        }
+        Some((name.to_string(), version.to_string(), latest))
+    }
+    fn uv_inventory(
+        &self,
+        home: &std::path::Path,
+        cancel: &Cancellation,
+    ) -> Result<Vec<PackageDetails>, EngineError> {
+        let id = self.kind.id();
+        let output = bytes(id, self.call(&["tool", "list"], cancel, false)?)?;
+        let text = String::from_utf8(output).map_err(|e| invalid(id, e))?;
+        if text.trim().is_empty() || text.trim() == "No tools installed" {
+            return Ok(vec![]);
+        }
+        let outdated: std::collections::BTreeMap<String, String> =
+            match self.call(&["tool", "list", "--outdated"], cancel, false) {
+                Ok(result) => String::from_utf8(bytes(id, result)?)
+                    .map(|text| {
+                        text.lines()
+                            .filter_map(Self::uv_entry)
+                            .filter_map(|(name, _, latest)| latest.map(|latest| (name, latest)))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                Err(_) => std::collections::BTreeMap::new(),
+            };
+        let mut details = Vec::new();
+        for line in text.lines() {
+            let Some((name, version, _)) = Self::uv_entry(line) else {
+                continue;
+            };
+            // Skip executable continuation lines already filtered; only tool
+            // headers carry versions.
+            if name.is_empty() {
+                continue;
+            }
+            let candidate = outdated
+                .get(&name)
+                .cloned()
+                .unwrap_or_else(|| version.clone());
+            details.push(self.detail(
+                home,
+                name,
+                "Isolated Python tool installed with uv".into(),
+                None,
+                version,
+                Some(candidate),
+            )?);
+        }
+        Ok(details)
+    }
+    fn composer_inventory(
+        &self,
+        home: &std::path::Path,
+        cancel: &Cancellation,
+    ) -> Result<Vec<PackageDetails>, EngineError> {
+        let id = self.kind.id();
+        let output = bytes(
+            id,
+            self.call(&["global", "show", "--format=json"], cancel, false)?,
+        )?;
+        // An empty global home has no composer.json; Composer reports that on
+        // stderr but still exits 0 with no JSON. Treat unparseable empty
+        // output as no packages only when stdout holds no document.
+        if output.iter().all(|b| b.is_ascii_whitespace()) {
+            return Ok(vec![]);
+        }
+        let show: ComposerShow = serde_json::from_slice(&output).map_err(|e| invalid(id, e))?;
+        let outdated: std::collections::BTreeMap<String, String> = match self.call(
+            &["global", "show", "--outdated", "--format=json"],
+            cancel,
+            false,
+        ) {
+            Ok(result) => serde_json::from_slice(&bytes(id, result)?)
+                .map(|show: ComposerShow| {
+                    show.installed
+                        .into_iter()
+                        .filter_map(|package| package.latest.map(|latest| (package.name, latest)))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            Err(_) => std::collections::BTreeMap::new(),
+        };
+        show.installed
+            .into_iter()
+            .map(|package| {
+                let candidate = outdated
+                    .get(&package.name)
+                    .cloned()
+                    .or(package.latest.clone())
+                    .unwrap_or_else(|| package.version.clone());
+                self.detail(
+                    home,
+                    package.name,
+                    package.description.clone().unwrap_or_default(),
+                    package.homepage.clone(),
+                    package.version,
+                    Some(candidate),
+                )
+            })
+            .collect()
+    }
+    /// Split a `*.gemspec` file name into `(name, version)`. Gem names may
+    /// contain dashes, so split at the last dash preceding a version.
+    fn gem_filename(file: &str) -> Option<(String, String)> {
+        let base = file.strip_suffix(".gemspec")?;
+        let (name, version) = base.rsplit_once('-')?;
+        if name.is_empty()
+            || version.is_empty()
+            || !version.starts_with(|c: char| c.is_ascii_digit())
+        {
+            return None;
+        }
+        Some((name.to_string(), version.to_string()))
+    }
+    /// Compare dot-separated gem versions numerically where possible so the
+    /// inventory reports one identity per gem (the highest installed).
+    fn gem_version_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+        let mut a_parts = a.split('.');
+        let mut b_parts = b.split('.');
+        loop {
+            match (a_parts.next(), b_parts.next()) {
+                (None, None) => return std::cmp::Ordering::Equal,
+                (None, _) => return std::cmp::Ordering::Less,
+                (_, None) => return std::cmp::Ordering::Greater,
+                (Some(x), Some(y)) => {
+                    let ord = match (x.parse::<u64>(), y.parse::<u64>()) {
+                        (Ok(x), Ok(y)) => x.cmp(&y),
+                        _ => x.cmp(y),
+                    };
+                    if ord != std::cmp::Ordering::Equal {
+                        return ord;
+                    }
+                }
+            }
+        }
+    }
+    /// Parse one `gem outdated` line: `name (installed < latest[, ...])`.
+    fn gem_outdated(line: &str) -> Option<(String, String)> {
+        let (name, rest) = line.split_once(' ')?;
+        if name.is_empty() || name.starts_with('-') {
+            return None;
+        }
+        let inner = rest.trim().strip_prefix('(')?.strip_suffix(')')?;
+        let (before, latest) = inner.split_once('<')?;
+        // Validate the installed side, then report the latest version.
+        before.split(',').rfind(|part| !part.trim().is_empty())?;
+        let latest = latest.split(',').next()?;
+        Some((name.to_string(), latest.trim().to_string()))
+    }
+    fn gem_inventory(
+        &self,
+        home: &std::path::Path,
+        cancel: &Cancellation,
+    ) -> Result<Vec<PackageDetails>, EngineError> {
+        let id = self.kind.id();
+        let mut names: Vec<(String, String)> = Vec::new();
+        match std::fs::read_dir(home.join("specifications")) {
+            Ok(entries) => {
+                for entry in entries.filter_map(Result::ok) {
+                    if cancel.requested() {
+                        return Err(EngineError::Cancelled);
+                    }
+                    let file = entry.file_name().to_string_lossy().into_owned();
+                    if let Some((name, version)) = Self::gem_filename(&file) {
+                        names.push((name, version));
+                    }
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+            Err(e) => return Err(invalid(id, e.to_string())),
+        }
+        let outdated: std::collections::BTreeMap<String, String> =
+            match self.call(&["outdated"], cancel, false) {
+                Ok(result) => String::from_utf8(bytes(id, result)?)
+                    .map(|text| text.lines().filter_map(Self::gem_outdated).collect())
+                    .unwrap_or_default(),
+                Err(_) => std::collections::BTreeMap::new(),
+            };
+        // Native updates retain older versions beside the new one; report one
+        // identity per gem at the highest installed version so engine
+        // selection stays unambiguous. Removal still drops every version.
+        // Sorted collection keeps the surviving identity deterministic.
+        names.sort();
+        let mut highest: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::new();
+        for (name, version) in names {
+            highest
+                .entry(name)
+                .and_modify(|keep| {
+                    if Self::gem_version_cmp(&version, keep) == std::cmp::Ordering::Greater {
+                        *keep = version.clone();
+                    }
+                })
+                .or_insert(version);
+        }
+        highest
+            .into_iter()
+            .map(|(name, version)| {
+                let candidate = outdated
+                    .get(&name)
+                    .cloned()
+                    .unwrap_or_else(|| version.clone());
+                self.detail(
+                    home,
+                    name,
+                    "RubyGem installed for the invoking user".into(),
+                    None,
+                    version,
+                    Some(candidate),
+                )
+            })
+            .collect()
+    }
     fn inventory(&self, cancel: &Cancellation) -> Result<Vec<PackageDetails>, EngineError> {
         let home = self
             .home
@@ -1608,6 +2241,11 @@ impl<T: Transport> DevTool<T> {
             DevKind::Npm => self.npm_inventory(&home, cancel),
             DevKind::Pnpm => self.pnpm_inventory(&home, cancel),
             DevKind::Bun => self.bun_inventory(&home),
+            DevKind::Pip => self.pip_inventory(&home, cancel),
+            DevKind::Pipx => self.pipx_inventory(&home, cancel),
+            DevKind::Uv => self.uv_inventory(&home, cancel),
+            DevKind::Composer => self.composer_inventory(&home, cancel),
+            DevKind::Gem => self.gem_inventory(&home, cancel),
         }
     }
     fn upgrade(
@@ -1618,11 +2256,16 @@ impl<T: Transport> DevTool<T> {
     ) -> Result<OperationOutcome, EngineError> {
         // pnpm and Bun keep pinned ranges, so plain `update` would not move
         // explicitly versioned tools. Reinstalling at `@latest` is also what
-        // the reported candidate reflects.
+        // the reported candidate reflects. Composer re-requires the package
+        // for the same reason; pip reinstalls with `--upgrade`.
         let name = self.target(target)?;
         progress(Progress::Message(format!(
             "Upgrading {name} as the invoking user."
         )));
+        let home = self
+            .home
+            .clone()
+            .ok_or_else(|| invalid(self.kind.id(), "manager home not detected"))?;
         let result = match self.kind {
             DevKind::Cargo => self.call(&["install", "--force", name], cancel, true)?,
             DevKind::Npm => self.call(&["update", "--global", name], cancel, true)?,
@@ -1630,6 +2273,31 @@ impl<T: Transport> DevTool<T> {
                 let latest = format!("{name}@latest");
                 self.call(&["add", "--global", &latest], cancel, true)?
             }
+            DevKind::Pip => self.pip_call(&home, &["install", "--upgrade", name], cancel, true)?,
+            DevKind::Pipx => self.call(&["upgrade", name], cancel, true)?,
+            // uv keeps exact version pins, so plain `tool upgrade` would not
+            // move explicitly versioned tools. Reinstalling at `@latest` is
+            // also what the reported candidate reflects.
+            DevKind::Uv => {
+                let latest = format!("{name}@latest");
+                self.call(&["tool", "install", "--force", &latest], cancel, true)?
+            }
+            DevKind::Composer => self.call(
+                &[
+                    "global",
+                    "require",
+                    "--no-interaction",
+                    "--no-progress",
+                    name,
+                ],
+                cancel,
+                true,
+            )?,
+            DevKind::Gem => self.call(
+                &["update", "--user-install", "--no-document", name],
+                cancel,
+                true,
+            )?,
         };
         Ok(OperationOutcome {
             cancellation_deferred: result.cancellation_deferred,
@@ -1640,8 +2308,8 @@ impl<T: Transport> DevTool<T> {
         cancel: &Cancellation,
         progress: &mut dyn FnMut(Progress),
     ) -> Result<OperationOutcome, EngineError> {
-        // Cargo has no registry upgrade command; refresh every installed
-        // tool in place as the single per-backend transaction.
+        // Cargo and pip have no registry upgrade-all command; refresh every
+        // installed tool in place as the single per-backend transaction.
         if self.kind == DevKind::Npm {
             progress(Progress::Message(format!(
                 "Updating {} packages as the invoking user.",
@@ -1652,11 +2320,67 @@ impl<T: Transport> DevTool<T> {
                 cancellation_deferred: result.cancellation_deferred,
             });
         }
+        if self.kind == DevKind::Pipx {
+            progress(Progress::Message(
+                "Upgrading pipx packages as the invoking user.".into(),
+            ));
+            let result = self.call(&["upgrade-all"], cancel, true)?;
+            return Ok(OperationOutcome {
+                cancellation_deferred: result.cancellation_deferred,
+            });
+        }
+        if self.kind == DevKind::Uv {
+            // `tool upgrade --all` keeps exact pins like per-package upgrade,
+            // so reinstall every tool at `@latest` as the single transaction.
+            for package in self.inventory(cancel)? {
+                let name = &package.package.id.name;
+                progress(Progress::Message(format!("Upgrading {name} to latest.")));
+                let latest = format!("{name}@latest");
+                self.call(&["tool", "install", "--force", &latest], cancel, true)?;
+            }
+            return Ok(OperationOutcome::default());
+        }
+        if self.kind == DevKind::Composer {
+            // `global update` respects pinned constraints, so re-require each
+            // installed package to reach the reported latest candidates.
+            for package in self.inventory(cancel)? {
+                let name = &package.package.id.name;
+                progress(Progress::Message(format!("Upgrading {name}.")));
+                self.call(
+                    &[
+                        "global",
+                        "require",
+                        "--no-interaction",
+                        "--no-progress",
+                        name,
+                    ],
+                    cancel,
+                    true,
+                )?;
+            }
+            return Ok(OperationOutcome::default());
+        }
+        if self.kind == DevKind::Gem {
+            progress(Progress::Message(
+                "Updating RubyGems as the invoking user.".into(),
+            ));
+            let result = self.call(&["update", "--user-install", "--no-document"], cancel, true)?;
+            return Ok(OperationOutcome {
+                cancellation_deferred: result.cancellation_deferred,
+            });
+        }
         for package in self.inventory(cancel)? {
             let name = &package.package.id.name;
             if self.kind == DevKind::Cargo {
                 progress(Progress::Message(format!("Reinstalling {name}.")));
                 self.call(&["install", "--force", name], cancel, true)?;
+            } else if self.kind == DevKind::Pip {
+                let home = self
+                    .home
+                    .clone()
+                    .ok_or_else(|| invalid(self.kind.id(), "manager home not detected"))?;
+                progress(Progress::Message(format!("Upgrading {name}.")));
+                self.pip_call(&home, &["install", "--upgrade", name], cancel, true)?;
             } else {
                 progress(Progress::Message(format!("Upgrading {name} to latest.")));
                 let latest = format!("{name}@latest");
@@ -1682,8 +2406,17 @@ impl<T: Transport> Backend for DevTool<T> {
             }
             Err(error) => return Err(error.into()),
         };
-        self.home = Some(home);
-        availability(self.call(&["--version"], cancel, false))
+        self.home = Some(home.clone());
+        if self.kind == DevKind::Pip {
+            availability(self.transport.venv_pip(
+                &home,
+                &[OsString::from("--version")],
+                cancel,
+                false,
+            ))
+        } else {
+            availability(self.call(&["--version"], cancel, false))
+        }
     }
     fn installed(&mut self, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
         Ok(self
@@ -1711,7 +2444,7 @@ impl<T: Transport> Backend for DevTool<T> {
                     || package.display_name.to_ascii_lowercase().contains(&lowered)
             })
             .collect();
-        if results.is_empty() && dev_name(query) {
+        if results.is_empty() && self.kind.valid_name(query) {
             results.push(Package {
                 id: PackageId {
                     backend: self.kind.id().into(),
@@ -1756,11 +2489,64 @@ impl<T: Transport> Backend for DevTool<T> {
                 DevKind::Cargo => vec!["install", self.target(target)?],
                 DevKind::Npm => vec!["install", "--global", self.target(target)?],
                 DevKind::Pnpm | DevKind::Bun => vec!["add", "--global", self.target(target)?],
+                DevKind::Pipx => vec!["install", self.target(target)?],
+                DevKind::Uv => vec!["tool", "install", self.target(target)?],
+                DevKind::Composer => vec![
+                    "global",
+                    "require",
+                    "--no-interaction",
+                    "--no-progress",
+                    self.target(target)?,
+                ],
+                DevKind::Gem => vec![
+                    "install",
+                    "--user-install",
+                    "--no-document",
+                    self.target(target)?,
+                ],
+                DevKind::Pip => {
+                    let name = self.target(target)?;
+                    let home = self
+                        .home
+                        .clone()
+                        .ok_or_else(|| invalid(self.kind.id(), "manager home not detected"))?;
+                    progress(Progress::Message(format!(
+                        "Running {id} as the invoking user; cancellation waits for completion."
+                    )));
+                    let result = self.pip_call(&home, &["install", name], cancel, true)?;
+                    return Ok(OperationOutcome {
+                        cancellation_deferred: result.cancellation_deferred,
+                    });
+                }
             },
             Operation::Remove(target) => match self.kind {
                 DevKind::Cargo => vec!["uninstall", self.target(target)?],
                 DevKind::Npm => vec!["uninstall", "--global", self.target(target)?],
                 DevKind::Pnpm | DevKind::Bun => vec!["remove", "--global", self.target(target)?],
+                DevKind::Pipx => vec!["uninstall", self.target(target)?],
+                DevKind::Uv => vec!["tool", "uninstall", self.target(target)?],
+                DevKind::Composer => vec!["global", "remove", self.target(target)?],
+                DevKind::Gem => vec![
+                    "uninstall",
+                    "--user-install",
+                    "-x",
+                    "-a",
+                    self.target(target)?,
+                ],
+                DevKind::Pip => {
+                    let name = self.target(target)?;
+                    let home = self
+                        .home
+                        .clone()
+                        .ok_or_else(|| invalid(self.kind.id(), "manager home not detected"))?;
+                    progress(Progress::Message(format!(
+                        "Running {id} as the invoking user; cancellation waits for completion."
+                    )));
+                    let result = self.pip_call(&home, &["uninstall", "-y", name], cancel, true)?;
+                    return Ok(OperationOutcome {
+                        cancellation_deferred: result.cancellation_deferred,
+                    });
+                }
             },
             Operation::Upgrade(target) => {
                 return self.upgrade(target, cancel, progress);
@@ -1790,7 +2576,7 @@ pub fn native_engine(
     if source.is_some_and(|s| {
         ![
             "apt", "dnf", "pacman", "zypper", "snap", "homebrew", "appimage", "flatpak", "cargo",
-            "npm", "pnpm", "bun",
+            "npm", "pnpm", "bun", "pip", "pipx", "uv", "composer", "gem",
         ]
         .contains(&s)
     }) {
@@ -1872,6 +2658,26 @@ pub fn native_engine(
             "bun",
             DevTool::bun as fn(NativeTransport) -> DevTool<NativeTransport>,
         ),
+        (
+            "pip",
+            DevTool::pip as fn(NativeTransport) -> DevTool<NativeTransport>,
+        ),
+        (
+            "pipx",
+            DevTool::pipx as fn(NativeTransport) -> DevTool<NativeTransport>,
+        ),
+        (
+            "uv",
+            DevTool::uv as fn(NativeTransport) -> DevTool<NativeTransport>,
+        ),
+        (
+            "composer",
+            DevTool::composer as fn(NativeTransport) -> DevTool<NativeTransport>,
+        ),
+        (
+            "gem",
+            DevTool::gem as fn(NativeTransport) -> DevTool<NativeTransport>,
+        ),
     ] {
         if source.is_none_or(|s| s == id) {
             let mut tool = make(NativeTransport {
@@ -1887,4 +2693,145 @@ pub fn native_engine(
         }
     }
     Ok(engine)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wave_five_name_policies() {
+        for name in [
+            "cowsay", "requests", "Pillow", "foo-bar", "foo_bar", "foo.bar", "a", "a1",
+        ] {
+            assert!(python_name(name), "{name}");
+            assert!(gem_name(name), "{name}");
+        }
+        for name in [
+            "",
+            "-evil",
+            "evil-",
+            "evil_",
+            "evil.",
+            "../evil",
+            "evil/thing",
+            "https://example.invalid/tool.tar.gz",
+            "name@latest",
+            "name==1.0",
+            "name;evil",
+            "white space",
+            "évil",
+        ] {
+            assert!(!python_name(name), "{name}");
+            assert!(!gem_name(name), "{name}");
+        }
+        assert!(python_name(&"a".repeat(214)));
+        assert!(!python_name(&"a".repeat(215)));
+        for name in ["psr/log", "monolog/monolog", "vendor123/pkg-name_1.2"] {
+            assert!(composer_name(name), "{name}");
+        }
+        for name in [
+            "",
+            "monolog",
+            "/package",
+            "vendor/",
+            "Vendor/Package",
+            "-vendor/package",
+            "vendor//package",
+            "vendor/pack age",
+            "vendor/package/extra",
+        ] {
+            assert!(!composer_name(name), "{name}");
+        }
+        assert!(!dev_name(""));
+        assert!(!dev_name("@scope"));
+        assert!(!dev_name("@scope/tool/extra"));
+        assert!(dev_name("@scope/tool"));
+        assert!(!dev_name("."));
+        assert!(!dev_name(".."));
+    }
+
+    #[test]
+    fn wave_five_parsers() {
+        assert_eq!(
+            DevTool::<NativeTransport>::uv_entry("cowsay v6.0"),
+            Some(("cowsay".into(), "6.0".into(), None))
+        );
+        assert_eq!(
+            DevTool::<NativeTransport>::uv_entry("cowsay v6.0 [latest: 6.1]"),
+            Some(("cowsay".into(), "6.0".into(), Some("6.1".into())))
+        );
+        for line in [
+            "", "   ", "-", "- cowsay", "nodash", "name ", "name v", "name 6.0",
+        ] {
+            assert_eq!(DevTool::<NativeTransport>::uv_entry(line), None, "{line}");
+        }
+        assert_eq!(
+            DevTool::<NativeTransport>::gem_filename("cowsay-0.3.0.gemspec"),
+            Some(("cowsay".into(), "0.3.0".into()))
+        );
+        assert_eq!(
+            DevTool::<NativeTransport>::gem_filename("foo-bar-1.0.gemspec"),
+            Some(("foo-bar".into(), "1.0".into()))
+        );
+        for file in [
+            "nodash.gemspec",
+            "README",
+            "name-.gemspec",
+            "name-x.gemspec",
+            "-1.0.gemspec",
+        ] {
+            assert_eq!(
+                DevTool::<NativeTransport>::gem_filename(file),
+                None,
+                "{file}"
+            );
+        }
+        assert_eq!(
+            DevTool::<NativeTransport>::gem_outdated("cowsay (0.3.0 < 0.4.0)"),
+            Some(("cowsay".into(), "0.4.0".into()))
+        );
+        assert_eq!(
+            DevTool::<NativeTransport>::gem_outdated("rake (13.0.0, 13.3.0 < 13.4.2)"),
+            Some(("rake".into(), "13.4.2".into()))
+        );
+        for line in [
+            "",
+            "cowsay",
+            "cowsay (0.3.0)",
+            "--evil (1.0 < 2.0)",
+            "-x (1 < 2)",
+        ] {
+            assert_eq!(
+                DevTool::<NativeTransport>::gem_outdated(line),
+                None,
+                "{line}"
+            );
+        }
+        use std::cmp::Ordering::*;
+        assert_eq!(
+            DevTool::<NativeTransport>::gem_version_cmp("1.0", "1.0"),
+            Equal
+        );
+        assert_eq!(
+            DevTool::<NativeTransport>::gem_version_cmp("0.2.0", "0.3.0"),
+            Less
+        );
+        assert_eq!(
+            DevTool::<NativeTransport>::gem_version_cmp("13.4.2", "13.0.0"),
+            Greater
+        );
+        assert_eq!(
+            DevTool::<NativeTransport>::gem_version_cmp("1.0", "1.0.0"),
+            Less
+        );
+        assert_eq!(
+            DevTool::<NativeTransport>::gem_version_cmp("1.0.0", "1.0"),
+            Greater
+        );
+        assert_eq!(
+            DevTool::<NativeTransport>::gem_version_cmp("1.0.a", "1.0.b"),
+            Less
+        );
+    }
 }

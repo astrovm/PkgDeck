@@ -501,3 +501,63 @@ fn dev_tool_runs_unprivileged_and_reports_status() {
         Err(ExecutionError::Disabled(_))
     ));
 }
+
+#[test]
+fn venv_pip_runs_only_inside_explicit_absolute_environments() {
+    let fixture = Fixture::new();
+    let venv = fixture.0.join("venv");
+    fs::create_dir_all(venv.join("bin")).unwrap();
+    symlink("/bin/true", venv.join("bin/python")).unwrap();
+    fs::write(venv.join("pyvenv.cfg"), "home = /usr/bin\n").unwrap();
+    let host = Host::new(
+        Runtime::Native,
+        env(&[
+            ("PATH", fixture.0.to_str().unwrap()),
+            ("HOME", "/home/test"),
+            ("VIRTUAL_ENV", venv.to_str().unwrap()),
+            ("PIPX_HOME", "/home/test/.local/share/pipx"),
+            ("UV_TOOL_DIR", "/home/test/.local/share/uv/tools"),
+            ("COMPOSER_HOME", "/home/test/.config/composer"),
+            ("GEM_HOME", "/home/test/gem"),
+            ("LD_LIBRARY_PATH", "/app/lib"),
+            ("PYTHONPATH", "/app/python"),
+        ]),
+    );
+    // Explicit manager homes survive sanitization; injection variables do not.
+    for name in [
+        "VIRTUAL_ENV",
+        "PIPX_HOME",
+        "UV_TOOL_DIR",
+        "COMPOSER_HOME",
+        "GEM_HOME",
+    ] {
+        assert!(host.var(name).is_some());
+    }
+    assert!(host.var("LD_LIBRARY_PATH").is_none());
+    assert!(host.var("PYTHONPATH").is_none());
+    let cancel = Cancellation::default();
+    let ok = host
+        .venv_pip(&venv, &["--version".into()], &cancel, false)
+        .unwrap();
+    assert_eq!(ok.code, Some(0));
+    // Relative roots, missing interpreters, and directories without a
+    // virtual-environment marker fail closed without running pip.
+    assert!(matches!(
+        host.venv_pip(Path::new("relative/venv"), &[], &cancel, false),
+        Err(ExecutionError::Invalid(_))
+    ));
+    assert!(matches!(
+        host.venv_pip(&fixture.0.join("missing"), &[], &cancel, false),
+        Err(ExecutionError::Disabled(_))
+    ));
+    assert!(matches!(
+        host.venv_pip(&fixture.0, &[], &cancel, false),
+        Err(ExecutionError::Disabled(_))
+    ));
+    // Sandboxed runtimes disable venv execution like every other host call.
+    let sandbox = Host::new(Runtime::Snap, env(&[]));
+    assert!(matches!(
+        sandbox.venv_pip(&venv, &[], &cancel, false),
+        Err(ExecutionError::Disabled(_))
+    ));
+}
