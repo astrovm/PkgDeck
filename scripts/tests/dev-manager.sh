@@ -6,9 +6,9 @@
 # Usage: scripts/tests/dev-manager.sh cargo|npm|pnpm|bun <pkd>
 set -euo pipefail
 trap 'echo "dev-manager FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
-echo "dev-manager: backend=$backend pkd=$pkd user=$(whoami) home=$HOME" 
 backend=${1:?Usage: scripts/tests/dev-manager.sh cargo|npm|pnpm|bun <pkd>}
 pkd=${2:?Usage: scripts/tests/dev-manager.sh cargo|npm|pnpm|bun <pkd>}
+echo "dev-manager: backend=$backend pkd=$pkd user=$(whoami) home=$HOME"
 run() { "$pkd" --json --yes --auth sudo --from "$backend" "$@"; }
 success() { run "$@" | grep -q '"exit_code":0'; }
 have() { run list | grep -q "\"name\":\"$1\""; }
