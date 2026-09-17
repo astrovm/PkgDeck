@@ -150,6 +150,21 @@ jobs:
           success remove hello-world
           ! snap list hello-world
 
+  dev-backends:
+    name: Real dev backends (${{ matrix.backend }})
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [cargo, npm, pnpm, bun]
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build CLI
+        run: cargo build --locked -p pkd
+      - name: Exercise actual development manager
+        run: scripts/tests/dev-manager.sh ${{ matrix.backend }} "$PWD/target/debug/pkd"
+
   desktop:
     name: GUI, coverage and packages (${{ matrix.arch }})
     timeout-minutes: 45
@@ -244,10 +259,13 @@ jobs:
           flatpak --user remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
           flatpak --user install -y --noninteractive flathub org.kde.kcalc
           run_flatpak() { build/AppDir/usr/bin/pkd --json --yes --auth sudo --from flatpak "$@"; }
+          check() { local file=$1 filter=$2; shift 2; "$@" | tee "$file" | jq -e "$filter" || { echo "--- $file ---"; cat "$file"; exit 1; }; }
           run_flatpak list | tee /tmp/pkd-flatpak-list.json | jq -e 'any(.data.packages[]; .id.name == "org.kde.kcalc")'
-          run_flatpak info org.kde.kcalc | tee /tmp/pkd-flatpak-info.json | jq -e '.exit_code == 0'
-          run_flatpak update | tee /tmp/pkd-flatpak-update.json | jq -e '.exit_code == 0'
-          run_flatpak remove org.kde.kcalc | tee /tmp/pkd-flatpak-remove.json | jq -e '.exit_code == 0'
+          flatpak --user search --columns=name,description,application,version,branch,remotes org.kde.kcalc | tee /tmp/pkd-flatpak-search-user.txt
+          flatpak --system search --columns=name,description,application,version,branch,remotes org.kde.kcalc | tee /tmp/pkd-flatpak-search-system.txt || true
+          check /tmp/pkd-flatpak-info.json '.exit_code == 0' run_flatpak info org.kde.kcalc
+          check /tmp/pkd-flatpak-update.json '.exit_code == 0' run_flatpak update
+          check /tmp/pkd-flatpak-remove.json '.exit_code == 0' run_flatpak remove org.kde.kcalc
           ! flatpak --user list --app | grep -q org.kde.kcalc
       - name: Build and inspect Snap
         run: |

@@ -467,3 +467,37 @@ fn system_manager_reads_keep_snap_timeout_and_exit_status() {
         Err(ExecutionError::Failed(_))
     ));
 }
+
+#[test]
+fn dev_tool_runs_unprivileged_and_reports_status() {
+    let fixture = Fixture::new();
+    fixture.executable("synthetic-ok");
+    let failing = fixture.0.join("synthetic-fail");
+    fs::write(&failing, "#!/bin/sh\nexit 3\n").unwrap();
+    fs::set_permissions(&failing, fs::Permissions::from_mode(0o755)).unwrap();
+    let host = Host::new(
+        Runtime::Native,
+        env(&[
+            ("PATH", fixture.0.to_str().unwrap()),
+            ("HOME", "/home/test"),
+        ]),
+    );
+    assert_eq!(
+        host.var("HOME").as_deref(),
+        Some(std::ffi::OsStr::new("/home/test"))
+    );
+    assert!(host.var("CARGO_HOME").is_none());
+    let cancel = Cancellation::default();
+    let ok = host
+        .dev_tool("synthetic-ok", "Synthetic", &[], &cancel, false)
+        .unwrap();
+    assert_eq!(ok.code, Some(0));
+    assert!(matches!(
+        host.dev_tool("synthetic-fail", "Synthetic", &[], &cancel, false),
+        Err(ExecutionError::Failed(_))
+    ));
+    assert!(matches!(
+        host.dev_tool("synthetic-missing", "Synthetic", &[], &cancel, false),
+        Err(ExecutionError::Disabled(_))
+    ));
+}

@@ -186,23 +186,38 @@ TestCase {
     }
     Component {
         id: vectorIcon
-        App.DeckIcon { width: 48; height: 48; z: 100 }
+        Item {
+            width: 48
+            height: 48
+            property alias name: inner.name
+            property alias ink: inner.ink
+            property alias drawings: inner.drawings
+            property alias available: inner.available
+            Rectangle {
+                anchors.fill: parent
+                color: "black"
+            }
+            App.DeckIcon {
+                id: inner
+                anchors.fill: parent
+            }
+        }
     }
     function test_bundled_vectors_render_without_an_icon_font() {
         const icon = createTemporaryObject(vectorIcon, browser.contentItem);
         verify(icon !== null);
         icon.ink = "transparent";
-        wait(30);
+        waitForRendering(icon);
         const blank = grabImage(icon);
         for (const name of Object.keys(icon.drawings)) {
             icon.name = name;
             icon.ink = "#ffffff";
-            wait(30);
+            waitForRendering(icon);
             verify(icon.available);
             verify(!grabImage(icon).equals(blank), name + " should paint a bundled vector");
             const light = grabImage(icon);
             icon.ink = "#102030";
-            wait(30);
+            waitForRendering(icon);
             verify(!grabImage(icon).equals(light), name + " should follow the palette");
         }
     }
