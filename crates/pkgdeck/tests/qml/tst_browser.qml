@@ -186,7 +186,22 @@ TestCase {
     }
     Component {
         id: vectorIcon
-        App.DeckIcon { width: 48; height: 48; z: 100 }
+        Item {
+            width: 48
+            height: 48
+            property alias name: inner.name
+            property alias ink: inner.ink
+            property alias drawings: inner.drawings
+            property alias available: inner.available
+            Rectangle {
+                anchors.fill: parent
+                color: "black"
+            }
+            App.DeckIcon {
+                id: inner
+                anchors.fill: parent
+            }
+        }
     }
     function test_bundled_vectors_render_without_an_icon_font() {
         const icon = createTemporaryObject(vectorIcon, browser.contentItem);
