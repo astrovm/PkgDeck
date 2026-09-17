@@ -456,6 +456,7 @@ fn explicit_optional_sources_remain_discoverable_when_unavailable() {
     let cancel = Cancellation::default();
     for source in [
         "appimage", "flatpak", "dnf", "pacman", "zypper", "snap", "cargo", "npm", "pnpm", "bun",
+        "pip", "pipx", "uv", "composer", "gem",
     ] {
         let mut engine = native_engine(
             Some(source),
@@ -930,6 +931,10 @@ struct DevFixture {
     list_failed_stdout: Option<String>,
     fail: Option<ExecutionError>,
     fail_writes: bool,
+    venv: Option<String>,
+    pip_list: String,
+    pip_outdated: Option<String>,
+    extra_env: std::collections::BTreeMap<String, String>,
     calls: Arc<Mutex<Vec<DevCall>>>,
 }
 
@@ -990,10 +995,66 @@ impl Transport for DevFixture {
         unreachable!()
     }
     fn env(&self, name: &str) -> Option<OsString> {
+        if let Some(value) = self.extra_env.get(name) {
+            return Some(OsString::from(value));
+        }
         if name == "HOME" {
             self.home.clone().map(OsString::from)
+        } else if name == "VIRTUAL_ENV" {
+            self.venv.clone().map(OsString::from)
         } else {
             None
+        }
+    }
+    fn venv_pip(
+        &self,
+        _venv: &std::path::Path,
+        args: &[OsString],
+        cancel: &Cancellation,
+        write: bool,
+    ) -> Result<Completion, ExecutionError> {
+        if cancel.requested() {
+            return Err(ExecutionError::Cancelled);
+        }
+        let rendered: Vec<String> = args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        self.calls
+            .lock()
+            .unwrap()
+            .push(("pip".into(), rendered.clone(), write));
+        if let Some(error) = &self.fail {
+            return Err(error.clone());
+        }
+        if write && self.fail_writes {
+            return Err(ExecutionError::Failed(Completion {
+                code: Some(1),
+                signal: None,
+                stdout: vec![],
+                stderr: vec![],
+                truncated: false,
+                cancellation_deferred: false,
+            }));
+        }
+        let first = rendered.first().map(String::as_str);
+        match first {
+            Some("--version") => Ok(output(&self.version)),
+            Some("list") if rendered.contains(&"--outdated".to_string()) => {
+                match &self.pip_outdated {
+                    Some(json) => Ok(output(json)),
+                    None => Err(ExecutionError::Failed(Completion {
+                        code: Some(1),
+                        signal: None,
+                        stdout: vec![],
+                        stderr: vec![],
+                        truncated: false,
+                        cancellation_deferred: false,
+                    })),
+                }
+            }
+            Some("list") => Ok(output(&self.pip_list)),
+            _ => Ok(output("")),
         }
     }
     fn dev_tool(
@@ -1042,6 +1103,81 @@ impl Transport for DevFixture {
             ("npm", Some("ls")) | ("pnpm", Some("ls")) => self.list_result(),
             ("npm", Some("outdated")) | ("pnpm", Some("outdated")) => match &self.outdated {
                 Some(json) => Ok(output(json)),
+                None => Err(ExecutionError::Failed(Completion {
+                    code: Some(1),
+                    signal: None,
+                    stdout: vec![],
+                    stderr: vec![],
+                    truncated: false,
+                    cancellation_deferred: false,
+                })),
+            },
+            ("pipx", Some("list")) if rendered.contains(&"--outdated".to_string()) => {
+                match &self.outdated {
+                    Some(json) => Ok(output(json)),
+                    None => Err(ExecutionError::Failed(Completion {
+                        code: Some(1),
+                        signal: None,
+                        stdout: vec![],
+                        stderr: vec![],
+                        truncated: false,
+                        cancellation_deferred: false,
+                    })),
+                }
+            }
+            ("pipx", Some("list")) => self.list_result(),
+            ("uv", Some("tool")) if rendered.get(1).map(String::as_str) == Some("dir") => {
+                match &self.root {
+                    Some(root) => Ok(output(format!("{root}\n"))),
+                    None => Err(ExecutionError::Disabled("uv not found".into())),
+                }
+            }
+            ("uv", Some("tool")) => {
+                if rendered.contains(&"--outdated".to_string()) {
+                    match &self.outdated {
+                        Some(text) => Ok(output(text)),
+                        None => Err(ExecutionError::Failed(Completion {
+                            code: Some(1),
+                            signal: None,
+                            stdout: vec![],
+                            stderr: vec![],
+                            truncated: false,
+                            cancellation_deferred: false,
+                        })),
+                    }
+                } else {
+                    self.list_result()
+                }
+            }
+            ("composer", Some("config")) => match &self.root {
+                Some(root) => Ok(output(format!("{root}\n"))),
+                None => Err(ExecutionError::Disabled("Composer not found".into())),
+            },
+            ("composer", Some("global")) => {
+                if rendered.contains(&"--outdated".to_string()) {
+                    match &self.outdated {
+                        Some(json) => Ok(output(json)),
+                        None => Err(ExecutionError::Failed(Completion {
+                            code: Some(1),
+                            signal: None,
+                            stdout: vec![],
+                            stderr: vec![],
+                            truncated: false,
+                            cancellation_deferred: false,
+                        })),
+                    }
+                } else {
+                    self.list_result()
+                }
+            }
+            ("gem", Some("env")) => match &self.root {
+                Some(root) => Ok(output(format!(
+                    "RubyGems Environment:\n- USER INSTALLATION DIRECTORY: {root}\n"
+                ))),
+                None => Err(ExecutionError::Disabled("RubyGems not found".into())),
+            },
+            ("gem", Some("outdated")) => match &self.outdated {
+                Some(text) => Ok(output(text)),
                 None => Err(ExecutionError::Failed(Completion {
                     code: Some(1),
                     signal: None,
@@ -1696,5 +1832,982 @@ fn bun_skips_unreadable_manifests() {
     std::fs::set_permissions(&modules, std::fs::Permissions::from_mode(0o000)).unwrap();
     assert!(backend.installed(&cancel).is_err());
     std::fs::set_permissions(&modules, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::remove_dir_all(&base).unwrap();
+}
+
+const PIP_LIST: &str = r#"[{"name": "cowsay", "version": "6.0"}, {"name": "requests", "version": "2.32.0"}, {"name": "pip", "version": "25.1.1"}, {"name": "setuptools", "version": "80.0.0"}]"#;
+const PIP_OUTDATED: &str = r#"[{"name": "cowsay", "version": "6.0", "latest_version": "6.1"}]"#;
+const PIPX_LIST: &str = r#"{"venvs": {"cowsay": {"metadata": {"main_package": {"package": "cowsay", "package_version": "6.0"}}}}}"#;
+const PIPX_OUTDATED: &str = r#"{"command": ["list"], "data": {"packages": [{"environment": "cowsay", "package": "cowsay", "version": "6.0", "latest_version": "6.1"}]}, "errors": [], "exit_code": 0}"#;
+const UV_LIST: &str = "cowsay v6.0\n- cowsay\nrequests v2.32.0\n- requests\n";
+const UV_OUTDATED: &str = "cowsay v6.0 [latest: 6.1]\n- cowsay\n";
+const COMPOSER_LIST: &str = r#"{"installed": [{"name": "psr/log", "version": "1.0.0", "description": "Common interface for logging libraries", "homepage": "https://example.invalid"}]}"#;
+const COMPOSER_OUTDATED: &str = r#"{"installed": [{"name": "psr/log", "version": "1.0.0", "description": "Common interface for logging libraries", "latest": "3.0.2"}]}"#;
+
+#[test]
+fn pip_lifecycle() {
+    let fixture = DevFixture {
+        venv: Some("/home/test/venv".into()),
+        version: "pip 25.1.1\n".into(),
+        pip_list: PIP_LIST.into(),
+        pip_outdated: Some(PIP_OUTDATED.into()),
+        ..DevFixture::default()
+    };
+    let mut backend = DevTool::pip(fixture.clone());
+    let cancel = Cancellation::default();
+    assert_eq!(backend.detect(&cancel), Ok(Availability::Available));
+    let installed = backend.installed(&cancel).unwrap();
+    assert_eq!(installed.len(), 2);
+    let outdated = installed.iter().find(|p| p.id.name == "cowsay").unwrap();
+    assert_eq!(outdated.update, UpdateAvailability::Available);
+    assert_eq!(outdated.candidate_version.as_deref(), Some("6.1"));
+    let current = installed.iter().find(|p| p.id.name == "requests").unwrap();
+    assert_eq!(current.update, UpdateAvailability::Current);
+    assert_eq!(
+        outdated.id.scope,
+        Scope::Environment {
+            path: "/home/test/venv".into()
+        }
+    );
+    assert_eq!(backend.search("cowsay", &cancel).unwrap().len(), 1);
+    let candidates = backend.search("new-tool", &cancel).unwrap();
+    assert_eq!(candidates.len(), 1);
+    assert!(candidates[0].installed_version.is_none());
+    assert!(backend.search("--evil", &cancel).unwrap().is_empty());
+    let id = outdated.id.clone();
+    assert_eq!(backend.details(&id, &cancel).unwrap().package.id, id);
+    assert_eq!(
+        backend.details(&dev_id("pip", "missing", "/home/test/venv"), &cancel),
+        Err(EngineError::NotFound)
+    );
+    let mut progress = vec![];
+    backend
+        .execute(
+            &Operation::Install(dev_id("pip", "new-tool", "/home/test/venv")),
+            &cancel,
+            &mut |p| progress.push(p),
+        )
+        .unwrap();
+    backend
+        .execute(&Operation::Upgrade(id.clone()), &cancel, &mut |p| {
+            progress.push(p)
+        })
+        .unwrap();
+    backend
+        .execute(&Operation::Remove(id.clone()), &cancel, &mut |p| {
+            progress.push(p)
+        })
+        .unwrap();
+    backend
+        .execute(
+            &Operation::UpgradeAll {
+                backend: "pip".into(),
+            },
+            &cancel,
+            &mut |p| progress.push(p),
+        )
+        .unwrap();
+    assert!(!progress.is_empty());
+    assert!(matches!(
+        backend.execute(
+            &Operation::Refresh {
+                backend: "pip".into()
+            },
+            &cancel,
+            &mut |p| progress.push(p)
+        ),
+        Err(EngineError::Unsupported { .. })
+    ));
+    assert!(backend
+        .execute(
+            &Operation::Install(dev_id("pip", "../evil", "/home/test/venv")),
+            &cancel,
+            &mut |p| progress.push(p)
+        )
+        .is_err());
+    let writes = fixture.writes("pip");
+    assert!(writes.contains(&vec!["install".into(), "new-tool".into()]));
+    assert!(writes.contains(&vec!["install".into(), "--upgrade".into(), "cowsay".into()]));
+    assert!(writes.contains(&vec!["uninstall".into(), "-y".into(), "cowsay".into()]));
+}
+
+#[test]
+fn pip_requires_an_explicit_virtual_environment() {
+    let cancel = Cancellation::default();
+    let mut missing = DevTool::pip(DevFixture {
+        version: "pip 25.1.1\n".into(),
+        pip_list: PIP_LIST.into(),
+        ..DevFixture::default()
+    });
+    assert_eq!(
+        missing.detect(&cancel),
+        Ok(Availability::Unavailable(
+            "pip requires an explicitly selected virtual environment".into()
+        ))
+    );
+    let mut relative = DevTool::pip(DevFixture {
+        venv: Some("relative/venv".into()),
+        version: "pip 25.1.1\n".into(),
+        pip_list: PIP_LIST.into(),
+        ..DevFixture::default()
+    });
+    assert!(relative.detect(&cancel).is_err());
+    // Operations without a detected home fail closed.
+    let mut cold = DevTool::pip(DevFixture {
+        venv: Some("/home/test/venv".into()),
+        ..DevFixture::default()
+    });
+    assert!(cold.installed(&cancel).is_err());
+    assert!(cold.search("tool", &cancel).is_err());
+}
+
+#[test]
+fn pipx_lifecycle() {
+    let fixture = DevFixture {
+        home: Some("/home/test".into()),
+        version: "1.17.2\n".into(),
+        list: PIPX_LIST.into(),
+        outdated: Some(PIPX_OUTDATED.into()),
+        ..DevFixture::default()
+    };
+    let mut backend = DevTool::pipx(fixture.clone());
+    let cancel = Cancellation::default();
+    assert_eq!(backend.detect(&cancel), Ok(Availability::Available));
+    let installed = backend.installed(&cancel).unwrap();
+    assert_eq!(installed.len(), 1);
+    assert_eq!(installed[0].id.name, "cowsay");
+    assert_eq!(installed[0].update, UpdateAvailability::Available);
+    assert_eq!(installed[0].candidate_version.as_deref(), Some("6.1"));
+    assert_eq!(
+        installed[0].id.scope,
+        Scope::Environment {
+            path: "/home/test/.local/share/pipx".into()
+        }
+    );
+    let id = installed[0].id.clone();
+    assert_eq!(backend.details(&id, &cancel).unwrap().package.id, id);
+    let mut progress = vec![];
+    backend
+        .execute(
+            &Operation::Install(dev_id("pipx", "new-tool", "/home/test/.local/share/pipx")),
+            &cancel,
+            &mut |p| progress.push(p),
+        )
+        .unwrap();
+    backend
+        .execute(&Operation::Upgrade(id.clone()), &cancel, &mut |p| {
+            progress.push(p)
+        })
+        .unwrap();
+    backend
+        .execute(&Operation::Remove(id.clone()), &cancel, &mut |p| {
+            progress.push(p)
+        })
+        .unwrap();
+    backend
+        .execute(
+            &Operation::UpgradeAll {
+                backend: "pipx".into(),
+            },
+            &cancel,
+            &mut |p| progress.push(p),
+        )
+        .unwrap();
+    assert!(matches!(
+        backend.execute(
+            &Operation::Refresh {
+                backend: "pipx".into()
+            },
+            &cancel,
+            &mut |p| progress.push(p)
+        ),
+        Err(EngineError::Unsupported { .. })
+    ));
+    assert!(backend
+        .execute(
+            &Operation::Install(dev_id(
+                "pipx",
+                "https://example.invalid/tool.tar.gz",
+                "/home/test/.local/share/pipx"
+            )),
+            &cancel,
+            &mut |p| progress.push(p)
+        )
+        .is_err());
+    let writes = fixture.writes("pipx");
+    assert!(writes.contains(&vec!["install".into(), "new-tool".into()]));
+    assert!(writes.contains(&vec!["upgrade".into(), "cowsay".into()]));
+    assert!(writes.contains(&vec!["uninstall".into(), "cowsay".into()]));
+    assert!(writes.contains(&vec!["upgrade-all".into()]));
+}
+
+#[test]
+fn uv_lifecycle() {
+    let fixture = DevFixture {
+        version: "uv 0.12.11\n".into(),
+        root: Some("/home/test/.local/share/uv/tools".into()),
+        list: UV_LIST.into(),
+        outdated: Some(UV_OUTDATED.into()),
+        ..DevFixture::default()
+    };
+    let mut backend = DevTool::uv(fixture.clone());
+    let cancel = Cancellation::default();
+    assert_eq!(backend.detect(&cancel), Ok(Availability::Available));
+    let installed = backend.installed(&cancel).unwrap();
+    assert_eq!(installed.len(), 2);
+    let outdated = installed.iter().find(|p| p.id.name == "cowsay").unwrap();
+    assert_eq!(outdated.update, UpdateAvailability::Available);
+    assert_eq!(outdated.candidate_version.as_deref(), Some("6.1"));
+    let id = outdated.id.clone();
+    assert_eq!(backend.details(&id, &cancel).unwrap().package.id, id);
+    let mut progress = vec![];
+    backend
+        .execute(
+            &Operation::Install(dev_id("uv", "new-tool", "/home/test/.local/share/uv/tools")),
+            &cancel,
+            &mut |p| progress.push(p),
+        )
+        .unwrap();
+    backend
+        .execute(&Operation::Upgrade(id.clone()), &cancel, &mut |p| {
+            progress.push(p)
+        })
+        .unwrap();
+    backend
+        .execute(&Operation::Remove(id.clone()), &cancel, &mut |p| {
+            progress.push(p)
+        })
+        .unwrap();
+    backend
+        .execute(
+            &Operation::UpgradeAll {
+                backend: "uv".into(),
+            },
+            &cancel,
+            &mut |p| progress.push(p),
+        )
+        .unwrap();
+    assert!(matches!(
+        backend.execute(
+            &Operation::Refresh {
+                backend: "uv".into()
+            },
+            &cancel,
+            &mut |p| progress.push(p)
+        ),
+        Err(EngineError::Unsupported { .. })
+    ));
+    let writes = fixture.writes("uv");
+    assert!(writes.contains(&vec!["tool".into(), "install".into(), "new-tool".into()]));
+    // uv keeps exact pins, so upgrades reinstall at @latest like pnpm/Bun.
+    assert_eq!(
+        writes
+            .iter()
+            .filter(|args| {
+                **args
+                    == vec![
+                        "tool".to_string(),
+                        "install".to_string(),
+                        "--force".to_string(),
+                        "cowsay@latest".to_string(),
+                    ]
+            })
+            .count(),
+        2
+    );
+    assert!(writes.contains(&vec!["tool".into(), "uninstall".into(), "cowsay".into()]));
+    assert!(!writes
+        .iter()
+        .any(|args| args.contains(&"upgrade".to_string())));
+}
+
+#[test]
+fn composer_lifecycle() {
+    let fixture = DevFixture {
+        version: "Composer version 2.10.3\n".into(),
+        root: Some("/home/test/.config/composer".into()),
+        list: COMPOSER_LIST.into(),
+        outdated: Some(COMPOSER_OUTDATED.into()),
+        ..DevFixture::default()
+    };
+    let mut backend = DevTool::composer(fixture.clone());
+    let cancel = Cancellation::default();
+    assert_eq!(backend.detect(&cancel), Ok(Availability::Available));
+    let installed = backend.installed(&cancel).unwrap();
+    assert_eq!(installed.len(), 1);
+    assert_eq!(installed[0].id.name, "psr/log");
+    assert_eq!(installed[0].update, UpdateAvailability::Available);
+    assert_eq!(installed[0].candidate_version.as_deref(), Some("3.0.2"));
+    assert_eq!(
+        installed[0].summary,
+        "Common interface for logging libraries"
+    );
+    let id = installed[0].id.clone();
+    assert_eq!(backend.details(&id, &cancel).unwrap().package.id, id);
+    assert_eq!(
+        backend.details(
+            &dev_id("composer", "missing/package", "/home/test/.config/composer"),
+            &cancel
+        ),
+        Err(EngineError::NotFound)
+    );
+    let mut progress = vec![];
+    backend
+        .execute(
+            &Operation::Install(dev_id(
+                "composer",
+                "monolog/monolog",
+                "/home/test/.config/composer",
+            )),
+            &cancel,
+            &mut |p| progress.push(p),
+        )
+        .unwrap();
+    backend
+        .execute(&Operation::Upgrade(id.clone()), &cancel, &mut |p| {
+            progress.push(p)
+        })
+        .unwrap();
+    backend
+        .execute(&Operation::Remove(id.clone()), &cancel, &mut |p| {
+            progress.push(p)
+        })
+        .unwrap();
+    backend
+        .execute(
+            &Operation::UpgradeAll {
+                backend: "composer".into(),
+            },
+            &cancel,
+            &mut |p| progress.push(p),
+        )
+        .unwrap();
+    assert!(matches!(
+        backend.execute(
+            &Operation::Refresh {
+                backend: "composer".into()
+            },
+            &cancel,
+            &mut |p| progress.push(p)
+        ),
+        Err(EngineError::Unsupported { .. })
+    ));
+    // Bare names without a vendor are rejected before any manager runs.
+    assert!(backend
+        .execute(
+            &Operation::Install(dev_id("composer", "monolog", "/home/test/.config/composer")),
+            &cancel,
+            &mut |p| progress.push(p)
+        )
+        .is_err());
+    let writes = fixture.writes("composer");
+    assert!(writes.contains(&vec![
+        "global".into(),
+        "require".into(),
+        "--no-interaction".into(),
+        "--no-progress".into(),
+        "monolog/monolog".into()
+    ]));
+    assert!(writes.contains(&vec!["global".into(), "remove".into(), "psr/log".into()]));
+    // Upgrade-all re-requires each package so pinned constraints still move.
+    assert_eq!(
+        writes
+            .iter()
+            .filter(|args| {
+                **args
+                    == vec![
+                        "global".to_string(),
+                        "require".to_string(),
+                        "--no-interaction".to_string(),
+                        "--no-progress".to_string(),
+                        "psr/log".to_string(),
+                    ]
+            })
+            .count(),
+        2
+    );
+    assert!(!writes
+        .iter()
+        .any(|args| args.contains(&"update".to_string())));
+}
+
+#[test]
+fn gem_lifecycle() {
+    let base = std::env::temp_dir().join(format!("pkgdeck-gem-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let home = base.join("gem");
+    std::fs::create_dir_all(home.join("specifications")).unwrap();
+    // A retained older version beside the new one still reports one identity.
+    for spec in [
+        "cowsay-0.3.0.gemspec",
+        "cowsay-0.2.0.gemspec",
+        "rake-13.0.0.gemspec",
+    ] {
+        std::fs::write(home.join("specifications").join(spec), "# stub\n").unwrap();
+    }
+    let fixture = DevFixture {
+        root: Some(home.to_str().unwrap().into()),
+        version: "4.0.20\n".into(),
+        outdated: Some("cowsay (0.3.0 < 0.4.0)\n".into()),
+        ..DevFixture::default()
+    };
+    let mut backend = DevTool::gem(fixture.clone());
+    let cancel = Cancellation::default();
+    assert_eq!(backend.detect(&cancel), Ok(Availability::Available));
+    let installed = backend.installed(&cancel).unwrap();
+    assert_eq!(installed.len(), 2);
+    let outdated = installed.iter().find(|p| p.id.name == "cowsay").unwrap();
+    assert_eq!(outdated.update, UpdateAvailability::Available);
+    assert_eq!(outdated.candidate_version.as_deref(), Some("0.4.0"));
+    let current = installed.iter().find(|p| p.id.name == "rake").unwrap();
+    assert_eq!(current.update, UpdateAvailability::Current);
+    assert_eq!(outdated.id.scope, Scope::Environment { path: home.clone() });
+    let id = outdated.id.clone();
+    assert_eq!(backend.details(&id, &cancel).unwrap().package.id, id);
+    assert_eq!(
+        backend.details(&dev_id("gem", "missing", home.to_str().unwrap()), &cancel),
+        Err(EngineError::NotFound)
+    );
+    let mut progress = vec![];
+    backend
+        .execute(
+            &Operation::Install(dev_id("gem", "new-tool", home.to_str().unwrap())),
+            &cancel,
+            &mut |p| progress.push(p),
+        )
+        .unwrap();
+    backend
+        .execute(&Operation::Upgrade(id.clone()), &cancel, &mut |p| {
+            progress.push(p)
+        })
+        .unwrap();
+    backend
+        .execute(&Operation::Remove(id.clone()), &cancel, &mut |p| {
+            progress.push(p)
+        })
+        .unwrap();
+    backend
+        .execute(
+            &Operation::UpgradeAll {
+                backend: "gem".into(),
+            },
+            &cancel,
+            &mut |p| progress.push(p),
+        )
+        .unwrap();
+    assert!(matches!(
+        backend.execute(
+            &Operation::Refresh {
+                backend: "gem".into()
+            },
+            &cancel,
+            &mut |p| progress.push(p)
+        ),
+        Err(EngineError::Unsupported { .. })
+    ));
+    assert!(backend
+        .execute(
+            &Operation::Install(dev_id("gem", "--evil", home.to_str().unwrap())),
+            &cancel,
+            &mut |p| progress.push(p)
+        )
+        .is_err());
+    let writes = fixture.writes("gem");
+    assert!(writes.contains(&vec![
+        "install".into(),
+        "--user-install".into(),
+        "--no-document".into(),
+        "new-tool".into()
+    ]));
+    assert!(writes.contains(&vec![
+        "update".into(),
+        "--user-install".into(),
+        "--no-document".into(),
+        "cowsay".into()
+    ]));
+    assert!(writes.contains(&vec![
+        "uninstall".into(),
+        "--user-install".into(),
+        "-x".into(),
+        "-a".into(),
+        "cowsay".into()
+    ]));
+    std::fs::remove_dir_all(&base).unwrap();
+}
+
+#[test]
+fn wave_five_name_policies_reject_options_paths_and_urls() {
+    for (make, valid, invalid) in [
+        ("pip", "cowsay", "--evil"),
+        ("pipx", "cowsay", "https://example.invalid/tool.tar.gz"),
+        ("uv", "cowsay", "../evil"),
+        ("gem", "cowsay", "--evil"),
+    ] {
+        let mut backend = match make {
+            "pip" => DevTool::pip(DevFixture {
+                venv: Some("/home/test/venv".into()),
+                version: "pip\n".into(),
+                pip_list: "[]".into(),
+                ..DevFixture::default()
+            }),
+            "pipx" => DevTool::pipx(DevFixture {
+                home: Some("/home/test".into()),
+                version: "1.0\n".into(),
+                list: r#"{"venvs": {}}"#.into(),
+                ..DevFixture::default()
+            }),
+            "uv" => DevTool::uv(DevFixture {
+                version: "uv\n".into(),
+                root: Some("/home/test/tools".into()),
+                list: "".into(),
+                ..DevFixture::default()
+            }),
+            _ => DevTool::gem(DevFixture {
+                version: "gem\n".into(),
+                root: Some("/home/test/gem".into()),
+                ..DevFixture::default()
+            }),
+        };
+        assert_eq!(backend.id(), make);
+        assert_eq!(
+            backend.detect(&Cancellation::default()),
+            Ok(Availability::Available)
+        );
+        // Invalid names never become synthetic candidates.
+        assert!(backend
+            .search(invalid, &Cancellation::default())
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            backend
+                .search(valid, &Cancellation::default())
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+    // Composer requires vendor/package.
+    let mut composer = DevTool::composer(DevFixture {
+        root: Some("/home/test/composer".into()),
+        list: COMPOSER_LIST.into(),
+        ..DevFixture::default()
+    });
+    assert_eq!(
+        composer.detect(&Cancellation::default()),
+        Ok(Availability::Available)
+    );
+    assert!(composer
+        .search("monolog", &Cancellation::default())
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        composer
+            .search("monolog/monolog", &Cancellation::default())
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn wave_five_malformed_metadata_is_never_treated_as_an_empty_success() {
+    let cancel = Cancellation::default();
+    // pip: invalid JSON and invalid entries.
+    for (list, outdated) in [
+        ("not json".to_string(), Some(PIP_OUTDATED.into())),
+        (
+            r#"[{"name": "--evil", "version": "1.0"}]"#.to_string(),
+            Some(PIP_OUTDATED.into()),
+        ),
+        (r#"[{"name": "ok", "version": ""}]"#.to_string(), None),
+    ] {
+        let mut backend = DevTool::pip(DevFixture {
+            venv: Some("/home/test/venv".into()),
+            version: "pip 25.1.1\n".into(),
+            pip_list: list,
+            pip_outdated: outdated,
+            ..DevFixture::default()
+        });
+        assert_eq!(backend.detect(&cancel), Ok(Availability::Available));
+        // Empty versions fail validation; other cases either list or error.
+        let _ = backend.installed(&cancel);
+    }
+    let mut bad_pip = DevTool::pip(DevFixture {
+        venv: Some("/home/test/venv".into()),
+        version: "pip 25.1.1\n".into(),
+        pip_list: "not json".into(),
+        pip_outdated: None,
+        ..DevFixture::default()
+    });
+    assert_eq!(bad_pip.detect(&cancel), Ok(Availability::Available));
+    assert!(bad_pip.installed(&cancel).is_err());
+    // pipx: invalid JSON.
+    let mut bad_pipx = DevTool::pipx(DevFixture {
+        home: Some("/home/test".into()),
+        version: "1.0\n".into(),
+        list: "not json".into(),
+        ..DevFixture::default()
+    });
+    assert_eq!(bad_pipx.detect(&cancel), Ok(Availability::Available));
+    assert!(bad_pipx.installed(&cancel).is_err());
+    // uv: relative tool dir and unreadable output.
+    let mut relative_uv = DevTool::uv(DevFixture {
+        version: "uv\n".into(),
+        root: Some("relative/tools".into()),
+        ..DevFixture::default()
+    });
+    assert!(relative_uv.detect(&cancel).is_err());
+    // composer: invalid JSON and relative home.
+    let mut bad_composer = DevTool::composer(DevFixture {
+        version: "Composer\n".into(),
+        root: Some("/home/test/composer".into()),
+        list: "not json".into(),
+        ..DevFixture::default()
+    });
+    assert_eq!(bad_composer.detect(&cancel), Ok(Availability::Available));
+    assert!(bad_composer.installed(&cancel).is_err());
+    let mut relative_composer = DevTool::composer(DevFixture {
+        version: "Composer\n".into(),
+        root: Some("relative/composer".into()),
+        ..DevFixture::default()
+    });
+    assert!(relative_composer.detect(&cancel).is_err());
+    // gem: invalid specification names are skipped, outdated failures stay current.
+    let base = std::env::temp_dir().join(format!("pkgdeck-gem-malformed-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(base.join("specifications")).unwrap();
+    std::fs::write(
+        base.join("specifications").join("nodash.gemspec"),
+        "# stub\n",
+    )
+    .unwrap();
+    std::fs::write(
+        base.join("specifications").join("ok-1.0.gemspec"),
+        "# stub\n",
+    )
+    .unwrap();
+    let mut gem = DevTool::gem(DevFixture {
+        root: Some(base.to_str().unwrap().into()),
+        version: "4.0.20\n".into(),
+        outdated: None,
+        ..DevFixture::default()
+    });
+    assert_eq!(gem.detect(&cancel), Ok(Availability::Available));
+    let installed = gem.installed(&cancel).unwrap();
+    assert_eq!(installed.len(), 1);
+    assert_eq!(installed[0].id.name, "ok");
+    assert_eq!(installed[0].update, UpdateAvailability::Current);
+    std::fs::remove_dir_all(&base).unwrap();
+    // gem: option-like specification names fail closed, never list as empty.
+    let evil_base = std::env::temp_dir().join(format!("pkgdeck-gem-evil-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&evil_base);
+    std::fs::create_dir_all(evil_base.join("specifications")).unwrap();
+    std::fs::write(
+        evil_base.join("specifications").join("--evil-1.0.gemspec"),
+        "# stub\n",
+    )
+    .unwrap();
+    let mut evil_gem = DevTool::gem(DevFixture {
+        root: Some(evil_base.to_str().unwrap().into()),
+        version: "4.0.20\n".into(),
+        outdated: None,
+        ..DevFixture::default()
+    });
+    assert_eq!(evil_gem.detect(&cancel), Ok(Availability::Available));
+    assert!(evil_gem.installed(&cancel).is_err());
+    std::fs::remove_dir_all(&evil_base).unwrap();
+    // gem without specifications lists nothing.
+    let empty_base = std::env::temp_dir().join(format!("pkgdeck-gem-empty-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&empty_base);
+    std::fs::create_dir_all(&empty_base).unwrap();
+    let mut empty_gem = DevTool::gem(DevFixture {
+        root: Some(empty_base.to_str().unwrap().into()),
+        version: "4.0.20\n".into(),
+        ..DevFixture::default()
+    });
+    assert_eq!(empty_gem.detect(&cancel), Ok(Availability::Available));
+    assert!(empty_gem.installed(&cancel).unwrap().is_empty());
+    std::fs::remove_dir_all(&empty_base).unwrap();
+}
+
+#[test]
+fn wave_five_transports_report_unavailable_and_failed_writes() {
+    let cancel = Cancellation::default();
+    let mut missing_pipx = DevTool::pipx(DevFixture {
+        home: Some("/home/test".into()),
+        fail: Some(ExecutionError::Disabled("pipx not found".into())),
+        ..DevFixture::default()
+    });
+    assert_eq!(
+        missing_pipx.detect(&cancel),
+        Ok(Availability::Unavailable("pipx not found".into()))
+    );
+    let mut broken_uv = DevTool::uv(DevFixture {
+        root: Some("/home/test/tools".into()),
+        fail: Some(ExecutionError::TimedOut),
+        ..DevFixture::default()
+    });
+    assert_eq!(
+        broken_uv.detect(&cancel),
+        Err(ExecutionError::TimedOut.into())
+    );
+    let fixture = DevFixture {
+        venv: Some("/home/test/venv".into()),
+        version: "pip 25.1.1\n".into(),
+        pip_list: PIP_LIST.into(),
+        pip_outdated: Some(PIP_OUTDATED.into()),
+        fail_writes: true,
+        ..DevFixture::default()
+    };
+    let mut backend = DevTool::pip(fixture);
+    assert_eq!(backend.detect(&cancel), Ok(Availability::Available));
+    assert_eq!(backend.installed(&cancel).unwrap().len(), 2);
+    assert!(backend
+        .execute(
+            &Operation::UpgradeAll {
+                backend: "pip".into()
+            },
+            &cancel,
+            &mut |_| {},
+        )
+        .is_err());
+    // Missing optionals stay discoverable but unavailable.
+    for source in ["pip", "pipx", "uv", "composer", "gem"] {
+        let mut engine = native_engine(
+            Some(source),
+            true,
+            Authorization::SudoNonInteractive,
+            &cancel,
+        )
+        .unwrap();
+        let sources = engine.discover(&cancel);
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].backend, source);
+    }
+}
+
+#[test]
+fn wave_five_relative_homes_fail_closed() {
+    let cancel = Cancellation::default();
+    for (make, variable) in [
+        ("pipx", "PIPX_HOME"),
+        ("uv", "UV_TOOL_DIR"),
+        ("composer", "COMPOSER_HOME"),
+        ("gem", "GEM_HOME"),
+    ] {
+        // Access the fixture through detection with a relative override.
+        let fixture = DevFixture {
+            extra_env: [(variable.to_string(), "relative/home".to_string())]
+                .into_iter()
+                .collect(),
+            version: "test\n".into(),
+            ..DevFixture::default()
+        };
+        let mut backend = match make {
+            "pipx" => DevTool::pipx(fixture),
+            "uv" => DevTool::uv(fixture),
+            "composer" => DevTool::composer(fixture),
+            _ => DevTool::gem(fixture),
+        };
+        assert!(backend.detect(&cancel).is_err());
+    }
+}
+
+#[test]
+fn wave_five_unreachable_registries_keep_installed_state_current() {
+    let cancel = Cancellation::default();
+    let mut pip = DevTool::pip(DevFixture {
+        venv: Some("/home/test/venv".into()),
+        version: "pip\n".into(),
+        pip_list: PIP_LIST.into(),
+        pip_outdated: None,
+        ..DevFixture::default()
+    });
+    assert_eq!(pip.detect(&cancel), Ok(Availability::Available));
+    let installed = pip.installed(&cancel).unwrap();
+    assert_eq!(installed.len(), 2);
+    assert!(installed
+        .iter()
+        .all(|p| p.update == UpdateAvailability::Current));
+    let mut pipx = DevTool::pipx(DevFixture {
+        home: Some("/home/test".into()),
+        version: "1.0\n".into(),
+        list: PIPX_LIST.into(),
+        outdated: None,
+        ..DevFixture::default()
+    });
+    assert_eq!(pipx.detect(&cancel), Ok(Availability::Available));
+    let installed = pipx.installed(&cancel).unwrap();
+    assert_eq!(installed.len(), 1);
+    assert_eq!(installed[0].update, UpdateAvailability::Current);
+    let mut uv = DevTool::uv(DevFixture {
+        version: "uv\n".into(),
+        root: Some("/home/test/tools".into()),
+        list: UV_LIST.into(),
+        outdated: None,
+        ..DevFixture::default()
+    });
+    assert_eq!(uv.detect(&cancel), Ok(Availability::Available));
+    assert!(uv
+        .installed(&cancel)
+        .unwrap()
+        .iter()
+        .all(|p| p.update == UpdateAvailability::Current));
+    let mut composer = DevTool::composer(DevFixture {
+        version: "Composer\n".into(),
+        root: Some("/home/test/composer".into()),
+        list: COMPOSER_LIST.into(),
+        outdated: None,
+        ..DevFixture::default()
+    });
+    assert_eq!(composer.detect(&cancel), Ok(Availability::Available));
+    assert!(composer
+        .installed(&cancel)
+        .unwrap()
+        .iter()
+        .all(|p| p.update == UpdateAvailability::Current));
+}
+
+#[test]
+fn wave_five_managers_skip_malformed_rows_and_reject_foreign_names() {
+    let cancel = Cancellation::default();
+    // uv skips executable continuations and garbage rows but rejects
+    // option-like tool names instead of running them.
+    let mut uv = DevTool::uv(DevFixture {
+        version: "uv\n".into(),
+        root: Some("/home/test/tools".into()),
+        list: "cowsay v6.0\n- cowsay\ngarbage row\n\n".into(),
+        outdated: Some("".into()),
+        ..DevFixture::default()
+    });
+    assert_eq!(uv.detect(&cancel), Ok(Availability::Available));
+    let installed = uv.installed(&cancel).unwrap();
+    assert_eq!(installed.len(), 1);
+    assert_eq!(installed[0].id.name, "cowsay");
+    let mut evil_uv = DevTool::uv(DevFixture {
+        version: "uv\n".into(),
+        root: Some("/home/test/tools".into()),
+        list: "--evil v1.0\n".into(),
+        outdated: Some("".into()),
+        ..DevFixture::default()
+    });
+    assert_eq!(evil_uv.detect(&cancel), Ok(Availability::Available));
+    assert!(evil_uv.installed(&cancel).is_err());
+    // An empty Composer home lists nothing; failed metadata never does.
+    let mut empty = DevTool::composer(DevFixture {
+        version: "Composer\n".into(),
+        root: Some("/home/test/composer".into()),
+        list: "   \n".into(),
+        ..DevFixture::default()
+    });
+    assert_eq!(empty.detect(&cancel), Ok(Availability::Available));
+    assert!(empty.installed(&cancel).unwrap().is_empty());
+    let mut bad_pipx = DevTool::pipx(DevFixture {
+        home: Some("/home/test".into()),
+        version: "1.0\n".into(),
+        list: "not json".into(),
+        ..DevFixture::default()
+    });
+    assert_eq!(bad_pipx.detect(&cancel), Ok(Availability::Available));
+    assert!(bad_pipx.installed(&cancel).is_err());
+}
+
+#[test]
+fn gem_tolerates_garbage_outdated_rows_and_cancellation() {
+    let base = std::env::temp_dir().join(format!("pkgdeck-gem-outdated-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(base.join("specifications")).unwrap();
+    std::fs::write(
+        base.join("specifications").join("ok-1.0.gemspec"),
+        "# stub\n",
+    )
+    .unwrap();
+    std::fs::write(base.join("specifications").join("README"), "not a spec\n").unwrap();
+    let mut backend = DevTool::gem(DevFixture {
+        root: Some(base.to_str().unwrap().into()),
+        version: "4.0.20\n".into(),
+        outdated: Some("garbage line\nok (1.0 < 1.1)\n--evil (1 < 2)\n".into()),
+        ..DevFixture::default()
+    });
+    let cancel = Cancellation::default();
+    assert_eq!(backend.detect(&cancel), Ok(Availability::Available));
+    let installed = backend.installed(&cancel).unwrap();
+    assert_eq!(installed.len(), 1);
+    assert_eq!(installed[0].candidate_version.as_deref(), Some("1.1"));
+    let cancelled = Cancellation::default();
+    cancelled.cancel();
+    assert_eq!(backend.installed(&cancelled), Err(EngineError::Cancelled));
+    std::fs::remove_dir_all(&base).unwrap();
+}
+
+#[test]
+fn gem_reports_unreadable_specification_directories() {
+    use std::os::unix::fs::PermissionsExt;
+    let base = std::env::temp_dir().join(format!("pkgdeck-gem-perms-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(base.join("specifications")).unwrap();
+    let mut backend = DevTool::gem(DevFixture {
+        root: Some(base.to_str().unwrap().into()),
+        version: "4.0.20\n".into(),
+        ..DevFixture::default()
+    });
+    let cancel = Cancellation::default();
+    assert_eq!(backend.detect(&cancel), Ok(Availability::Available));
+    std::fs::set_permissions(
+        base.join("specifications"),
+        std::fs::Permissions::from_mode(0o000),
+    )
+    .unwrap();
+    // Root bypasses permission bits; otherwise the failure must surface.
+    let result = backend.installed(&cancel);
+    std::fs::set_permissions(
+        base.join("specifications"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    if rustix::process::geteuid().is_root() {
+        let _ = result;
+    } else {
+        assert!(result.is_err());
+    }
+    std::fs::remove_dir_all(&base).unwrap();
+}
+
+#[test]
+fn default_venv_pip_transport_reports_disabled() {
+    // Fixtures without a venv_pip override deny pip while other seams work.
+    let cancel = Cancellation::default();
+    let raw = Raw(output(""));
+    assert!(matches!(
+        raw.venv_pip(std::path::Path::new("/home/test/venv"), &[], &cancel, false),
+        Err(ExecutionError::Disabled(_))
+    ));
+}
+
+#[test]
+fn native_venv_pip_transport_uses_the_selected_environment() {
+    use pkgdeck_core::host::{Host, Runtime};
+    let base = std::env::temp_dir().join(format!("pkgdeck-venv-transport-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let venv = base.join("venv");
+    std::fs::create_dir_all(venv.join("bin")).unwrap();
+    std::os::unix::fs::symlink("/bin/true", venv.join("bin/python")).unwrap();
+    std::fs::write(venv.join("pyvenv.cfg"), "home = /usr/bin\n").unwrap();
+    let transport = NativeTransport {
+        host: Host::new(
+            Runtime::Native,
+            [("PATH".into(), "/usr/bin:/bin".into())].into(),
+        ),
+        authorization: Authorization::SudoNonInteractive,
+    };
+    let cancel = Cancellation::default();
+    let ok = transport
+        .venv_pip(&venv, &["--version".into()], &cancel, false)
+        .unwrap();
+    assert_eq!(ok.code, Some(0));
+    assert!(matches!(
+        transport.venv_pip(&base.join("missing"), &[], &cancel, false),
+        Err(ExecutionError::Disabled(_))
+    ));
     std::fs::remove_dir_all(&base).unwrap();
 }

@@ -1,6 +1,6 @@
 # Interactive terminal interface
 
-Run `pkd` in a terminal. `--from apt|homebrew|cargo|npm|pnpm|bun` restricts sources and `--arch`
+Run `pkd` in a terminal. `--from apt|homebrew|cargo|npm|pnpm|bun|pip|pipx|uv|composer|gem` restricts sources and `--arch`
 filters package rows. Both input and output must be terminals. Qt and a display
 server are not required.
 

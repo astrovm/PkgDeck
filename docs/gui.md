@@ -42,7 +42,7 @@ Closing a busy window requests cancellation and keeps it open until completion.
 Settings persist appearance, source filter, and authorization preference through Qt's
 per-user settings. The default GUI authorization uses the host polkit agent.
 Existing sudo credentials are also supported; passwords are never collected by
-PkgDeck. Homebrew and the development managers (Cargo, npm, pnpm, Bun) remain unprivileged. `pkgdeck --from apt|homebrew|cargo|npm|pnpm|bun --auth
+PkgDeck. Homebrew and the development managers (Cargo, npm, pnpm, Bun, pip, pipx, uv, Composer, RubyGems) remain unprivileged. `pkgdeck --from apt|homebrew|cargo|npm|pnpm|bun|pip|pipx|uv|composer|gem --auth
 sudo|polkit` overrides the saved settings for the current session.
 
 The interface uses a consistent surface, border, and accent palette in both light
