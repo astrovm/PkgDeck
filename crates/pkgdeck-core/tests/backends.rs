@@ -861,3 +861,50 @@ fn flatpak_remote_search_resolves_to_a_single_identity() {
     assert!(id.remote.is_some());
     assert_eq!(engine.details(&id, &cancel).unwrap().package.id, id);
 }
+
+#[test]
+fn flatpak_search_survives_failing_system_scope() {
+    #[derive(Clone)]
+    struct UserOnly;
+    impl Transport for UserOnly {
+        fn apt_query(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &Cancellation,
+        ) -> Result<Completion, ExecutionError> {
+            unreachable!()
+        }
+        fn apt_write(&self, _: AptAction, _: &Cancellation) -> Result<Completion, ExecutionError> {
+            unreachable!()
+        }
+        fn brew(
+            &self,
+            _: &[OsString],
+            _: &Cancellation,
+            _: bool,
+        ) -> Result<Completion, ExecutionError> {
+            unreachable!()
+        }
+        fn flatpak(
+            &self,
+            _: &[OsString],
+            _: &Cancellation,
+            _: bool,
+            system: bool,
+        ) -> Result<Completion, ExecutionError> {
+            if system {
+                return Err(ExecutionError::TimedOut);
+            }
+            Ok(output(
+                "Synthetic app\tSynthetic description\tio.example.App\t1.0\tstable\tflathub\n",
+            ))
+        }
+    }
+    let cancel = Cancellation::default();
+    let mut backend = Flatpak::new(UserOnly);
+    let results = backend.search("io.example.App", &cancel).unwrap();
+    assert_eq!(results.len(), 1);
+    assert!(matches!(results[0].id.scope, Scope::User { .. }));
+}

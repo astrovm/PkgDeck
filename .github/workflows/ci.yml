@@ -244,10 +244,10 @@ jobs:
           flatpak --user remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
           flatpak --user install -y --noninteractive flathub org.kde.kcalc
           run_flatpak() { build/AppDir/usr/bin/pkd --json --yes --auth sudo --from flatpak "$@"; }
-          run_flatpak list | jq -e 'any(.data.packages[]; .id.name == "org.kde.kcalc")'
-          run_flatpak info org.kde.kcalc | jq -e '.exit_code == 0'
-          run_flatpak update | jq -e '.exit_code == 0'
-          run_flatpak remove org.kde.kcalc | jq -e '.exit_code == 0'
+          run_flatpak list | tee /tmp/pkd-flatpak-list.json | jq -e 'any(.data.packages[]; .id.name == "org.kde.kcalc")'
+          run_flatpak info org.kde.kcalc | tee /tmp/pkd-flatpak-info.json | jq -e '.exit_code == 0'
+          run_flatpak update | tee /tmp/pkd-flatpak-update.json | jq -e '.exit_code == 0'
+          run_flatpak remove org.kde.kcalc | tee /tmp/pkd-flatpak-remove.json | jq -e '.exit_code == 0'
           ! flatpak --user list --app | grep -q org.kde.kcalc
       - name: Build and inspect Snap
         run: |

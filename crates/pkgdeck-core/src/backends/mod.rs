@@ -321,8 +321,13 @@ impl<T: Transport> Backend for Flatpak<T> {
         if query.trim().is_empty() || query.starts_with('-') {
             return Err(invalid("flatpak", "expected a search term"));
         }
+        // The user catalog is the primary source; a failing system query
+        // (for example, a machine with no system remotes) must not fail
+        // the whole search when user results are available.
         let mut result = self.search_scope(query, cancel, false)?;
-        result.extend(self.search_scope(query, cancel, true)?);
+        if let Ok(system) = self.search_scope(query, cancel, true) {
+            result.extend(system);
+        }
         // Remote search results do not carry an installed scope: the user and
         // system queries return the same catalog entries. Deduplicate them so
         // a single remote application resolves unambiguously, preferring the
