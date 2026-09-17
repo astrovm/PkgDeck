@@ -130,6 +130,12 @@ impl Host {
         }
     }
 
+    /// Read one sanitized environment value (for example `HOME`) without
+    /// exposing the whole map. Tool homes derive from this, never from PATH.
+    pub fn var(&self, name: &str) -> Option<OsString> {
+        self.env.get(&OsString::from(name)).cloned()
+    }
+
     /// Resolve on the host, never by running a shell or probing a packaged runtime.
     pub fn resolve(&self, name: &str) -> Result<Option<PathBuf>, ExecutionError> {
         self.enabled()?;
@@ -213,6 +219,43 @@ impl Host {
             command,
             Limits {
                 timeout: std::time::Duration::from_secs(120),
+                output_bytes: 32 * 1024 * 1024,
+            },
+            cancel,
+            write,
+        )?;
+        if result.code == Some(0) {
+            Ok(result)
+        } else {
+            Err(ExecutionError::Failed(result))
+        }
+    }
+
+    /// Development tools always run as the invoking user with a bounded
+    /// output cap; arguments are never interpreted by a shell. `label` names
+    /// the manager for disabled diagnostics.
+    pub fn dev_tool(
+        &self,
+        executable: &str,
+        label: &str,
+        args: &[OsString],
+        cancel: &Cancellation,
+        write: bool,
+    ) -> Result<Completion, ExecutionError> {
+        self.enabled()?;
+        if write && rustix::process::geteuid().is_root() {
+            return Err(ExecutionError::Invalid(
+                "run the frontend as an unprivileged user".into(),
+            ));
+        }
+        let path = self
+            .resolve(executable)?
+            .ok_or_else(|| ExecutionError::Disabled(format!("{label} not found")))?;
+        let command = self.command(&path, args)?;
+        let result = process::run(
+            command,
+            Limits {
+                timeout: std::time::Duration::from_secs(300),
                 output_bytes: 32 * 1024 * 1024,
             },
             cancel,

@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# Exercise one Wave 4 development manager through pkd against real tools.
+# Ephemeral runners need no cleanup; lifecycle state is confirmed through
+# the underlying manager, never only PkgDeck output.
+# Usage: scripts/tests/dev-manager.sh cargo|npm|pnpm|bun <pkd>
+set -euo pipefail
+backend=${1:?Usage: scripts/tests/dev-manager.sh cargo|npm|pnpm|bun <pkd>}
+pkd=${2:?Usage: scripts/tests/dev-manager.sh cargo|npm|pnpm|bun <pkd>}
+run() { "$pkd" --json --yes --auth sudo --from "$backend" "$@"; }
+success() { run "$@" | grep -q '"exit_code":0'; }
+have() { run list | grep -q "\"name\":\"$1\""; }
+
+setup_node() {
+    if ! command -v npm >/dev/null; then
+        sudo apt-get update
+        sudo apt-get install -y nodejs npm
+    fi
+}
+
+case $backend in
+cargo)
+    success sources
+    cargo install --version 0.10.0 cowsay
+    have cowsay
+    success info cowsay
+    success upgrade cowsay
+    cargo install --list | grep -q '^cowsay v0.14.0 '
+    success remove cowsay
+    ! cargo install --list | grep -q '^cowsay v'
+    ;;
+npm)
+    setup_node
+    success sources
+    npm install --global cowsay@1.5.0
+    have cowsay
+    success info cowsay
+    success upgrade
+    npm ls --global --depth=0 | grep -q 'cowsay@1.6.0'
+    success remove cowsay
+    ! npm ls --global --depth=0 2>/dev/null | grep -q 'cowsay@'
+    success install cowsay
+    have cowsay
+    success remove cowsay
+    ;;
+pnpm)
+    setup_node
+    if ! command -v pnpm >/dev/null; then
+        npm install --global pnpm
+    fi
+    success sources
+    pnpm add --global cowsay@1.5.0
+    have cowsay
+    success info cowsay
+    success upgrade
+    pnpm ls --global --depth=0 | grep -q 'cowsay@1.6.0'
+    success remove cowsay
+    ! pnpm ls --global --depth=0 | grep -q 'cowsay@'
+    success install cowsay
+    have cowsay
+    success remove cowsay
+    ;;
+bun)
+    if ! command -v bun >/dev/null; then
+        curl -fsSL https://bun.sh/install | bash
+        export PATH="$HOME/.bun/bin:$PATH"
+    fi
+    success sources
+    bun add --global cowsay@1.5.0
+    have cowsay
+    success info cowsay
+    success upgrade cowsay
+    grep -q '"version": "1.6.0"' "$HOME/.bun/install/global/node_modules/cowsay/package.json"
+    success remove cowsay
+    ! test -e "$HOME/.bun/install/global/node_modules/cowsay"
+    success install cowsay
+    have cowsay
+    success remove cowsay
+    ;;
+*) exit 2 ;;
+esac

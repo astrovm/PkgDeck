@@ -14,7 +14,7 @@ pub struct Args {
     #[arg(long, global = true)]
     pub json: bool,
     /// Restrict operations to one source.
-    #[arg(long, global = true, value_parser = ["apt", "dnf", "pacman", "zypper", "snap", "homebrew", "appimage", "flatpak"])]
+    #[arg(long, global = true, value_parser = ["apt", "dnf", "pacman", "zypper", "snap", "homebrew", "appimage", "flatpak", "cargo", "npm", "pnpm", "bun"])]
     pub from: Option<String>,
     #[arg(long, global = true)]
     pub arch: Option<String>,

@@ -289,6 +289,7 @@ impl ffi::PackageController {
         }
         if ![
             "", "apt", "dnf", "pacman", "zypper", "snap", "homebrew", "appimage", "flatpak",
+            "cargo", "npm", "pnpm", "bun",
         ]
         .contains(&source.as_str())
         {

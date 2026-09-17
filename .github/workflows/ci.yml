@@ -150,6 +150,21 @@ jobs:
           success remove hello-world
           ! snap list hello-world
 
+  dev-backends:
+    name: Real dev backends (${{ matrix.backend }})
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [cargo, npm, pnpm, bun]
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build CLI
+        run: cargo build --locked -p pkd
+      - name: Exercise actual development manager
+        run: scripts/tests/dev-manager.sh ${{ matrix.backend }} "$PWD/target/debug/pkd"
+
   desktop:
     name: GUI, coverage and packages (${{ matrix.arch }})
     timeout-minutes: 45

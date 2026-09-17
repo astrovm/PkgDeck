@@ -248,7 +248,7 @@ Add each wave only after its advertised capabilities pass integration tests.
 | --- | --- | --- |
 | 2 | AppImage, Flatpak | Local Type 2 imports; Flatpak user/system installations. |
 | 3 | DNF, Pacman, Zypper, Snap | Distro-specific operations and Snap lifecycle. **Implemented.** |
-| 4 | Cargo, npm, pnpm, Bun | User-installed command-line tools. |
+| 4 | Cargo, npm, pnpm, Bun | User-installed command-line tools. **Implemented.** |
 | 5 | pip, pipx, uv, Composer, RubyGems | Explicit environments and isolated user tools. |
 
 For AppImages, manage only PkgDeck-owned files and desktop entries; never execute
@@ -281,10 +281,10 @@ Use `scripts/verify.sh full --engine podman` for the pinned rootless build
 environment and `scripts/verify.sh containers --engine podman` for disposable APT
 and Homebrew tests. VM dependencies are cached separately from test overlays.
 
-The CLI supports APT and Homebrew package operations and `pkd doctor` diagnostics.
+The CLI supports APT, Homebrew, and development-manager (Cargo, npm, pnpm, Bun) package operations and `pkd doctor` diagnostics.
 The core contains their adapters, the shared engine, and the host authorization
-boundary. Both the interactive TUI and GUI use the same engine. Additional
-backends and release publication remain later steps.
+boundary. Both the interactive TUI and GUI use the same engine. Wave 5
+development backends and release publication remain later steps.
 
 Pinned baseline:
 
