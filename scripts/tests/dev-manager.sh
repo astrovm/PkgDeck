@@ -67,6 +67,7 @@ pnpm)
     success remove cowsay
     ;;
 bun)
+    setup_node
     if ! command -v bun >/dev/null; then
         curl -fsSL https://bun.sh/install -o /tmp/bun-install.sh \
             && bash /tmp/bun-install.sh || npm install --global bun
