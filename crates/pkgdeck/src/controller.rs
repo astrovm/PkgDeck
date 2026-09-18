@@ -21,6 +21,7 @@ pub mod ffi {
         #[qproperty(QString, confirmation)]
         #[qproperty(QString, version)]
         #[qproperty(bool, busy)]
+        #[qproperty(bool, writing)]
         #[qproperty(bool, upgradable)]
         type PackageController = super::Controller;
         #[qinvokable]
@@ -53,6 +54,11 @@ enum Job {
     Details(PackageId),
     Write(Operation),
     UpgradeAll(Vec<Operation>),
+}
+impl Job {
+    fn writes(&self) -> bool {
+        matches!(self, Self::Write(_) | Self::UpgradeAll(_))
+    }
 }
 enum Payload {
     Packages(PackageReport),
@@ -179,6 +185,7 @@ pub struct Controller {
     confirmation: QString,
     version: QString,
     busy: bool,
+    writing: bool,
     upgradable: bool,
     updates_view: bool,
     packages: Vec<Package>,
@@ -202,6 +209,7 @@ impl Default for Controller {
             confirmation: QString::default(),
             version: pkgdeck_core::VERSION.into(),
             busy: false,
+            writing: false,
             upgradable: false,
             updates_view: false,
             packages: vec![],
@@ -347,10 +355,10 @@ fn operation_label(operation: &Operation) -> String {
         scope_label(&id.scope)
     )
 }
-fn package_row(p: &Package) -> Value {
+fn package_row(p: &Package, same_from: &[String]) -> Value {
     json!({"name": p.id.name, "source": p.id.backend, "architecture": p.id.architecture,
         "remote": p.id.remote, "scope": p.id.scope, "scope_label": scope_label(&p.id.scope), "summary": p.summary, "installed": p.installed_version,
-        "candidate": p.candidate_version, "update": p.update, "kind": "package", "icon": p.icon})
+        "candidate": p.candidate_version, "update": p.update, "kind": "package", "icon": p.icon, "same_app_from": same_from})
 }
 impl ffi::PackageController {
     fn start(mut self: Pin<&mut Self>, job: Job) {
@@ -406,13 +414,15 @@ impl ffi::PackageController {
                 Err(error) => send(Reply::Done(Err(error))),
             }
         });
+        let writing = worker_job.writes();
         self.as_mut().rust_mut().worker = Some(Worker {
             handle,
             receiver,
             cancel,
             job: worker_job,
         });
-        self.set_busy(true);
+        self.as_mut().set_busy(true);
+        self.set_writing(writing);
     }
     pub fn load(
         mut self: Pin<&mut Self>,
@@ -421,7 +431,7 @@ impl ffi::PackageController {
         sources: QString,
         sudo: bool,
     ) {
-        if self.rust().worker.is_some() {
+        if self.rust().worker.as_ref().is_some_and(|w| w.job.writes()) {
             return;
         }
         let view = view.to_string();
@@ -458,6 +468,13 @@ impl ffi::PackageController {
         self.as_mut().set_confirmation(QString::default());
         self.as_mut().set_rows("[]".into());
         self.as_mut().set_details("{}".into());
+        // Reads are preemptible: cancel the in-flight load or details
+        // query and run this one next. Native writes keep the lock.
+        if self.rust().worker.is_some() {
+            self.rust().worker.as_ref().unwrap().cancel.cancel();
+            self.as_mut().rust_mut().queued = Some(Job::Load(view, query));
+            return;
+        }
         self.start(Job::Load(view, query));
     }
     pub fn select(mut self: Pin<&mut Self>, index: i32) {
@@ -489,8 +506,9 @@ impl ffi::PackageController {
                 }
                 return;
             }
+            let same = same_app_sources(&self.rust().packages, &package.id);
             self.as_mut().set_details(encoded(
-                json!({"package": package_row(&package), "description": package.summary}),
+                json!({"package": package_row(&package, &same), "description": package.summary}),
             ));
             self.start(Job::Details(package.id));
         } else if let Some(failure) = usize::try_from(index)
@@ -643,11 +661,20 @@ impl ffi::PackageController {
                 }
             }
             Ok(Payload::Packages(report)) => {
+                if matches!(self.rust().queued, Some(Job::Load(..))) {
+                    return;
+                }
                 let upgradable = self.rust().updates_view
                     && report.failures.is_empty()
                     && !upgrade_plan(&report.packages).is_empty();
                 self.as_mut().set_upgradable(upgradable);
-                let mut rows: Vec<_> = report.packages.iter().map(package_row).collect();
+                let same = same_app_sources_all(&report.packages);
+                let mut rows: Vec<_> = report
+                    .packages
+                    .iter()
+                    .zip(same)
+                    .map(|(p, from)| package_row(p, &from))
+                    .collect();
                 rows.extend(report.failures.iter().map(|failure| {
                     json!({"kind": "failure", "name": failure.backend, "source": failure.backend,
                         "summary": failure.error.to_string(), "available": false})
@@ -672,14 +699,20 @@ impl ffi::PackageController {
                 self.set_status(status.as_str().into());
             }
             Ok(Payload::Sources(sources)) => {
+                if matches!(self.rust().queued, Some(Job::Load(..))) {
+                    return;
+                }
                 let rows: Vec<_> = sources.iter().map(|s| json!({"kind": "source", "name": s.backend, "source": s.backend, "summary": source_status(s), "available": s.availability == Ok(Availability::Available), "capabilities": s.capabilities})).collect();
                 self.as_mut().rust_mut().sources = sources;
                 self.as_mut().set_rows(encoded(rows));
                 self.set_status("Source availability checked. Select a source for details.".into());
             }
             Ok(Payload::Details(details)) => {
+                if matches!(self.rust().queued, Some(Job::Load(..))) {
+                    return;
+                }
                 let data = encoded(
-                    json!({"package": package_row(&details.package), "description": details.description, "homepage": details.homepage, "dependencies": details.dependencies}),
+                    json!({"package": package_row(&details.package, &same_app_sources(&self.rust().packages, &details.package.id)), "description": details.description, "homepage": details.homepage, "dependencies": details.dependencies}),
                 );
                 // Bound memory use for large searches; reload and writes invalidate this snapshot.
                 if self.rust().detail_cache.len() >= 128 {
@@ -747,9 +780,10 @@ impl ffi::PackageController {
                 self.as_mut().set_status("Backend worker failed.".into());
             }
             let queued = self.as_mut().rust_mut().queued.take();
+            self.as_mut().set_writing(false);
             self.as_mut().set_busy(false);
-            // A selection that arrived while the worker was busy starts now
-            // that the previous job has fully terminated.
+            // A selection or view change that arrived while the worker was
+            // busy starts now that the previous job has fully terminated.
             if let Some(job) = queued {
                 self.start(job);
             }
@@ -858,6 +892,7 @@ mod tests {
             candidate_version: Some("2".into()),
             update: UpdateAvailability::Available,
             icon: None,
+            component_ids: vec![],
         };
         let mut engine = Engine::default();
         engine
@@ -895,6 +930,7 @@ mod tests {
                 candidate_version: Some("2".into()),
                 update,
                 icon: None,
+                component_ids: vec![],
             }
         }
         let packages = vec![
@@ -942,6 +978,7 @@ mod tests {
                 candidate_version: Some("2".into()),
                 update: UpdateAvailability::Available,
                 icon: None,
+                component_ids: vec![],
             }
         }
         // Identity shape mirrors QML rowIdentity: [source, name, arch, remote, scope].
@@ -1037,6 +1074,7 @@ mod tests {
                 candidate_version: None,
                 update: UpdateAvailability::Unknown,
                 icon: None,
+                component_ids: vec![],
             },
             description: String::new(),
             homepage: None,
@@ -1062,6 +1100,7 @@ mod tests {
             candidate_version: Some("2".into()),
             update: UpdateAvailability::Available,
             icon: None,
+            component_ids: vec![],
         };
         let mut engine = Engine::default();
         engine
@@ -1104,9 +1143,10 @@ mod tests {
             candidate_version: Some("2".into()),
             update: UpdateAvailability::Available,
             icon: None,
+            component_ids: vec![],
         };
-        assert_eq!(package_row(&package)["source"], "fixture");
-        assert!(encoded(package_row(&package))
+        assert_eq!(package_row(&package, &[])["source"], "fixture");
+        assert!(encoded(package_row(&package, &[]))
             .to_string()
             .contains("synthetic"));
         let mut other = package.clone();

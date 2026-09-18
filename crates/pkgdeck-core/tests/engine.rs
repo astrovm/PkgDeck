@@ -38,6 +38,7 @@ fn package(id: PackageId) -> Package {
         candidate_version: Some("1.0".into()),
         update: UpdateAvailability::Unknown,
         icon: None,
+        component_ids: vec![],
     }
 }
 fn selector() -> Selector {

@@ -41,6 +41,12 @@ pub struct Package {
     /// access where the backend can provide one. Absent otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<PathBuf>,
+    /// AppStream component ids (desktop-id stems) identifying the same
+    /// application across managers, e.g. `org.mozilla.firefox` for the APT,
+    /// Flatpak, and Snap Firefox builds. Display-only grouping key: writes
+    /// always address exact backend identities. Empty when unknown.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub component_ids: Vec<String>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq)]
@@ -123,4 +129,175 @@ pub struct Selector {
     pub backend: Option<String>,
     pub architecture: Option<String>,
     pub scope: Option<Scope>,
+}
+
+/// Installed backends keyed by AppStream component id. Empty stems are
+/// ignored so they never join unrelated rows.
+fn installed_component_backends(
+    packages: &[Package],
+) -> std::collections::BTreeMap<&str, std::collections::BTreeSet<&str>> {
+    let mut index = std::collections::BTreeMap::new();
+    for package in packages {
+        if package.installed_version.is_none() {
+            continue;
+        }
+        for component in &package.component_ids {
+            if component.is_empty() {
+                continue;
+            }
+            index
+                .entry(component.as_str())
+                .or_insert_with(std::collections::BTreeSet::new)
+                .insert(package.id.backend.as_str());
+        }
+    }
+    index
+}
+fn backends_sharing(
+    components: &[String],
+    backend: &str,
+    index: &std::collections::BTreeMap<&str, std::collections::BTreeSet<&str>>,
+) -> Vec<String> {
+    let mut backends = std::collections::BTreeSet::new();
+    for component in components {
+        if component.is_empty() {
+            continue;
+        }
+        if let Some(set) = index.get(component.as_str()) {
+            for other in set {
+                if *other != backend {
+                    backends.insert(*other);
+                }
+            }
+        }
+    }
+    backends.into_iter().map(str::to_owned).collect()
+}
+/// Sorted backend ids, other than `id`'s own backend, with an installed
+/// package sharing one of its AppStream component ids. Only installed
+/// packages group: remote catalog entries never join, and a backend with
+/// several matching packages is listed once. Display-only: selection and
+/// writes always address exact identities, never groups.
+pub fn same_app_sources(packages: &[Package], id: &PackageId) -> Vec<String> {
+    let Some(package) = packages.iter().find(|package| package.id == *id) else {
+        return vec![];
+    };
+    backends_sharing(
+        &package.component_ids,
+        &id.backend,
+        &installed_component_backends(packages),
+    )
+}
+/// Per-row `same_app_sources` for a whole report, sharing one inverted index.
+pub fn same_app_sources_all(packages: &[Package]) -> Vec<Vec<String>> {
+    let index = installed_component_backends(packages);
+    packages
+        .iter()
+        .map(|package| backends_sharing(&package.component_ids, &package.id.backend, &index))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn package(backend: &str, name: &str, installed: bool, components: &[&str]) -> Package {
+        Package {
+            id: PackageId {
+                backend: backend.into(),
+                name: name.into(),
+                architecture: "amd64".into(),
+                scope: Scope::System,
+                remote: None,
+            },
+            display_name: name.into(),
+            summary: String::new(),
+            installed_version: installed.then(|| "1".into()),
+            candidate_version: Some("2".into()),
+            update: UpdateAvailability::Available,
+            icon: None,
+            component_ids: components.iter().map(ToString::to_string).collect(),
+        }
+    }
+    fn firefox_id() -> PackageId {
+        PackageId {
+            backend: "apt".into(),
+            name: "firefox".into(),
+            architecture: "amd64".into(),
+            scope: Scope::System,
+            remote: None,
+        }
+    }
+    #[test]
+    fn same_app_groups_installed_packages_by_component() {
+        let packages = vec![
+            package("apt", "firefox", true, &["firefox"]),
+            package(
+                "flatpak",
+                "org.mozilla.firefox",
+                true,
+                &["org.mozilla.firefox", "firefox"],
+            ),
+            package("snap", "firefox", true, &["firefox"]),
+            package("apt", "unrelated", true, &["unrelated"]),
+        ];
+        assert_eq!(
+            same_app_sources(&packages, &firefox_id()),
+            vec!["flatpak".to_string(), "snap".to_string()]
+        );
+    }
+    #[test]
+    fn same_app_ignores_remote_same_backend_and_unknown() {
+        let packages = vec![
+            package("apt", "firefox", true, &["firefox"]),
+            // Remote catalog entries never join a group.
+            package("flatpak", "org.mozilla.firefox", false, &["firefox"]),
+            // A second apt row is the same backend, not another source.
+            package("apt", "firefox-esr", true, &["firefox"]),
+            // No shared component id.
+            package("snap", "chromium", true, &["chromium"]),
+        ];
+        assert!(same_app_sources(&packages, &firefox_id()).is_empty());
+        // Unknown identities and component-less packages group with nothing.
+        assert!(same_app_sources(
+            &packages,
+            &PackageId {
+                backend: "apt".into(),
+                name: "missing".into(),
+                architecture: "amd64".into(),
+                scope: Scope::System,
+                remote: None,
+            }
+        )
+        .is_empty());
+        assert!(same_app_sources(
+            &packages,
+            &PackageId {
+                backend: "snap".into(),
+                name: "chromium".into(),
+                architecture: "amd64".into(),
+                scope: Scope::System,
+                remote: None,
+            }
+        )
+        .is_empty());
+    }
+    #[test]
+    fn empty_component_stems_never_group() {
+        let packages = vec![
+            package("apt", "one", true, &[""]),
+            package("flatpak", "two", true, &[""]),
+        ];
+        assert!(same_app_sources(
+            &packages,
+            &PackageId {
+                backend: "apt".into(),
+                name: "one".into(),
+                architecture: "amd64".into(),
+                scope: Scope::System,
+                remote: None,
+            }
+        )
+        .is_empty());
+        assert!(same_app_sources_all(&packages).iter().all(Vec::is_empty));
+    }
 }

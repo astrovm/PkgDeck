@@ -349,6 +349,7 @@ mod tests {
                 candidate_version: Some("2.0".into()),
                 update: UpdateAvailability::Available,
                 icon: None,
+                component_ids: vec![],
             }
         }
     }

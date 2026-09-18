@@ -736,6 +736,7 @@ mod tests {
             candidate_version: Some("1".into()),
             update: UpdateAvailability::Current,
             icon: None,
+            component_ids: vec![],
         }
     }
     struct Fixture {

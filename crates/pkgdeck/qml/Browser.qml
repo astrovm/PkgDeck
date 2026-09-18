@@ -283,7 +283,21 @@ Controls.ApplicationWindow {
     }
 
     function rowTooltip(data) {
-        return data.name + "\n" + (data.installed || "not installed") + " → " + (data.candidate || "unknown") + "\n" + (data.summary || "");
+        const same = sameAppNames(data).length > 0 ? "\nAlso installed from: " + sameAppNames(data).join(", ") : "";
+        return data.name + "\n" + (data.installed || "not installed") + " → " + (data.candidate || "unknown") + "\n" + (data.summary || "") + same;
+    }
+    // Display names for backend ids, and the "also installed from" suffix
+    // for rows whose application exists in several managers at once.
+    function sourceDisplayName(id) {
+        const at = sourceIds.indexOf(id);
+        return at >= 0 ? sourceNames[at] : id;
+    }
+    function sameAppNames(row) {
+        return ((row && row.same_app_from) || []).map((id) => root.sourceDisplayName(id));
+    }
+    function sameAppSummary(row) {
+        const names = sameAppNames(row);
+        return names.length > 0 ? " · also in " + names.join(", ") : "";
     }
     // Local icon files become file:// URLs. Paths come from the backend and
     // may contain spaces, which raw concatenation would leave unencoded and
@@ -317,7 +331,7 @@ Controls.ApplicationWindow {
         return found;
     }
     function openView(view) {
-        if (backend.busy)
+        if (backend.writing && ["Search", "Installed", "Updates", "Sources"].indexOf(view) >= 0)
             return;
         queryDirty = false;
         selectedIdentity = null;
@@ -467,7 +481,7 @@ Controls.ApplicationWindow {
                         Layout.fillWidth: true
                         text: modelData
                         symbol: ({"Search":"search", "Installed":"installed", "Updates":"updates", "Sources":"sources", "Settings":"settings", "About":"help"})[modelData]
-                        enabled: !backend.busy
+                        enabled: !backend.writing
                         navigation: true
                         primary: root.currentView === modelData
                         onClicked: root.openView(modelData)
@@ -517,7 +531,7 @@ Controls.ApplicationWindow {
                     visible: root.compact
                     model: ["Search", "Installed", "Updates", "Sources", "Settings", "About"]
                     currentIndex: model.indexOf(root.currentView)
-                    enabled: !backend.busy
+                    enabled: !backend.writing
                     onActivated: root.openView(currentText)
                     Accessible.name: "Navigation"
                     Layout.fillWidth: true
@@ -536,7 +550,7 @@ Controls.ApplicationWindow {
                     id: sourceFilterButton
                     text: root.sourceSummary()
                     symbol: "sources"
-                    enabled: !backend.busy
+                    enabled: !backend.writing
                     onClicked: sourcePopup.open()
                     Accessible.name: "Package source filter"
                     Layout.preferredWidth: 210
@@ -607,7 +621,7 @@ Controls.ApplicationWindow {
                     Layout.fillWidth: true
                     placeholderText: "Search packages"
                     Accessible.name: "Search packages"
-                    enabled: !backend.busy
+                    enabled: !backend.writing
                     selectByMouse: true
                     implicitHeight: 44
                     color: root.ink
@@ -635,7 +649,7 @@ Controls.ApplicationWindow {
                     text: "Search"
                     symbol: "search"
                     primary: true
-                    enabled: !backend.busy && search.text.trim().length > 0
+                    enabled: !backend.writing && search.text.trim().length > 0
                     onClicked: { root.currentView = "Search"; root.queryDirty = false; root.reload(); }
                 }
             }
@@ -649,7 +663,7 @@ Controls.ApplicationWindow {
                     text: root.installedFilter
                     placeholderText: "Filter installed packages"
                     Accessible.name: "Filter installed packages"
-                    enabled: !backend.busy
+                    enabled: !backend.writing
                     selectByMouse: true
                     implicitHeight: 44
                     color: root.ink
@@ -670,7 +684,7 @@ Controls.ApplicationWindow {
                     text: "Filter"
                     symbol: "search"
                     primary: true
-                    enabled: !backend.busy
+                    enabled: !backend.writing
                     onClicked: { root.installedFilter = installedFilterField.text; root.reload(); }
                 }
             }
@@ -687,15 +701,6 @@ Controls.ApplicationWindow {
                     Accessible.name: "Appearance"
                     Layout.fillWidth: true
                     Layout.maximumWidth: 420
-                }
-                Controls.Label {
-                    text: "Package sources"
-                }
-                Controls.Label {
-                    Layout.fillWidth: true
-                    wrapMode: Text.WordWrap
-                    color: root.muted
-                    text: "Choose which sources every section queries using the source selector in the header."
                 }
                 Controls.Label {
                     text: "Privilege elevation"
@@ -722,8 +727,9 @@ Controls.ApplicationWindow {
                 objectName: "aboutText"
                 visible: root.currentView === "About"
                 Layout.fillWidth: true
+                Layout.alignment: Qt.AlignTop
                 wrapMode: Text.WordWrap
-                text: "PkgDeck " + backend.version + "\nA unified package interface for Linux.\n\nKeyboard shortcuts\nCtrl+1: Search • Ctrl+2: Installed • Ctrl+3: Updates • Ctrl+4: Sources\nCtrl+F: search • Ctrl+L: focus results • Up/Down: select • Ctrl+I: install • Ctrl+D: remove • Ctrl+U: upgrade • Ctrl+M: refresh source • Ctrl+R: reload\nEscape: cancel current work\n\nRefresh updates source metadata; Upgrade changes an installed package. Writes require confirmation and may change native dependencies. Cancellation waits for a native write already running.\n\nSearches show configured package sources. Check the status area for a source that is unavailable or did not respond."
+                text: "PkgDeck " + backend.version + "\nA unified package interface for Linux.\n\nKeyboard shortcuts\nCtrl+1: Search • Ctrl+2: Installed • Ctrl+3: Updates • Ctrl+4: Sources\nCtrl+F: search • Ctrl+L: focus results • Up/Down: select • Ctrl+I: install • Ctrl+D: remove • Ctrl+U: upgrade • Ctrl+M: refresh source • Ctrl+R: reload\nEscape: cancel current work\n\nRefresh updates source metadata; Upgrade changes an installed package. Writes require confirmation and may change native dependencies. Cancellation waits for a native write already running.\n\nSearches show configured package sources. A failed source stays as a row in Sources and in the current results."
                 textFormat: Text.PlainText
             }
             Rectangle {
@@ -747,12 +753,27 @@ Controls.ApplicationWindow {
                         Layout.fillWidth: true
                         Layout.margins: 14
                         Controls.Label {
-                            text: root.viewItems.length + (root.currentView === "Sources" ? (root.viewItems.length === 1 ? " source" : " sources") : (root.viewItems.length === 1 ? " package" : " packages")) + (root.currentView === "Updates" && root.checkedPackages.length > 0 ? " · " + root.checkedPackages.length + " selected" : "")
+                            text: backend.writing && backend.status.length ? backend.status : root.viewItems.length + (root.currentView === "Sources" ? (root.viewItems.length === 1 ? " source" : " sources") : (root.viewItems.length === 1 ? " package" : " packages")) + (root.currentView === "Updates" && root.checkedPackages.length > 0 ? " · " + root.checkedPackages.length + " selected" : "")
                             color: root.muted
                             font.pixelSize: 12
+                            elide: Text.ElideRight
                             Layout.fillWidth: true
                         }
-                        Controls.Label { text: "↑ ↓ Select"; color: root.muted; font.pixelSize: 12 }
+                        Controls.BusyIndicator {
+                            objectName: "resultsBusy"
+                            running: backend.busy
+                            visible: running && results.count > 0
+                            Layout.preferredWidth: 18
+                            Layout.preferredHeight: 18
+                        }
+                        ActionButton {
+                            objectName: "resultsCancel"
+                            text: "Cancel"
+                            symbol: "cancel"
+                            visible: backend.busy
+                            implicitHeight: 28
+                            onClicked: backend.cancel()
+                        }
                     }
                     Rectangle { Layout.fillWidth: true; height: 1; color: root.line }
                     RowLayout {
@@ -886,7 +907,7 @@ Controls.ApplicationWindow {
                             leftPadding: 16
                             rightPadding: 16
                             highlighted: results.currentIndex === index
-                            enabled: !backend.busy
+                            enabled: !backend.writing
                             Accessible.name: (modelData.kind === "package" ? (modelData.update === "available" ? "Update available. " : (modelData.installed ? "Installed. " : "Not installed. ")) : "") + modelData.name + ", " + modelData.source + ", " + (modelData.summary || "")
                             onClicked: { results.forceActiveFocus(); root.choose(index); }
                             onHoveredChanged: {
@@ -936,8 +957,8 @@ Controls.ApplicationWindow {
                                     id: packageCheck
                                     visible: root.currentView === "Updates" && modelData.kind === "package"
                                     checked: root.checkedPackages.indexOf(root.rowIdentity(modelData)) >= 0
-                                    enabled: !backend.busy
-                                    onToggled: root.togglePackage(modelData)
+                                     enabled: !backend.writing
+                                     onToggled: root.togglePackage(modelData)
                                     Accessible.name: "Select " + (modelData.name || "")
                                     Layout.preferredWidth: 28
                                     Layout.alignment: Qt.AlignVCenter
@@ -980,7 +1001,8 @@ Controls.ApplicationWindow {
                                             Accessible.ignored: true
                                         }
                                         Controls.Label {
-                                        text: modelData.source.toUpperCase() + (modelData.remote ? " · " + modelData.remote : "") + (modelData.architecture ? " · " + modelData.architecture : "")
+                                        objectName: "packageSourceLine"
+                                        text: modelData.source.toUpperCase() + (modelData.remote ? " · " + modelData.remote : "") + (modelData.architecture ? " · " + modelData.architecture : "") + root.sameAppSummary(modelData)
                                         color: root.muted
                                         font.pixelSize: 11
                                         elide: Text.ElideRight
@@ -1015,14 +1037,26 @@ Controls.ApplicationWindow {
                                 }
                             }
                         }
-                        Controls.Label {
+                        Column {
                             anchors.centerIn: parent
                             width: parent.width - 32
-                            horizontalAlignment: Text.AlignHCenter
-                            wrapMode: Text.WordWrap
-                            color: root.muted
+                            spacing: 8
                             visible: results.count === 0
-                            text: backend.busy ? "Loading packages…" : root.currentView === "Search" ? "Search by name or description.\nIf nothing matches, try a shorter search or another source." : "No results to show.\nCheck source availability or reload to try again."
+                            Controls.BusyIndicator {
+                                running: backend.busy
+                                visible: running
+                                anchors.horizontalCenter: parent.horizontalCenter
+                                width: 32
+                                height: 32
+                            }
+                            Controls.Label {
+                                width: parent.width
+                                horizontalAlignment: Text.AlignHCenter
+                                wrapMode: Text.WordWrap
+                                color: root.muted
+                                visible: !backend.busy
+                                text: root.currentView === "Search" ? "Search by name or description.\nIf nothing matches, try a shorter search or another source." : "No results to show.\nCheck source availability or reload to try again."
+                            }
                         }
                     }
                 }
@@ -1084,7 +1118,7 @@ Controls.ApplicationWindow {
                             background: null
                             wrapMode: TextEdit.Wrap
                             textFormat: TextEdit.PlainText
-                            text: root.detail.package ? (root.detail.description || "") + "\n\nScope: " + (root.detail.package.scope_label || "Unknown") + "   ·   Homepage: " + (root.detail.homepage || "Unavailable") + "\nDependencies: " + ((root.detail.dependencies || []).join(", ") || "None listed") : (root.detail.failure ? (root.detail.failure.error || "") + "\n\n" + (root.detail.hint || "") : (root.detail.availability || "") + "\n\nCapabilities: " + (root.detail.capabilities || []).join(", "))
+                            text: root.detail.package ? (root.detail.description || "") + "\n\nScope: " + (root.detail.package.scope_label || "Unknown") + "   ·   Homepage: " + (root.detail.homepage || "Unavailable") + (root.sameAppNames(root.detail.package).length > 0 ? "\nAlso installed from: " + root.sameAppNames(root.detail.package).join(", ") : "") + "\nDependencies: " + ((root.detail.dependencies || []).join(", ") || "None listed") : (root.detail.failure ? (root.detail.failure.error || "") + "\n\n" + (root.detail.hint || "") : (root.detail.availability || "") + "\n\nCapabilities: " + (root.detail.capabilities || []).join(", "))
                             Accessible.name: "Selected package, source, or failure details"
                         }
                     }
@@ -1109,7 +1143,7 @@ Controls.ApplicationWindow {
                     visible: root.currentView === "Updates"
                     text: "Select all"
                     symbol: "installed"
-                    enabled: !backend.busy
+                    enabled: !backend.writing
                     onClicked: root.selectAllPackages()
                 }
                 ActionButton {
@@ -1117,7 +1151,7 @@ Controls.ApplicationWindow {
                     visible: root.currentView === "Updates" && root.checkedPackages.length > 0
                     text: "Select none"
                     symbol: "cancel"
-                    enabled: !backend.busy
+                    enabled: !backend.writing
                     onClicked: root.checkedPackages = []
                 }
                 ActionButton {
@@ -1176,48 +1210,8 @@ Controls.ApplicationWindow {
                 ActionButton {
                     text: "Reload"
                     symbol: "refresh"
-                    enabled: !backend.busy
+                    enabled: !backend.writing
                     onClicked: root.reload()
-                }
-            }
-            RowLayout {
-                Layout.fillWidth: true
-                DeckIcon {
-                    name: "help"
-                    ink: root.muted
-                    visible: !backend.busy
-                    Layout.alignment: Qt.AlignTop
-                    Layout.preferredWidth: 18
-                    Layout.preferredHeight: 18
-                }
-                Controls.BusyIndicator {
-                    running: backend.busy
-                    visible: running
-                    Layout.preferredWidth: 32
-                    Layout.preferredHeight: 32
-                }
-                Controls.ScrollView {
-                    Layout.fillWidth: true
-                    Layout.preferredHeight: root.compact ? 42 : 44
-                    Controls.TextArea {
-                        objectName: "operationStatus"
-                        color: root.muted
-                        background: null
-                        font.pixelSize: 12
-                        padding: 0
-                        text: backend.status
-                        readOnly: true
-                        selectByMouse: true
-                        textFormat: TextEdit.PlainText
-                        wrapMode: TextEdit.Wrap
-                        Accessible.name: "Operation status"
-                    }
-                }
-                ActionButton {
-                    text: "Cancel"
-                    symbol: "cancel"
-                    visible: backend.busy
-                    onClicked: backend.cancel()
                 }
             }
         }
@@ -1262,12 +1256,12 @@ Controls.ApplicationWindow {
     }
     Shortcut {
         sequence: "Ctrl+L"
-        enabled: !backend.busy
+        enabled: !backend.writing
         onActivated: results.forceActiveFocus()
     }
     Shortcut {
         sequence: "Ctrl+F"
-        enabled: !backend.busy
+        enabled: !backend.writing
         onActivated: {
             root.openView("Search");
             search.selectAll();
@@ -1291,7 +1285,7 @@ Controls.ApplicationWindow {
     }
     Shortcut {
         sequence: "Ctrl+R"
-        enabled: !backend.busy
+        enabled: !backend.writing
         onActivated: root.reload()
     }
     Shortcut {
