@@ -19,6 +19,7 @@ pub mod ffi {
         #[qproperty(QString, details)]
         #[qproperty(QString, status)]
         #[qproperty(QString, confirmation)]
+        #[qproperty(QString, version)]
         #[qproperty(bool, busy)]
         #[qproperty(bool, upgradable)]
         type PackageController = super::Controller;
@@ -64,7 +65,7 @@ enum Reply {
 fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn FnMut(Reply)) {
     let result = match job {
         Job::Load(view, query) => {
-            if view == "Sources" || view == "Discover" {
+            if view == "Sources" {
                 Ok(Payload::Sources(engine.discover(cancel)))
             } else {
                 let mut report = if view == "Search" {
@@ -76,6 +77,16 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
                     report
                         .packages
                         .retain(|p| p.update == UpdateAvailability::Available);
+                }
+                // The Installed view filters client-side by substring; other
+                // views ignore the query so stale field text never narrows
+                // them. Failures are preserved so partial results stay visible.
+                if view == "Installed" && !query.trim().is_empty() {
+                    let needle = query.trim().to_lowercase();
+                    report.packages.retain(|p| {
+                        p.id.name.to_lowercase().contains(&needle)
+                            || p.summary.to_lowercase().contains(&needle)
+                    });
                 }
                 Ok(Payload::Packages(report))
             }
@@ -148,10 +159,12 @@ pub struct Controller {
     details: QString,
     status: QString,
     confirmation: QString,
+    version: QString,
     busy: bool,
     upgradable: bool,
     updates_view: bool,
     packages: Vec<Package>,
+    failures: Vec<BackendFailure>,
     detail_cache: BTreeMap<PackageId, QString>,
     sources: Vec<Source>,
     pending: Option<Job>,
@@ -166,10 +179,12 @@ impl Default for Controller {
             details: "{}".into(),
             status: "Choose a view or search for a package.".into(),
             confirmation: QString::default(),
+            version: pkgdeck_core::VERSION.into(),
             busy: false,
             upgradable: false,
             updates_view: false,
             packages: vec![],
+            failures: vec![],
             detail_cache: BTreeMap::new(),
             sources: vec![],
             pending: None,
@@ -210,6 +225,14 @@ fn source_status(source: &Source) -> String {
         Err(error) => error.to_string(),
     }
 }
+/// Details for a failed source row. Served from the stored report without a
+/// backend roundtrip: the query already failed, re-querying cannot help.
+fn failure_details(failure: &BackendFailure) -> QString {
+    encoded(json!({
+        "failure": {"backend": failure.backend, "error": failure.error.to_string()},
+        "hint": format!("Check the {} source in the Sources view, or run the manager directly in a terminal for complete output.", failure.backend),
+    }))
+}
 fn operation_label(operation: &Operation) -> String {
     let (action, id) = match operation {
         Operation::Install(id) => ("Install", id),
@@ -246,14 +269,13 @@ impl ffi::PackageController {
         let token = cancel.clone();
         let (sender, receiver) = mpsc::channel();
         let handle = thread::spawn(move || {
-            let discover =
-                matches!(&job, Job::Load(view, _) if view == "Sources" || view == "Discover");
+            let sources_view = matches!(&job, Job::Load(view, _) if view == "Sources");
             let mut send = |reply| {
                 let _ = sender.send(reply);
             };
             match pkgdeck_core::backends::native_engine(
                 source.as_deref(),
-                discover,
+                sources_view,
                 authorization,
                 &token,
             ) {
@@ -282,7 +304,7 @@ impl ffi::PackageController {
         let view = view.to_string();
         let query = query.to_string();
         let source = source.to_string();
-        if !["Search", "Installed", "Updates", "Sources", "Discover"].contains(&view.as_str())
+        if !["Search", "Installed", "Updates", "Sources"].contains(&view.as_str())
             || (view == "Search" && query.trim().is_empty())
         {
             return;
@@ -302,6 +324,7 @@ impl ffi::PackageController {
         self.as_mut().rust_mut().sudo = sudo;
         self.as_mut().rust_mut().detail_cache.clear();
         self.as_mut().rust_mut().packages.clear();
+        self.as_mut().rust_mut().failures.clear();
         self.as_mut().rust_mut().sources.clear();
         self.as_mut().rust_mut().pending = None;
         self.as_mut().set_confirmation(QString::default());
@@ -327,6 +350,16 @@ impl ffi::PackageController {
                 json!({"package": package_row(&package), "description": package.summary}),
             ));
             self.start(Job::Details(package.id));
+        } else if let Some(failure) = usize::try_from(index)
+            .ok()
+            .and_then(|i| {
+                i.checked_sub(self.rust().packages.len())
+                    .and_then(|j| self.rust().failures.get(j))
+            })
+            .cloned()
+        {
+            self.as_mut().set_details(failure_details(&failure));
+            self.set_status("Source failure details.".into());
         } else if let Some(source) = usize::try_from(index)
             .ok()
             .and_then(|i| self.rust().sources.get(i))
@@ -455,11 +488,12 @@ impl ffi::PackageController {
                     )
                 };
                 self.as_mut().rust_mut().packages = report.packages;
+                self.as_mut().rust_mut().failures = report.failures;
                 self.as_mut().set_rows(encoded(rows));
                 self.set_status(status.as_str().into());
             }
             Ok(Payload::Sources(sources)) => {
-                let rows: Vec<_> = sources.iter().map(|s| json!({"kind": "source", "name": s.backend, "source": s.backend, "summary": source_status(s), "available": s.availability == Ok(Availability::Available)})).collect();
+                let rows: Vec<_> = sources.iter().map(|s| json!({"kind": "source", "name": s.backend, "source": s.backend, "summary": source_status(s), "available": s.availability == Ok(Availability::Available), "capabilities": s.capabilities})).collect();
                 self.as_mut().rust_mut().sources = sources;
                 self.as_mut().set_rows(encoded(rows));
                 self.set_status("Source availability checked. Select a source for details.".into());
@@ -490,6 +524,7 @@ impl ffi::PackageController {
                 self.as_mut().set_upgradable(false);
                 self.as_mut().rust_mut().detail_cache.clear();
                 self.as_mut().rust_mut().packages.clear();
+                self.as_mut().rust_mut().failures.clear();
                 self.as_mut().rust_mut().sources.clear();
                 self.as_mut().set_rows("[]".into());
                 self.as_mut().set_details("{}".into());
@@ -589,6 +624,74 @@ mod tests {
         }
     }
     #[test]
+    fn controller_version_tracks_package_metadata() {
+        assert_eq!(
+            Controller::default().version.to_string(),
+            pkgdeck_core::VERSION
+        );
+    }
+    #[test]
+    fn installed_view_filters_by_query_while_other_views_ignore_it() {
+        fn load(engine: &mut Engine, view: &str, query: &str) -> PackageReport {
+            let mut replies = vec![];
+            execute(
+                engine,
+                Job::Load(view.into(), query.into()),
+                &Cancellation::default(),
+                &mut |r| replies.push(r),
+            );
+            match replies.pop().unwrap() {
+                Reply::Done(Ok(Payload::Packages(report))) => report,
+                _ => panic!("expected a package report"),
+            }
+        }
+        let package = Package {
+            id: PackageId {
+                backend: "fixture".into(),
+                name: "synthetic".into(),
+                architecture: "all".into(),
+                scope: Scope::System,
+                remote: None,
+            },
+            display_name: "Synthetic".into(),
+            summary: "Fixture".into(),
+            installed_version: Some("1".into()),
+            candidate_version: Some("2".into()),
+            update: UpdateAvailability::Available,
+        };
+        let mut engine = Engine::default();
+        engine
+            .register(Fixture {
+                package: package.clone(),
+                fail: false,
+            })
+            .unwrap();
+        assert_eq!(load(&mut engine, "Installed", "").packages.len(), 1);
+        assert_eq!(
+            load(&mut engine, "Installed", "synthetic").packages.len(),
+            1
+        );
+        assert_eq!(load(&mut engine, "Installed", "FIXTURE").packages.len(), 1);
+        assert!(load(&mut engine, "Installed", "missing")
+            .packages
+            .is_empty());
+        // Updates never narrows by the query; stale field text is ignored.
+        assert_eq!(load(&mut engine, "Updates", "missing").packages.len(), 1);
+    }
+    #[test]
+    fn failure_details_carry_backend_error_and_hint() {
+        let failure = BackendFailure {
+            backend: "npm".into(),
+            error: EngineError::InvalidResponse {
+                backend: "npm".into(),
+                reason: "npm ls failed: boom".into(),
+            },
+        };
+        let text = failure_details(&failure).to_string();
+        assert!(text.contains("npm ls failed: boom"));
+        assert!(text.contains("Sources view"));
+    }
+    #[test]
     fn jobs_keep_source_identity_native_updates_and_typed_failures() {
         let id = PackageId {
             backend: "fixture".into(),
@@ -641,7 +744,7 @@ mod tests {
                 Job::Load("Search".into(), "synthetic".into()),
                 Job::Load("Installed".into(), "".into()),
                 Job::Load("Updates".into(), "".into()),
-                Job::Load("Discover".into(), "".into()),
+                Job::Load("Sources".into(), "".into()),
                 Job::Details(id.clone()),
                 Job::Write(Operation::Upgrade(id.clone())),
                 Job::UpgradeAll(vec![Operation::UpgradeAll {

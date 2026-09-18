@@ -1279,6 +1279,55 @@ struct NpmLs {
     dependencies: Option<std::collections::BTreeMap<String, NpmInstalled>>,
 }
 
+/// Explain an `npm ls` document without an installed tree: prefer npm's own
+/// `error.summary`, then `error.detail` or code, then the first `problems`
+/// entries. Falls back to a generic reason when npm said nothing usable.
+fn npm_ls_problem(value: &serde_json::Value) -> String {
+    const LIMIT: usize = 240;
+    fn truncate(text: &str) -> String {
+        if text.chars().count() > LIMIT {
+            text.chars().take(LIMIT).collect::<String>() + "…"
+        } else {
+            text.to_owned()
+        }
+    }
+    let detail = value
+        .get("error")
+        .and_then(|error| {
+            error
+                .get("summary")
+                .or_else(|| error.get("detail"))
+                .and_then(|detail| detail.as_str())
+                .map(str::trim)
+                .filter(|detail| !detail.is_empty())
+                .map(str::to_owned)
+                .or_else(|| {
+                    error
+                        .get("code")
+                        .and_then(|code| code.as_str())
+                        .map(|code| format!("npm error {code}"))
+                })
+        })
+        .or_else(|| {
+            value
+                .get("problems")
+                .and_then(|problems| problems.as_array())
+                .map(|problems| {
+                    problems
+                        .iter()
+                        .filter_map(|problem| problem.as_str())
+                        .take(3)
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                })
+                .filter(|joined| !joined.is_empty())
+        });
+    match detail {
+        Some(detail) => format!("npm ls failed: {}", truncate(&detail)),
+        None => "npm reported an error".to_owned(),
+    }
+}
+
 #[derive(Deserialize)]
 struct NpmInstalled {
     version: String,
@@ -1778,11 +1827,15 @@ impl<T: Transport> DevTool<T> {
         let id = self.kind.id();
         let (value, lenient) =
             self.lenient_json(&["ls", "--global", "--depth=0", "--json"], cancel)?;
+        // Keep npm's own diagnostic before the document moves: a failing
+        // tree without installed packages reports its cause here instead of
+        // a bare failure downstream.
+        let problem = npm_ls_problem(&value);
         let report: NpmLs = serde_json::from_value(value).map_err(|e| invalid(id, e))?;
         let installed = match (report.dependencies, lenient) {
             (Some(dependencies), _) => dependencies,
             (None, false) => std::collections::BTreeMap::new(),
-            (None, true) => return Err(invalid(id, "npm reported an error")),
+            (None, true) => return Err(invalid(id, problem)),
         };
         let outdated: std::collections::BTreeMap<String, NpmOutdated> =
             match self.lenient_json(&["outdated", "--global", "--json"], cancel) {

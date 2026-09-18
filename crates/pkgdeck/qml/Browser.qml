@@ -7,23 +7,27 @@ import org.kde.kirigami as Kirigami
 Controls.ApplicationWindow {
     id: root
     required property var backend
-    property string currentView: "Discover"
-    property string resultView: "Discover"
+    property string currentView: "Search"
+    property string resultView: "Search"
     property var items: currentView === resultView ? JSON.parse(backend.rows || "[]") : []
     property var detail: JSON.parse(backend.details || "{}")
     property bool closePending: false
+    property bool queryDirty: false
     property var selected: results.currentIndex >= 0 && results.currentIndex < items.length ? items[results.currentIndex] : null
     property string source: argument("--from", preferences.source)
+    property string installedFilter: ""
     property bool useSudo: argument("--auth", preferences.authorization) === "sudo"
+    readonly property var sourceIds: ["", "apt", "dnf", "pacman", "zypper", "snap", "homebrew", "appimage", "flatpak", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "composer", "gem"]
+    readonly property var sourceNames: ["All available sources", "APT", "DNF", "Pacman", "Zypper", "Snap", "Homebrew", "AppImage", "Flatpak", "Cargo", "npm", "pnpm", "Bun", "pip", "pipx", "uv", "Composer", "RubyGems"]
     readonly property bool compact: width < 760
     readonly property bool dark: preferences.appearance === 1 || (preferences.appearance === 0 && Qt.styleHints.colorScheme === Qt.Dark)
-    readonly property color canvas: dark ? "#111820" : "#f3f5f8"
-    readonly property color surface: dark ? "#1b2531" : "#ffffff"
+    readonly property color canvas: dark ? "#000000" : "#f3f5f8"
+    readonly property color surface: dark ? "#101014" : "#ffffff"
     readonly property color ink: dark ? "#ecf1f8" : "#1c2b3e"
     readonly property color muted: dark ? "#a2b1c4" : "#57677e"
-    readonly property color line: dark ? "#334153" : "#dce3ec"
+    readonly property color line: dark ? "#2a2e37" : "#dce3ec"
     readonly property color accent: dark ? "#80b6ff" : "#245fc6"
-    readonly property color selection: dark ? "#283e59" : "#e8f0ff"
+    readonly property color selection: dark ? "#1a2740" : "#e8f0ff"
     color: canvas
     font.family: "sans-serif"
     font.pixelSize: 14
@@ -84,17 +88,26 @@ Controls.ApplicationWindow {
     function openView(view) {
         if (backend.busy)
             return;
+        backend.status = {
+            "Search": "Type a query and press Enter to search.",
+            "Installed": "Loading installed packages…",
+            "Updates": "Loading available updates…",
+            "Sources": "Checking source availability…",
+            "Settings": "Adjust appearance, package source, and authorization.",
+            "About": "About PkgDeck."
+        }[view] || "";
+        queryDirty = false;
         currentView = view;
         results.currentIndex = -1;
         if (view === "Search")
             search.forceActiveFocus();
-        else if (["Discover", "Installed", "Updates", "Sources"].indexOf(view) >= 0)
+        else if (["Search", "Installed", "Updates", "Sources"].indexOf(view) >= 0)
             reload();
     }
     function reload() {
         resultView = currentView;
         results.currentIndex = -1;
-        backend.load(currentView, search.text, source, useSudo);
+        backend.load(currentView, currentView === "Installed" ? installedFilter : search.text, source, useSudo);
     }
     function choose(index) {
         if (backend.busy || index < 0 || index >= items.length)
@@ -129,6 +142,11 @@ Controls.ApplicationWindow {
         }
         function onRowsChanged() {
             results.currentIndex = -1;
+            if (root.queryDirty) {
+                root.queryDirty = false;
+            } else if (root.items.length > 0) {
+                results.forceActiveFocus();
+            }
         }
         function onConfirmationChanged() {
             if (backend.confirmation.length)
@@ -157,21 +175,32 @@ Controls.ApplicationWindow {
                 anchors.fill: parent
                 anchors.margins: 16
                 spacing: 8
-                Controls.Label {
-                    text: "PkgDeck"
-                    font.pixelSize: 25
-                    font.bold: true
-                    color: root.ink
+                RowLayout {
+                    spacing: 10
                     Layout.topMargin: 12
+                    Image {
+                        objectName: "appLogo"
+                        source: "qrc:/pkgdeck/logo.svg"
+                        sourceSize.width: 30
+                        sourceSize.height: 30
+                        fillMode: Image.PreserveAspectFit
+                        Accessible.ignored: true
+                    }
+                    Controls.Label {
+                        text: "PkgDeck"
+                        font.pixelSize: 25
+                        font.bold: true
+                        color: root.ink
+                    }
                 }
                 Item { Layout.preferredHeight: 24 }
                 Repeater {
-                    model: ["Discover", "Search", "Installed", "Updates", "Sources", "Settings", "Help / About"]
+                    model: ["Search", "Installed", "Updates", "Sources", "Settings", "About"]
                     delegate: ActionButton {
                         required property string modelData
                         Layout.fillWidth: true
                         text: modelData
-                        symbol: ({"Discover":"discover", "Search":"search", "Installed":"installed", "Updates":"updates", "Sources":"sources", "Settings":"settings", "Help / About":"help"})[modelData]
+                        symbol: ({"Search":"search", "Installed":"installed", "Updates":"updates", "Sources":"sources", "Settings":"settings", "About":"help"})[modelData]
                         enabled: !backend.busy
                         navigation: true
                         primary: root.currentView === modelData
@@ -220,7 +249,7 @@ Controls.ApplicationWindow {
                 Layout.fillWidth: true
                 Controls.ComboBox {
                     visible: root.compact
-                    model: ["Discover", "Search", "Installed", "Updates", "Sources", "Settings", "Help / About"]
+                    model: ["Search", "Installed", "Updates", "Sources", "Settings", "About"]
                     currentIndex: model.indexOf(root.currentView)
                     enabled: !backend.busy
                     onActivated: root.openView(currentText)
@@ -236,22 +265,29 @@ Controls.ApplicationWindow {
                     font.bold: true
                     Layout.fillWidth: true
                 }
-                Controls.Label {
-                    visible: !root.compact
-                    text: root.source ? root.source.toUpperCase() : "ALL SOURCES"
-                    color: root.muted
-                    font.pixelSize: 11
-                    font.letterSpacing: 1
+                Controls.ComboBox {
+                    objectName: "sourceFilter"
+                    model: root.sourceNames
+                    currentIndex: root.sourceIds.indexOf(root.source)
+                    enabled: !backend.busy
+                    onActivated: {
+                        root.source = root.sourceIds[currentIndex];
+                        preferences.source = root.source;
+                        if (["Search", "Installed", "Updates", "Sources"].indexOf(root.currentView) >= 0)
+                            root.reload();
+                    }
+                    Accessible.name: "Package source filter"
+                    Layout.preferredWidth: 210
                 }
             }
             RowLayout {
                 Layout.fillWidth: true
-                visible: ["Search", "Discover"].indexOf(root.currentView) >= 0
+                visible: root.currentView === "Search"
                 Controls.TextField {
                     id: search
                     objectName: "searchField"
                     Layout.fillWidth: true
-                    placeholderText: "Search package names and summaries"
+                    placeholderText: "Search packages"
                     Accessible.name: "Search packages"
                     enabled: !backend.busy
                     selectByMouse: true
@@ -267,23 +303,58 @@ Controls.ApplicationWindow {
                     }
                     onAccepted: {
                         root.currentView = "Search";
+                        root.queryDirty = false;
                         root.reload();
                     }
+                    Keys.onDownPressed: {
+                        results.forceActiveFocus();
+                        if (root.items.length > 0)
+                            root.choose(0);
+                    }
+                    onTextChanged: root.queryDirty = true
                 }
                 ActionButton {
                     text: "Search"
                     symbol: "search"
                     primary: true
                     enabled: !backend.busy && search.text.trim().length > 0
-                    onClicked: { root.currentView = "Search"; root.reload(); }
+                    onClicked: { root.currentView = "Search"; root.queryDirty = false; root.reload(); }
                 }
             }
-            Controls.Label {
-                visible: root.currentView === "Discover"
-                text: "Search packages or select a source to inspect its availability."
-                textFormat: Text.PlainText
-                wrapMode: Text.WordWrap
+            RowLayout {
                 Layout.fillWidth: true
+                visible: root.currentView === "Installed"
+                Controls.TextField {
+                    id: installedFilterField
+                    objectName: "installedFilterField"
+                    Layout.fillWidth: true
+                    text: root.installedFilter
+                    placeholderText: "Filter installed packages"
+                    Accessible.name: "Filter installed packages"
+                    enabled: !backend.busy
+                    selectByMouse: true
+                    implicitHeight: 44
+                    color: root.ink
+                    placeholderTextColor: root.muted
+                    leftPadding: 14
+                    background: Rectangle {
+                        color: root.surface
+                        radius: 8
+                        border.color: installedFilterField.activeFocus ? root.accent : root.line
+                        border.width: installedFilterField.activeFocus ? 2 : 1
+                    }
+                    onAccepted: {
+                        root.installedFilter = text;
+                        root.reload();
+                    }
+                }
+                ActionButton {
+                    text: "Filter"
+                    symbol: "search"
+                    primary: true
+                    enabled: !backend.busy
+                    onClicked: { root.installedFilter = installedFilterField.text; root.reload(); }
+                }
             }
             ColumnLayout {
                 visible: root.currentView === "Settings"
@@ -301,16 +372,16 @@ Controls.ApplicationWindow {
                 }
                 Controls.ComboBox {
                     objectName: "sourceSetting"
-                    model: ["All available sources", "APT", "DNF", "Pacman", "Zypper", "Snap", "Homebrew", "AppImage", "Flatpak", "Cargo", "npm", "pnpm", "Bun", "pip", "pipx", "uv", "Composer", "RubyGems"]
-                    currentIndex: ["", "apt", "dnf", "pacman", "zypper", "snap", "homebrew", "appimage", "flatpak", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "composer", "gem"].indexOf(root.source)
+                    model: root.sourceNames
+                    currentIndex: root.sourceIds.indexOf(root.source)
                     onActivated: {
-                        root.source = ["", "apt", "dnf", "pacman", "zypper", "snap", "homebrew", "appimage", "flatpak", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "composer", "gem"][currentIndex];
+                        root.source = root.sourceIds[currentIndex];
                         preferences.source = root.source;
                     }
                     Accessible.name: "Package source"
                 }
                 Controls.Label {
-                    text: "APT authorization"
+                    text: "Privilege elevation"
                 }
                 Controls.ComboBox {
                     objectName: "authorizationSetting"
@@ -320,26 +391,27 @@ Controls.ApplicationWindow {
                         root.useSudo = currentIndex === 1;
                         preferences.authorization = root.useSudo ? "sudo" : "polkit";
                     }
-                    Accessible.name: "APT authorization"
+                    Accessible.name: "Privilege elevation"
                 }
                 Controls.Label {
                     Layout.fillWidth: true
                     wrapMode: Text.WordWrap
-                    text: "Polkit uses your host's authentication agent. Sudo requires an existing grant; passwords are never collected here. Homebrew always runs unprivileged. Choose the appearance below, or follow your system theme."
+                    text: "Polkit uses your host's authentication agent. Sudo requires an existing grant; passwords are never collected here. Homebrew and development managers always run unprivileged without elevation. Choose the appearance above, or follow your system theme."
                 }
             }
             Controls.Label {
-                visible: root.currentView === "Help / About"
+                objectName: "aboutText"
+                visible: root.currentView === "About"
                 Layout.fillWidth: true
                 wrapMode: Text.WordWrap
-                text: "PkgDeck 0.1.0\nA unified package interface for Linux.\n\nCtrl+F: search • Ctrl+1: Discover • Ctrl+3: Installed • Ctrl+4: Updates • Ctrl+5: Sources\nCtrl+L: focus results • Up/Down: select • Ctrl+I: install • Ctrl+D: remove • Ctrl+U: upgrade • Ctrl+M: refresh source • Ctrl+R: reload\nEscape: cancel current work\n\nRefresh updates source metadata; Upgrade changes an installed package. Writes require confirmation and may change native dependencies. Cancellation waits for a native write already running.\n\nSearches show configured package sources. Check the status area for a source that is unavailable or did not respond."
+                text: "PkgDeck " + backend.version + "\nA unified package interface for Linux.\n\nKeyboard shortcuts\nCtrl+1: Search • Ctrl+2: Installed • Ctrl+3: Updates • Ctrl+4: Sources\nCtrl+F: search • Ctrl+L: focus results • Up/Down: select • Ctrl+I: install • Ctrl+D: remove • Ctrl+U: upgrade • Ctrl+M: refresh source • Ctrl+R: reload\nEscape: cancel current work\n\nRefresh updates source metadata; Upgrade changes an installed package. Writes require confirmation and may change native dependencies. Cancellation waits for a native write already running.\n\nSearches show configured package sources. Check the status area for a source that is unavailable or did not respond."
                 textFormat: Text.PlainText
             }
             Rectangle {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 Layout.minimumHeight: 130
-                visible: root.currentView !== "Settings" && root.currentView !== "Help / About"
+                visible: root.currentView !== "Settings" && root.currentView !== "About"
                 color: root.surface
                 radius: 10
                 border.color: results.activeFocus ? root.accent : root.line
@@ -351,7 +423,7 @@ Controls.ApplicationWindow {
                         Layout.fillWidth: true
                         Layout.margins: 14
                         Controls.Label {
-                            text: root.items.length + (root.currentView === "Sources" || root.currentView === "Discover" ? (root.items.length === 1 ? " source" : " sources") : (root.items.length === 1 ? " package" : " packages"))
+                            text: root.items.length + (root.currentView === "Sources" ? (root.items.length === 1 ? " source" : " sources") : (root.items.length === 1 ? " package" : " packages"))
                             color: root.muted
                             font.pixelSize: 12
                             Layout.fillWidth: true
@@ -367,9 +439,9 @@ Controls.ApplicationWindow {
                         Layout.rightMargin: 16
                         Layout.topMargin: 10
                         Layout.bottomMargin: 10
-                        Controls.Label { text: "NAME / SOURCE"; color: root.muted; font.pixelSize: 11; Layout.preferredWidth: 202 }
-                        Controls.Label { text: "VERSION"; color: root.muted; font.pixelSize: 11; Layout.preferredWidth: 150 }
-                        Controls.Label { text: "SUMMARY"; color: root.muted; font.pixelSize: 11; Layout.fillWidth: true }
+                        Controls.Label { objectName: "columnHeader0"; text: root.currentView === "Sources" ? "SOURCE" : "NAME / SOURCE"; color: root.muted; font.pixelSize: 11; Layout.preferredWidth: 202 }
+                        Controls.Label { objectName: "columnHeader1"; text: root.currentView === "Sources" ? "STATUS" : "VERSION"; color: root.muted; font.pixelSize: 11; Layout.preferredWidth: 150 }
+                        Controls.Label { objectName: "columnHeader2"; text: root.currentView === "Sources" ? "CAPABILITIES" : "SUMMARY"; color: root.muted; font.pixelSize: 11; Layout.fillWidth: true }
                     }
                     ListView {
                         id: results
@@ -386,6 +458,19 @@ Controls.ApplicationWindow {
                         Controls.ScrollBar.vertical: Controls.ScrollBar {}
                         Keys.onDownPressed: root.choose(Math.min(count - 1, currentIndex + 1))
                         Keys.onUpPressed: root.choose(Math.max(0, currentIndex - 1))
+                        Keys.onPressed: (event) => {
+                            if (event.key === Qt.Key_PageDown)
+                                root.choose(Math.min(count - 1, (currentIndex < 0 ? 0 : currentIndex) + 10));
+                            else if (event.key === Qt.Key_PageUp)
+                                root.choose(Math.max(0, (currentIndex < 0 ? 0 : currentIndex) - 10));
+                            else if (event.key === Qt.Key_Home)
+                                root.choose(0);
+                            else if (event.key === Qt.Key_End)
+                                root.choose(count - 1);
+                            else
+                                return;
+                            event.accepted = true;
+                        }
                         delegate: Controls.ItemDelegate {
                             id: packageRow
                             required property var modelData
@@ -395,8 +480,8 @@ Controls.ApplicationWindow {
                             leftPadding: 16
                             rightPadding: 16
                             highlighted: results.currentIndex === index
-                            enabled: !backend.busy && modelData.kind !== "failure"
-                            Accessible.name: modelData.name + ", " + modelData.source + ", " + (modelData.summary || "")
+                            enabled: !backend.busy
+                            Accessible.name: (modelData.kind === "package" ? (modelData.update === "available" ? "Update available. " : (modelData.installed ? "Installed. " : "Not installed. ")) : "") + modelData.name + ", " + modelData.source + ", " + (modelData.summary || "")
                             onClicked: { results.forceActiveFocus(); root.choose(index); }
                             background: Rectangle {
                                 color: packageRow.highlighted ? root.selection : (packageRow.hovered ? root.canvas : "transparent")
@@ -436,7 +521,7 @@ Controls.ApplicationWindow {
                                     }
                                     Controls.Label {
                                         visible: root.compact
-                                        text: modelData.summary || ""
+                                        text: modelData.kind === "source" ? (modelData.capabilities || []).join(", ") : (modelData.summary || "")
                                         color: root.muted
                                         textFormat: Text.PlainText
                                         elide: Text.ElideRight
@@ -454,12 +539,15 @@ Controls.ApplicationWindow {
                                 Controls.Label {
                                     visible: !root.compact
                                     Layout.fillWidth: true
-                                    text: modelData.summary || ""
+                                    text: modelData.kind === "source" ? (modelData.capabilities || []).join(", ") : (modelData.summary || "")
                                     color: root.muted
                                     textFormat: Text.PlainText
                                     elide: Text.ElideRight
                                 }
                             }
+                            Controls.ToolTip.visible: packageRow.hovered && modelData.kind === "package"
+                            Controls.ToolTip.delay: 400
+                            Controls.ToolTip.text: modelData.name + "\n" + (modelData.installed || "not installed") + " → " + (modelData.candidate || "unknown") + "\n" + (modelData.summary || "")
                         }
                         Controls.Label {
                             anchors.centerIn: parent
@@ -474,7 +562,7 @@ Controls.ApplicationWindow {
                 }
             }
             Rectangle {
-                visible: root.selected !== null && ["Search", "Installed", "Updates", "Sources", "Discover"].indexOf(root.currentView) >= 0
+                visible: root.selected !== null && ["Search", "Installed", "Updates", "Sources"].indexOf(root.currentView) >= 0
                 Layout.fillWidth: true
                 Layout.preferredHeight: Math.min(root.height * 0.27, 180)
                 color: root.surface
@@ -487,7 +575,7 @@ Controls.ApplicationWindow {
                     RowLayout {
                         Layout.fillWidth: true
                         DeckIcon {
-                            name: root.selected && root.selected.kind === "source" ? root.selected.source : "package"
+                            name: root.selected ? (root.selected.kind === "source" ? root.selected.source : (root.selected.kind === "failure" ? "warning" : "package")) : "package"
                             ink: root.accent
                             Layout.preferredWidth: 24
                             Layout.preferredHeight: 24
@@ -514,8 +602,8 @@ Controls.ApplicationWindow {
                             background: null
                             wrapMode: TextEdit.Wrap
                             textFormat: TextEdit.PlainText
-                            text: root.detail.package ? (root.detail.description || "") + "\n\nScope: " + (root.detail.package.scope_label || "Unknown") + "   ·   Homepage: " + (root.detail.homepage || "Unavailable") + "\nDependencies: " + ((root.detail.dependencies || []).join(", ") || "None listed") : (root.detail.availability || "") + "\n\nCapabilities: " + (root.detail.capabilities || []).join(", ")
-                            Accessible.name: "Selected package or source details"
+                            text: root.detail.package ? (root.detail.description || "") + "\n\nScope: " + (root.detail.package.scope_label || "Unknown") + "   ·   Homepage: " + (root.detail.homepage || "Unavailable") + "\nDependencies: " + ((root.detail.dependencies || []).join(", ") || "None listed") : (root.detail.failure ? (root.detail.failure.error || "") + "\n\n" + (root.detail.hint || "") : (root.detail.availability || "") + "\n\nCapabilities: " + (root.detail.capabilities || []).join(", "))
+                            Accessible.name: "Selected package, source, or failure details"
                         }
                     }
                 }
@@ -523,7 +611,7 @@ Controls.ApplicationWindow {
             Flow {
                 Layout.fillWidth: true
                 spacing: 8
-                visible: ["Search", "Installed", "Updates", "Sources", "Discover"].indexOf(root.currentView) >= 0
+                visible: ["Search", "Installed", "Updates", "Sources"].indexOf(root.currentView) >= 0
                 ActionButton {
                     objectName: "upgradeAllButton"
                     visible: root.currentView === "Updates"
@@ -532,6 +620,15 @@ Controls.ApplicationWindow {
                     primary: true
                     enabled: !backend.busy && backend.upgradable
                     onClicked: root.propose("upgrade-all")
+                }
+                Controls.Label {
+                    objectName: "upgradeAllHint"
+                    visible: root.currentView === "Updates" && !backend.upgradable && !backend.busy && root.items.some((row) => row.kind === "failure")
+                    text: "Upgrade all is unavailable while a source query fails. Select a failed row for details."
+                    color: root.muted
+                    font.pixelSize: 12
+                    wrapMode: Text.WordWrap
+                    Layout.fillWidth: true
                 }
                 ActionButton {
                     objectName: "installButton"
@@ -670,18 +767,18 @@ Controls.ApplicationWindow {
     }
     Shortcut {
         sequence: "Ctrl+1"
-        onActivated: root.openView("Discover")
+        onActivated: root.openView("Search")
     }
     Shortcut {
-        sequence: "Ctrl+3"
+        sequence: "Ctrl+2"
         onActivated: root.openView("Installed")
     }
     Shortcut {
-        sequence: "Ctrl+4"
+        sequence: "Ctrl+3"
         onActivated: root.openView("Updates")
     }
     Shortcut {
-        sequence: "Ctrl+5"
+        sequence: "Ctrl+4"
         onActivated: root.openView("Sources")
     }
     Shortcut {

@@ -15,16 +15,19 @@ TestCase {
         property string details: "{}"
         property string status: "Ready"
         property string confirmation: ""
+        property string version: "9.9.9-test"
         property bool busy: false
         property bool upgradable: false
         property string lastView: ""
         property string lastQuery: ""
+        property string lastSource: ""
         property int selection: -1
         property int writes: 0
         property int cancels: 0
         function load(view, query, source, sudo) {
             lastView = view;
             lastQuery = query;
+            lastSource = source;
         }
         function select(index) {
             selection = index;
@@ -143,7 +146,7 @@ TestCase {
         verify(findChild(browser, "packageDetails").text.indexOf("<b>literal metadata</b>") >= 0);
     }
     function test_views_loading_errors_and_resize() {
-        for (const view of ["Discover", "Installed", "Updates", "Sources", "Settings", "Help / About"]) {
+        for (const view of ["Search", "Installed", "Updates", "Sources", "Settings", "About"]) {
             browser.openView(view);
             compare(browser.currentView, view);
         }
@@ -262,6 +265,115 @@ TestCase {
         wait(30);
         verify(link.visible);
         verify(link.width >= 24);
+    }
+    function test_about_shows_backend_version() {
+        browser.openView("About");
+        compare(browser.currentView, "About");
+        const about = findChild(browser, "aboutText");
+        verify(about !== null);
+        verify(about.text.indexOf("9.9.9-test") >= 0);
+        verify(about.text.indexOf("Ctrl+2: Installed") >= 0);
+    }
+    function test_view_status_and_source_columns() {
+        browser.openView("Settings");
+        compare(findChild(browser, "operationStatus").text.indexOf("appearance") >= 0, true);
+        browser.openView("About");
+        compare(findChild(browser, "operationStatus").text, "About PkgDeck.");
+        browser.openView("Sources");
+        compare(findChild(browser, "columnHeader0").text, "SOURCE");
+        compare(findChild(browser, "columnHeader1").text, "STATUS");
+        compare(findChild(browser, "columnHeader2").text, "CAPABILITIES");
+        browser.openView("Search");
+        compare(findChild(browser, "columnHeader0").text, "NAME / SOURCE");
+        compare(findChild(browser, "columnHeader1").text, "VERSION");
+        compare(findChild(browser, "columnHeader2").text, "SUMMARY");
+        browser.reload();
+        fake.rows = JSON.stringify([
+            {
+                kind: "source",
+                name: "apt",
+                source: "apt",
+                summary: "Available",
+                available: true,
+                capabilities: ["search", "installed"]
+            }
+        ]);
+        wait(30);
+        compare(browser.items.length, 1);
+        compare(browser.items[0].capabilities.join(","), "search,installed");
+    }
+    function test_search_focus_and_list_keys() {
+        browser.openView("Search");
+        populate();
+        const search = findChild(browser, "searchField");
+        const list = findChild(browser, "packageResults");
+        verify(list.activeFocus);
+        search.forceActiveFocus();
+        search.text = "synthetic";
+        fake.rows = JSON.stringify(JSON.parse(fake.rows).reverse());
+        wait(30);
+        verify(search.activeFocus);
+        verify(!list.activeFocus);
+        compare(browser.queryDirty, false);
+        keyClick(Qt.Key_Down);
+        compare(fake.selection, 0);
+        keyClick(Qt.Key_PageDown);
+        compare(fake.selection, 1);
+        keyClick(Qt.Key_Home);
+        compare(fake.selection, 0);
+        keyClick(Qt.Key_End);
+        compare(fake.selection, 1);
+    }
+    function test_header_source_filter_and_installed_filter() {
+        browser.openView("Installed");
+        const filter = findChild(browser, "sourceFilter");
+        verify(filter !== null);
+        filter.currentIndex = 1;
+        filter.activated(1);
+        compare(browser.source, "apt");
+        compare(fake.lastSource, "apt");
+        compare(fake.lastView, "Installed");
+        browser.openView("Settings");
+        const setting = findChild(browser, "sourceSetting");
+        setting.currentIndex = 0;
+        setting.activated(0);
+        compare(browser.source, "");
+        const field = findChild(browser, "installedFilterField");
+        verify(field !== null);
+        browser.openView("Installed");
+        field.forceActiveFocus();
+        field.text = "synthetic";
+        keyClick(Qt.Key_Return);
+        compare(browser.installedFilter, "synthetic");
+        compare(fake.lastView, "Installed");
+        compare(fake.lastQuery, "synthetic");
+    }
+    function test_failure_rows_show_diagnostics() {
+        fake.details = JSON.stringify({
+            failure: {backend: "npm", error: "invalid response from npm: npm ls failed: boom"},
+            hint: "Check the npm source in the Sources view."
+        });
+        wait(30);
+        const details = findChild(browser, "packageDetails");
+        verify(details.text.indexOf("npm ls failed: boom") >= 0);
+        verify(details.text.indexOf("Sources view") >= 0);
+    }
+    function test_sidebar_shows_app_logo() {
+        const logo = findChild(browser, "appLogo");
+        verify(logo !== null);
+        verify(logo.source.toString().indexOf("logo.svg") >= 0);
+    }
+    function test_upgrade_all_hint() {
+        browser.openView("Updates");
+        fake.rows = JSON.stringify([
+            {kind: "package", name: "tool", source: "apt", architecture: "all", installed: "1", candidate: "2", update: "available", summary: "Updatable"},
+            {kind: "failure", name: "npm", source: "npm", summary: "boom", available: false}
+        ]);
+        wait(30);
+        const hint = findChild(browser, "upgradeAllHint");
+        verify(hint.visible);
+        verify(hint.text.indexOf("source query fails") >= 0);
+        verify(!findChild(browser, "upgradeAllButton").enabled);
     }
     function test_close_requests_cancellation() {
         fake.busy = true;

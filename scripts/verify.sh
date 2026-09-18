@@ -78,6 +78,6 @@ else
     stage lint cargo clippy --workspace --all-targets --locked -- -D warnings
     mkdir -p coverage
     stage coverage cargo llvm-cov --workspace --include-build-script --ignore-filename-regex pkgdeck-tools --locked --lcov --output-path coverage/lcov.info
-    stage coverage-gate cargo llvm-cov report --json --summary-only --include-build-script --ignore-filename-regex pkgdeck-tools --fail-under-lines 95
+    stage coverage-gate cargo llvm-cov report --summary-only --include-build-script --ignore-filename-regex pkgdeck-tools --fail-under-lines 95
     stage release cargo build --workspace --release --locked
 fi

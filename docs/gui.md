@@ -11,17 +11,20 @@ host authorization boundary as the terminal frontend.
 This capture uses synthetic metadata on a private test display. The default
 appearance follows the system; Settings also offers explicit Dark and Light modes.
 
-The sidebar provides Discover, Search, Installed, Updates, Sources, Settings, and
-Help/About. Discover reports actual source availability on the current computer;
+The sidebar provides Search, Installed, Updates, Sources, Settings, and
+About. Sources reports actual source availability on the current computer;
 it does not invent recommendations or combine matching names across sources.
 Search submits on Enter or the Search button. Results use a virtualized ListView,
 with the selected package's description, scope, homepage, and dependencies below.
+The VERSION column carries the state: a bare candidate means not installed,
+`· installed` marks installed packages, and `→` marks an available update.
 Matching names remain separate source/architecture/scope identities.
 
 Install, Remove, Upgrade, and Refresh source operate on the selected identity.
 Updates also provides **Upgrade all** (Ctrl+Shift+U), without selecting a row.
 It confirms every listed package identity, respects the selected source filter,
-and is disabled when there are no upgrades or any source query failed. The batch
+and is disabled when there are no upgrades or any source query failed. A hint
+beside the button names the reason while it is unavailable. The batch
 reports every result, including partial failures and cancellation. Completed
 upgrades are not rolled back; cancellation skips remaining writes once the active
 native transaction finishes. Reload reads the remaining updates.
@@ -31,7 +34,8 @@ native transaction finishes. Reload reads the remaining updates.
 Each write requires confirmation, with No focused initially. Refresh changes
 source metadata only. Successful writes clear stale results; use Reload to read
 current state. Failures and partial query results remain visible in the scrollable
-status area. Native dependency changes can accompany package operations.
+status area; selecting a failed row shows the underlying manager error with a
+remediation hint, without re-querying. Native dependency changes can accompany package operations.
 
 Queries and writes execute on a Rust worker. The GUI polls a message channel and
 updates Qt properties on its own thread. It shows native progress messages and an
@@ -40,7 +44,10 @@ reads; an already-running native write finishes safely under its manager's lock.
 Closing a busy window requests cancellation and keeps it open until completion.
 
 Settings persist appearance, source filter, and authorization preference through Qt's
-per-user settings. The default GUI authorization uses the host polkit agent.
+per-user settings. The source filter is also available as a selector in the
+header, next to the current view name. The Installed view has its own filter
+field that narrows the loaded packages by name or summary without a new
+native query. The default GUI authorization uses the host polkit agent.
 Existing sudo credentials are also supported; passwords are never collected by
 PkgDeck. Homebrew and the development managers (Cargo, npm, pnpm, Bun, pip, pipx, uv, Composer, RubyGems) remain unprivileged. `pkgdeck --from apt|homebrew|cargo|npm|pnpm|bun|pip|pipx|uv|composer|gem --auth
 sudo|polkit` overrides the saved settings for the current session.
@@ -61,7 +68,9 @@ cache. Background polling stops when work finishes.
 | Ctrl+F | Open Search and focus its field |
 | Ctrl+L | Focus package/source results |
 | Up/Down | Select a result and load its details |
-| Ctrl+1 / Ctrl+3 / Ctrl+4 / Ctrl+5 | Discover / Installed / Updates / Sources |
+| Down in the search field | Jump to the results and select the first row |
+| PageUp/PageDown/Home/End | Move the selection in larger steps or to either end |
+| Ctrl+1 / Ctrl+2 / Ctrl+3 / Ctrl+4 | Search / Installed / Updates / Sources |
 | Ctrl+I / Ctrl+D / Ctrl+U | Propose install / remove / upgrade |
 | Ctrl+Shift+U in Updates | Confirm all listed upgrades |
 | Ctrl+M | Propose metadata refresh for the selected source |

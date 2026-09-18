@@ -72,6 +72,10 @@ Search/list data contain `packages` and per-backend `failures`; info returns pac
 details; sources returns `sources`; writes return `operations`, each with its
 operation and `result` (`{"Ok":...}` or `{"Err":...}`). Selection and other top-level
 failures contain `error` and, when available, a human-readable `message`.
+A failing source row means the underlying manager errored: the message carries
+the manager's own diagnostic where available, and the same command run directly
+in a terminal shows complete output. Failed sources block ambiguous selection
+and batch upgrades until every queried source answers.
 Package IDs always include `backend`, `name`, `architecture`, and `scope`.
 Versions remain native strings and update availability is `unknown`, `current`,
 or `available`. Native version semantics determine update availability.

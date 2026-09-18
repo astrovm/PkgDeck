@@ -557,7 +557,7 @@ impl Desktop {
     }
     pub fn write(&mut self, op: &str, name: &str) {
         if op == "update" {
-            self.key("ctrl+5");
+            self.key("ctrl+4");
             self.key("ctrl+l");
             self.key("Down");
             self.key("ctrl+m");
@@ -622,8 +622,8 @@ pub fn gui_lifecycle(args: &[String]) {
         gui.write(op, "fixture");
         assert_eq!(state(&dir.0)["installed"], installed, "{}", gui.logs());
     }
+    gui.key("ctrl+2");
     gui.key("ctrl+3");
-    gui.key("ctrl+4");
     gui.xdo(&["windowsize", &gui.window, "400", "520"]);
     gui.key("ctrl+f");
     gui.xdo(&["windowsize", &gui.window, "1100", "760"]);
@@ -646,7 +646,7 @@ pub fn gui_lifecycle(args: &[String]) {
         call.extend(["--auth".into(), "sudo".into()]);
         let mut gui = Desktop::new();
         gui.launch(&call);
-        gui.key("ctrl+4");
+        gui.key("ctrl+3");
         gui.key("ctrl+shift+u");
         gui.key("alt+n");
         assert_eq!(state(&dir.0), initial);
