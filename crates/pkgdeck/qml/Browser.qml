@@ -12,6 +12,7 @@ Controls.ApplicationWindow {
     property var items: currentView === resultView ? JSON.parse(backend.rows || "[]") : []
     property var detail: JSON.parse(backend.details || "{}")
     property bool closePending: false
+    property bool queryDirty: false
     property var selected: results.currentIndex >= 0 && results.currentIndex < items.length ? items[results.currentIndex] : null
     property string source: argument("--from", preferences.source)
     property bool useSudo: argument("--auth", preferences.authorization) === "sudo"
@@ -84,6 +85,15 @@ Controls.ApplicationWindow {
     function openView(view) {
         if (backend.busy)
             return;
+        backend.status = {
+            "Search": "Type a query and press Enter to search.",
+            "Installed": "Loading installed packages…",
+            "Updates": "Loading available updates…",
+            "Sources": "Checking source availability…",
+            "Settings": "Adjust appearance, package source, and authorization.",
+            "About": "About PkgDeck."
+        }[view] || "";
+        queryDirty = false;
         currentView = view;
         results.currentIndex = -1;
         if (view === "Search")
@@ -129,6 +139,11 @@ Controls.ApplicationWindow {
         }
         function onRowsChanged() {
             results.currentIndex = -1;
+            if (root.queryDirty) {
+                root.queryDirty = false;
+            } else if (root.items.length > 0) {
+                results.forceActiveFocus();
+            }
         }
         function onConfirmationChanged() {
             if (backend.confirmation.length)
@@ -267,15 +282,22 @@ Controls.ApplicationWindow {
                     }
                     onAccepted: {
                         root.currentView = "Search";
+                        root.queryDirty = false;
                         root.reload();
                     }
+                    Keys.onDownPressed: {
+                        results.forceActiveFocus();
+                        if (root.items.length > 0)
+                            root.choose(0);
+                    }
+                    onTextChanged: root.queryDirty = true
                 }
                 ActionButton {
                     text: "Search"
                     symbol: "search"
                     primary: true
                     enabled: !backend.busy && search.text.trim().length > 0
-                    onClicked: { root.currentView = "Search"; root.reload(); }
+                    onClicked: { root.currentView = "Search"; root.queryDirty = false; root.reload(); }
                 }
             }
             ColumnLayout {
@@ -361,9 +383,9 @@ Controls.ApplicationWindow {
                         Layout.rightMargin: 16
                         Layout.topMargin: 10
                         Layout.bottomMargin: 10
-                        Controls.Label { text: "NAME / SOURCE"; color: root.muted; font.pixelSize: 11; Layout.preferredWidth: 202 }
-                        Controls.Label { text: "VERSION"; color: root.muted; font.pixelSize: 11; Layout.preferredWidth: 150 }
-                        Controls.Label { text: "SUMMARY"; color: root.muted; font.pixelSize: 11; Layout.fillWidth: true }
+                        Controls.Label { objectName: "columnHeader0"; text: root.currentView === "Sources" ? "SOURCE" : "NAME / SOURCE"; color: root.muted; font.pixelSize: 11; Layout.preferredWidth: 202 }
+                        Controls.Label { objectName: "columnHeader1"; text: root.currentView === "Sources" ? "STATUS" : "VERSION"; color: root.muted; font.pixelSize: 11; Layout.preferredWidth: 150 }
+                        Controls.Label { objectName: "columnHeader2"; text: root.currentView === "Sources" ? "CAPABILITIES" : "SUMMARY"; color: root.muted; font.pixelSize: 11; Layout.fillWidth: true }
                     }
                     ListView {
                         id: results
@@ -380,6 +402,19 @@ Controls.ApplicationWindow {
                         Controls.ScrollBar.vertical: Controls.ScrollBar {}
                         Keys.onDownPressed: root.choose(Math.min(count - 1, currentIndex + 1))
                         Keys.onUpPressed: root.choose(Math.max(0, currentIndex - 1))
+                        Keys.onPressed: (event) => {
+                            if (event.key === Qt.Key_PageDown)
+                                root.choose(Math.min(count - 1, (currentIndex < 0 ? 0 : currentIndex) + 10));
+                            else if (event.key === Qt.Key_PageUp)
+                                root.choose(Math.max(0, (currentIndex < 0 ? 0 : currentIndex) - 10));
+                            else if (event.key === Qt.Key_Home)
+                                root.choose(0);
+                            else if (event.key === Qt.Key_End)
+                                root.choose(count - 1);
+                            else
+                                return;
+                            event.accepted = true;
+                        }
                         delegate: Controls.ItemDelegate {
                             id: packageRow
                             required property var modelData
@@ -430,7 +465,7 @@ Controls.ApplicationWindow {
                                     }
                                     Controls.Label {
                                         visible: root.compact
-                                        text: modelData.summary || ""
+                                        text: modelData.kind === "source" ? (modelData.capabilities || []).join(", ") : (modelData.summary || "")
                                         color: root.muted
                                         textFormat: Text.PlainText
                                         elide: Text.ElideRight
@@ -448,12 +483,15 @@ Controls.ApplicationWindow {
                                 Controls.Label {
                                     visible: !root.compact
                                     Layout.fillWidth: true
-                                    text: modelData.summary || ""
+                                    text: modelData.kind === "source" ? (modelData.capabilities || []).join(", ") : (modelData.summary || "")
                                     color: root.muted
                                     textFormat: Text.PlainText
                                     elide: Text.ElideRight
                                 }
                             }
+                            Controls.ToolTip.visible: packageRow.hovered && modelData.kind === "package"
+                            Controls.ToolTip.delay: 400
+                            Controls.ToolTip.text: modelData.name + "\n" + (modelData.installed || "not installed") + " → " + (modelData.candidate || "unknown") + "\n" + (modelData.summary || "")
                         }
                         Controls.Label {
                             anchors.centerIn: parent

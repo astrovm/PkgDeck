@@ -272,6 +272,56 @@ TestCase {
         verify(about.text.indexOf("9.9.9-test") >= 0);
         verify(about.text.indexOf("Ctrl+2: Installed") >= 0);
     }
+    function test_view_status_and_source_columns() {
+        browser.openView("Settings");
+        compare(findChild(browser, "operationStatus").text.indexOf("appearance") >= 0, true);
+        browser.openView("About");
+        compare(findChild(browser, "operationStatus").text, "About PkgDeck.");
+        browser.openView("Sources");
+        compare(findChild(browser, "columnHeader0").text, "SOURCE");
+        compare(findChild(browser, "columnHeader1").text, "STATUS");
+        compare(findChild(browser, "columnHeader2").text, "CAPABILITIES");
+        browser.openView("Search");
+        compare(findChild(browser, "columnHeader0").text, "NAME / SOURCE");
+        compare(findChild(browser, "columnHeader1").text, "VERSION");
+        compare(findChild(browser, "columnHeader2").text, "SUMMARY");
+        browser.reload();
+        fake.rows = JSON.stringify([
+            {
+                kind: "source",
+                name: "apt",
+                source: "apt",
+                summary: "Available",
+                available: true,
+                capabilities: ["search", "installed"]
+            }
+        ]);
+        wait(30);
+        compare(browser.items.length, 1);
+        compare(browser.items[0].capabilities.join(","), "search,installed");
+    }
+    function test_search_focus_and_list_keys() {
+        browser.openView("Search");
+        populate();
+        const search = findChild(browser, "searchField");
+        const list = findChild(browser, "packageResults");
+        verify(list.activeFocus);
+        search.forceActiveFocus();
+        search.text = "synthetic";
+        fake.rows = JSON.stringify(JSON.parse(fake.rows).reverse());
+        wait(30);
+        verify(search.activeFocus);
+        verify(!list.activeFocus);
+        compare(browser.queryDirty, false);
+        keyClick(Qt.Key_Down);
+        compare(fake.selection, 0);
+        keyClick(Qt.Key_PageDown);
+        compare(fake.selection, 1);
+        keyClick(Qt.Key_Home);
+        compare(fake.selection, 0);
+        keyClick(Qt.Key_End);
+        compare(fake.selection, 1);
+    }
     function test_close_requests_cancellation() {
         fake.busy = true;
         browser.close();

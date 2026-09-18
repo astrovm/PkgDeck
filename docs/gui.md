@@ -61,6 +61,8 @@ cache. Background polling stops when work finishes.
 | Ctrl+F | Open Search and focus its field |
 | Ctrl+L | Focus package/source results |
 | Up/Down | Select a result and load its details |
+| Down in the search field | Jump to the results and select the first row |
+| PageUp/PageDown/Home/End | Move the selection in larger steps or to either end |
 | Ctrl+1 / Ctrl+2 / Ctrl+3 / Ctrl+4 | Search / Installed / Updates / Sources |
 | Ctrl+I / Ctrl+D / Ctrl+U | Propose install / remove / upgrade |
 | Ctrl+Shift+U in Updates | Confirm all listed upgrades |
