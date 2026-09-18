@@ -624,9 +624,13 @@ fn streaming_reports_cumulative_partials_equal_to_the_sync_query() {
         assert!(partial.packages.windows(2).all(|w| w[0].id <= w[1].id));
         partials.push(partial);
     });
-    // One emission per backend; failures accumulate across partials.
+    // One emission per backend. Reports are cumulative, so a failure
+    // reappears in later partials; assert on membership, never on sums.
     assert_eq!(partials.len(), 2);
-    assert_eq!(partials.iter().map(|p| p.failures.len()).sum::<usize>(), 1);
+    for partial in &partials {
+        assert!(partial.failures.iter().all(|f| f.backend == "two"));
+    }
+    assert_eq!(final_report.failures.len(), 1);
     assert_eq!(partials.last().unwrap(), &final_report);
     // The terminal emission matches a synchronous query on the same state.
     assert_eq!(live.search("fixture", &cancel), final_report);
