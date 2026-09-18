@@ -401,6 +401,15 @@ TestCase {
         compare(list.currentIndex, 1);
         compare(fake.selection, 0);
     }
+    function test_source_filter_popup_lists_sources() {
+        const filter = findChild(browser, "sourceFilter");
+        verify(filter !== null);
+        filter.popup.open();
+        tryCompare(filter.popup, "visible", true);
+        verify(filter.popup.contentItem.count > 1);
+        filter.popup.close();
+        tryCompare(filter.popup, "visible", false);
+    }
     function test_close_requests_cancellation() {
         fake.busy = true;
         browser.close();

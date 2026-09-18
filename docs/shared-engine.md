@@ -62,7 +62,7 @@ silently installing the only visible result from an incomplete search.
 
 ## Streaming queries and remembered detection
 
-`search_stream` and `installed_stream` fan queries out over worker threads,
+`search_stream` fans the query out over worker threads,
 emitting the cumulative sorted report as each backend answers; the terminal
 emission equals the synchronous query. Frontends render partials for perceived
 speed while the final state stays deterministic. Backends return to the engine

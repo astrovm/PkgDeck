@@ -209,8 +209,8 @@ retains its versioned contract. Terminal color is omitted when output is piped o
 
 Search results stream in per backend in both interactive frontends, and the
 selection follows the same package identity across partials. Package details
-reuse a shared cache, each backend is detected once per session instead of
-once per selection, and failed source rows are selectable for diagnostics.
+reuse a shared cache, each backend is detected at discovery time rather than
+on every selection and query, and failed source rows are selectable for diagnostics.
 
 GUI detail snapshots avoid repeated native queries and are invalidated on reload
 or writes. The TUI no longer redraws continuously while idle. Local checks cover

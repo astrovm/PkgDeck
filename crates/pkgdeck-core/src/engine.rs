@@ -304,14 +304,6 @@ impl Engine {
     ) -> PackageReport {
         self.stream(Some(query), cancel, emit)
     }
-    /// [`search_stream`] for installed listings.
-    pub fn installed_stream(
-        &mut self,
-        cancel: &Cancellation,
-        emit: &mut dyn FnMut(PackageReport),
-    ) -> PackageReport {
-        self.stream(None, cancel, emit)
-    }
     fn stream(
         &mut self,
         query: Option<&str>,

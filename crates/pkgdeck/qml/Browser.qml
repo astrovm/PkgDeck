@@ -114,7 +114,16 @@ Controls.ApplicationWindow {
         popup: Controls.Popup {
             y: combo.height
             width: combo.width
+            implicitHeight: Math.min(contentItem.implicitHeight, 320)
             padding: 4
+            contentItem: ListView {
+                clip: true
+                implicitHeight: contentHeight
+                model: combo.popup.visible ? combo.delegateModel : null
+                currentIndex: combo.highlightedIndex
+                delegate: combo.delegate
+                Controls.ScrollIndicator.vertical: Controls.ScrollIndicator { }
+            }
             background: Rectangle {
                 color: root.surface
                 radius: 8

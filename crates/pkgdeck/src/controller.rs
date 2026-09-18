@@ -421,7 +421,8 @@ impl ffi::PackageController {
             // A running Details job is stale the moment the selection moves:
             // cancel it and queue the new identity. A selection that lands
             // while rows stream in queues behind the load instead. Writes
-            // are never preempted; their selection simply waits.
+            // are never preempted; selections made mid-write highlight
+            // without loading details until the write finishes.
             if let Some(worker) = &self.rust().worker {
                 if matches!(worker.job, Job::Details(_)) {
                     worker.cancel.cancel();
