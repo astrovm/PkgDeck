@@ -57,6 +57,7 @@ TestCase {
         App.Browser {
             backend: fake
             repositoryIconSource: Qt.resolvedUrl("../../assets/" + (dark ? "github-dark.png" : "github.png"))
+            logoIconSource: Qt.resolvedUrl("../../assets/logo.svg")
         }
     }
     function initTestCase() {
@@ -374,6 +375,40 @@ TestCase {
         verify(hint.visible);
         verify(hint.text.indexOf("source query fails") >= 0);
         verify(!findChild(browser, "upgradeAllButton").enabled);
+    }
+    function test_selection_survives_streaming_partials() {
+        browser.openView("Search");
+        populate();
+        const list = findChild(browser, "packageResults");
+        list.forceActiveFocus();
+        keyClick(Qt.Key_Down);
+        compare(fake.selection, 0);
+        // A partial inserting a row above follows the identity, not the index,
+        // and never refires selection on its own.
+        fake.rows = JSON.stringify([
+            {
+                kind: "package",
+                name: "aaa-first",
+                source: "apt",
+                architecture: "all",
+                installed: null,
+                candidate: "1",
+                summary: "Inserted above"
+            },
+            ...JSON.parse(fake.rows)
+        ]);
+        wait(30);
+        compare(list.currentIndex, 1);
+        compare(fake.selection, 0);
+    }
+    function test_source_filter_popup_lists_sources() {
+        const filter = findChild(browser, "sourceFilter");
+        verify(filter !== null);
+        filter.popup.open();
+        tryCompare(filter.popup, "visible", true);
+        verify(filter.popup.contentItem.count > 1);
+        filter.popup.close();
+        tryCompare(filter.popup, "visible", false);
     }
     function test_close_requests_cancellation() {
         fake.busy = true;

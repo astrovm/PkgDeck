@@ -60,6 +60,24 @@ package. Explicitly selecting a successful backend ignores failures in other
 backends; failures in the chosen backend still block selection. This prevents
 silently installing the only visible result from an incomplete search.
 
+## Streaming queries and remembered detection
+
+`search_stream` fans the query out over worker threads,
+emitting the cumulative sorted report as each backend answers; the terminal
+emission equals the synchronous query. Frontends render partials for perceived
+speed while the final state stays deterministic. Backends return to the engine
+afterwards for reuse. Cancellation surfaces per backend exactly like the
+synchronous query; there is no cross-backend rollback. The synchronous
+`search`/`installed` used by scripting stays single-shot and unchanged.
+
+`native_engine` remembers definitive detection outcomes on the engine, so the
+immediately following query skips its own detection round instead of paying
+for the same probe twice. Failed detections are never cached: the query
+retries them, preserving today's behavior under transient failures. Engines
+are short-lived per query, so entries cannot go stale. `details_reuse`
+extends the same idea to selections on a warm engine; prefer `details` for
+cold engines, where availability is re-validated first.
+
 ## Operations and progress
 
 `Operation::Refresh` targets one backend's metadata. `Operation::Upgrade` targets

@@ -13,6 +13,10 @@ Controls.ApplicationWindow {
     property var detail: JSON.parse(backend.details || "{}")
     property bool closePending: false
     property bool queryDirty: false
+    property var selectedIdentity: null
+    function rowIdentity(row) {
+        return row ? JSON.stringify([row.source, row.name, row.architecture, row.remote || null, row.scope]) : "";
+    }
     property var selected: results.currentIndex >= 0 && results.currentIndex < items.length ? items[results.currentIndex] : null
     property string source: argument("--from", preferences.source)
     property string installedFilter: ""
@@ -73,7 +77,67 @@ Controls.ApplicationWindow {
         }
     }
 
+    component ThemedComboBox: Controls.ComboBox {
+        id: combo
+        background: Rectangle {
+            color: root.surface
+            radius: 8
+            border.color: combo.activeFocus ? root.accent : root.line
+            border.width: combo.activeFocus ? 2 : 1
+        }
+        contentItem: Text {
+            text: combo.displayText
+            color: combo.enabled ? root.ink : root.muted
+            elide: Text.ElideRight
+            verticalAlignment: Text.AlignVCenter
+            leftPadding: 14
+            rightPadding: 8
+        }
+        delegate: Controls.ItemDelegate {
+            required property var modelData
+            required property int index
+            width: ListView.view.width
+            text: modelData
+            font: combo.font
+            highlighted: combo.highlightedIndex === index
+            background: Rectangle {
+                color: highlighted ? root.selection : "transparent"
+            }
+            contentItem: Text {
+                text: modelData
+                color: root.ink
+                elide: Text.ElideRight
+                verticalAlignment: Text.AlignVCenter
+                leftPadding: 14
+            }
+        }
+        popup: Controls.Popup {
+            y: combo.height
+            width: combo.width
+            implicitHeight: Math.min(contentItem.implicitHeight, 320)
+            padding: 4
+            contentItem: ListView {
+                clip: true
+                implicitHeight: contentHeight
+                model: combo.popup.visible ? combo.delegateModel : null
+                currentIndex: combo.highlightedIndex
+                delegate: combo.delegate
+                Controls.ScrollIndicator.vertical: Controls.ScrollIndicator { }
+            }
+            background: Rectangle {
+                color: root.surface
+                radius: 8
+                border.color: root.line
+            }
+        }
+    }
+
+    function rowTooltip(data) {
+        return data.name + "\n" + (data.installed || "not installed") + " → " + (data.candidate || "unknown") + "\n" + (data.summary || "");
+    }
+
     property url repositoryIconSource: root.dark ? "qrc:/pkgdeck/github-dark.png" : "qrc:/pkgdeck/github.png"
+    property url logoIconSource: "qrc:/pkgdeck/logo.svg"
     readonly property url repositoryUrl: "https://github.com/astrovm/PkgDeck"
     width: 1100
     height: 760
@@ -97,6 +161,7 @@ Controls.ApplicationWindow {
             "About": "About PkgDeck."
         }[view] || "";
         queryDirty = false;
+        selectedIdentity = null;
         currentView = view;
         results.currentIndex = -1;
         if (view === "Search")
@@ -107,12 +172,14 @@ Controls.ApplicationWindow {
     function reload() {
         resultView = currentView;
         results.currentIndex = -1;
+        selectedIdentity = null;
         backend.load(currentView, currentView === "Installed" ? installedFilter : search.text, source, useSudo);
     }
     function choose(index) {
-        if (backend.busy || index < 0 || index >= items.length)
+        if (index < 0 || index >= items.length)
             return;
         results.currentIndex = index;
+        selectedIdentity = rowIdentity(items[index]);
         backend.select(index);
     }
     function propose(action) {
@@ -141,7 +208,19 @@ Controls.ApplicationWindow {
                 results.forceActiveFocus();
         }
         function onRowsChanged() {
+            // Streaming partials re-sort rows around the selection: follow
+            // the selected identity instead of the row index.
             results.currentIndex = -1;
+            if (root.selectedIdentity) {
+                for (let i = 0; i < root.items.length; i++) {
+                    if (root.rowIdentity(root.items[i]) === root.selectedIdentity) {
+                        results.currentIndex = i;
+                        break;
+                    }
+                }
+            }
+            resultsBox.opacity = 0.35;
+            resultsBox.opacity = 1;
             if (root.queryDirty) {
                 root.queryDirty = false;
             } else if (root.items.length > 0) {
@@ -180,7 +259,7 @@ Controls.ApplicationWindow {
                     Layout.topMargin: 12
                     Image {
                         objectName: "appLogo"
-                        source: "qrc:/pkgdeck/logo.svg"
+                        source: root.logoIconSource
                         sourceSize.width: 30
                         sourceSize.height: 30
                         fillMode: Image.PreserveAspectFit
@@ -247,7 +326,7 @@ Controls.ApplicationWindow {
             spacing: 14
             RowLayout {
                 Layout.fillWidth: true
-                Controls.ComboBox {
+                ThemedComboBox {
                     visible: root.compact
                     model: ["Search", "Installed", "Updates", "Sources", "Settings", "About"]
                     currentIndex: model.indexOf(root.currentView)
@@ -265,7 +344,7 @@ Controls.ApplicationWindow {
                     font.bold: true
                     Layout.fillWidth: true
                 }
-                Controls.ComboBox {
+                ThemedComboBox {
                     objectName: "sourceFilter"
                     model: root.sourceNames
                     currentIndex: root.sourceIds.indexOf(root.source)
@@ -360,7 +439,7 @@ Controls.ApplicationWindow {
                 visible: root.currentView === "Settings"
                 Layout.fillWidth: true
                 Controls.Label { text: "Appearance" }
-                Controls.ComboBox {
+                ThemedComboBox {
                     objectName: "appearanceSetting"
                     model: ["System", "Dark", "Light"]
                     currentIndex: preferences.appearance
@@ -370,7 +449,7 @@ Controls.ApplicationWindow {
                 Controls.Label {
                     text: "Package source"
                 }
-                Controls.ComboBox {
+                ThemedComboBox {
                     objectName: "sourceSetting"
                     model: root.sourceNames
                     currentIndex: root.sourceIds.indexOf(root.source)
@@ -383,7 +462,7 @@ Controls.ApplicationWindow {
                 Controls.Label {
                     text: "Privilege elevation"
                 }
-                Controls.ComboBox {
+                ThemedComboBox {
                     objectName: "authorizationSetting"
                     model: ["Host polkit agent", "Existing sudo credentials"]
                     currentIndex: root.useSudo ? 1 : 0
@@ -408,6 +487,7 @@ Controls.ApplicationWindow {
                 textFormat: Text.PlainText
             }
             Rectangle {
+                id: resultsBox
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 Layout.minimumHeight: 130
@@ -415,6 +495,10 @@ Controls.ApplicationWindow {
                 color: root.surface
                 radius: 10
                 border.color: results.activeFocus ? root.accent : root.line
+                opacity: 1
+                Behavior on opacity {
+                    NumberAnimation { duration: 120 }
+                }
                 ColumnLayout {
                     anchors.fill: parent
                     anchors.margins: 1
@@ -483,6 +567,42 @@ Controls.ApplicationWindow {
                             enabled: !backend.busy
                             Accessible.name: (modelData.kind === "package" ? (modelData.update === "available" ? "Update available. " : (modelData.installed ? "Installed. " : "Not installed. ")) : "") + modelData.name + ", " + modelData.source + ", " + (modelData.summary || "")
                             onClicked: { results.forceActiveFocus(); root.choose(index); }
+                            onHoveredChanged: {
+                                if (hovered && modelData.kind === "package")
+                                    tipDelay.restart();
+                                else {
+                                    tipDelay.stop();
+                                    tipCard.visible = false;
+                                }
+                            }
+                            Timer {
+                                id: tipDelay
+                                interval: 400
+                                onTriggered: tipCard.visible = true
+                            }
+                            Rectangle {
+                                id: tipCard
+                                visible: false
+                                z: 10
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                anchors.leftMargin: 16
+                                anchors.rightMargin: 16
+                                y: packageRow.height + 2
+                                height: tipText.implicitHeight + 16
+                                color: root.surface
+                                border.color: root.line
+                                radius: 6
+                                Text {
+                                    id: tipText
+                                    anchors.fill: parent
+                                    anchors.margins: 8
+                                    text: root.rowTooltip(modelData)
+                                    color: root.ink
+                                    wrapMode: Text.WordWrap
+                                    textFormat: Text.PlainText
+                                }
+                            }
                             background: Rectangle {
                                 color: packageRow.highlighted ? root.selection : (packageRow.hovered ? root.canvas : "transparent")
                                 Rectangle { width: 3; height: parent.height; visible: packageRow.highlighted; color: root.accent }
@@ -531,6 +651,7 @@ Controls.ApplicationWindow {
                                 Controls.Label {
                                     Layout.preferredWidth: root.compact ? 100 : 150
                                     text: modelData.kind === "failure" ? "Failed" : (modelData.kind === "source" ? (modelData.available ? "Available" : "Unavailable") : (modelData.installed ? modelData.installed + (modelData.update === "available" ? " → " + modelData.candidate : " · installed") : modelData.candidate || "Unknown"))
+                                    font.family: "monospace"
                                     color: modelData.kind === "failure" ? "#e87979" : (modelData.update === "available" ? root.accent : root.muted)
                                     textFormat: Text.PlainText
                                     elide: Text.ElideRight
@@ -545,9 +666,6 @@ Controls.ApplicationWindow {
                                     elide: Text.ElideRight
                                 }
                             }
-                            Controls.ToolTip.visible: packageRow.hovered && modelData.kind === "package"
-                            Controls.ToolTip.delay: 400
-                            Controls.ToolTip.text: modelData.name + "\n" + (modelData.installed || "not installed") + " → " + (modelData.candidate || "unknown") + "\n" + (modelData.summary || "")
                         }
                         Controls.Label {
                             anchors.centerIn: parent

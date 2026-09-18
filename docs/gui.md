@@ -1,15 +1,15 @@
 # Graphical package browser
 
-`pkgdeck` opens the Qt/Kirigami frontend. It uses the same APT/Homebrew engine and
+`pkgdeck` opens the Qt/Kirigami frontend. It uses the same shared engine and
 host authorization boundary as the terminal frontend.
 
-![Implemented GUI with synthetic packages](screenshots/pkgdeck-gui-live.png)
+![Implemented GUI](screenshots/pkgdeck-gui-live.png)
 
 [Light appearance](screenshots/pkgdeck-gui-light-live.png) ·
 [Compact layout](screenshots/pkgdeck-gui-compact-live.png)
 
-This capture uses synthetic metadata on a private test display. The default
-appearance follows the system; Settings also offers explicit Dark and Light modes.
+Captures show real local packages in the true-black dark theme.
+The default appearance follows the system; Settings also offers explicit Dark and Light modes.
 
 The sidebar provides Search, Installed, Updates, Sources, Settings, and
 About. Sources reports actual source availability on the current computer;
@@ -29,7 +29,7 @@ reports every result, including partial failures and cancellation. Completed
 upgrades are not rolled back; cancellation skips remaining writes once the active
 native transaction finishes. Reload reads the remaining updates.
 
-![Upgrade all with synthetic packages](screenshots/pkgdeck-updates-live.png)
+![Upgrade all](screenshots/pkgdeck-updates-live.png)
 
 Each write requires confirmation, with No focused initially. Refresh changes
 source metadata only. Successful writes clear stale results; use Reload to read
@@ -38,8 +38,11 @@ status area; selecting a failed row shows the underlying manager error with a
 remediation hint, without re-querying. Native dependency changes can accompany package operations.
 
 Queries and writes execute on a Rust worker. The GUI polls a message channel and
-updates Qt properties on its own thread. It shows native progress messages and an
-indeterminate activity indicator, not an invented percentage. Cancel interrupts
+updates Qt properties on its own thread. Search results stream in per backend,
+so fast sources render while slow ones still query; the selection follows the
+same package identity across partials. Hovering a package row shows its full
+untruncated versions and summary. Native progress messages and an indeterminate
+activity indicator replace invented percentages. Cancel interrupts
 reads; an already-running native write finishes safely under its manager's lock.
 Closing a busy window requests cancellation and keeps it open until completion.
 

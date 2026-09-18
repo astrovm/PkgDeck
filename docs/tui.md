@@ -1,6 +1,6 @@
 # Interactive terminal interface
 
-Run `pkd` in a terminal. `--from apt|homebrew|cargo|npm|pnpm|bun|pip|pipx|uv|composer|gem` restricts sources and `--arch`
+Run `pkd` in a terminal. `--from apt|dnf|pacman|zypper|snap|homebrew|appimage|flatpak|cargo|npm|pnpm|bun|pip|pipx|uv|composer|gem` restricts sources and `--arch`
 filters package rows. Both input and output must be terminals. Qt and a display
 server are not required.
 
@@ -23,14 +23,17 @@ server are not required.
 | Escape, Ctrl-C, `q` | Cancel active work; otherwise go back or quit |
 
 Search runs only on submission. Rows retain backend, architecture, and scope;
-matching names from different sources are separate selections. The confirmation
+matching names from different sources are separate selections. Search results
+stream in per backend, and the selection follows the same package identity
+across partials. The confirmation
 shows the exact identity. Every write requires confirmation, including when
 `--yes` was supplied. Native dependency changes may accompany the requested
 operation. Refreshing metadata never upgrades packages.
 
 The results table stays above selection-linked details. Wide terminals include a
 summary column; narrower terminals prioritize identity and versions. Rounded
-borders, colored headings, and a distinct selected row follow the soft reference. Text labels require no
+borders, colored headings, and a distinct selected row give the interface
+its structure. Text labels require no
 icon font. Smaller terminals show fewer rows and shorter details; scrolling and
 expanded status keep longer content accessible. Package metadata control
 characters are replaced before display.
@@ -50,7 +53,8 @@ APT defaults to the existing noninteractive sudo authorization path. Establish
 credentials with `sudo -v` in the same terminal before launching `pkd`, or use
 host-configured authorization. A missing grant is reported as authorization
 denied; the TUI never reads passwords. `pkd --auth polkit` uses a configured host
-polkit agent, which may require a graphical session. Homebrew stays unprivileged.
+polkit agent, which may require a graphical session. Homebrew and the development
+managers stay unprivileged.
 See [the host contract](host-execution.md) for sandbox restrictions.
 
 ## Portable status symbols
@@ -60,10 +64,12 @@ available update. CLI results use `[OK]` for completion and `[!]` for errors.
 The TUI also marks navigation and active work. These are ordinary ASCII characters;
 no Nerd Font, icon font installation, or terminal configuration is required.
 Labels remain visible, colors are optional, and JSON output contains no decorations.
+The TUI honors `NO_COLOR` and `TERM=dumb` by dropping chromatic styling while
+keeping layout, markers, and attributes.
 
 ## Captures
 
-Actual terminal output with synthetic package metadata:
+Actual terminal output:
 
 ![Interactive TUI](screenshots/pkd-tui-live.png)
 

@@ -189,6 +189,11 @@ pub enum Event {
 #[derive(Default)]
 pub struct Engine {
     backends: BTreeMap<String, Box<dyn Backend>>,
+    /// Successful detections remembered by [`native_engine`](crate::backends::native_engine)
+    /// (and friends) so the immediately following query skips its own round.
+    /// Failed detections are never cached: the query retries them. Engines
+    /// are short-lived per query, so entries cannot go stale.
+    detected: BTreeMap<String, Availability>,
 }
 impl Engine {
     pub fn register(&mut self, backend: impl Backend + 'static) -> Result<(), EngineError> {
@@ -198,6 +203,15 @@ impl Engine {
         }
         self.backends.insert(id, Box::new(backend));
         Ok(())
+    }
+
+    /// Remember a detection outcome for the query that follows registration.
+    /// Only definitive outcomes are kept; failures fall through to a fresh
+    /// detection at query time, preserving today's retry behavior.
+    pub fn note_detected(&mut self, id: String, status: Result<Availability, EngineError>) {
+        if let Ok(availability) = status {
+            self.detected.insert(id, availability);
+        }
     }
 
     pub fn discover(&mut self, cancel: &Cancellation) -> Vec<Source> {
@@ -259,24 +273,13 @@ impl Engine {
             } else {
                 Capability::Installed
             };
-            let result = self.ready(&id, capability, cancel).and_then(|backend| {
-                let packages = match query {
-                    Some(query) => backend.search(query, cancel)?,
-                    None => backend.installed(cancel)?,
-                };
-                let mut seen = BTreeSet::new();
-                if packages.iter().any(|p| {
-                    p.id.backend != id
-                        || !seen.insert(&p.id)
-                        || (query.is_none() && p.installed_version.is_none())
-                }) {
-                    return Err(EngineError::InvalidResponse {
-                        backend: id.clone(),
-                        reason: "foreign/duplicate identity or missing installed state".into(),
-                    });
+            let noted = self.detected.get(&id).cloned();
+            let result = match self.backends.get_mut(&id) {
+                None => Err(EngineError::UnknownBackend(id.clone())),
+                Some(backend) => {
+                    Self::query_backend(&mut **backend, &id, noted, capability, query, cancel)
                 }
-                Ok(packages)
-            });
+            };
             match result {
                 Ok(packages) => report.packages.extend(packages),
                 Err(error) => report.failures.push(BackendFailure { backend: id, error }),
@@ -284,6 +287,127 @@ impl Engine {
         }
         report.packages.sort_by(|a, b| a.id.cmp(&b.id));
         report
+    }
+
+    /// Query every backend concurrently, emitting the cumulative sorted
+    /// report as each backend answers. The final emission equals [`search`]
+    /// / [`installed`](Self::installed); frontends render partials for
+    /// perceived speed while the terminal state stays deterministic.
+    /// Backends return to the engine afterwards for reuse. Cancellation
+    /// surfaces per backend like the synchronous query; there is no
+    /// cross-backend rollback.
+    pub fn search_stream(
+        &mut self,
+        query: &str,
+        cancel: &Cancellation,
+        emit: &mut dyn FnMut(PackageReport),
+    ) -> PackageReport {
+        self.stream(Some(query), cancel, emit)
+    }
+    fn stream(
+        &mut self,
+        query: Option<&str>,
+        cancel: &Cancellation,
+        emit: &mut dyn FnMut(PackageReport),
+    ) -> PackageReport {
+        // Workers own their backends so queries run concurrently; the engine
+        // reassembles itself afterwards for reuse.
+        let backends = std::mem::take(&mut self.backends);
+        let noted = &self.detected;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (accumulated, stash) = std::thread::scope(|s| {
+            for (id, mut backend) in backends {
+                let tx = tx.clone();
+                let capability = if query.is_some() {
+                    Capability::Search
+                } else {
+                    Capability::Installed
+                };
+                let noted = noted.get(&id).cloned();
+                s.spawn(move || {
+                    let result =
+                        Self::query_backend(&mut *backend, &id, noted, capability, query, cancel);
+                    let _ = tx.send((id, backend, result));
+                });
+            }
+            drop(tx);
+            let mut accumulated = PackageReport::default();
+            let mut stash = Vec::new();
+            for (id, backend, result) in rx {
+                match result {
+                    Ok(packages) => accumulated.packages.extend(packages),
+                    Err(error) => accumulated.failures.push(BackendFailure {
+                        backend: id.clone(),
+                        error,
+                    }),
+                }
+                accumulated.packages.sort_by(|a, b| a.id.cmp(&b.id));
+                stash.push((id, backend));
+                emit(accumulated.clone());
+            }
+            (accumulated, stash)
+        });
+        for (id, backend) in stash {
+            self.backends.insert(id, backend);
+        }
+        accumulated
+    }
+
+    /// One backend query with the same checks as [`Engine::ready`], consulting a
+    /// remembered detection outcome first. Shared by the synchronous query and
+    /// the streaming fan-out so both agree on success, failure, and validation.
+    fn query_backend(
+        backend: &mut dyn Backend,
+        id: &str,
+        noted: Option<Availability>,
+        capability: Capability,
+        query: Option<&str>,
+        cancel: &Cancellation,
+    ) -> Result<Vec<Package>, EngineError> {
+        if cancel.requested() {
+            return Err(EngineError::Cancelled);
+        }
+        if !backend.capabilities().contains(&capability) {
+            return Err(backend.unsupported(capability));
+        }
+        match noted {
+            Some(Availability::Available) => {}
+            Some(Availability::Unavailable(reason)) => {
+                return Err(EngineError::Unavailable {
+                    backend: id.into(),
+                    reason,
+                });
+            }
+            None => {
+                if let Availability::Unavailable(reason) = backend.detect(cancel)? {
+                    return Err(EngineError::Unavailable {
+                        backend: id.into(),
+                        reason,
+                    });
+                }
+                // Detection may have taken time; do not start a query after
+                // cancellation.
+                if cancel.requested() {
+                    return Err(EngineError::Cancelled);
+                }
+            }
+        }
+        let packages = match query {
+            Some(query) => backend.search(query, cancel)?,
+            None => backend.installed(cancel)?,
+        };
+        let mut seen = BTreeSet::new();
+        if packages.iter().any(|p| {
+            p.id.backend != id
+                || !seen.insert(&p.id)
+                || (query.is_none() && p.installed_version.is_none())
+        }) {
+            return Err(EngineError::InvalidResponse {
+                backend: id.into(),
+                reason: "foreign/duplicate identity or missing installed state".into(),
+            });
+        }
+        Ok(packages)
     }
 
     pub fn details(
@@ -294,6 +418,37 @@ impl Engine {
         let result = self
             .ready(&id.backend, Capability::Details, cancel)?
             .details(id, cancel)?;
+        if result.package.id != *id {
+            return Err(EngineError::InvalidResponse {
+                backend: id.backend.clone(),
+                reason: "details returned a different identity".into(),
+            });
+        }
+        Ok(result)
+    }
+
+    /// Details against previously detected state, without re-running
+    /// detection. Prefer [`details`](Self::details) for cold engines: this
+    /// skips availability re-validation, so a backend removed after
+    /// discovery surfaces its command failure instead of `Unavailable`.
+    /// Frontends reuse warm engines for selections and rebuild on
+    /// navigation, where discovery runs again.
+    pub fn details_reuse(
+        &mut self,
+        id: &PackageId,
+        cancel: &Cancellation,
+    ) -> Result<PackageDetails, EngineError> {
+        if cancel.requested() {
+            return Err(EngineError::Cancelled);
+        }
+        let backend = self
+            .backends
+            .get_mut(&id.backend)
+            .ok_or_else(|| EngineError::UnknownBackend(id.backend.clone()))?;
+        if !backend.capabilities().contains(&Capability::Details) {
+            return Err(backend.unsupported(Capability::Details));
+        }
+        let result = backend.details(id, cancel)?;
         if result.package.id != *id {
             return Err(EngineError::InvalidResponse {
                 backend: id.backend.clone(),
