@@ -15,6 +15,7 @@ TestCase {
         property string details: "{}"
         property string status: "Ready"
         property string confirmation: ""
+        property string version: "9.9.9-test"
         property bool busy: false
         property bool upgradable: false
         property string lastView: ""
@@ -143,7 +144,7 @@ TestCase {
         verify(findChild(browser, "packageDetails").text.indexOf("<b>literal metadata</b>") >= 0);
     }
     function test_views_loading_errors_and_resize() {
-        for (const view of ["Discover", "Installed", "Updates", "Sources", "Settings", "Help / About"]) {
+        for (const view of ["Search", "Installed", "Updates", "Sources", "Settings", "About"]) {
             browser.openView(view);
             compare(browser.currentView, view);
         }
@@ -262,6 +263,14 @@ TestCase {
         wait(30);
         verify(link.visible);
         verify(link.width >= 24);
+    }
+    function test_about_shows_backend_version() {
+        browser.openView("About");
+        compare(browser.currentView, "About");
+        const about = findChild(browser, "aboutText");
+        verify(about !== null);
+        verify(about.text.indexOf("9.9.9-test") >= 0);
+        verify(about.text.indexOf("Ctrl+2: Installed") >= 0);
     }
     function test_close_requests_cancellation() {
         fake.busy = true;

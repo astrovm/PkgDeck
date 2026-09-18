@@ -7,8 +7,8 @@ import org.kde.kirigami as Kirigami
 Controls.ApplicationWindow {
     id: root
     required property var backend
-    property string currentView: "Discover"
-    property string resultView: "Discover"
+    property string currentView: "Search"
+    property string resultView: "Search"
     property var items: currentView === resultView ? JSON.parse(backend.rows || "[]") : []
     property var detail: JSON.parse(backend.details || "{}")
     property bool closePending: false
@@ -88,7 +88,7 @@ Controls.ApplicationWindow {
         results.currentIndex = -1;
         if (view === "Search")
             search.forceActiveFocus();
-        else if (["Discover", "Installed", "Updates", "Sources"].indexOf(view) >= 0)
+        else if (["Search", "Installed", "Updates", "Sources"].indexOf(view) >= 0)
             reload();
     }
     function reload() {
@@ -166,12 +166,12 @@ Controls.ApplicationWindow {
                 }
                 Item { Layout.preferredHeight: 24 }
                 Repeater {
-                    model: ["Discover", "Search", "Installed", "Updates", "Sources", "Settings", "Help / About"]
+                    model: ["Search", "Installed", "Updates", "Sources", "Settings", "About"]
                     delegate: ActionButton {
                         required property string modelData
                         Layout.fillWidth: true
                         text: modelData
-                        symbol: ({"Discover":"discover", "Search":"search", "Installed":"installed", "Updates":"updates", "Sources":"sources", "Settings":"settings", "Help / About":"help"})[modelData]
+                        symbol: ({"Search":"search", "Installed":"installed", "Updates":"updates", "Sources":"sources", "Settings":"settings", "About":"help"})[modelData]
                         enabled: !backend.busy
                         navigation: true
                         primary: root.currentView === modelData
@@ -220,7 +220,7 @@ Controls.ApplicationWindow {
                 Layout.fillWidth: true
                 Controls.ComboBox {
                     visible: root.compact
-                    model: ["Discover", "Search", "Installed", "Updates", "Sources", "Settings", "Help / About"]
+                    model: ["Search", "Installed", "Updates", "Sources", "Settings", "About"]
                     currentIndex: model.indexOf(root.currentView)
                     enabled: !backend.busy
                     onActivated: root.openView(currentText)
@@ -246,7 +246,7 @@ Controls.ApplicationWindow {
             }
             RowLayout {
                 Layout.fillWidth: true
-                visible: ["Search", "Discover"].indexOf(root.currentView) >= 0
+                visible: root.currentView === "Search"
                 Controls.TextField {
                     id: search
                     objectName: "searchField"
@@ -277,13 +277,6 @@ Controls.ApplicationWindow {
                     enabled: !backend.busy && search.text.trim().length > 0
                     onClicked: { root.currentView = "Search"; root.reload(); }
                 }
-            }
-            Controls.Label {
-                visible: root.currentView === "Discover"
-                text: "Search packages or select a source to inspect its availability."
-                textFormat: Text.PlainText
-                wrapMode: Text.WordWrap
-                Layout.fillWidth: true
             }
             ColumnLayout {
                 visible: root.currentView === "Settings"
@@ -329,17 +322,18 @@ Controls.ApplicationWindow {
                 }
             }
             Controls.Label {
-                visible: root.currentView === "Help / About"
+                objectName: "aboutText"
+                visible: root.currentView === "About"
                 Layout.fillWidth: true
                 wrapMode: Text.WordWrap
-                text: "PkgDeck 0.1.0\nA unified package interface for Linux.\n\nCtrl+F: search • Ctrl+1: Discover • Ctrl+3: Installed • Ctrl+4: Updates • Ctrl+5: Sources\nCtrl+L: focus results • Up/Down: select • Ctrl+I: install • Ctrl+D: remove • Ctrl+U: upgrade • Ctrl+M: refresh source • Ctrl+R: reload\nEscape: cancel current work\n\nRefresh updates source metadata; Upgrade changes an installed package. Writes require confirmation and may change native dependencies. Cancellation waits for a native write already running.\n\nSearches show configured package sources. Check the status area for a source that is unavailable or did not respond."
+                text: "PkgDeck " + backend.version + "\nA unified package interface for Linux.\n\nKeyboard shortcuts\nCtrl+1: Search • Ctrl+2: Installed • Ctrl+3: Updates • Ctrl+4: Sources\nCtrl+F: search • Ctrl+L: focus results • Up/Down: select • Ctrl+I: install • Ctrl+D: remove • Ctrl+U: upgrade • Ctrl+M: refresh source • Ctrl+R: reload\nEscape: cancel current work\n\nRefresh updates source metadata; Upgrade changes an installed package. Writes require confirmation and may change native dependencies. Cancellation waits for a native write already running.\n\nSearches show configured package sources. Check the status area for a source that is unavailable or did not respond."
                 textFormat: Text.PlainText
             }
             Rectangle {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 Layout.minimumHeight: 130
-                visible: root.currentView !== "Settings" && root.currentView !== "Help / About"
+                visible: root.currentView !== "Settings" && root.currentView !== "About"
                 color: root.surface
                 radius: 10
                 border.color: results.activeFocus ? root.accent : root.line
@@ -351,7 +345,7 @@ Controls.ApplicationWindow {
                         Layout.fillWidth: true
                         Layout.margins: 14
                         Controls.Label {
-                            text: root.items.length + (root.currentView === "Sources" || root.currentView === "Discover" ? (root.items.length === 1 ? " source" : " sources") : (root.items.length === 1 ? " package" : " packages"))
+                            text: root.items.length + (root.currentView === "Sources" ? (root.items.length === 1 ? " source" : " sources") : (root.items.length === 1 ? " package" : " packages"))
                             color: root.muted
                             font.pixelSize: 12
                             Layout.fillWidth: true
@@ -474,7 +468,7 @@ Controls.ApplicationWindow {
                 }
             }
             Rectangle {
-                visible: root.selected !== null && ["Search", "Installed", "Updates", "Sources", "Discover"].indexOf(root.currentView) >= 0
+                visible: root.selected !== null && ["Search", "Installed", "Updates", "Sources"].indexOf(root.currentView) >= 0
                 Layout.fillWidth: true
                 Layout.preferredHeight: Math.min(root.height * 0.27, 180)
                 color: root.surface
@@ -523,7 +517,7 @@ Controls.ApplicationWindow {
             Flow {
                 Layout.fillWidth: true
                 spacing: 8
-                visible: ["Search", "Installed", "Updates", "Sources", "Discover"].indexOf(root.currentView) >= 0
+                visible: ["Search", "Installed", "Updates", "Sources"].indexOf(root.currentView) >= 0
                 ActionButton {
                     objectName: "upgradeAllButton"
                     visible: root.currentView === "Updates"
@@ -670,18 +664,18 @@ Controls.ApplicationWindow {
     }
     Shortcut {
         sequence: "Ctrl+1"
-        onActivated: root.openView("Discover")
+        onActivated: root.openView("Search")
     }
     Shortcut {
-        sequence: "Ctrl+3"
+        sequence: "Ctrl+2"
         onActivated: root.openView("Installed")
     }
     Shortcut {
-        sequence: "Ctrl+4"
+        sequence: "Ctrl+3"
         onActivated: root.openView("Updates")
     }
     Shortcut {
-        sequence: "Ctrl+5"
+        sequence: "Ctrl+4"
         onActivated: root.openView("Sources")
     }
     Shortcut {

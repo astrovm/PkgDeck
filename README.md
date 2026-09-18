@@ -187,8 +187,8 @@ authorization, and Qt Quick/private-display/packaged-bundle verification.
 
 - Connect the engine through a thin CXX-Qt bridge with asynchronous operations.
 - Build sidebar navigation, search/results, selection-linked details, and
-  source-aware actions. Add Installed, Updates, Sources, Settings, Help/About,
-  and Discover backed by available data.
+  source-aware actions. Add Installed, Updates, Sources, Settings, and About
+  backed by available data.
 - Use system themes, dark mode, accessible controls, keyboard navigation, and
   virtualized lists or `TableView`.
 - Include loading, empty, unavailable-backend, authorization, and failure states.

@@ -11,8 +11,8 @@ host authorization boundary as the terminal frontend.
 This capture uses synthetic metadata on a private test display. The default
 appearance follows the system; Settings also offers explicit Dark and Light modes.
 
-The sidebar provides Discover, Search, Installed, Updates, Sources, Settings, and
-Help/About. Discover reports actual source availability on the current computer;
+The sidebar provides Search, Installed, Updates, Sources, Settings, and
+About. Sources reports actual source availability on the current computer;
 it does not invent recommendations or combine matching names across sources.
 Search submits on Enter or the Search button. Results use a virtualized ListView,
 with the selected package's description, scope, homepage, and dependencies below.
@@ -61,7 +61,7 @@ cache. Background polling stops when work finishes.
 | Ctrl+F | Open Search and focus its field |
 | Ctrl+L | Focus package/source results |
 | Up/Down | Select a result and load its details |
-| Ctrl+1 / Ctrl+3 / Ctrl+4 / Ctrl+5 | Discover / Installed / Updates / Sources |
+| Ctrl+1 / Ctrl+2 / Ctrl+3 / Ctrl+4 | Search / Installed / Updates / Sources |
 | Ctrl+I / Ctrl+D / Ctrl+U | Propose install / remove / upgrade |
 | Ctrl+Shift+U in Updates | Confirm all listed upgrades |
 | Ctrl+M | Propose metadata refresh for the selected source |

@@ -19,6 +19,7 @@ pub mod ffi {
         #[qproperty(QString, details)]
         #[qproperty(QString, status)]
         #[qproperty(QString, confirmation)]
+        #[qproperty(QString, version)]
         #[qproperty(bool, busy)]
         #[qproperty(bool, upgradable)]
         type PackageController = super::Controller;
@@ -64,7 +65,7 @@ enum Reply {
 fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn FnMut(Reply)) {
     let result = match job {
         Job::Load(view, query) => {
-            if view == "Sources" || view == "Discover" {
+            if view == "Sources" {
                 Ok(Payload::Sources(engine.discover(cancel)))
             } else {
                 let mut report = if view == "Search" {
@@ -148,6 +149,7 @@ pub struct Controller {
     details: QString,
     status: QString,
     confirmation: QString,
+    version: QString,
     busy: bool,
     upgradable: bool,
     updates_view: bool,
@@ -166,6 +168,7 @@ impl Default for Controller {
             details: "{}".into(),
             status: "Choose a view or search for a package.".into(),
             confirmation: QString::default(),
+            version: pkgdeck_core::VERSION.into(),
             busy: false,
             upgradable: false,
             updates_view: false,
@@ -246,14 +249,13 @@ impl ffi::PackageController {
         let token = cancel.clone();
         let (sender, receiver) = mpsc::channel();
         let handle = thread::spawn(move || {
-            let discover =
-                matches!(&job, Job::Load(view, _) if view == "Sources" || view == "Discover");
+            let sources_view = matches!(&job, Job::Load(view, _) if view == "Sources");
             let mut send = |reply| {
                 let _ = sender.send(reply);
             };
             match pkgdeck_core::backends::native_engine(
                 source.as_deref(),
-                discover,
+                sources_view,
                 authorization,
                 &token,
             ) {
@@ -282,7 +284,7 @@ impl ffi::PackageController {
         let view = view.to_string();
         let query = query.to_string();
         let source = source.to_string();
-        if !["Search", "Installed", "Updates", "Sources", "Discover"].contains(&view.as_str())
+        if !["Search", "Installed", "Updates", "Sources"].contains(&view.as_str())
             || (view == "Search" && query.trim().is_empty())
         {
             return;
@@ -459,7 +461,7 @@ impl ffi::PackageController {
                 self.set_status(status.as_str().into());
             }
             Ok(Payload::Sources(sources)) => {
-                let rows: Vec<_> = sources.iter().map(|s| json!({"kind": "source", "name": s.backend, "source": s.backend, "summary": source_status(s), "available": s.availability == Ok(Availability::Available)})).collect();
+                let rows: Vec<_> = sources.iter().map(|s| json!({"kind": "source", "name": s.backend, "source": s.backend, "summary": source_status(s), "available": s.availability == Ok(Availability::Available), "capabilities": s.capabilities})).collect();
                 self.as_mut().rust_mut().sources = sources;
                 self.as_mut().set_rows(encoded(rows));
                 self.set_status("Source availability checked. Select a source for details.".into());
@@ -589,6 +591,13 @@ mod tests {
         }
     }
     #[test]
+    fn controller_version_tracks_package_metadata() {
+        assert_eq!(
+            Controller::default().version.to_string(),
+            pkgdeck_core::VERSION
+        );
+    }
+    #[test]
     fn jobs_keep_source_identity_native_updates_and_typed_failures() {
         let id = PackageId {
             backend: "fixture".into(),
@@ -641,7 +650,7 @@ mod tests {
                 Job::Load("Search".into(), "synthetic".into()),
                 Job::Load("Installed".into(), "".into()),
                 Job::Load("Updates".into(), "".into()),
-                Job::Load("Discover".into(), "".into()),
+                Job::Load("Sources".into(), "".into()),
                 Job::Details(id.clone()),
                 Job::Write(Operation::Upgrade(id.clone())),
                 Job::UpgradeAll(vec![Operation::UpgradeAll {
