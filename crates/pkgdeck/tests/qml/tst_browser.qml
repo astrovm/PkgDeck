@@ -17,6 +17,7 @@ TestCase {
         property string confirmation: ""
         property string version: "9.9.9-test"
         property bool busy: false
+        property bool writing: false
         property bool upgradable: false
         property string lastView: ""
         property string lastQuery: ""
@@ -74,6 +75,7 @@ TestCase {
         fake.status = "Ready";
         fake.confirmation = "";
         fake.busy = false;
+        fake.writing = false;
         fake.upgradable = false;
         fake.writes = 0;
         fake.cancels = 0;
@@ -108,7 +110,8 @@ TestCase {
         waitForRendering(browser.contentItem);
         clickDelegate(delegate);
     }
-    function populate() {        fake.rows = JSON.stringify([
+    function populate() {
+        fake.rows = JSON.stringify([
             {
                 kind: "package",
                 name: "synthetic-tool",
@@ -182,18 +185,31 @@ TestCase {
         browser.choose(0);
         fake.busy = true;
         verify(!findChild(browser, "installButton").enabled);
+        // Reads do not lock navigation or selection.
+        browser.openView("Updates");
+        compare(browser.currentView, "Updates");
+        browser.openView("Installed");
+        compare(browser.currentView, "Installed");
+        const list = findChild(browser, "packageResults");
+        list.forceActiveFocus();
+        keyClick(Qt.Key_Down);
+        compare(fake.selection, 0);
+        verify(findChild(browser, "resultsBusy").visible);
+        verify(findChild(browser, "resultsCancel").visible);
+        fake.writing = true;
         browser.openView("Updates");
         compare(browser.currentView, "Installed");
-        fake.status = "Authorization denied\nNative lock busy\nPartial results: source unavailable";
-        compare(findChild(browser, "operationStatus").text, fake.status);
+        browser.openView("Settings");
+        compare(browser.currentView, "Settings");
+        fake.writing = false;
         fake.busy = false;
+        browser.openView("Installed");
         verify(findChild(browser, "packageResults").activeFocus);
         browser.width = 380;
         browser.height = 500;
         wait(30);
         verify(findChild(browser, "packageResults").width <= 380);
         verify(findChild(browser, "packageResults").height >= 78);
-        verify(findChild(browser, "operationStatus").width > 0);
         browser.width = 1100;
         browser.height = 760;
     }
@@ -275,6 +291,31 @@ TestCase {
         fake.busy = false;
         browser.openView("Installed");
         verify(!button.visible);
+    }
+    function test_same_app_badge_lists_other_sources() {
+        browser.openView("Search");
+        fake.rows = JSON.stringify([
+            {kind: "package", name: "firefox", source: "apt", architecture: "amd64", installed: "1", candidate: "2", scope: "system", summary: "Web browser", same_app_from: ["flatpak", "snap"]},
+            {kind: "package", name: "lonely", source: "apt", architecture: "amd64", installed: "1", candidate: "1", scope: "system", summary: "Only here", same_app_from: []}
+        ]);
+        waitForRendering(browser.contentItem);
+        compare(browser.viewItems.length, 2);
+        // Pooled ListView delegates reparent at the QObject level, so the
+        // window-rooted search cannot descend into rows: search from the
+        // results list instead.
+        const results = findChild(browser, "packageResults");
+        verify(results !== null);
+        let line = null;
+        for (let i = 0; i < 50 && line === null; i++) {
+            wait(20);
+            line = findChild(results, "packageSourceLine");
+        }
+        verify(line !== null);
+        verify(line.text.indexOf("APT") >= 0);
+        verify(line.text.indexOf("also in") >= 0);
+        verify(line.text.indexOf("Flatpak") >= 0);
+        verify(line.text.indexOf("Snap") >= 0);
+        compare(browser.sameAppSummary(browser.viewItems[1]), "");
     }
     function test_updates_multiselect_upgrade_selected() {
         browser.openView("Updates");
@@ -368,12 +409,15 @@ TestCase {
         verify(about !== null);
         verify(about.text.indexOf("9.9.9-test") >= 0);
         verify(about.text.indexOf("Ctrl+2: Installed") >= 0);
+        const at = about.mapToItem(browser.contentItem, 0, 0);
+        verify(at.y < browser.height / 3);
     }
     function test_view_status_and_source_columns() {
         browser.openView("Settings");
-        compare(findChild(browser, "operationStatus").text, "Ready");
+        verify(findChild(browser, "appearanceSetting") !== null);
+        verify(findChild(browser, "authorizationSetting") !== null);
         browser.openView("About");
-        compare(findChild(browser, "operationStatus").text, "Ready");
+        verify(findChild(browser, "aboutText").visible);
         browser.openView("Sources");
         compare(findChild(browser, "columnHeader0").text, "SOURCE");
         compare(findChild(browser, "columnHeader1").text, "STATUS");

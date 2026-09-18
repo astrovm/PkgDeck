@@ -121,6 +121,7 @@ impl AppImage {
                 UpdateAvailability::Current
             },
             icon: None,
+            component_ids: vec![],
         })
     }
     fn installed_packages(&self) -> Result<Vec<Package>, EngineError> {
@@ -233,6 +234,15 @@ impl AppImage {
                             UpdateAvailability::Current
                         },
                         icon,
+                        // The entry's desktop-id stem joins the shared
+                        // namespace (e.g. an Audacity AppImage groups with
+                        // an Audacity install from another manager).
+                        component_ids: vec![super::component_stem(
+                            &desktop
+                                .file_stem()
+                                .map(|stem| stem.to_string_lossy().into_owned())
+                                .unwrap_or_default(),
+                        )],
                     },
                     desktop,
                 ))
@@ -366,6 +376,7 @@ impl Backend for AppImage {
                 candidate_version: None,
                 update: UpdateAvailability::Unknown,
                 icon: None,
+                component_ids: vec![],
             }]);
         }
         let query = query.to_ascii_lowercase();

@@ -19,6 +19,13 @@ with the selected package's description, scope, homepage, and dependencies below
 The VERSION column carries the state: a bare candidate means not installed,
 `· installed` marks installed packages, and `→` marks an available update.
 Matching names remain separate source/architecture/scope identities.
+Installed packages whose application exists in several managers at once show
+an "also in …" badge on the row, the tooltip, and the details panel: the
+grouping key is the AppStream component id (APT's DEP-11 data, Flatpak app
+ids, snap desktop entries, AppImage desktop entries), resolved from local
+files only. Grouping is display-only; installs, removals, and upgrades still
+address one exact backend identity, and remote catalog entries never join a
+group.
 Click a column header to sort ascending, again for descending (▲▼); drag the
 header gutter to resize the name and version columns. Headers are Tab stops:
 Space or Return sorts without a mouse. Sorting is display-only:
@@ -42,18 +49,20 @@ remaining updates and clears the checks.
 
 Each write requires confirmation, with No focused initially. Refresh changes
 source metadata only. Successful writes clear stale results; use Reload to read
-current state. Failures and partial query results remain visible in the scrollable
-status area; selecting a failed row shows the underlying manager error with a
-remediation hint, without re-querying. Native dependency changes can accompany package operations.
+current state. Failures stay as rows in the results table; selecting a failed
+row shows the underlying manager error with a remediation hint, without
+re-querying. Native dependency changes can accompany package operations.
 
 Queries and writes execute on a Rust worker. The GUI polls a message channel and
 updates Qt properties on its own thread. Search results stream in per backend,
 so fast sources render while slow ones still query; the selection follows the
 same package identity across partials. Hovering a package row shows its full
-untruncated versions and summary. Native progress messages and an indeterminate
-activity indicator replace invented percentages. Cancel interrupts
-reads; an already-running native write finishes safely under its manager's lock.
-Closing a busy window requests cancellation and keeps it open until completion.
+untruncated versions and summary. Switching sections or the selected row during
+a query cancels the in-flight read and starts the new one; native writes keep
+the lock until they finish. An indeterminate spinner in the results table
+replaces invented percentages. Cancel interrupts reads; an already-running
+native write finishes safely under its manager's lock. Closing a busy window
+requests cancellation and keeps it open until completion.
 
 Settings persist appearance, source filter, and authorization preference through Qt's
 per-user settings. The source filter is also available as a checklist in the
@@ -70,8 +79,8 @@ sudo|polkit` overrides the saved settings for the current session.
 The interface uses a consistent surface, border, and accent palette in both light
 and dark mode. Text labels accompany navigation, and package metadata remains
 plain text. Narrow windows replace the sidebar with a navigation selector and
-compact result rows. Only applicable package actions are shown. Details and status
-remain selectable and scrollable.
+compact result rows. Only applicable package actions are shown. Details remain
+selectable and scrollable.
 
 Results are virtualized. Up to 128 detail records are cached for the current
 result snapshot, so revisiting a package avoids launching another native query.
@@ -124,8 +133,8 @@ executable. The real-window test creates a private Xvfb display; it does not use
 the user's display or package database. It verifies native fixture state after
 install, refresh, upgrade, and removal, and exercises resize and read cancellation.
 Qt Quick tests cover keyboard navigation, exact confirmation, source views,
-loading/errors, the source checklist, Updates multi-select, and column
-sort/resize with backend index mapping. Xvfb, xdotool, and fonts are included in
+loading/errors, the source checklist, Updates multi-select, column
+sort/resize with backend index mapping, and the same-application badge. Xvfb, xdotool, and fonts are included in
 the development image and desktop CI dependencies.
 
 To check the staged release bundle against real managers:

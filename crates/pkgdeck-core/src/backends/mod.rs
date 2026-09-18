@@ -199,12 +199,14 @@ impl Transport for NativeTransport {
 pub struct Apt<T = NativeTransport> {
     pub transport: T,
     desktop_entries: Option<std::collections::BTreeMap<String, PathBuf>>,
+    components: Option<std::collections::BTreeMap<String, Vec<String>>>,
 }
 impl<T> Apt<T> {
     pub fn new(transport: T) -> Self {
         Self {
             transport,
             desktop_entries: None,
+            components: None,
         }
     }
 }
@@ -300,6 +302,7 @@ impl<T: Transport> Flatpak<T> {
                     candidate_version: Some(fields[3].into()),
                     update: UpdateAvailability::Unknown,
                     icon: None,
+                    component_ids: vec![],
                 })
             })
             .collect()
@@ -359,6 +362,7 @@ impl<T: Transport> Flatpak<T> {
                     candidate_version: Some(fields[3].into()),
                     update: UpdateAvailability::Unknown,
                     icon: None,
+                    component_ids: vec![],
                 })
             })
             .collect()
@@ -440,6 +444,10 @@ impl<T: Transport> Backend for Flatpak<T> {
             };
             if !roots.is_empty() {
                 package.icon = flatpak_icon(&roots, &package.id.name);
+            }
+            // The Flatpak application id is itself the AppStream component id.
+            if flatpak_id(&package.id.name) {
+                package.component_ids = vec![package.id.name.clone()];
             }
         }
         Ok(result)
@@ -671,6 +679,84 @@ fn desktop_icon(home: Option<&std::path::Path>, desktop: &std::path::Path) -> Op
     }
     icon_file(&PathBuf::from("/usr/share/pixmaps"), name)
 }
+
+/// Strip one trailing `.desktop` suffix so DEP-11 component ids
+/// (`org.mozilla.firefox.desktop`), Flatpak app ids (`org.mozilla.firefox`),
+/// and snap desktop basenames (`firefox.desktop`) share one namespace.
+fn component_stem(id: &str) -> String {
+    id.strip_suffix(".desktop").unwrap_or(id).to_owned()
+}
+
+/// Map installed Debian packages to their AppStream component-id stems by
+/// scanning DEP-11 YAML (`<id>.yml.gz`), gunzipped in memory. Documents are
+/// `---`-separated with top-level `ID:`/`Package:` scalars; a package can
+/// own several components. Missing or unreadable data maps nothing.
+fn dep11_component_ids(
+    yaml_dir: &std::path::Path,
+) -> std::collections::BTreeMap<String, Vec<String>> {
+    use std::io::Read;
+    let mut map: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    let Ok(entries) = std::fs::read_dir(yaml_dir) else {
+        return map;
+    };
+    for entry in entries.flatten() {
+        if entry.path().extension().is_none_or(|ext| ext != "gz") {
+            continue;
+        }
+        let Ok(file) = std::fs::File::open(entry.path()) else {
+            continue;
+        };
+        let mut decoder = flate2::read::GzDecoder::new(file);
+        let mut text = String::new();
+        if decoder.read_to_string(&mut text).is_err() {
+            continue;
+        }
+        let mut id: Option<String> = None;
+        let mut package: Option<String> = None;
+        let mut flush = |id: &mut Option<String>, package: &mut Option<String>| {
+            if let (Some(id), Some(package)) = (id.take(), package.take()) {
+                let stem = component_stem(&id);
+                map.entry(package).or_default().push(stem);
+            }
+        };
+        for line in text.lines() {
+            if line == "---" {
+                flush(&mut id, &mut package);
+            } else if let Some(value) = line.strip_prefix("ID: ") {
+                id = Some(value.trim().to_owned());
+            } else if let Some(value) = line.strip_prefix("Package: ") {
+                package = Some(value.trim().to_owned());
+            }
+        }
+        flush(&mut id, &mut package);
+    }
+    for ids in map.values_mut() {
+        ids.sort();
+        ids.dedup();
+    }
+    map
+}
+
+/// Desktop-id stems shipped by an installed snap (`meta/gui/*.desktop`).
+/// CLI-only snaps expose no desktop entry and group with nothing.
+fn snap_desktop_ids(sysroot: &std::path::Path, name: &str) -> Vec<String> {
+    if name.is_empty() || name.contains('/') {
+        return vec![];
+    }
+    let gui = sysroot.join("snap").join(name).join("current/meta/gui");
+    let Ok(entries) = std::fs::read_dir(&gui) else {
+        return vec![];
+    };
+    let mut ids: Vec<String> = entries
+        .flatten()
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "desktop"))
+        .map(|entry| component_stem(&entry.file_name().to_string_lossy()))
+        .collect();
+    ids.sort();
+    ids.dedup();
+    ids
+}
 impl<T: Transport> Apt<T> {
     fn query(
         &self,
@@ -701,6 +787,13 @@ impl<T: Transport> Apt<T> {
         self.desktop_entries
             .get_or_insert_with(|| apt_desktop_map(std::path::Path::new("/var/lib/dpkg/info")))
     }
+    /// Installed packages mapped to their AppStream component-id stems,
+    /// scanned once per backend lifetime like the desktop entries above.
+    fn component_map(&mut self) -> &std::collections::BTreeMap<String, Vec<String>> {
+        self.components.get_or_insert_with(|| {
+            dep11_component_ids(std::path::Path::new("/var/lib/app-info/yaml"))
+        })
+    }
 }
 impl<T: Transport> Backend for Apt<T> {
     fn id(&self) -> &str {
@@ -722,13 +815,17 @@ impl<T: Transport> Backend for Apt<T> {
     fn installed(&mut self, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
         let home = self.transport.env("HOME").map(PathBuf::from);
         let packages = self.query("installed", "", "", cancel)?;
-        let map = self.desktop_entries();
         Ok(packages
             .into_iter()
             .map(|mut d| {
-                if let Some(desktop) = map.get(&d.package.id.name) {
-                    d.package.icon = desktop_icon(home.as_deref(), desktop);
+                if let Some(desktop) = self.desktop_entries().get(&d.package.id.name).cloned() {
+                    d.package.icon = desktop_icon(home.as_deref(), &desktop);
                 }
+                d.package.component_ids = self
+                    .component_map()
+                    .get(&d.package.id.name)
+                    .cloned()
+                    .unwrap_or_default();
                 d.package
             })
             .collect())
@@ -746,10 +843,14 @@ impl<T: Transport> Backend for Apt<T> {
             .ok_or(EngineError::NotFound)?;
         if details.package.installed_version.is_some() {
             let home = self.transport.env("HOME").map(PathBuf::from);
-            let map = self.desktop_entries();
-            if let Some(desktop) = map.get(&id.name) {
-                details.package.icon = desktop_icon(home.as_deref(), desktop);
+            if let Some(desktop) = self.desktop_entries().get(&id.name).cloned() {
+                details.package.icon = desktop_icon(home.as_deref(), &desktop);
             }
+            details.package.component_ids = self
+                .component_map()
+                .get(&id.name)
+                .cloned()
+                .unwrap_or_default();
         }
         Ok(details)
     }
@@ -877,6 +978,7 @@ impl<T: Transport> Homebrew<T> {
                         installed_version: installed,
                         candidate_version: candidate,
                         icon: None,
+                        component_ids: vec![],
                     },
                     description: f.desc.unwrap_or_default(),
                     homepage: (!f.homepage.is_empty()).then_some(f.homepage),
@@ -1163,6 +1265,7 @@ impl<T: Transport> SystemManager<T> {
             candidate_version: Some(version.into()),
             update: UpdateAvailability::Unknown,
             icon: None,
+            component_ids: vec![],
         })
     }
     fn parse(&self, value: Vec<u8>, installed: bool) -> Result<Vec<Package>, EngineError> {
@@ -1289,6 +1392,13 @@ impl<T: Transport> SystemManager<T> {
             package.icon = snap_icon(std::path::Path::new("/"), &package.id.name);
         }
     }
+    /// Desktop-id stems shipped by an installed snap. CLI-only snaps expose
+    /// no desktop entry and group with nothing.
+    fn snap_components(&self, package: &mut Package) {
+        if matches!(self.kind, ManagerKind::Snap) {
+            package.component_ids = snap_desktop_ids(std::path::Path::new("/"), &package.id.name);
+        }
+    }
 }
 impl<T: Transport> Backend for SystemManager<T> {
     fn id(&self) -> &str {
@@ -1313,6 +1423,7 @@ impl<T: Transport> Backend for SystemManager<T> {
         let mut packages = self.query(true, "", cancel)?;
         for package in &mut packages {
             self.snap_icon(package);
+            self.snap_components(package);
         }
         Ok(packages)
     }
@@ -1328,6 +1439,7 @@ impl<T: Transport> Backend for SystemManager<T> {
             .find(|package| package.id == *id)
             .ok_or(EngineError::NotFound)?;
         self.snap_icon(&mut package);
+        self.snap_components(&mut package);
         Ok(PackageDetails {
             description: package.summary.clone(),
             homepage: None,
@@ -1954,6 +2066,7 @@ impl<T: Transport> DevTool<T> {
                 installed_version: Some(installed),
                 candidate_version: candidate,
                 icon: None,
+                component_ids: vec![],
             },
             description: summary,
             homepage,
@@ -2699,6 +2812,7 @@ impl<T: Transport> Backend for DevTool<T> {
                 candidate_version: None,
                 update: UpdateAvailability::Unknown,
                 icon: None,
+                component_ids: vec![],
             });
         }
         Ok(results)
@@ -3077,6 +3191,73 @@ mod tests {
             DevTool::<NativeTransport>::gem_version_cmp("1.0.a", "1.0.b"),
             Less
         );
+    }
+
+    #[test]
+    fn component_stems_share_one_namespace() {
+        assert_eq!(component_stem("firefox.desktop"), "firefox");
+        assert_eq!(
+            component_stem("org.mozilla.firefox.desktop"),
+            "org.mozilla.firefox"
+        );
+        assert_eq!(component_stem("org.mozilla.firefox"), "org.mozilla.firefox");
+        assert_eq!(component_stem("plain"), "plain");
+    }
+
+    #[test]
+    fn dep11_maps_packages_to_component_stems() {
+        use std::io::Write;
+        let base = std::env::temp_dir().join(format!("pkgdeck-dep11-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder
+            .write_all(
+                b"---\nFile: DEP-11\nVersion: '1.0'\n---\nType: desktop-application\nID: org.mozilla.firefox.desktop\nPackage: firefox\n---\nType: desktop-application\nID: firefox.desktop\nPackage: firefox\n---\nType: desktop-application\nID: org.chromium.Chromium.desktop\nPackage: chromium\nDescription:\n  C: >-\n    ID: not-a-component\n",
+            )
+            .unwrap();
+        std::fs::write(
+            base.join("test_dep11_Components-amd64.yml.gz"),
+            encoder.finish().unwrap(),
+        )
+        .unwrap();
+        // Non-gzipped and corrupt files never contribute.
+        std::fs::write(base.join("notes.txt"), "ID: fake.desktop\nPackage: fake\n").unwrap();
+        std::fs::write(base.join("broken.yml.gz"), b"not gzip data").unwrap();
+        let map = dep11_component_ids(&base);
+        assert_eq!(
+            map.get("firefox"),
+            Some(&vec![
+                "firefox".to_string(),
+                "org.mozilla.firefox".to_string()
+            ])
+        );
+        assert_eq!(
+            map.get("chromium"),
+            Some(&vec!["org.chromium.Chromium".to_string()])
+        );
+        assert!(!map.contains_key("fake"));
+        assert!(dep11_component_ids(&base.join("missing")).is_empty());
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn snap_desktop_ids_list_gui_entries() {
+        let base = std::env::temp_dir().join(format!("pkgdeck-snapids-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let gui = base.join("snap/spot/current/meta/gui");
+        std::fs::create_dir_all(&gui).unwrap();
+        std::fs::write(gui.join("spot.desktop"), "[Desktop Entry]\n").unwrap();
+        std::fs::write(gui.join("spot-settings.desktop"), "[Desktop Entry]\n").unwrap();
+        std::fs::write(gui.join("icon.png"), "png").unwrap();
+        assert_eq!(
+            snap_desktop_ids(&base, "spot"),
+            vec!["spot".to_string(), "spot-settings".to_string()]
+        );
+        assert!(snap_desktop_ids(&base, "missing").is_empty());
+        assert!(snap_desktop_ids(&base, "../evil").is_empty());
+        assert!(snap_desktop_ids(&base, "").is_empty());
+        std::fs::remove_dir_all(&base).unwrap();
     }
 
     #[test]
