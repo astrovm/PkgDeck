@@ -20,12 +20,14 @@ TestCase {
         property bool upgradable: false
         property string lastView: ""
         property string lastQuery: ""
+        property string lastSource: ""
         property int selection: -1
         property int writes: 0
         property int cancels: 0
         function load(view, query, source, sudo) {
             lastView = view;
             lastQuery = query;
+            lastSource = source;
         }
         function select(index) {
             selection = index;
@@ -321,6 +323,30 @@ TestCase {
         compare(fake.selection, 0);
         keyClick(Qt.Key_End);
         compare(fake.selection, 1);
+    }
+    function test_header_source_filter_and_installed_filter() {
+        browser.openView("Installed");
+        const filter = findChild(browser, "sourceFilter");
+        verify(filter !== null);
+        filter.currentIndex = 1;
+        filter.activated(1);
+        compare(browser.source, "apt");
+        compare(fake.lastSource, "apt");
+        compare(fake.lastView, "Installed");
+        browser.openView("Settings");
+        const setting = findChild(browser, "sourceSetting");
+        setting.currentIndex = 0;
+        setting.activated(0);
+        compare(browser.source, "");
+        const field = findChild(browser, "installedFilterField");
+        verify(field !== null);
+        browser.openView("Installed");
+        field.forceActiveFocus();
+        field.text = "synthetic";
+        keyClick(Qt.Key_Return);
+        compare(browser.installedFilter, "synthetic");
+        compare(fake.lastView, "Installed");
+        compare(fake.lastQuery, "synthetic");
     }
     function test_close_requests_cancellation() {
         fake.busy = true;

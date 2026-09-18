@@ -15,7 +15,10 @@ Controls.ApplicationWindow {
     property bool queryDirty: false
     property var selected: results.currentIndex >= 0 && results.currentIndex < items.length ? items[results.currentIndex] : null
     property string source: argument("--from", preferences.source)
+    property string installedFilter: ""
     property bool useSudo: argument("--auth", preferences.authorization) === "sudo"
+    readonly property var sourceIds: ["", "apt", "dnf", "pacman", "zypper", "snap", "homebrew", "appimage", "flatpak", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "composer", "gem"]
+    readonly property var sourceNames: ["All available sources", "APT", "DNF", "Pacman", "Zypper", "Snap", "Homebrew", "AppImage", "Flatpak", "Cargo", "npm", "pnpm", "Bun", "pip", "pipx", "uv", "Composer", "RubyGems"]
     readonly property bool compact: width < 760
     readonly property bool dark: preferences.appearance === 1 || (preferences.appearance === 0 && Qt.styleHints.colorScheme === Qt.Dark)
     readonly property color canvas: dark ? "#111820" : "#f3f5f8"
@@ -104,7 +107,7 @@ Controls.ApplicationWindow {
     function reload() {
         resultView = currentView;
         results.currentIndex = -1;
-        backend.load(currentView, search.text, source, useSudo);
+        backend.load(currentView, currentView === "Installed" ? installedFilter : search.text, source, useSudo);
     }
     function choose(index) {
         if (backend.busy || index < 0 || index >= items.length)
@@ -251,12 +254,19 @@ Controls.ApplicationWindow {
                     font.bold: true
                     Layout.fillWidth: true
                 }
-                Controls.Label {
-                    visible: !root.compact
-                    text: root.source ? root.source.toUpperCase() : "ALL SOURCES"
-                    color: root.muted
-                    font.pixelSize: 11
-                    font.letterSpacing: 1
+                Controls.ComboBox {
+                    objectName: "sourceFilter"
+                    model: root.sourceNames
+                    currentIndex: root.sourceIds.indexOf(root.source)
+                    enabled: !backend.busy
+                    onActivated: {
+                        root.source = root.sourceIds[currentIndex];
+                        preferences.source = root.source;
+                        if (["Search", "Installed", "Updates", "Sources"].indexOf(root.currentView) >= 0)
+                            root.reload();
+                    }
+                    Accessible.name: "Package source filter"
+                    Layout.preferredWidth: 210
                 }
             }
             RowLayout {
@@ -266,7 +276,7 @@ Controls.ApplicationWindow {
                     id: search
                     objectName: "searchField"
                     Layout.fillWidth: true
-                    placeholderText: "Search package names and summaries"
+                    placeholderText: "Search packages"
                     Accessible.name: "Search packages"
                     enabled: !backend.busy
                     selectByMouse: true
@@ -300,6 +310,41 @@ Controls.ApplicationWindow {
                     onClicked: { root.currentView = "Search"; root.queryDirty = false; root.reload(); }
                 }
             }
+            RowLayout {
+                Layout.fillWidth: true
+                visible: root.currentView === "Installed"
+                Controls.TextField {
+                    id: installedFilterField
+                    objectName: "installedFilterField"
+                    Layout.fillWidth: true
+                    text: root.installedFilter
+                    placeholderText: "Filter installed packages"
+                    Accessible.name: "Filter installed packages"
+                    enabled: !backend.busy
+                    selectByMouse: true
+                    implicitHeight: 44
+                    color: root.ink
+                    placeholderTextColor: root.muted
+                    leftPadding: 14
+                    background: Rectangle {
+                        color: root.surface
+                        radius: 8
+                        border.color: installedFilterField.activeFocus ? root.accent : root.line
+                        border.width: installedFilterField.activeFocus ? 2 : 1
+                    }
+                    onAccepted: {
+                        root.installedFilter = text;
+                        root.reload();
+                    }
+                }
+                ActionButton {
+                    text: "Filter"
+                    symbol: "search"
+                    primary: true
+                    enabled: !backend.busy
+                    onClicked: { root.installedFilter = installedFilterField.text; root.reload(); }
+                }
+            }
             ColumnLayout {
                 visible: root.currentView === "Settings"
                 Layout.fillWidth: true
@@ -316,16 +361,16 @@ Controls.ApplicationWindow {
                 }
                 Controls.ComboBox {
                     objectName: "sourceSetting"
-                    model: ["All available sources", "APT", "DNF", "Pacman", "Zypper", "Snap", "Homebrew", "AppImage", "Flatpak", "Cargo", "npm", "pnpm", "Bun", "pip", "pipx", "uv", "Composer", "RubyGems"]
-                    currentIndex: ["", "apt", "dnf", "pacman", "zypper", "snap", "homebrew", "appimage", "flatpak", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "composer", "gem"].indexOf(root.source)
+                    model: root.sourceNames
+                    currentIndex: root.sourceIds.indexOf(root.source)
                     onActivated: {
-                        root.source = ["", "apt", "dnf", "pacman", "zypper", "snap", "homebrew", "appimage", "flatpak", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "composer", "gem"][currentIndex];
+                        root.source = root.sourceIds[currentIndex];
                         preferences.source = root.source;
                     }
                     Accessible.name: "Package source"
                 }
                 Controls.Label {
-                    text: "APT authorization"
+                    text: "Privilege elevation"
                 }
                 Controls.ComboBox {
                     objectName: "authorizationSetting"
@@ -335,12 +380,12 @@ Controls.ApplicationWindow {
                         root.useSudo = currentIndex === 1;
                         preferences.authorization = root.useSudo ? "sudo" : "polkit";
                     }
-                    Accessible.name: "APT authorization"
+                    Accessible.name: "Privilege elevation"
                 }
                 Controls.Label {
                     Layout.fillWidth: true
                     wrapMode: Text.WordWrap
-                    text: "Polkit uses your host's authentication agent. Sudo requires an existing grant; passwords are never collected here. Homebrew always runs unprivileged. Choose the appearance below, or follow your system theme."
+                    text: "Polkit uses your host's authentication agent. Sudo requires an existing grant; passwords are never collected here. Homebrew and development managers always run unprivileged without elevation. Choose the appearance above, or follow your system theme."
                 }
             }
             Controls.Label {

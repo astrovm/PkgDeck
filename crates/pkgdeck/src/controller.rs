@@ -78,6 +78,16 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
                         .packages
                         .retain(|p| p.update == UpdateAvailability::Available);
                 }
+                // The Installed view filters client-side by substring; other
+                // views ignore the query so stale field text never narrows
+                // them. Failures are preserved so partial results stay visible.
+                if view == "Installed" && !query.trim().is_empty() {
+                    let needle = query.trim().to_lowercase();
+                    report.packages.retain(|p| {
+                        p.id.name.to_lowercase().contains(&needle)
+                            || p.summary.to_lowercase().contains(&needle)
+                    });
+                }
                 Ok(Payload::Packages(report))
             }
         }
@@ -596,6 +606,54 @@ mod tests {
             Controller::default().version.to_string(),
             pkgdeck_core::VERSION
         );
+    }
+    #[test]
+    fn installed_view_filters_by_query_while_other_views_ignore_it() {
+        fn load(engine: &mut Engine, view: &str, query: &str) -> PackageReport {
+            let mut replies = vec![];
+            execute(
+                engine,
+                Job::Load(view.into(), query.into()),
+                &Cancellation::default(),
+                &mut |r| replies.push(r),
+            );
+            match replies.pop().unwrap() {
+                Reply::Done(Ok(Payload::Packages(report))) => report,
+                _ => panic!("expected a package report"),
+            }
+        }
+        let package = Package {
+            id: PackageId {
+                backend: "fixture".into(),
+                name: "synthetic".into(),
+                architecture: "all".into(),
+                scope: Scope::System,
+                remote: None,
+            },
+            display_name: "Synthetic".into(),
+            summary: "Fixture".into(),
+            installed_version: Some("1".into()),
+            candidate_version: Some("2".into()),
+            update: UpdateAvailability::Available,
+        };
+        let mut engine = Engine::default();
+        engine
+            .register(Fixture {
+                package: package.clone(),
+                fail: false,
+            })
+            .unwrap();
+        assert_eq!(load(&mut engine, "Installed", "").packages.len(), 1);
+        assert_eq!(
+            load(&mut engine, "Installed", "synthetic").packages.len(),
+            1
+        );
+        assert_eq!(load(&mut engine, "Installed", "FIXTURE").packages.len(), 1);
+        assert!(load(&mut engine, "Installed", "missing")
+            .packages
+            .is_empty());
+        // Updates never narrows by the query; stale field text is ignored.
+        assert_eq!(load(&mut engine, "Updates", "missing").packages.len(), 1);
     }
     #[test]
     fn jobs_keep_source_identity_native_updates_and_typed_failures() {

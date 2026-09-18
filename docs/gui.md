@@ -40,7 +40,10 @@ reads; an already-running native write finishes safely under its manager's lock.
 Closing a busy window requests cancellation and keeps it open until completion.
 
 Settings persist appearance, source filter, and authorization preference through Qt's
-per-user settings. The default GUI authorization uses the host polkit agent.
+per-user settings. The source filter is also available as a selector in the
+header, next to the current view name. The Installed view has its own filter
+field that narrows the loaded packages by name or summary without a new
+native query. The default GUI authorization uses the host polkit agent.
 Existing sudo credentials are also supported; passwords are never collected by
 PkgDeck. Homebrew and the development managers (Cargo, npm, pnpm, Bun, pip, pipx, uv, Composer, RubyGems) remain unprivileged. `pkgdeck --from apt|homebrew|cargo|npm|pnpm|bun|pip|pipx|uv|composer|gem --auth
 sudo|polkit` overrides the saved settings for the current session.
