@@ -164,6 +164,7 @@ pub struct Controller {
     upgradable: bool,
     updates_view: bool,
     packages: Vec<Package>,
+    failures: Vec<BackendFailure>,
     detail_cache: BTreeMap<PackageId, QString>,
     sources: Vec<Source>,
     pending: Option<Job>,
@@ -183,6 +184,7 @@ impl Default for Controller {
             upgradable: false,
             updates_view: false,
             packages: vec![],
+            failures: vec![],
             detail_cache: BTreeMap::new(),
             sources: vec![],
             pending: None,
@@ -222,6 +224,14 @@ fn source_status(source: &Source) -> String {
         Ok(Availability::Unavailable(reason)) => format!("Unavailable: {reason}"),
         Err(error) => error.to_string(),
     }
+}
+/// Details for a failed source row. Served from the stored report without a
+/// backend roundtrip: the query already failed, re-querying cannot help.
+fn failure_details(failure: &BackendFailure) -> QString {
+    encoded(json!({
+        "failure": {"backend": failure.backend, "error": failure.error.to_string()},
+        "hint": format!("Check the {} source in the Sources view, or run the manager directly in a terminal for complete output.", failure.backend),
+    }))
 }
 fn operation_label(operation: &Operation) -> String {
     let (action, id) = match operation {
@@ -314,6 +324,7 @@ impl ffi::PackageController {
         self.as_mut().rust_mut().sudo = sudo;
         self.as_mut().rust_mut().detail_cache.clear();
         self.as_mut().rust_mut().packages.clear();
+        self.as_mut().rust_mut().failures.clear();
         self.as_mut().rust_mut().sources.clear();
         self.as_mut().rust_mut().pending = None;
         self.as_mut().set_confirmation(QString::default());
@@ -339,6 +350,16 @@ impl ffi::PackageController {
                 json!({"package": package_row(&package), "description": package.summary}),
             ));
             self.start(Job::Details(package.id));
+        } else if let Some(failure) = usize::try_from(index)
+            .ok()
+            .and_then(|i| {
+                i.checked_sub(self.rust().packages.len())
+                    .and_then(|j| self.rust().failures.get(j))
+            })
+            .cloned()
+        {
+            self.as_mut().set_details(failure_details(&failure));
+            self.set_status("Source failure details.".into());
         } else if let Some(source) = usize::try_from(index)
             .ok()
             .and_then(|i| self.rust().sources.get(i))
@@ -467,6 +488,7 @@ impl ffi::PackageController {
                     )
                 };
                 self.as_mut().rust_mut().packages = report.packages;
+                self.as_mut().rust_mut().failures = report.failures;
                 self.as_mut().set_rows(encoded(rows));
                 self.set_status(status.as_str().into());
             }
@@ -502,6 +524,7 @@ impl ffi::PackageController {
                 self.as_mut().set_upgradable(false);
                 self.as_mut().rust_mut().detail_cache.clear();
                 self.as_mut().rust_mut().packages.clear();
+                self.as_mut().rust_mut().failures.clear();
                 self.as_mut().rust_mut().sources.clear();
                 self.as_mut().set_rows("[]".into());
                 self.as_mut().set_details("{}".into());
@@ -654,6 +677,19 @@ mod tests {
             .is_empty());
         // Updates never narrows by the query; stale field text is ignored.
         assert_eq!(load(&mut engine, "Updates", "missing").packages.len(), 1);
+    }
+    #[test]
+    fn failure_details_carry_backend_error_and_hint() {
+        let failure = BackendFailure {
+            backend: "npm".into(),
+            error: EngineError::InvalidResponse {
+                backend: "npm".into(),
+                reason: "npm ls failed: boom".into(),
+            },
+        };
+        let text = failure_details(&failure).to_string();
+        assert!(text.contains("npm ls failed: boom"));
+        assert!(text.contains("Sources view"));
     }
     #[test]
     fn jobs_keep_source_identity_native_updates_and_typed_failures() {

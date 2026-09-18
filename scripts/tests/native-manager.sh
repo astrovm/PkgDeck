@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+trap 'echo "native-manager FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
 
 backend=${1:?Expected dnf, pacman, or zypper}
 binary=${2:?Expected absolute pkd binary path}
@@ -12,6 +13,7 @@ esac
 
 podman run --rm -v "$binary:/opt/pkd:ro" "$image" bash -lc "
     set -euo pipefail
+    trap 'echo \"real $backend lifecycle FAILED at line \$LINENO: \$BASH_COMMAND\" >&2' ERR
     $bootstrap
     useradd -m pkgdeck-test
     printf 'pkgdeck-test ALL=(root) NOPASSWD: /usr/bin/$manager\\n' >/etc/sudoers.d/pkgdeck

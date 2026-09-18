@@ -175,12 +175,23 @@ Controls.ApplicationWindow {
                 anchors.fill: parent
                 anchors.margins: 16
                 spacing: 8
-                Controls.Label {
-                    text: "PkgDeck"
-                    font.pixelSize: 25
-                    font.bold: true
-                    color: root.ink
+                RowLayout {
+                    spacing: 10
                     Layout.topMargin: 12
+                    Image {
+                        objectName: "appLogo"
+                        source: "qrc:/pkgdeck/logo.svg"
+                        sourceSize.width: 30
+                        sourceSize.height: 30
+                        fillMode: Image.PreserveAspectFit
+                        Accessible.ignored: true
+                    }
+                    Controls.Label {
+                        text: "PkgDeck"
+                        font.pixelSize: 25
+                        font.bold: true
+                        color: root.ink
+                    }
                 }
                 Item { Layout.preferredHeight: 24 }
                 Repeater {
@@ -469,8 +480,8 @@ Controls.ApplicationWindow {
                             leftPadding: 16
                             rightPadding: 16
                             highlighted: results.currentIndex === index
-                            enabled: !backend.busy && modelData.kind !== "failure"
-                            Accessible.name: modelData.name + ", " + modelData.source + ", " + (modelData.summary || "")
+                            enabled: !backend.busy
+                            Accessible.name: (modelData.kind === "package" ? (modelData.update === "available" ? "Update available. " : (modelData.installed ? "Installed. " : "Not installed. ")) : "") + modelData.name + ", " + modelData.source + ", " + (modelData.summary || "")
                             onClicked: { results.forceActiveFocus(); root.choose(index); }
                             background: Rectangle {
                                 color: packageRow.highlighted ? root.selection : (packageRow.hovered ? root.canvas : "transparent")
@@ -484,7 +495,7 @@ Controls.ApplicationWindow {
                                     Layout.preferredWidth: root.compact ? -1 : 202
                                     Layout.fillWidth: root.compact
                                     Controls.Label {
-                                        text: modelData.name
+                                        text: (modelData.kind === "package" ? (modelData.update === "available" ? "[^] " : (modelData.installed ? "[x] " : "[ ] ")) : "") + modelData.name
                                         color: root.ink
                                         font.bold: true
                                         textFormat: Text.PlainText
@@ -564,7 +575,7 @@ Controls.ApplicationWindow {
                     RowLayout {
                         Layout.fillWidth: true
                         DeckIcon {
-                            name: root.selected && root.selected.kind === "source" ? root.selected.source : "package"
+                            name: root.selected ? (root.selected.kind === "source" ? root.selected.source : (root.selected.kind === "failure" ? "warning" : "package")) : "package"
                             ink: root.accent
                             Layout.preferredWidth: 24
                             Layout.preferredHeight: 24
@@ -591,8 +602,8 @@ Controls.ApplicationWindow {
                             background: null
                             wrapMode: TextEdit.Wrap
                             textFormat: TextEdit.PlainText
-                            text: root.detail.package ? (root.detail.description || "") + "\n\nScope: " + (root.detail.package.scope_label || "Unknown") + "   ·   Homepage: " + (root.detail.homepage || "Unavailable") + "\nDependencies: " + ((root.detail.dependencies || []).join(", ") || "None listed") : (root.detail.availability || "") + "\n\nCapabilities: " + (root.detail.capabilities || []).join(", ")
-                            Accessible.name: "Selected package or source details"
+                            text: root.detail.package ? (root.detail.description || "") + "\n\nScope: " + (root.detail.package.scope_label || "Unknown") + "   ·   Homepage: " + (root.detail.homepage || "Unavailable") + "\nDependencies: " + ((root.detail.dependencies || []).join(", ") || "None listed") : (root.detail.failure ? (root.detail.failure.error || "") + "\n\n" + (root.detail.hint || "") : (root.detail.availability || "") + "\n\nCapabilities: " + (root.detail.capabilities || []).join(", "))
+                            Accessible.name: "Selected package, source, or failure details"
                         }
                     }
                 }
@@ -609,6 +620,15 @@ Controls.ApplicationWindow {
                     primary: true
                     enabled: !backend.busy && backend.upgradable
                     onClicked: root.propose("upgrade-all")
+                }
+                Controls.Label {
+                    objectName: "upgradeAllHint"
+                    visible: root.currentView === "Updates" && !backend.upgradable && !backend.busy && root.items.some((row) => row.kind === "failure")
+                    text: "Upgrade all is unavailable while a source query fails. Select a failed row for details."
+                    color: root.muted
+                    font.pixelSize: 12
+                    wrapMode: Text.WordWrap
+                    Layout.fillWidth: true
                 }
                 ActionButton {
                     objectName: "installButton"

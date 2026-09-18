@@ -348,6 +348,33 @@ TestCase {
         compare(fake.lastView, "Installed");
         compare(fake.lastQuery, "synthetic");
     }
+    function test_failure_rows_show_diagnostics() {
+        fake.details = JSON.stringify({
+            failure: {backend: "npm", error: "invalid response from npm: npm ls failed: boom"},
+            hint: "Check the npm source in the Sources view."
+        });
+        wait(30);
+        const details = findChild(browser, "packageDetails");
+        verify(details.text.indexOf("npm ls failed: boom") >= 0);
+        verify(details.text.indexOf("Sources view") >= 0);
+    }
+    function test_sidebar_shows_app_logo() {
+        const logo = findChild(browser, "appLogo");
+        verify(logo !== null);
+        verify(logo.source.toString().indexOf("logo.svg") >= 0);
+    }
+    function test_upgrade_all_hint_and_state_markers() {
+        browser.openView("Updates");
+        fake.rows = JSON.stringify([
+            {kind: "package", name: "tool", source: "apt", architecture: "all", installed: "1", candidate: "2", update: "available", summary: "Updatable"},
+            {kind: "failure", name: "npm", source: "npm", summary: "boom", available: false}
+        ]);
+        wait(30);
+        const hint = findChild(browser, "upgradeAllHint");
+        verify(hint.visible);
+        verify(hint.text.indexOf("source query fails") >= 0);
+        verify(!findChild(browser, "upgradeAllButton").enabled);
+    }
     function test_close_requests_cancellation() {
         fake.busy = true;
         browser.close();

@@ -6,9 +6,16 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
     echo 'VM fixture requires x86_64' >&2
     exit 1
 }
-for tool in qemu-system-x86_64 qemu-img genisoimage curl sha256sum flock; do command -v "$tool" >/dev/null; done
+for tool in qemu-system-x86_64 qemu-img genisoimage curl sha256sum flock; do
+    command -v "$tool" >/dev/null || { echo "Missing prerequisite: $tool" >&2; exit 1; }
+done
 binaries=$(realpath "${CARGO_TARGET_DIR:-target}/debug")
-for name in pkd pkgdeck-tools examples/apt-probe; do [[ -f $binaries/$name ]]; done
+for name in pkd pkgdeck-tools examples/apt-probe; do
+    [[ -f $binaries/$name ]] || {
+        echo "Missing build artifact: $binaries/$name (build the workspace debug binaries first)" >&2
+        exit 1
+    }
+done
 cache=$(realpath -m "${PKGDECK_VM_CACHE:-build/host-vm}")
 mkdir -p "$cache"
 exec 9>"$cache/cache.lock"

@@ -5,6 +5,7 @@ use pkgdeck_core::{engine::*, package::*, process::Cancellation};
 use ratatui::{
     layout::{Constraint, Layout},
     style::{Color, Modifier, Style},
+    text::{Line, Span},
     widgets::{Block, Paragraph, Row, Table, TableState, Wrap},
 };
 use std::{io, sync::mpsc, thread, time::Duration};
@@ -108,6 +109,18 @@ struct App {
     scroll: u16,
     busy: bool,
     cancelled: bool,
+    color: bool,
+}
+/// Honor NO_COLOR and dumb terminals, mirroring the CLI contract: styling is
+/// chromatic only when explicitly allowed. Layout markers are unaffected.
+fn colors_enabled() -> bool {
+    colors_allowed(
+        std::env::var_os("NO_COLOR").is_none(),
+        std::env::var("TERM"),
+    )
+}
+fn colors_allowed(no_color_unset: bool, term: Result<String, std::env::VarError>) -> bool {
+    no_color_unset && term.is_ok_and(|term| term != "dumb")
 }
 impl Default for App {
     fn default() -> Self {
@@ -125,10 +138,24 @@ impl Default for App {
             status: "Press / to search; 2 installed, 3 updates, 4 sources.".into(),
             busy: false,
             cancelled: false,
+            color: true,
         }
     }
 }
 impl App {
+    /// Strip foreground/background colors when the terminal opts out. Text
+    /// attributes and layout are preserved so output stays structured.
+    fn paint(&self, style: Style) -> Style {
+        if self.color {
+            style
+        } else {
+            Style {
+                fg: None,
+                bg: None,
+                ..style
+            }
+        }
+    }
     fn load(&mut self, view: View) -> Job {
         self.scroll = 0;
         self.view = view;
@@ -335,7 +362,9 @@ impl App {
                     .block(
                         Block::bordered()
                             .border_type(ratatui::widgets::BorderType::Rounded)
-                            .border_style(Style::default().fg(Color::Rgb(104, 151, 207)))
+                            .border_style(
+                                self.paint(Style::default().fg(Color::Rgb(104, 151, 207))),
+                            )
                             .title("Status / confirmation - PgUp/PgDn scroll, Esc back"),
                     ),
                 frame.area(),
@@ -351,16 +380,24 @@ impl App {
             Constraint::Length(2),
         ])
         .split(frame.area());
+        // The query only applies to Search; dim it elsewhere so a stale
+        // string is not mistaken for a filter on other views.
+        let query = Line::from(vec![
+            Span::raw("1 / Search   2 [x] Installed   3 [^] Updates   4 [=] Sources\n\n/ "),
+            Span::styled(
+                format!("{}{}", self.query, if self.editing { "_" } else { "" }),
+                if self.view == View::Search {
+                    Style::default()
+                } else {
+                    Style::default().add_modifier(Modifier::DIM)
+                },
+            ),
+        ]);
         frame.render_widget(
-            Paragraph::new(format!(
-                "1 / Search   2 [x] Installed   3 [^] Updates   4 [=] Sources\n\n/ {}{}",
-                self.query,
-                if self.editing { "_" } else { "" }
-            ))
-            .block(
+            Paragraph::new(query).block(
                 Block::bordered()
                     .border_type(ratatui::widgets::BorderType::Rounded)
-                    .border_style(Style::default().fg(Color::Rgb(104, 151, 207)))
+                    .border_style(self.paint(Style::default().fg(Color::Rgb(104, 151, 207))))
                     .title(format!("PkgDeck - {:?}", self.view)),
             ),
             areas[0],
@@ -441,15 +478,17 @@ impl App {
                 .column_spacing(2)
                 .header(
                     Row::new(headers).style(
-                        Style::default()
-                            .fg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD),
+                        self.paint(
+                            Style::default()
+                                .fg(Color::Cyan)
+                                .add_modifier(Modifier::BOLD),
+                        ),
                     ),
                 )
                 .block(
                     Block::bordered()
                         .border_type(ratatui::widgets::BorderType::Rounded)
-                        .border_style(Style::default().fg(Color::Rgb(104, 151, 207)))
+                        .border_style(self.paint(Style::default().fg(Color::Rgb(104, 151, 207))))
                         .title(format!(
                             " Results · {} {} ",
                             if self.view == View::Sources {
@@ -465,10 +504,12 @@ impl App {
                         )),
                 )
                 .row_highlight_style(
-                    Style::default()
-                        .bg(Color::Rgb(40, 62, 89))
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD),
+                    self.paint(
+                        Style::default()
+                            .bg(Color::Rgb(40, 62, 89))
+                            .fg(Color::White)
+                            .add_modifier(Modifier::BOLD),
+                    ),
                 )
                 .highlight_symbol("> "),
             areas[1],
@@ -478,7 +519,22 @@ impl App {
             self.table
                 .selected()
                 .and_then(|i| self.sources.get(i))
-                .map(|s| format!("{}\n{:?}\n{:?}", s.backend, s.availability, s.capabilities))
+                .map(|s| {
+                    let status = match &s.availability {
+                        Ok(Availability::Available) => "Available".into(),
+                        Ok(Availability::Unavailable(reason)) => {
+                            format!("Unavailable: {reason}")
+                        }
+                        Err(error) => error.to_string(),
+                    };
+                    let capabilities = s
+                        .capabilities
+                        .iter()
+                        .map(|c| format!("{c:?}"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("{}\n{}\nCapabilities: {}", s.backend, status, capabilities)
+                })
                 .unwrap_or_else(|| "No source selected.".into())
         } else if let Some(d) = &self.details {
             format!(
@@ -507,7 +563,7 @@ impl App {
                 .block(
                     Block::bordered()
                         .border_type(ratatui::widgets::BorderType::Rounded)
-                        .border_style(Style::default().fg(Color::Rgb(104, 151, 207)))
+                        .border_style(self.paint(Style::default().fg(Color::Rgb(104, 151, 207))))
                         .title("Package details"),
                 ),
             areas[2],
@@ -523,17 +579,27 @@ impl App {
                 .block(
                     Block::bordered()
                         .border_type(ratatui::widgets::BorderType::Rounded)
-                        .border_style(Style::default().fg(Color::Rgb(104, 151, 207)))
+                        .border_style(self.paint(Style::default().fg(Color::Rgb(104, 151, 207))))
                         .title("Status / confirmation"),
                 ),
             areas[3],
         );
-        frame.render_widget(Paragraph::new("/ search  arrows/j/k select  Enter details  i install  d remove  g upgrade\nu refresh source  r reload  e status  PgUp/PgDn details  Esc cancel/back  q quit").wrap(Wrap { trim: false }), areas[4]);
+        // Two fixed wordings keep wraps on item boundaries: the full ledger
+        // needs 100 columns, while the compact ledger fits narrow terminals.
+        let footer = if frame.area().width >= 100 {
+            "/ search  arrows/j/k select  Enter details  i install  d remove  g upgrade\nu refresh source  r reload  e status  PgUp/PgDn details  Esc cancel/back  q quit"
+        } else {
+            "/ search  arrows select  Enter details  i install  d remove\ng upgrade  u refresh  r reload  e status  PgUp/PgDn  Esc back  q quit"
+        };
+        frame.render_widget(Paragraph::new(footer).wrap(Wrap { trim: false }), areas[4]);
     }
 }
 
 pub fn run(terminal: &mut ratatui::DefaultTerminal, args: &Args) -> io::Result<()> {
-    let mut app = App::default();
+    let mut app = App {
+        color: colors_enabled(),
+        ..App::default()
+    };
     let shutdown = Cancellation::default();
     let signal = signal_hook::flag::register(signal_hook::consts::SIGTERM, shutdown.flag())?;
     let mut worker: Option<(thread::JoinHandle<()>, mpsc::Receiver<Reply>, Cancellation)> = None;
@@ -875,5 +941,54 @@ mod tests {
             app.key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE))
                 .0
         );
+    }
+
+    #[test]
+    fn color_opt_out_keeps_layout_without_chromatic_styles() {
+        assert!(colors_allowed(true, Ok("xterm-256color".into())));
+        assert!(!colors_allowed(false, Ok("xterm-256color".into())));
+        assert!(!colors_allowed(true, Ok("dumb".into())));
+        assert!(!colors_allowed(true, Err(std::env::VarError::NotPresent)));
+        let styled = Style::default().fg(Color::Cyan);
+        assert_eq!(App::default().paint(styled), styled);
+        let plain = App {
+            color: false,
+            ..App::default()
+        }
+        .paint(styled);
+        assert_eq!(plain.fg, None);
+        assert_eq!(plain.bg, None);
+        let mut app = App {
+            color: false,
+            ..App::default()
+        };
+        let screen = render(&mut app, 100, 30);
+        assert!(screen.contains("PkgDeck"));
+        assert!(screen.contains("cancel/back"));
+    }
+
+    #[test]
+    fn sources_show_humanized_details_and_narrow_footer() {
+        let mut engine = Engine::default();
+        engine
+            .register(Fixture {
+                package: package(),
+                deny: false,
+            })
+            .unwrap();
+        let mut app = App::default();
+        drive(&mut app, &mut engine, KeyCode::Char('4'));
+        assert_eq!(app.sources.len(), 1);
+        key(&mut app, KeyCode::Down);
+        let screen = render(&mut app, 100, 30);
+        assert!(screen.contains("Available"));
+        assert!(!screen.contains("Ok("));
+        assert!(screen.contains("Capabilities:"));
+        assert!(!screen.contains("Capabilities: ["));
+        let narrow = render(&mut app, 70, 24);
+        assert!(narrow.contains("Esc back"));
+        assert!(!narrow.contains("cancel/back"));
+        let wide = render(&mut app, 120, 30);
+        assert!(wide.contains("cancel/back"));
     }
 }

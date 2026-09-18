@@ -134,21 +134,9 @@ jobs:
           sudo systemctl enable --now snapd.socket
           sudo snap wait system seed.loaded
       - name: Build CLI
-        run: cargo build --locked -p pkd && install -m 755 target/debug/pkd /tmp/pkgdeck-pkd
+        run: cargo build --locked -p pkd
       - name: Exercise actual Snap lifecycle
-        run: |
-          sudo useradd -m pkgdeck-test
-          echo 'pkgdeck-test ALL=(root) NOPASSWD: /usr/bin/snap' | sudo tee /etc/sudoers.d/pkgdeck-snap
-          run() { sudo -u pkgdeck-test /tmp/pkgdeck-pkd --json --yes --auth sudo --from snap "$@"; }
-          success() { run "$@" | grep -q '"exit_code":0'; }
-          success sources
-          success search hello-world
-          success info hello-world
-          success update
-          success install hello-world
-          snap list hello-world
-          success remove hello-world
-          ! snap list hello-world
+        run: scripts/tests/snap-manager.sh "$PWD/target/debug/pkd"
 
   dev-backends:
     name: Real dev backends (${{ matrix.backend }})

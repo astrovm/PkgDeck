@@ -16,12 +16,15 @@ About. Sources reports actual source availability on the current computer;
 it does not invent recommendations or combine matching names across sources.
 Search submits on Enter or the Search button. Results use a virtualized ListView,
 with the selected package's description, scope, homepage, and dependencies below.
-Matching names remain separate source/architecture/scope identities.
+Rows carry state markers: `[^]` for an available update, `[x]` for installed,
+and `[ ]` for not installed. Matching names remain separate
+source/architecture/scope identities.
 
 Install, Remove, Upgrade, and Refresh source operate on the selected identity.
 Updates also provides **Upgrade all** (Ctrl+Shift+U), without selecting a row.
 It confirms every listed package identity, respects the selected source filter,
-and is disabled when there are no upgrades or any source query failed. The batch
+and is disabled when there are no upgrades or any source query failed. A hint
+beside the button names the reason while it is unavailable. The batch
 reports every result, including partial failures and cancellation. Completed
 upgrades are not rolled back; cancellation skips remaining writes once the active
 native transaction finishes. Reload reads the remaining updates.
@@ -31,7 +34,8 @@ native transaction finishes. Reload reads the remaining updates.
 Each write requires confirmation, with No focused initially. Refresh changes
 source metadata only. Successful writes clear stale results; use Reload to read
 current state. Failures and partial query results remain visible in the scrollable
-status area. Native dependency changes can accompany package operations.
+status area; selecting a failed row shows the underlying manager error with a
+remediation hint, without re-querying. Native dependency changes can accompany package operations.
 
 Queries and writes execute on a Rust worker. The GUI polls a message channel and
 updates Qt properties on its own thread. It shows native progress messages and an

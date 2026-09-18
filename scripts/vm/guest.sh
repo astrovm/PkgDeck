@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+trap 'echo "guest FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
 [[ $EUID == 0 && -f /etc/pkgdeck-prepared ]]
 if [[ ${1:-} == --container ]]; then
     [[ -f /run/.containerenv && -f /etc/pkgdeck-disposable-container ]]
