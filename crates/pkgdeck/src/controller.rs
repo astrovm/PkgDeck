@@ -439,10 +439,7 @@ impl ffi::PackageController {
         {
             return;
         }
-        const KNOWN: &[&str] = &[
-            "apt", "dnf", "pacman", "zypper", "snap", "homebrew", "appimage", "flatpak", "cargo",
-            "npm", "pnpm", "bun", "pip", "pipx", "uv", "composer", "gem",
-        ];
+        const KNOWN: &[&str] = pkgdeck_core::backends::BACKEND_IDS;
         if sources.iter().any(|s| !KNOWN.contains(&s.as_str())) {
             self.set_status("Unknown source.".into());
             return;

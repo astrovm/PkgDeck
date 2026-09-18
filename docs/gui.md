@@ -20,8 +20,10 @@ The VERSION column carries the state: a bare candidate means not installed,
 `· installed` marks installed packages, and `→` marks an available update.
 Matching names remain separate source/architecture/scope identities.
 Click a column header to sort ascending, again for descending (▲▼); drag the
-header gutter to resize the name and version columns. Sorting is display-only:
-selection and actions map the visible row back to backend order.
+header gutter to resize the name and version columns. Headers are Tab stops:
+Space or Return sorts without a mouse. Sorting is display-only:
+selection and actions map the visible row back to backend order. Column
+widths and the active sort persist across restarts like the source filter.
 
 Install, Remove, Upgrade, and Refresh source operate on the selected identity.
 Updates also provides **Upgrade all** (Ctrl+Shift+U), without selecting a row.

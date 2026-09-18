@@ -17,7 +17,7 @@ pkd upgrade neovim --from apt --yes
 pkd remove neovim --from apt --yes
 ```
 
-`--from` accepts `apt`, `dnf`, `pacman`, `zypper`, `snap`, `homebrew`, `appimage`, `flatpak`, `cargo`, `npm`, `pnpm`, `bun`, `pip`, `pipx`, `uv`, `composer`, or `gem`. Without it, queries cover detected managers;
+`--from` accepts `apt`, `dnf`, `pacman`, `zypper`, `snap`, `homebrew`, `appimage`, `flatpak`, `cargo`, `npm`, `pnpm`, `bun`, `pip`, `pipx`, `uv`, `composer`, or `gem`, and repeats to select several sources. Without it, queries cover detected managers;
 missing optional managers are omitted, while detection/query failures remain
 visible. `sources` includes unavailable managers and their reasons. Search uses
 literal case-insensitive substrings: APT names/summaries and Homebrew formula names.
@@ -25,7 +25,7 @@ Homebrew identities preserve tap-qualified names (for example
 `owner/tap/formula`). Aliases and fuzzy matches are not installation selectors.
 
 Install, info, remove, and named upgrades require an exact package identifier.
-Matching identifiers across managers are ambiguous until `--from` selects a source.
+Matching identifiers across managers are ambiguous until a single `--from` pins the source.
 Use `--arch` to distinguish APT architectures. Homebrew's detected prefix is part
 of each identity; the CLI operates on the `brew` executable in the invoking user's
 host PATH. It does not merge packages across prefixes or treat equal names as the

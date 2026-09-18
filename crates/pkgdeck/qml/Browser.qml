@@ -44,7 +44,8 @@ Controls.ApplicationWindow {
             return sourceNames[sourceIds.indexOf(checked[0])];
         return checked.length + " sources";
     }
-    function toggleSource(id) {        let checked = checkedSources();
+    function toggleSource(id) {
+        let checked = checkedSources();
         const at = checked.indexOf(id);
         if (at >= 0) {
             if (checked.length <= 1)
@@ -100,6 +101,10 @@ Controls.ApplicationWindow {
     property int versionWidth: 150
     property string sortColumn: ""
     property bool sortAscending: true
+    onNameWidthChanged: preferences.nameWidth = root.nameWidth
+    onVersionWidthChanged: preferences.versionWidth = root.versionWidth
+    onSortColumnChanged: preferences.sortColumn = root.sortColumn
+    onSortAscendingChanged: preferences.sortAscending = root.sortAscending
     function sortArrow(column) {
         return sortColumn === column ? (sortAscending ? " ▲" : " ▼") : "";
     }
@@ -135,6 +140,8 @@ Controls.ApplicationWindow {
     }
     // The visible index addresses viewItems; the backend addresses items.
     // With no active sort the two orders match and this is the identity.
+    // Sorted duplicates resolve to the first raw match: identical rows are
+    // one engine identity shown twice, so either index acts on the same one.
     function originalIndex(visible) {
         if (visible < 0 || visible >= viewItems.length)
             return -1;
@@ -200,6 +207,25 @@ Controls.ApplicationWindow {
             }
         }
     }
+    // Shared checkbox indicator: transparent box with an accent check.
+    // Both the source checklist and the Updates multi-select use it so the
+    // two stay visually identical; positioning comes from the instance.
+    component TickBox: Rectangle {
+        required property bool ticked
+        implicitWidth: 20
+        implicitHeight: 20
+        color: "transparent"
+        border.color: root.line
+        radius: 4
+        DeckIcon {
+            name: "installed"
+            ink: root.accent
+            anchors.centerIn: parent
+            width: 14
+            height: 14
+            visible: ticked
+        }
+    }
 
     component ThemedComboBox: Controls.ComboBox {
         id: combo
@@ -258,6 +284,12 @@ Controls.ApplicationWindow {
 
     function rowTooltip(data) {
         return data.name + "\n" + (data.installed || "not installed") + " → " + (data.candidate || "unknown") + "\n" + (data.summary || "");
+    }
+    // Local icon files become file:// URLs. Paths come from the backend and
+    // may contain spaces, which raw concatenation would leave unencoded and
+    // unloadable (hiding the fallback source icon with a blank gap).
+    function iconUrl(path) {
+        return path ? "file://" + encodeURI(path) : "";
     }
 
     property url repositoryIconSource: root.dark ? "qrc:/pkgdeck/github-dark.png" : "qrc:/pkgdeck/github.png"
@@ -321,6 +353,10 @@ Controls.ApplicationWindow {
         property string sourceList: ""
         property string source: ""
         property string authorization: "polkit"
+        property int nameWidth: 202
+        property int versionWidth: 150
+        property string sortColumn: ""
+        property bool sortAscending: true
     }
     onClosing: function (close) {
         if (backend.busy) {
@@ -381,6 +417,15 @@ Controls.ApplicationWindow {
             sourceSelection = preferences.sourceList;
         else if (preferences.source !== "")
             sourceSelection = preferences.source;
+        // Restore the persisted column layout; stored values predate
+        // validation, so clamp widths and allowlist the sort column.
+        if (preferences.nameWidth >= 80 && preferences.nameWidth <= 600)
+            nameWidth = preferences.nameWidth;
+        if (preferences.versionWidth >= 80 && preferences.versionWidth <= 600)
+            versionWidth = preferences.versionWidth;
+        if (["name", "version", "status", "summary", "capabilities"].indexOf(preferences.sortColumn) >= 0)
+            sortColumn = preferences.sortColumn;
+        sortAscending = preferences.sortAscending;
         reload();
     }
 
@@ -524,23 +569,11 @@ Controls.ApplicationWindow {
                                         checked: root.checkedSources().indexOf(modelData) >= 0
                                         enabled: !checked || root.checkedSources().length > 1
                                         onToggled: root.toggleSource(modelData)
-                                        indicator: Rectangle {
-                                            implicitWidth: 20
-                                            implicitHeight: 20
+                                        indicator: TickBox {
                                             anchors.verticalCenter: parent.verticalCenter
                                             anchors.left: parent.left
                                             anchors.leftMargin: 8
-                                            color: "transparent"
-                                            border.color: root.line
-                                            radius: 4
-                                            DeckIcon {
-                                                name: "installed"
-                                                ink: root.accent
-                                                anchors.centerIn: parent
-                                                width: 14
-                                                height: 14
-                                                visible: checkRow.checked
-                                            }
+                                            ticked: checkRow.checked
                                         }
                                         background: Rectangle {
                                             color: checkRow.hovered ? root.selection : "transparent"
@@ -736,12 +769,19 @@ Controls.ApplicationWindow {
                             text: (root.currentView === "Sources" ? "SOURCE" : "NAME / SOURCE") + root.sortArrow("name")
                             color: root.muted
                             font.pixelSize: 11
+                            font.underline: sortNameArea.activeFocus
                             elide: Text.ElideRight
                             Layout.preferredWidth: root.nameWidth
                             MouseArea {
+                                id: sortNameArea
                                 anchors.fill: parent
                                 cursorShape: Qt.PointingHandCursor
+                                activeFocusOnTab: true
+                                Accessible.role: Accessible.Button
+                                Accessible.name: "Sort by name"
                                 onClicked: root.cycleSort("name")
+                                Keys.onSpacePressed: root.cycleSort("name")
+                                Keys.onReturnPressed: root.cycleSort("name")
                                 MouseArea {
                                     objectName: "columnResize0"
                                     anchors.right: parent.right
@@ -752,7 +792,7 @@ Controls.ApplicationWindow {
                                     property real pressX: 0
                                     property int startWidth: 0
                                     onPressed: (mouse) => { pressX = mouse.x; startWidth = root.nameWidth; }
-                                    onPositionChanged: (mouse) => { if (pressed) root.nameWidth = Math.max(80, Math.round(startWidth + mouse.x - pressX)); }
+                                    onPositionChanged: (mouse) => { if (pressed) root.nameWidth = Math.max(80, Math.min(600, Math.round(startWidth + mouse.x - pressX))); }
                                 }
                             }
                         }
@@ -761,12 +801,19 @@ Controls.ApplicationWindow {
                             text: (root.currentView === "Sources" ? "STATUS" : "VERSION") + root.sortArrow(root.currentView === "Sources" ? "status" : "version")
                             color: root.muted
                             font.pixelSize: 11
+                            font.underline: sortVersionArea.activeFocus
                             elide: Text.ElideRight
                             Layout.preferredWidth: root.versionWidth
                             MouseArea {
+                                id: sortVersionArea
                                 anchors.fill: parent
                                 cursorShape: Qt.PointingHandCursor
+                                activeFocusOnTab: true
+                                Accessible.role: Accessible.Button
+                                Accessible.name: root.currentView === "Sources" ? "Sort by status" : "Sort by version"
                                 onClicked: root.cycleSort(root.currentView === "Sources" ? "status" : "version")
+                                Keys.onSpacePressed: root.cycleSort(root.currentView === "Sources" ? "status" : "version")
+                                Keys.onReturnPressed: root.cycleSort(root.currentView === "Sources" ? "status" : "version")
                                 MouseArea {
                                     objectName: "columnResize1"
                                     anchors.right: parent.right
@@ -777,7 +824,7 @@ Controls.ApplicationWindow {
                                     property real pressX: 0
                                     property int startWidth: 0
                                     onPressed: (mouse) => { pressX = mouse.x; startWidth = root.versionWidth; }
-                                    onPositionChanged: (mouse) => { if (pressed) root.versionWidth = Math.max(80, Math.round(startWidth + mouse.x - pressX)); }
+                                    onPositionChanged: (mouse) => { if (pressed) root.versionWidth = Math.max(80, Math.min(600, Math.round(startWidth + mouse.x - pressX))); }
                                 }
                             }
                         }
@@ -786,12 +833,19 @@ Controls.ApplicationWindow {
                             text: (root.currentView === "Sources" ? "CAPABILITIES" : "SUMMARY") + root.sortArrow(root.currentView === "Sources" ? "capabilities" : "summary")
                             color: root.muted
                             font.pixelSize: 11
+                            font.underline: sortSummaryArea.activeFocus
                             elide: Text.ElideRight
                             Layout.fillWidth: true
                             MouseArea {
+                                id: sortSummaryArea
                                 anchors.fill: parent
                                 cursorShape: Qt.PointingHandCursor
+                                activeFocusOnTab: true
+                                Accessible.role: Accessible.Button
+                                Accessible.name: root.currentView === "Sources" ? "Sort by capabilities" : "Sort by summary"
                                 onClicked: root.cycleSort(root.currentView === "Sources" ? "capabilities" : "summary")
+                                Keys.onSpacePressed: root.cycleSort(root.currentView === "Sources" ? "capabilities" : "summary")
+                                Keys.onReturnPressed: root.cycleSort(root.currentView === "Sources" ? "capabilities" : "summary")
                             }
                         }
                     }
@@ -887,21 +941,9 @@ Controls.ApplicationWindow {
                                     Accessible.name: "Select " + (modelData.name || "")
                                     Layout.preferredWidth: 28
                                     Layout.alignment: Qt.AlignVCenter
-                                    indicator: Rectangle {
-                                        implicitWidth: 20
-                                        implicitHeight: 20
+                                    indicator: TickBox {
                                         anchors.centerIn: parent
-                                        color: "transparent"
-                                        border.color: root.line
-                                        radius: 4
-                                        DeckIcon {
-                                            name: "installed"
-                                            ink: root.accent
-                                            anchors.centerIn: parent
-                                            width: 14
-                                            height: 14
-                                            visible: packageCheck.checked
-                                        }
+                                        ticked: packageCheck.checked
                                     }
                                     contentItem: Item {}
                                 }
@@ -929,7 +971,7 @@ Controls.ApplicationWindow {
                                         }
                                         Image {
                                             visible: !!modelData.icon
-                                            source: modelData.icon ? "file://" + modelData.icon : ""
+                                            source: root.iconUrl(modelData.icon || "")
                                             sourceSize.width: 14
                                             sourceSize.height: 14
                                             fillMode: Image.PreserveAspectFit
@@ -998,16 +1040,21 @@ Controls.ApplicationWindow {
                     spacing: 6
                     RowLayout {
                         Layout.fillWidth: true
-                        DeckIcon {
+                        Item {
                             visible: !(root.selected && root.selected.icon)
-                            name: root.selected ? (root.selected.kind === "source" ? root.selected.source : (root.selected.kind === "failure" ? "warning" : "package")) : "package"
-                            ink: root.accent
-                            Layout.preferredWidth: 24
-                            Layout.preferredHeight: 24
+                            Layout.preferredWidth: 40
+                            Layout.preferredHeight: 40
+                            DeckIcon {
+                                name: root.selected ? (root.selected.kind === "source" ? root.selected.source : (root.selected.kind === "failure" ? "warning" : "package")) : "package"
+                                ink: root.accent
+                                anchors.centerIn: parent
+                                width: 24
+                                height: 24
+                            }
                         }
                         Image {
                             visible: !!(root.selected && root.selected.icon)
-                            source: (root.selected && root.selected.icon) ? "file://" + root.selected.icon : ""
+                            source: root.iconUrl((root.selected && root.selected.icon) || "")
                             sourceSize.width: 40
                             sourceSize.height: 40
                             fillMode: Image.PreserveAspectFit

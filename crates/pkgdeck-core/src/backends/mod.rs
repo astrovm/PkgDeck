@@ -20,6 +20,14 @@ const CAPABILITIES: &[Capability] = &[
     Capability::Upgrade,
 ];
 
+/// Backend ids accepted by `--from` and the source checklist. Adding a
+/// backend means extending this list, the GUI `sourceIds`, and the CLI
+/// value parser together.
+pub const BACKEND_IDS: &[&str] = &[
+    "apt", "dnf", "pacman", "zypper", "snap", "homebrew", "appimage", "flatpak", "cargo", "npm",
+    "pnpm", "bun", "pip", "pipx", "uv", "composer", "gem",
+];
+
 /// A narrow transport seam lets adapter tests supply synthetic native responses.
 pub trait Transport: Send {
     fn apt_query(
@@ -188,7 +196,18 @@ impl Transport for NativeTransport {
     }
 }
 
-pub struct Apt<T = NativeTransport>(pub T);
+pub struct Apt<T = NativeTransport> {
+    pub transport: T,
+    desktop_entries: Option<std::collections::BTreeMap<String, PathBuf>>,
+}
+impl<T> Apt<T> {
+    pub fn new(transport: T) -> Self {
+        Self {
+            transport,
+            desktop_entries: None,
+        }
+    }
+}
 pub struct Homebrew<T = NativeTransport> {
     pub transport: T,
     prefix: Option<PathBuf>,
@@ -660,8 +679,11 @@ impl<T: Transport> Apt<T> {
         arch: &str,
         cancel: &Cancellation,
     ) -> Result<Vec<PackageDetails>, EngineError> {
-        serde_json::from_slice(&bytes("apt", self.0.apt_query(mode, query, arch, cancel)?)?)
-            .map_err(|e| invalid("apt", e))
+        serde_json::from_slice(&bytes(
+            "apt",
+            self.transport.apt_query(mode, query, arch, cancel)?,
+        )?)
+        .map_err(|e| invalid("apt", e))
     }
     fn target(&self, id: &PackageId) -> Result<String, EngineError> {
         if id.backend != "apt" || id.scope != Scope::System {
@@ -670,6 +692,14 @@ impl<T: Transport> Apt<T> {
         let target = format!("{}:{}", id.name, id.architecture);
         AptAction::Install(target.clone()).arguments()?;
         Ok(target)
+    }
+    /// Installed packages mapped to their desktop entries, scanned once per
+    /// backend lifetime. Backend instances are rebuilt for every load, so the
+    /// cache never outlives the query that populated it; repeated selections
+    /// reuse it instead of re-reading every dpkg file list.
+    fn desktop_entries(&mut self) -> &std::collections::BTreeMap<String, PathBuf> {
+        self.desktop_entries
+            .get_or_insert_with(|| apt_desktop_map(std::path::Path::new("/var/lib/dpkg/info")))
     }
 }
 impl<T: Transport> Backend for Apt<T> {
@@ -680,7 +710,7 @@ impl<T: Transport> Backend for Apt<T> {
         CAPABILITIES
     }
     fn detect(&mut self, cancel: &Cancellation) -> Result<Availability, EngineError> {
-        availability(self.0.apt_query("detect", "", "", cancel))
+        availability(self.transport.apt_query("detect", "", "", cancel))
     }
     fn search(&mut self, query: &str, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
         Ok(self
@@ -690,10 +720,10 @@ impl<T: Transport> Backend for Apt<T> {
             .collect())
     }
     fn installed(&mut self, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
-        let map = apt_desktop_map(std::path::Path::new("/var/lib/dpkg/info"));
-        let home = self.0.env("HOME").map(PathBuf::from);
-        Ok(self
-            .query("installed", "", "", cancel)?
+        let home = self.transport.env("HOME").map(PathBuf::from);
+        let packages = self.query("installed", "", "", cancel)?;
+        let map = self.desktop_entries();
+        Ok(packages
             .into_iter()
             .map(|mut d| {
                 if let Some(desktop) = map.get(&d.package.id.name) {
@@ -715,8 +745,8 @@ impl<T: Transport> Backend for Apt<T> {
             .find(|d| d.package.id == *id)
             .ok_or(EngineError::NotFound)?;
         if details.package.installed_version.is_some() {
-            let map = apt_desktop_map(std::path::Path::new("/var/lib/dpkg/info"));
-            let home = self.0.env("HOME").map(PathBuf::from);
+            let home = self.transport.env("HOME").map(PathBuf::from);
+            let map = self.desktop_entries();
             if let Some(desktop) = map.get(&id.name) {
                 details.package.icon = desktop_icon(home.as_deref(), desktop);
             }
@@ -740,7 +770,7 @@ impl<T: Transport> Backend for Apt<T> {
         progress(Progress::Message(
             "Running apt-get; cancellation waits for the native transaction to finish.".into(),
         ));
-        let result = self.0.apt_write(action, cancel)?;
+        let result = self.transport.apt_write(action, cancel)?;
         Ok(OperationOutcome {
             cancellation_deferred: result.cancellation_deferred,
         })
@@ -1252,7 +1282,8 @@ impl<T: Transport> SystemManager<T> {
         Ok(id.name.clone())
     }
     /// Local snap icons resolve straight from the filesystem, which doubles
-    /// as the installed check: remote catalog entries never match a file.
+    /// as the installed check: remote rows only match a file when an
+    /// installed snap shares the name, which is the same application.
     fn snap_icon(&self, package: &mut Package) {
         if matches!(self.kind, ManagerKind::Snap) {
             package.icon = snap_icon(std::path::Path::new("/"), &package.id.name);
@@ -2787,13 +2818,7 @@ pub fn native_engine(
     authorization: Authorization,
     cancel: &Cancellation,
 ) -> Result<Engine, EngineError> {
-    if let Some(unknown) = sources.iter().find(|s| {
-        ![
-            "apt", "dnf", "pacman", "zypper", "snap", "homebrew", "appimage", "flatpak", "cargo",
-            "npm", "pnpm", "bun", "pip", "pipx", "uv", "composer", "gem",
-        ]
-        .contains(&s.as_str())
-    }) {
+    if let Some(unknown) = sources.iter().find(|s| !BACKEND_IDS.contains(&s.as_str())) {
         return Err(EngineError::UnknownBackend(unknown.into()));
     }
     let allowed = |id: &str| sources.is_empty() || sources.iter().any(|s| s == id);
@@ -2805,7 +2830,7 @@ pub fn native_engine(
             return Err(ExecutionError::Disabled(reason.into()).into());
         }
     }
-    let mut apt = Apt(NativeTransport {
+    let mut apt = Apt::new(NativeTransport {
         host: host.clone(),
         authorization,
     });

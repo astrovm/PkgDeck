@@ -81,8 +81,13 @@ TestCase {
         browser = createTemporaryObject(window, test);
         verify(browser !== null);
         browser.requestActivate();
-        // Fresh checklist per test: QSettings persist across tests in one run.
+        // Fresh checklist and column layout per test: QSettings persist
+        // across tests in one run.
         browser.sourceSelection = "";
+        browser.sortColumn = "";
+        browser.sortAscending = true;
+        browser.nameWidth = 202;
+        browser.versionWidth = 150;
         wait(30);
     }
     function cleanup() {
@@ -331,6 +336,13 @@ TestCase {
         mouseMove(grip, grip.width / 2 + 60, grip.height / 2);
         mouseRelease(grip, grip.width / 2 + 60, grip.height / 2);
         verify(browser.nameWidth > 202);
+        // Keyboard sorting through the header Tab stop (currently descending).
+        const sortArea = header0.children[0];
+        sortArea.forceActiveFocus();
+        verify(sortArea.activeFocus);
+        keyClick(Qt.Key_Space);
+        compare(browser.viewItems[0].name, "alpha");
+        verify(header0.text.indexOf("▲") >= 0);
     }
     function test_repository_sidebar() {
         compare(browser.repositoryUrl.toString(), "https://github.com/astrovm/PkgDeck");

@@ -274,7 +274,7 @@ fn lifecycle(mut backend: impl Backend) {
 }
 #[test]
 fn apt_lifecycle() {
-    lifecycle(Apt(Fixture::new()));
+    lifecycle(Apt::new(Fixture::new()));
 }
 #[test]
 fn homebrew_lifecycle() {
@@ -638,7 +638,7 @@ fn failures_preserve_native_categories() {
             e => Err(e.into()),
         };
         assert_eq!(
-            Apt(fixture.clone()).detect(&Cancellation::default()),
+            Apt::new(fixture.clone()).detect(&Cancellation::default()),
             expected
         );
         assert_eq!(
@@ -702,7 +702,9 @@ fn malformed_metadata_is_never_treated_as_an_empty_success() {
     let mut failed = output("[]");
     failed.code = Some(1);
     for result in [output("not json"), truncated, failed] {
-        assert!(Apt(Raw(result.clone())).search("fixture", &cancel).is_err());
+        assert!(Apt::new(Raw(result.clone()))
+            .search("fixture", &cancel)
+            .is_err());
         let mut brew = Homebrew::new(Raw(result));
         brew.detect(&cancel).unwrap();
         assert!(brew.installed(&cancel).is_err());
