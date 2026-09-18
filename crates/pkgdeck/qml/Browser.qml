@@ -495,7 +495,7 @@ Controls.ApplicationWindow {
                                     Layout.preferredWidth: root.compact ? -1 : 202
                                     Layout.fillWidth: root.compact
                                     Controls.Label {
-                                        text: (modelData.kind === "package" ? (modelData.update === "available" ? "[^] " : (modelData.installed ? "[x] " : "[ ] ")) : "") + modelData.name
+                                        text: modelData.name
                                         color: root.ink
                                         font.bold: true
                                         textFormat: Text.PlainText

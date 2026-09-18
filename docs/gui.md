@@ -16,9 +16,9 @@ About. Sources reports actual source availability on the current computer;
 it does not invent recommendations or combine matching names across sources.
 Search submits on Enter or the Search button. Results use a virtualized ListView,
 with the selected package's description, scope, homepage, and dependencies below.
-Rows carry state markers: `[^]` for an available update, `[x]` for installed,
-and `[ ]` for not installed. Matching names remain separate
-source/architecture/scope identities.
+The VERSION column carries the state: a bare candidate means not installed,
+`· installed` marks installed packages, and `→` marks an available update.
+Matching names remain separate source/architecture/scope identities.
 
 Install, Remove, Upgrade, and Refresh source operate on the selected identity.
 Updates also provides **Upgrade all** (Ctrl+Shift+U), without selecting a row.

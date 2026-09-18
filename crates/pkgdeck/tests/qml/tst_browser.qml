@@ -363,7 +363,7 @@ TestCase {
         verify(logo !== null);
         verify(logo.source.toString().indexOf("logo.svg") >= 0);
     }
-    function test_upgrade_all_hint_and_state_markers() {
+    function test_upgrade_all_hint() {
         browser.openView("Updates");
         fake.rows = JSON.stringify([
             {kind: "package", name: "tool", source: "apt", architecture: "all", installed: "1", candidate: "2", update: "available", summary: "Updatable"},
