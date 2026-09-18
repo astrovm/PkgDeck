@@ -21,13 +21,13 @@ Controls.ApplicationWindow {
     readonly property var sourceNames: ["All available sources", "APT", "DNF", "Pacman", "Zypper", "Snap", "Homebrew", "AppImage", "Flatpak", "Cargo", "npm", "pnpm", "Bun", "pip", "pipx", "uv", "Composer", "RubyGems"]
     readonly property bool compact: width < 760
     readonly property bool dark: preferences.appearance === 1 || (preferences.appearance === 0 && Qt.styleHints.colorScheme === Qt.Dark)
-    readonly property color canvas: dark ? "#111820" : "#f3f5f8"
-    readonly property color surface: dark ? "#1b2531" : "#ffffff"
+    readonly property color canvas: dark ? "#000000" : "#f3f5f8"
+    readonly property color surface: dark ? "#101014" : "#ffffff"
     readonly property color ink: dark ? "#ecf1f8" : "#1c2b3e"
     readonly property color muted: dark ? "#a2b1c4" : "#57677e"
-    readonly property color line: dark ? "#334153" : "#dce3ec"
+    readonly property color line: dark ? "#2a2e37" : "#dce3ec"
     readonly property color accent: dark ? "#80b6ff" : "#245fc6"
-    readonly property color selection: dark ? "#283e59" : "#e8f0ff"
+    readonly property color selection: dark ? "#1a2740" : "#e8f0ff"
     color: canvas
     font.family: "sans-serif"
     font.pixelSize: 14
