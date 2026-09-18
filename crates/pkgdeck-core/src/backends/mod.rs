@@ -280,6 +280,7 @@ impl<T: Transport> Flatpak<T> {
                     installed_version: Some(fields[3].into()),
                     candidate_version: Some(fields[3].into()),
                     update: UpdateAvailability::Unknown,
+                    icon: None,
                 })
             })
             .collect()
@@ -338,6 +339,7 @@ impl<T: Transport> Flatpak<T> {
                     installed_version: None,
                     candidate_version: Some(fields[3].into()),
                     update: UpdateAvailability::Unknown,
+                    icon: None,
                 })
             })
             .collect()
@@ -403,8 +405,24 @@ impl<T: Transport> Backend for Flatpak<T> {
         Ok(result)
     }
     fn installed(&mut self, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
+        let home = self.transport.env("HOME").map(PathBuf::from);
         let mut result = self.list(cancel, false)?;
         result.extend(self.list(cancel, true)?);
+        for package in &mut result {
+            // Exported icons double as the installed check per scope.
+            let roots: Vec<PathBuf> = match &package.id.scope {
+                Scope::User { .. } => home
+                    .as_ref()
+                    .map(|home| home.join(".local/share/flatpak/exports"))
+                    .into_iter()
+                    .collect(),
+                Scope::System => vec![PathBuf::from("/var/lib/flatpak/exports")],
+                _ => vec![],
+            };
+            if !roots.is_empty() {
+                package.icon = flatpak_icon(&roots, &package.id.name);
+            }
+        }
         Ok(result)
     }
     fn details(
@@ -527,6 +545,113 @@ fn availability(result: Result<Completion, ExecutionError>) -> Result<Availabili
         Err(error) => Err(error.into()),
     }
 }
+
+/// Local application icons, resolved without network access for installed
+/// packages only. Remote catalog entries never carry icons: fetching them
+/// would add a download cache with eviction semantics on top of every
+/// backend. Names that cannot resolve keep the generic source icon.
+fn icon_file(dir: &std::path::Path, stem: &str) -> Option<PathBuf> {
+    for extension in ["png", "svg", "xpm"] {
+        let candidate = dir.join(format!("{stem}.{extension}"));
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Installed snaps expose their icon beside the desktop entry. `sysroot`
+/// is `/` on a real system and a fixture directory in tests.
+fn snap_icon(sysroot: &std::path::Path, name: &str) -> Option<PathBuf> {
+    if name.is_empty() || name.contains('/') {
+        return None;
+    }
+    icon_file(
+        &sysroot.join("snap").join(name).join("current/meta/gui"),
+        "icon",
+    )
+}
+
+/// Installed Flatpak applications export icons per installation scope.
+/// `export_roots` holds the `exports` directories, user scope first.
+fn flatpak_icon(export_roots: &[PathBuf], app_id: &str) -> Option<PathBuf> {
+    if !flatpak_id(app_id) {
+        return None;
+    }
+    for root in export_roots {
+        for size in ["128x128", "64x64", "48x48", "32x32"] {
+            let dir = root.join("share/icons/hicolor").join(size).join("apps");
+            if let Some(icon) = icon_file(&dir, app_id) {
+                return Some(icon);
+            }
+        }
+    }
+    None
+}
+
+/// Map installed Debian packages to their first desktop entry by scanning
+/// the dpkg file lists once per query. File names are `<package>.list` or
+/// `<package>:<arch>.list`; only GUI applications resolve.
+fn apt_desktop_map(info_dir: &std::path::Path) -> std::collections::BTreeMap<String, PathBuf> {
+    let mut map = std::collections::BTreeMap::new();
+    let entries = std::fs::read_dir(info_dir).into_iter().flatten().flatten();
+    for entry in entries {
+        let file = entry.file_name().to_string_lossy().into_owned();
+        let Some(stem) = file.strip_suffix(".list") else {
+            continue;
+        };
+        let package = stem.split_once(':').map_or(stem, |(name, _)| name);
+        if package.is_empty() || map.contains_key(package) {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(entry.path()) else {
+            continue;
+        };
+        if let Some(desktop) = content.lines().find(|line| {
+            line.strip_prefix("/usr/share/applications/")
+                .is_some_and(|path| path.ends_with(".desktop"))
+        }) {
+            map.insert(package.to_owned(), PathBuf::from(desktop));
+        }
+    }
+    map
+}
+
+/// Resolve a desktop entry's `Icon` value: absolute paths are used directly
+/// while bare names search the icon theme. `home` selects the user theme
+/// directory and is `None` when the sanitized environment hides it.
+fn desktop_icon(home: Option<&std::path::Path>, desktop: &std::path::Path) -> Option<PathBuf> {
+    let content = std::fs::read_to_string(desktop).ok()?;
+    let name = content
+        .lines()
+        .find_map(|line| line.strip_prefix("Icon="))?
+        .trim();
+    if name.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(name);
+    if path.is_absolute() {
+        return path.is_file().then_some(path);
+    }
+    if name.contains('/') {
+        return None;
+    }
+    let mut dirs = vec![
+        PathBuf::from("/usr/local/share/icons"),
+        PathBuf::from("/usr/share/icons"),
+    ];
+    if let Some(home) = home {
+        dirs.insert(0, home.join(".local/share/icons"));
+    }
+    for dir in &dirs {
+        for size in ["64x64", "48x48", "32x32"] {
+            if let Some(icon) = icon_file(&dir.join("hicolor").join(size).join("apps"), name) {
+                return Some(icon);
+            }
+        }
+    }
+    icon_file(&PathBuf::from("/usr/share/pixmaps"), name)
+}
 impl<T: Transport> Apt<T> {
     fn query(
         &self,
@@ -565,10 +690,17 @@ impl<T: Transport> Backend for Apt<T> {
             .collect())
     }
     fn installed(&mut self, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
+        let map = apt_desktop_map(std::path::Path::new("/var/lib/dpkg/info"));
+        let home = self.0.env("HOME").map(PathBuf::from);
         Ok(self
             .query("installed", "", "", cancel)?
             .into_iter()
-            .map(|d| d.package)
+            .map(|mut d| {
+                if let Some(desktop) = map.get(&d.package.id.name) {
+                    d.package.icon = desktop_icon(home.as_deref(), desktop);
+                }
+                d.package
+            })
             .collect())
     }
     fn details(
@@ -577,10 +709,19 @@ impl<T: Transport> Backend for Apt<T> {
         cancel: &Cancellation,
     ) -> Result<PackageDetails, EngineError> {
         self.target(id)?;
-        self.query("details", &id.name, &id.architecture, cancel)?
+        let mut details = self
+            .query("details", &id.name, &id.architecture, cancel)?
             .into_iter()
             .find(|d| d.package.id == *id)
-            .ok_or(EngineError::NotFound)
+            .ok_or(EngineError::NotFound)?;
+        if details.package.installed_version.is_some() {
+            let map = apt_desktop_map(std::path::Path::new("/var/lib/dpkg/info"));
+            let home = self.0.env("HOME").map(PathBuf::from);
+            if let Some(desktop) = map.get(&id.name) {
+                details.package.icon = desktop_icon(home.as_deref(), desktop);
+            }
+        }
+        Ok(details)
     }
     fn execute(
         &mut self,
@@ -705,6 +846,7 @@ impl<T: Transport> Homebrew<T> {
                         },
                         installed_version: installed,
                         candidate_version: candidate,
+                        icon: None,
                     },
                     description: f.desc.unwrap_or_default(),
                     homepage: (!f.homepage.is_empty()).then_some(f.homepage),
@@ -990,6 +1132,7 @@ impl<T: Transport> SystemManager<T> {
             installed_version: None,
             candidate_version: Some(version.into()),
             update: UpdateAvailability::Unknown,
+            icon: None,
         })
     }
     fn parse(&self, value: Vec<u8>, installed: bool) -> Result<Vec<Package>, EngineError> {
@@ -1108,6 +1251,13 @@ impl<T: Transport> SystemManager<T> {
         }
         Ok(id.name.clone())
     }
+    /// Local snap icons resolve straight from the filesystem, which doubles
+    /// as the installed check: remote catalog entries never match a file.
+    fn snap_icon(&self, package: &mut Package) {
+        if matches!(self.kind, ManagerKind::Snap) {
+            package.icon = snap_icon(std::path::Path::new("/"), &package.id.name);
+        }
+    }
 }
 impl<T: Transport> Backend for SystemManager<T> {
     fn id(&self) -> &str {
@@ -1129,7 +1279,11 @@ impl<T: Transport> Backend for SystemManager<T> {
         self.query(false, query, cancel)
     }
     fn installed(&mut self, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
-        self.query(true, "", cancel)
+        let mut packages = self.query(true, "", cancel)?;
+        for package in &mut packages {
+            self.snap_icon(package);
+        }
+        Ok(packages)
     }
     fn details(
         &mut self,
@@ -1137,11 +1291,12 @@ impl<T: Transport> Backend for SystemManager<T> {
         cancel: &Cancellation,
     ) -> Result<PackageDetails, EngineError> {
         let name = self.target(id)?;
-        let package = self
+        let mut package = self
             .query(false, &name, cancel)?
             .into_iter()
             .find(|package| package.id == *id)
             .ok_or(EngineError::NotFound)?;
+        self.snap_icon(&mut package);
         Ok(PackageDetails {
             description: package.summary.clone(),
             homepage: None,
@@ -1767,6 +1922,7 @@ impl<T: Transport> DevTool<T> {
                 },
                 installed_version: Some(installed),
                 candidate_version: candidate,
+                icon: None,
             },
             description: summary,
             homepage,
@@ -2511,6 +2667,7 @@ impl<T: Transport> Backend for DevTool<T> {
                 installed_version: None,
                 candidate_version: None,
                 update: UpdateAvailability::Unknown,
+                icon: None,
             });
         }
         Ok(results)
@@ -2620,24 +2777,30 @@ impl<T: Transport> Backend for DevTool<T> {
 
 /// Missing optional managers are omitted from automatic queries, but explicit selections
 /// and source discovery retain their unavailability. Detection failures are never hidden.
+///
+/// `sources` selects backends by id: empty means every available backend,
+/// while a non-empty set registers exactly those members (unavailable ones
+/// included, so discovery and explicit queries report their status).
 pub fn native_engine(
-    source: Option<&str>,
+    sources: &[String],
     discover: bool,
     authorization: Authorization,
     cancel: &Cancellation,
 ) -> Result<Engine, EngineError> {
-    if source.is_some_and(|s| {
+    if let Some(unknown) = sources.iter().find(|s| {
         ![
             "apt", "dnf", "pacman", "zypper", "snap", "homebrew", "appimage", "flatpak", "cargo",
             "npm", "pnpm", "bun", "pip", "pipx", "uv", "composer", "gem",
         ]
-        .contains(&s)
+        .contains(&s.as_str())
     }) {
-        return Err(EngineError::UnknownBackend(source.unwrap().into()));
+        return Err(EngineError::UnknownBackend(unknown.into()));
     }
+    let allowed = |id: &str| sources.is_empty() || sources.iter().any(|s| s == id);
+    let explicit = !sources.is_empty();
     let mut engine = Engine::default();
     let host = Host::current();
-    if !discover && source.is_none() {
+    if !discover && sources.is_empty() {
         if let Some(reason) = host.runtime.disabled_reason() {
             return Err(ExecutionError::Disabled(reason.into()).into());
         }
@@ -2650,22 +2813,22 @@ pub fn native_engine(
         host,
         authorization,
     });
-    if source.is_none_or(|s| s == "apt") {
+    if allowed("apt") {
         let status = apt.detect(cancel);
-        if discover || source.is_some() || !matches!(status, Ok(Availability::Unavailable(_))) {
+        if discover || explicit || !matches!(status, Ok(Availability::Unavailable(_))) {
             engine.note_detected("apt".into(), status);
             engine.register(apt)?;
         }
     }
-    if source.is_none_or(|s| s == "homebrew") {
+    if allowed("homebrew") {
         let status = brew.detect(cancel);
-        if discover || source.is_some() || !matches!(status, Ok(Availability::Unavailable(_))) {
+        if discover || explicit || !matches!(status, Ok(Availability::Unavailable(_))) {
             engine.note_detected("homebrew".into(), status);
             engine.register(brew)?;
         }
     }
     for backend in ["dnf", "pacman", "zypper", "snap"] {
-        if source.is_none_or(|source| source == backend) {
+        if allowed(backend) {
             let transport = NativeTransport {
                 host: Host::current(),
                 authorization,
@@ -2677,7 +2840,7 @@ pub fn native_engine(
                 "snap" => SystemManager::snap(transport),
                 _ => unreachable!(),
             };
-            if discover || source.is_some() {
+            if discover || explicit {
                 engine.register(manager)?;
                 continue;
             }
@@ -2688,10 +2851,10 @@ pub fn native_engine(
             }
         }
     }
-    if source.is_none_or(|s| s == "appimage") {
+    if allowed("appimage") {
         engine.register(AppImage::native())?;
     }
-    if source.is_none_or(|s| s == "flatpak") {
+    if allowed("flatpak") {
         engine.register(Flatpak::new(NativeTransport {
             host: Host::current(),
             authorization,
@@ -2735,13 +2898,13 @@ pub fn native_engine(
             DevTool::gem as fn(NativeTransport) -> DevTool<NativeTransport>,
         ),
     ] {
-        if source.is_none_or(|s| s == id) {
+        if allowed(id) {
             let mut tool = make(NativeTransport {
                 host: Host::current(),
                 authorization,
             });
             if discover
-                || source.is_some()
+                || explicit
                 || !matches!(tool.detect(cancel), Ok(Availability::Unavailable(_)))
             {
                 engine.register(tool)?;
@@ -2889,5 +3052,71 @@ mod tests {
             DevTool::<NativeTransport>::gem_version_cmp("1.0.a", "1.0.b"),
             Less
         );
+    }
+
+    #[test]
+    fn local_icons_resolve_without_network_access() {
+        let base = std::env::temp_dir().join(format!("pkgdeck-icons-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        // Snap layout: <sysroot>/snap/<name>/current/meta/gui/icon.<ext>.
+        let gui = base.join("snap/hello/current/meta/gui");
+        std::fs::create_dir_all(&gui).unwrap();
+        std::fs::write(gui.join("icon.svg"), "<svg/>").unwrap();
+        assert_eq!(snap_icon(&base, "hello"), Some(gui.join("icon.svg")));
+        assert_eq!(snap_icon(&base, "missing"), None);
+        assert_eq!(snap_icon(&base, "../evil"), None);
+        assert_eq!(snap_icon(&base, ""), None);
+        // Flatpak layout: <exports>/share/icons/hicolor/<size>/apps/<id>.<ext>.
+        let exports = base.join("exports");
+        let apps = exports.join("share/icons/hicolor/64x64/apps");
+        std::fs::create_dir_all(&apps).unwrap();
+        std::fs::write(apps.join("org.example.App.png"), "png").unwrap();
+        assert_eq!(
+            flatpak_icon(std::slice::from_ref(&exports), "org.example.App"),
+            Some(apps.join("org.example.App.png"))
+        );
+        assert_eq!(
+            flatpak_icon(std::slice::from_ref(&exports), "missing.app"),
+            None
+        );
+        assert_eq!(flatpak_icon(&[exports], "--evil"), None);
+        assert_eq!(flatpak_icon(&[], "org.example.App"), None);
+        // Debian layout: <info>/<pkg>[_<arch>].list naming desktop entries.
+        let info = base.join("info");
+        std::fs::create_dir_all(&info).unwrap();
+        std::fs::write(
+            info.join("brave-browser.list"),
+            "/usr/bin/brave\n/usr/share/applications/brave-browser.desktop\n",
+        )
+        .unwrap();
+        std::fs::write(info.join("plain.list"), "/usr/bin/plain\n").unwrap();
+        let map = apt_desktop_map(&info);
+        assert_eq!(
+            map.get("brave-browser"),
+            Some(&PathBuf::from(
+                "/usr/share/applications/brave-browser.desktop"
+            ))
+        );
+        assert!(!map.contains_key("plain"));
+        // A bare Icon= name resolves through the theme; absolute paths
+        // resolve directly when the file exists.
+        let real = base.join("real-icon.png");
+        std::fs::write(&real, "png").unwrap();
+        let desktop = base.join("myapp.desktop");
+        std::fs::write(
+            &desktop,
+            format!("[Desktop Entry]\nName=Mine\nIcon={}\n", real.display()),
+        )
+        .unwrap();
+        assert_eq!(desktop_icon(None, &desktop), Some(real));
+        std::fs::write(&desktop, "[Desktop Entry]\nName=Mine\n").unwrap();
+        assert_eq!(desktop_icon(None, &desktop), None);
+        std::fs::write(
+            &desktop,
+            "[Desktop Entry]\nName=Mine\nIcon=/nowhere/icon.png\n",
+        )
+        .unwrap();
+        assert_eq!(desktop_icon(None, &desktop), None);
+        std::fs::remove_dir_all(&base).unwrap();
     }
 }

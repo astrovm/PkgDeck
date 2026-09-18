@@ -680,7 +680,7 @@ pub fn run(terminal: &mut ratatui::DefaultTerminal, args: &Args) -> io::Result<(
                         // Details address one backend directly, skipping every
                         // other backend's detection roundtrip.
                         let source = match &job {
-                            Job::Details(id) => Some(id.backend.clone()),
+                            Job::Details(id) => vec![id.backend.clone()],
                             _ => source,
                         };
                         let mut deliver = |mut reply| {
@@ -692,7 +692,7 @@ pub fn run(terminal: &mut ratatui::DefaultTerminal, args: &Args) -> io::Result<(
                             let _ = send.send(reply);
                         };
                         match pkgdeck_core::backends::native_engine(
-                            source.as_deref(),
+                            &source,
                             discover,
                             auth.into(),
                             &token,
@@ -735,6 +735,7 @@ mod tests {
             installed_version: None,
             candidate_version: Some("1".into()),
             update: UpdateAvailability::Current,
+            icon: None,
         }
     }
     struct Fixture {

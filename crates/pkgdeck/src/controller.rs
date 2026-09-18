@@ -36,6 +36,9 @@ pub mod ffi {
         #[qinvokable]
         fn propose(self: Pin<&mut PackageController>, action: QString, index: i32);
         #[qinvokable]
+        #[cxx_name = "proposeChecked"]
+        fn propose_checked(self: Pin<&mut PackageController>, identities: QString);
+        #[qinvokable]
         fn confirm(self: Pin<&mut PackageController>, approved: bool);
         #[qinvokable]
         fn cancel(self: Pin<&mut PackageController>);
@@ -186,9 +189,7 @@ pub struct Controller {
     queued: Option<Job>,
     selected: Option<PackageId>,
     engine: Option<Engine>,
-    busy_since: Option<std::time::Instant>,
-    progressed: bool,
-    source: Option<String>,
+    source_filter: Vec<String>,
     sudo: bool,
     worker: Option<Worker>,
 }
@@ -211,9 +212,7 @@ impl Default for Controller {
             queued: None,
             selected: None,
             engine: None,
-            busy_since: None,
-            progressed: false,
-            source: None,
+            source_filter: Vec::new(),
             sudo: false,
             worker: None,
         }
@@ -238,23 +237,18 @@ fn encoded(value: impl serde::Serialize) -> QString {
 }
 /// Engine scope for a job: Details jobs address one backend directly, so the
 /// engine registers only that backend and skips every other backend's
-/// detection roundtrip. All other jobs use the session source filter.
-fn engine_source(job: &Job, filter: Option<&str>) -> Option<String> {
+/// detection roundtrip. All other jobs use the session source set, where an
+/// empty filter means every available backend.
+fn engine_source(job: &Job, filter: &[String]) -> Vec<String> {
     match job {
-        Job::Details(id) => Some(id.backend.clone()),
-        _ => filter.map(str::to_owned),
+        Job::Details(id) => vec![id.backend.clone()],
+        _ => filter.to_owned(),
     }
 }
 /// A finished details reply is fresh only while its identity is still the
 /// current selection; rapid navigation supersedes slower replies.
 fn details_fresh(selected: Option<&PackageId>, details: &PackageDetails) -> bool {
     selected.is_some_and(|id| *id == details.package.id)
-}
-/// Show the working status only for jobs that actually take time, so fast
-/// selections never flash it. Progress messages bypass this entirely.
-fn working_grace_exceeded(since: Option<std::time::Instant>, progressed: bool) -> bool {
-    !progressed
-        && since.is_some_and(|started| started.elapsed() > std::time::Duration::from_millis(200))
 }
 fn scope_label(scope: &Scope) -> String {
     match scope {
@@ -278,6 +272,36 @@ fn failure_details(failure: &BackendFailure) -> QString {
         "hint": format!("Check the {} source in the Sources view, or run the manager directly in a terminal for complete output.", failure.backend),
     }))
 }
+/// Upgrade operations for checked identities that still resolve to an
+/// installed package with an available update. Stale identities (rows that
+/// moved on or vanished) are skipped, never guessed.
+fn checked_upgrades(packages: &[Package], identities: &str) -> Vec<Operation> {
+    let Ok(raw) = serde_json::from_str::<Vec<Vec<serde_json::Value>>>(identities) else {
+        return vec![];
+    };
+    raw.into_iter()
+        .filter_map(|parts| {
+            let [backend, name, architecture, remote, scope] = parts.as_slice() else {
+                return None;
+            };
+            let id = PackageId {
+                backend: backend.as_str()?.to_owned(),
+                name: name.as_str()?.to_owned(),
+                architecture: architecture.as_str()?.to_owned(),
+                scope: serde_json::from_value(scope.clone()).ok()?,
+                remote: remote.as_str().map(str::to_owned),
+            };
+            packages
+                .iter()
+                .find(|package| package.id == id)
+                .filter(|package| {
+                    package.installed_version.is_some()
+                        && package.update == UpdateAvailability::Available
+                })
+                .map(|package| Operation::Upgrade(package.id.clone()))
+        })
+        .collect()
+}
 fn operation_label(operation: &Operation) -> String {
     let (action, id) = match operation {
         Operation::Install(id) => ("Install", id),
@@ -297,14 +321,14 @@ fn operation_label(operation: &Operation) -> String {
 fn package_row(p: &Package) -> Value {
     json!({"name": p.id.name, "source": p.id.backend, "architecture": p.id.architecture,
         "remote": p.id.remote, "scope": p.id.scope, "scope_label": scope_label(&p.id.scope), "summary": p.summary, "installed": p.installed_version,
-        "candidate": p.candidate_version, "update": p.update, "kind": "package"})
+        "candidate": p.candidate_version, "update": p.update, "kind": "package", "icon": p.icon})
 }
 impl ffi::PackageController {
     fn start(mut self: Pin<&mut Self>, job: Job) {
         if self.rust().worker.is_some() {
             return;
         }
-        let source = self.rust().source.clone();
+        let source_filter = self.rust().source_filter.clone();
         let authorization = if self.rust().sudo {
             Authorization::SudoNonInteractive
         } else {
@@ -341,7 +365,7 @@ impl ffi::PackageController {
                 }
             }
             match pkgdeck_core::backends::native_engine(
-                engine_source(&job, source.as_deref()).as_deref(),
+                &engine_source(&job, &source_filter),
                 sources_view,
                 authorization,
                 &token,
@@ -359,15 +383,13 @@ impl ffi::PackageController {
             cancel,
             job: worker_job,
         });
-        self.as_mut().rust_mut().busy_since = Some(std::time::Instant::now());
-        self.as_mut().rust_mut().progressed = false;
         self.set_busy(true);
     }
     pub fn load(
         mut self: Pin<&mut Self>,
         view: QString,
         query: QString,
-        source: QString,
+        sources: QString,
         sudo: bool,
     ) {
         if self.rust().worker.is_some() {
@@ -375,24 +397,30 @@ impl ffi::PackageController {
         }
         let view = view.to_string();
         let query = query.to_string();
-        let source = source.to_string();
+        // Comma-joined checked source ids; empty means every available source.
+        let sources: Vec<String> = sources
+            .to_string()
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .collect();
         if !["Search", "Installed", "Updates", "Sources"].contains(&view.as_str())
             || (view == "Search" && query.trim().is_empty())
         {
             return;
         }
-        if ![
-            "", "apt", "dnf", "pacman", "zypper", "snap", "homebrew", "appimage", "flatpak",
-            "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "composer", "gem",
-        ]
-        .contains(&source.as_str())
-        {
+        const KNOWN: &[&str] = &[
+            "apt", "dnf", "pacman", "zypper", "snap", "homebrew", "appimage", "flatpak", "cargo",
+            "npm", "pnpm", "bun", "pip", "pipx", "uv", "composer", "gem",
+        ];
+        if sources.iter().any(|s| !KNOWN.contains(&s.as_str())) {
             self.set_status("Unknown source.".into());
             return;
         }
         self.as_mut().set_upgradable(false);
         self.as_mut().rust_mut().updates_view = view == "Updates";
-        self.as_mut().rust_mut().source = (!source.is_empty()).then_some(source);
+        self.as_mut().rust_mut().source_filter = sources;
         self.as_mut().rust_mut().sudo = sudo;
         self.as_mut().rust_mut().detail_cache.clear();
         self.as_mut().rust_mut().packages.clear();
@@ -528,6 +556,30 @@ impl ffi::PackageController {
             self.as_mut().set_confirmation(QString::default());
         }
         self.rust_mut().pending = operation.map(Job::Write);
+    }
+    /// Queue an upgrade of the checked Updates rows. Identities are
+    /// re-resolved against the current package list: stale rows (moved on
+    /// or vanished while streaming) are skipped, never guessed. An empty
+    /// resolution clears any pending confirmation and says so in status.
+    pub fn propose_checked(mut self: Pin<&mut Self>, identities: QString) {
+        if self.rust().worker.is_some() {
+            return;
+        }
+        let operations = checked_upgrades(&self.rust().packages, &identities.to_string());
+        if operations.is_empty() {
+            self.as_mut().set_confirmation(QString::default());
+            self.as_mut()
+                .set_status("No selected packages can be upgraded.".into());
+            return;
+        }
+        let count = operations.len();
+        let labels = operations
+            .iter()
+            .map(operation_label)
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        self.as_mut().set_confirmation(format!("Upgrade {count} selected packages?\n\n{labels}\n\nEach source runs as one transaction. Native dependency changes may follow. Successful upgrades are not rolled back if another fails. Continue?").as_str().into());
+        self.rust_mut().pending = Some(Job::UpgradeAll(operations));
     }
     pub fn confirm(mut self: Pin<&mut Self>, approved: bool) {
         if self.rust().worker.is_some() {
@@ -670,7 +722,6 @@ impl ffi::PackageController {
             if joined.is_err() {
                 self.as_mut().set_status("Backend worker failed.".into());
             }
-            self.as_mut().rust_mut().busy_since = None;
             let queued = self.as_mut().rust_mut().queued.take();
             self.as_mut().set_busy(false);
             // A selection that arrived while the worker was busy starts now
@@ -679,21 +730,14 @@ impl ffi::PackageController {
                 self.start(job);
             }
         } else {
-            let mut progressed = false;
             for reply in replies {
                 match reply {
                     Reply::Partial(report) => self.as_mut().apply(Ok(Payload::Packages(report))),
                     Reply::Progress(message) => {
-                        progressed = true;
                         self.as_mut().set_status(message.as_str().into());
                     }
                     _ => {}
                 }
-            }
-            if progressed {
-                self.as_mut().rust_mut().progressed = true;
-            } else if working_grace_exceeded(self.rust().busy_since, self.rust().progressed) {
-                self.as_mut().set_status("Working…".into());
             }
         }
     }
@@ -789,6 +833,7 @@ mod tests {
             installed_version: Some("1".into()),
             candidate_version: Some("2".into()),
             update: UpdateAvailability::Available,
+            icon: None,
         };
         let mut engine = Engine::default();
         engine
@@ -808,6 +853,53 @@ mod tests {
             .is_empty());
         // Updates never narrows by the query; stale field text is ignored.
         assert_eq!(load(&mut engine, "Updates", "missing").packages.len(), 1);
+    }
+    #[test]
+    fn checked_identities_resolve_only_to_upgradable_packages() {
+        fn package(name: &str, installed: bool, update: UpdateAvailability) -> Package {
+            Package {
+                id: PackageId {
+                    backend: "fixture".into(),
+                    name: name.into(),
+                    architecture: "all".into(),
+                    scope: Scope::System,
+                    remote: None,
+                },
+                display_name: name.into(),
+                summary: "Fixture".into(),
+                installed_version: installed.then(|| "1".into()),
+                candidate_version: Some("2".into()),
+                update,
+                icon: None,
+            }
+        }
+        let packages = vec![
+            package("upgradable", true, UpdateAvailability::Available),
+            package("current", true, UpdateAvailability::Current),
+            package("uninstalled", false, UpdateAvailability::Available),
+        ];
+        // Identity shape mirrors QML rowIdentity: [source, name, arch, remote, scope].
+        let row = |name: &str| {
+            vec![
+                serde_json::json!("fixture"),
+                serde_json::json!(name),
+                serde_json::json!("all"),
+                serde_json::json!(null),
+                serde_json::json!("system"),
+            ]
+        };
+        let identities = serde_json::to_string(&vec![
+            row("upgradable"),
+            row("current"),
+            row("uninstalled"),
+            row("vanished"),
+            vec![serde_json::json!("bogus")],
+        ])
+        .unwrap();
+        let operations = checked_upgrades(&packages, &identities);
+        assert_eq!(operations.len(), 1);
+        assert!(matches!(&operations[0], Operation::Upgrade(id) if id.name == "upgradable"));
+        assert!(checked_upgrades(&packages, "not json").is_empty());
     }
     #[test]
     fn failure_details_carry_backend_error_and_hint() {
@@ -832,20 +924,23 @@ mod tests {
             remote: None,
         };
         assert_eq!(
-            engine_source(&Job::Details(id.clone()), None),
-            Some("homebrew".into())
+            engine_source(&Job::Details(id.clone()), &[]),
+            vec!["homebrew".to_string()]
         );
         assert_eq!(
-            engine_source(&Job::Details(id), Some("apt")),
-            Some("homebrew".into())
+            engine_source(&Job::Details(id), &["apt".to_string()]),
+            vec!["homebrew".to_string()]
         );
         assert_eq!(
-            engine_source(&Job::Load("Installed".into(), "".into()), Some("apt")),
-            Some("apt".into())
+            engine_source(
+                &Job::Load("Installed".into(), "".into()),
+                &["apt".to_string()]
+            ),
+            vec!["apt".to_string()]
         );
         assert_eq!(
-            engine_source(&Job::Load("Installed".into(), "".into()), None),
-            None
+            engine_source(&Job::Load("Installed".into(), "".into()), &[]),
+            Vec::<String>::new()
         );
     }
     #[test]
@@ -867,6 +962,7 @@ mod tests {
                 installed_version: None,
                 candidate_version: None,
                 update: UpdateAvailability::Unknown,
+                icon: None,
             },
             description: String::new(),
             homepage: None,
@@ -875,26 +971,6 @@ mod tests {
         assert!(details_fresh(Some(&id), &details));
         assert!(!details_fresh(None, &details));
         assert!(!details_fresh(Some(&other), &details));
-    }
-    #[test]
-    fn working_status_waits_out_fast_jobs() {
-        assert!(!working_grace_exceeded(None, false));
-        assert!(!working_grace_exceeded(
-            Some(std::time::Instant::now()),
-            false
-        ));
-        assert!(!working_grace_exceeded(
-            Some(std::time::Instant::now()),
-            true
-        ));
-        assert!(working_grace_exceeded(
-            Some(std::time::Instant::now() - std::time::Duration::from_millis(500)),
-            false
-        ));
-        assert!(!working_grace_exceeded(
-            Some(std::time::Instant::now() - std::time::Duration::from_millis(500)),
-            true
-        ));
     }
     #[test]
     fn loads_stream_partials_before_the_terminal_report() {
@@ -911,6 +987,7 @@ mod tests {
             installed_version: Some("1".into()),
             candidate_version: Some("2".into()),
             update: UpdateAvailability::Available,
+            icon: None,
         };
         let mut engine = Engine::default();
         engine
@@ -952,6 +1029,7 @@ mod tests {
             installed_version: Some("1".into()),
             candidate_version: Some("2".into()),
             update: UpdateAvailability::Available,
+            icon: None,
         };
         assert_eq!(package_row(&package)["source"], "fixture");
         assert!(encoded(package_row(&package))

@@ -120,6 +120,7 @@ impl AppImage {
             } else {
                 UpdateAvailability::Current
             },
+            icon: None,
         })
     }
     fn installed_packages(&self) -> Result<Vec<Package>, EngineError> {
@@ -227,6 +228,7 @@ impl AppImage {
                         } else {
                             UpdateAvailability::Current
                         },
+                        icon: None,
                     },
                     desktop,
                 ))
@@ -359,6 +361,7 @@ impl Backend for AppImage {
                 installed_version: None,
                 candidate_version: None,
                 update: UpdateAvailability::Unknown,
+                icon: None,
             }]);
         }
         let query = query.to_ascii_lowercase();

@@ -37,6 +37,10 @@ pub struct Package {
     pub candidate_version: Option<String>,
     /// Backends decide upgrade availability using their own version semantics.
     pub update: UpdateAvailability,
+    /// Local icon file for installed packages, resolved without network
+    /// access where the backend can provide one. Absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<PathBuf>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq)]

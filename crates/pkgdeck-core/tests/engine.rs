@@ -37,6 +37,7 @@ fn package(id: PackageId) -> Package {
         installed_version: None,
         candidate_version: Some("1.0".into()),
         update: UpdateAvailability::Unknown,
+        icon: None,
     }
 }
 fn selector() -> Selector {
