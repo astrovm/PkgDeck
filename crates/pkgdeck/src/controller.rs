@@ -60,33 +60,47 @@ enum Payload {
 }
 enum Reply {
     Progress(String),
+    Partial(PackageReport),
     Done(Result<Payload, EngineError>),
+    Engine(Engine),
 }
 fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn FnMut(Reply)) {
+    fn filter_updates(report: &mut PackageReport) {
+        report
+            .packages
+            .retain(|p| p.update == UpdateAvailability::Available);
+    }
+    // The Installed view filters client-side by substring; other views
+    // ignore the query so stale field text never narrows them. Failures
+    // are preserved so partial results stay visible.
+    fn filter_installed(report: &mut PackageReport, query: &str) {
+        if !query.trim().is_empty() {
+            let needle = query.trim().to_lowercase();
+            report.packages.retain(|p| {
+                p.id.name.to_lowercase().contains(&needle)
+                    || p.summary.to_lowercase().contains(&needle)
+            });
+        }
+    }
     let result = match job {
         Job::Load(view, query) => {
             if view == "Sources" {
                 Ok(Payload::Sources(engine.discover(cancel)))
+            } else if view == "Search" {
+                // Stream cumulative partials so fast backends render while
+                // slow ones still query; the terminal emission below carries
+                // the same deterministic report as a synchronous query.
+                let mut send_partial = |partial| send(Reply::Partial(partial));
+                let report = engine.search_stream(&query, cancel, &mut send_partial);
+                Ok(Payload::Packages(report))
             } else {
-                let mut report = if view == "Search" {
-                    engine.search(&query, cancel)
-                } else {
-                    engine.installed(cancel)
-                };
+                // Installed and Updates stay synchronous: upgrade gating
+                // needs complete failures, which partials cannot promise.
+                let mut report = engine.installed(cancel);
                 if view == "Updates" {
-                    report
-                        .packages
-                        .retain(|p| p.update == UpdateAvailability::Available);
-                }
-                // The Installed view filters client-side by substring; other
-                // views ignore the query so stale field text never narrows
-                // them. Failures are preserved so partial results stay visible.
-                if view == "Installed" && !query.trim().is_empty() {
-                    let needle = query.trim().to_lowercase();
-                    report.packages.retain(|p| {
-                        p.id.name.to_lowercase().contains(&needle)
-                            || p.summary.to_lowercase().contains(&needle)
-                    });
+                    filter_updates(&mut report);
+                } else {
+                    filter_installed(&mut report, &query);
                 }
                 Ok(Payload::Packages(report))
             }
@@ -145,6 +159,7 @@ struct Worker {
     handle: thread::JoinHandle<()>,
     receiver: mpsc::Receiver<Reply>,
     cancel: Cancellation,
+    job: Job,
 }
 impl Drop for Controller {
     fn drop(&mut self) {
@@ -168,6 +183,11 @@ pub struct Controller {
     detail_cache: BTreeMap<PackageId, QString>,
     sources: Vec<Source>,
     pending: Option<Job>,
+    queued: Option<Job>,
+    selected: Option<PackageId>,
+    engine: Option<Engine>,
+    busy_since: Option<std::time::Instant>,
+    progressed: bool,
     source: Option<String>,
     sudo: bool,
     worker: Option<Worker>,
@@ -188,6 +208,11 @@ impl Default for Controller {
             detail_cache: BTreeMap::new(),
             sources: vec![],
             pending: None,
+            queued: None,
+            selected: None,
+            engine: None,
+            busy_since: None,
+            progressed: false,
             source: None,
             sudo: false,
             worker: None,
@@ -210,6 +235,26 @@ fn encoded(value: impl serde::Serialize) -> QString {
         .expect("serializable frontend data")
         .as_str()
         .into()
+}
+/// Engine scope for a job: Details jobs address one backend directly, so the
+/// engine registers only that backend and skips every other backend's
+/// detection roundtrip. All other jobs use the session source filter.
+fn engine_source(job: &Job, filter: Option<&str>) -> Option<String> {
+    match job {
+        Job::Details(id) => Some(id.backend.clone()),
+        _ => filter.map(str::to_owned),
+    }
+}
+/// A finished details reply is fresh only while its identity is still the
+/// current selection; rapid navigation supersedes slower replies.
+fn details_fresh(selected: Option<&PackageId>, details: &PackageDetails) -> bool {
+    selected.is_some_and(|id| *id == details.package.id)
+}
+/// Show the working status only for jobs that actually take time, so fast
+/// selections never flash it. Progress messages bypass this entirely.
+fn working_grace_exceeded(since: Option<std::time::Instant>, progressed: bool) -> bool {
+    !progressed
+        && since.is_some_and(|started| started.elapsed() > std::time::Duration::from_millis(200))
 }
 fn scope_label(scope: &Scope) -> String {
     match scope {
@@ -268,18 +313,43 @@ impl ffi::PackageController {
         let cancel = Cancellation::default();
         let token = cancel.clone();
         let (sender, receiver) = mpsc::channel();
+        let worker_job = job.clone();
+        // Loads rebuild for fresh discovery; the previous engine is dropped.
+        // Every other job inherits the warm engine when one survived.
+        let cached = self.as_mut().rust_mut().engine.take();
         let handle = thread::spawn(move || {
             let sources_view = matches!(&job, Job::Load(view, _) if view == "Sources");
             let mut send = |reply| {
                 let _ = sender.send(reply);
             };
+            // Fast path: Details against a warm engine reuse detected state
+            // outright. A filter change since discovery surfaces as
+            // UnknownBackend and falls through to the scoped rebuild below.
+            if let (Job::Details(id), Some(mut engine)) = (&job, cached) {
+                match engine.details_reuse(id, &token) {
+                    Ok(details) => {
+                        send(Reply::Done(Ok(Payload::Details(Box::new(details)))));
+                        send(Reply::Engine(engine));
+                        return;
+                    }
+                    Err(EngineError::UnknownBackend(_)) => {}
+                    Err(error) => {
+                        send(Reply::Done(Err(error)));
+                        send(Reply::Engine(engine));
+                        return;
+                    }
+                }
+            }
             match pkgdeck_core::backends::native_engine(
-                source.as_deref(),
+                engine_source(&job, source.as_deref()).as_deref(),
                 sources_view,
                 authorization,
                 &token,
             ) {
-                Ok(mut engine) => execute(&mut engine, job, &token, &mut send),
+                Ok(mut engine) => {
+                    execute(&mut engine, job, &token, &mut send);
+                    send(Reply::Engine(engine));
+                }
                 Err(error) => send(Reply::Done(Err(error))),
             }
         });
@@ -287,8 +357,10 @@ impl ffi::PackageController {
             handle,
             receiver,
             cancel,
+            job: worker_job,
         });
-        self.as_mut().set_status("Working…".into());
+        self.as_mut().rust_mut().busy_since = Some(std::time::Instant::now());
+        self.as_mut().rust_mut().progressed = false;
         self.set_busy(true);
     }
     pub fn load(
@@ -327,23 +399,39 @@ impl ffi::PackageController {
         self.as_mut().rust_mut().failures.clear();
         self.as_mut().rust_mut().sources.clear();
         self.as_mut().rust_mut().pending = None;
+        self.as_mut().rust_mut().queued = None;
+        self.as_mut().rust_mut().selected = None;
         self.as_mut().set_confirmation(QString::default());
         self.as_mut().set_rows("[]".into());
         self.as_mut().set_details("{}".into());
         self.start(Job::Load(view, query));
     }
     pub fn select(mut self: Pin<&mut Self>, index: i32) {
-        if self.rust().worker.is_some() {
-            return;
-        }
         if let Some(package) = usize::try_from(index)
             .ok()
             .and_then(|i| self.rust().packages.get(i))
             .cloned()
         {
+            self.as_mut().rust_mut().selected = Some(package.id.clone());
             if let Some(details) = self.rust().detail_cache.get(&package.id).cloned() {
                 self.as_mut().set_details(details);
                 self.set_status("Package details loaded.".into());
+                return;
+            }
+            // A running Details job is stale the moment the selection moves:
+            // cancel it and queue the new identity. A selection that lands
+            // while rows stream in queues behind the load instead. Writes
+            // are never preempted; their selection simply waits.
+            if let Some(worker) = &self.rust().worker {
+                if matches!(worker.job, Job::Details(_)) {
+                    worker.cancel.cancel();
+                    self.as_mut().rust_mut().queued = Some(Job::Details(package.id));
+                    return;
+                }
+                if matches!(worker.job, Job::Load(..)) {
+                    self.as_mut().rust_mut().queued = Some(Job::Details(package.id));
+                    return;
+                }
                 return;
             }
             self.as_mut().set_details(encoded(
@@ -445,6 +533,7 @@ impl ffi::PackageController {
             return;
         }
         let pending = self.as_mut().rust_mut().pending.take();
+        self.as_mut().rust_mut().queued = None;
         self.as_mut().set_confirmation(QString::default());
         if approved {
             if let Some(op) = pending {
@@ -453,6 +542,11 @@ impl ffi::PackageController {
         }
     }
     pub fn cancel(mut self: Pin<&mut Self>) {
+        if self.rust().worker.is_some() {
+            // An explicit cancellation also drops any queued selection: the
+            // user asked everything to stop, not to continue afterwards.
+            self.as_mut().rust_mut().queued = None;
+        }
         if let Some(worker) = &self.rust().worker {
             worker.cancel.cancel();
             self.as_mut().set_status(
@@ -462,7 +556,15 @@ impl ffi::PackageController {
     }
     fn apply(mut self: Pin<&mut Self>, result: Result<Payload, EngineError>) {
         match result {
-            Err(e) => self.set_status(e.to_string().as_str().into()),
+            Err(e) => {
+                // A superseded Details job ends cancelled once its replacement
+                // is queued; that abort carries no news worth flashing.
+                let superseded =
+                    matches!(e, EngineError::Cancelled) && self.rust().queued.is_some();
+                if !superseded {
+                    self.set_status(e.to_string().as_str().into());
+                }
+            }
             Ok(Payload::Packages(report)) => {
                 let upgradable = self.rust().updates_view
                     && report.failures.is_empty()
@@ -510,8 +612,12 @@ impl ffi::PackageController {
                     .rust_mut()
                     .detail_cache
                     .insert(details.package.id.clone(), data.clone());
-                self.as_mut().set_details(data);
-                self.set_status("Package details loaded.".into());
+                // A superseded reply still warms the cache, but only the
+                // current selection may take over the details panel.
+                if details_fresh(self.rust().selected.as_ref(), &details) {
+                    self.as_mut().set_details(data);
+                    self.set_status("Package details loaded.".into());
+                }
             }
             Ok(Payload::Batch(status)) => {
                 // Clear the entire snapshot even on partial failure: any native write may
@@ -550,19 +656,43 @@ impl ffi::PackageController {
             let worker = self.as_mut().rust_mut().worker.take().unwrap();
             let joined = worker.handle.join();
             for reply in replies.into_iter().chain(worker.receiver.try_iter()) {
-                if let Reply::Done(result) = reply {
-                    self.as_mut().apply(result);
+                match reply {
+                    // The join above guarantees the thread finished sending.
+                    Reply::Engine(engine) => {
+                        self.as_mut().rust_mut().engine = Some(engine);
+                    }
+                    Reply::Partial(report) => self.as_mut().apply(Ok(Payload::Packages(report))),
+                    Reply::Done(result) => self.as_mut().apply(result),
+                    Reply::Progress(_) => {}
                 }
             }
             if joined.is_err() {
                 self.as_mut().set_status("Backend worker failed.".into());
             }
-            self.set_busy(false);
+            self.as_mut().rust_mut().busy_since = None;
+            let queued = self.as_mut().rust_mut().queued.take();
+            self.as_mut().set_busy(false);
+            // A selection that arrived while the worker was busy starts now
+            // that the previous job has fully terminated.
+            if let Some(job) = queued {
+                self.start(job);
+            }
         } else {
+            let mut progressed = false;
             for reply in replies {
-                if let Reply::Progress(message) = reply {
-                    self.as_mut().set_status(message.as_str().into());
+                match reply {
+                    Reply::Partial(report) => self.as_mut().apply(Ok(Payload::Packages(report))),
+                    Reply::Progress(message) => {
+                        progressed = true;
+                        self.as_mut().set_status(message.as_str().into());
+                    }
+                    _ => {}
                 }
+            }
+            if progressed {
+                self.as_mut().rust_mut().progressed = true;
+            } else if working_grace_exceeded(self.rust().busy_since, self.rust().progressed) {
+                self.as_mut().set_status("Working…".into());
             }
         }
     }
@@ -690,6 +820,120 @@ mod tests {
         let text = failure_details(&failure).to_string();
         assert!(text.contains("npm ls failed: boom"));
         assert!(text.contains("Sources view"));
+    }
+    #[test]
+    fn details_jobs_scope_their_own_backend() {
+        let id = PackageId {
+            backend: "homebrew".into(),
+            name: "synthetic".into(),
+            architecture: "all".into(),
+            scope: Scope::System,
+            remote: None,
+        };
+        assert_eq!(
+            engine_source(&Job::Details(id.clone()), None),
+            Some("homebrew".into())
+        );
+        assert_eq!(
+            engine_source(&Job::Details(id), Some("apt")),
+            Some("homebrew".into())
+        );
+        assert_eq!(
+            engine_source(&Job::Load("Installed".into(), "".into()), Some("apt")),
+            Some("apt".into())
+        );
+        assert_eq!(
+            engine_source(&Job::Load("Installed".into(), "".into()), None),
+            None
+        );
+    }
+    #[test]
+    fn stale_details_replies_never_take_the_panel() {
+        let id = PackageId {
+            backend: "fixture".into(),
+            name: "synthetic".into(),
+            architecture: "all".into(),
+            scope: Scope::System,
+            remote: None,
+        };
+        let mut other = id.clone();
+        other.name = "other".into();
+        let details = PackageDetails {
+            package: Package {
+                id: id.clone(),
+                display_name: "Synthetic".into(),
+                summary: "Fixture".into(),
+                installed_version: None,
+                candidate_version: None,
+                update: UpdateAvailability::Unknown,
+            },
+            description: String::new(),
+            homepage: None,
+            dependencies: vec![],
+        };
+        assert!(details_fresh(Some(&id), &details));
+        assert!(!details_fresh(None, &details));
+        assert!(!details_fresh(Some(&other), &details));
+    }
+    #[test]
+    fn working_status_waits_out_fast_jobs() {
+        assert!(!working_grace_exceeded(None, false));
+        assert!(!working_grace_exceeded(
+            Some(std::time::Instant::now()),
+            false
+        ));
+        assert!(!working_grace_exceeded(
+            Some(std::time::Instant::now()),
+            true
+        ));
+        assert!(working_grace_exceeded(
+            Some(std::time::Instant::now() - std::time::Duration::from_millis(500)),
+            false
+        ));
+        assert!(!working_grace_exceeded(
+            Some(std::time::Instant::now() - std::time::Duration::from_millis(500)),
+            true
+        ));
+    }
+    #[test]
+    fn loads_stream_partials_before_the_terminal_report() {
+        let package = Package {
+            id: PackageId {
+                backend: "fixture".into(),
+                name: "synthetic".into(),
+                architecture: "all".into(),
+                scope: Scope::System,
+                remote: None,
+            },
+            display_name: "Synthetic".into(),
+            summary: "Fixture".into(),
+            installed_version: Some("1".into()),
+            candidate_version: Some("2".into()),
+            update: UpdateAvailability::Available,
+        };
+        let mut engine = Engine::default();
+        engine
+            .register(Fixture {
+                package: package.clone(),
+                fail: false,
+            })
+            .unwrap();
+        let mut replies = vec![];
+        execute(
+            &mut engine,
+            Job::Load("Search".into(), "synthetic".into()),
+            &Cancellation::default(),
+            &mut |r| replies.push(r),
+        );
+        assert_eq!(replies.len(), 2);
+        let partial = match replies.remove(0) {
+            Reply::Partial(report) => report,
+            _ => panic!("expected a streaming partial first"),
+        };
+        match replies.remove(0) {
+            Reply::Done(Ok(Payload::Packages(report))) => assert_eq!(report, partial),
+            _ => panic!("expected the terminal report last"),
+        }
     }
     #[test]
     fn jobs_keep_source_identity_native_updates_and_typed_failures() {

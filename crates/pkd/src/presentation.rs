@@ -173,7 +173,14 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
             ("Homepage", &data["homepage"]),
             ("Dependencies", &data["dependencies"]),
         ] {
-            output.push_str(&format!("{label:>12}  {}\n", value(field)));
+            // A missing installed version means not installed, matching the
+            // state legend; every other null stays a plain Unavailable.
+            let text = if label == "Installed" && field.is_null() {
+                "not installed".into()
+            } else {
+                value(field)
+            };
+            output.push_str(&format!("{label:>12}  {text}\n"));
         }
     } else if let Some(sources) = data["sources"].as_array() {
         let rows = sources
@@ -259,6 +266,18 @@ mod tests {
             false
         )
         .contains("Dependencies  library"));
+        let uninstalled = human(
+            &json!({"package":{"id":{"name":"synthetic","backend":"fixture","architecture":"all","scope":"system"},"installed_version":null}}),
+            80,
+            false,
+        );
+        assert!(uninstalled.contains("Installed  not installed"));
+        let installed = human(
+            &json!({"package":{"id":{"name":"synthetic","backend":"fixture","architecture":"all","scope":"system"},"installed_version":"1.0"}}),
+            80,
+            false,
+        );
+        assert!(installed.contains("Installed  1.0"));
         assert!(human(&json!({"sources":[{"backend":"fixture","availability":{"Ok":"available"},"capabilities":["search"]}]}), 100, false).contains("available"));
         assert!(human(
             &json!({"packages":[],"failures":[{"backend":"fixture","error":"offline"}]}),

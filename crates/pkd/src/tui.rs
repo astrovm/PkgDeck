@@ -36,17 +36,21 @@ fn perform(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
     match job {
         Job::Load(View::Sources, _) => send(Reply::Sources(engine.discover(cancel))),
         Job::Load(view, query) => {
-            let mut report = if view == View::Search {
-                engine.search(&query, cancel)
+            if view == View::Search {
+                // Stream cumulative partials like the GUI; Updates stays
+                // synchronous below so upgrade gating sees complete failures.
+                engine.search_stream(&query, cancel, &mut |partial| {
+                    send(Reply::Packages(partial))
+                });
             } else {
-                engine.installed(cancel)
-            };
-            if view == View::Updates {
-                report
-                    .packages
-                    .retain(|p| p.update == UpdateAvailability::Available);
+                let mut report = engine.installed(cancel);
+                if view == View::Updates {
+                    report
+                        .packages
+                        .retain(|p| p.update == UpdateAvailability::Available);
+                }
+                send(Reply::Packages(report));
             }
-            send(Reply::Packages(report));
         }
         Job::Details(id) => match engine.details(&id, cancel) {
             Ok(details) => send(Reply::Details(Box::new(details))),
@@ -178,8 +182,18 @@ impl App {
                         .collect::<Vec<_>>()
                         .join("; ")
                 };
+                // Streaming partials re-sort rows around the selection:
+                // follow the selected identity instead of the row index.
+                let keep = self
+                    .table
+                    .selected()
+                    .and_then(|i| self.packages.get(i))
+                    .map(|p| p.id.clone());
                 self.packages = report.packages;
-                self.table.select((!self.packages.is_empty()).then_some(0));
+                let selected = keep
+                    .and_then(|id| self.packages.iter().position(|p| p.id == id))
+                    .or((!self.packages.is_empty()).then_some(0));
+                self.table.select(selected);
             }
             Reply::Sources(sources) => {
                 self.sources = sources;
@@ -663,6 +677,12 @@ pub fn run(terminal: &mut ratatui::DefaultTerminal, args: &Args) -> io::Result<(
                     app.status = "Loading…".into();
                     let handle = thread::spawn(move || {
                         let discover = matches!(job, Job::Load(View::Sources, _));
+                        // Details address one backend directly, skipping every
+                        // other backend's detection roundtrip.
+                        let source = match &job {
+                            Job::Details(id) => Some(id.backend.clone()),
+                            _ => source,
+                        };
                         let mut deliver = |mut reply| {
                             if let Reply::Packages(report) = &mut reply {
                                 report.packages.retain(|p| {
@@ -965,6 +985,36 @@ mod tests {
         let screen = render(&mut app, 100, 30);
         assert!(screen.contains("PkgDeck"));
         assert!(screen.contains("cancel/back"));
+    }
+
+    #[test]
+    fn streaming_partials_keep_selection_on_identity() {
+        fn report(names: &[&str]) -> PackageReport {
+            PackageReport {
+                packages: names
+                    .iter()
+                    .map(|name| {
+                        let mut package = package();
+                        package.id.name = (*name).into();
+                        package.display_name = (*name).into();
+                        package
+                    })
+                    .collect(),
+                failures: vec![],
+            }
+        }
+        let mut app = App::default();
+        app.reply(Reply::Packages(report(&["alpha", "beta"])));
+        assert_eq!(app.table.selected(), Some(0));
+        key(&mut app, KeyCode::Down);
+        assert_eq!(app.table.selected(), Some(1));
+        // A partial inserting a row above follows the identity, not the index.
+        app.reply(Reply::Packages(report(&["aaa", "alpha", "beta"])));
+        assert_eq!(app.table.selected(), Some(2));
+        assert_eq!(app.packages[2].id.name, "beta");
+        // A vanished selection falls back to the first row, never a wrong one.
+        app.reply(Reply::Packages(report(&["aaa"])));
+        assert_eq!(app.table.selected(), Some(0));
     }
 
     #[test]

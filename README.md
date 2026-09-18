@@ -13,7 +13,7 @@ Both use the shared `pkgdeck-core` Rust library.
 
 ## Preview
 
-Soft design references (including planned backends). See the [implemented GUI](docs/gui.md)
+Real captures from the current app. See the [implemented GUI](docs/gui.md)
 and [terminal guide](docs/tui.md) for the current interface and supported behavior.
 
 ![PkgDeck GUI](docs/screenshots/pkgdeck-gui.png)
@@ -28,7 +28,7 @@ and [terminal guide](docs/tui.md) for the current interface and supported behavi
 - **Applications:** Flatpak, Snap, Homebrew (Linux formulae), AppImage.
 - **Development:** Cargo, npm, pnpm, Bun, pip, pipx, uv, Composer, RubyGems.
 
-Development package managers will initially focus on user-installed command-line tools rather than project dependencies. pip support will be restricted to explicitly selected virtual environments.
+Development package managers focus on user-installed command-line tools rather than project dependencies. pip support is restricted to explicitly selected virtual environments.
 
 AppImage support will initially cover importing local Type 2 AppImages, desktop integration, launching, and removal.
 
@@ -60,7 +60,9 @@ Running `pkd` without arguments opens the interactive TUI:
 pkd
 ```
 
-APT and Linux Homebrew CLI commands are implemented:
+Package lifecycle commands are implemented for every supported backend
+(`apt`, `dnf`, `pacman`, `zypper`, `snap`, `homebrew`, `appimage`, `flatpak`,
+`cargo`, `npm`, `pnpm`, `bun`, `pip`, `pipx`, `uv`, `composer`, `gem`):
 
 ```sh
 pkd search neovim
@@ -82,11 +84,11 @@ If stdin or stdout is not attached to a terminal, `pkd` without arguments must n
 
 ## Implementation plan
 
-The screenshots are soft references for information hierarchy and interaction:
+The captures above show information hierarchy and interaction:
 source/version columns, selection-linked details, clear actions, and readable
 progress. Layouts must adapt to the window or terminal. Theme colors, icons,
 available packages, and progress indicators must reflect actual platform and
-backend capabilities rather than reproduce the mockups literally.
+backend capabilities.
 
 ### 1. Workspace and build pipeline — implemented
 
@@ -203,7 +205,12 @@ source identity. The GUI adds light/dark/system appearance, contextual actions,
 and compact navigation. The TUI adds styled tables and readable operation
 confirmations. Human CLI output uses aligned tables and labeled details; `--json`
 retains its versioned contract. Terminal color is omitted when output is piped or
-`NO_COLOR` is set (CLI).
+`NO_COLOR` is set (CLI and TUI).
+
+Search results stream in per backend in both interactive frontends, and the
+selection follows the same package identity across partials. Package details
+reuse a shared cache, each backend is detected once per session instead of
+once per selection, and failed source rows are selectable for diagnostics.
 
 GUI detail snapshots avoid repeated native queries and are invalidated on reload
 or writes. The TUI no longer redraws continuously while idle. Local checks cover
@@ -246,7 +253,7 @@ Add each wave only after its advertised capabilities pass integration tests.
 
 | Wave | Backends | Initial scope |
 | --- | --- | --- |
-| 2 | AppImage, Flatpak | Local Type 2 imports; Flatpak user/system installations. |
+| 2 | AppImage, Flatpak | Local Type 2 imports; Flatpak user/system installations. **Implemented.** |
 | 3 | DNF, Pacman, Zypper, Snap | Distro-specific operations and Snap lifecycle. **Implemented.** |
 | 4 | Cargo, npm, pnpm, Bun | User-installed command-line tools. **Implemented.** |
 | 5 | pip, pipx, uv, Composer, RubyGems | Explicit environments and isolated user tools. **Implemented.** |
@@ -281,7 +288,8 @@ Use `scripts/verify.sh full --engine podman` for the pinned rootless build
 environment and `scripts/verify.sh containers --engine podman` for disposable APT
 and Homebrew tests. VM dependencies are cached separately from test overlays.
 
-The CLI supports APT, Homebrew, and development-manager (Cargo, npm, pnpm, Bun, pip, pipx, uv, Composer, RubyGems) package operations and `pkd doctor` diagnostics.
+The CLI supports package operations across all backends (system managers, Flatpak,
+Snap, Homebrew, AppImage, and development managers) and `pkd doctor` diagnostics.
 The core contains their adapters, the shared engine, and the host authorization
 boundary. Both the interactive TUI and GUI use the same engine. Release
 publication remains a later step.

@@ -1658,15 +1658,15 @@ fn dev_backends_reject_malformed_metadata() {
     for (stdout, expected) in [
         (
             r#"{"error": {"code": "ELSPROBLEMS", "summary": "missing: left-pad@1.3.0, required by root"}}"#,
-            "npm ls failed: missing: left-pad@1.3.0, required by root",
+            "ls failed: missing: left-pad@1.3.0, required by root",
         ),
         (
             r#"{"problems": ["missing: a@1, required by root", "invalid: b@2"]}"#,
-            "npm ls failed: missing: a@1, required by root; invalid: b@2",
+            "ls failed: missing: a@1, required by root; invalid: b@2",
         ),
         (
             r#"{"error": {"code": "EACCES"}}"#,
-            "npm ls failed: npm error EACCES",
+            "ls failed: npm error EACCES",
         ),
         (r#"{"error": {}}"#, "npm reported an error"),
     ] {
@@ -1680,6 +1680,19 @@ fn dev_backends_reject_malformed_metadata() {
         let error = failing.installed(&cancel).unwrap_err().to_string();
         assert!(error.contains(expected), "{error}");
     }
+    let long = "y".repeat(300);
+    let mut truncated = DevTool::npm(DevFixture {
+        version: "12.0.2\n".into(),
+        root: Some("/home/test/lib/node_modules".into()),
+        list_failed_stdout: Some(format!(r#"{{"error": {{"summary": "{long}"}}}}"#)),
+        ..DevFixture::default()
+    });
+    assert_eq!(truncated.detect(&cancel), Ok(Availability::Available));
+    let error = truncated.installed(&cancel).unwrap_err().to_string();
+    assert!(
+        error.contains("ls failed: ") && error.ends_with('…'),
+        "{error}"
+    );
     let mut empty = DevTool::npm(DevFixture {
         version: "12.0.2\n".into(),
         root: Some("/home/test/lib/node_modules".into()),

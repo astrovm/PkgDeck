@@ -1323,7 +1323,7 @@ fn npm_ls_problem(value: &serde_json::Value) -> String {
                 .filter(|joined| !joined.is_empty())
         });
     match detail {
-        Some(detail) => format!("npm ls failed: {}", truncate(&detail)),
+        Some(detail) => format!("ls failed: {}", truncate(&detail)),
         None => "npm reported an error".to_owned(),
     }
 }
@@ -2650,19 +2650,19 @@ pub fn native_engine(
         host,
         authorization,
     });
-    if source.is_none_or(|s| s == "apt")
-        && (discover
-            || source.is_some()
-            || !matches!(apt.detect(cancel), Ok(Availability::Unavailable(_))))
-    {
-        engine.register(apt)?;
+    if source.is_none_or(|s| s == "apt") {
+        let status = apt.detect(cancel);
+        if discover || source.is_some() || !matches!(status, Ok(Availability::Unavailable(_))) {
+            engine.note_detected("apt".into(), status);
+            engine.register(apt)?;
+        }
     }
-    if source.is_none_or(|s| s == "homebrew")
-        && (discover
-            || source.is_some()
-            || !matches!(brew.detect(cancel), Ok(Availability::Unavailable(_))))
-    {
-        engine.register(brew)?;
+    if source.is_none_or(|s| s == "homebrew") {
+        let status = brew.detect(cancel);
+        if discover || source.is_some() || !matches!(status, Ok(Availability::Unavailable(_))) {
+            engine.note_detected("homebrew".into(), status);
+            engine.register(brew)?;
+        }
     }
     for backend in ["dnf", "pacman", "zypper", "snap"] {
         if source.is_none_or(|source| source == backend) {
@@ -2677,10 +2677,13 @@ pub fn native_engine(
                 "snap" => SystemManager::snap(transport),
                 _ => unreachable!(),
             };
-            if discover
-                || source.is_some()
-                || !matches!(manager.detect(cancel), Ok(Availability::Unavailable(_)))
-            {
+            if discover || source.is_some() {
+                engine.register(manager)?;
+                continue;
+            }
+            let status = manager.detect(cancel);
+            if !matches!(status, Ok(Availability::Unavailable(_))) {
+                engine.note_detected(backend.into(), status);
                 engine.register(manager)?;
             }
         }

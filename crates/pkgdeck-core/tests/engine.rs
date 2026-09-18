@@ -563,3 +563,82 @@ fn errors_keep_typed_execution_causes_and_useful_diagnostics() {
     }
     assert!(EngineError::NotFound.source().is_none());
 }
+
+#[test]
+fn details_reuse_skips_detection_for_warm_engines() {
+    let cancel = Cancellation::default();
+    // No detect() call happens before details_reuse: a broken detector would
+    // fail here if the engine re-validated availability.
+    let mut broken = Engine::default();
+    broken
+        .register(Synthetic::new("synthetic", Fault::Detect))
+        .unwrap();
+    assert!(matches!(
+        broken.details_reuse(&id("synthetic"), &cancel),
+        Ok(details) if details.package.id == id("synthetic")
+    ));
+    // Unknown backends, missing capabilities, wrong identities, and prior
+    // cancellation still report precisely.
+    let mut ready = engine(Fault::None);
+    assert_eq!(
+        ready.details_reuse(&id("missing"), &cancel),
+        Err(EngineError::UnknownBackend("missing".into()))
+    );
+    let mut bare = Engine::default();
+    bare.register(Defaults).unwrap();
+    assert!(matches!(
+        bare.details_reuse(&id("defaults"), &cancel),
+        Err(EngineError::Unsupported { .. })
+    ));
+    let mut wrong = engine(Fault::WrongDetails);
+    assert!(matches!(
+        wrong.details_reuse(&id("synthetic"), &cancel),
+        Err(EngineError::InvalidResponse { .. })
+    ));
+    let missing = PackageId {
+        backend: "synthetic".into(),
+        ..id("synthetic")
+    };
+    let mut missing_id = missing.clone();
+    missing_id.name = "absent".into();
+    assert_eq!(
+        engine(Fault::None).details_reuse(&missing_id, &cancel),
+        Err(EngineError::NotFound)
+    );
+    let cancelled = Cancellation::default();
+    cancelled.cancel();
+    assert_eq!(
+        engine(Fault::None).details_reuse(&id("synthetic"), &cancelled),
+        Err(EngineError::Cancelled)
+    );
+}
+
+#[test]
+fn streaming_reports_cumulative_partials_equal_to_the_sync_query() {
+    let cancel = Cancellation::default();
+    let mut live = Engine::default();
+    live.register(Synthetic::new("one", Fault::None)).unwrap();
+    live.register(Synthetic::new("two", Fault::Query)).unwrap();
+    let mut partials = vec![];
+    let final_report = live.search_stream("fixture", &cancel, &mut |partial| {
+        assert!(partial.packages.windows(2).all(|w| w[0].id <= w[1].id));
+        partials.push(partial);
+    });
+    // One emission per backend; failures accumulate across partials.
+    assert_eq!(partials.len(), 2);
+    assert_eq!(partials.iter().map(|p| p.failures.len()).sum::<usize>(), 1);
+    assert_eq!(partials.last().unwrap(), &final_report);
+    // The terminal emission matches a synchronous query on the same state.
+    assert_eq!(live.search("fixture", &cancel), final_report);
+    // Cancellation surfaces per backend like the synchronous query.
+    let cancelled = Cancellation::default();
+    cancelled.cancel();
+    let mut dead = Engine::default();
+    dead.register(Synthetic::new("one", Fault::None)).unwrap();
+    let mut seen = 0;
+    dead.search_stream("fixture", &cancelled, &mut |_| seen += 1);
+    assert_eq!(seen, 1);
+    // The engine reassembles itself and stays usable afterwards.
+    let report = dead.search("fixture", &Cancellation::default());
+    assert!(report.failures.is_empty());
+}
