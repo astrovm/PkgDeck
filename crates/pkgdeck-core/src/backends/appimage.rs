@@ -237,12 +237,11 @@ impl AppImage {
                         // The entry's desktop-id stem joins the shared
                         // namespace (e.g. an Audacity AppImage groups with
                         // an Audacity install from another manager).
-                        component_ids: vec![super::component_stem(
-                            &desktop
-                                .file_stem()
-                                .map(|stem| stem.to_string_lossy().into_owned())
-                                .unwrap_or_default(),
-                        )],
+                        component_ids: desktop
+                            .file_stem()
+                            .and_then(|stem| super::component_stem(&stem.to_string_lossy()))
+                            .into_iter()
+                            .collect(),
                     },
                     desktop,
                 ))

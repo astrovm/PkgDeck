@@ -762,7 +762,7 @@ Controls.ApplicationWindow {
                         Controls.BusyIndicator {
                             objectName: "resultsBusy"
                             running: backend.busy
-                            visible: running
+                            visible: running && results.count > 0
                             Layout.preferredWidth: 18
                             Layout.preferredHeight: 18
                         }

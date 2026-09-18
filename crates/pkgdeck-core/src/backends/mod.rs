@@ -590,7 +590,7 @@ fn icon_file(dir: &std::path::Path, stem: &str) -> Option<PathBuf> {
 /// Installed snaps expose their icon beside the desktop entry. `sysroot`
 /// is `/` on a real system and a fixture directory in tests.
 fn snap_icon(sysroot: &std::path::Path, name: &str) -> Option<PathBuf> {
-    if name.is_empty() || name.contains('/') {
+    if name.is_empty() || name.contains('/') || name.contains("..") {
         return None;
     }
     icon_file(
@@ -683,18 +683,20 @@ fn desktop_icon(home: Option<&std::path::Path>, desktop: &std::path::Path) -> Op
 /// Strip one trailing `.desktop` suffix so DEP-11 component ids
 /// (`org.mozilla.firefox.desktop`), Flatpak app ids (`org.mozilla.firefox`),
 /// and snap desktop basenames (`firefox.desktop`) share one namespace.
-fn component_stem(id: &str) -> String {
-    id.strip_suffix(".desktop").unwrap_or(id).to_owned()
+/// Empty stems are `None` so they never join unrelated rows.
+fn component_stem(id: &str) -> Option<String> {
+    let stem = id.strip_suffix(".desktop").unwrap_or(id).trim();
+    (!stem.is_empty()).then(|| stem.to_owned())
 }
 
 /// Map installed Debian packages to their AppStream component-id stems by
-/// scanning DEP-11 YAML (`<id>.yml.gz`), gunzipped in memory. Documents are
+/// scanning DEP-11 YAML (`<id>.yml.gz`) as a gzip line stream. Documents are
 /// `---`-separated with top-level `ID:`/`Package:` scalars; a package can
 /// own several components. Missing or unreadable data maps nothing.
 fn dep11_component_ids(
     yaml_dir: &std::path::Path,
 ) -> std::collections::BTreeMap<String, Vec<String>> {
-    use std::io::Read;
+    use std::io::{BufRead, BufReader};
     let mut map: std::collections::BTreeMap<String, Vec<String>> =
         std::collections::BTreeMap::new();
     let Ok(entries) = std::fs::read_dir(yaml_dir) else {
@@ -707,20 +709,20 @@ fn dep11_component_ids(
         let Ok(file) = std::fs::File::open(entry.path()) else {
             continue;
         };
-        let mut decoder = flate2::read::GzDecoder::new(file);
-        let mut text = String::new();
-        if decoder.read_to_string(&mut text).is_err() {
-            continue;
-        }
+        let decoder = BufReader::new(flate2::read::GzDecoder::new(file));
         let mut id: Option<String> = None;
         let mut package: Option<String> = None;
         let mut flush = |id: &mut Option<String>, package: &mut Option<String>| {
             if let (Some(id), Some(package)) = (id.take(), package.take()) {
-                let stem = component_stem(&id);
-                map.entry(package).or_default().push(stem);
+                if let Some(stem) = component_stem(&id) {
+                    map.entry(package).or_default().push(stem);
+                }
             }
         };
-        for line in text.lines() {
+        for line in decoder.lines() {
+            let Ok(line) = line else {
+                break;
+            };
             if line == "---" {
                 flush(&mut id, &mut package);
             } else if let Some(value) = line.strip_prefix("ID: ") {
@@ -741,7 +743,7 @@ fn dep11_component_ids(
 /// Desktop-id stems shipped by an installed snap (`meta/gui/*.desktop`).
 /// CLI-only snaps expose no desktop entry and group with nothing.
 fn snap_desktop_ids(sysroot: &std::path::Path, name: &str) -> Vec<String> {
-    if name.is_empty() || name.contains('/') {
+    if name.is_empty() || name.contains('/') || name.contains("..") {
         return vec![];
     }
     let gui = sysroot.join("snap").join(name).join("current/meta/gui");
@@ -751,7 +753,7 @@ fn snap_desktop_ids(sysroot: &std::path::Path, name: &str) -> Vec<String> {
     let mut ids: Vec<String> = entries
         .flatten()
         .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "desktop"))
-        .map(|entry| component_stem(&entry.file_name().to_string_lossy()))
+        .filter_map(|entry| component_stem(&entry.file_name().to_string_lossy()))
         .collect();
     ids.sort();
     ids.dedup();
@@ -3195,13 +3197,22 @@ mod tests {
 
     #[test]
     fn component_stems_share_one_namespace() {
-        assert_eq!(component_stem("firefox.desktop"), "firefox");
+        assert_eq!(
+            component_stem("firefox.desktop"),
+            Some("firefox".to_string())
+        );
         assert_eq!(
             component_stem("org.mozilla.firefox.desktop"),
-            "org.mozilla.firefox"
+            Some("org.mozilla.firefox".to_string())
         );
-        assert_eq!(component_stem("org.mozilla.firefox"), "org.mozilla.firefox");
-        assert_eq!(component_stem("plain"), "plain");
+        assert_eq!(
+            component_stem("org.mozilla.firefox"),
+            Some("org.mozilla.firefox".to_string())
+        );
+        assert_eq!(component_stem("plain"), Some("plain".to_string()));
+        assert_eq!(component_stem(""), None);
+        assert_eq!(component_stem(".desktop"), None);
+        assert_eq!(component_stem("   "), None);
     }
 
     #[test]
@@ -3213,7 +3224,7 @@ mod tests {
         let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         encoder
             .write_all(
-                b"---\nFile: DEP-11\nVersion: '1.0'\n---\nType: desktop-application\nID: org.mozilla.firefox.desktop\nPackage: firefox\n---\nType: desktop-application\nID: firefox.desktop\nPackage: firefox\n---\nType: desktop-application\nID: org.chromium.Chromium.desktop\nPackage: chromium\nDescription:\n  C: >-\n    ID: not-a-component\n",
+                b"---\nFile: DEP-11\nVersion: '1.0'\n---\nType: desktop-application\nID: org.mozilla.firefox.desktop\nPackage: firefox\n---\nType: desktop-application\nID: firefox.desktop\nPackage: firefox\n---\nType: desktop-application\nID: org.chromium.Chromium.desktop\nPackage: chromium\nDescription:\n  C: >-\n    ID: not-a-component\n---\nType: desktop-application\nID: .desktop\nPackage: emptyid\n",
             )
             .unwrap();
         std::fs::write(
@@ -3237,6 +3248,7 @@ mod tests {
             Some(&vec!["org.chromium.Chromium".to_string()])
         );
         assert!(!map.contains_key("fake"));
+        assert!(!map.contains_key("emptyid"));
         assert!(dep11_component_ids(&base.join("missing")).is_empty());
         std::fs::remove_dir_all(&base).unwrap();
     }

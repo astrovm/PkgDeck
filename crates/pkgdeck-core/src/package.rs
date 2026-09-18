@@ -131,34 +131,70 @@ pub struct Selector {
     pub scope: Option<Scope>,
 }
 
+/// Installed backends keyed by AppStream component id. Empty stems are
+/// ignored so they never join unrelated rows.
+fn installed_component_backends(
+    packages: &[Package],
+) -> std::collections::BTreeMap<&str, std::collections::BTreeSet<&str>> {
+    let mut index = std::collections::BTreeMap::new();
+    for package in packages {
+        if package.installed_version.is_none() {
+            continue;
+        }
+        for component in &package.component_ids {
+            if component.is_empty() {
+                continue;
+            }
+            index
+                .entry(component.as_str())
+                .or_insert_with(std::collections::BTreeSet::new)
+                .insert(package.id.backend.as_str());
+        }
+    }
+    index
+}
+fn backends_sharing(
+    components: &[String],
+    backend: &str,
+    index: &std::collections::BTreeMap<&str, std::collections::BTreeSet<&str>>,
+) -> Vec<String> {
+    let mut backends = std::collections::BTreeSet::new();
+    for component in components {
+        if component.is_empty() {
+            continue;
+        }
+        if let Some(set) = index.get(component.as_str()) {
+            for other in set {
+                if *other != backend {
+                    backends.insert(*other);
+                }
+            }
+        }
+    }
+    backends.into_iter().map(str::to_owned).collect()
+}
 /// Sorted backend ids, other than `id`'s own backend, with an installed
 /// package sharing one of its AppStream component ids. Only installed
 /// packages group: remote catalog entries never join, and a backend with
 /// several matching packages is listed once. Display-only: selection and
 /// writes always address exact identities, never groups.
 pub fn same_app_sources(packages: &[Package], id: &PackageId) -> Vec<String> {
-    let own: Vec<&str> = packages
-        .iter()
-        .find(|package| package.id == *id)
-        .map(|package| package.component_ids.iter().map(String::as_str).collect())
-        .unwrap_or_default();
-    if own.is_empty() {
+    let Some(package) = packages.iter().find(|package| package.id == *id) else {
         return vec![];
-    }
-    let mut backends: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
-    for package in packages {
-        if package.id.backend == id.backend || package.installed_version.is_none() {
-            continue;
-        }
-        if package
-            .component_ids
-            .iter()
-            .any(|component| own.contains(&component.as_str()))
-        {
-            backends.insert(package.id.backend.as_str());
-        }
-    }
-    backends.into_iter().map(str::to_owned).collect()
+    };
+    backends_sharing(
+        &package.component_ids,
+        &id.backend,
+        &installed_component_backends(packages),
+    )
+}
+/// Per-row `same_app_sources` for a whole report, sharing one inverted index.
+pub fn same_app_sources_all(packages: &[Package]) -> Vec<Vec<String>> {
+    let index = installed_component_backends(packages);
+    packages
+        .iter()
+        .map(|package| backends_sharing(&package.component_ids, &package.id.backend, &index))
+        .collect()
 }
 
 #[cfg(test)]
@@ -244,5 +280,24 @@ mod tests {
             }
         )
         .is_empty());
+    }
+    #[test]
+    fn empty_component_stems_never_group() {
+        let packages = vec![
+            package("apt", "one", true, &[""]),
+            package("flatpak", "two", true, &[""]),
+        ];
+        assert!(same_app_sources(
+            &packages,
+            &PackageId {
+                backend: "apt".into(),
+                name: "one".into(),
+                architecture: "amd64".into(),
+                scope: Scope::System,
+                remote: None,
+            }
+        )
+        .is_empty());
+        assert!(same_app_sources_all(&packages).iter().all(Vec::is_empty));
     }
 }

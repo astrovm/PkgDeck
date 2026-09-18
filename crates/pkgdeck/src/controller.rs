@@ -668,10 +668,12 @@ impl ffi::PackageController {
                     && report.failures.is_empty()
                     && !upgrade_plan(&report.packages).is_empty();
                 self.as_mut().set_upgradable(upgradable);
+                let same = same_app_sources_all(&report.packages);
                 let mut rows: Vec<_> = report
                     .packages
                     .iter()
-                    .map(|p| package_row(p, &same_app_sources(&report.packages, &p.id)))
+                    .zip(same)
+                    .map(|(p, from)| package_row(p, &from))
                     .collect();
                 rows.extend(report.failures.iter().map(|failure| {
                     json!({"kind": "failure", "name": failure.backend, "source": failure.backend,
