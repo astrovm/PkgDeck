@@ -19,15 +19,24 @@ with the selected package's description, scope, homepage, and dependencies below
 The VERSION column carries the state: a bare candidate means not installed,
 `· installed` marks installed packages, and `→` marks an available update.
 Matching names remain separate source/architecture/scope identities.
+Click a column header to sort ascending, again for descending (▲▼); drag the
+header gutter to resize the name and version columns. Headers are Tab stops:
+Space or Return sorts without a mouse. Sorting is display-only:
+selection and actions map the visible row back to backend order. Column
+widths and the active sort persist across restarts like the source filter.
 
 Install, Remove, Upgrade, and Refresh source operate on the selected identity.
 Updates also provides **Upgrade all** (Ctrl+Shift+U), without selecting a row.
 It confirms every listed package identity, respects the selected source filter,
 and is disabled when there are no upgrades or any source query failed. A hint
-beside the button names the reason while it is unavailable. The batch
-reports every result, including partial failures and cancellation. Completed
-upgrades are not rolled back; cancellation skips remaining writes once the active
-native transaction finishes. Reload reads the remaining updates.
+beside the button names the reason while it is unavailable. For a subset,
+check individual rows (Select all / Select none in the header) and choose
+**Upgrade selected**: the checked identities re-resolve against the current
+rows, so entries that moved on or vanished while streaming are skipped, never
+guessed. The batch reports every result, including partial failures and
+cancellation. Completed upgrades are not rolled back; cancellation skips
+remaining writes once the active native transaction finishes. Reload reads the
+remaining updates and clears the checks.
 
 ![Upgrade all](screenshots/pkgdeck-updates-live.png)
 
@@ -47,8 +56,11 @@ reads; an already-running native write finishes safely under its manager's lock.
 Closing a busy window requests cancellation and keeps it open until completion.
 
 Settings persist appearance, source filter, and authorization preference through Qt's
-per-user settings. The source filter is also available as a selector in the
-header, next to the current view name. The Installed view has its own filter
+per-user settings. The source filter is also available as a checklist in the
+header, next to the current view name: unchecking hides a source from every
+query, which is how backends you never use stay silent. The last checked
+source stays enabled so queries can never select nothing; the choice persists
+across restarts. The Installed view has its own filter
 field that narrows the loaded packages by name or summary without a new
 native query. The default GUI authorization uses the host polkit agent.
 Existing sudo credentials are also supported; passwords are never collected by
@@ -99,6 +111,11 @@ directories. Packaged GUI smoke tests use the same isolated data directories.
 Icons follow the light/dark palette and disabled states. Text labels remain the
 accessible names; decorative icons are ignored by accessibility tools.
 
+Package rows and the details header additionally show the application's own
+icon where the host already has one: Snap metadata, Flatpak exports, and APT
+desktop entries are read from local files only, never downloaded. Results
+without a local icon keep the generic source symbol.
+
 ## Local verification
 
 `scripts/verify.sh full` runs Qt Quick tests against the actual Browser component,
@@ -107,7 +124,8 @@ executable. The real-window test creates a private Xvfb display; it does not use
 the user's display or package database. It verifies native fixture state after
 install, refresh, upgrade, and removal, and exercises resize and read cancellation.
 Qt Quick tests cover keyboard navigation, exact confirmation, source views,
-loading/errors, and closing during work. Xvfb, xdotool, and fonts are included in
+loading/errors, the source checklist, Updates multi-select, and column
+sort/resize with backend index mapping. Xvfb, xdotool, and fonts are included in
 the development image and desktop CI dependencies.
 
 To check the staged release bundle against real managers:

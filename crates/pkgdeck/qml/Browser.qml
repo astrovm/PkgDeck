@@ -17,12 +17,143 @@ Controls.ApplicationWindow {
     function rowIdentity(row) {
         return row ? JSON.stringify([row.source, row.name, row.architecture, row.remote || null, row.scope]) : "";
     }
-    property var selected: results.currentIndex >= 0 && results.currentIndex < items.length ? items[results.currentIndex] : null
-    property string source: argument("--from", preferences.source)
+    property var selected: results.currentIndex >= 0 && results.currentIndex < viewItems.length ? viewItems[results.currentIndex] : null
+    // Explicitly checked source ids, comma-joined; empty means every
+    // available source. Unchecking hides a source from all queries, which
+    // is how backends you never use stay silent.
+    property string sourceSelection: ""
     property string installedFilter: ""
     property bool useSudo: argument("--auth", preferences.authorization) === "sudo"
-    readonly property var sourceIds: ["", "apt", "dnf", "pacman", "zypper", "snap", "homebrew", "appimage", "flatpak", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "composer", "gem"]
-    readonly property var sourceNames: ["All available sources", "APT", "DNF", "Pacman", "Zypper", "Snap", "Homebrew", "AppImage", "Flatpak", "Cargo", "npm", "pnpm", "Bun", "pip", "pipx", "uv", "Composer", "RubyGems"]
+    readonly property var sourceIds: ["apt", "dnf", "pacman", "zypper", "snap", "homebrew", "appimage", "flatpak", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "composer", "gem"]
+    readonly property var sourceNames: ["APT", "DNF", "Pacman", "Zypper", "Snap", "Homebrew", "AppImage", "Flatpak", "Cargo", "npm", "pnpm", "Bun", "pip", "pipx", "uv", "Composer", "RubyGems"]
+    function checkedSources() {
+        if (sourceSelection === "")
+            return sourceIds.slice();
+        const checked = sourceSelection.split(",").filter((id) => sourceIds.indexOf(id) >= 0);
+        return checked.length > 0 ? checked : sourceIds.slice();
+    }
+    function checkedCsv() {
+        const checked = checkedSources();
+        return checked.length >= sourceIds.length ? "" : checked.join(",");
+    }
+    function sourceSummary() {
+        const checked = checkedSources();
+        if (checked.length >= sourceIds.length)
+            return "All available sources";
+        if (checked.length === 1)
+            return sourceNames[sourceIds.indexOf(checked[0])];
+        return checked.length + " sources";
+    }
+    function toggleSource(id) {
+        let checked = checkedSources();
+        const at = checked.indexOf(id);
+        if (at >= 0) {
+            if (checked.length <= 1)
+                return;
+            checked.splice(at, 1);
+        } else {
+            checked.push(id);
+            checked.sort((a, b) => sourceIds.indexOf(a) - sourceIds.indexOf(b));
+        }
+        sourceSelection = checked.length >= sourceIds.length ? "" : checked.join(",");
+        preferences.sourceList = sourceSelection;
+        preferences.source = "";
+        if (["Search", "Installed", "Updates", "Sources"].indexOf(root.currentView) >= 0)
+            root.reload();
+    }
+    // Delegate lookup by position in sourceIds. Popup content reparents to
+    // the Overlay, so findChild cannot reach the checkboxes; the Repeater
+    // hands out the live delegate for real clicks in tests.
+    function sourceCheckAt(index) {
+        return checklistRepeater.itemAt(index);
+    }
+    // Checked package identities for the Updates multi-select. Identities,
+    // not indexes: streaming partials re-sort rows, so the controller
+    // re-resolves each identity and skips stale ones, never guessing.
+    property var checkedPackages: []
+    function togglePackage(row) {
+        const id = rowIdentity(row);
+        if (!id)
+            return;
+        const checked = checkedPackages.slice();
+        const at = checked.indexOf(id);
+        if (at >= 0)
+            checked.splice(at, 1);
+        else
+            checked.push(id);
+        checkedPackages = checked;
+    }
+    function selectAllPackages() {
+        const all = [];
+        for (let i = 0; i < root.viewItems.length; i++) {
+            if (root.viewItems[i].kind === "package") {
+                const id = rowIdentity(root.viewItems[i]);
+                if (id && all.indexOf(id) < 0)
+                    all.push(id);
+            }
+        }
+        checkedPackages = all;
+    }
+    // Column widths (drag the header gutter) and the active sort. Sorting
+    // is QML-side over a copied array: the backend keeps its own order,
+    // so selection and actions map the visible index back to the raw one.
+    property int nameWidth: 202
+    property int versionWidth: 150
+    property string sortColumn: ""
+    property bool sortAscending: true
+    onNameWidthChanged: preferences.nameWidth = root.nameWidth
+    onVersionWidthChanged: preferences.versionWidth = root.versionWidth
+    onSortColumnChanged: preferences.sortColumn = root.sortColumn
+    onSortAscendingChanged: preferences.sortAscending = root.sortAscending
+    function sortArrow(column) {
+        return sortColumn === column ? (sortAscending ? " ▲" : " ▼") : "";
+    }
+    function cycleSort(column) {
+        if (sortColumn === column)
+            sortAscending = !sortAscending;
+        else {
+            sortColumn = column;
+            sortAscending = true;
+        }
+    }
+    function sortValue(column, row) {
+        if (column === "version")
+            return row.installed || row.candidate || "";
+        if (column === "summary" || column === "status")
+            return row.summary || "";
+        if (column === "capabilities")
+            return (row.capabilities || []).join(", ");
+        return row.name || "";
+    }
+    property var viewItems: {
+        const rows = items.slice();
+        if (sortColumn !== "") {
+            const column = sortColumn;
+            const dir = sortAscending ? 1 : -1;
+            rows.sort((a, b) => {
+                const x = sortValue(column, a).toLowerCase();
+                const y = sortValue(column, b).toLowerCase();
+                return x < y ? -dir : (x > y ? dir : 0);
+            });
+        }
+        return rows;
+    }
+    // The visible index addresses viewItems; the backend addresses items.
+    // With no active sort the two orders match and this is the identity.
+    // Sorted duplicates resolve to the first raw match: identical rows are
+    // one engine identity shown twice, so either index acts on the same one.
+    function originalIndex(visible) {
+        if (visible < 0 || visible >= viewItems.length)
+            return -1;
+        if (sortColumn === "")
+            return visible;
+        const id = rowIdentity(viewItems[visible]);
+        for (let i = 0; i < items.length; i++) {
+            if (rowIdentity(items[i]) === id)
+                return i;
+        }
+        return -1;
+    }
     readonly property bool compact: width < 760
     readonly property bool dark: preferences.appearance === 1 || (preferences.appearance === 0 && Qt.styleHints.colorScheme === Qt.Dark)
     readonly property color canvas: dark ? "#000000" : "#f3f5f8"
@@ -74,6 +205,25 @@ Controls.ApplicationWindow {
                 Layout.fillWidth: control.navigation
                 verticalAlignment: Text.AlignVCenter
             }
+        }
+    }
+    // Shared checkbox indicator: transparent box with an accent check.
+    // Both the source checklist and the Updates multi-select use it so the
+    // two stay visually identical; positioning comes from the instance.
+    component TickBox: Rectangle {
+        required property bool ticked
+        implicitWidth: 20
+        implicitHeight: 20
+        color: "transparent"
+        border.color: root.line
+        radius: 4
+        DeckIcon {
+            name: "installed"
+            ink: root.accent
+            anchors.centerIn: parent
+            width: 14
+            height: 14
+            visible: ticked
         }
     }
 
@@ -135,6 +285,12 @@ Controls.ApplicationWindow {
     function rowTooltip(data) {
         return data.name + "\n" + (data.installed || "not installed") + " → " + (data.candidate || "unknown") + "\n" + (data.summary || "");
     }
+    // Local icon files become file:// URLs. Paths come from the backend and
+    // may contain spaces, which raw concatenation would leave unencoded and
+    // unloadable (hiding the fallback source icon with a blank gap).
+    function iconUrl(path) {
+        return path ? "file://" + encodeURI(path) : "";
+    }
 
     property url repositoryIconSource: root.dark ? "qrc:/pkgdeck/github-dark.png" : "qrc:/pkgdeck/github.png"
     property url logoIconSource: "qrc:/pkgdeck/logo.svg"
@@ -149,19 +305,23 @@ Controls.ApplicationWindow {
         const index = Qt.application.arguments.indexOf(name);
         return index >= 0 ? Qt.application.arguments[index + 1] : fallback;
     }
+    function collectArguments(name) {
+        const found = [];
+        const args = Qt.application.arguments;
+        for (let i = 0; i < args.length; i++) {
+            if (args[i] === name && i + 1 < args.length)
+                found.push(args[i + 1]);
+            else if (args[i].indexOf(name + "=") === 0)
+                found.push(args[i].slice(name.length + 1));
+        }
+        return found;
+    }
     function openView(view) {
         if (backend.busy)
             return;
-        backend.status = {
-            "Search": "Type a query and press Enter to search.",
-            "Installed": "Loading installed packages…",
-            "Updates": "Loading available updates…",
-            "Sources": "Checking source availability…",
-            "Settings": "Adjust appearance, package source, and authorization.",
-            "About": "About PkgDeck."
-        }[view] || "";
         queryDirty = false;
         selectedIdentity = null;
+        checkedPackages = [];
         currentView = view;
         results.currentIndex = -1;
         if (view === "Search")
@@ -173,24 +333,30 @@ Controls.ApplicationWindow {
         resultView = currentView;
         results.currentIndex = -1;
         selectedIdentity = null;
-        backend.load(currentView, currentView === "Installed" ? installedFilter : search.text, source, useSudo);
+        checkedPackages = [];
+        backend.load(currentView, currentView === "Installed" ? installedFilter : search.text, checkedCsv(), useSudo);
     }
     function choose(index) {
-        if (index < 0 || index >= items.length)
+        if (index < 0 || index >= viewItems.length)
             return;
         results.currentIndex = index;
-        selectedIdentity = rowIdentity(items[index]);
-        backend.select(index);
+        selectedIdentity = rowIdentity(viewItems[index]);
+        backend.select(originalIndex(index));
     }
     function propose(action) {
-        backend.propose(action, results.currentIndex);
+        backend.propose(action, originalIndex(results.currentIndex));
     }
     Settings {
         id: preferences
         category: "Browser"
         property int appearance: 0
+        property string sourceList: ""
         property string source: ""
         property string authorization: "polkit"
+        property int nameWidth: 202
+        property int versionWidth: 150
+        property string sortColumn: ""
+        property bool sortAscending: true
     }
     onClosing: function (close) {
         if (backend.busy) {
@@ -212,8 +378,8 @@ Controls.ApplicationWindow {
             // the selected identity instead of the row index.
             results.currentIndex = -1;
             if (root.selectedIdentity) {
-                for (let i = 0; i < root.items.length; i++) {
-                    if (root.rowIdentity(root.items[i]) === root.selectedIdentity) {
+                for (let i = 0; i < root.viewItems.length; i++) {
+                    if (root.rowIdentity(root.viewItems[i]) === root.selectedIdentity) {
                         results.currentIndex = i;
                         break;
                     }
@@ -223,7 +389,7 @@ Controls.ApplicationWindow {
             resultsBox.opacity = 1;
             if (root.queryDirty) {
                 root.queryDirty = false;
-            } else if (root.items.length > 0) {
+            } else if (root.viewItems.length > 0) {
                 results.forceActiveFocus();
             }
         }
@@ -240,7 +406,28 @@ Controls.ApplicationWindow {
         repeat: true
         onTriggered: backend.poll()
     }
-    Component.onCompleted: reload()
+    Component.onCompleted: {
+        // Explicit --from flags seed the session checklist without
+        // persisting; otherwise restore the stored list, migrating the
+        // legacy single-source preference on first sight.
+        const cli = collectArguments("--from").filter((id) => sourceIds.indexOf(id) >= 0);
+        if (cli.length > 0)
+            sourceSelection = cli.join(",");
+        else if (preferences.sourceList !== "")
+            sourceSelection = preferences.sourceList;
+        else if (preferences.source !== "")
+            sourceSelection = preferences.source;
+        // Restore the persisted column layout; stored values predate
+        // validation, so clamp widths and allowlist the sort column.
+        if (preferences.nameWidth >= 80 && preferences.nameWidth <= 600)
+            nameWidth = preferences.nameWidth;
+        if (preferences.versionWidth >= 80 && preferences.versionWidth <= 600)
+            versionWidth = preferences.versionWidth;
+        if (["name", "version", "status", "summary", "capabilities"].indexOf(preferences.sortColumn) >= 0)
+            sortColumn = preferences.sortColumn;
+        sortAscending = preferences.sortAscending;
+        reload();
+    }
 
     RowLayout {
         anchors.fill: parent
@@ -344,19 +531,71 @@ Controls.ApplicationWindow {
                     font.bold: true
                     Layout.fillWidth: true
                 }
-                ThemedComboBox {
+                ActionButton {
                     objectName: "sourceFilter"
-                    model: root.sourceNames
-                    currentIndex: root.sourceIds.indexOf(root.source)
+                    id: sourceFilterButton
+                    text: root.sourceSummary()
+                    symbol: "sources"
                     enabled: !backend.busy
-                    onActivated: {
-                        root.source = root.sourceIds[currentIndex];
-                        preferences.source = root.source;
-                        if (["Search", "Installed", "Updates", "Sources"].indexOf(root.currentView) >= 0)
-                            root.reload();
-                    }
+                    onClicked: sourcePopup.open()
                     Accessible.name: "Package source filter"
                     Layout.preferredWidth: 210
+                    Controls.Popup {
+                        id: sourcePopup
+                        objectName: "sourcePopup"
+                        y: sourceFilterButton.height + 4
+                        width: 250
+                        height: 340
+                        padding: 4
+                        closePolicy: Controls.Popup.CloseOnEscape | Controls.Popup.CloseOnPressOutside
+                        contentItem: Flickable {
+                            anchors.fill: parent
+                            clip: true
+                            contentWidth: width
+                            contentHeight: checklist.height
+                            Column {
+                                id: checklist
+                                width: parent.width
+                                Repeater {
+                                    id: checklistRepeater
+                                    model: root.sourceIds
+                                    delegate: Controls.CheckDelegate {
+                                        id: checkRow
+                                        required property var modelData
+                                        required property int index
+                                        objectName: "sourceCheck-" + modelData
+                                        width: checklist.width
+                                        text: root.sourceNames[index]
+                                        checked: root.checkedSources().indexOf(modelData) >= 0
+                                        enabled: !checked || root.checkedSources().length > 1
+                                        onToggled: root.toggleSource(modelData)
+                                        indicator: TickBox {
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            anchors.left: parent.left
+                                            anchors.leftMargin: 8
+                                            ticked: checkRow.checked
+                                        }
+                                        background: Rectangle {
+                                            color: checkRow.hovered ? root.selection : "transparent"
+                                        }
+                                        contentItem: Text {
+                                            text: root.sourceNames[index]
+                                            color: checkRow.enabled ? root.ink : root.muted
+                                            elide: Text.ElideRight
+                                            verticalAlignment: Text.AlignVCenter
+                                            leftPadding: 34
+                                        }
+                                    }
+                                }
+                            }
+                            Controls.ScrollBar.vertical: Controls.ScrollBar { }
+                        }
+                        background: Rectangle {
+                            color: root.surface
+                            radius: 8
+                            border.color: root.line
+                        }
+                    }
                 }
             }
             RowLayout {
@@ -387,7 +626,7 @@ Controls.ApplicationWindow {
                     }
                     Keys.onDownPressed: {
                         results.forceActiveFocus();
-                        if (root.items.length > 0)
+                        if (root.viewItems.length > 0)
                             root.choose(0);
                     }
                     onTextChanged: root.queryDirty = true
@@ -438,6 +677,7 @@ Controls.ApplicationWindow {
             ColumnLayout {
                 visible: root.currentView === "Settings"
                 Layout.fillWidth: true
+                Layout.alignment: Qt.AlignTop
                 Controls.Label { text: "Appearance" }
                 ThemedComboBox {
                     objectName: "appearanceSetting"
@@ -445,19 +685,17 @@ Controls.ApplicationWindow {
                     currentIndex: preferences.appearance
                     onActivated: preferences.appearance = currentIndex
                     Accessible.name: "Appearance"
+                    Layout.fillWidth: true
+                    Layout.maximumWidth: 420
                 }
                 Controls.Label {
-                    text: "Package source"
+                    text: "Package sources"
                 }
-                ThemedComboBox {
-                    objectName: "sourceSetting"
-                    model: root.sourceNames
-                    currentIndex: root.sourceIds.indexOf(root.source)
-                    onActivated: {
-                        root.source = root.sourceIds[currentIndex];
-                        preferences.source = root.source;
-                    }
-                    Accessible.name: "Package source"
+                Controls.Label {
+                    Layout.fillWidth: true
+                    wrapMode: Text.WordWrap
+                    color: root.muted
+                    text: "Choose which sources every section queries using the source selector in the header."
                 }
                 Controls.Label {
                     text: "Privilege elevation"
@@ -471,6 +709,8 @@ Controls.ApplicationWindow {
                         preferences.authorization = root.useSudo ? "sudo" : "polkit";
                     }
                     Accessible.name: "Privilege elevation"
+                    Layout.fillWidth: true
+                    Layout.maximumWidth: 420
                 }
                 Controls.Label {
                     Layout.fillWidth: true
@@ -507,7 +747,7 @@ Controls.ApplicationWindow {
                         Layout.fillWidth: true
                         Layout.margins: 14
                         Controls.Label {
-                            text: root.items.length + (root.currentView === "Sources" ? (root.items.length === 1 ? " source" : " sources") : (root.items.length === 1 ? " package" : " packages"))
+                            text: root.viewItems.length + (root.currentView === "Sources" ? (root.viewItems.length === 1 ? " source" : " sources") : (root.viewItems.length === 1 ? " package" : " packages")) + (root.currentView === "Updates" && root.checkedPackages.length > 0 ? " · " + root.checkedPackages.length + " selected" : "")
                             color: root.muted
                             font.pixelSize: 12
                             Layout.fillWidth: true
@@ -523,16 +763,98 @@ Controls.ApplicationWindow {
                         Layout.rightMargin: 16
                         Layout.topMargin: 10
                         Layout.bottomMargin: 10
-                        Controls.Label { objectName: "columnHeader0"; text: root.currentView === "Sources" ? "SOURCE" : "NAME / SOURCE"; color: root.muted; font.pixelSize: 11; Layout.preferredWidth: 202 }
-                        Controls.Label { objectName: "columnHeader1"; text: root.currentView === "Sources" ? "STATUS" : "VERSION"; color: root.muted; font.pixelSize: 11; Layout.preferredWidth: 150 }
-                        Controls.Label { objectName: "columnHeader2"; text: root.currentView === "Sources" ? "CAPABILITIES" : "SUMMARY"; color: root.muted; font.pixelSize: 11; Layout.fillWidth: true }
+                        Item { visible: root.currentView === "Updates"; Layout.preferredWidth: 28 }
+                        Controls.Label {
+                            objectName: "columnHeader0"
+                            text: (root.currentView === "Sources" ? "SOURCE" : "NAME / SOURCE") + root.sortArrow("name")
+                            color: root.muted
+                            font.pixelSize: 11
+                            font.underline: sortNameArea.activeFocus
+                            elide: Text.ElideRight
+                            Layout.preferredWidth: root.nameWidth
+                            MouseArea {
+                                id: sortNameArea
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                activeFocusOnTab: true
+                                Accessible.role: Accessible.Button
+                                Accessible.name: "Sort by name"
+                                onClicked: root.cycleSort("name")
+                                Keys.onSpacePressed: root.cycleSort("name")
+                                Keys.onReturnPressed: root.cycleSort("name")
+                                MouseArea {
+                                    objectName: "columnResize0"
+                                    anchors.right: parent.right
+                                    anchors.top: parent.top
+                                    anchors.bottom: parent.bottom
+                                    width: 12
+                                    cursorShape: Qt.SplitHCursor
+                                    property real pressX: 0
+                                    property int startWidth: 0
+                                    onPressed: (mouse) => { pressX = mouse.x; startWidth = root.nameWidth; }
+                                    onPositionChanged: (mouse) => { if (pressed) root.nameWidth = Math.max(80, Math.min(600, Math.round(startWidth + mouse.x - pressX))); }
+                                }
+                            }
+                        }
+                        Controls.Label {
+                            objectName: "columnHeader1"
+                            text: (root.currentView === "Sources" ? "STATUS" : "VERSION") + root.sortArrow(root.currentView === "Sources" ? "status" : "version")
+                            color: root.muted
+                            font.pixelSize: 11
+                            font.underline: sortVersionArea.activeFocus
+                            elide: Text.ElideRight
+                            Layout.preferredWidth: root.versionWidth
+                            MouseArea {
+                                id: sortVersionArea
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                activeFocusOnTab: true
+                                Accessible.role: Accessible.Button
+                                Accessible.name: root.currentView === "Sources" ? "Sort by status" : "Sort by version"
+                                onClicked: root.cycleSort(root.currentView === "Sources" ? "status" : "version")
+                                Keys.onSpacePressed: root.cycleSort(root.currentView === "Sources" ? "status" : "version")
+                                Keys.onReturnPressed: root.cycleSort(root.currentView === "Sources" ? "status" : "version")
+                                MouseArea {
+                                    objectName: "columnResize1"
+                                    anchors.right: parent.right
+                                    anchors.top: parent.top
+                                    anchors.bottom: parent.bottom
+                                    width: 12
+                                    cursorShape: Qt.SplitHCursor
+                                    property real pressX: 0
+                                    property int startWidth: 0
+                                    onPressed: (mouse) => { pressX = mouse.x; startWidth = root.versionWidth; }
+                                    onPositionChanged: (mouse) => { if (pressed) root.versionWidth = Math.max(80, Math.min(600, Math.round(startWidth + mouse.x - pressX))); }
+                                }
+                            }
+                        }
+                        Controls.Label {
+                            objectName: "columnHeader2"
+                            text: (root.currentView === "Sources" ? "CAPABILITIES" : "SUMMARY") + root.sortArrow(root.currentView === "Sources" ? "capabilities" : "summary")
+                            color: root.muted
+                            font.pixelSize: 11
+                            font.underline: sortSummaryArea.activeFocus
+                            elide: Text.ElideRight
+                            Layout.fillWidth: true
+                            MouseArea {
+                                id: sortSummaryArea
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                activeFocusOnTab: true
+                                Accessible.role: Accessible.Button
+                                Accessible.name: root.currentView === "Sources" ? "Sort by capabilities" : "Sort by summary"
+                                onClicked: root.cycleSort(root.currentView === "Sources" ? "capabilities" : "summary")
+                                Keys.onSpacePressed: root.cycleSort(root.currentView === "Sources" ? "capabilities" : "summary")
+                                Keys.onReturnPressed: root.cycleSort(root.currentView === "Sources" ? "capabilities" : "summary")
+                            }
+                        }
                     }
                     ListView {
                         id: results
                         objectName: "packageResults"
                         Layout.fillWidth: true
                         Layout.fillHeight: true
-                        model: root.items
+                        model: root.viewItems
                         clip: true
                         reuseItems: true
                         currentIndex: -1
@@ -610,9 +932,24 @@ Controls.ApplicationWindow {
                             }
                             contentItem: RowLayout {
                                 spacing: 14
+                                Controls.CheckBox {
+                                    id: packageCheck
+                                    visible: root.currentView === "Updates" && modelData.kind === "package"
+                                    checked: root.checkedPackages.indexOf(root.rowIdentity(modelData)) >= 0
+                                    enabled: !backend.busy
+                                    onToggled: root.togglePackage(modelData)
+                                    Accessible.name: "Select " + (modelData.name || "")
+                                    Layout.preferredWidth: 28
+                                    Layout.alignment: Qt.AlignVCenter
+                                    indicator: TickBox {
+                                        anchors.centerIn: parent
+                                        ticked: packageCheck.checked
+                                    }
+                                    contentItem: Item {}
+                                }
                                 ColumnLayout {
                                     spacing: 4
-                                    Layout.preferredWidth: root.compact ? -1 : 202
+                                    Layout.preferredWidth: root.compact ? -1 : root.nameWidth
                                     Layout.fillWidth: root.compact
                                     Controls.Label {
                                         text: modelData.name
@@ -626,10 +963,21 @@ Controls.ApplicationWindow {
                                         Layout.fillWidth: true
                                         spacing: 6
                                         DeckIcon {
+                                            visible: !modelData.icon
                                             name: modelData.source
                                             ink: root.muted
                                             Layout.preferredWidth: 14
                                             Layout.preferredHeight: 14
+                                        }
+                                        Image {
+                                            visible: !!modelData.icon
+                                            source: root.iconUrl(modelData.icon || "")
+                                            sourceSize.width: 14
+                                            sourceSize.height: 14
+                                            fillMode: Image.PreserveAspectFit
+                                            Layout.preferredWidth: 14
+                                            Layout.preferredHeight: 14
+                                            Accessible.ignored: true
                                         }
                                         Controls.Label {
                                         text: modelData.source.toUpperCase() + (modelData.remote ? " · " + modelData.remote : "") + (modelData.architecture ? " · " + modelData.architecture : "")
@@ -649,7 +997,7 @@ Controls.ApplicationWindow {
                                     }
                                 }
                                 Controls.Label {
-                                    Layout.preferredWidth: root.compact ? 100 : 150
+                                    Layout.preferredWidth: root.compact ? 100 : root.versionWidth
                                     text: modelData.kind === "failure" ? "Failed" : (modelData.kind === "source" ? (modelData.available ? "Available" : "Unavailable") : (modelData.installed ? modelData.installed + (modelData.update === "available" ? " → " + modelData.candidate : " · installed") : modelData.candidate || "Unknown"))
                                     font.family: "monospace"
                                     color: modelData.kind === "failure" ? "#e87979" : (modelData.update === "available" ? root.accent : root.muted)
@@ -692,11 +1040,27 @@ Controls.ApplicationWindow {
                     spacing: 6
                     RowLayout {
                         Layout.fillWidth: true
-                        DeckIcon {
-                            name: root.selected ? (root.selected.kind === "source" ? root.selected.source : (root.selected.kind === "failure" ? "warning" : "package")) : "package"
-                            ink: root.accent
-                            Layout.preferredWidth: 24
-                            Layout.preferredHeight: 24
+                        Item {
+                            visible: !(root.selected && root.selected.icon)
+                            Layout.preferredWidth: 40
+                            Layout.preferredHeight: 40
+                            DeckIcon {
+                                name: root.selected ? (root.selected.kind === "source" ? root.selected.source : (root.selected.kind === "failure" ? "warning" : "package")) : "package"
+                                ink: root.accent
+                                anchors.centerIn: parent
+                                width: 24
+                                height: 24
+                            }
+                        }
+                        Image {
+                            visible: !!(root.selected && root.selected.icon)
+                            source: root.iconUrl((root.selected && root.selected.icon) || "")
+                            sourceSize.width: 40
+                            sourceSize.height: 40
+                            fillMode: Image.PreserveAspectFit
+                            Layout.preferredWidth: 40
+                            Layout.preferredHeight: 40
+                            Accessible.ignored: true
                         }
                         Controls.Label {
                         text: root.selected ? root.selected.name : ""
@@ -727,6 +1091,7 @@ Controls.ApplicationWindow {
                 }
             }
             Flow {
+                objectName: "updatesActions"
                 Layout.fillWidth: true
                 spacing: 8
                 visible: ["Search", "Installed", "Updates", "Sources"].indexOf(root.currentView) >= 0
@@ -738,6 +1103,31 @@ Controls.ApplicationWindow {
                     primary: true
                     enabled: !backend.busy && backend.upgradable
                     onClicked: root.propose("upgrade-all")
+                }
+                ActionButton {
+                    objectName: "selectAllButton"
+                    visible: root.currentView === "Updates"
+                    text: "Select all"
+                    symbol: "installed"
+                    enabled: !backend.busy
+                    onClicked: root.selectAllPackages()
+                }
+                ActionButton {
+                    objectName: "selectNoneButton"
+                    visible: root.currentView === "Updates" && root.checkedPackages.length > 0
+                    text: "Select none"
+                    symbol: "cancel"
+                    enabled: !backend.busy
+                    onClicked: root.checkedPackages = []
+                }
+                ActionButton {
+                    objectName: "upgradeSelectedButton"
+                    visible: root.currentView === "Updates" && root.checkedPackages.length > 0
+                    text: "Upgrade selected"
+                    symbol: "updates"
+                    primary: true
+                    enabled: !backend.busy
+                    onClicked: backend.proposeChecked(JSON.stringify(root.checkedPackages))
                 }
                 Controls.Label {
                     objectName: "upgradeAllHint"

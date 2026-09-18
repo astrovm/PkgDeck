@@ -13,9 +13,10 @@ use std::io::{self, IsTerminal, Write};
 pub struct Args {
     #[arg(long, global = true)]
     pub json: bool,
-    /// Restrict operations to one source.
+    /// Restrict operations to the given sources. Repeatable; empty means
+    /// every available source.
     #[arg(long, global = true, value_parser = ["apt", "dnf", "pacman", "zypper", "snap", "homebrew", "appimage", "flatpak", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "composer", "gem"])]
-    pub from: Option<String>,
+    pub from: Vec<String>,
     #[arg(long, global = true)]
     pub arch: Option<String>,
     /// Approve native package and dependency changes without prompting.
@@ -104,7 +105,12 @@ fn select(
     };
     report.select(&Selector {
         name: name.into(),
-        backend: args.from.clone(),
+        // A single --from pins the backend; several restrict the engine to
+        // that set and leave ambiguity resolution to the selector.
+        backend: match args.from.as_slice() {
+            [one] => Some(one.clone()),
+            _ => None,
+        },
         architecture: args.arch.clone(),
         scope: None,
     })
@@ -280,7 +286,7 @@ pub fn run(args: &Args) -> u8 {
         Err(e) => return emit(args, json!({"error":e.to_string()}), 1),
     };
     let mut engine = match pkgdeck_core::backends::native_engine(
-        args.from.as_deref(),
+        &args.from,
         matches!(args.command, Some(Commands::Sources)),
         args.auth.into(),
         &cancel,
@@ -342,6 +348,7 @@ mod tests {
                 installed_version: self.installed.then(|| "1.0".into()),
                 candidate_version: Some("2.0".into()),
                 update: UpdateAvailability::Available,
+                icon: None,
             }
         }
     }

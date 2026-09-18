@@ -24,6 +24,7 @@ TestCase {
         property int selection: -1
         property int writes: 0
         property int cancels: 0
+        property string lastChecked: ""
         function load(view, query, source, sudo) {
             lastView = view;
             lastQuery = query;
@@ -39,6 +40,9 @@ TestCase {
         }
         function propose(action, index) {
             confirmation = action + " synthetic-tool from apt, all, system";
+        }
+        function proposeChecked(identities) {
+            lastChecked = identities;
         }
         function confirm(approved) {
             if (approved)
@@ -73,16 +77,38 @@ TestCase {
         fake.upgradable = false;
         fake.writes = 0;
         fake.cancels = 0;
+        fake.lastChecked = "";
         browser = createTemporaryObject(window, test);
         verify(browser !== null);
         browser.requestActivate();
+        // Fresh checklist and column layout per test: QSettings persist
+        // across tests in one run.
+        browser.sourceSelection = "";
+        browser.sortColumn = "";
+        browser.sortAscending = true;
+        browser.nameWidth = 202;
+        browser.versionWidth = 150;
         wait(30);
     }
     function cleanup() {
         browser.close();
     }
-    function populate() {
-        fake.rows = JSON.stringify([
+    // Popup content reparents to the Overlay, which QTest item clicks
+    // reject after the first one ("window not shown"): click by window
+    // coordinates mapped through the delegate instead.
+    function clickDelegate(delegate) {
+        const at = delegate.mapToItem(browser.contentItem, delegate.width / 2, delegate.height / 2);
+        mouseClick(browser, at.x, at.y);
+    }
+    function clickSourceCheck(index) {
+        const popup = findChild(browser, "sourcePopup");
+        const delegate = browser.sourceCheckAt(index);
+        const view = popup.contentItem;
+        view.contentY = Math.max(0, Math.min(delegate.y - 8, view.contentHeight - view.height));
+        waitForRendering(browser.contentItem);
+        clickDelegate(delegate);
+    }
+    function populate() {        fake.rows = JSON.stringify([
             {
                 kind: "package",
                 name: "synthetic-tool",
@@ -250,6 +276,74 @@ TestCase {
         browser.openView("Installed");
         verify(!button.visible);
     }
+    function test_updates_multiselect_upgrade_selected() {
+        browser.openView("Updates");
+        populate();
+        waitForRendering(browser.contentItem);
+        const selectAll = findChild(browser, "selectAllButton");
+        verify(selectAll.visible);
+        const upgradeSelected = findChild(browser, "upgradeSelectedButton");
+        const selectNone = findChild(browser, "selectNoneButton");
+        verify(!upgradeSelected.visible);
+        mouseClick(selectAll);
+        compare(browser.checkedPackages.length, 2);
+        waitForRendering(browser.contentItem);
+        verify(upgradeSelected.visible);
+        verify(selectNone.visible);
+        mouseClick(upgradeSelected);
+        verify(fake.lastChecked !== "");
+        const sent = JSON.parse(fake.lastChecked);
+        compare(sent.length, 2);
+        // Identities mirror the controller shape: [source, name, arch, remote, scope].
+        verify(sent[0].indexOf("synthetic-tool") >= 0);
+        verify(sent[0].indexOf("apt") >= 0);
+        verify(sent[1].indexOf("homebrew") >= 0);
+        mouseClick(selectNone);
+        compare(browser.checkedPackages.length, 0);
+        verify(!upgradeSelected.visible);
+        // Single-row toggle without the header buttons.
+        browser.togglePackage(browser.items[1]);
+        compare(browser.checkedPackages.length, 1);
+        verify(upgradeSelected.visible);
+        browser.togglePackage(browser.items[1]);
+        compare(browser.checkedPackages.length, 0);
+    }
+    function test_columns_sort_resize_and_index_mapping() {
+        browser.openView("Search");
+        fake.rows = JSON.stringify([
+            {kind: "package", name: "bravo", source: "apt", architecture: "all", installed: null, candidate: "1", scope: "system", summary: "B"},
+            {kind: "package", name: "alpha", source: "apt", architecture: "all", installed: "1", candidate: "2", scope: "system", summary: "A"}
+        ]);
+        waitForRendering(browser.contentItem);
+        compare(browser.viewItems[0].name, "bravo");
+        const header0 = findChild(browser, "columnHeader0");
+        verify(header0 !== null);
+        mouseClick(header0);
+        compare(browser.viewItems[0].name, "alpha");
+        verify(header0.text.indexOf("▲") >= 0);
+        // The visible index maps back to backend order for actions.
+        browser.choose(0);
+        compare(fake.selection, 1);
+        mouseClick(header0);
+        compare(browser.viewItems[0].name, "bravo");
+        verify(header0.text.indexOf("▼") >= 0);
+        browser.choose(0);
+        compare(fake.selection, 0);
+        const grip = findChild(browser, "columnResize0");
+        verify(grip !== null);
+        compare(browser.nameWidth, 202);
+        mousePress(grip, grip.width / 2, grip.height / 2);
+        mouseMove(grip, grip.width / 2 + 60, grip.height / 2);
+        mouseRelease(grip, grip.width / 2 + 60, grip.height / 2);
+        verify(browser.nameWidth > 202);
+        // Keyboard sorting through the header Tab stop (currently descending).
+        const sortArea = header0.children[0];
+        sortArea.forceActiveFocus();
+        verify(sortArea.activeFocus);
+        keyClick(Qt.Key_Space);
+        compare(browser.viewItems[0].name, "alpha");
+        verify(header0.text.indexOf("▲") >= 0);
+    }
     function test_repository_sidebar() {
         compare(browser.repositoryUrl.toString(), "https://github.com/astrovm/PkgDeck");
         const icon = findChild(browser, "repositoryIcon");
@@ -277,9 +371,9 @@ TestCase {
     }
     function test_view_status_and_source_columns() {
         browser.openView("Settings");
-        compare(findChild(browser, "operationStatus").text.indexOf("appearance") >= 0, true);
+        compare(findChild(browser, "operationStatus").text, "Ready");
         browser.openView("About");
-        compare(findChild(browser, "operationStatus").text, "About PkgDeck.");
+        compare(findChild(browser, "operationStatus").text, "Ready");
         browser.openView("Sources");
         compare(findChild(browser, "columnHeader0").text, "SOURCE");
         compare(findChild(browser, "columnHeader1").text, "STATUS");
@@ -325,20 +419,39 @@ TestCase {
         keyClick(Qt.Key_End);
         compare(fake.selection, 1);
     }
-    function test_header_source_filter_and_installed_filter() {
+    function test_header_source_checklist_and_installed_filter() {
         browser.openView("Installed");
         const filter = findChild(browser, "sourceFilter");
         verify(filter !== null);
-        filter.currentIndex = 1;
-        filter.activated(1);
-        compare(browser.source, "apt");
-        compare(fake.lastSource, "apt");
+        compare(filter.text, "All available sources");
+        const popup = findChild(browser, "sourcePopup");
+        verify(popup !== null);
+        popup.open();
+        tryCompare(popup, "visible", true);
+        const npm = browser.sourceIds.indexOf("npm");
+        verify(browser.sourceCheckAt(npm).checked);
+        clickSourceCheck(npm);
+        compare(browser.sourceSelection, "apt,dnf,pacman,zypper,snap,homebrew,appimage,flatpak,cargo,pnpm,bun,pip,pipx,uv,composer,gem");
+        compare(filter.text, "16 sources");
+        compare(fake.lastSource, "apt,dnf,pacman,zypper,snap,homebrew,appimage,flatpak,cargo,pnpm,bun,pip,pipx,uv,composer,gem");
         compare(fake.lastView, "Installed");
-        browser.openView("Settings");
-        const setting = findChild(browser, "sourceSetting");
-        setting.currentIndex = 0;
-        setting.activated(0);
-        compare(browser.source, "");
+        // Re-checking the last unchecked source returns to all available.
+        clickSourceCheck(npm);
+        compare(browser.sourceSelection, "");
+        compare(filter.text, "All available sources");
+        // Unchecking down to one source disables that final checkbox.
+        const ids = ["apt", "dnf", "pacman", "zypper", "snap", "homebrew", "appimage", "flatpak", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "composer", "gem"];
+        for (let idx = 0; idx < ids.length; idx++) {
+            if (ids[idx] === "apt")
+                continue;
+            clickSourceCheck(browser.sourceIds.indexOf(ids[idx]));
+        }
+        compare(browser.sourceSelection, "apt");
+        compare(filter.text, "APT");
+        const last = browser.sourceCheckAt(browser.sourceIds.indexOf("apt"));
+        verify(last !== null);
+        verify(!last.enabled);
+        popup.close();
         const field = findChild(browser, "installedFilterField");
         verify(field !== null);
         browser.openView("Installed");
@@ -402,13 +515,17 @@ TestCase {
         compare(fake.selection, 0);
     }
     function test_source_filter_popup_lists_sources() {
-        const filter = findChild(browser, "sourceFilter");
-        verify(filter !== null);
-        filter.popup.open();
-        tryCompare(filter.popup, "visible", true);
-        verify(filter.popup.contentItem.count > 1);
-        filter.popup.close();
-        tryCompare(filter.popup, "visible", false);
+        browser.openView("Search");
+        const popup = findChild(browser, "sourcePopup");
+        verify(popup !== null);
+        popup.open();
+        tryCompare(popup, "visible", true);
+        verify(popup.contentItem.contentHeight > 0);
+        const npmCheck = browser.sourceCheckAt(browser.sourceIds.indexOf("npm"));
+        verify(npmCheck !== null);
+        verify(npmCheck.checked);
+        popup.close();
+        tryCompare(popup, "visible", false);
     }
     function test_close_requests_cancellation() {
         fake.busy = true;

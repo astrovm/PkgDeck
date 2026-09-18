@@ -120,6 +120,7 @@ impl AppImage {
             } else {
                 UpdateAvailability::Current
             },
+            icon: None,
         })
     }
     fn installed_packages(&self) -> Result<Vec<Package>, EngineError> {
@@ -209,6 +210,10 @@ impl AppImage {
                     .unwrap_or_else(|| "External AppImage".into());
                 let version = Self::desktop_value(&contents, "X-AppImage-Version=")
                     .unwrap_or_else(|| "local".into());
+                // External entries keep their own desktop file, so its Icon=
+                // resolves like any local entry. Managed imports stay
+                // icon-less until .DirIcon extraction exists.
+                let icon = super::desktop_icon(None, &desktop);
                 Some((
                     Package {
                         id: PackageId {
@@ -227,6 +232,7 @@ impl AppImage {
                         } else {
                             UpdateAvailability::Current
                         },
+                        icon,
                     },
                     desktop,
                 ))
@@ -359,6 +365,7 @@ impl Backend for AppImage {
                 installed_version: None,
                 candidate_version: None,
                 update: UpdateAvailability::Unknown,
+                icon: None,
             }]);
         }
         let query = query.to_ascii_lowercase();
@@ -597,12 +604,15 @@ mod tests {
         let external = base.join("Audacity.AppImage");
         fs::create_dir_all(&applications).unwrap();
         type2(&external);
+        let icon = base.join("audacity.png");
+        fs::write(&icon, "png").unwrap();
         let desktop = applications.join("audacity.desktop");
         fs::write(
             &desktop,
             format!(
-                "[Desktop Entry]\nType=Application\nName=Audacity Portable\nExec=\"{}\" %U\nX-AppImage-Version=4.0\n",
-                external.display()
+                "[Desktop Entry]\nType=Application\nName=Audacity Portable\nExec=\"{}\" %U\nIcon={}\nX-AppImage-Version=4.0\n",
+                external.display(),
+                icon.display()
             ),
         )
         .unwrap();
@@ -615,6 +625,7 @@ mod tests {
         let package = backend.search("audacity", &cancel).unwrap().remove(0);
         assert_eq!(package.display_name, "Audacity Portable");
         assert_eq!(package.installed_version.as_deref(), Some("4.0"));
+        assert_eq!(package.icon, Some(icon));
         assert_eq!(
             backend.details(&package.id, &cancel).unwrap().package,
             package

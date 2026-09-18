@@ -45,6 +45,7 @@ impl Fixture {
                 },
                 installed_version: installed,
                 candidate_version: Some(candidate),
+                icon: None,
             },
             description: "Synthetic package description".into(),
             homepage: None,
@@ -273,7 +274,7 @@ fn lifecycle(mut backend: impl Backend) {
 }
 #[test]
 fn apt_lifecycle() {
-    lifecycle(Apt(Fixture::new()));
+    lifecycle(Apt::new(Fixture::new()));
 }
 #[test]
 fn homebrew_lifecycle() {
@@ -459,7 +460,7 @@ fn explicit_optional_sources_remain_discoverable_when_unavailable() {
         "pip", "pipx", "uv", "composer", "gem",
     ] {
         let mut engine = native_engine(
-            Some(source),
+            &[source.to_string()],
             true,
             Authorization::SudoNonInteractive,
             &cancel,
@@ -469,6 +470,35 @@ fn explicit_optional_sources_remain_discoverable_when_unavailable() {
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0].backend, source);
     }
+}
+
+#[test]
+fn native_engine_accepts_source_sets() {
+    let cancel = Cancellation::default();
+    native_engine(&[], true, Authorization::SudoNonInteractive, &cancel).unwrap();
+    let mut pair = native_engine(
+        &["apt".to_string(), "flatpak".to_string()],
+        true,
+        Authorization::SudoNonInteractive,
+        &cancel,
+    )
+    .unwrap();
+    let mut ids: Vec<_> = pair
+        .discover(&cancel)
+        .into_iter()
+        .map(|source| source.backend)
+        .collect();
+    ids.sort();
+    assert_eq!(ids, vec!["apt", "flatpak"]);
+    assert!(matches!(
+        native_engine(
+            &["apt".to_string(), "foreign".to_string()],
+            false,
+            Authorization::Polkit,
+            &cancel
+        ),
+        Err(EngineError::UnknownBackend(_))
+    ));
 }
 
 #[test]
@@ -608,7 +638,7 @@ fn failures_preserve_native_categories() {
             e => Err(e.into()),
         };
         assert_eq!(
-            Apt(fixture.clone()).detect(&Cancellation::default()),
+            Apt::new(fixture.clone()).detect(&Cancellation::default()),
             expected
         );
         assert_eq!(
@@ -672,7 +702,9 @@ fn malformed_metadata_is_never_treated_as_an_empty_success() {
     let mut failed = output("[]");
     failed.code = Some(1);
     for result in [output("not json"), truncated, failed] {
-        assert!(Apt(Raw(result.clone())).search("fixture", &cancel).is_err());
+        assert!(Apt::new(Raw(result.clone()))
+            .search("fixture", &cancel)
+            .is_err());
         let mut brew = Homebrew::new(Raw(result));
         brew.detect(&cancel).unwrap();
         assert!(brew.installed(&cancel).is_err());
@@ -750,7 +782,12 @@ fn native_apt_transport_reads_host_metadata_or_reports_prerequisites() {
     assert!(sandbox.apt_write(AptAction::Refresh, &cancel).is_err());
     assert!(sandbox.brew(&[], &cancel, true).is_err());
     assert!(matches!(
-        native_engine(Some("foreign"), false, Authorization::Polkit, &cancel),
+        native_engine(
+            &["foreign".to_string()],
+            false,
+            Authorization::Polkit,
+            &cancel
+        ),
         Err(EngineError::UnknownBackend(_))
     ));
 }
@@ -2612,7 +2649,7 @@ fn wave_five_transports_report_unavailable_and_failed_writes() {
     // Missing optionals stay discoverable but unavailable.
     for source in ["pip", "pipx", "uv", "composer", "gem"] {
         let mut engine = native_engine(
-            Some(source),
+            &[source.to_string()],
             true,
             Authorization::SudoNonInteractive,
             &cancel,
