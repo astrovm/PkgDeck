@@ -3090,14 +3090,41 @@ mod tests {
         )
         .unwrap();
         std::fs::write(info.join("plain.list"), "/usr/bin/plain\n").unwrap();
+        // Non-list files never name a package, and duplicate entries for
+        // one package resolve exactly once.
+        std::fs::write(info.join("README"), "inventory\n").unwrap();
+        std::fs::write(
+            info.join("brave-browser:amd64.list"),
+            "/usr/bin/brave\n/usr/share/applications/other.desktop\n",
+        )
+        .unwrap();
         let map = apt_desktop_map(&info);
+        // Either list may win the readdir order, but duplicates resolve once.
+        let brave = map.get("brave-browser").unwrap();
+        assert!(
+            brave.ends_with("brave-browser.desktop") || brave.ends_with("other.desktop"),
+            "{brave:?}"
+        );
         assert_eq!(
-            map.get("brave-browser"),
-            Some(&PathBuf::from(
-                "/usr/share/applications/brave-browser.desktop"
-            ))
+            map.values()
+                .filter(|p| {
+                    p.ends_with("brave-browser.desktop") || p.ends_with("other.desktop")
+                })
+                .count(),
+            1
         );
         assert!(!map.contains_key("plain"));
+        assert!(!map.contains_key("README"));
+        assert_eq!(
+            map.values()
+                .filter(|p| p.ends_with("brave-browser.desktop"))
+                .count()
+                + map
+                    .values()
+                    .filter(|p| p.ends_with("other.desktop"))
+                    .count(),
+            1
+        );
         // A bare Icon= name resolves through the theme; absolute paths
         // resolve directly when the file exists.
         let real = base.join("real-icon.png");
@@ -3111,12 +3138,38 @@ mod tests {
         assert_eq!(desktop_icon(None, &desktop), Some(real));
         std::fs::write(&desktop, "[Desktop Entry]\nName=Mine\n").unwrap();
         assert_eq!(desktop_icon(None, &desktop), None);
+        std::fs::write(&desktop, "[Desktop Entry]\nName=Mine\nIcon=\n").unwrap();
+        assert_eq!(desktop_icon(None, &desktop), None);
         std::fs::write(
             &desktop,
             "[Desktop Entry]\nName=Mine\nIcon=/nowhere/icon.png\n",
         )
         .unwrap();
         assert_eq!(desktop_icon(None, &desktop), None);
+        // Relative names with a slash never touch the filesystem.
+        std::fs::write(&desktop, "[Desktop Entry]\nName=Mine\nIcon=subdir/icon\n").unwrap();
+        assert_eq!(desktop_icon(None, &desktop), None);
+        // Unique names miss every theme directory including pixmaps.
+        std::fs::write(
+            &desktop,
+            "[Desktop Entry]\nName=Mine\nIcon=pkgdeck-definitely-missing-icon\n",
+        )
+        .unwrap();
+        assert_eq!(desktop_icon(None, &desktop), None);
+        // The user theme directory wins over the system ones.
+        let home = base.join("home");
+        let theme = home.join(".local/share/icons/hicolor/48x48/apps");
+        std::fs::create_dir_all(&theme).unwrap();
+        std::fs::write(theme.join("pkgdeck-fixture-icon.png"), "png").unwrap();
+        std::fs::write(
+            &desktop,
+            "[Desktop Entry]\nName=Mine\nIcon=pkgdeck-fixture-icon\n",
+        )
+        .unwrap();
+        assert_eq!(
+            desktop_icon(Some(&home), &desktop),
+            Some(theme.join("pkgdeck-fixture-icon.png"))
+        );
         std::fs::remove_dir_all(&base).unwrap();
     }
 }

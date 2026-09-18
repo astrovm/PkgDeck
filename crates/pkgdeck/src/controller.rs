@@ -302,6 +302,35 @@ fn checked_upgrades(packages: &[Package], identities: &str) -> Vec<Operation> {
         })
         .collect()
 }
+/// The resolved outcome of an Upgrade-selected request: the operations to
+/// queue plus the exact confirmation and status text to show. Pure so the
+/// resolution rules stay covered without a Qt object.
+struct CheckedPlan {
+    operations: Vec<Operation>,
+    confirmation: String,
+    status: Option<String>,
+}
+fn plan_checked_upgrade(packages: &[Package], identities: &str) -> CheckedPlan {
+    let operations = checked_upgrades(packages, identities);
+    if operations.is_empty() {
+        return CheckedPlan {
+            operations: vec![],
+            confirmation: String::new(),
+            status: Some("No selected packages can be upgraded.".into()),
+        };
+    }
+    let count = operations.len();
+    let labels = operations
+        .iter()
+        .map(operation_label)
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    CheckedPlan {
+        operations,
+        confirmation: format!("Upgrade {count} selected packages?\n\n{labels}\n\nEach source runs as one transaction. Native dependency changes may follow. Successful upgrades are not rolled back if another fails. Continue?"),
+        status: None,
+    }
+}
 fn operation_label(operation: &Operation) -> String {
     let (action, id) = match operation {
         Operation::Install(id) => ("Install", id),
@@ -565,21 +594,19 @@ impl ffi::PackageController {
         if self.rust().worker.is_some() {
             return;
         }
-        let operations = checked_upgrades(&self.rust().packages, &identities.to_string());
-        if operations.is_empty() {
+        let plan = plan_checked_upgrade(&self.rust().packages, &identities.to_string());
+        if plan.operations.is_empty() {
             self.as_mut().set_confirmation(QString::default());
+        } else {
             self.as_mut()
-                .set_status("No selected packages can be upgraded.".into());
-            return;
+                .set_confirmation(plan.confirmation.as_str().into());
         }
-        let count = operations.len();
-        let labels = operations
-            .iter()
-            .map(operation_label)
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        self.as_mut().set_confirmation(format!("Upgrade {count} selected packages?\n\n{labels}\n\nEach source runs as one transaction. Native dependency changes may follow. Successful upgrades are not rolled back if another fails. Continue?").as_str().into());
-        self.rust_mut().pending = Some(Job::UpgradeAll(operations));
+        if let Some(status) = plan.status {
+            self.as_mut().set_status(status.as_str().into());
+        }
+        if !plan.operations.is_empty() {
+            self.rust_mut().pending = Some(Job::UpgradeAll(plan.operations));
+        }
     }
     pub fn confirm(mut self: Pin<&mut Self>, approved: bool) {
         if self.rust().worker.is_some() {
@@ -900,6 +927,56 @@ mod tests {
         assert_eq!(operations.len(), 1);
         assert!(matches!(&operations[0], Operation::Upgrade(id) if id.name == "upgradable"));
         assert!(checked_upgrades(&packages, "not json").is_empty());
+    }
+    #[test]
+    fn checked_proposals_plan_selected_upgrades() {
+        fn package(name: &str) -> Package {
+            Package {
+                id: PackageId {
+                    backend: "fixture".into(),
+                    name: name.into(),
+                    architecture: "all".into(),
+                    scope: Scope::System,
+                    remote: None,
+                },
+                display_name: name.into(),
+                summary: "Fixture".into(),
+                installed_version: Some("1".into()),
+                candidate_version: Some("2".into()),
+                update: UpdateAvailability::Available,
+                icon: None,
+            }
+        }
+        // Identity shape mirrors QML rowIdentity: [source, name, arch, remote, scope].
+        let row = |name: &str| {
+            serde_json::to_string(&vec![
+                serde_json::json!("fixture"),
+                serde_json::json!(name),
+                serde_json::json!("all"),
+                serde_json::json!(null),
+                serde_json::json!("system"),
+            ])
+            .unwrap()
+        };
+        let packages = vec![package("upgradable")];
+        // Stale identities resolve to nothing: empty confirmation, status set.
+        let empty = plan_checked_upgrade(&packages, &format!("[{}]", row("vanished")));
+        assert!(empty.operations.is_empty());
+        assert!(empty.confirmation.is_empty());
+        assert_eq!(
+            empty.status.as_deref(),
+            Some("No selected packages can be upgraded.")
+        );
+        // One live identity plans a single-upgrade batch with confirmation.
+        let plan = plan_checked_upgrade(
+            &packages,
+            &format!("[{}, {}]", row("upgradable"), row("vanished")),
+        );
+        assert_eq!(plan.operations.len(), 1);
+        assert!(matches!(&plan.operations[0], Operation::Upgrade(id) if id.name == "upgradable"));
+        assert!(plan.status.is_none());
+        assert!(plan.confirmation.contains("Upgrade 1 selected packages?"));
+        assert!(plan.confirmation.contains("Upgrade upgradable"));
     }
     #[test]
     fn failure_details_carry_backend_error_and_hint() {
