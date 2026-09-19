@@ -1228,6 +1228,14 @@ Controls.ApplicationWindow {
                     enabled: !backend.writing
                     onClicked: root.selectNonePackages()
                 }
+                ActionButton {
+                    objectName: "selectAllButton"
+                    visible: root.currentView === "Updates" && root.uncheckedPackages.length > 0
+                    text: "Select all"
+                    symbol: "installed"
+                    enabled: !backend.writing
+                    onClicked: root.uncheckedPackages = []
+                }
                 Controls.Label {
                     objectName: "upgradeAllHint"
                     visible: root.currentView === "Updates" && !backend.upgradable && !backend.busy && root.items.some((row) => row.kind === "failure")

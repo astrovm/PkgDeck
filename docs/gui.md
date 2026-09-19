@@ -43,7 +43,7 @@ widths and the active sort persist across restarts like the source filter.
 
 Install, Remove, Upgrade, and Refresh source operate on the selected identity.
 Updates checks every row by default. Uncheck rows to narrow the upgrade, or
-use Select none to start empty; the single **Upgrade** button (Ctrl+Shift+U)
+use Select none to start empty and Select all to re-check everything; the single **Upgrade** button (Ctrl+Shift+U)
 reads **Upgrade all** while everything is checked and **Upgrade selected**
 otherwise. The all path batches per backend; the subset path confirms exactly
 the checked identities, which re-resolve against the current rows, so entries
