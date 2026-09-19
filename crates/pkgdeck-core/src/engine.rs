@@ -304,6 +304,16 @@ impl Engine {
     ) -> PackageReport {
         self.stream(Some(query), cancel, emit)
     }
+    /// Installed-set counterpart to [`search_stream`](Self::search_stream):
+    /// same cumulative sorted partials, same terminal report as
+    /// [`installed`](Self::installed).
+    pub fn installed_stream(
+        &mut self,
+        cancel: &Cancellation,
+        emit: &mut dyn FnMut(PackageReport),
+    ) -> PackageReport {
+        self.stream(None, cancel, emit)
+    }
     fn stream(
         &mut self,
         query: Option<&str>,
