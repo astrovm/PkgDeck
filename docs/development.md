@@ -6,6 +6,7 @@ Local work and GitHub CI use the same entry points:
 scripts/verify.sh fast   # Format, script behavior, Qt-free lint/tests/build
 scripts/setup-dev.sh    # Once per SDK/tool version; safe to repeat
 scripts/verify.sh full  # Workspace lint, tests, >=95% coverage, release builds
+scripts/verify.sh full --only lint,coverage,release,tests  # Full-mode subset for parallel CI jobs
 scripts/verify.sh vm    # Real package/authorization tests in a disposable VM
 ```
 

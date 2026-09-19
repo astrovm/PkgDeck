@@ -31,6 +31,7 @@ pub mod ffi {
             query: QString,
             source: QString,
             sudo: bool,
+            force: bool,
         );
         #[qinvokable]
         fn select(self: Pin<&mut PackageController>, index: i32);
@@ -196,6 +197,7 @@ pub struct Controller {
     queued: Option<Job>,
     selected: Option<PackageId>,
     engine: Option<Engine>,
+    view_cache: ViewCache,
     source_filter: Vec<String>,
     sudo: bool,
     worker: Option<Worker>,
@@ -220,6 +222,7 @@ impl Default for Controller {
             queued: None,
             selected: None,
             engine: None,
+            view_cache: ViewCache { entries: vec![] },
             source_filter: Vec::new(),
             sudo: false,
             worker: None,
@@ -339,6 +342,47 @@ fn plan_checked_upgrade(packages: &[Package], identities: &str) -> CheckedPlan {
         status: None,
     }
 }
+/// Cache key for one view snapshot: view, search text, checked sources,
+/// and elevation. The Installed filter is client-side, so it stays out of
+/// the key and shares the loaded rows while typing.
+fn cache_key(view: &str, query: &str, sources: &[String], sudo: bool) -> String {
+    format!("{view}\0{query}\0{}\0{sudo}", sources.join(","))
+}
+/// Per-view snapshots so switching sections is instant after the first
+/// visit. Small Vec, oldest evicted: views are few and searches share keys
+/// only when repeated exactly.
+struct ViewCache {
+    entries: Vec<(String, CachedView)>,
+}
+#[derive(Clone)]
+struct CachedView {
+    packages: Vec<Package>,
+    failures: Vec<BackendFailure>,
+    sources: Vec<Source>,
+    rows: QString,
+    status: QString,
+    upgradable: bool,
+    updates_view: bool,
+}
+impl ViewCache {
+    const CAPACITY: usize = 8;
+    fn get(&self, key: &str) -> Option<&CachedView> {
+        self.entries
+            .iter()
+            .find(|(candidate, _)| candidate == key)
+            .map(|(_, view)| view)
+    }
+    fn insert(&mut self, key: String, view: CachedView) {
+        self.entries.retain(|(candidate, _)| candidate != &key);
+        if self.entries.len() >= Self::CAPACITY {
+            self.entries.remove(0);
+        }
+        self.entries.push((key, view));
+    }
+    fn clear(&mut self) {
+        self.entries.clear();
+    }
+}
 fn operation_label(operation: &Operation) -> String {
     let (action, id) = match operation {
         Operation::Install(id) => ("Install", id),
@@ -430,6 +474,7 @@ impl ffi::PackageController {
         query: QString,
         sources: QString,
         sudo: bool,
+        force: bool,
     ) {
         if self.rust().worker.as_ref().is_some_and(|w| w.job.writes()) {
             return;
@@ -454,11 +499,38 @@ impl ffi::PackageController {
             self.set_status("Unknown source.".into());
             return;
         }
+        // A cached snapshot serves instantly with no worker and no spinner.
+        // Only when idle: a still-running worker owns the table until its
+        // replacement is queued below.
+        if !force && self.rust().worker.is_none() {
+            let key = cache_key(&view, &query, &sources, sudo);
+            if let Some(cached) = self.rust().view_cache.get(&key).cloned() {
+                self.as_mut().set_upgradable(cached.upgradable);
+                self.as_mut().rust_mut().updates_view = cached.updates_view;
+                self.as_mut().rust_mut().source_filter = sources;
+                self.as_mut().rust_mut().sudo = sudo;
+                self.as_mut().rust_mut().packages = cached.packages;
+                self.as_mut().rust_mut().failures = cached.failures;
+                self.as_mut().rust_mut().sources = cached.sources;
+                self.as_mut().rust_mut().pending = None;
+                self.as_mut().rust_mut().queued = None;
+                self.as_mut().rust_mut().selected = None;
+                self.as_mut().set_confirmation(QString::default());
+                self.as_mut().set_rows(cached.rows);
+                self.as_mut().set_details("{}".into());
+                self.set_status(cached.status);
+                return;
+            }
+        }
         self.as_mut().set_upgradable(false);
         self.as_mut().rust_mut().updates_view = view == "Updates";
         self.as_mut().rust_mut().source_filter = sources;
         self.as_mut().rust_mut().sudo = sudo;
-        self.as_mut().rust_mut().detail_cache.clear();
+        // Details survive view switches so re-selecting a package is
+        // instant; only an explicit reload or a write may invalidate them.
+        if force {
+            self.as_mut().rust_mut().detail_cache.clear();
+        }
         self.as_mut().rust_mut().packages.clear();
         self.as_mut().rust_mut().failures.clear();
         self.as_mut().rust_mut().sources.clear();
@@ -476,6 +548,20 @@ impl ffi::PackageController {
             return;
         }
         self.start(Job::Load(view, query));
+    }
+    /// Snapshot the current table under `key`. Called after a terminal view
+    /// report lands; the caller guarantees no newer load superseded it.
+    fn stash_current(self: Pin<&mut Self>, key: String) {
+        let view = CachedView {
+            packages: self.rust().packages.clone(),
+            failures: self.rust().failures.clone(),
+            sources: self.rust().sources.clone(),
+            rows: self.rust().rows.clone(),
+            status: self.rust().status.clone(),
+            upgradable: self.rust().upgradable,
+            updates_view: self.rust().updates_view,
+        };
+        self.rust_mut().view_cache.insert(key, view);
     }
     pub fn select(mut self: Pin<&mut Self>, index: i32) {
         if let Some(package) = usize::try_from(index)
@@ -738,6 +824,9 @@ impl ffi::PackageController {
             }
             Ok(Payload::Written(outcome)) => {
                 self.as_mut().set_upgradable(false);
+                // Any native write may change dependencies belonging to
+                // another listed package: drop every cached view with them.
+                self.as_mut().rust_mut().view_cache.clear();
                 self.as_mut().rust_mut().detail_cache.clear();
                 self.as_mut().rust_mut().packages.clear();
                 self.as_mut().rust_mut().failures.clear();
@@ -772,7 +861,32 @@ impl ffi::PackageController {
                         self.as_mut().rust_mut().engine = Some(engine);
                     }
                     Reply::Partial(report) => self.as_mut().apply(Ok(Payload::Packages(report))),
-                    Reply::Done(result) => self.as_mut().apply(result),
+                    Reply::Done(result) => {
+                        // Snapshot terminal view reports for instant
+                        // switching back, unless a newer load already
+                        // superseded this one (its guard in apply skips it).
+                        let key = match &worker.job {
+                            Job::Load(view, query)
+                                if !matches!(self.rust().queued, Some(Job::Load(..))) =>
+                            {
+                                Some(cache_key(
+                                    view,
+                                    query,
+                                    &self.rust().source_filter.clone(),
+                                    self.rust().sudo,
+                                ))
+                            }
+                            _ => None,
+                        };
+                        let stashable =
+                            matches!(result, Ok(Payload::Packages(_)) | Ok(Payload::Sources(_)));
+                        self.as_mut().apply(result);
+                        if stashable {
+                            if let Some(key) = key {
+                                self.as_mut().stash_current(key);
+                            }
+                        }
+                    }
                     Reply::Progress(_) => {}
                 }
             }
@@ -855,6 +969,63 @@ mod tests {
                 })
             }
         }
+    }
+    fn cached_view(name: &str) -> CachedView {
+        CachedView {
+            packages: vec![],
+            failures: vec![],
+            sources: vec![],
+            rows: format!(r#"[{{"name":"{name}"}}]"#).as_str().into(),
+            status: "cached".into(),
+            upgradable: false,
+            updates_view: false,
+        }
+    }
+    #[test]
+    fn cache_keys_separate_views_queries_sources_and_elevation() {
+        let apt = vec!["apt".to_string()];
+        let all: Vec<String> = vec![];
+        assert_eq!(
+            cache_key("Installed", "", &all, false),
+            cache_key("Installed", "", &all, false)
+        );
+        assert_ne!(
+            cache_key("Installed", "", &all, false),
+            cache_key("Updates", "", &all, false)
+        );
+        assert_ne!(
+            cache_key("Search", "fire", &all, false),
+            cache_key("Search", "firefox", &all, false)
+        );
+        assert_ne!(
+            cache_key("Installed", "", &all, false),
+            cache_key("Installed", "", &apt, false)
+        );
+        assert_ne!(
+            cache_key("Installed", "", &all, false),
+            cache_key("Installed", "", &all, true)
+        );
+    }
+    #[test]
+    fn view_cache_replaces_evicts_oldest_and_clears() {
+        let mut cache = ViewCache { entries: vec![] };
+        assert!(cache.get("missing").is_none());
+        cache.insert("a".into(), cached_view("a"));
+        cache.insert("b".into(), cached_view("b"));
+        assert!(cache.get("a").is_some());
+        // Re-inserting a key replaces it without growing the cache.
+        cache.insert("a".into(), cached_view("a2"));
+        assert_eq!(cache.entries.len(), 2);
+        assert!(cache.get("a").is_some());
+        for i in 0..ViewCache::CAPACITY {
+            cache.insert(format!("k{i}"), cached_view("x"));
+        }
+        assert_eq!(cache.entries.len(), ViewCache::CAPACITY);
+        // Oldest ("b", then "a") evicted first.
+        assert!(cache.get("b").is_none());
+        assert!(cache.get("a").is_none());
+        cache.clear();
+        assert!(cache.entries.is_empty());
     }
     #[test]
     fn controller_version_tracks_package_metadata() {

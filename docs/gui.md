@@ -15,7 +15,9 @@ The sidebar provides Search, Installed, Updates, Sources, Settings, and
 About. Sources reports actual source availability on the current computer;
 it does not invent recommendations or combine matching names across sources.
 Search submits on Enter or the Search button. Results use a virtualized ListView,
-with the selected package's description, scope, homepage, and dependencies below.
+ranked best-match-first (exact name, name prefix, name substring, then summary
+matches), with the selected package's description, scope, homepage, and dependencies below.
+Submitting a search clears any column sort so the best match is always first.
 The VERSION column carries the state: a bare candidate means not installed,
 `· installed` marks installed packages, and `→` marks an available update.
 Matching names remain separate source/architecture/scope identities.
@@ -57,7 +59,10 @@ Queries and writes execute on a Rust worker. The GUI polls a message channel and
 updates Qt properties on its own thread. Search results stream in per backend,
 so fast sources render while slow ones still query; the selection follows the
 same package identity across partials. Hovering a package row shows its full
-untruncated versions and summary. Switching sections or the selected row during
+untruncated versions and summary. Finished views are cached, so switching
+sections shows the last results instantly; only the first visit, a source
+change, or Reload queries native managers, and writes invalidate every cached
+view. Switching sections or the selected row during
 a query cancels the in-flight read and starts the new one; native writes keep
 the lock until they finish. An indeterminate spinner in the results table
 replaces invented percentages. Cancel interrupts reads; an already-running
@@ -70,8 +75,8 @@ header, next to the current view name: unchecking hides a source from every
 query, which is how backends you never use stay silent. The last checked
 source stays enabled so queries can never select nothing; the choice persists
 across restarts. The Installed view has its own filter
-field that narrows the loaded packages by name or summary without a new
-native query. The default GUI authorization uses the host polkit agent.
+field that narrows the loaded rows as you type, without a new native query.
+Enter jumps to the first match. The default GUI authorization uses the host polkit agent.
 Existing sudo credentials are also supported; passwords are never collected by
 PkgDeck. Homebrew and the development managers (Cargo, npm, pnpm, Bun, pip, pipx, uv, Composer, RubyGems) remain unprivileged. `pkgdeck --from apt|homebrew|cargo|npm|pnpm|bun|pip|pipx|uv|composer|gem --auth
 sudo|polkit` overrides the saved settings for the current session.
@@ -134,7 +139,8 @@ the user's display or package database. It verifies native fixture state after
 install, refresh, upgrade, and removal, and exercises resize and read cancellation.
 Qt Quick tests cover keyboard navigation, exact confirmation, source views,
 loading/errors, the source checklist, Updates multi-select, column
-sort/resize with backend index mapping, and the same-application badge. Xvfb, xdotool, and fonts are included in
+sort/resize with backend index mapping, the same-application badge,
+best-match search ranking, and the live Installed filter. Xvfb, xdotool, and fonts are included in
 the development image and desktop CI dependencies.
 
 To check the staged release bundle against real managers:

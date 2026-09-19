@@ -125,8 +125,41 @@ Controls.ApplicationWindow {
             return (row.capabilities || []).join(", ");
         return row.name || "";
     }
+    // Best-match-first score for the Search view: exact name, name prefix,
+    // name substring, summary prefix, summary substring, then anything the
+    // backend returned through another field. Ties break by name and source
+    // so streaming partials settle into a stable order.
+    function relevanceScore(row, query) {
+        const name = (row.name || "").toLowerCase();
+        const summary = (row.summary || "").toLowerCase();
+        if (name === query)
+            return 0;
+        if (name.indexOf(query) === 0)
+            return 1;
+        if (name.indexOf(query) >= 0)
+            return 2;
+        if (summary.indexOf(query) === 0)
+            return 3;
+        if (summary.indexOf(query) >= 0)
+            return 4;
+        return 5;
+    }
+    function relevanceTiebreak(a, b) {
+        if (a.name !== b.name)
+            return a.name < b.name ? -1 : 1;
+        if (a.source !== b.source)
+            return a.source < b.source ? -1 : 1;
+        return 0;
+    }
     property var viewItems: {
-        const rows = items.slice();
+        let rows = items.slice();
+        // The Installed filter narrows the loaded rows as you type; the
+        // backend is queried once with an empty query (see reload).
+        if (root.currentView === "Installed") {
+            const filter = root.installedFilter.trim().toLowerCase();
+            if (filter !== "")
+                rows = rows.filter((row) => row.kind !== "package" || ((row.name || "") + " " + (row.summary || "") + " " + (row.source || "")).toLowerCase().indexOf(filter) >= 0);
+        }
         if (sortColumn !== "") {
             const column = sortColumn;
             const dir = sortAscending ? 1 : -1;
@@ -135,18 +168,21 @@ Controls.ApplicationWindow {
                 const y = sortValue(column, b).toLowerCase();
                 return x < y ? -dir : (x > y ? dir : 0);
             });
+        } else if (root.currentView === "Search") {
+            const query = search.text.trim().toLowerCase();
+            if (query !== "")
+                rows.sort((a, b) => (relevanceScore(a, query) - relevanceScore(b, query)) || relevanceTiebreak(a, b));
         }
         return rows;
     }
     // The visible index addresses viewItems; the backend addresses items.
-    // With no active sort the two orders match and this is the identity.
-    // Sorted duplicates resolve to the first raw match: identical rows are
-    // one engine identity shown twice, so either index acts on the same one.
+    // Filtering, relevance ranking, and column sorts all reorder or narrow
+    // the rows, so always resolve through the row identity. Duplicate rows
+    // resolve to the first raw match: identical rows are one engine identity
+    // shown twice, so either index acts on the same one.
     function originalIndex(visible) {
         if (visible < 0 || visible >= viewItems.length)
             return -1;
-        if (sortColumn === "")
-            return visible;
         const id = rowIdentity(viewItems[visible]);
         for (let i = 0; i < items.length; i++) {
             if (rowIdentity(items[i]) === id)
@@ -343,12 +379,17 @@ Controls.ApplicationWindow {
         else if (["Search", "Installed", "Updates", "Sources"].indexOf(view) >= 0)
             reload();
     }
-    function reload() {
+    // Reload the current view. Without force, a cached snapshot serves
+    // instantly with no worker; force always queries native managers.
+    function reload(force) {
         resultView = currentView;
         results.currentIndex = -1;
         selectedIdentity = null;
         checkedPackages = [];
-        backend.load(currentView, currentView === "Installed" ? installedFilter : search.text, checkedCsv(), useSudo);
+        // Installed filtering is client-side over the loaded rows (see
+        // viewItems), so the backend always returns the full installed set
+        // and typing never triggers a native query.
+        backend.load(currentView, currentView === "Installed" ? "" : search.text, checkedCsv(), useSudo, force === true);
     }
     function choose(index) {
         if (index < 0 || index >= viewItems.length)
@@ -636,7 +677,10 @@ Controls.ApplicationWindow {
                     onAccepted: {
                         root.currentView = "Search";
                         root.queryDirty = false;
-                        root.reload();
+                        // A fresh search resets to best-match order: a stale
+                        // column sort would otherwise silently win over it.
+                        root.sortColumn = "";
+                        root.reload(true);
                     }
                     Keys.onDownPressed: {
                         results.forceActiveFocus();
@@ -650,7 +694,7 @@ Controls.ApplicationWindow {
                     symbol: "search"
                     primary: true
                     enabled: !backend.writing && search.text.trim().length > 0
-                    onClicked: { root.currentView = "Search"; root.queryDirty = false; root.reload(); }
+                    onClicked: { root.currentView = "Search"; root.queryDirty = false; root.sortColumn = ""; root.reload(true); }
                 }
             }
             RowLayout {
@@ -675,23 +719,23 @@ Controls.ApplicationWindow {
                         border.color: installedFilterField.activeFocus ? root.accent : root.line
                         border.width: installedFilterField.activeFocus ? 2 : 1
                     }
+                    onTextChanged: root.installedFilter = text
                     onAccepted: {
-                        root.installedFilter = text;
-                        root.reload();
+                        results.forceActiveFocus();
+                        if (root.viewItems.length > 0)
+                            root.choose(0);
                     }
-                }
-                ActionButton {
-                    text: "Filter"
-                    symbol: "search"
-                    primary: true
-                    enabled: !backend.writing
-                    onClicked: { root.installedFilter = installedFilterField.text; root.reload(); }
+                    Keys.onDownPressed: {
+                        results.forceActiveFocus();
+                        if (root.viewItems.length > 0)
+                            root.choose(0);
+                    }
                 }
             }
             ColumnLayout {
                 visible: root.currentView === "Settings"
                 Layout.fillWidth: true
-                Layout.alignment: Qt.AlignTop
+                Layout.fillHeight: true
                 Controls.Label { text: "Appearance" }
                 ThemedComboBox {
                     objectName: "appearanceSetting"
@@ -722,12 +766,15 @@ Controls.ApplicationWindow {
                     wrapMode: Text.WordWrap
                     text: "Polkit uses your host's authentication agent. Sudo requires an existing grant; passwords are never collected here. Homebrew and development managers always run unprivileged without elevation. Choose the appearance above, or follow your system theme."
                 }
+                // Absorbs leftover height so the settings stack stays top-anchored.
+                Item { Layout.fillHeight: true }
             }
             Controls.Label {
                 objectName: "aboutText"
                 visible: root.currentView === "About"
                 Layout.fillWidth: true
-                Layout.alignment: Qt.AlignTop
+                Layout.fillHeight: true
+                verticalAlignment: Text.AlignTop
                 wrapMode: Text.WordWrap
                 text: "PkgDeck " + backend.version + "\nA unified package interface for Linux.\n\nKeyboard shortcuts\nCtrl+1: Search • Ctrl+2: Installed • Ctrl+3: Updates • Ctrl+4: Sources\nCtrl+F: search • Ctrl+L: focus results • Up/Down: select • Ctrl+I: install • Ctrl+D: remove • Ctrl+U: upgrade • Ctrl+M: refresh source • Ctrl+R: reload\nEscape: cancel current work\n\nRefresh updates source metadata; Upgrade changes an installed package. Writes require confirmation and may change native dependencies. Cancellation waits for a native write already running.\n\nSearches show configured package sources. A failed source stays as a row in Sources and in the current results."
                 textFormat: Text.PlainText
@@ -1211,7 +1258,7 @@ Controls.ApplicationWindow {
                     text: "Reload"
                     symbol: "refresh"
                     enabled: !backend.writing
-                    onClicked: root.reload()
+                    onClicked: root.reload(true)
                 }
             }
         }
@@ -1286,7 +1333,7 @@ Controls.ApplicationWindow {
     Shortcut {
         sequence: "Ctrl+R"
         enabled: !backend.writing
-        onActivated: root.reload()
+        onActivated: root.reload(true)
     }
     Shortcut {
         sequence: "Ctrl+I"

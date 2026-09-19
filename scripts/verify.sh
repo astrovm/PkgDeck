@@ -3,14 +3,31 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 mode=${1:-fast}
 if (($#)); then shift; fi
-usage='Usage: scripts/verify.sh [fast|full|vm|containers] [--engine native|podman]'
+usage='Usage: scripts/verify.sh [fast|full|vm|containers] [--engine native|podman] [--only lint,coverage,release,tests]'
 if [[ "$mode" == --help ]]; then echo "$usage"; exit 0; fi
 engine=native
-if [[ "${1:-}" == --engine && $# == 2 ]]; then engine=$2; shift 2; fi
-if (($#)) || [[ ! "$mode" =~ ^(fast|full|vm|containers)$ ]] || [[ ! "$engine" =~ ^(native|podman)$ ]] || [[ "$mode" == vm && "$engine" == podman ]]; then
+only=all
+while (($#)); do
+    case "${1:-}" in
+        --engine) [[ $# -ge 2 ]] || { echo "$usage" >&2; exit 2; }; engine=$2; shift 2;;
+        --only) [[ $# -ge 2 ]] || { echo "$usage" >&2; exit 2; }; only=$2; shift 2;;
+        *) echo "$usage" >&2; exit 2;;
+    esac
+done
+if [[ ! "$mode" =~ ^(fast|full|vm|containers)$ ]] || [[ ! "$engine" =~ ^(native|podman)$ ]] || [[ "$mode" == vm && "$engine" == podman ]]; then
     echo "$usage" >&2
     exit 2
 fi
+if [[ "$mode" != full && "$only" != all ]]; then
+    echo "--only applies to full mode" >&2
+    exit 2
+fi
+if [[ ! "$only" =~ ^(all|(lint|coverage|release|tests)(,(lint|coverage|release|tests))*)$ ]]; then
+    echo "$usage" >&2
+    exit 2
+fi
+# Full-mode stage selector for parallel CI jobs sharing one rust cache key.
+want() { [[ $only == all || ",$only," == *",$1,"* ]]; }
 prerequisites=(timeout tee)
 if [[ "$engine" == native ]]; then prerequisites+=(cargo jq); fi
 for tool in "${prerequisites[@]}"; do
@@ -56,11 +73,16 @@ if [[ "$mode" == vm ]]; then
     stage vm scripts/test-host-vm.sh
     exit 0
 fi
-stage format cargo fmt --all --check
-stage infrastructure scripts/tests/infrastructure.sh
-stage no-python scripts/check-no-python.sh
-stage apt-helper scripts/build-apt.sh
-stage apt-metadata scripts/tests/apt-metadata.sh
+# Stage-selected full runs (parallel CI jobs) skip the shared prefix: the
+# terminal job already covers it, and repeating it in every split job would
+# cost more than it signals.
+if [[ $only == all ]]; then
+    stage format cargo fmt --all --check
+    stage infrastructure scripts/tests/infrastructure.sh
+    stage no-python scripts/check-no-python.sh
+    stage apt-helper scripts/build-apt.sh
+    stage apt-metadata scripts/tests/apt-metadata.sh
+fi
 if [[ "$mode" == fast ]]; then
     stage lint cargo clippy --locked -p pkgdeck-core -p pkd --all-targets -- -D warnings
     stage tests cargo test --locked -p pkgdeck-core -p pkd
@@ -71,13 +93,23 @@ else
     [[ $(qtpaths6 --qt-version) == 6.10.2 ]] && dpkg-query -W libkirigami-dev >/dev/null 2>&1 || {
         echo 'Ubuntu Qt 6.10.2/Kirigami toolchain missing. Install the development prerequisites.' >&2; exit 1;
     }
-    command -v cargo-llvm-cov >/dev/null && [[ $(cargo llvm-cov --version) == 'cargo-llvm-cov 0.9.1' ]] || {
-        echo 'cargo-llvm-cov 0.9.1 missing. Run scripts/setup-dev.sh.' >&2; exit 1;
-    }
+    if want coverage; then
+        command -v cargo-llvm-cov >/dev/null && [[ $(cargo llvm-cov --version) == 'cargo-llvm-cov 0.9.1' ]] || {
+            echo 'cargo-llvm-cov 0.9.1 missing. Run scripts/setup-dev.sh.' >&2; exit 1;
+        }
+    fi
     export QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=software
-    stage lint cargo clippy --workspace --all-targets --locked -- -D warnings
-    mkdir -p coverage
-    stage coverage cargo llvm-cov --workspace --include-build-script --ignore-filename-regex pkgdeck-tools --locked --lcov --output-path coverage/lcov.info
-    stage coverage-gate cargo llvm-cov report --summary-only --include-build-script --ignore-filename-regex pkgdeck-tools --fail-under-lines 95
-    stage release cargo build --workspace --release --locked
+    want lint && stage lint cargo clippy --workspace --all-targets --locked -- -D warnings
+    if want coverage; then
+        mkdir -p coverage
+        stage coverage cargo llvm-cov --workspace --include-build-script --ignore-filename-regex pkgdeck-tools --locked --lcov --output-path coverage/lcov.info
+        stage coverage-gate cargo llvm-cov report --summary-only --include-build-script --ignore-filename-regex pkgdeck-tools --fail-under-lines 95
+    fi
+    want release && stage release cargo build --workspace --release --locked
+    # Plain debug test run without coverage instrumentation; the aarch64 CI
+    # job uses this while x86_64 carries the coverage gate.
+    want tests && stage tests cargo test --workspace --locked
+    # A skipped trailing stage leaves a non-zero status behind; reaching
+    # this point means every selected stage passed.
+    exit 0
 fi

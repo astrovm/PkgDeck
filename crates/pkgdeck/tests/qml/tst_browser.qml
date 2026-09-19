@@ -22,14 +22,16 @@ TestCase {
         property string lastView: ""
         property string lastQuery: ""
         property string lastSource: ""
+        property bool lastForce: false
         property int selection: -1
         property int writes: 0
         property int cancels: 0
         property string lastChecked: ""
-        function load(view, query, source, sudo) {
+        function load(view, query, source, sudo, force) {
             lastView = view;
             lastQuery = query;
             lastSource = source;
+            lastForce = !!force;
         }
         function select(index) {
             selection = index;
@@ -80,6 +82,7 @@ TestCase {
         fake.writes = 0;
         fake.cancels = 0;
         fake.lastChecked = "";
+        fake.lastForce = false;
         browser = createTemporaryObject(window, test);
         verify(browser !== null);
         browser.requestActivate();
@@ -185,9 +188,11 @@ TestCase {
         browser.choose(0);
         fake.busy = true;
         verify(!findChild(browser, "installButton").enabled);
-        // Reads do not lock navigation or selection.
+        // Reads do not lock navigation or selection. Section switches go
+        // through the cache path, never forced.
         browser.openView("Updates");
         compare(browser.currentView, "Updates");
+        compare(fake.lastForce, false);
         browser.openView("Installed");
         compare(browser.currentView, "Installed");
         const list = findChild(browser, "packageResults");
@@ -411,6 +416,13 @@ TestCase {
         verify(about.text.indexOf("Ctrl+2: Installed") >= 0);
         const at = about.mapToItem(browser.contentItem, 0, 0);
         verify(at.y < browser.height / 3);
+        // A tall window must not vertically center the text (regression:
+        // the label used to float mid-window without a fill-height item).
+        browser.height = 1300;
+        waitForRendering(browser.contentItem);
+        const tall = about.mapToItem(browser.contentItem, 0, 0);
+        verify(tall.y < browser.height / 3);
+        browser.height = 760;
     }
     function test_view_status_and_source_columns() {
         browser.openView("Settings");
@@ -454,14 +466,49 @@ TestCase {
         verify(search.activeFocus);
         verify(!list.activeFocus);
         compare(browser.queryDirty, false);
+        // Best-match ranking puts the apt row first visibly although the
+        // backend order is reversed; selection follows the visible order.
         keyClick(Qt.Key_Down);
-        compare(fake.selection, 0);
+        compare(fake.selection, 1);
         keyClick(Qt.Key_PageDown);
-        compare(fake.selection, 1);
-        keyClick(Qt.Key_Home);
         compare(fake.selection, 0);
-        keyClick(Qt.Key_End);
+        keyClick(Qt.Key_Home);
         compare(fake.selection, 1);
+        keyClick(Qt.Key_End);
+        compare(fake.selection, 0);
+    }
+    function test_search_ranks_best_matches_first() {
+        browser.openView("Search");
+        const search = findChild(browser, "searchField");
+        search.text = "fire";
+        fake.rows = JSON.stringify([
+            {kind: "package", name: "x-fire-helper", source: "apt", architecture: "all", installed: null, candidate: "1", scope: "system", summary: "Helper"},
+            {kind: "package", name: "firefox", source: "apt", architecture: "all", installed: null, candidate: "1", scope: "system", summary: "Browser"},
+            {kind: "package", name: "fire", source: "apt", architecture: "all", installed: null, candidate: "1", scope: "system", summary: "Exact"},
+            {kind: "package", name: "zzz", source: "apt", architecture: "all", installed: null, candidate: "1", scope: "system", summary: "Fire starter"}
+        ]);
+        waitForRendering(browser.contentItem);
+        compare(browser.viewItems.length, 4);
+        compare(browser.viewItems[0].name, "fire");
+        compare(browser.viewItems[1].name, "firefox");
+        compare(browser.viewItems[2].name, "x-fire-helper");
+        compare(browser.viewItems[3].name, "zzz");
+        // Actions map the visible row back to backend order.
+        browser.choose(0);
+        compare(fake.selection, 2);
+        // An explicit column sort wins over relevance ranking.
+        browser.cycleSort("name");
+        compare(browser.viewItems[0].name, "fire");
+        compare(browser.viewItems[1].name, "firefox");
+        compare(browser.viewItems[3].name, "zzz");
+        // Submitting a fresh search resets to best-match order and forces
+        // a native query instead of serving the cached snapshot.
+        search.forceActiveFocus();
+        keyClick(Qt.Key_Return);
+        compare(browser.sortColumn, "");
+        compare(browser.viewItems[0].name, "fire");
+        compare(fake.lastForce, true);
+        compare(fake.lastView, "Search");
     }
     function test_header_source_checklist_and_installed_filter() {
         browser.openView("Installed");
@@ -499,12 +546,21 @@ TestCase {
         const field = findChild(browser, "installedFilterField");
         verify(field !== null);
         browser.openView("Installed");
+        populate();
+        compare(fake.lastQuery, "");
+        compare(browser.viewItems.length, 2);
+        // Typing narrows the loaded rows immediately without a native query.
         field.forceActiveFocus();
-        field.text = "synthetic";
+        field.text = "homebrew";
+        compare(browser.installedFilter, "homebrew");
+        compare(browser.viewItems.length, 1);
+        compare(browser.viewItems[0].source, "homebrew");
+        compare(fake.lastQuery, "");
+        // Enter jumps to the first match; clearing restores every row.
         keyClick(Qt.Key_Return);
-        compare(browser.installedFilter, "synthetic");
-        compare(fake.lastView, "Installed");
-        compare(fake.lastQuery, "synthetic");
+        compare(fake.selection, 1);
+        field.text = "";
+        compare(browser.viewItems.length, 2);
     }
     function test_failure_rows_show_diagnostics() {
         fake.details = JSON.stringify({
