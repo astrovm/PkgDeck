@@ -303,6 +303,7 @@ impl<T: Transport> Flatpak<T> {
                     update: UpdateAvailability::Unknown,
                     icon: None,
                     component_ids: vec![],
+                    homepages: vec![],
                 })
             })
             .collect()
@@ -363,6 +364,7 @@ impl<T: Transport> Flatpak<T> {
                     update: UpdateAvailability::Unknown,
                     icon: None,
                     component_ids: vec![],
+                    homepages: vec![],
                 })
             })
             .collect()
@@ -828,6 +830,10 @@ impl<T: Transport> Backend for Apt<T> {
                     .get(&d.package.id.name)
                     .cloned()
                     .unwrap_or_default();
+                // The native helper already reports the control-file
+                // homepage for every package: reuse it as a grouping key
+                // so CLI tools (no AppStream entry) group across managers.
+                d.package.homepages = d.homepage.clone().into_iter().collect();
                 d.package
             })
             .collect())
@@ -853,6 +859,7 @@ impl<T: Transport> Backend for Apt<T> {
                 .get(&id.name)
                 .cloned()
                 .unwrap_or_default();
+            details.package.homepages = details.homepage.clone().into_iter().collect();
         }
         Ok(details)
     }
@@ -981,6 +988,11 @@ impl<T: Transport> Homebrew<T> {
                         candidate_version: candidate,
                         icon: None,
                         component_ids: vec![],
+                        homepages: if f.homepage.is_empty() {
+                            vec![]
+                        } else {
+                            vec![f.homepage.clone()]
+                        },
                     },
                     description: f.desc.unwrap_or_default(),
                     homepage: (!f.homepage.is_empty()).then_some(f.homepage),
@@ -1268,6 +1280,7 @@ impl<T: Transport> SystemManager<T> {
             update: UpdateAvailability::Unknown,
             icon: None,
             component_ids: vec![],
+            homepages: vec![],
         })
     }
     fn parse(&self, value: Vec<u8>, installed: bool) -> Result<Vec<Package>, EngineError> {
@@ -2081,6 +2094,9 @@ impl<T: Transport> DevTool<T> {
                 candidate_version: candidate,
                 icon: None,
                 component_ids: vec![],
+                // Manifest homepages (bun, composer, …) double as grouping
+                // keys so dev tools group with native builds of the same app.
+                homepages: homepage.clone().into_iter().collect(),
             },
             description: summary,
             homepage,
@@ -2827,6 +2843,7 @@ impl<T: Transport> Backend for DevTool<T> {
                 update: UpdateAvailability::Unknown,
                 icon: None,
                 component_ids: vec![],
+                homepages: vec![],
             });
         }
         Ok(results)

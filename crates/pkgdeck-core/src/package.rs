@@ -47,6 +47,23 @@ pub struct Package {
     /// always address exact backend identities. Empty when unknown.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub component_ids: Vec<String>,
+    /// Upstream homepages (raw URLs) identifying the same application
+    /// across managers where AppStream has no entry, e.g. a CLI tool
+    /// installed from both APT and Homebrew. Same display-only contract
+    /// as component ids; normalized only while grouping. Empty when unknown.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub homepages: Vec<String>,
+}
+/// Normalize a homepage for grouping: case-insensitive, no scheme, no
+/// `www.` prefix, no query/fragment, no trailing slash. Empty or
+/// unparseable values are `None` so they never join unrelated rows.
+pub fn normalize_homepage(url: &str) -> Option<String> {
+    let url = url.trim().to_lowercase();
+    let url = url.split(['?', '#']).next().unwrap_or("");
+    let url = url.split("://").last().unwrap_or("");
+    let url = url.trim_end_matches('/');
+    let url = url.strip_prefix("www.").unwrap_or(url);
+    (!url.is_empty()).then(|| url.to_owned())
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq)]
@@ -131,47 +148,58 @@ pub struct Selector {
     pub scope: Option<Scope>,
 }
 
-/// Installed backends keyed by AppStream component id. Empty stems are
-/// ignored so they never join unrelated rows.
+/// Grouping keys for one package: AppStream component ids plus normalized
+/// homepages, each in its own namespace so a stem can never collide with a
+/// URL. Empty values are ignored so they never join unrelated rows.
+fn app_keys(components: &[String], homepages: &[String]) -> Vec<String> {
+    let mut keys: Vec<String> = components
+        .iter()
+        .filter(|id| !id.is_empty())
+        .map(|id| format!("c:{id}"))
+        .collect();
+    keys.extend(
+        homepages
+            .iter()
+            .filter_map(|url| normalize_homepage(url))
+            .map(|url| format!("h:{url}")),
+    );
+    keys
+}
+/// Installed backends keyed by grouping key (see [`app_keys`]).
 fn installed_component_backends(
     packages: &[Package],
-) -> std::collections::BTreeMap<&str, std::collections::BTreeSet<&str>> {
+) -> std::collections::BTreeMap<String, std::collections::BTreeSet<String>> {
     let mut index = std::collections::BTreeMap::new();
     for package in packages {
         if package.installed_version.is_none() {
             continue;
         }
-        for component in &package.component_ids {
-            if component.is_empty() {
-                continue;
-            }
+        for key in app_keys(&package.component_ids, &package.homepages) {
             index
-                .entry(component.as_str())
+                .entry(key)
                 .or_insert_with(std::collections::BTreeSet::new)
-                .insert(package.id.backend.as_str());
+                .insert(package.id.backend.clone());
         }
     }
     index
 }
 fn backends_sharing(
     components: &[String],
+    homepages: &[String],
     backend: &str,
-    index: &std::collections::BTreeMap<&str, std::collections::BTreeSet<&str>>,
+    index: &std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
 ) -> Vec<String> {
     let mut backends = std::collections::BTreeSet::new();
-    for component in components {
-        if component.is_empty() {
-            continue;
-        }
-        if let Some(set) = index.get(component.as_str()) {
+    for key in app_keys(components, homepages) {
+        if let Some(set) = index.get(&key) {
             for other in set {
-                if *other != backend {
-                    backends.insert(*other);
+                if other != backend {
+                    backends.insert(other.clone());
                 }
             }
         }
     }
-    backends.into_iter().map(str::to_owned).collect()
+    backends.into_iter().collect()
 }
 /// Best-match-first ordering for search results, shared by the terminal
 /// frontends (the GUI ranks in QML for live keystrokes; same rule, see
@@ -213,18 +241,21 @@ fn score(package: &Package, query: &str) -> u8 {
     }
 }
 /// Sorted backend ids, other than `id`'s own backend, with an installed
-/// package sharing one of its AppStream component ids. Only installed
-/// packages group: remote catalog entries never join, and a backend with
-/// several matching packages is listed once. Display-only: selection and
-/// writes always address exact identities, never groups.
+/// package sharing one of its AppStream component ids or normalized
+/// homepages. Only installed packages group: remote catalog entries never
+/// join, and a backend with several matching packages is listed once.
+/// Display-only: selection and writes always address exact identities,
+/// never groups.
 pub fn same_app_sources(packages: &[Package], id: &PackageId) -> Vec<String> {
     let Some(package) = packages.iter().find(|package| package.id == *id) else {
         return vec![];
     };
+    let index = installed_component_backends(packages);
     backends_sharing(
         &package.component_ids,
+        &package.homepages,
         &id.backend,
-        &installed_component_backends(packages),
+        &index,
     )
 }
 /// Per-row `same_app_sources` for a whole report, sharing one inverted index.
@@ -232,7 +263,14 @@ pub fn same_app_sources_all(packages: &[Package]) -> Vec<Vec<String>> {
     let index = installed_component_backends(packages);
     packages
         .iter()
-        .map(|package| backends_sharing(&package.component_ids, &package.id.backend, &index))
+        .map(|package| {
+            backends_sharing(
+                &package.component_ids,
+                &package.homepages,
+                &package.id.backend,
+                &index,
+            )
+        })
         .collect()
 }
 
@@ -255,6 +293,7 @@ mod tests {
             update: UpdateAvailability::Available,
             icon: None,
             component_ids: components.iter().map(ToString::to_string).collect(),
+            homepages: vec![],
         }
     }
     fn firefox_id() -> PackageId {
@@ -353,6 +392,55 @@ mod tests {
         rank_search_matches(&mut packages, "fire");
         assert_eq!(packages[0].id.backend, "apt");
         assert_eq!(packages[1].id.backend, "npm");
+    }
+    #[test]
+    fn normalize_homepage_strips_scheme_www_and_trailing_slash() {
+        assert_eq!(
+            normalize_homepage("https://github.com/sharkdp/bat/"),
+            Some("github.com/sharkdp/bat".into())
+        );
+        assert_eq!(
+            normalize_homepage("http://www.libreoffice.org/discover/writer/"),
+            Some("libreoffice.org/discover/writer".into())
+        );
+        assert_eq!(
+            normalize_homepage("https://gnu.org/software/libidn/#libidn2"),
+            Some("gnu.org/software/libidn".into())
+        );
+        assert_eq!(normalize_homepage(""), None);
+        assert_eq!(normalize_homepage("   "), None);
+        assert_eq!(normalize_homepage("https://"), None);
+    }
+    #[test]
+    fn same_app_groups_by_shared_homepage() {
+        let mut apt = package("apt", "bat", true, &[]);
+        apt.homepages = vec!["https://github.com/sharkdp/bat".into()];
+        let mut brew = package("homebrew", "bat", true, &[]);
+        brew.homepages = vec!["https://github.com/sharkdp/bat/".into()];
+        let mut other = package("apt", "other", true, &[]);
+        other.homepages = vec!["https://example.invalid/other".into()];
+        let packages = vec![apt, brew, other];
+        let apt_id = PackageId {
+            backend: "apt".into(),
+            name: "bat".into(),
+            architecture: "amd64".into(),
+            scope: Scope::System,
+            remote: None,
+        };
+        // Trailing-slash variants still match after normalization.
+        assert_eq!(
+            same_app_sources(&packages, &apt_id),
+            vec!["homebrew".to_string()]
+        );
+        // Components and homepages union: either key groups.
+        let mut snap = package("snap", "bat", true, &["bat"]);
+        snap.homepages = vec!["https://github.com/sharkdp/bat".into()];
+        let mut packages = packages;
+        packages.push(snap);
+        assert_eq!(
+            same_app_sources(&packages, &apt_id),
+            vec!["homebrew".to_string(), "snap".to_string()]
+        );
     }
     #[test]
     fn empty_component_stems_never_group() {

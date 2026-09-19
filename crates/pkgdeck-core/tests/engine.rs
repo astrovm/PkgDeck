@@ -39,6 +39,7 @@ fn package(id: PackageId) -> Package {
         update: UpdateAvailability::Unknown,
         icon: None,
         component_ids: vec![],
+        homepages: vec![],
     }
 }
 fn selector() -> Selector {

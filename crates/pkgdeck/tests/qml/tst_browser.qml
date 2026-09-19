@@ -322,6 +322,35 @@ TestCase {
         verify(line.text.indexOf("Snap") >= 0);
         compare(browser.sameAppSummary(browser.viewItems[1]), "");
     }
+    function test_multi_source_toggle_lists_grouped_apps() {
+        browser.openView("Installed");
+        fake.rows = JSON.stringify([
+            {kind: "package", name: "solo", source: "apt", architecture: "amd64", installed: "1", candidate: "1", scope: "system", summary: "Only here", same_app_from: []},
+            {kind: "package", name: "duo", source: "apt", architecture: "amd64", installed: "1", candidate: "2", scope: "system", summary: "In two places", same_app_from: ["homebrew"]},
+            {kind: "failure", name: "npm", source: "npm", summary: "boom", available: false}
+        ]);
+        waitForRendering(browser.contentItem);
+        compare(browser.viewItems.length, 3);
+        const check = findChild(browser, "multiSourceCheck");
+        verify(check !== null);
+        verify(check.visible);
+        verify(!browser.multiSourceOnly);
+        mouseClick(check);
+        compare(browser.multiSourceOnly, true);
+        // The grouped app stays; failed sources stay visible as diagnostics.
+        compare(browser.viewItems.length, 2);
+        compare(browser.viewItems[0].name, "duo");
+        compare(browser.viewItems[1].kind, "failure");
+        // Combines with the text filter (failed rows stay in both).
+        const field = findChild(browser, "installedFilterField");
+        field.text = "duo";
+        compare(browser.viewItems.length, 2);
+        compare(browser.viewItems[0].name, "duo");
+        field.text = "";
+        mouseClick(check);
+        compare(browser.multiSourceOnly, false);
+        compare(browser.viewItems.length, 3);
+    }
     function test_updates_multiselect_upgrade_selected() {
         browser.openView("Updates");
         populate();

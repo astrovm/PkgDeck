@@ -23,6 +23,10 @@ Controls.ApplicationWindow {
     // is how backends you never use stay silent.
     property string sourceSelection: ""
     property string installedFilter: ""
+    // Session-only filter showing just the apps installed from more than
+    // one source. Session-only like the text filter: view state, not a
+    // persisted preference.
+    property bool multiSourceOnly: false
     property bool useSudo: argument("--auth", preferences.authorization) === "sudo"
     readonly property var sourceIds: ["apt", "dnf", "pacman", "zypper", "snap", "homebrew", "appimage", "flatpak", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "composer", "gem"]
     readonly property var sourceNames: ["APT", "DNF", "Pacman", "Zypper", "Snap", "Homebrew", "AppImage", "Flatpak", "Cargo", "npm", "pnpm", "Bun", "pip", "pipx", "uv", "Composer", "RubyGems"]
@@ -169,6 +173,8 @@ Controls.ApplicationWindow {
             const filter = root.installedFilter.trim().toLowerCase();
             if (filter !== "")
                 rows = rows.filter((row) => row.kind !== "package" || ((row.name || "") + " " + (row.summary || "") + " " + (row.source || "")).toLowerCase().indexOf(filter) >= 0);
+            if (root.multiSourceOnly)
+                rows = rows.filter((row) => row.kind !== "package" || ((row.same_app_from || []).length > 0));
         }
         if (sortColumn !== "") {
             const column = sortColumn;
@@ -742,6 +748,27 @@ Controls.ApplicationWindow {
                         results.forceActiveFocus();
                         if (root.viewItems.length > 0)
                             root.choose(0);
+                    }
+                }
+                Controls.CheckBox {
+                    id: multiSourceCheck
+                    objectName: "multiSourceCheck"
+                    text: "Multiple sources"
+                    checked: root.multiSourceOnly
+                    enabled: !backend.writing
+                    onToggled: root.multiSourceOnly = checked
+                    Accessible.name: "Show only applications installed from multiple sources"
+                    Layout.alignment: Qt.AlignVCenter
+                    indicator: TickBox {
+                        x: 0
+                        y: (multiSourceCheck.height - height) / 2
+                        ticked: multiSourceCheck.checked
+                    }
+                    contentItem: Text {
+                        text: multiSourceCheck.text
+                        color: root.ink
+                        verticalAlignment: Text.AlignVCenter
+                        leftPadding: 28
                     }
                 }
             }

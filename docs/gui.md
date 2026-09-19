@@ -25,12 +25,16 @@ The VERSION column carries the state: a bare candidate means not installed,
 `· installed` marks installed packages, and `→` marks an available update.
 Matching names remain separate source/architecture/scope identities.
 Installed packages whose application exists in several managers at once show
-an "also in …" badge on the row, the tooltip, and the details panel: the
-grouping key is the AppStream component id (APT's DEP-11 data, Flatpak app
-ids, snap desktop entries, AppImage desktop entries), resolved from local
-files only. Grouping is display-only; installs, removals, and upgrades still
-address one exact backend identity, and remote catalog entries never join a
-group.
+an "also in …" badge on the row, the tooltip, and the details panel. Two
+local-only signals feed the grouping: the AppStream component id (APT's
+DEP-11 data, Flatpak app ids, snap desktop entries, AppImage desktop
+entries) and the upstream homepage (APT control data, Homebrew formulae,
+and dev-tool manifests), normalized and matched exactly. Grouping is
+display-only; installs, removals, and upgrades still address one exact
+backend identity, and remote catalog entries never join a group. The
+Installed view's Multiple sources checkbox lists just those apps:
+
+![Multiple sources](screenshots/pkgdeck-installed-multisource.png)
 Click a column header to sort ascending, again for descending (▲▼); drag the
 header gutter to resize the name and version columns. Headers are Tab stops:
 Space or Return sorts without a mouse. Sorting is display-only:
