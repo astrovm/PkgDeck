@@ -46,7 +46,7 @@ Rust uses the repository's `rust-toolchain.toml`; Cargo verifies registry packag
 
 Prerequisites are rustup/Cargo, a C++ compiler, `libapt-pkg-dev`, jq,
 Ninja, pkg-config, LLD, and the Qt/KDE development/runtime
-system libraries listed in `.github/workflows/ci.yml`. The bootstrap reports
+system libraries listed in `.github/actions/setup-desktop/action.yml`. The bootstrap reports
 missing command prerequisites before downloading. It does not install host OS
 packages or grant authorization.
 
@@ -72,6 +72,41 @@ Infrastructure changes should be tested through the shared scripts locally,
 including a fresh setup and a repeated cached setup when changing bootstrap logic.
 CI runs the same checks on x86_64 and aarch64; local x86_64 success does not claim
 ARM validation. Run `pinact run --verify` when changing GitHub workflows.
+
+## CI structure and naming
+
+The workflow is named `CI`. Checks use `Category / Scope (architecture)`:
+
+| Check | Responsibility |
+| --- | --- |
+| `Test / Terminal (x86_64, aarch64)` | Fast checks and Qt-free CLI/TUI builds, one job per architecture |
+| `Lint / Workspace (x86_64, aarch64)` | Workspace Clippy, one job per architecture |
+| `Coverage / Workspace (x86_64)` | Workspace tests with the 95% coverage gate |
+| `Test / Workspace (aarch64)` | Native workspace tests without instrumentation |
+| `Test / Podman (x86_64, aarch64)` | Container workspace tests and CLI/TUI APT/Homebrew lifecycles, one job per architecture |
+| `Test / VM (x86_64)` | VM lifecycles and authorization checks |
+| `Test / Backend / <backend> (x86_64)` | Real native/development-manager lifecycle tests |
+| `Package / Linux (x86_64, aarch64)` | Release build, package formats, and packaged GUI lifecycles, one job per architecture |
+
+Job IDs and log stages use lowercase kebab-case (`test-workspace`,
+`lint-terminal`, `build-release`, `check-coverage`). Step names start with an
+action: `Install`, `Build`, `Run`, or `Upload`. Artifacts use
+`<kind>-<scope>-<architecture>`, for example `logs-podman-aarch64`.
+Rust tests retain descriptive snake_case names; Qt Quick uses its standard
+`tst_*.qml` files and `test_*` functions.
+
+Desktop jobs share `.github/actions/setup-desktop`: packaging tools are installed
+only for packaging, and cargo-llvm-cov only for coverage. Packaging owns release
+builds; Podman exercises the container test environment without repeating native
+lint, coverage, and release stages.
+
+Native Rust caches are separated by architecture and purpose (terminal, lint,
+tests, coverage, release). Keys include dependency/toolchain inputs and the source
+revision, with fallback to the latest compatible build. Backend jobs restore the
+terminal cache without competing to save it. Container caches are separate and
+include the development-image inputs. Incremental compiler directories are
+excluded from uploads to reduce cache size. A new cache namespace starts cold;
+subsequent successful runs populate it.
 
 ## Rootless Podman
 

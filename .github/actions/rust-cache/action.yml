@@ -1,0 +1,39 @@
+name: Cache Rust build outputs
+description: Keep native build caches separate by architecture, job, and toolchain inputs.
+inputs:
+  arch:
+    description: Target architecture.
+    required: true
+  scope:
+    description: Owning job or build profile.
+    required: true
+  save:
+    description: Save successful builds; consumers of another job's cache restore only.
+    default: 'true'
+runs:
+  using: composite
+  steps:
+    - name: Restore and save Rust cache
+      if: inputs.save == 'true'
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          target
+          !target/**/incremental
+          ~/.cargo/registry
+          ~/.cargo/git
+          ~/.cargo/bin/cargo-llvm-cov
+        key: rust-v3-ubuntu-26.04-${{ inputs.arch }}-${{ inputs.scope }}-${{ hashFiles('Cargo.toml', 'crates/*/Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.github/actions/setup-desktop/action.yml', 'scripts/dev-env.sh') }}-${{ github.sha }}
+        restore-keys: rust-v3-ubuntu-26.04-${{ inputs.arch }}-${{ inputs.scope }}-${{ hashFiles('Cargo.toml', 'crates/*/Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.github/actions/setup-desktop/action.yml', 'scripts/dev-env.sh') }}-
+    - name: Restore Rust cache
+      if: inputs.save != 'true'
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          target
+          !target/**/incremental
+          ~/.cargo/registry
+          ~/.cargo/git
+          ~/.cargo/bin/cargo-llvm-cov
+        key: rust-v3-ubuntu-26.04-${{ inputs.arch }}-${{ inputs.scope }}-${{ hashFiles('Cargo.toml', 'crates/*/Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.github/actions/setup-desktop/action.yml', 'scripts/dev-env.sh') }}-${{ github.sha }}
+        restore-keys: rust-v3-ubuntu-26.04-${{ inputs.arch }}-${{ inputs.scope }}-${{ hashFiles('Cargo.toml', 'crates/*/Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.github/actions/setup-desktop/action.yml', 'scripts/dev-env.sh') }}-

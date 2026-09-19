@@ -1,0 +1,38 @@
+name: Set up desktop dependencies
+description: Install the Ubuntu Qt/KDE toolchain shared by desktop CI jobs.
+inputs:
+  packaging:
+    description: Include package-building and lifecycle tools.
+    default: 'false'
+  coverage:
+    description: Install the pinned coverage tool.
+    default: 'false'
+runs:
+  using: composite
+  steps:
+    - name: Install desktop dependencies
+      shell: bash
+      env:
+        PACKAGING: ${{ inputs.packaging }}
+      run: |
+        packages=(
+          build-essential libapt-pkg-dev jq libarchive-tools cmake ninja-build lld pkg-config
+          qt6-base-dev qt6-declarative-dev qt6-declarative-dev-tools qt6-tools-dev
+          qt6-shadertools-dev qt6-wayland qt6-svg-plugins libkirigami-dev extra-cmake-modules
+          libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-dev libvulkan-dev
+          libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-shape0 libxcb-xkb1
+          libxkbcommon-x11-0 libxcb-image0 libxcb-render-util0 libxcb-randr0 libxcb-sync1
+          libxcb-xfixes0 libxcb-glx0 libdbus-1-3 libfontconfig1 libfreetype6 libopengl0
+          libpulse0 libgssapi-krb5-2 libnss3 libasound2t64 libxcomposite1 libxdamage1
+          libxtst6 libwayland-cursor0 libwayland-egl1 xvfb xdotool fonts-dejavu-core
+        )
+        if [[ "$PACKAGING" == true ]]; then
+          packages+=(flatpak flatpak-builder snapd squashfs-tools zsync desktop-file-utils podman)
+        fi
+        sudo apt-get update
+        sudo apt-get install -y "${packages[@]}"
+        rustup show
+    - name: Install coverage tool
+      if: inputs.coverage == 'true'
+      shell: bash
+      run: scripts/setup-dev.sh

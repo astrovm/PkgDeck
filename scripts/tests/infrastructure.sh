@@ -27,7 +27,7 @@ chmod +x "$work/bin/cargo"
 expect_code 23 env PATH="$work/bin:$PATH" PKGDECK_LOG_ROOT="$work/logs" scripts/verify.sh fast
 grep -q 'FAIL format' "$work/output"
 grep -q synthetic-format-error "$work/logs/latest/format.log"
-[[ ! -e $work/logs/latest/tests.log ]]
+[[ ! -e $work/logs/latest/test-terminal.log ]]
 printf '#!/bin/sh\necho synthetic-slow-stage\nexec sleep 30\n' >"$work/bin/cargo"
 expect_code 124 env PATH="$work/bin:$PATH" PKGDECK_LOG_ROOT="$work/slow" PKGDECK_STAGE_TIMEOUT=0.1s scripts/verify.sh fast
 grep -q synthetic-slow-stage "$work/slow/latest/format.log"

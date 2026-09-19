@@ -9,12 +9,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  terminal:
-    name: Qt-free terminal (${{ matrix.runner }})
+  test-terminal:
+    name: Test / Terminal (${{ matrix.arch }})
     timeout-minutes: 10
     strategy:
       fail-fast: false
@@ -26,97 +26,100 @@ jobs:
             arch: aarch64
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - run: sudo apt-get update && sudo apt-get install -y libapt-pkg-dev jq
-      - run: rustup show
-      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        id: terminal-rust-cache
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install terminal dependencies
+        run: sudo apt-get update && sudo apt-get install -y libapt-pkg-dev jq
+      - name: Set up Rust
+        run: rustup show
+      - name: Cache Rust build outputs
+        uses: ./.github/actions/rust-cache
         with:
-          path: |
-            target
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: rust-v2-${{ matrix.arch }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml') }}
-      - run: scripts/verify.sh fast
-      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        if: success() && steps.terminal-rust-cache.outputs.cache-hit != 'true'
-        with:
-          path: |
-            target
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ steps.terminal-rust-cache.outputs.cache-primary-key }}
+          arch: ${{ matrix.arch }}
+          scope: terminal
+      - name: Run terminal checks
+        run: scripts/verify.sh fast
 
-  host-vm:
-    name: APT and Homebrew lifecycles in disposable VM (x86_64)
+  test-vm:
+    name: Test / VM (x86_64)
     runs-on: ubuntu-26.04
     timeout-minutes: 35
     env:
-      # The stage timed out at 20m while every step was still passing (native
-      # brew update alone takes ~100s under TCG emulation); keep headroom.
       PKGDECK_STAGE_TIMEOUT: 30m
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install VM tooling
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install VM dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y qemu-system-x86 qemu-utils genisoimage
-      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Restore terminal build outputs
+        uses: ./.github/actions/rust-cache
         with:
-          path: |
-            target
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: rust-v2-x86_64-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml') }}
-      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        id: vm-cache
+          arch: x86_64
+          scope: terminal
+          save: 'false'
+      - name: Cache prepared VM
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: build/host-vm
           key: ubuntu-host-vm-26.04-20260823-${{ hashFiles('scripts/vm/prepare.sh') }}
-      - name: Verify native lifecycle and authorization
+      - name: Run VM lifecycle and authorization tests
         run: scripts/verify.sh vm
-      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        if: success() && steps.vm-cache.outputs.cache-hit != 'true'
-        with:
-          path: build/host-vm
-          key: ${{ steps.vm-cache.outputs.cache-primary-key }}
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - name: Upload VM logs
         if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: host-vm-logs
+          name: logs-vm-x86_64
           path: |
             build/host-vm/logs
             build/verification
 
-  containers:
-    name: Rootless Podman (${{ matrix.runner }})
-    timeout-minutes: 45
+  test-podman:
+    name: Test / Podman (${{ matrix.arch }})
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-26.04, ubuntu-26.04-arm]
+        include:
+          - runner: ubuntu-26.04
+            arch: x86_64
+          - runner: ubuntu-26.04-arm
+            arch: aarch64
     runs-on: ${{ matrix.runner }}
     env:
-      PKGDECK_STAGE_TIMEOUT: 35m
+      PKGDECK_STAGE_TIMEOUT: 30m
+      PKGDECK_CONTAINER_CACHE: ${{ github.workspace }}/build/container-cache
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install rootless container tooling
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Podman dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y podman
           podman info
-      - name: Verify development image and native package lifecycles
-        run: |
-          scripts/verify.sh full --engine podman
-          scripts/verify.sh containers --engine podman
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: always()
+      - name: Cache container build outputs
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          name: container-verification-${{ matrix.runner }}
+          path: |
+            build/container-cache
+            !build/container-cache/target/**/incremental
+          key: podman-v1-${{ matrix.arch }}-${{ hashFiles('containers/development.Containerfile', 'scripts/setup-dev.sh', 'scripts/dev-env.sh', 'Cargo.toml', 'crates/*/Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: podman-v1-${{ matrix.arch }}-${{ hashFiles('containers/development.Containerfile', 'scripts/setup-dev.sh', 'scripts/dev-env.sh', 'Cargo.toml', 'crates/*/Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml') }}-
+      - name: Run container workspace tests
+        # Native jobs own lint/coverage; packaging owns release builds.
+        run: scripts/verify.sh full --only tests --engine podman
+      - name: Run container CLI and TUI lifecycle tests
+        run: scripts/verify.sh containers --engine podman
+      - name: Upload Podman logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: logs-podman-${{ matrix.arch }}
           path: build/verification
 
-  native-backends:
-    name: Real native backends (${{ matrix.backend }})
+  test-native-backends:
+    name: Test / Backend / ${{ matrix.backend }} (x86_64)
     timeout-minutes: 25
     strategy:
       fail-fast: false
@@ -124,49 +127,47 @@ jobs:
         backend: [dnf, pacman, zypper]
     runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install rootless container tooling
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Podman dependencies
         run: sudo apt-get update && sudo apt-get install -y podman
-      # Restore-only: the terminal job owns the save for this key, so the
-      # CLI build below is incremental instead of cold on every run.
-      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Restore terminal build outputs
+        uses: ./.github/actions/rust-cache
         with:
-          path: |
-            target
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: rust-v2-x86_64-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml') }}
+          arch: x86_64
+          scope: terminal
+          save: 'false'
       - name: Build CLI
         run: cargo build --locked -p pkd
-      - name: Exercise actual package manager
+      - name: Run backend lifecycle tests
         run: scripts/tests/native-manager.sh ${{ matrix.backend }} "$PWD/target/debug/pkd"
 
-  snap-backend:
-    name: Real Snap backend
+  test-snap:
+    name: Test / Backend / snap (x86_64)
     timeout-minutes: 25
     runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install and start Snapd
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Snap dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y snapd
           sudo systemctl enable --now snapd.socket
           sudo snap wait system seed.loaded
-      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Restore terminal build outputs
+        uses: ./.github/actions/rust-cache
         with:
-          path: |
-            target
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: rust-v2-x86_64-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml') }}
+          arch: x86_64
+          scope: terminal
+          save: 'false'
       - name: Build CLI
         run: cargo build --locked -p pkd
-      - name: Exercise actual Snap lifecycle
+      - name: Run backend lifecycle tests
         run: scripts/tests/snap-manager.sh "$PWD/target/debug/pkd"
 
-  dev-backends:
-    name: Real dev backends (${{ matrix.backend }})
+  test-dev-backends:
+    name: Test / Backend / ${{ matrix.backend }} (x86_64)
     timeout-minutes: 25
     strategy:
       fail-fast: false
@@ -174,21 +175,21 @@ jobs:
         backend: [cargo, npm, pnpm, bun, pip, pipx, uv, composer, gem]
     runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Restore terminal build outputs
+        uses: ./.github/actions/rust-cache
         with:
-          path: |
-            target
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: rust-v2-x86_64-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml') }}
+          arch: x86_64
+          scope: terminal
+          save: 'false'
       - name: Build CLI
         run: cargo build --locked -p pkd
-      - name: Exercise actual development manager
+      - name: Run backend lifecycle tests
         run: scripts/tests/dev-manager.sh ${{ matrix.backend }} "$PWD/target/debug/pkd"
 
-  desktop-lint:
-    name: Desktop lint (${{ matrix.arch }})
+  lint-workspace:
+    name: Lint / Workspace (${{ matrix.arch }})
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -203,128 +204,68 @@ jobs:
       QT_QPA_PLATFORM: offscreen
       QT_QUICK_BACKEND: software
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install build and packaging dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential libapt-pkg-dev jq libarchive-tools cmake ninja-build lld pkg-config qt6-base-dev qt6-declarative-dev qt6-declarative-dev-tools qt6-tools-dev qt6-shadertools-dev qt6-wayland qt6-svg-plugins libkirigami-dev extra-cmake-modules libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-dev libvulkan-dev libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-shape0 libxcb-xkb1 libxkbcommon-x11-0 libxcb-image0 libxcb-render-util0 libxcb-randr0 libxcb-sync1 libxcb-xfixes0 libxcb-glx0 libdbus-1-3 libfontconfig1 libfreetype6 libopengl0 libpulse0 libgssapi-krb5-2 libnss3 libasound2t64 libxcomposite1 libxdamage1 libxtst6 libwayland-cursor0 libwayland-egl1 flatpak flatpak-builder snapd squashfs-tools zsync desktop-file-utils podman xvfb xdotool fonts-dejavu-core
-          rustup show
-      - name: Prepare pinned development tools
-        run: scripts/setup-dev.sh
-      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        id: rust-cache
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Cache Rust build outputs
+        uses: ./.github/actions/rust-cache
         with:
-          path: |
-            target
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: rust-v2-${{ matrix.arch }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml') }}
-      - name: Verify workspace lint
+          arch: ${{ matrix.arch }}
+          scope: lint
+      - name: Set up desktop dependencies
+        uses: ./.github/actions/setup-desktop
+      - name: Run workspace lint
         run: scripts/verify.sh full --only lint
 
-  desktop-coverage:
-    name: Desktop coverage (x86_64)
+  coverage-workspace:
+    name: Coverage / Workspace (x86_64)
     timeout-minutes: 20
     runs-on: ubuntu-26.04
     env:
       QT_QPA_PLATFORM: offscreen
       QT_QUICK_BACKEND: software
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install build and packaging dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential libapt-pkg-dev jq libarchive-tools cmake ninja-build lld pkg-config qt6-base-dev qt6-declarative-dev qt6-declarative-dev-tools qt6-tools-dev qt6-shadertools-dev qt6-wayland qt6-svg-plugins libkirigami-dev extra-cmake-modules libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-dev libvulkan-dev libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-shape0 libxcb-xkb1 libxkbcommon-x11-0 libxcb-image0 libxcb-render-util0 libxcb-randr0 libxcb-sync1 libxcb-xfixes0 libxcb-glx0 libdbus-1-3 libfontconfig1 libfreetype6 libopengl0 libpulse0 libgssapi-krb5-2 libnss3 libasound2t64 libxcomposite1 libxdamage1 libxtst6 libwayland-cursor0 libwayland-egl1 flatpak flatpak-builder snapd squashfs-tools zsync desktop-file-utils podman xvfb xdotool fonts-dejavu-core
-          rustup show
-      - name: Prepare pinned development tools
-        run: scripts/setup-dev.sh
-      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Cache Rust build outputs
+        uses: ./.github/actions/rust-cache
         with:
-          path: |
-            target
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: rust-v2-x86_64-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml') }}
-      - name: Verify coverage gate
+          arch: x86_64
+          scope: coverage
+      - name: Set up desktop dependencies
+        uses: ./.github/actions/setup-desktop
+        with:
+          coverage: 'true'
+      - name: Run workspace coverage
         run: scripts/verify.sh full --only coverage
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - name: Upload coverage report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: coverage-x86_64
+          name: coverage-workspace-x86_64
           path: coverage/lcov.info
           if-no-files-found: error
 
-  desktop-tests:
-    name: Desktop tests (aarch64)
+  test-workspace:
+    name: Test / Workspace (aarch64)
     timeout-minutes: 20
     runs-on: ubuntu-26.04-arm
     env:
       QT_QPA_PLATFORM: offscreen
       QT_QUICK_BACKEND: software
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install build and packaging dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential libapt-pkg-dev jq libarchive-tools cmake ninja-build lld pkg-config qt6-base-dev qt6-declarative-dev qt6-declarative-dev-tools qt6-tools-dev qt6-shadertools-dev qt6-wayland qt6-svg-plugins libkirigami-dev extra-cmake-modules libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-dev libvulkan-dev libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-shape0 libxcb-xkb1 libxkbcommon-x11-0 libxcb-image0 libxcb-render-util0 libxcb-randr0 libxcb-sync1 libxcb-xfixes0 libxcb-glx0 libdbus-1-3 libfontconfig1 libfreetype6 libopengl0 libpulse0 libgssapi-krb5-2 libnss3 libasound2t64 libxcomposite1 libxdamage1 libxtst6 libwayland-cursor0 libwayland-egl1 flatpak flatpak-builder snapd squashfs-tools zsync desktop-file-utils podman xvfb xdotool fonts-dejavu-core
-          rustup show
-      - name: Prepare pinned development tools
-        run: scripts/setup-dev.sh
-      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        id: rust-cache
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Cache Rust build outputs
+        uses: ./.github/actions/rust-cache
         with:
-          path: |
-            target
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: rust-v2-aarch64-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml') }}
-      - name: Verify debug test suite
+          arch: aarch64
+          scope: tests
+      - name: Set up desktop dependencies
+        uses: ./.github/actions/setup-desktop
+      - name: Run workspace tests
         run: scripts/verify.sh full --only tests
-      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        if: success() && steps.rust-cache.outputs.cache-hit != 'true'
-        with:
-          path: |
-            target
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
 
-  desktop-release:
-    name: Desktop release build (x86_64)
-    timeout-minutes: 15
-    runs-on: ubuntu-26.04
-    env:
-      QT_QPA_PLATFORM: offscreen
-      QT_QUICK_BACKEND: software
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install build and packaging dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential libapt-pkg-dev jq libarchive-tools cmake ninja-build lld pkg-config qt6-base-dev qt6-declarative-dev qt6-declarative-dev-tools qt6-tools-dev qt6-shadertools-dev qt6-wayland qt6-svg-plugins libkirigami-dev extra-cmake-modules libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-dev libvulkan-dev libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-shape0 libxcb-xkb1 libxkbcommon-x11-0 libxcb-image0 libxcb-render-util0 libxcb-randr0 libxcb-sync1 libxcb-xfixes0 libxcb-glx0 libdbus-1-3 libfontconfig1 libfreetype6 libopengl0 libpulse0 libgssapi-krb5-2 libnss3 libasound2t64 libxcomposite1 libxdamage1 libxtst6 libwayland-cursor0 libwayland-egl1 flatpak flatpak-builder snapd squashfs-tools zsync desktop-file-utils podman xvfb xdotool fonts-dejavu-core
-          rustup show
-      - name: Prepare pinned development tools
-        run: scripts/setup-dev.sh
-      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        id: rust-cache
-        with:
-          path: |
-            target
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: rust-v2-x86_64-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml') }}
-      - name: Verify release build
-        run: scripts/verify.sh full --only release
-      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        if: success() && steps.rust-cache.outputs.cache-hit != 'true'
-        with:
-          path: |
-            target
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
-
-  packaging:
-    name: Packages (${{ matrix.arch }})
+  package:
+    name: Package / Linux (${{ matrix.arch }})
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -339,26 +280,20 @@ jobs:
       QT_QPA_PLATFORM: offscreen
       QT_QUICK_BACKEND: software
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install build and packaging dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential libapt-pkg-dev jq libarchive-tools cmake ninja-build lld pkg-config qt6-base-dev qt6-declarative-dev qt6-declarative-dev-tools qt6-tools-dev qt6-shadertools-dev qt6-wayland qt6-svg-plugins libkirigami-dev extra-cmake-modules libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-dev libvulkan-dev libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-shape0 libxcb-xkb1 libxkbcommon-x11-0 libxcb-image0 libxcb-render-util0 libxcb-randr0 libxcb-sync1 libxcb-xfixes0 libxcb-glx0 libdbus-1-3 libfontconfig1 libfreetype6 libopengl0 libpulse0 libgssapi-krb5-2 libnss3 libasound2t64 libxcomposite1 libxdamage1 libxtst6 libwayland-cursor0 libwayland-egl1 flatpak flatpak-builder snapd squashfs-tools zsync desktop-file-utils podman xvfb xdotool fonts-dejavu-core
-          rustup show
-      - name: Prepare pinned development tools
-        run: scripts/setup-dev.sh
-      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Cache Rust build outputs
+        uses: ./.github/actions/rust-cache
         with:
-          path: |
-            target
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: rust-v2-${{ matrix.arch }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml') }}
-      - name: Build release binaries for bundling
-        # Each job gets a fresh workspace: the release build from the
-        # desktop-release job does not travel with the shared source cache.
+          arch: ${{ matrix.arch }}
+          scope: release
+      - name: Set up desktop dependencies
+        uses: ./.github/actions/setup-desktop
+        with:
+          packaging: 'true'
+      - name: Build release binaries
         run: scripts/verify.sh full --only release
-      - name: Build and stage both executables
+      - name: Test staged bundle
         run: |
           source scripts/dev-env.sh
           cargo build --locked -p pkgdeck-tools
@@ -370,9 +305,9 @@ jobs:
           scripts/xtask.sh terminal build/AppDir/AppRun --cli
           build/AppDir/AppRun --cli --version
           build/AppDir/AppRun --cli doctor
-      - name: Verify staged GUI native lifecycles in isolation
+      - name: Run packaged GUI lifecycle tests
         run: PKGDECK_FRONTEND=gui PKGDECK_BINARY_DIR="$PWD/build/AppDir/usr/bin" scripts/container.sh lifecycle
-      - name: Build and smoke-test AppImage
+      - name: Build and test AppImage
         env:
           APPIMAGETOOL: ${{ github.workspace }}/build/appimagetool
         run: |
@@ -393,7 +328,7 @@ jobs:
           XDG_DATA_HOME="$data" "$appimage" --cli --json --yes --from appimage install "$appimage" | jq -e '.exit_code == 0'
           imported=$(XDG_DATA_HOME="$data" "$appimage" --cli --json --from appimage list | jq -r '.data.packages[0].id.name')
           XDG_DATA_HOME="$data" "$appimage" --cli --json --yes --from appimage remove "$imported" | jq -e '.exit_code == 0'
-      - name: Build and smoke-test Flatpak
+      - name: Build and test Flatpak
         run: |
           sudo flatpak remote-add --system --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
           sudo flatpak install --system -y --noninteractive flathub org.kde.Platform//6.11 org.kde.Sdk//6.11 org.freedesktop.Sdk.Extension.rust-stable//25.08
@@ -412,7 +347,7 @@ jobs:
           check /tmp/pkd-flatpak-update.json '.exit_code == 0' run_flatpak update
           check /tmp/pkd-flatpak-remove.json '.exit_code == 0' run_flatpak remove org.kde.kcalc
           ! flatpak --user list --app | grep -q org.kde.kcalc
-      - name: Build and inspect Snap
+      - name: Build and test Snap
         run: |
           scripts/package.sh snap
           unsquashfs -d build/snap-check build/artifacts/*.snap
@@ -421,8 +356,9 @@ jobs:
           unset LD_LIBRARY_PATH QML_IMPORT_PATH
           scripts/xtask.sh gui build/snap-check/AppRun
           scripts/xtask.sh terminal build/snap-check/usr/bin/pkd
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - name: Upload packages
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: packages-${{ matrix.arch }}
+          name: packages-linux-${{ matrix.arch }}
           path: build/artifacts/*
           if-no-files-found: error
