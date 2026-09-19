@@ -308,6 +308,24 @@ fn wave_three_parsers_preserve_system_identities() {
 }
 
 #[test]
+fn snap_search_keeps_store_summaries_for_ranking() {
+    let cancel = Cancellation::default();
+    let mut snap = Snap::snap(Raw(output(
+        "Name Version Publisher Notes Summary\ngimp 2.10.38 snapcrafters - GNU Image Manipulation Program\nopenvino-ai-plugins-gimp 1.0 intel - AI plugins for GIMP\nbare 1.0 canonical -\n",
+    )));
+    let packages = snap.search("gimp", &cancel).unwrap();
+    assert_eq!(packages.len(), 3);
+    assert_eq!(packages[0].summary, "GNU Image Manipulation Program");
+    assert_eq!(packages[1].summary, "AI plugins for GIMP");
+    assert_eq!(packages[2].summary, "");
+    // `snap list` has no summary column: installed rows keep the placeholder.
+    let installed = snap.installed(&cancel).unwrap();
+    assert_eq!(installed.len(), 3);
+    assert!(installed.iter().all(|p| p.summary == "Snap package"));
+    assert!(installed.iter().all(|p| p.installed_version.is_some()));
+}
+
+#[test]
 fn flatpak_lists_user_and_system_applications_without_collapsing_scope() {
     let cancel = Cancellation::default();
     let metadata = "io.example.User\tx86_64\tstable\t1.0\tUser app\nio.example.System\tx86_64\tstable\t2.0\tSystem app\n";

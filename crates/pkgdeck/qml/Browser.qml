@@ -127,8 +127,18 @@ Controls.ApplicationWindow {
     }
     // Best-match-first score for the Search view: exact name, name prefix,
     // name substring, summary prefix, summary substring, then anything the
-    // backend returned through another field. Ties break by name and source
-    // so streaming partials settle into a stable order.
+    // backend returned through another field. Unverifiable offers (a package
+    // row with neither an installed nor a candidate version, e.g. a dev
+    // backend's uninstalled-name guess) always sort below verified rows so
+    // real packages are never buried under names that may not exist. Ties
+    // break by name and source so streaming partials settle into a stable
+    // order.
+    // A package row is an unverified guess when no backend reported a
+    // version for it either way. If a future source legitimately returns
+    // version-less rows, they will sink here too by design.
+    function isFabricated(row) {
+        return row.kind === "package" && !row.installed && !row.candidate;
+    }
     function relevanceScore(row, query) {
         const name = (row.name || "").toLowerCase();
         const summary = (row.summary || "").toLowerCase();
@@ -166,12 +176,15 @@ Controls.ApplicationWindow {
             rows.sort((a, b) => {
                 const x = sortValue(column, a).toLowerCase();
                 const y = sortValue(column, b).toLowerCase();
-                return x < y ? -dir : (x > y ? dir : 0);
+                // Total order: the engine sort is not stable for equal
+                // keys, so same-name rows from several sources would flip
+                // on every keystroke without a direction-aware tiebreak.
+                return (x < y ? -dir : (x > y ? dir : 0)) || relevanceTiebreak(a, b) * dir;
             });
         } else if (root.currentView === "Search") {
             const query = search.text.trim().toLowerCase();
             if (query !== "")
-                rows.sort((a, b) => (relevanceScore(a, query) - relevanceScore(b, query)) || relevanceTiebreak(a, b));
+                rows.sort((a, b) => ((isFabricated(a) ? 1 : 0) - (isFabricated(b) ? 1 : 0)) || (relevanceScore(a, query) - relevanceScore(b, query)) || relevanceTiebreak(a, b));
         }
         return rows;
     }

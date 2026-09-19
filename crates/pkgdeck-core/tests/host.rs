@@ -58,6 +58,15 @@ impl Drop for Fixture {
         fs::remove_dir_all(&self.0).unwrap();
     }
 }
+/// Fixture executables are symlinks to system binaries, never freshly
+/// written scripts: parallel write→exec of new files trips an ETXTBSY race
+/// (observed at a few percent under thread churn, never single-threaded,
+/// on both tmpfs and disk), while execs of pre-existing files never fail.
+fn link_executable(dir: &Path, name: &str, target: &str) -> PathBuf {
+    let path = dir.join(name);
+    symlink(target, &path).unwrap();
+    path
+}
 
 #[test]
 fn formats_and_nested_sandbox_markers_fail_closed() {
@@ -434,11 +443,9 @@ fn apt_refresh_upgrade_and_multiarch_keep_native_safety_options() {
 #[test]
 fn system_manager_reads_keep_snap_timeout_and_exit_status() {
     let fixture = Fixture::new();
-    fixture.executable("snap");
-    fixture.executable("synthetic-ok");
-    let failing = fixture.0.join("synthetic-tool");
-    fs::write(&failing, "#!/bin/sh\nexit 3\n").unwrap();
-    fs::set_permissions(&failing, fs::Permissions::from_mode(0o755)).unwrap();
+    link_executable(&fixture.0, "snap", "/bin/true");
+    link_executable(&fixture.0, "synthetic-ok", "/bin/true");
+    link_executable(&fixture.0, "synthetic-tool", "/bin/false");
     let host = Host::new(
         Runtime::Native,
         env(&[("PATH", fixture.0.to_str().unwrap())]),
@@ -471,10 +478,8 @@ fn system_manager_reads_keep_snap_timeout_and_exit_status() {
 #[test]
 fn dev_tool_runs_unprivileged_and_reports_status() {
     let fixture = Fixture::new();
-    fixture.executable("synthetic-ok");
-    let failing = fixture.0.join("synthetic-fail");
-    fs::write(&failing, "#!/bin/sh\nexit 3\n").unwrap();
-    fs::set_permissions(&failing, fs::Permissions::from_mode(0o755)).unwrap();
+    link_executable(&fixture.0, "synthetic-ok", "/bin/true");
+    link_executable(&fixture.0, "synthetic-fail", "/bin/false");
     let host = Host::new(
         Runtime::Native,
         env(&[
