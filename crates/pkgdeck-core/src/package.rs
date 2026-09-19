@@ -173,6 +173,45 @@ fn backends_sharing(
     }
     backends.into_iter().map(str::to_owned).collect()
 }
+/// Best-match-first ordering for search results, shared by the terminal
+/// frontends (the GUI ranks in QML for live keystrokes; same rule, see
+/// Browser.qml relevanceScore): exact name, name prefix, name substring,
+/// summary prefix, summary substring, then the rest. Unverifiable offers
+/// (no version either way) sink below verified rows, and name/source
+/// ties break deterministically. Display-only: engine order is untouched.
+pub fn rank_search_matches(packages: &mut [Package], query: &str) {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return;
+    }
+    packages.sort_by(|a, b| {
+        fabricated(a)
+            .cmp(&fabricated(b))
+            .then(score(a, &query).cmp(&score(b, &query)))
+            .then(a.id.name.cmp(&b.id.name))
+            .then(a.id.backend.cmp(&b.id.backend))
+    });
+}
+fn fabricated(package: &Package) -> bool {
+    package.installed_version.is_none() && package.candidate_version.is_none()
+}
+fn score(package: &Package, query: &str) -> u8 {
+    let name = package.id.name.to_lowercase();
+    let summary = package.summary.to_lowercase();
+    if name == query {
+        0
+    } else if name.starts_with(query) {
+        1
+    } else if name.contains(query) {
+        2
+    } else if summary.starts_with(query) {
+        3
+    } else if summary.contains(query) {
+        4
+    } else {
+        5
+    }
+}
 /// Sorted backend ids, other than `id`'s own backend, with an installed
 /// package sharing one of its AppStream component ids. Only installed
 /// packages group: remote catalog entries never join, and a backend with
@@ -280,6 +319,40 @@ mod tests {
             }
         )
         .is_empty());
+    }
+    #[test]
+    fn rank_search_matches_orders_exact_prefix_substring_summary() {
+        fn row(name: &str, summary: &str) -> Package {
+            let mut package = package("apt", name, false, &[]);
+            package.summary = summary.into();
+            package.candidate_version = Some("1".into());
+            package
+        }
+        let mut packages = vec![
+            row("zzz", "fire starter"),
+            row("x-fire-helper", "helper"),
+            row("firefox", "browser"),
+            row("fire", "exact"),
+        ];
+        rank_search_matches(&mut packages, "fire");
+        let names: Vec<_> = packages.iter().map(|p| p.id.name.as_str()).collect();
+        assert_eq!(names, vec!["fire", "firefox", "x-fire-helper", "zzz"]);
+        // Empty queries keep engine order.
+        let mut same = packages.clone();
+        rank_search_matches(&mut same, "   ");
+        assert_eq!(same, packages);
+    }
+    #[test]
+    fn rank_search_matches_sinks_unverified_guesses() {
+        let mut guess = package("npm", "fire", false, &[]);
+        guess.candidate_version = None;
+        let mut real = package("apt", "zzz", false, &[]);
+        real.summary = "fire starter".into();
+        real.candidate_version = Some("1".into());
+        let mut packages = vec![guess, real];
+        rank_search_matches(&mut packages, "fire");
+        assert_eq!(packages[0].id.backend, "apt");
+        assert_eq!(packages[1].id.backend, "npm");
     }
     #[test]
     fn empty_component_stems_never_group() {

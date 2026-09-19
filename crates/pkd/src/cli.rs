@@ -42,19 +42,22 @@ impl From<Auth> for Authorization {
 }
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Check host readiness and backend availability.
     Doctor,
+    /// List package sources with availability and capabilities.
     Sources,
-    Search {
-        query: String,
-    },
-    Info {
-        name: String,
-    },
+    /// Search packages by name or description, best matches first.
+    Search { query: String },
+    /// Show details for one exact package identifier.
+    Info { name: String },
+    /// List installed packages.
     List,
+    /// Install packages by exact identifier.
     Install {
         #[arg(required = true)]
         names: Vec<String>,
     },
+    /// Remove installed packages.
     Remove {
         #[arg(required = true)]
         names: Vec<String>,
@@ -62,9 +65,7 @@ pub enum Commands {
     /// Refresh source metadata without upgrading packages.
     Update,
     /// Upgrade named packages, or all available updates if no names are supplied.
-    Upgrade {
-        names: Vec<String>,
-    },
+    Upgrade { names: Vec<String> },
 }
 impl Commands {
     fn writes(&self) -> bool {
@@ -135,7 +136,8 @@ pub fn dispatch(
             return (json!({"sources": sources}), code);
         }
         Commands::Search { query } => {
-            let report = engine.search(query, cancel);
+            let mut report = engine.search(query, cancel);
+            rank_search_matches(&mut report.packages, query);
             let code = if report.failures.is_empty() { 0 } else { 8 };
             return (json!(report), code);
         }
