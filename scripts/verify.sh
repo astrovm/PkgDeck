@@ -64,7 +64,7 @@ if [[ "$mode" == containers ]]; then
     exit 0
 fi
 if [[ "$engine" == podman ]]; then
-    stage "container-$mode" scripts/container.sh development "$mode"
+    stage "container-$mode" scripts/container.sh development "$mode" --only "$only"
     exit 0
 fi
 if [[ "$mode" == vm ]]; then

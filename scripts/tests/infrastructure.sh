@@ -31,6 +31,27 @@ grep -q synthetic-format-error "$work/logs/latest/format.log"
 printf '#!/bin/sh\necho synthetic-slow-stage\nexec sleep 30\n' >"$work/bin/cargo"
 expect_code 124 env PATH="$work/bin:$PATH" PKGDECK_LOG_ROOT="$work/slow" PKGDECK_STAGE_TIMEOUT=0.1s scripts/verify.sh fast
 grep -q synthetic-slow-stage "$work/slow/latest/format.log"
+# Exercise the real container wrapper with a synthetic engine: no image or
+# desktop is needed to check forwarding, mounts, and failure propagation.
+cat >"$work/bin/podman" <<'EOF'
+#!/bin/bash
+case "$1" in
+    info) echo true ;;
+    image) exit 0 ;;
+    run) printf '%s\n' "$@" >"$PODMAN_ARGS"; exit "${PODMAN_STATUS:-0}" ;;
+    *) exit 2 ;;
+esac
+EOF
+chmod +x "$work/bin/podman"
+expect_code 23 env PATH="$work/bin:$PATH" PODMAN_ARGS="$work/args" PODMAN_STATUS=23 PKGDECK_CONTAINER_CACHE="$work/cache" PKGDECK_LOG_ROOT="$work/container-logs" scripts/verify.sh full --only tests --engine podman
+grep -Fxq -- '--only' "$work/args"
+grep -Fxq tests "$work/args"
+grep -Fxq "$work/cache/cargo:/cache/cargo:rw" "$work/args"
+grep -Fxq "$work/cache/target:/workspace/target:rw" "$work/args"
+grep -q 'CARGO_HOME=/cache/cargo' containers/development.Containerfile
+expect_code 0 env PATH="$work/bin:$PATH" PODMAN_ARGS="$work/args" PKGDECK_CONTAINER_CACHE="$work/cache" scripts/container.sh development --exec cargo test --locked example
+grep -Fxq example "$work/args"
+expect_code 2 env PATH="$work/bin:$PATH" PKGDECK_CONTAINER_CACHE="$work/cache" scripts/container.sh development --exec
 source scripts/vm/cache.sh
 printf synthetic-base >"$work/base"
 qemu-img() { printf synthetic-prepared >"${@: -2:1}"; }

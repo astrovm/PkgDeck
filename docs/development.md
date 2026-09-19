@@ -1,12 +1,12 @@
 # Local verification and development tools
 
-Local work and GitHub CI use the same entry points:
+Use rootless Podman for local verification: it supplies the toolchain and keeps
+GUI tests away from your desktop. Local work and GitHub CI use the same verifier:
 
 ```sh
-scripts/verify.sh fast   # Format, script behavior, Qt-free lint/tests/build
-scripts/setup-dev.sh    # Once per SDK/tool version; safe to repeat
-scripts/verify.sh full  # Workspace lint, tests, >=95% coverage, release builds
-scripts/verify.sh full --only lint,coverage,release,tests  # Full-mode subset for parallel CI jobs
+scripts/verify.sh fast --engine podman   # Format, script behavior, Qt-free lint/tests/build
+scripts/verify.sh full --only tests --engine podman  # Workspace tests
+scripts/verify.sh full --engine podman  # Lint, tests, >=95% coverage, release builds
 scripts/verify.sh vm    # Real package/authorization tests in a disposable VM
 ```
 
@@ -20,44 +20,21 @@ VM details also remain in `build/host-vm/`. No verification mode publishes relea
 
 ## Running tests
 
-Use these entry points; they match CI exactly. Anything else is unsupported.
+For focused reruns, use the same image and persistent caches:
 
 ```sh
-scripts/verify.sh fast                      # no Qt needed
-source scripts/dev-env.sh                   # once per shell, required below
-cargo test --locked -p pkgdeck-core -p pkd  # Rust unit + integration tests
-cargo test -p pkgdeck --test entrypoint quick_controls   # QML suite, headless
-cargo test -p pkgdeck --test entrypoint     # above plus the real-window lifecycle
-scripts/verify.sh full --only tests         # everything above, as CI runs it
+scripts/container.sh development --exec cargo test --locked -p pkgdeck --test entrypoint quick_controls
+scripts/container.sh development --shell
 ```
 
-`source scripts/dev-env.sh` selects the system Qt 6.10.2 toolchain
-(`qmltestrunner`, Kirigami imports) and must precede any direct `cargo`
-invocation. The QML suite runs `qmltestrunner` offscreen with temporary XDG
-directories; it needs no display and never touches your session.
-`real_window` additionally drives the built app on a private Xvfb server
-via `xdotool` — also fully isolated — and needs `xvfb`, `xdotool`, and
-fonts (`xvfb xdotool fonts-dejavu-core`, same list CI installs).
+Both commands select the image's Qt/Kirigami environment automatically. The QML
+suite uses offscreen rendering; real-window tests use private Xvfb and xdotool.
+Neither needs host display sockets.
 
-Do not:
-- run `qmltestrunner -input ...` by hand: tool and Kirigami resolution
-  depend on the `dev-env.sh` environment;
-- prepend another Qt SDK's `bin/` to `PATH`: it hijacks `qmltestrunner`
-  and breaks imports with misleading "module not installed" errors;
-- set `DISPLAY` or drive the app manually: the harness owns private
-  displays, and GUI tests never need your session.
-
-If a suite fails, match the symptom:
-- `qmltestrunner: No such file` → `dev-env.sh` was not sourced.
-- `Type App.Browser unavailable` / `module "org.kde.kirigami" is not
-  installed → `QML_IMPORT_PATH` lacks Kirigami; source `dev-env.sh` and
-  remove any foreign Qt from `PATH`. The harness now preflights both and
-  says so directly.
-- `Xvfb`/`xdotool: No such file` → install the GUI test prerequisites.
-- `state.json missing ... fixture backend never ran` (`real_window`) →
-  the scripted drive stalled before any write; inspect the attached
-  `application.log`, and confirm Xvfb/xdotool/software rendering work
-  (CI's desktop job is the reference environment).
+Native verification remains available by omitting `--engine podman`, after
+installing the prerequisites below and running `scripts/setup-dev.sh`.
+For direct GUI Cargo tests, first `source scripts/dev-env.sh` to select system
+Qt 6.10.2 and Kirigami. Qt-free Cargo tests do not need that environment.
 
 ## SDK and prerequisites
 
@@ -124,7 +101,9 @@ that location. `--userns=keep-id` gives build outputs the invoking user's owners
 Host `target/` is hidden by the container's compiler-cache mount; the two builds
 do not mix artifacts. The checkout is writable for build-generated configuration
 and logs. Host HOME, Cargo credentials, package databases, and daemon sockets are
-not mounted. GUI verification uses offscreen rendering and needs no desktop socket.
+not mounted. GUI verification uses offscreen rendering or private Xvfb and needs
+no desktop socket. Warm runs reuse the container's downloads and compiled output;
+the first run also builds the image and dependencies.
 
 The lifecycle container mounts only the checkout and selected binaries read-only.
 Root inside its user namespace can prepare synthetic users and package fixtures,

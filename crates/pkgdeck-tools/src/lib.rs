@@ -97,11 +97,8 @@ fn invocation(args: &[String], dir: &Path) -> Vec<String> {
 }
 fn state(dir: &Path) -> Value {
     let path = dir.join("state.json");
-    let raw = fs::read(&path).unwrap_or_else(|e| {
-        panic!(
-            "state.json missing at {path:?}: the fixture backend never ran, so the scripted drive stalled before any write (see application.log attached to the assertion context); {e}"
-        )
-    });
+    let raw =
+        fs::read(&path).unwrap_or_else(|e| panic!("Cannot read fixture state at {path:?}: {e}"));
     serde_json::from_slice(&raw).unwrap()
 }
 
@@ -425,13 +422,6 @@ impl Default for Desktop {
 }
 impl Desktop {
     pub fn new() -> Self {
-        for tool in ["Xvfb", "xdotool"] {
-            if Command::new(tool).arg("--help").output().is_err() {
-                panic!(
-                    "{tool} not found: real-window tests drive the app on a private Xvfb server via xdotool (e.g. apt install xvfb xdotool fonts-dejavu-core, as in .github/workflows/ci.yml)"
-                );
-            }
-        }
         let dir = Temp::new();
         let displayfile = dir.0.join("display");
         let output = fs::File::create(&displayfile).unwrap();
@@ -735,23 +725,6 @@ pub fn gui(args: &[String], failure: bool) {
 }
 pub fn qml() {
     let dir = Temp::new();
-    if Command::new("qmltestrunner")
-        .arg("--help")
-        .output()
-        .is_err()
-    {
-        panic!(
-            "qmltestrunner not found on PATH; source scripts/dev-env.sh first so the system Qt 6.10.2 toolchain is selected"
-        );
-    }
-    let kirigami = std::env::split_paths(&std::env::var_os("QML_IMPORT_PATH").unwrap_or_default())
-        .any(|dir| dir.join("org/kde/kirigami/qmldir").is_file());
-    if !kirigami {
-        panic!(
-            "Kirigami QML module not visible via QML_IMPORT_PATH ({:?}); source scripts/dev-env.sh first and do not override PATH with another Qt SDK, which hijacks tool resolution and breaks imports",
-            std::env::var_os("QML_IMPORT_PATH")
-        );
-    }
     run(Command::new("timeout")
         .args(["--kill-after=5s", "60s", "qmltestrunner"])
         .args([
