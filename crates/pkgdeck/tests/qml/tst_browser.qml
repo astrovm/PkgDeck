@@ -351,37 +351,39 @@ TestCase {
         compare(browser.multiSourceOnly, false);
         compare(browser.viewItems.length, 3);
     }
-    function test_updates_multiselect_upgrade_selected() {
+    function test_updates_checked_by_default_and_upgrade_subset() {
         browser.openView("Updates");
         populate();
         waitForRendering(browser.contentItem);
-        const selectAll = findChild(browser, "selectAllButton");
-        verify(selectAll.visible);
-        const upgradeSelected = findChild(browser, "upgradeSelectedButton");
+        // Every row starts checked; the removed buttons are gone.
+        verify(findChild(browser, "selectAllButton") === null);
+        verify(findChild(browser, "upgradeSelectedButton") === null);
+        compare(browser.selectedCount(), 2);
+        const upgradeBtn = findChild(browser, "upgradeAllButton");
+        verify(upgradeBtn.visible);
+        compare(upgradeBtn.text, "Upgrade all");
         const selectNone = findChild(browser, "selectNoneButton");
-        verify(!upgradeSelected.visible);
-        mouseClick(selectAll);
-        compare(browser.checkedPackages.length, 2);
-        waitForRendering(browser.contentItem);
-        verify(upgradeSelected.visible);
         verify(selectNone.visible);
-        mouseClick(upgradeSelected);
+        // Deselect one row: the single button switches to the subset path.
+        browser.togglePackage(browser.items[1]);
+        compare(browser.selectedCount(), 1);
+        compare(browser.uncheckedPackages.length, 1);
+        compare(upgradeBtn.text, "Upgrade selected");
+        mouseClick(upgradeBtn);
         verify(fake.lastChecked !== "");
         const sent = JSON.parse(fake.lastChecked);
-        compare(sent.length, 2);
+        compare(sent.length, 1);
         // Identities mirror the controller shape: [source, name, arch, remote, scope].
         verify(sent[0].indexOf("synthetic-tool") >= 0);
         verify(sent[0].indexOf("apt") >= 0);
-        verify(sent[1].indexOf("homebrew") >= 0);
+        // Select none hides the upgrade button; re-checking shows it again.
         mouseClick(selectNone);
-        compare(browser.checkedPackages.length, 0);
-        verify(!upgradeSelected.visible);
-        // Single-row toggle without the header buttons.
+        compare(browser.selectedCount(), 0);
+        verify(!upgradeBtn.visible);
         browser.togglePackage(browser.items[1]);
-        compare(browser.checkedPackages.length, 1);
-        verify(upgradeSelected.visible);
-        browser.togglePackage(browser.items[1]);
-        compare(browser.checkedPackages.length, 0);
+        compare(browser.selectedCount(), 1);
+        verify(upgradeBtn.visible);
+        compare(upgradeBtn.text, "Upgrade selected");
     }
     function test_columns_sort_resize_and_index_mapping() {
         browser.openView("Search");
