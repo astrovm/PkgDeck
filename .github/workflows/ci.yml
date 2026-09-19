@@ -354,6 +354,10 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
           key: rust-v2-${{ matrix.arch }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml') }}
+      - name: Build release binaries for bundling
+        # Each job gets a fresh workspace: the release build from the
+        # desktop-release job does not travel with the shared source cache.
+        run: scripts/verify.sh full --only release
       - name: Build and stage both executables
         run: |
           source scripts/dev-env.sh

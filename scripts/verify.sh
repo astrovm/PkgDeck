@@ -109,4 +109,7 @@ else
     # Plain debug test run without coverage instrumentation; the aarch64 CI
     # job uses this while x86_64 carries the coverage gate.
     want tests && stage tests cargo test --workspace --locked
+    # A skipped trailing stage leaves a non-zero status behind; reaching
+    # this point means every selected stage passed.
+    exit 0
 fi
