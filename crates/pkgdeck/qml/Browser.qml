@@ -133,6 +133,9 @@ Controls.ApplicationWindow {
     // real packages are never buried under names that may not exist. Ties
     // break by name and source so streaming partials settle into a stable
     // order.
+    // A package row is an unverified guess when no backend reported a
+    // version for it either way. If a future source legitimately returns
+    // version-less rows, they will sink here too by design.
     function isFabricated(row) {
         return row.kind === "package" && !row.installed && !row.candidate;
     }
@@ -173,7 +176,10 @@ Controls.ApplicationWindow {
             rows.sort((a, b) => {
                 const x = sortValue(column, a).toLowerCase();
                 const y = sortValue(column, b).toLowerCase();
-                return x < y ? -dir : (x > y ? dir : 0);
+                // Total order: the engine sort is not stable for equal
+                // keys, so same-name rows from several sources would flip
+                // on every keystroke without a direction-aware tiebreak.
+                return (x < y ? -dir : (x > y ? dir : 0)) || relevanceTiebreak(a, b) * dir;
             });
         } else if (root.currentView === "Search") {
             const query = search.text.trim().toLowerCase();

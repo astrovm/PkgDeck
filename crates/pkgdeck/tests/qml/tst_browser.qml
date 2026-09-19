@@ -510,11 +510,9 @@ TestCase {
         browser.cycleSort("name");
         compare(browser.viewItems[0].name, "bun");
         compare(browser.viewItems[1].name, "fire");
-        compare(browser.viewItems[2].name, "fire");
-        // Equal names keep engine order, which is not stable: assert the
-        // pair as a set instead of a fixed sequence.
-        const pair = [browser.viewItems[1].source, browser.viewItems[2].source].sort();
-        compare(pair.join(","), "apt,npm");
+        // The direction-aware tiebreak makes equal names deterministic.
+        compare(browser.viewItems[1].source, "apt");
+        compare(browser.viewItems[2].source, "npm");
         compare(browser.viewItems[5].name, "zzz");
         // Submitting a fresh search resets to best-match order and forces
         // a native query instead of serving the cached snapshot.
