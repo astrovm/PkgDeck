@@ -970,42 +970,14 @@ Controls.ApplicationWindow {
                             enabled: !backend.writing
                             Accessible.name: (modelData.kind === "package" ? (modelData.update === "available" ? "Update available. " : (modelData.installed ? "Installed. " : "Not installed. ")) : "") + modelData.name + ", " + modelData.source + ", " + (modelData.summary || "")
                             onClicked: { results.forceActiveFocus(); root.choose(index); }
-                            onHoveredChanged: {
-                                if (hovered && modelData.kind === "package")
-                                    tipDelay.restart();
-                                else {
-                                    tipDelay.stop();
-                                    tipCard.visible = false;
-                                }
-                            }
-                            Timer {
-                                id: tipDelay
-                                interval: 400
-                                onTriggered: tipCard.visible = true
-                            }
-                            Rectangle {
-                                id: tipCard
-                                visible: false
-                                z: 10
-                                anchors.left: parent.left
-                                anchors.right: parent.right
-                                anchors.leftMargin: 16
-                                anchors.rightMargin: 16
-                                y: packageRow.height + 2
-                                height: tipText.implicitHeight + 16
-                                color: root.surface
-                                border.color: root.line
-                                radius: 6
-                                Text {
-                                    id: tipText
-                                    anchors.fill: parent
-                                    anchors.margins: 8
-                                    text: root.rowTooltip(modelData)
-                                    color: root.ink
-                                    wrapMode: Text.WordWrap
-                                    textFormat: Text.PlainText
-                                }
-                            }
+                            // Framework tooltip: single Overlay instance per
+                            // hover, positioned by Qt, with text bound to the
+                            // current row. The previous per-delegate card
+                            // could show one row's versions with another
+                            // row's summary under item reuse.
+                            Controls.ToolTip.visible: packageRow.hovered && modelData.kind === "package"
+                            Controls.ToolTip.delay: 400
+                            Controls.ToolTip.text: root.rowTooltip(modelData)
                             background: Rectangle {
                                 color: packageRow.highlighted ? root.selection : (packageRow.hovered ? root.canvas : "transparent")
                                 Rectangle { width: 3; height: parent.height; visible: packageRow.highlighted; color: root.accent }

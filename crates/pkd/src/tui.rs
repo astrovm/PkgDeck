@@ -5,7 +5,7 @@ use pkgdeck_core::{engine::*, package::*, process::Cancellation};
 use ratatui::{
     layout::{Constraint, Layout},
     style::{Color, Modifier, Style},
-    text::{Line, Span},
+    text::{Line, Span, Text},
     widgets::{Block, Paragraph, Row, Table, TableState, Wrap},
 };
 use std::{io, sync::mpsc, thread, time::Duration};
@@ -171,7 +171,7 @@ impl App {
     }
     fn reply(&mut self, reply: Reply) {
         match reply {
-            Reply::Packages(report) => {
+            Reply::Packages(mut report) => {
                 self.status = if report.failures.is_empty() {
                     format!("{} packages", report.packages.len())
                 } else {
@@ -182,6 +182,13 @@ impl App {
                         .collect::<Vec<_>>()
                         .join("; ")
                 };
+                // Best matches first in Search; other views keep backend
+                // order. Selection follows identity below, so ranking
+                // never loses the selected row.
+                if self.view == View::Search {
+                    let query = self.query.clone();
+                    rank_search_matches(&mut report.packages, &query);
+                }
                 // Streaming partials re-sort rows around the selection:
                 // follow the selected identity instead of the row index.
                 let keep = self
@@ -298,6 +305,9 @@ impl App {
                 self.details = None;
                 self.table.select(None);
                 self.editing = true;
+                // No load starts here, so retire the previous view's
+                // status instead of leaving it stale under empty rows.
+                self.status = "Press / to search; 2 installed, 3 updates, 4 sources.".into();
                 None
             }
             KeyCode::Char('2') => Some(self.load(View::Installed)),
@@ -395,17 +405,47 @@ impl App {
         ])
         .split(frame.area());
         // The query only applies to Search; dim it elsewhere so a stale
-        // string is not mistaken for a filter on other views.
-        let query = Line::from(vec![
-            Span::raw("1 / Search   2 [x] Installed   3 [^] Updates   4 [=] Sources\n\n/ "),
-            Span::styled(
-                format!("{}{}", self.query, if self.editing { "_" } else { "" }),
-                if self.view == View::Search {
-                    Style::default()
-                } else {
-                    Style::default().add_modifier(Modifier::DIM)
-                },
-            ),
+        // string is not mistaken for a filter on other views. The current
+        // view renders bold so navigation has a visible anchor; newlines
+        // need separate lines (a single Line never breaks).
+        let current = self.view;
+        let item = |key: &str, symbol: &str, name: &str, view: View| {
+            let style = if current == view {
+                Style::default()
+                    .add_modifier(Modifier::BOLD)
+                    .fg(Color::Rgb(104, 151, 207))
+            } else {
+                Style::default()
+            };
+            vec![
+                Span::raw(key.to_owned()),
+                Span::styled(symbol.to_owned(), style),
+                Span::styled(format!(" {name}   "), style),
+            ]
+        };
+        let mut nav: Vec<Span> = vec![];
+        for (key, symbol, name, view) in [
+            ("1 ", "/", "Search", View::Search),
+            ("2 ", "[x]", "Installed", View::Installed),
+            ("3 ", "[^]", "Updates", View::Updates),
+            ("4 ", "[=]", "Sources", View::Sources),
+        ] {
+            nav.extend(item(key, symbol, name, view));
+        }
+        let query = Text::from(vec![
+            Line::from(nav),
+            Line::from(""),
+            Line::from(vec![
+                Span::raw("/ "),
+                Span::styled(
+                    format!("{}{}", self.query, if self.editing { "_" } else { "" }),
+                    if self.view == View::Search {
+                        Style::default()
+                    } else {
+                        Style::default().add_modifier(Modifier::DIM)
+                    },
+                ),
+            ]),
         ]);
         frame.render_widget(
             Paragraph::new(query).block(
@@ -831,6 +871,36 @@ mod tests {
             .iter()
             .map(|c| c.symbol())
             .collect()
+    }
+    #[test]
+    fn search_reply_ranks_best_matches_first() {
+        let row = |backend: &str, name: &str| Package {
+            id: PackageId {
+                backend: backend.into(),
+                name: name.into(),
+                architecture: "all".into(),
+                scope: Scope::System,
+                remote: None,
+            },
+            display_name: name.into(),
+            summary: "s".into(),
+            installed_version: None,
+            candidate_version: Some("1".into()),
+            update: UpdateAvailability::Unknown,
+            icon: None,
+            component_ids: vec![],
+        };
+        let mut app = App {
+            view: View::Search,
+            query: "fire".into(),
+            ..App::default()
+        };
+        app.reply(Reply::Packages(PackageReport {
+            packages: vec![row("apt", "x-fire-helper"), row("apt", "fire")],
+            failures: vec![],
+        }));
+        assert_eq!(app.packages[0].id.name, "fire");
+        assert_eq!(app.packages[1].id.name, "x-fire-helper");
     }
     #[test]
     fn keyboard_lifecycle_uses_selected_identity_and_explicit_confirmation() {

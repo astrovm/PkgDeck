@@ -21,6 +21,8 @@ pkd remove neovim --from apt --yes
 missing optional managers are omitted, while detection/query failures remain
 visible. `sources` includes unavailable managers and their reasons. Search uses
 literal case-insensitive substrings: APT names/summaries and Homebrew formula names.
+Results rank best-match-first (exact name, name prefix, name substring, then
+summary matches); unverified name guesses sort last.
 Homebrew identities preserve tap-qualified names (for example
 `owner/tap/formula`). Aliases and fuzzy matches are not installation selectors.
 
