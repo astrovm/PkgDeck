@@ -137,7 +137,11 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
                         value(&p["id"]["name"])
                     ),
                     value(&p["id"]["backend"]),
-                    value(&p["candidate_version"]),
+                    value(if p["installed_version"].is_null() {
+                        &p["candidate_version"]
+                    } else {
+                        &p["installed_version"]
+                    }),
                     value(&p["summary"]),
                 ]
             })
@@ -256,6 +260,20 @@ mod tests {
         assert!(output.contains("[^] fixture"));
         assert!(output.contains("[^] Update available"));
         assert!(!output.contains('\u{1b}'));
+    }
+    #[test]
+    fn package_table_shows_the_installed_version_when_present() {
+        let output = human(
+            &json!({"packages":[
+                {"id":{"name":"installed","backend":"apt"},"installed_version":"1.2.3","candidate_version":"9.9.9"},
+                {"id":{"name":"available","backend":"apt"},"candidate_version":"4.5.6"}
+            ]}),
+            100,
+            false,
+        );
+        assert!(output.contains("1.2.3"));
+        assert!(output.contains("4.5.6"));
+        assert!(!output.contains("9.9.9"));
     }
     #[test]
     fn details_failures_and_operations_are_readable() {

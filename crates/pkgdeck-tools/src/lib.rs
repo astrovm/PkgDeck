@@ -96,7 +96,10 @@ fn invocation(args: &[String], dir: &Path) -> Vec<String> {
     result
 }
 fn state(dir: &Path) -> Value {
-    serde_json::from_slice(&fs::read(dir.join("state.json")).unwrap()).unwrap()
+    let path = dir.join("state.json");
+    let raw =
+        fs::read(&path).unwrap_or_else(|e| panic!("Cannot read fixture state at {path:?}: {e}"));
+    serde_json::from_slice(&raw).unwrap()
 }
 
 pub struct Terminal {
@@ -649,7 +652,7 @@ pub fn gui_lifecycle(args: &[String]) {
         gui.key("ctrl+3");
         gui.key("ctrl+shift+u");
         gui.key("alt+n");
-        assert_eq!(state(&dir.0), initial);
+        assert_eq!(state(&dir.0), initial, "{}", gui.logs());
         assert!(!dir.0.join("attempts").exists());
         gui.key("ctrl+shift+u");
         if mode == "slow" {

@@ -59,18 +59,18 @@ if [[ "$mode" == containers ]]; then
     else
         stage build-cli cargo build --locked -p pkd -p pkgdeck-tools
     fi
-    stage container-lifecycles scripts/container.sh lifecycle
-    stage tui-lifecycles env PKGDECK_FRONTEND=tui scripts/container.sh lifecycle
+    stage test-cli-lifecycle scripts/container.sh lifecycle
+    stage test-tui-lifecycle env PKGDECK_FRONTEND=tui scripts/container.sh lifecycle
     exit 0
 fi
 if [[ "$engine" == podman ]]; then
-    stage "container-$mode" scripts/container.sh development "$mode"
+    stage "verify-podman-$mode" scripts/container.sh development "$mode" --only "$only"
     exit 0
 fi
 if [[ "$mode" == vm ]]; then
     stage build-probe cargo build --locked -p pkgdeck-core --example apt-probe
     stage build-cli cargo build --locked -p pkd -p pkgdeck-tools
-    stage vm scripts/test-host-vm.sh
+    stage test-vm-lifecycle scripts/test-host-vm.sh
     exit 0
 fi
 # Stage-selected full runs (parallel CI jobs) skip the shared prefix: the
@@ -78,16 +78,16 @@ fi
 # cost more than it signals.
 if [[ $only == all ]]; then
     stage format cargo fmt --all --check
-    stage infrastructure scripts/tests/infrastructure.sh
-    stage no-python scripts/check-no-python.sh
-    stage apt-helper scripts/build-apt.sh
-    stage apt-metadata scripts/tests/apt-metadata.sh
+    stage test-infrastructure scripts/tests/infrastructure.sh
+    stage check-no-python scripts/check-no-python.sh
+    stage build-apt-helper scripts/build-apt.sh
+    stage test-apt-metadata scripts/tests/apt-metadata.sh
 fi
 if [[ "$mode" == fast ]]; then
-    stage lint cargo clippy --locked -p pkgdeck-core -p pkd --all-targets -- -D warnings
-    stage tests cargo test --locked -p pkgdeck-core -p pkd
-    stage build cargo build --locked -p pkd -p pkgdeck-tools
-    stage qt-free scripts/check-qt-free.sh
+    stage lint-terminal cargo clippy --locked -p pkgdeck-core -p pkd --all-targets -- -D warnings
+    stage test-terminal cargo test --locked -p pkgdeck-core -p pkd
+    stage build-terminal cargo build --locked -p pkd -p pkgdeck-tools
+    stage check-qt-free scripts/check-qt-free.sh
 else
     source scripts/dev-env.sh
     [[ $(qtpaths6 --qt-version) == 6.10.2 ]] && dpkg-query -W libkirigami-dev >/dev/null 2>&1 || {
@@ -99,16 +99,16 @@ else
         }
     fi
     export QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=software
-    want lint && stage lint cargo clippy --workspace --all-targets --locked -- -D warnings
+    want lint && stage lint-workspace cargo clippy --workspace --all-targets --locked -- -D warnings
     if want coverage; then
         mkdir -p coverage
-        stage coverage cargo llvm-cov --workspace --include-build-script --ignore-filename-regex pkgdeck-tools --locked --lcov --output-path coverage/lcov.info
-        stage coverage-gate cargo llvm-cov report --summary-only --include-build-script --ignore-filename-regex pkgdeck-tools --fail-under-lines 95
+        stage test-coverage cargo llvm-cov --workspace --include-build-script --ignore-filename-regex pkgdeck-tools --locked --lcov --output-path coverage/lcov.info
+        stage check-coverage cargo llvm-cov report --summary-only --include-build-script --ignore-filename-regex pkgdeck-tools --fail-under-lines 95
     fi
-    want release && stage release cargo build --workspace --release --locked
+    want release && stage build-release cargo build --workspace --release --locked
     # Plain debug test run without coverage instrumentation; the aarch64 CI
     # job uses this while x86_64 carries the coverage gate.
-    want tests && stage tests cargo test --workspace --locked
+    want tests && stage test-workspace cargo test --workspace --locked
     # A skipped trailing stage leaves a non-zero status behind; reaching
     # this point means every selected stage passed.
     exit 0

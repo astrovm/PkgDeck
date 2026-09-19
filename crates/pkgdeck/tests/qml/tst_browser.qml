@@ -462,7 +462,14 @@ TestCase {
         waitForRendering(browser.contentItem);
         const tall = about.mapToItem(browser.contentItem, 0, 0);
         verify(tall.y < browser.height / 3);
-        browser.height = 760;
+        browser.width = 360;
+        browser.height = 400;
+        waitForRendering(browser.contentItem);
+        const scroll = findChild(browser, "aboutScroll");
+        verify(scroll.contentHeight > scroll.availableHeight);
+        scroll.contentItem.contentY = scroll.contentHeight - scroll.availableHeight;
+        verify(scroll.contentItem.contentY > 0);
+        verify(!findChild(browser, "sourceFilter").visible);
     }
     function test_view_status_and_source_columns() {
         browser.openView("Settings");
@@ -505,7 +512,13 @@ TestCase {
         wait(30);
         verify(search.activeFocus);
         verify(!list.activeFocus);
-        compare(browser.queryDirty, false);
+        compare(browser.queryDirty, true);
+        fake.busy = true;
+        fake.rows = JSON.stringify(JSON.parse(fake.rows).reverse());
+        fake.rows = JSON.stringify(JSON.parse(fake.rows).reverse());
+        fake.busy = false;
+        wait(30);
+        verify(search.activeFocus); // Every partial and completion preserve typing.
         // Best-match ranking puts the apt row first visibly although the
         // backend order is reversed; selection follows the visible order.
         keyClick(Qt.Key_Down);
@@ -516,6 +529,33 @@ TestCase {
         compare(fake.selection, 1);
         keyClick(Qt.Key_End);
         compare(fake.selection, 0);
+    }
+    function test_installed_filter_keeps_focus_during_streaming() {
+        browser.openView("Installed");
+        populate();
+        browser.choose(0);
+        const filter = findChild(browser, "installedFilterField");
+        filter.forceActiveFocus();
+        filter.text = "synthetic";
+        fake.busy = true;
+        fake.rows = JSON.stringify(JSON.parse(fake.rows).reverse());
+        fake.busy = false;
+        wait(30);
+        verify(filter.activeFocus);
+    }
+    function test_update_selection_cache_tracks_rows_and_deselections() {
+        browser.openView("Updates");
+        populate();
+        compare(browser.selectedCount(), 2);
+        browser.selectNonePackages();
+        compare(browser.selectedCount(), 0);
+        const rows = JSON.parse(fake.rows);
+        rows.push(Object.assign({}, rows[0], {name: "new-update"}));
+        fake.rows = JSON.stringify(rows);
+        compare(browser.selectedCount(), 1);
+        verify(browser.packageChecked(rows[2]));
+        browser.uncheckedPackages = [];
+        compare(browser.selectedCount(), 3);
     }
     function test_search_ranks_best_matches_first() {
         browser.openView("Search");
@@ -629,6 +669,7 @@ TestCase {
         const logo = findChild(browser, "appLogo");
         verify(logo !== null);
         verify(logo.source.toString().indexOf("logo.svg") >= 0);
+        tryCompare(logo, "status", Image.Ready);
     }
     function test_upgrade_all_hint() {
         browser.openView("Updates");

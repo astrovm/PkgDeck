@@ -27,7 +27,7 @@ run_container() {
     trap cleanup EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
-    podman run --rm --cidfile "$run_directory/cid" --label io.pkgdeck.verification=true "$@" &
+    podman run --rm --cidfile "$run_directory/cid" --label io.pkgdeck.verification=true "$@" <&0 &
     if wait "$!"; then status=0; else status=$?; fi
     exit "$status"
 }
@@ -37,12 +37,21 @@ if [[ "$kind" == development ]]; then
     mkdir -p "$cache/cargo" "$cache/target"
     if [[ "${1:-}" == --binary-dir ]]; then printf '%s/target/debug\n' "$cache"; exit 0; fi
     command=(scripts/verify.sh "$@")
+    interactive=()
+    if [[ "${1:-}" == --exec ]]; then
+        shift
+        (($#)) || { echo 'Expected a command after --exec' >&2; exit 2; }
+        command=("$@")
+    elif [[ "${1:-}" == --shell ]]; then
+        command=(bash)
+        interactive=(-it)
+    fi
     if [[ "${1:-}" == --build-cli ]]; then command=(cargo build --locked -p pkd -p pkgdeck-tools); fi
     # No host HOME, credentials, daemon sockets, or package database is mounted.
-    run_container --userns=keep-id \
+    run_container "${interactive[@]}" --userns=keep-id -e LANG=C.UTF-8 \
         -v "$PWD:/workspace:rw" -v "$cache/cargo:/cache/cargo:rw" \
         -v "$cache/target:/workspace/target:rw" \
-        "$image" bash -c 'mkdir -p "$HOME"; exec "$@"' -- "${command[@]}"
+        "$image" bash -ec 'mkdir -p "$HOME"; source scripts/dev-env.sh; exec "$@"' -- "${command[@]}"
 else
     # Root in this user namespace is unprivileged on the host. Package tools and
     # sudo grants can change only the disposable container's filesystem.

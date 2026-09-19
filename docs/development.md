@@ -1,12 +1,12 @@
 # Local verification and development tools
 
-Local work and GitHub CI use the same entry points:
+Use rootless Podman for local verification: it supplies the toolchain and keeps
+GUI tests away from your desktop. Local work and GitHub CI use the same verifier:
 
 ```sh
-scripts/verify.sh fast   # Format, script behavior, Qt-free lint/tests/build
-scripts/setup-dev.sh    # Once per SDK/tool version; safe to repeat
-scripts/verify.sh full  # Workspace lint, tests, >=95% coverage, release builds
-scripts/verify.sh full --only lint,coverage,release,tests  # Full-mode subset for parallel CI jobs
+scripts/verify.sh fast --engine podman   # Format, script behavior, Qt-free lint/tests/build
+scripts/verify.sh full --only tests --engine podman  # Workspace tests
+scripts/verify.sh full --engine podman  # Lint, tests, >=95% coverage, release builds
 scripts/verify.sh vm    # Real package/authorization tests in a disposable VM
 ```
 
@@ -18,6 +18,24 @@ stops subsequent stages and preserves its exit status. Stages time out after
 that limit (GNU timeout syntax). The VM launcher has its own cleanup and deadline.
 VM details also remain in `build/host-vm/`. No verification mode publishes releases.
 
+## Running tests
+
+For focused reruns, use the same image and persistent caches:
+
+```sh
+scripts/container.sh development --exec cargo test --locked -p pkgdeck --test entrypoint quick_controls
+scripts/container.sh development --shell
+```
+
+Both commands select the image's Qt/Kirigami environment automatically. The QML
+suite uses offscreen rendering; real-window tests use private Xvfb and xdotool.
+Neither needs host display sockets.
+
+Native verification remains available by omitting `--engine podman`, after
+installing the prerequisites below and running `scripts/setup-dev.sh`.
+For direct GUI Cargo tests, first `source scripts/dev-env.sh` to select system
+Qt 6.10.2 and Kirigami. Qt-free Cargo tests do not need that environment.
+
 ## SDK and prerequisites
 
 Ubuntu 26.04 supplies Qt 6.10.2, Kirigami/ECM 6.24.0, CMake 4.2.3, and Ninja
@@ -28,7 +46,7 @@ Rust uses the repository's `rust-toolchain.toml`; Cargo verifies registry packag
 
 Prerequisites are rustup/Cargo, a C++ compiler, `libapt-pkg-dev`, jq,
 Ninja, pkg-config, LLD, and the Qt/KDE development/runtime
-system libraries listed in `.github/workflows/ci.yml`. The bootstrap reports
+system libraries listed in `.github/actions/setup-desktop/action.yml`. The bootstrap reports
 missing command prerequisites before downloading. It does not install host OS
 packages or grant authorization.
 
@@ -54,6 +72,41 @@ Infrastructure changes should be tested through the shared scripts locally,
 including a fresh setup and a repeated cached setup when changing bootstrap logic.
 CI runs the same checks on x86_64 and aarch64; local x86_64 success does not claim
 ARM validation. Run `pinact run --verify` when changing GitHub workflows.
+
+## CI structure and naming
+
+The workflow is named `CI`. Checks use `Category / Scope (architecture)`:
+
+| Check | Responsibility |
+| --- | --- |
+| `Test / Terminal (x86_64, aarch64)` | Fast checks and Qt-free CLI/TUI builds, one job per architecture |
+| `Lint / Workspace (x86_64, aarch64)` | Workspace Clippy, one job per architecture |
+| `Coverage / Workspace (x86_64)` | Workspace tests with the 95% coverage gate |
+| `Test / Workspace (aarch64)` | Native workspace tests without instrumentation |
+| `Test / Podman (x86_64, aarch64)` | Container workspace tests and CLI/TUI APT/Homebrew lifecycles, one job per architecture |
+| `Test / VM (x86_64)` | VM lifecycles and authorization checks |
+| `Test / Backend / <backend> (x86_64)` | Real native/development-manager lifecycle tests |
+| `Package / Linux (x86_64, aarch64)` | Release build, package formats, and packaged GUI lifecycles, one job per architecture |
+
+Job IDs and log stages use lowercase kebab-case (`test-workspace`,
+`lint-terminal`, `build-release`, `check-coverage`). Step names start with an
+action: `Install`, `Build`, `Run`, or `Upload`. Artifacts use
+`<kind>-<scope>-<architecture>`, for example `logs-podman-aarch64`.
+Rust tests retain descriptive snake_case names; Qt Quick uses its standard
+`tst_*.qml` files and `test_*` functions.
+
+Desktop jobs share `.github/actions/setup-desktop`: packaging tools are installed
+only for packaging, and cargo-llvm-cov only for coverage. Packaging owns release
+builds; Podman exercises the container test environment without repeating native
+lint, coverage, and release stages.
+
+Native Rust caches are separated by architecture and purpose (terminal, lint,
+tests, coverage, release). Keys include dependency/toolchain inputs and the source
+revision, with fallback to the latest compatible build. Backend jobs restore the
+terminal cache without competing to save it. Container caches are separate and
+include the development-image inputs. Incremental compiler directories are
+excluded from uploads to reduce cache size. A new cache namespace starts cold;
+subsequent successful runs populate it.
 
 ## Rootless Podman
 
@@ -83,7 +136,9 @@ that location. `--userns=keep-id` gives build outputs the invoking user's owners
 Host `target/` is hidden by the container's compiler-cache mount; the two builds
 do not mix artifacts. The checkout is writable for build-generated configuration
 and logs. Host HOME, Cargo credentials, package databases, and daemon sockets are
-not mounted. GUI verification uses offscreen rendering and needs no desktop socket.
+not mounted. GUI verification uses offscreen rendering or private Xvfb and needs
+no desktop socket. Warm runs reuse the container's downloads and compiled output;
+the first run also builds the image and dependencies.
 
 The lifecycle container mounts only the checkout and selected binaries read-only.
 Root inside its user namespace can prepare synthetic users and package fixtures,

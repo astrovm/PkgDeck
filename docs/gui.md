@@ -142,7 +142,7 @@ without a local icon keep the generic source symbol.
 
 ## Local verification
 
-`scripts/verify.sh full` runs Qt Quick tests against the actual Browser component,
+`scripts/verify.sh full --only tests --engine podman` runs Qt Quick tests against the actual Browser component,
 Rust worker tests, and a real-window lifecycle using a synthetic Homebrew
 executable. The real-window test creates a private Xvfb display; it does not use
 the user's display or package database. It verifies native fixture state after
@@ -151,9 +151,11 @@ Qt Quick tests cover keyboard navigation, exact confirmation, source views,
 loading/errors, the source checklist, Updates multi-select, column
 sort/resize with backend index mapping, the same-application badge,
 best-match search ranking, and the live Installed filter. Xvfb, xdotool, and fonts are included in
-the development image and desktop CI dependencies.
+the development image and desktop CI dependencies. See
+[development](development.md#running-tests) for focused reruns and native setup.
 
-To check the staged release bundle against real managers:
+To check the staged release bundle against real managers using the native
+development prerequisites:
 
 ```sh
 scripts/verify.sh full
