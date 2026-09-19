@@ -71,32 +71,55 @@ Controls.ApplicationWindow {
     function sourceCheckAt(index) {
         return checklistRepeater.itemAt(index);
     }
-    // Checked package identities for the Updates multi-select. Identities,
-    // not indexes: streaming partials re-sort rows, so the controller
-    // re-resolves each identity and skips stale ones, never guessing.
-    property var checkedPackages: []
+    // Deselected package identities for the Updates multi-select. Every
+    // row is checked by default; deselections (not selections) are stored
+    // so newly streamed rows start checked too. Identities, not indexes:
+    // streaming partials re-sort rows, so the controller re-resolves each
+    // identity and skips stale ones, never guessing.
+    property var uncheckedPackages: []
+    function packageChecked(row) {
+        return uncheckedPackages.indexOf(rowIdentity(row)) < 0;
+    }
     function togglePackage(row) {
         const id = rowIdentity(row);
         if (!id)
             return;
-        const checked = checkedPackages.slice();
-        const at = checked.indexOf(id);
+        const unchecked = uncheckedPackages.slice();
+        const at = unchecked.indexOf(id);
         if (at >= 0)
-            checked.splice(at, 1);
+            unchecked.splice(at, 1);
         else
-            checked.push(id);
-        checkedPackages = checked;
+            unchecked.push(id);
+        uncheckedPackages = unchecked;
     }
-    function selectAllPackages() {
+    function packageIdentities() {
         const all = [];
-        for (let i = 0; i < root.viewItems.length; i++) {
-            if (root.viewItems[i].kind === "package") {
-                const id = rowIdentity(root.viewItems[i]);
+        for (let i = 0; i < root.items.length; i++) {
+            if (root.items[i].kind === "package") {
+                const id = rowIdentity(root.items[i]);
                 if (id && all.indexOf(id) < 0)
                     all.push(id);
             }
         }
-        checkedPackages = all;
+        return all;
+    }
+    function checkedIdentities() {
+        const unchecked = uncheckedPackages;
+        return packageIdentities().filter((id) => unchecked.indexOf(id) < 0);
+    }
+    function selectedCount() {
+        return checkedIdentities().length;
+    }
+    function selectNonePackages() {
+        uncheckedPackages = packageIdentities();
+    }
+    // Nothing deselected: batch per backend like Upgrade all; otherwise
+    // upgrade exactly the checked rows.
+    function upgradeUpdates() {
+        if (uncheckedPackages.length === 0)
+            root.propose("upgrade-all");
+        else
+            backend.proposeChecked(JSON.stringify(checkedIdentities()));
     }
     // Column widths (drag the header gutter) and the active sort. Sorting
     // is QML-side over a copied array: the backend keeps its own order,
@@ -390,7 +413,7 @@ Controls.ApplicationWindow {
             return;
         queryDirty = false;
         selectedIdentity = null;
-        checkedPackages = [];
+        uncheckedPackages = [];
         currentView = view;
         results.currentIndex = -1;
         if (view === "Search")
@@ -404,7 +427,7 @@ Controls.ApplicationWindow {
         resultView = currentView;
         results.currentIndex = -1;
         selectedIdentity = null;
-        checkedPackages = [];
+        uncheckedPackages = [];
         // Installed filtering is client-side over the loaded rows (see
         // viewItems), so the backend always returns the full installed set
         // and typing never triggers a native query.
@@ -840,7 +863,7 @@ Controls.ApplicationWindow {
                         Layout.fillWidth: true
                         Layout.margins: 14
                         Controls.Label {
-                            text: backend.writing && backend.status.length ? backend.status : root.viewItems.length + (root.currentView === "Sources" ? (root.viewItems.length === 1 ? " source" : " sources") : (root.viewItems.length === 1 ? " package" : " packages")) + (root.currentView === "Updates" && root.checkedPackages.length > 0 ? " · " + root.checkedPackages.length + " selected" : "")
+                            text: backend.writing && backend.status.length ? backend.status : root.viewItems.length + (root.currentView === "Sources" ? (root.viewItems.length === 1 ? " source" : " sources") : (root.viewItems.length === 1 ? " package" : " packages")) + (root.currentView === "Updates" ? " · " + root.selectedCount() + " selected" : "")
                             color: root.muted
                             font.pixelSize: 12
                             elide: Text.ElideRight
@@ -1015,7 +1038,7 @@ Controls.ApplicationWindow {
                                 Controls.CheckBox {
                                     id: packageCheck
                                     visible: root.currentView === "Updates" && modelData.kind === "package"
-                                    checked: root.checkedPackages.indexOf(root.rowIdentity(modelData)) >= 0
+                                    checked: root.packageChecked(modelData)
                                      enabled: !backend.writing
                                      onToggled: root.togglePackage(modelData)
                                     Accessible.name: "Select " + (modelData.name || "")
@@ -1190,37 +1213,20 @@ Controls.ApplicationWindow {
                 visible: ["Search", "Installed", "Updates", "Sources"].indexOf(root.currentView) >= 0
                 ActionButton {
                     objectName: "upgradeAllButton"
-                    visible: root.currentView === "Updates"
-                    text: "Upgrade all"
+                    visible: root.currentView === "Updates" && (root.uncheckedPackages.length === 0 || root.selectedCount() > 0)
+                    text: root.uncheckedPackages.length === 0 ? "Upgrade all" : "Upgrade selected"
                     symbol: "updates"
                     primary: true
-                    enabled: !backend.busy && backend.upgradable
-                    onClicked: root.propose("upgrade-all")
-                }
-                ActionButton {
-                    objectName: "selectAllButton"
-                    visible: root.currentView === "Updates"
-                    text: "Select all"
-                    symbol: "installed"
-                    enabled: !backend.writing
-                    onClicked: root.selectAllPackages()
+                    enabled: !backend.busy && (root.uncheckedPackages.length > 0 || backend.upgradable)
+                    onClicked: root.upgradeUpdates()
                 }
                 ActionButton {
                     objectName: "selectNoneButton"
-                    visible: root.currentView === "Updates" && root.checkedPackages.length > 0
+                    visible: root.currentView === "Updates" && root.selectedCount() > 0
                     text: "Select none"
                     symbol: "cancel"
                     enabled: !backend.writing
-                    onClicked: root.checkedPackages = []
-                }
-                ActionButton {
-                    objectName: "upgradeSelectedButton"
-                    visible: root.currentView === "Updates" && root.checkedPackages.length > 0
-                    text: "Upgrade selected"
-                    symbol: "updates"
-                    primary: true
-                    enabled: !backend.busy
-                    onClicked: backend.proposeChecked(JSON.stringify(root.checkedPackages))
+                    onClicked: root.selectNonePackages()
                 }
                 Controls.Label {
                     objectName: "upgradeAllHint"
@@ -1364,8 +1370,8 @@ Controls.ApplicationWindow {
     }
     Shortcut {
         sequence: "Ctrl+Shift+U"
-        enabled: root.currentView === "Updates" && !backend.busy && backend.upgradable
-        onActivated: root.propose("upgrade-all")
+        enabled: root.currentView === "Updates" && !backend.busy && root.selectedCount() > 0 && (root.uncheckedPackages.length > 0 || backend.upgradable)
+        onActivated: root.upgradeUpdates()
     }
     Shortcut {
         sequence: "Ctrl+M"

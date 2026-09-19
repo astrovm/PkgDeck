@@ -42,17 +42,18 @@ selection and actions map the visible row back to backend order. Column
 widths and the active sort persist across restarts like the source filter.
 
 Install, Remove, Upgrade, and Refresh source operate on the selected identity.
-Updates also provides **Upgrade all** (Ctrl+Shift+U), without selecting a row.
-It confirms every listed package identity, respects the selected source filter,
-and is disabled when there are no upgrades or any source query failed. A hint
-beside the button names the reason while it is unavailable. For a subset,
-check individual rows (Select all / Select none in the header) and choose
-**Upgrade selected**: the checked identities re-resolve against the current
-rows, so entries that moved on or vanished while streaming are skipped, never
-guessed. The batch reports every result, including partial failures and
-cancellation. Completed upgrades are not rolled back; cancellation skips
-remaining writes once the active native transaction finishes. Reload reads the
-remaining updates and clears the checks.
+Updates checks every row by default. Uncheck rows to narrow the upgrade, or
+use Select none to start empty; the single **Upgrade** button (Ctrl+Shift+U)
+reads **Upgrade all** while everything is checked and **Upgrade selected**
+otherwise. The all path batches per backend; the subset path confirms exactly
+the checked identities, which re-resolve against the current rows, so entries
+that moved on or vanished while streaming are skipped, never guessed. Upgrade
+all is disabled when there are no upgrades or any source query failed; a hint
+beside the button names the reason while it is unavailable. The batch reports
+every result, including partial failures and cancellation. Completed upgrades
+are not rolled back; cancellation skips remaining writes once the active
+native transaction finishes. Reload reads the remaining updates and re-checks
+every row.
 
 ![Upgrade all](screenshots/pkgdeck-updates-live.png)
 
@@ -63,9 +64,11 @@ row shows the underlying manager error with a remediation hint, without
 re-querying. Native dependency changes can accompany package operations.
 
 Queries and writes execute on a Rust worker. The GUI polls a message channel and
-updates Qt properties on its own thread. Search results stream in per backend,
-so fast sources render while slow ones still query; the selection follows the
-same package identity across partials. Hovering a package row shows its full
+updates Qt properties on its own thread. Search, Installed, and Updates
+results stream in per backend, so rows appear while slow sources still
+query; the selection follows the
+same package identity across partials. Upgrade availability still waits for
+the terminal report with complete failures. Hovering a package row shows its full
 untruncated versions and summary. Finished views are cached, so switching
 sections shows the last results instantly; only the first visit, a source
 change, or Reload queries native managers, and writes invalidate every cached
@@ -108,7 +111,7 @@ cache. Background polling stops when work finishes.
 | PageUp/PageDown/Home/End | Move the selection in larger steps or to either end |
 | Ctrl+1 / Ctrl+2 / Ctrl+3 / Ctrl+4 | Search / Installed / Updates / Sources |
 | Ctrl+I / Ctrl+D / Ctrl+U | Propose install / remove / upgrade |
-| Ctrl+Shift+U in Updates | Confirm all listed upgrades |
+| Ctrl+Shift+U in Updates | Confirm the checked upgrades (all by default) |
 | Ctrl+M | Propose metadata refresh for the selected source |
 | Ctrl+R | Reload the current view |
 | Alt+Y / Alt+N in confirmation | Confirm / reject |
