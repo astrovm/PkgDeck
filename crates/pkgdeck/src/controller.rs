@@ -104,9 +104,20 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
                 let report = engine.search_stream(&query, cancel, &mut send_partial);
                 Ok(Payload::Packages(report))
             } else {
-                // Installed and Updates stay synchronous: upgrade gating
-                // needs complete failures, which partials cannot promise.
-                let mut report = engine.installed(cancel);
+                // Installed and Updates stream like Search so rows appear
+                // while slow backends still query. Every partial carries
+                // the same view filter as the terminal report below.
+                // Upgrade gating still waits for the terminal report with
+                // complete failures (see apply); partials only fill rows.
+                let mut send_partial = |mut partial: PackageReport| {
+                    if view == "Updates" {
+                        filter_updates(&mut partial);
+                    } else {
+                        filter_installed(&mut partial, &query);
+                    }
+                    send(Reply::Partial(partial))
+                };
+                let mut report = engine.installed_stream(cancel, &mut send_partial);
                 if view == "Updates" {
                     filter_updates(&mut report);
                 } else {
@@ -750,10 +761,16 @@ impl ffi::PackageController {
                 if matches!(self.rust().queued, Some(Job::Load(..))) {
                     return;
                 }
-                let upgradable = self.rust().updates_view
-                    && report.failures.is_empty()
-                    && !upgrade_plan(&report.packages).is_empty();
-                self.as_mut().set_upgradable(upgradable);
+                // Upgrade gating waits for the terminal report, when no
+                // worker remains: partials cannot promise complete
+                // failures, so an early partial must not enable it. Rows,
+                // status, and failures below update on every partial.
+                if self.rust().worker.is_none() {
+                    let upgradable = self.rust().updates_view
+                        && report.failures.is_empty()
+                        && !upgrade_plan(&report.packages).is_empty();
+                    self.as_mut().set_upgradable(upgradable);
+                }
                 let same = same_app_sources_all(&report.packages);
                 let mut rows: Vec<_> = report
                     .packages
@@ -1300,6 +1317,54 @@ mod tests {
         match replies.remove(0) {
             Reply::Done(Ok(Payload::Packages(report))) => assert_eq!(report, partial),
             _ => panic!("expected the terminal report last"),
+        }
+    }
+    #[test]
+    fn installed_and_updates_loads_stream_filtered_partials() {
+        let package = Package {
+            id: PackageId {
+                backend: "fixture".into(),
+                name: "synthetic".into(),
+                architecture: "all".into(),
+                scope: Scope::System,
+                remote: None,
+            },
+            display_name: "Synthetic".into(),
+            summary: "Fixture".into(),
+            installed_version: Some("1".into()),
+            candidate_version: Some("2".into()),
+            update: UpdateAvailability::Available,
+            icon: None,
+            component_ids: vec![],
+            homepages: vec![],
+        };
+        let mut engine = Engine::default();
+        engine
+            .register(Fixture {
+                package: package.clone(),
+                fail: false,
+            })
+            .unwrap();
+        // Both views stream one partial per backend, each carrying the
+        // same view filter as the terminal report.
+        for view in ["Installed", "Updates"] {
+            let mut replies = vec![];
+            execute(
+                &mut engine,
+                Job::Load(view.into(), "".into()),
+                &Cancellation::default(),
+                &mut |r| replies.push(r),
+            );
+            assert_eq!(replies.len(), 2);
+            let partial = match replies.remove(0) {
+                Reply::Partial(report) => report,
+                _ => panic!("expected a streaming partial first"),
+            };
+            assert_eq!(partial.packages, vec![package.clone()]);
+            match replies.remove(0) {
+                Reply::Done(Ok(Payload::Packages(report))) => assert_eq!(report, partial),
+                _ => panic!("expected the terminal report last"),
+            }
         }
     }
     #[test]

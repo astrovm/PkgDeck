@@ -649,3 +649,26 @@ fn streaming_reports_cumulative_partials_equal_to_the_sync_query() {
     let report = dead.search("fixture", &Cancellation::default());
     assert!(report.failures.is_empty());
 }
+
+#[test]
+fn installed_stream_reports_cumulative_partials_equal_to_the_sync_query() {
+    let cancel = Cancellation::default();
+    let mut live = Engine::default();
+    live.register(Synthetic::new("one", Fault::None)).unwrap();
+    live.register(Synthetic::new("two", Fault::Query)).unwrap();
+    let mut partials = vec![];
+    let final_report = live.installed_stream(&cancel, &mut |partial| {
+        assert!(partial.packages.windows(2).all(|w| w[0].id <= w[1].id));
+        partials.push(partial);
+    });
+    // One emission per backend. Reports are cumulative, so a failure
+    // reappears in later partials; assert on membership, never on sums.
+    assert_eq!(partials.len(), 2);
+    for partial in &partials {
+        assert!(partial.failures.iter().all(|f| f.backend == "two"));
+    }
+    assert_eq!(final_report.failures.len(), 1);
+    assert_eq!(partials.last().unwrap(), &final_report);
+    // The terminal emission matches a synchronous query on the same state.
+    assert_eq!(live.installed(&cancel), final_report);
+}

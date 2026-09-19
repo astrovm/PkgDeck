@@ -63,9 +63,11 @@ row shows the underlying manager error with a remediation hint, without
 re-querying. Native dependency changes can accompany package operations.
 
 Queries and writes execute on a Rust worker. The GUI polls a message channel and
-updates Qt properties on its own thread. Search results stream in per backend,
-so fast sources render while slow ones still query; the selection follows the
-same package identity across partials. Hovering a package row shows its full
+updates Qt properties on its own thread. Search, Installed, and Updates
+results stream in per backend, so rows appear while slow sources still
+query; the selection follows the
+same package identity across partials. Upgrade availability still waits for
+the terminal report with complete failures. Hovering a package row shows its full
 untruncated versions and summary. Finished views are cached, so switching
 sections shows the last results instantly; only the first visit, a source
 change, or Reload queries native managers, and writes invalidate every cached
