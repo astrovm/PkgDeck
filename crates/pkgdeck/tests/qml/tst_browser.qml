@@ -22,14 +22,16 @@ TestCase {
         property string lastView: ""
         property string lastQuery: ""
         property string lastSource: ""
+        property bool lastForce: false
         property int selection: -1
         property int writes: 0
         property int cancels: 0
         property string lastChecked: ""
-        function load(view, query, source, sudo) {
+        function load(view, query, source, sudo, force) {
             lastView = view;
             lastQuery = query;
             lastSource = source;
+            lastForce = !!force;
         }
         function select(index) {
             selection = index;
@@ -80,6 +82,7 @@ TestCase {
         fake.writes = 0;
         fake.cancels = 0;
         fake.lastChecked = "";
+        fake.lastForce = false;
         browser = createTemporaryObject(window, test);
         verify(browser !== null);
         browser.requestActivate();
@@ -185,9 +188,11 @@ TestCase {
         browser.choose(0);
         fake.busy = true;
         verify(!findChild(browser, "installButton").enabled);
-        // Reads do not lock navigation or selection.
+        // Reads do not lock navigation or selection. Section switches go
+        // through the cache path, never forced.
         browser.openView("Updates");
         compare(browser.currentView, "Updates");
+        compare(fake.lastForce, false);
         browser.openView("Installed");
         compare(browser.currentView, "Installed");
         const list = findChild(browser, "packageResults");
@@ -496,6 +501,14 @@ TestCase {
         compare(browser.viewItems[0].name, "fire");
         compare(browser.viewItems[1].name, "firefox");
         compare(browser.viewItems[3].name, "zzz");
+        // Submitting a fresh search resets to best-match order and forces
+        // a native query instead of serving the cached snapshot.
+        search.forceActiveFocus();
+        keyClick(Qt.Key_Return);
+        compare(browser.sortColumn, "");
+        compare(browser.viewItems[0].name, "fire");
+        compare(fake.lastForce, true);
+        compare(fake.lastView, "Search");
     }
     function test_header_source_checklist_and_installed_filter() {
         browser.openView("Installed");

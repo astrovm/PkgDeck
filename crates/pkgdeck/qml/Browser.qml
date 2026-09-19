@@ -379,7 +379,9 @@ Controls.ApplicationWindow {
         else if (["Search", "Installed", "Updates", "Sources"].indexOf(view) >= 0)
             reload();
     }
-    function reload() {
+    // Reload the current view. Without force, a cached snapshot serves
+    // instantly with no worker; force always queries native managers.
+    function reload(force) {
         resultView = currentView;
         results.currentIndex = -1;
         selectedIdentity = null;
@@ -387,7 +389,7 @@ Controls.ApplicationWindow {
         // Installed filtering is client-side over the loaded rows (see
         // viewItems), so the backend always returns the full installed set
         // and typing never triggers a native query.
-        backend.load(currentView, currentView === "Installed" ? "" : search.text, checkedCsv(), useSudo);
+        backend.load(currentView, currentView === "Installed" ? "" : search.text, checkedCsv(), useSudo, force === true);
     }
     function choose(index) {
         if (index < 0 || index >= viewItems.length)
@@ -675,7 +677,10 @@ Controls.ApplicationWindow {
                     onAccepted: {
                         root.currentView = "Search";
                         root.queryDirty = false;
-                        root.reload();
+                        // A fresh search resets to best-match order: a stale
+                        // column sort would otherwise silently win over it.
+                        root.sortColumn = "";
+                        root.reload(true);
                     }
                     Keys.onDownPressed: {
                         results.forceActiveFocus();
@@ -689,7 +694,7 @@ Controls.ApplicationWindow {
                     symbol: "search"
                     primary: true
                     enabled: !backend.writing && search.text.trim().length > 0
-                    onClicked: { root.currentView = "Search"; root.queryDirty = false; root.reload(); }
+                    onClicked: { root.currentView = "Search"; root.queryDirty = false; root.sortColumn = ""; root.reload(true); }
                 }
             }
             RowLayout {
@@ -1253,7 +1258,7 @@ Controls.ApplicationWindow {
                     text: "Reload"
                     symbol: "refresh"
                     enabled: !backend.writing
-                    onClicked: root.reload()
+                    onClicked: root.reload(true)
                 }
             }
         }
@@ -1328,7 +1333,7 @@ Controls.ApplicationWindow {
     Shortcut {
         sequence: "Ctrl+R"
         enabled: !backend.writing
-        onActivated: root.reload()
+        onActivated: root.reload(true)
     }
     Shortcut {
         sequence: "Ctrl+I"

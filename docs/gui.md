@@ -17,6 +17,7 @@ it does not invent recommendations or combine matching names across sources.
 Search submits on Enter or the Search button. Results use a virtualized ListView,
 ranked best-match-first (exact name, name prefix, name substring, then summary
 matches), with the selected package's description, scope, homepage, and dependencies below.
+Submitting a search clears any column sort so the best match is always first.
 The VERSION column carries the state: a bare candidate means not installed,
 `· installed` marks installed packages, and `→` marks an available update.
 Matching names remain separate source/architecture/scope identities.
@@ -58,7 +59,10 @@ Queries and writes execute on a Rust worker. The GUI polls a message channel and
 updates Qt properties on its own thread. Search results stream in per backend,
 so fast sources render while slow ones still query; the selection follows the
 same package identity across partials. Hovering a package row shows its full
-untruncated versions and summary. Switching sections or the selected row during
+untruncated versions and summary. Finished views are cached, so switching
+sections shows the last results instantly; only the first visit, a source
+change, or Reload queries native managers, and writes invalidate every cached
+view. Switching sections or the selected row during
 a query cancels the in-flight read and starts the new one; native writes keep
 the lock until they finish. An indeterminate spinner in the results table
 replaces invented percentages. Cancel interrupts reads; an already-running
