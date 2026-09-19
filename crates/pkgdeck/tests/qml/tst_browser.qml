@@ -355,8 +355,8 @@ TestCase {
         browser.openView("Updates");
         populate();
         waitForRendering(browser.contentItem);
-        // Every row starts checked; the removed buttons are gone.
-        verify(findChild(browser, "selectAllButton") === null);
+        // Every row starts checked, so Select all stays hidden until
+        // something is deselected; the old Upgrade selected button is gone.
         verify(findChild(browser, "upgradeSelectedButton") === null);
         compare(browser.selectedCount(), 2);
         const upgradeBtn = findChild(browser, "upgradeAllButton");
@@ -380,6 +380,15 @@ TestCase {
         mouseClick(selectNone);
         compare(browser.selectedCount(), 0);
         verify(!upgradeBtn.visible);
+        // Select all re-checks everything and restores the Upgrade all path.
+        const selectAll = findChild(browser, "selectAllButton");
+        verify(selectAll.visible);
+        waitForRendering(browser.contentItem);
+        mouseClick(selectAll);
+        compare(browser.selectedCount(), 2);
+        compare(browser.uncheckedPackages.length, 0);
+        verify(upgradeBtn.visible);
+        compare(upgradeBtn.text, "Upgrade all");
         browser.togglePackage(browser.items[1]);
         compare(browser.selectedCount(), 1);
         verify(upgradeBtn.visible);
