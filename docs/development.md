@@ -18,6 +18,47 @@ stops subsequent stages and preserves its exit status. Stages time out after
 that limit (GNU timeout syntax). The VM launcher has its own cleanup and deadline.
 VM details also remain in `build/host-vm/`. No verification mode publishes releases.
 
+## Running tests
+
+Use these entry points; they match CI exactly. Anything else is unsupported.
+
+```sh
+scripts/verify.sh fast                      # no Qt needed
+source scripts/dev-env.sh                   # once per shell, required below
+cargo test --locked -p pkgdeck-core -p pkd  # Rust unit + integration tests
+cargo test -p pkgdeck --test entrypoint quick_controls   # QML suite, headless
+cargo test -p pkgdeck --test entrypoint     # above plus the real-window lifecycle
+scripts/verify.sh full --only tests         # everything above, as CI runs it
+```
+
+`source scripts/dev-env.sh` selects the system Qt 6.10.2 toolchain
+(`qmltestrunner`, Kirigami imports) and must precede any direct `cargo`
+invocation. The QML suite runs `qmltestrunner` offscreen with temporary XDG
+directories; it needs no display and never touches your session.
+`real_window` additionally drives the built app on a private Xvfb server
+via `xdotool` — also fully isolated — and needs `xvfb`, `xdotool`, and
+fonts (`xvfb xdotool fonts-dejavu-core`, same list CI installs).
+
+Do not:
+- run `qmltestrunner -input ...` by hand: tool and Kirigami resolution
+  depend on the `dev-env.sh` environment;
+- prepend another Qt SDK's `bin/` to `PATH`: it hijacks `qmltestrunner`
+  and breaks imports with misleading "module not installed" errors;
+- set `DISPLAY` or drive the app manually: the harness owns private
+  displays, and GUI tests never need your session.
+
+If a suite fails, match the symptom:
+- `qmltestrunner: No such file` → `dev-env.sh` was not sourced.
+- `Type App.Browser unavailable` / `module "org.kde.kirigami" is not
+  installed → `QML_IMPORT_PATH` lacks Kirigami; source `dev-env.sh` and
+  remove any foreign Qt from `PATH`. The harness now preflights both and
+  says so directly.
+- `Xvfb`/`xdotool: No such file` → install the GUI test prerequisites.
+- `state.json missing ... fixture backend never ran` (`real_window`) →
+  the scripted drive stalled before any write; inspect the attached
+  `application.log`, and confirm Xvfb/xdotool/software rendering work
+  (CI's desktop job is the reference environment).
+
 ## SDK and prerequisites
 
 Ubuntu 26.04 supplies Qt 6.10.2, Kirigami/ECM 6.24.0, CMake 4.2.3, and Ninja
