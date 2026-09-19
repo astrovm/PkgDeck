@@ -419,8 +419,8 @@ impl App {
             };
             vec![
                 Span::raw(key.to_owned()),
-                Span::styled(symbol.to_owned(), style),
-                Span::styled(format!(" {name}   "), style),
+                Span::styled(symbol.to_owned(), self.paint(style)),
+                Span::styled(format!(" {name}   "), self.paint(style)),
             ]
         };
         let mut nav: Vec<Span> = vec![];
@@ -1059,6 +1059,13 @@ mod tests {
         let screen = render(&mut app, 100, 30);
         assert!(screen.contains("PkgDeck"));
         assert!(screen.contains("cancel/back"));
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        for cell in terminal.backend().buffer().content() {
+            assert_eq!(cell.fg, Color::Reset);
+            assert_eq!(cell.bg, Color::Reset);
+        }
     }
 
     #[test]

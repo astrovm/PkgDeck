@@ -11,17 +11,20 @@ use std::io::{self, IsTerminal, Write};
 #[derive(Parser)]
 #[command(version = pkgdeck_core::VERSION, about = "PkgDeck package manager")]
 pub struct Args {
+    /// Emit machine-readable JSON instead of a human-readable table.
     #[arg(long, global = true)]
     pub json: bool,
     /// Restrict operations to the given sources. Repeatable; empty means
     /// every available source.
     #[arg(long, global = true, value_parser = ["apt", "dnf", "pacman", "zypper", "snap", "homebrew", "appimage", "flatpak", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "composer", "gem"])]
     pub from: Vec<String>,
+    /// Select the package architecture when a name is ambiguous.
     #[arg(long, global = true)]
     pub arch: Option<String>,
     /// Approve native package and dependency changes without prompting.
     #[arg(long, short = 'y', global = true)]
     pub yes: bool,
+    /// Authorize system changes using existing sudo credentials or host polkit.
     #[arg(long, global = true, value_enum, default_value = "sudo")]
     pub auth: Auth,
     #[command(subcommand)]

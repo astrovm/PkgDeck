@@ -77,8 +77,9 @@ Controls.ApplicationWindow {
     // streaming partials re-sort rows, so the controller re-resolves each
     // identity and skips stale ones, never guessing.
     property var uncheckedPackages: []
+    readonly property var uncheckedIdentitySet: new Set(uncheckedPackages)
     function packageChecked(row) {
-        return uncheckedPackages.indexOf(rowIdentity(row)) < 0;
+        return !uncheckedIdentitySet.has(rowIdentity(row));
     }
     function togglePackage(row) {
         const id = rowIdentity(row);
@@ -92,20 +93,30 @@ Controls.ApplicationWindow {
             unchecked.push(id);
         uncheckedPackages = unchecked;
     }
-    function packageIdentities() {
+    readonly property var allPackageIdentities: {
         const all = [];
-        for (let i = 0; i < root.items.length; i++) {
-            if (root.items[i].kind === "package") {
-                const id = rowIdentity(root.items[i]);
-                if (id && all.indexOf(id) < 0)
+        const seen = new Set();
+        const rows = root.items;
+        for (let i = 0; i < rows.length; i++) {
+            if (rows[i].kind === "package") {
+                const id = rowIdentity(rows[i]);
+                if (id && !seen.has(id)) {
+                    seen.add(id);
                     all.push(id);
+                }
             }
         }
         return all;
     }
+    function packageIdentities() {
+        return allPackageIdentities;
+    }
+    readonly property var checkedPackageIds: {
+        const unchecked = uncheckedIdentitySet;
+        return allPackageIdentities.filter((id) => !unchecked.has(id));
+    }
     function checkedIdentities() {
-        const unchecked = uncheckedPackages;
-        return packageIdentities().filter((id) => unchecked.indexOf(id) < 0);
+        return checkedPackageIds;
     }
     function selectedCount() {
         return checkedIdentities().length;
@@ -307,6 +318,7 @@ Controls.ApplicationWindow {
 
     component ThemedComboBox: Controls.ComboBox {
         id: combo
+        implicitHeight: 38
         background: Rectangle {
             color: root.surface
             radius: 8
@@ -443,6 +455,11 @@ Controls.ApplicationWindow {
     function propose(action) {
         backend.propose(action, originalIndex(results.currentIndex));
     }
+    function focusResultsAfterLoad() {
+        if (!queryDirty && !installedFilterField.activeFocus && !sourcePopup.opened && !confirmation.opened
+                && ["Search", "Installed", "Updates", "Sources"].indexOf(currentView) >= 0)
+            results.forceActiveFocus();
+    }
     Settings {
         id: preferences
         category: "Browser"
@@ -468,7 +485,7 @@ Controls.ApplicationWindow {
             if (!backend.busy && root.closePending)
                 root.close();
             else if (!backend.busy && root.selected !== null)
-                results.forceActiveFocus();
+                root.focusResultsAfterLoad();
         }
         function onRowsChanged() {
             // Streaming partials re-sort rows around the selection: follow
@@ -482,13 +499,8 @@ Controls.ApplicationWindow {
                     }
                 }
             }
-            resultsBox.opacity = 0.35;
-            resultsBox.opacity = 1;
-            if (root.queryDirty) {
-                root.queryDirty = false;
-            } else if (root.viewItems.length > 0) {
-                results.forceActiveFocus();
-            }
+            if (root.viewItems.length > 0)
+                root.focusResultsAfterLoad();
         }
         function onConfirmationChanged() {
             if (backend.confirmation.length)
@@ -631,6 +643,7 @@ Controls.ApplicationWindow {
                 ActionButton {
                     objectName: "sourceFilter"
                     id: sourceFilterButton
+                    visible: ["Search", "Installed", "Updates", "Sources"].indexOf(root.currentView) >= 0
                     text: root.sourceSummary()
                     symbol: "sources"
                     enabled: !backend.writing
@@ -832,15 +845,22 @@ Controls.ApplicationWindow {
                 // Absorbs leftover height so the settings stack stays top-anchored.
                 Item { Layout.fillHeight: true }
             }
-            Controls.Label {
-                objectName: "aboutText"
+            Controls.ScrollView {
+                id: aboutScroll
+                objectName: "aboutScroll"
                 visible: root.currentView === "About"
                 Layout.fillWidth: true
                 Layout.fillHeight: true
-                verticalAlignment: Text.AlignTop
-                wrapMode: Text.WordWrap
-                text: "PkgDeck " + backend.version + "\nA unified package interface for Linux.\n\nKeyboard shortcuts\nCtrl+1: Search • Ctrl+2: Installed • Ctrl+3: Updates • Ctrl+4: Sources\nCtrl+F: search • Ctrl+L: focus results • Up/Down: select • Ctrl+I: install • Ctrl+D: remove • Ctrl+U: upgrade • Ctrl+M: refresh source • Ctrl+R: reload\nEscape: cancel current work\n\nRefresh updates source metadata; Upgrade changes an installed package. Writes require confirmation and may change native dependencies. Cancellation waits for a native write already running.\n\nSearches show configured package sources. A failed source stays as a row in Sources and in the current results."
-                textFormat: Text.PlainText
+                contentWidth: availableWidth
+                clip: true
+                Controls.Label {
+                    objectName: "aboutText"
+                    width: aboutScroll.availableWidth
+                    verticalAlignment: Text.AlignTop
+                    wrapMode: Text.WordWrap
+                    text: "PkgDeck " + backend.version + "\nA unified package interface for Linux.\n\nKeyboard shortcuts\nCtrl+1: Search • Ctrl+2: Installed • Ctrl+3: Updates • Ctrl+4: Sources\nCtrl+F: search • Ctrl+L: focus results • Up/Down: select • Ctrl+I: install • Ctrl+D: remove • Ctrl+U: upgrade • Ctrl+M: refresh source • Ctrl+R: reload\nEscape: cancel current work\n\nRefresh updates source metadata; Upgrade changes an installed package. Writes require confirmation and may change native dependencies. Cancellation waits for a native write already running.\n\nSearches show configured package sources. A failed source stays as a row in Sources and in the current results."
+                    textFormat: Text.PlainText
+                }
             }
             Rectangle {
                 id: resultsBox
@@ -851,10 +871,6 @@ Controls.ApplicationWindow {
                 color: root.surface
                 radius: 10
                 border.color: results.activeFocus ? root.accent : root.line
-                opacity: 1
-                Behavior on opacity {
-                    NumberAnimation { duration: 120 }
-                }
                 ColumnLayout {
                     anchors.fill: parent
                     anchors.margins: 1
@@ -1039,8 +1055,8 @@ Controls.ApplicationWindow {
                                     id: packageCheck
                                     visible: root.currentView === "Updates" && modelData.kind === "package"
                                     checked: root.packageChecked(modelData)
-                                     enabled: !backend.writing
-                                     onToggled: root.togglePackage(modelData)
+                                    enabled: !backend.writing
+                                    onToggled: root.togglePackage(modelData)
                                     Accessible.name: "Select " + (modelData.name || "")
                                     Layout.preferredWidth: 28
                                     Layout.alignment: Qt.AlignVCenter
@@ -1132,12 +1148,13 @@ Controls.ApplicationWindow {
                                 height: 32
                             }
                             Controls.Label {
+                                objectName: "emptyState"
                                 width: parent.width
                                 horizontalAlignment: Text.AlignHCenter
                                 wrapMode: Text.WordWrap
                                 color: root.muted
                                 visible: !backend.busy
-                                text: root.currentView === "Search" ? "Search by name or description.\nIf nothing matches, try a shorter search or another source." : "No results to show.\nCheck source availability or reload to try again."
+                                text: root.currentView === "Search" ? (search.text.trim().length === 0 ? "Find your next package.\nSearch by name or description." : "No matching packages.\nTry a shorter search or another source.") : (root.currentView === "Updates" ? "You're up to date.\nNo updates reported by the selected sources." : (root.currentView === "Installed" && (root.installedFilter.length > 0 || root.multiSourceOnly) ? "No packages match these filters.\nClear the filter or include more sources." : "No results to show.\nCheck source availability or reload to try again."))
                             }
                         }
                     }

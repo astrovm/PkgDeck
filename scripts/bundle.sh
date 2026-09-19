@@ -23,7 +23,7 @@ scripts/build-apt.sh "${CARGO_TARGET_DIR:-target}/release"
 cp "${CARGO_TARGET_DIR:-target}/release/"{pkd,pkgdeck,pkgdeck-apt-query} "$out/usr/bin/"
 for module in QtQuick QtQml QtCore org; do cp -a "$QT_QML_DIR/$module" "$out/usr/qml/"; done
 shopt -s nullglob
-for pattern in platforms/libqoffscreen.so platforms/libqminimal.so platforms/libqxcb.so 'platforms/libqwayland*.so' 'imageformats/libqjpeg.so' 'imageformats/libqico.so' 'iconengines/*.so' 'xcbglintegrations/*.so' 'wayland-graphics-integration-client/*.so' 'wayland-shell-integration/*.so' platforminputcontexts/libcomposeplatforminputcontextplugin.so platforminputcontexts/libibusplatforminputcontextplugin.so; do
+for pattern in platforms/libqoffscreen.so platforms/libqminimal.so platforms/libqxcb.so 'platforms/libqwayland*.so' 'imageformats/libqjpeg.so' 'imageformats/libqico.so' 'imageformats/libqsvg.so' 'iconengines/*.so' 'xcbglintegrations/*.so' 'wayland-graphics-integration-client/*.so' 'wayland-shell-integration/*.so' platforminputcontexts/libcomposeplatforminputcontextplugin.so platforminputcontexts/libibusplatforminputcontextplugin.so; do
     for source in "$QT_PLUGIN_DIR"/$pattern; do
         mkdir -p "$out/usr/plugins/${pattern%/*}"
         cp "$source" "$out/usr/plugins/${pattern%/*}/"
