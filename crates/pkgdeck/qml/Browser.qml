@@ -127,8 +127,15 @@ Controls.ApplicationWindow {
     }
     // Best-match-first score for the Search view: exact name, name prefix,
     // name substring, summary prefix, summary substring, then anything the
-    // backend returned through another field. Ties break by name and source
-    // so streaming partials settle into a stable order.
+    // backend returned through another field. Unverifiable offers (a package
+    // row with neither an installed nor a candidate version, e.g. a dev
+    // backend's uninstalled-name guess) always sort below verified rows so
+    // real packages are never buried under names that may not exist. Ties
+    // break by name and source so streaming partials settle into a stable
+    // order.
+    function isFabricated(row) {
+        return row.kind === "package" && !row.installed && !row.candidate;
+    }
     function relevanceScore(row, query) {
         const name = (row.name || "").toLowerCase();
         const summary = (row.summary || "").toLowerCase();
@@ -171,7 +178,7 @@ Controls.ApplicationWindow {
         } else if (root.currentView === "Search") {
             const query = search.text.trim().toLowerCase();
             if (query !== "")
-                rows.sort((a, b) => (relevanceScore(a, query) - relevanceScore(b, query)) || relevanceTiebreak(a, b));
+                rows.sort((a, b) => ((isFabricated(a) ? 1 : 0) - (isFabricated(b) ? 1 : 0)) || (relevanceScore(a, query) - relevanceScore(b, query)) || relevanceTiebreak(a, b));
         }
         return rows;
     }

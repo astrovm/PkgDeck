@@ -1350,8 +1350,20 @@ impl<T: Transport> SystemManager<T> {
                     if fields.len() < 2 {
                         return Err(invalid("snap", "invalid list metadata"));
                     }
+                    // `snap find` prints Name Version Publisher Notes
+                    // Summary; the store summary is what matched the query,
+                    // so keep it for ranking instead of a placeholder.
+                    // `snap list` has no summary column.
+                    let summary: String = if installed {
+                        "Snap package".into()
+                    } else {
+                        fields
+                            .get(4..)
+                            .map(|tail| tail.join(" "))
+                            .unwrap_or_default()
+                    };
                     let mut package =
-                        self.package(fields[0], std::env::consts::ARCH, fields[1], "Snap package")?;
+                        self.package(fields[0], std::env::consts::ARCH, fields[1], &summary)?;
                     if installed {
                         package.installed_version = Some(fields[1].into());
                         package.update = UpdateAvailability::Current;

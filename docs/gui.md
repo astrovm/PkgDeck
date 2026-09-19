@@ -17,7 +17,10 @@ it does not invent recommendations or combine matching names across sources.
 Search submits on Enter or the Search button. Results use a virtualized ListView,
 ranked best-match-first (exact name, name prefix, name substring, then summary
 matches), with the selected package's description, scope, homepage, and dependencies below.
-Submitting a search clears any column sort so the best match is always first.
+Unverifiable offers sort last: a row with neither an installed nor a candidate
+version (for example a dev backend guessing an uninstalled name) never buries
+a real package. Submitting a search clears any column sort so the best match
+is always first.
 The VERSION column carries the state: a bare candidate means not installed,
 `· installed` marks installed packages, and `→` marks an available update.
 Matching names remain separate source/architecture/scope identities.

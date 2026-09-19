@@ -485,22 +485,37 @@ TestCase {
             {kind: "package", name: "x-fire-helper", source: "apt", architecture: "all", installed: null, candidate: "1", scope: "system", summary: "Helper"},
             {kind: "package", name: "firefox", source: "apt", architecture: "all", installed: null, candidate: "1", scope: "system", summary: "Browser"},
             {kind: "package", name: "fire", source: "apt", architecture: "all", installed: null, candidate: "1", scope: "system", summary: "Exact"},
-            {kind: "package", name: "zzz", source: "apt", architecture: "all", installed: null, candidate: "1", scope: "system", summary: "Fire starter"}
+            {kind: "package", name: "zzz", source: "apt", architecture: "all", installed: null, candidate: "1", scope: "system", summary: "Fire starter"},
+            {kind: "package", name: "fire", source: "npm", architecture: "x64", installed: null, candidate: null, scope: "system", summary: "Install fire with npm"},
+            {kind: "failure", name: "bun", source: "bun", summary: "boom", available: false}
         ]);
         waitForRendering(browser.contentItem);
-        compare(browser.viewItems.length, 4);
+        compare(browser.viewItems.length, 6);
         compare(browser.viewItems[0].name, "fire");
+        compare(browser.viewItems[0].source, "apt");
         compare(browser.viewItems[1].name, "firefox");
         compare(browser.viewItems[2].name, "x-fire-helper");
         compare(browser.viewItems[3].name, "zzz");
+        // A failed source stays above unverified guesses; the guess with an
+        // exact name but no version at all sinks to the bottom.
+        compare(browser.viewItems[4].kind, "failure");
+        compare(browser.viewItems[5].name, "fire");
+        compare(browser.viewItems[5].source, "npm");
         // Actions map the visible row back to backend order.
         browser.choose(0);
         compare(fake.selection, 2);
+        browser.choose(5);
+        compare(fake.selection, 4);
         // An explicit column sort wins over relevance ranking.
         browser.cycleSort("name");
-        compare(browser.viewItems[0].name, "fire");
-        compare(browser.viewItems[1].name, "firefox");
-        compare(browser.viewItems[3].name, "zzz");
+        compare(browser.viewItems[0].name, "bun");
+        compare(browser.viewItems[1].name, "fire");
+        compare(browser.viewItems[2].name, "fire");
+        // Equal names keep engine order, which is not stable: assert the
+        // pair as a set instead of a fixed sequence.
+        const pair = [browser.viewItems[1].source, browser.viewItems[2].source].sort();
+        compare(pair.join(","), "apt,npm");
+        compare(browser.viewItems[5].name, "zzz");
         // Submitting a fresh search resets to best-match order and forces
         // a native query instead of serving the cached snapshot.
         search.forceActiveFocus();
