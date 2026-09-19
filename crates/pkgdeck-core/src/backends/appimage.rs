@@ -122,6 +122,7 @@ impl AppImage {
             },
             icon: None,
             component_ids: vec![],
+            homepages: vec![],
         })
     }
     fn installed_packages(&self) -> Result<Vec<Package>, EngineError> {
@@ -242,6 +243,7 @@ impl AppImage {
                             .and_then(|stem| super::component_stem(&stem.to_string_lossy()))
                             .into_iter()
                             .collect(),
+                        homepages: vec![],
                     },
                     desktop,
                 ))
@@ -376,6 +378,7 @@ impl Backend for AppImage {
                 update: UpdateAvailability::Unknown,
                 icon: None,
                 component_ids: vec![],
+                homepages: vec![],
             }]);
         }
         let query = query.to_ascii_lowercase();

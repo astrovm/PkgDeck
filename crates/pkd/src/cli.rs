@@ -352,6 +352,7 @@ mod tests {
                 update: UpdateAvailability::Available,
                 icon: None,
                 component_ids: vec![],
+                homepages: vec![],
             }
         }
     }

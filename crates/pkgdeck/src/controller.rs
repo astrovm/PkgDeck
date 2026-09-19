@@ -1064,6 +1064,7 @@ mod tests {
             update: UpdateAvailability::Available,
             icon: None,
             component_ids: vec![],
+            homepages: vec![],
         };
         let mut engine = Engine::default();
         engine
@@ -1102,6 +1103,7 @@ mod tests {
                 update,
                 icon: None,
                 component_ids: vec![],
+                homepages: vec![],
             }
         }
         let packages = vec![
@@ -1150,6 +1152,7 @@ mod tests {
                 update: UpdateAvailability::Available,
                 icon: None,
                 component_ids: vec![],
+                homepages: vec![],
             }
         }
         // Identity shape mirrors QML rowIdentity: [source, name, arch, remote, scope].
@@ -1246,6 +1249,7 @@ mod tests {
                 update: UpdateAvailability::Unknown,
                 icon: None,
                 component_ids: vec![],
+                homepages: vec![],
             },
             description: String::new(),
             homepage: None,
@@ -1272,6 +1276,7 @@ mod tests {
             update: UpdateAvailability::Available,
             icon: None,
             component_ids: vec![],
+            homepages: vec![],
         };
         let mut engine = Engine::default();
         engine
@@ -1315,6 +1320,7 @@ mod tests {
             update: UpdateAvailability::Available,
             icon: None,
             component_ids: vec![],
+            homepages: vec![],
         };
         assert_eq!(package_row(&package, &[])["source"], "fixture");
         assert!(encoded(package_row(&package, &[]))

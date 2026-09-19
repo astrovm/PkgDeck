@@ -47,6 +47,7 @@ impl Fixture {
                 candidate_version: Some(candidate),
                 icon: None,
                 component_ids: vec![],
+                homepages: vec![],
             },
             description: "Synthetic package description".into(),
             homepage: None,

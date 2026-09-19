@@ -777,6 +777,7 @@ mod tests {
             update: UpdateAvailability::Current,
             icon: None,
             component_ids: vec![],
+            homepages: vec![],
         }
     }
     struct Fixture {
@@ -889,6 +890,7 @@ mod tests {
             update: UpdateAvailability::Unknown,
             icon: None,
             component_ids: vec![],
+            homepages: vec![],
         };
         let mut app = App {
             view: View::Search,
