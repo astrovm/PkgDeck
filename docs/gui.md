@@ -22,19 +22,22 @@ version (for example a dev backend guessing an uninstalled name) never buries
 a real package. Submitting a search clears any column sort so the best match
 is always first.
 The VERSION column carries the state: a bare candidate means not installed,
-`· installed` marks installed packages, and `→` marks an available update.
+`· installed` marks installed packages outside the Installed view, and `→`
+marks an available update. Installed rows show only their version because the
+view already establishes their state.
 Matching names remain separate source/architecture/scope identities.
-Installed packages whose application exists in several managers at once show
-an "also in …" badge on the row, the tooltip, and the details panel. Two
+Installed packages related to an installation from another manager show a
+distinct "Related install: …" badge on the row, tooltip, and details panel. This
+is intentionally not described as an exact duplicate: package names and package
+boundaries can differ between managers. Two
 local-only signals feed the grouping: the AppStream component id (APT's
 DEP-11 data, Flatpak app ids, snap desktop entries, AppImage desktop
 entries) and the upstream homepage (APT control data, Homebrew formulae,
 and dev-tool manifests), normalized and matched exactly. Grouping is
 display-only; installs, removals, and upgrades still address one exact
 backend identity, and remote catalog entries never join a group. The
-Installed view's Multiple sources checkbox lists just those apps:
+Installed view's Related installs checkbox lists just those packages:
 
-![Multiple sources](screenshots/pkgdeck-installed-multisource.png)
 Click a column header to sort ascending, again for descending (▲▼); drag the
 header gutter to resize the name and version columns. Headers are Tab stops:
 Space or Return sorts without a mouse. Sorting is display-only:

@@ -373,11 +373,11 @@ Controls.ApplicationWindow {
     }
 
     function rowTooltip(data) {
-        const same = sameAppNames(data).length > 0 ? "\nAlso installed from: " + sameAppNames(data).join(", ") : "";
+        const same = sameAppNames(data).length > 0 ? "\nRelated install: " + sameAppNames(data).join(", ") : "";
         return data.name + "\n" + (data.installed || "not installed") + " → " + (data.candidate || "unknown") + "\n" + (data.summary || "") + same;
     }
-    // Display names for backend ids, and the "also installed from" suffix
-    // for rows whose application exists in several managers at once.
+    // Display names for backend ids used by related-install indicators without
+    // changing the rows' exact identities.
     function sourceDisplayName(id) {
         const at = sourceIds.indexOf(id);
         return at >= 0 ? sourceNames[at] : id;
@@ -387,7 +387,18 @@ Controls.ApplicationWindow {
     }
     function sameAppSummary(row) {
         const names = sameAppNames(row);
-        return names.length > 0 ? " · also in " + names.join(", ") : "";
+        return names.length > 0 ? "Related install: " + names.join(", ") : "";
+    }
+    function versionText(row) {
+        if (row.kind === "failure")
+            return "Failed";
+        if (row.kind === "source")
+            return row.available ? "Available" : "Unavailable";
+        if (row.update === "available")
+            return row.installed + " → " + row.candidate;
+        if (row.installed)
+            return root.currentView === "Installed" ? row.installed : row.installed + " · installed";
+        return row.candidate || "Unknown";
     }
     // Local icon files become file:// URLs. Paths come from the backend and
     // may contain spaces, which raw concatenation would leave unencoded and
@@ -789,11 +800,11 @@ Controls.ApplicationWindow {
                 Controls.CheckBox {
                     id: multiSourceCheck
                     objectName: "multiSourceCheck"
-                    text: "Multiple sources"
+                    text: "Related installs"
                     checked: root.multiSourceOnly
                     enabled: !backend.writing
                     onToggled: root.multiSourceOnly = checked
-                    Accessible.name: "Show only applications installed from multiple sources"
+                    Accessible.name: "Show only packages related to installs from other sources"
                     Layout.alignment: Qt.AlignVCenter
                     indicator: TickBox {
                         x: 0
@@ -1100,11 +1111,29 @@ Controls.ApplicationWindow {
                                         }
                                         Controls.Label {
                                         objectName: "packageSourceLine"
-                                        text: modelData.source.toUpperCase() + (modelData.remote ? " · " + modelData.remote : "") + (modelData.architecture ? " · " + modelData.architecture : "") + root.sameAppSummary(modelData)
+                                        text: modelData.source.toUpperCase() + (modelData.remote ? " · " + modelData.remote : "") + (modelData.architecture ? " · " + modelData.architecture : "")
                                         color: root.muted
                                         font.pixelSize: 11
                                         elide: Text.ElideRight
                                         Layout.fillWidth: true
+                                        }
+                                        Rectangle {
+                                            objectName: "relatedInstallBadge"
+                                            visible: root.sameAppNames(modelData).length > 0
+                                            color: root.selection
+                                            border.color: root.accent
+                                            border.width: 1
+                                            radius: 4
+                                            implicitWidth: relatedInstallText.implicitWidth + 12
+                                            implicitHeight: 20
+                                            Controls.Label {
+                                                id: relatedInstallText
+                                                anchors.centerIn: parent
+                                                text: root.sameAppSummary(modelData)
+                                                color: root.accent
+                                                font.pixelSize: 10
+                                                font.bold: true
+                                            }
                                         }
                                     }
                                     Controls.Label {
@@ -1118,7 +1147,7 @@ Controls.ApplicationWindow {
                                 }
                                 Controls.Label {
                                     Layout.preferredWidth: root.compact ? 100 : root.versionWidth
-                                    text: modelData.kind === "failure" ? "Failed" : (modelData.kind === "source" ? (modelData.available ? "Available" : "Unavailable") : (modelData.installed ? modelData.installed + (modelData.update === "available" ? " → " + modelData.candidate : " · installed") : modelData.candidate || "Unknown"))
+                                    text: root.versionText(modelData)
                                     font.family: "monospace"
                                     color: modelData.kind === "failure" ? "#e87979" : (modelData.update === "available" ? root.accent : root.muted)
                                     textFormat: Text.PlainText
@@ -1217,7 +1246,7 @@ Controls.ApplicationWindow {
                             background: null
                             wrapMode: TextEdit.Wrap
                             textFormat: TextEdit.PlainText
-                            text: root.detail.package ? (root.detail.description || "") + "\n\nScope: " + (root.detail.package.scope_label || "Unknown") + "   ·   Homepage: " + (root.detail.homepage || "Unavailable") + (root.sameAppNames(root.detail.package).length > 0 ? "\nAlso installed from: " + root.sameAppNames(root.detail.package).join(", ") : "") + "\nDependencies: " + ((root.detail.dependencies || []).join(", ") || "None listed") : (root.detail.failure ? (root.detail.failure.error || "") + "\n\n" + (root.detail.hint || "") : (root.detail.availability || "") + "\n\nCapabilities: " + (root.detail.capabilities || []).join(", "))
+                            text: root.detail.package ? (root.detail.description || "") + "\n\nScope: " + (root.detail.package.scope_label || "Unknown") + "   ·   Homepage: " + (root.detail.homepage || "Unavailable") + (root.sameAppNames(root.detail.package).length > 0 ? "\nRelated install: " + root.sameAppNames(root.detail.package).join(", ") : "") + "\nDependencies: " + ((root.detail.dependencies || []).join(", ") || "None listed") : (root.detail.failure ? (root.detail.failure.error || "") + "\n\n" + (root.detail.hint || "") : (root.detail.availability || "") + "\n\nCapabilities: " + (root.detail.capabilities || []).join(", "))
                             Accessible.name: "Selected package, source, or failure details"
                         }
                     }

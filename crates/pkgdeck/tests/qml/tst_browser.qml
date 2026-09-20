@@ -317,9 +317,11 @@ TestCase {
         }
         verify(line !== null);
         verify(line.text.indexOf("APT") >= 0);
-        verify(line.text.indexOf("also in") >= 0);
-        verify(line.text.indexOf("Flatpak") >= 0);
-        verify(line.text.indexOf("Snap") >= 0);
+        verify(line.text.indexOf("also in") < 0);
+        const badge = findChild(results, "relatedInstallBadge");
+        verify(badge !== null);
+        verify(badge.visible);
+        compare(browser.sameAppSummary(browser.viewItems[0]), "Related install: Flatpak, Snap");
         compare(browser.sameAppSummary(browser.viewItems[1]), "");
     }
     function test_multi_source_toggle_lists_grouped_apps() {
@@ -335,6 +337,7 @@ TestCase {
         verify(check !== null);
         verify(check.visible);
         verify(!browser.multiSourceOnly);
+        compare(check.text, "Related installs");
         mouseClick(check);
         compare(browser.multiSourceOnly, true);
         // The grouped app stays; failed sources stay visible as diagnostics.
@@ -350,6 +353,17 @@ TestCase {
         mouseClick(check);
         compare(browser.multiSourceOnly, false);
         compare(browser.viewItems.length, 3);
+    }
+    function test_installed_view_omits_redundant_state_label() {
+        browser.openView("Installed");
+        const installed = {kind: "package", name: "tool", source: "apt", architecture: "amd64", installed: "1.2.3", candidate: "1.2.3", scope: "system", summary: "Tool"};
+        compare(browser.versionText(installed), "1.2.3");
+        browser.openView("Search");
+        compare(browser.versionText(installed), "1.2.3 · installed");
+        installed.candidate = "2.0.0";
+        installed.update = "available";
+        browser.openView("Updates");
+        compare(browser.versionText(installed), "1.2.3 → 2.0.0");
     }
     function test_updates_checked_by_default_and_upgrade_subset() {
         browser.openView("Updates");
