@@ -26,17 +26,19 @@ The VERSION column carries the state: a bare candidate means not installed,
 marks an available update. Installed rows show only their version because the
 view already establishes their state.
 Matching names remain separate source/architecture/scope identities.
-Installed packages related to an installation from another manager show a
-distinct "Related install: …" badge on the row, tooltip, and details panel. This
-is intentionally not described as an exact duplicate: package names and package
-boundaries can differ between managers. Two
+Installed packages related to an installation from another manager are placed
+together under one compact family header. The header shows the number of exact
+package records and their managers; each package remains a separate selectable
+row with its own name, source, architecture, version, and summary. Two
 local-only signals feed the grouping: the AppStream component id (APT's
 DEP-11 data, Flatpak app ids, snap desktop entries, AppImage desktop
 entries) and the upstream homepage (APT control data, Homebrew formulae,
 and dev-tool manifests), normalized and matched exactly. Grouping is
 display-only; installs, removals, and upgrades still address one exact
 backend identity, and remote catalog entries never join a group. The
-Installed view's Related installs checkbox lists just those packages:
+Installed view's Duplicate installs checkbox lists just those groups. Package
+names and package boundaries can differ between managers, so grouping does not
+claim that the files inside each package are identical.
 
 Click a column header to sort ascending, again for descending (▲▼); drag the
 header gutter to resize the name and version columns. Headers are Tab stops:

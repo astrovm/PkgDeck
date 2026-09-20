@@ -410,10 +410,11 @@ fn operation_label(operation: &Operation) -> String {
         scope_label(&id.scope)
     )
 }
-fn package_row(p: &Package, same_from: &[String]) -> Value {
+fn package_row(p: &Package, same_from: &[String], same_group: Option<&str>) -> Value {
     json!({"name": p.id.name, "source": p.id.backend, "architecture": p.id.architecture,
         "remote": p.id.remote, "scope": p.id.scope, "scope_label": scope_label(&p.id.scope), "summary": p.summary, "installed": p.installed_version,
-        "candidate": p.candidate_version, "update": p.update, "kind": "package", "icon": p.icon, "same_app_from": same_from})
+        "candidate": p.candidate_version, "update": p.update, "kind": "package", "icon": p.icon,
+        "same_app_from": same_from, "same_app_group": same_group})
 }
 impl ffi::PackageController {
     fn start(mut self: Pin<&mut Self>, job: Job) {
@@ -605,7 +606,7 @@ impl ffi::PackageController {
             }
             let same = same_app_sources(&self.rust().packages, &package.id);
             self.as_mut().set_details(encoded(
-                json!({"package": package_row(&package, &same), "description": package.summary}),
+                json!({"package": package_row(&package, &same, None), "description": package.summary}),
             ));
             self.start(Job::Details(package.id));
         } else if let Some(failure) = usize::try_from(index)
@@ -772,11 +773,12 @@ impl ffi::PackageController {
                     self.as_mut().set_upgradable(upgradable);
                 }
                 let same = same_app_sources_all(&report.packages);
+                let groups = same_app_group_keys_all(&report.packages);
                 let mut rows: Vec<_> = report
                     .packages
                     .iter()
-                    .zip(same)
-                    .map(|(p, from)| package_row(p, &from))
+                    .zip(same.into_iter().zip(groups))
+                    .map(|(p, (from, group))| package_row(p, &from, group.as_deref()))
                     .collect();
                 rows.extend(report.failures.iter().map(|failure| {
                     json!({"kind": "failure", "name": failure.backend, "source": failure.backend,
@@ -815,7 +817,7 @@ impl ffi::PackageController {
                     return;
                 }
                 let data = encoded(
-                    json!({"package": package_row(&details.package, &same_app_sources(&self.rust().packages, &details.package.id)), "description": details.description, "homepage": details.homepage, "dependencies": details.dependencies}),
+                    json!({"package": package_row(&details.package, &same_app_sources(&self.rust().packages, &details.package.id), None), "description": details.description, "homepage": details.homepage, "dependencies": details.dependencies}),
                 );
                 // Bound memory use for large searches; reload and writes invalidate this snapshot.
                 if self.rust().detail_cache.len() >= 128 {
@@ -1387,8 +1389,8 @@ mod tests {
             component_ids: vec![],
             homepages: vec![],
         };
-        assert_eq!(package_row(&package, &[])["source"], "fixture");
-        assert!(encoded(package_row(&package, &[]))
+        assert_eq!(package_row(&package, &[], None)["source"], "fixture");
+        assert!(encoded(package_row(&package, &[], None))
             .to_string()
             .contains("synthetic"));
         let mut other = package.clone();

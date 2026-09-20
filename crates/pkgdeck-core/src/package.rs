@@ -274,6 +274,53 @@ pub fn same_app_sources_all(packages: &[Package]) -> Vec<Vec<String>> {
         .collect()
 }
 
+/// Stable display-group key for each package. A key is returned only when it
+/// links installed packages from more than one backend; callers can therefore
+/// group related rows without changing their exact package identities.
+pub fn same_app_group_keys_all(packages: &[Package]) -> Vec<Option<String>> {
+    let index = installed_component_backends(packages);
+    let mut labels: std::collections::BTreeMap<String, String> = index
+        .iter()
+        .filter(|(_, backends)| backends.len() > 1)
+        .map(|(key, _)| (key.clone(), key.clone()))
+        .collect();
+    // A package carrying both a component id and a homepage joins those
+    // namespaces. Propagate the smallest key until transitive links settle.
+    loop {
+        let mut changed = false;
+        for package in packages {
+            let keys: Vec<_> = app_keys(&package.component_ids, &package.homepages)
+                .into_iter()
+                .filter(|key| labels.contains_key(key))
+                .collect();
+            let Some(label) = keys.iter().filter_map(|key| labels.get(key)).min().cloned() else {
+                continue;
+            };
+            for key in keys {
+                if labels.get(&key).is_some_and(|current| current > &label) {
+                    labels.insert(key, label.clone());
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    packages
+        .iter()
+        .map(|package| {
+            if package.installed_version.is_none() {
+                return None;
+            }
+            app_keys(&package.component_ids, &package.homepages)
+                .into_iter()
+                .filter_map(|key| labels.get(&key).cloned())
+                .min()
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -441,6 +488,11 @@ mod tests {
             same_app_sources(&packages, &apt_id),
             vec!["homebrew".to_string(), "snap".to_string()]
         );
+        let groups = same_app_group_keys_all(&packages);
+        assert!(groups[0].is_some());
+        assert_eq!(groups[0], groups[1]);
+        assert_eq!(groups[0], groups[3]);
+        assert_eq!(groups[2], None);
     }
     #[test]
     fn empty_component_stems_never_group() {
