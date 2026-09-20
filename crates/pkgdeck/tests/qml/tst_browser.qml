@@ -297,7 +297,7 @@ TestCase {
         browser.openView("Installed");
         verify(!button.visible);
     }
-    function test_same_app_badge_lists_other_sources() {
+    function test_same_app_relationship_stays_out_of_source_metadata() {
         browser.openView("Search");
         fake.rows = JSON.stringify([
             {kind: "package", name: "firefox", source: "apt", architecture: "amd64", installed: "1", candidate: "2", scope: "system", summary: "Web browser", same_app_from: ["flatpak", "snap"]},
@@ -317,39 +317,61 @@ TestCase {
         }
         verify(line !== null);
         verify(line.text.indexOf("APT") >= 0);
-        verify(line.text.indexOf("also in") >= 0);
-        verify(line.text.indexOf("Flatpak") >= 0);
-        verify(line.text.indexOf("Snap") >= 0);
+        verify(line.text.indexOf("also in") < 0);
+        compare(browser.sameAppSummary(browser.viewItems[0]), "Also installed from: Flatpak, Snap");
         compare(browser.sameAppSummary(browser.viewItems[1]), "");
     }
     function test_multi_source_toggle_lists_grouped_apps() {
         browser.openView("Installed");
         fake.rows = JSON.stringify([
             {kind: "package", name: "solo", source: "apt", architecture: "amd64", installed: "1", candidate: "1", scope: "system", summary: "Only here", same_app_from: []},
-            {kind: "package", name: "duo", source: "apt", architecture: "amd64", installed: "1", candidate: "2", scope: "system", summary: "In two places", same_app_from: ["homebrew"]},
+            {kind: "package", name: "duo-libs", source: "apt", architecture: "amd64", installed: "1", candidate: "2", scope: "system", summary: "In two places", same_app_from: ["homebrew"], same_app_group: "h:duo"},
+            {kind: "package", name: "duo", source: "homebrew", architecture: "x86_64", installed: "2", candidate: "2", scope: "user", summary: "In two places", same_app_from: ["apt"], same_app_group: "h:duo"},
             {kind: "failure", name: "npm", source: "npm", summary: "boom", available: false}
         ]);
         waitForRendering(browser.contentItem);
-        compare(browser.viewItems.length, 3);
+        compare(browser.viewItems.length, 4);
+        compare(browser.viewItems[1].groupStart, true);
+        compare(browser.viewItems[1].groupTitle, "duo");
+        compare(browser.viewItems[1].groupCount, 2);
+        compare(browser.viewItems[1].groupSources.join(","), "APT,Homebrew");
+        compare(browser.viewItems[2].groupStart, false);
+        const results = findChild(browser, "packageResults");
+        tryVerify(() => findChild(results, "packageGroupTitle") !== null);
+        compare(findChild(results, "packageGroupTitle").text, "duo");
         const check = findChild(browser, "multiSourceCheck");
         verify(check !== null);
         verify(check.visible);
         verify(!browser.multiSourceOnly);
+        compare(check.text, "Duplicate installs");
         mouseClick(check);
         compare(browser.multiSourceOnly, true);
         // The grouped app stays; failed sources stay visible as diagnostics.
-        compare(browser.viewItems.length, 2);
-        compare(browser.viewItems[0].name, "duo");
-        compare(browser.viewItems[1].kind, "failure");
+        compare(browser.viewItems.length, 3);
+        compare(browser.viewItems[0].name, "duo-libs");
+        compare(browser.viewItems[1].name, "duo");
+        compare(browser.viewItems[2].kind, "failure");
         // Combines with the text filter (failed rows stay in both).
         const field = findChild(browser, "installedFilterField");
         field.text = "duo";
-        compare(browser.viewItems.length, 2);
-        compare(browser.viewItems[0].name, "duo");
+        compare(browser.viewItems.length, 3);
+        compare(browser.viewItems[0].name, "duo-libs");
+        compare(browser.viewItems[1].name, "duo");
         field.text = "";
         mouseClick(check);
         compare(browser.multiSourceOnly, false);
-        compare(browser.viewItems.length, 3);
+        compare(browser.viewItems.length, 4);
+    }
+    function test_installed_view_omits_redundant_state_label() {
+        browser.openView("Installed");
+        const installed = {kind: "package", name: "tool", source: "apt", architecture: "amd64", installed: "1.2.3", candidate: "1.2.3", scope: "system", summary: "Tool"};
+        compare(browser.versionText(installed), "1.2.3");
+        browser.openView("Search");
+        compare(browser.versionText(installed), "1.2.3 · installed");
+        installed.candidate = "2.0.0";
+        installed.update = "available";
+        browser.openView("Updates");
+        compare(browser.versionText(installed), "1.2.3 → 2.0.0");
     }
     function test_updates_checked_by_default_and_upgrade_subset() {
         browser.openView("Updates");

@@ -199,14 +199,44 @@ Controls.ApplicationWindow {
             return a.source < b.source ? -1 : 1;
         return 0;
     }
+    function groupInstalledRows(rows) {
+        const members = new Map();
+        for (const row of rows) {
+            if (row.kind === "package" && row.same_app_group) {
+                if (!members.has(row.same_app_group))
+                    members.set(row.same_app_group, []);
+                members.get(row.same_app_group).push(row);
+            }
+        }
+        const emitted = new Set();
+        const grouped = [];
+        for (const row of rows) {
+            const key = row.same_app_group;
+            const group = key ? members.get(key) : null;
+            if (!group || group.length < 2) {
+                grouped.push(row);
+                continue;
+            }
+            if (emitted.has(key))
+                continue;
+            emitted.add(key);
+            const title = group.reduce((best, member) => member.name.length < best.length ? member.name : best, group[0].name);
+            const sources = [...new Set(group.map((member) => root.sourceDisplayName(member.source)))];
+            for (let i = 0; i < group.length; i++)
+                grouped.push(Object.assign({}, group[i], {groupStart: i === 0, groupTitle: title, groupCount: group.length, groupSources: sources}));
+        }
+        return grouped;
+    }
     property var viewItems: {
         let rows = items.slice();
         // The Installed filter narrows the loaded rows as you type; the
         // backend is queried once with an empty query (see reload).
         if (root.currentView === "Installed") {
             const filter = root.installedFilter.trim().toLowerCase();
-            if (filter !== "")
-                rows = rows.filter((row) => row.kind !== "package" || ((row.name || "") + " " + (row.summary || "") + " " + (row.source || "")).toLowerCase().indexOf(filter) >= 0);
+            if (filter !== "") {
+                const matchingGroups = new Set(rows.filter((row) => row.kind === "package" && ((row.name || "") + " " + (row.summary || "") + " " + (row.source || "")).toLowerCase().indexOf(filter) >= 0).map((row) => row.same_app_group).filter(Boolean));
+                rows = rows.filter((row) => row.kind !== "package" || matchingGroups.has(row.same_app_group) || ((row.name || "") + " " + (row.summary || "") + " " + (row.source || "")).toLowerCase().indexOf(filter) >= 0);
+            }
             if (root.multiSourceOnly)
                 rows = rows.filter((row) => row.kind !== "package" || ((row.same_app_from || []).length > 0));
         }
@@ -226,7 +256,7 @@ Controls.ApplicationWindow {
             if (query !== "")
                 rows.sort((a, b) => ((isFabricated(a) ? 1 : 0) - (isFabricated(b) ? 1 : 0)) || (relevanceScore(a, query) - relevanceScore(b, query)) || relevanceTiebreak(a, b));
         }
-        return rows;
+        return root.currentView === "Installed" ? groupInstalledRows(rows) : rows;
     }
     // The visible index addresses viewItems; the backend addresses items.
     // Filtering, relevance ranking, and column sorts all reorder or narrow
@@ -373,11 +403,11 @@ Controls.ApplicationWindow {
     }
 
     function rowTooltip(data) {
-        const same = sameAppNames(data).length > 0 ? "\nAlso installed from: " + sameAppNames(data).join(", ") : "";
+        const same = sameAppNames(data).length > 0 ? "\nRelated install: " + sameAppNames(data).join(", ") : "";
         return data.name + "\n" + (data.installed || "not installed") + " → " + (data.candidate || "unknown") + "\n" + (data.summary || "") + same;
     }
-    // Display names for backend ids, and the "also installed from" suffix
-    // for rows whose application exists in several managers at once.
+    // Display names for backend ids used by related-install indicators without
+    // changing the rows' exact identities.
     function sourceDisplayName(id) {
         const at = sourceIds.indexOf(id);
         return at >= 0 ? sourceNames[at] : id;
@@ -387,7 +417,18 @@ Controls.ApplicationWindow {
     }
     function sameAppSummary(row) {
         const names = sameAppNames(row);
-        return names.length > 0 ? " · also in " + names.join(", ") : "";
+        return names.length > 0 ? "Also installed from: " + names.join(", ") : "";
+    }
+    function versionText(row) {
+        if (row.kind === "failure")
+            return "Failed";
+        if (row.kind === "source")
+            return row.available ? "Available" : "Unavailable";
+        if (row.update === "available")
+            return row.installed + " → " + row.candidate;
+        if (row.installed)
+            return root.currentView === "Installed" ? row.installed : row.installed + " · installed";
+        return row.candidate || "Unknown";
     }
     // Local icon files become file:// URLs. Paths come from the backend and
     // may contain spaces, which raw concatenation would leave unencoded and
@@ -789,11 +830,11 @@ Controls.ApplicationWindow {
                 Controls.CheckBox {
                     id: multiSourceCheck
                     objectName: "multiSourceCheck"
-                    text: "Multiple sources"
+                    text: "Duplicate installs"
                     checked: root.multiSourceOnly
                     enabled: !backend.writing
                     onToggled: root.multiSourceOnly = checked
-                    Accessible.name: "Show only applications installed from multiple sources"
+                    Accessible.name: "Show only packages installed from multiple sources"
                     Layout.alignment: Qt.AlignVCenter
                     indicator: TickBox {
                         x: 0
@@ -1029,7 +1070,8 @@ Controls.ApplicationWindow {
                             required property var modelData
                             required property int index
                             width: ListView.view.width
-                            height: root.compact ? 78 : 56
+                            height: (root.compact ? 78 : 56) + (modelData.groupStart ? 38 : 0)
+                            topPadding: modelData.groupStart ? 38 : 0
                             leftPadding: 16
                             rightPadding: 16
                             highlighted: results.currentIndex === index
@@ -1044,6 +1086,34 @@ Controls.ApplicationWindow {
                             Controls.ToolTip.visible: packageRow.hovered && modelData.kind === "package"
                             Controls.ToolTip.delay: 400
                             Controls.ToolTip.text: root.rowTooltip(modelData)
+                            Rectangle {
+                                visible: !!modelData.groupStart
+                                anchors.top: parent.top
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                height: 38
+                                color: root.selection
+                                z: 2
+                                Rectangle { width: 3; height: parent.height; color: root.accent }
+                                RowLayout {
+                                    anchors.fill: parent
+                                    anchors.leftMargin: 16
+                                    anchors.rightMargin: 16
+                                    Controls.Label {
+                                        objectName: modelData.groupStart ? "packageGroupTitle" : ""
+                                        text: modelData.groupTitle || ""
+                                        color: root.ink
+                                        font.bold: true
+                                        elide: Text.ElideRight
+                                        Layout.fillWidth: true
+                                    }
+                                    Controls.Label {
+                                        text: (modelData.groupCount || 0) + " packages · " + (modelData.groupSources || []).join(" + ")
+                                        color: root.accent
+                                        font.pixelSize: 11
+                                    }
+                                }
+                            }
                             background: Rectangle {
                                 color: packageRow.highlighted ? root.selection : (packageRow.hovered ? root.canvas : "transparent")
                                 Rectangle { width: 3; height: parent.height; visible: packageRow.highlighted; color: root.accent }
@@ -1100,7 +1170,7 @@ Controls.ApplicationWindow {
                                         }
                                         Controls.Label {
                                         objectName: "packageSourceLine"
-                                        text: modelData.source.toUpperCase() + (modelData.remote ? " · " + modelData.remote : "") + (modelData.architecture ? " · " + modelData.architecture : "") + root.sameAppSummary(modelData)
+                                        text: modelData.source.toUpperCase() + (modelData.remote ? " · " + modelData.remote : "") + (modelData.architecture ? " · " + modelData.architecture : "")
                                         color: root.muted
                                         font.pixelSize: 11
                                         elide: Text.ElideRight
@@ -1118,7 +1188,7 @@ Controls.ApplicationWindow {
                                 }
                                 Controls.Label {
                                     Layout.preferredWidth: root.compact ? 100 : root.versionWidth
-                                    text: modelData.kind === "failure" ? "Failed" : (modelData.kind === "source" ? (modelData.available ? "Available" : "Unavailable") : (modelData.installed ? modelData.installed + (modelData.update === "available" ? " → " + modelData.candidate : " · installed") : modelData.candidate || "Unknown"))
+                                    text: root.versionText(modelData)
                                     font.family: "monospace"
                                     color: modelData.kind === "failure" ? "#e87979" : (modelData.update === "available" ? root.accent : root.muted)
                                     textFormat: Text.PlainText
@@ -1217,7 +1287,7 @@ Controls.ApplicationWindow {
                             background: null
                             wrapMode: TextEdit.Wrap
                             textFormat: TextEdit.PlainText
-                            text: root.detail.package ? (root.detail.description || "") + "\n\nScope: " + (root.detail.package.scope_label || "Unknown") + "   ·   Homepage: " + (root.detail.homepage || "Unavailable") + (root.sameAppNames(root.detail.package).length > 0 ? "\nAlso installed from: " + root.sameAppNames(root.detail.package).join(", ") : "") + "\nDependencies: " + ((root.detail.dependencies || []).join(", ") || "None listed") : (root.detail.failure ? (root.detail.failure.error || "") + "\n\n" + (root.detail.hint || "") : (root.detail.availability || "") + "\n\nCapabilities: " + (root.detail.capabilities || []).join(", "))
+                            text: root.detail.package ? (root.detail.description || "") + "\n\nScope: " + (root.detail.package.scope_label || "Unknown") + "   ·   Homepage: " + (root.detail.homepage || "Unavailable") + (root.sameAppNames(root.detail.package).length > 0 ? "\nRelated install: " + root.sameAppNames(root.detail.package).join(", ") : "") + "\nDependencies: " + ((root.detail.dependencies || []).join(", ") || "None listed") : (root.detail.failure ? (root.detail.failure.error || "") + "\n\n" + (root.detail.hint || "") : (root.detail.availability || "") + "\n\nCapabilities: " + (root.detail.capabilities || []).join(", "))
                             Accessible.name: "Selected package, source, or failure details"
                         }
                     }
