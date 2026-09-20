@@ -373,6 +373,20 @@ TestCase {
         browser.openView("Updates");
         compare(browser.versionText(installed), "1.2.3 → 2.0.0");
     }
+    function test_completed_write_forces_current_view_refresh() {
+        browser.openView("Installed");
+        populate();
+        fake.lastForce = false;
+        fake.writing = true;
+        fake.busy = true;
+        // The controller invalidates every package snapshot after a write.
+        fake.rows = "[]";
+        fake.busy = false;
+        fake.writing = false;
+        tryCompare(fake, "lastForce", true);
+        compare(fake.lastView, "Installed");
+        compare(fake.lastQuery, "");
+    }
     function test_updates_checked_by_default_and_upgrade_subset() {
         browser.openView("Updates");
         populate();
