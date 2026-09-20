@@ -528,6 +528,10 @@ Controls.ApplicationWindow {
             else if (!backend.busy && root.selected !== null)
                 root.focusResultsAfterLoad();
         }
+        function onWritingChanged() {
+            if (!backend.writing && ["Search", "Installed", "Updates", "Sources"].indexOf(root.currentView) >= 0)
+                postWriteReload.restart();
+        }
         function onRowsChanged() {
             // Streaming partials re-sort rows around the selection: follow
             // the selected identity instead of the row index.
@@ -555,6 +559,14 @@ Controls.ApplicationWindow {
         running: backend.busy
         repeat: true
         onTriggered: backend.poll()
+    }
+    Timer {
+        id: postWriteReload
+        interval: 0
+        onTriggered: {
+            if (!backend.busy && !root.closePending)
+                root.reload(true);
+        }
     }
     Component.onCompleted: {
         // Explicit --from flags seed the session checklist without
