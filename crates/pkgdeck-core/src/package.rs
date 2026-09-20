@@ -310,9 +310,7 @@ pub fn same_app_group_keys_all(packages: &[Package]) -> Vec<Option<String>> {
     packages
         .iter()
         .map(|package| {
-            if package.installed_version.is_none() {
-                return None;
-            }
+            package.installed_version.as_ref()?;
             app_keys(&package.component_ids, &package.homepages)
                 .into_iter()
                 .filter_map(|key| labels.get(&key).cloned())
