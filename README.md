@@ -23,10 +23,18 @@ and [CLI guide](docs/cli.md) for the current interface and supported behavior.
 - **System:** APT, DNF, Pacman, Zypper.
 - **Applications:** Flatpak, Snap, Homebrew (Linux formulae), AppImage.
 - **Development:** Cargo, npm, pnpm, Bun, pip, pipx, uv, Composer, RubyGems.
+- **Firmware:** fwupd device updates.
 
 Development package managers focus on user-installed command-line tools rather than project dependencies. pip support is restricted to explicitly selected virtual environments.
 
 AppImage support will initially cover importing local Type 2 AppImages, desktop integration, launching, and removal.
+
+Repository controls are available under **Sources → Repositories** and `pkd repos`:
+Flatpak User/System remotes, configured firmware remotes, and the native APT
+Software Sources editor. Firmware from fwupd joins the regular **Updates** list
+and **Update all**, with device requirements shown before confirmation. See the
+[GUI guide](docs/gui.md#repositories-and-firmware) and
+[CLI guide](docs/cli.md#repositories-and-firmware).
 
 ## Architecture
 
@@ -301,7 +309,6 @@ Build and test the CLI without installing Qt:
 
 ```sh
 cargo build --locked -p pkd
-scripts/build-apt.sh # Requires the distribution's libapt-pkg-dev package
 cargo test --locked -p pkgdeck-core -p pkd
 cargo run --locked -p pkd -- --help
 cargo run --locked -p pkd -- doctor
@@ -310,11 +317,14 @@ cargo run --locked -p pkd
 
 The last command prints CLI help. CLI tests use synthetic shell fixtures;
 install jq for the fixtures.
+On APT systems, install `libapt-pkg-dev` before building. Cargo automatically
+builds the separate APT query helper for both CLI and GUI development runs.
+Packaged applications use the helper shipped beside their executable.
 
 For the GUI, install the Ubuntu 26.04 Qt/KDE development packages, a C++ compiler, CMake, Ninja, and LLD:
 
 ```sh
-sudo apt-get install qt6-base-dev qt6-declarative-dev qt6-declarative-dev-tools qt6-tools-dev qt6-shadertools-dev qt6-wayland libkirigami-dev extra-cmake-modules
+sudo apt-get install qt6-base-dev qt6-declarative-dev qt6-declarative-dev-tools qt6-tools-dev qt6-shadertools-dev qt6-wayland qt6-svg-plugins qt6-image-formats-plugins libkirigami-dev extra-cmake-modules
 source scripts/dev-env.sh
 cargo build --workspace --locked
 cargo test --workspace --locked
@@ -336,6 +346,8 @@ For local package staging, build the release workspace, run
 `scripts/bundle.sh`, then `scripts/package.sh appimage`, `flatpak`, or
 `snap` with the corresponding tools/runtime installed. The AppImage path requires
 `APPIMAGETOOL` pointing to appimagetool 1.9.1. All formats contain both executables.
+After changing Cargo dependencies, run `scripts/flatpak-sources.sh` and commit
+the updated offline source list. CI checks that it matches `Cargo.lock`.
 
 Initial CI checks cover extracted Snap contents and entry points. Installed Snap
 confinement, privileged host operations, FUSE-based AppImage launching, release

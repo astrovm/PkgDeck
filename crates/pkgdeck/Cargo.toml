@@ -13,6 +13,9 @@ pkgdeck-core.workspace = true
 cxx.workspace = true
 cxx-qt.workspace = true
 cxx-qt-lib.workspace = true
+roxmltree = { version = "0.21", default-features = false }
+serde_yaml = { version = "0.9", default-features = false }
+flate2 = { version = "1", default-features = false, features = ["miniz_oxide"] }
 
 [build-dependencies]
 cxx-qt-build.workspace = true

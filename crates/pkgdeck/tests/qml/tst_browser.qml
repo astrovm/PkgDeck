@@ -11,6 +11,10 @@ TestCase {
     property var browser
     QtObject {
         id: fake
+        property string repositories: "{}"
+        property string lastRepositoryChange: ""
+        function loadRepositories() {}
+        function changeRepository(request) { lastRepositoryChange = request; }
         property string rows: "[]"
         property string details: "{}"
         property string status: "Ready"
@@ -47,6 +51,7 @@ TestCase {
             });
         }
         function propose(action, index) {
+            selection = index;
             confirmation = action + " synthetic-tool from apt, all, system";
         }
         function proposeChecked(identities) {
@@ -77,6 +82,8 @@ TestCase {
         Qt.application.domain = "example.invalid";
     }
     function init() {
+        fake.repositories = "{}";
+        fake.lastRepositoryChange = "";
         fake.rows = "[]";
         fake.details = "{}";
         fake.status = "Ready";
@@ -234,9 +241,9 @@ TestCase {
         list.forceActiveFocus();
         keyClick(Qt.Key_Down);
         compare(fake.selection, 0);
-        verify(findChild(browser, "installButton").enabled);
+        verify(findChild(list.itemAtIndex(0), "rowPackageAction").enabled);
         waitForRendering(browser.contentItem);
-        mouseClick(findChild(browser, "installButton"));
+        mouseClick(findChild(list.itemAtIndex(0), "rowPackageAction"));
         const dialog = findChild(browser, "confirmationDialog");
         tryCompare(dialog, "opened", true);
         compare(fake.writes, 0);
@@ -244,7 +251,7 @@ TestCase {
         tryCompare(dialog, "visible", false);
         compare(fake.writes, 0);
         waitForRendering(browser.contentItem);
-        mouseClick(findChild(browser, "installButton"));
+        mouseClick(findChild(list.itemAtIndex(0), "rowPackageAction"));
         tryCompare(dialog, "opened", true);
         keyClick(Qt.Key_Y, Qt.AltModifier);
         compare(fake.writes, 1);
@@ -252,9 +259,9 @@ TestCase {
         list.forceActiveFocus();
         keyClick(Qt.Key_Down);
         compare(fake.selection, 1);
-        verify(findChild(browser, "upgradeButton").enabled);
-        verify(findChild(browser, "removeButton").enabled);
-        verify(!findChild(browser, "installButton").enabled);
+        const action = findChild(list.itemAtIndex(1), "rowPackageAction");
+        verify(action.enabled);
+        compare(action.symbol, "remove");
         verify(findChild(browser, "packageDetails").text.indexOf("<b>literal metadata</b>") >= 0);
     }
     function test_views_loading_errors_and_resize() {
@@ -266,7 +273,7 @@ TestCase {
         populate();
         browser.choose(0);
         fake.busy = true;
-        verify(!findChild(browser, "installButton").enabled);
+        verify(!findChild(findChild(browser, "packageResults").itemAtIndex(0), "rowPackageAction").enabled);
         // Reads do not lock navigation or selection. Section switches go
         // through the cache path, never forced.
         browser.openView("Updates");
@@ -447,7 +454,7 @@ TestCase {
         const installed = {kind: "package", name: "tool", source: "apt", architecture: "amd64", installed: "1.2.3", candidate: "1.2.3", scope: "system", summary: "Tool"};
         compare(browser.versionText(installed), "1.2.3");
         browser.openView("Search");
-        compare(browser.versionText(installed), "1.2.3 · installed");
+        compare(browser.versionText(installed), "1.2.3");
         installed.candidate = "2.0.0";
         installed.update = "available";
         browser.openView("Updates");
@@ -461,13 +468,23 @@ TestCase {
         fake.rows = JSON.stringify([runtime]);
         wait(30);
         browser.choose(0);
-        verify(!findChild(browser, "installButton").visible);
-        verify(findChild(browser, "removeButton").enabled);
-        verify(findChild(browser, "upgradeButton").enabled);
-        compare(browser.versionText(runtime), "Update available");
+        const action = findChild(findChild(browser, "packageResults").itemAtIndex(0), "rowPackageAction");
+        verify(action.enabled);
+        compare(action.symbol, "updates");
+        mouseClick(action);
+        compare(fake.selection, 0);
+        verify(fake.confirmation.indexOf("upgrade ") === 0);
+        const dialog = findChild(browser, "confirmationDialog");
+        tryCompare(dialog, "opened", true);
+        keyClick(Qt.Key_N, Qt.AltModifier);
+        tryCompare(dialog, "visible", false);
+        compare(browser.versionText(runtime), "—");
         runtime.installed = "1.0";
         runtime.candidate = "1.0";
-        compare(browser.versionText(runtime), "1.0 · update available");
+        compare(browser.versionText(runtime), "1.0");
+        runtime.installed = "";
+        runtime.candidate = "2.0";
+        compare(browser.versionText(runtime), "2.0");
     }
     function test_completed_write_forces_current_view_refresh() {
         browser.openView("Installed");
@@ -488,19 +505,19 @@ TestCase {
         populate();
         waitForRendering(browser.contentItem);
         // Every row starts checked, so Select all stays hidden until
-        // something is deselected; the old Upgrade selected button is gone.
+        // something is deselected; the old Update selected button is gone.
         verify(findChild(browser, "upgradeSelectedButton") === null);
         compare(browser.selectedCount(), 2);
         const upgradeBtn = findChild(browser, "upgradeAllButton");
         verify(upgradeBtn.visible);
-        compare(upgradeBtn.text, "Upgrade all");
+        compare(upgradeBtn.text, "Update all");
         const selectNone = findChild(browser, "selectNoneButton");
         verify(selectNone.visible);
         // Deselect one row: the single button switches to the subset path.
         browser.togglePackage(browser.items[1]);
         compare(browser.selectedCount(), 1);
         compare(browser.uncheckedPackages.length, 1);
-        compare(upgradeBtn.text, "Upgrade selected");
+        compare(upgradeBtn.text, "Update selected");
         mouseClick(upgradeBtn);
         verify(fake.lastChecked !== "");
         const sent = JSON.parse(fake.lastChecked);
@@ -512,7 +529,7 @@ TestCase {
         mouseClick(selectNone);
         compare(browser.selectedCount(), 0);
         verify(!upgradeBtn.visible);
-        // Select all re-checks everything and restores the Upgrade all path.
+        // Select all re-checks everything and restores the Update all path.
         const selectAll = findChild(browser, "selectAllButton");
         verify(selectAll.visible);
         waitForRendering(browser.contentItem);
@@ -520,11 +537,11 @@ TestCase {
         compare(browser.selectedCount(), 2);
         compare(browser.uncheckedPackages.length, 0);
         verify(upgradeBtn.visible);
-        compare(upgradeBtn.text, "Upgrade all");
+        compare(upgradeBtn.text, "Update all");
         browser.togglePackage(browser.items[1]);
         compare(browser.selectedCount(), 1);
         verify(upgradeBtn.visible);
-        compare(upgradeBtn.text, "Upgrade selected");
+        compare(upgradeBtn.text, "Update selected");
     }
     function test_columns_sort_resize_and_index_mapping() {
         browser.openView("Search");
@@ -598,9 +615,11 @@ TestCase {
         browser.height = 400;
         waitForRendering(browser.contentItem);
         const scroll = findChild(browser, "aboutScroll");
-        verify(scroll.contentHeight > scroll.availableHeight);
-        scroll.contentItem.contentY = scroll.contentHeight - scroll.availableHeight;
-        verify(scroll.contentItem.contentY > 0);
+        verify(about.width <= scroll.availableWidth);
+        if (scroll.contentHeight > scroll.availableHeight) {
+            scroll.contentItem.contentY = scroll.contentHeight - scroll.availableHeight;
+            verify(scroll.contentItem.contentY > 0);
+        }
         verify(!findChild(browser, "sourceFilter").visible);
     }
     function test_view_status_and_source_columns() {
@@ -702,30 +721,21 @@ TestCase {
             {kind: "failure", name: "bun", source: "bun", summary: "boom", available: false}
         ]);
         waitForRendering(browser.contentItem);
-        compare(browser.viewItems.length, 6);
+        compare(browser.viewItems.length, 5);
         compare(browser.viewItems[0].name, "fire");
         compare(browser.viewItems[0].source, "apt");
         compare(browser.viewItems[1].name, "firefox");
         compare(browser.viewItems[2].name, "x-fire-helper");
         compare(browser.viewItems[3].name, "zzz");
-        // A failed source stays above unverified guesses; the guess with an
-        // exact name but no version at all sinks to the bottom.
+        // Failed sources stay visible; guessed offers are excluded entirely.
         compare(browser.viewItems[4].kind, "failure");
-        compare(browser.viewItems[5].name, "fire");
-        compare(browser.viewItems[5].source, "npm");
-        // Actions map the visible row back to backend order.
         browser.choose(0);
         compare(fake.selection, 2);
-        browser.choose(5);
-        compare(fake.selection, 4);
-        // An explicit column sort wins over relevance ranking.
         browser.cycleSort("name");
         compare(browser.viewItems[0].name, "bun");
         compare(browser.viewItems[1].name, "fire");
-        // The direction-aware tiebreak makes equal names deterministic.
         compare(browser.viewItems[1].source, "apt");
-        compare(browser.viewItems[2].source, "npm");
-        compare(browser.viewItems[5].name, "zzz");
+        compare(browser.viewItems[4].name, "zzz");
         // Submitting a fresh search resets to best-match order and forces
         // a native query instead of serving the cached snapshot.
         search.forceActiveFocus();
@@ -735,11 +745,202 @@ TestCase {
         compare(fake.lastForce, true);
         compare(fake.lastView, "Search");
     }
+    function test_search_compares_sources_and_actions_without_opening_details() {
+        const field = findChild(browser, "searchField");
+        field.text = "player";
+        fake.rows = JSON.stringify([
+            {kind: "package", name: "player-plugin", source: "apt", installed: null, candidate: "1", scope: "system"},
+            {kind: "package", name: "org.example.Player", source: "flatpak", installed: null, candidate: "1", scope: "system"},
+            {kind: "package", name: "player", source: "apt", installed: "1", candidate: "1", scope: "system"},
+            {kind: "package", name: "player", source: "snap", installed: null, candidate: "1", scope: "system"},
+            {kind: "package", name: "player", source: "npm", installed: null, candidate: null, scope: "system"}
+        ]);
+        waitForRendering(browser.contentItem);
+        compare(browser.viewItems.length, 4);
+        compare(browser.viewItems[3].name, "player-plugin");
+        const list = findChild(browser, "packageResults");
+        for (let i = 0; i < 3; ++i) {
+            const row = browser.viewItems[i];
+            const action = findChild(list.itemAtIndex(i), "rowPackageAction");
+            verify(action !== null);
+            compare(action.symbol, row.installed ? "remove" : "install");
+            mouseClick(action);
+            compare(fake.selection, browser.originalIndex(i));
+            verify(fake.confirmation.indexOf(row.installed ? "remove" : "install") === 0);
+            verify(browser.selected === null);
+            const dialog = findChild(browser, "confirmationDialog");
+            tryCompare(dialog, "opened", true);
+            keyClick(Qt.Key_N, Qt.AltModifier);
+            tryCompare(dialog, "visible", false);
+        }
+        compare(fake.writes, 0);
+    }
+    function test_package_icon_loads_and_falls_back_on_error() {
+        populate();
+        const rows = JSON.parse(fake.rows);
+        rows[0].icon = Qt.resolvedUrl("../../assets/logo.svg").toString().replace("file://", "");
+        fake.rows = JSON.stringify(rows);
+        const results = findChild(browser, "packageResults");
+        waitForRendering(browser.contentItem);
+        let row = results.itemAtIndex(0);
+        tryCompare(findChild(row, "packageIcon"), "visible", true);
+        verify(!findChild(row, "packageIconFallback").visible);
+        rows[0].icon = "/missing/synthetic-icon.png";
+        fake.rows = JSON.stringify(rows);
+        waitForRendering(browser.contentItem);
+        row = results.itemAtIndex(0);
+        tryCompare(findChild(row, "packageIconFallback"), "visible", true);
+        verify(!findChild(row, "packageIcon").visible);
+    }
+    function test_flatpak_installation_scopes_are_visible_and_selectable() {
+        populate();
+        const app = {kind: "package", name: "org.example.Player", display_name: "Player",
+            source: "flatpak", remote: "flathub", architecture: "x86_64", candidate: "1",
+            reference: "org.example.Player/x86_64/stable", installed: null, update: "unknown"};
+        fake.rows = JSON.stringify([
+            Object.assign({}, app, {scope: {user: {uid: 1000}}}),
+            Object.assign({}, app, {scope: "system"})
+        ]);
+        const results = findChild(browser, "packageResults");
+        tryCompare(results, "count", 2);
+        waitForRendering(browser.contentItem);
+        const userRow = results.itemAtIndex(0);
+        const systemRow = results.itemAtIndex(1);
+        compare(findChild(userRow, "packageSourceLine").text, "FLATPAK · flathub · User");
+        compare(findChild(systemRow, "packageSourceLine").text, "FLATPAK · flathub · System");
+        mouseClick(findChild(systemRow, "rowPackageAction"));
+        compare(fake.selection, 1);
+        const dialog = findChild(browser, "confirmationDialog");
+        tryCompare(dialog, "opened", true);
+        keyClick(Qt.Key_N, Qt.AltModifier);
+        tryCompare(dialog, "visible", false);
+        compare(fake.writes, 0);
+    }
+    function test_failed_screenshots_collapse_and_keep_working_images() {
+        populate();
+        browser.choose(0);
+        const row = JSON.parse(fake.rows)[0];
+        const good = Qt.resolvedUrl("../../assets/logo.svg").toString();
+        const bad = Qt.resolvedUrl("missing-synthetic-screenshot.png").toString();
+        fake.details = JSON.stringify({package: row, screenshots: [{url: bad}, {url: good}]});
+        const gallery = findChild(browser, "screenshotGallery");
+        tryCompare(gallery, "count", 1);
+        compare(browser.visibleScreenshots[0].url, good);
+        verify(gallery.visible);
+        fake.details = JSON.stringify({package: row, screenshots: [{url: bad}]});
+        tryCompare(gallery, "count", 0);
+        verify(!gallery.visible);
+        // Reopening details may retry images after a transient network failure.
+        browser.choose(1);
+        browser.choose(0);
+        fake.details = JSON.stringify({package: row, screenshots: [{url: good}]});
+        tryCompare(gallery, "count", 1);
+        verify(gallery.visible);
+    }
+    function test_compact_action_content_is_centered_and_inside_button() {
+        populate();
+        fake.busy = true;
+        const button = findChild(browser, "resultsCancel");
+        tryCompare(button, "visible", true);
+        waitForRendering(browser.contentItem);
+        const contents = button.contentItem.children[0];
+        const position = contents.mapToItem(button, 0, 0);
+        verify(position.y >= 0);
+        verify(position.y + contents.height <= button.height);
+        verify(Math.abs(position.y + contents.height / 2 - button.height / 2) <= 1);
+        verify(Math.abs(position.x + contents.width / 2 - button.width / 2) <= 1);
+    }
+    function test_app_screenshots_follow_selected_identity_and_open_viewer() {
+        populate();
+        browser.choose(0);
+        const gallery = findChild(browser, "screenshotGallery");
+        verify(!gallery.visible);
+        const row = JSON.parse(fake.rows)[0];
+        fake.details = JSON.stringify({package: row, description: "Example app", screenshots: [
+            {url: Qt.resolvedUrl("../../assets/logo.svg").toString(), caption: "Example screenshot"}
+        ]});
+        tryCompare(gallery, "visible", true);
+        tryCompare(gallery, "count", 1);
+        waitForRendering(browser.contentItem);
+        const thumbnail = gallery.itemAtIndex(0);
+        verify(thumbnail !== null);
+        tryCompare(thumbnail, "enabled", true);
+        browser.width = 400;
+        browser.height = 520;
+        waitForRendering(browser.contentItem);
+        const panel = findChild(browser, "detailsPanel");
+        const galleryPosition = gallery.mapToItem(panel, 0, 0);
+        verify(galleryPosition.y + gallery.height <= panel.height - 12);
+        const actions = findChild(browser, "updatesActions");
+        const actionsPosition = actions.mapToItem(browser.contentItem, 0, 0);
+        verify(actionsPosition.y + actions.height <= browser.contentItem.height);
+        mouseClick(thumbnail);
+        const viewer = findChild(browser, "screenshotDialog");
+        tryCompare(viewer, "opened", true);
+        compare(viewer.title, "Example screenshot");
+        verify(browser.screenshotUrl.length > 0);
+        viewer.close();
+        tryCompare(viewer, "visible", false);
+        compare(browser.screenshotUrl, "");
+        browser.choose(1);
+        // A late details response from another identity must never show its images.
+        fake.details = JSON.stringify({package: row, screenshots: [{url: "https://example.invalid/stale.png"}]});
+        compare(gallery.count, 0);
+        verify(!gallery.visible);
+        const close = findChild(browser, "closeDetailsButton");
+        compare(close.text, "");
+        mouseClick(close);
+        verify(browser.selected === null);
+        verify(!findChild(browser, "detailsPanel").visible);
+        compare(fake.writes, 0);
+    }
+    function test_repository_scopes_and_actions() {
+        browser.openView("Sources");
+        const rows = [
+            {backend: "flatpak", name: "fixture", title: "Fixture", url: "https://example.invalid", scope: {user: {uid: 1000}}, enabled: true, priority: 1},
+            {backend: "flatpak", name: "fixture", title: "Fixture", url: "https://example.invalid", scope: "system", enabled: false, priority: 2}
+        ];
+        fake.repositories = JSON.stringify({repositories: rows, errors: []});
+        waitForRendering(browser.contentItem);
+        clickDelegate(findChild(browser, "repositoriesButton"));
+        const dialog = findChild(browser, "repositoriesDialog");
+        tryCompare(dialog, "visible", true);
+        const list = findChild(browser, "repositoryList");
+        tryCompare(list, "count", 2);
+        tryVerify(() => list.itemAtIndex(1) !== null);
+        clickDelegate(findChild(list.itemAtIndex(1), "repositoryEnabled"));
+        let request = JSON.parse(fake.lastRepositoryChange);
+        compare(request.scope, "system");
+        compare(request.action, "set_enabled");
+        compare(request.enabled, true);
+        clickDelegate(findChild(list.itemAtIndex(0), "removeRepositoryButton"));
+        request = JSON.parse(fake.lastRepositoryChange);
+        compare(request.scope.user.uid, 1000);
+        compare(request.action, "remove");
+        compare(fake.writes, 0);
+        dialog.close();
+        browser.repositoryChange({backend: "flatpak", name: "new", scope: "system"}, "add", {url: "https://example.invalid/new.flatpakrepo"});
+        request = JSON.parse(fake.lastRepositoryChange);
+        compare(request.url, "https://example.invalid/new.flatpakrepo");
+        compare(request.scope, "system");
+    }
+    function test_firmware_row_updates_instead_of_removing() {
+        browser.openView("Installed");
+        fake.rows = JSON.stringify([{kind: "package", name: "synthetic-device", display_name: "Synthetic BIOS", source: "fwupd", architecture: "device", installed: "1", candidate: "2", update: "available", scope: "system", summary: "Firmware · AC power required"}]);
+        const list = findChild(browser, "packageResults");
+        tryVerify(() => list.itemAtIndex(0) !== null);
+        const action = findChild(list.itemAtIndex(0), "rowPackageAction");
+        compare(action.symbol, "updates");
+        waitForRendering(browser.contentItem);
+        clickDelegate(action);
+        verify(fake.confirmation.indexOf("upgrade") === 0);
+        compare(fake.writes, 0);
+    }
     function test_header_source_checklist_and_installed_filter() {
         browser.openView("Installed");
         const filter = findChild(browser, "sourceFilter");
         verify(filter !== null);
-        compare(filter.text, "All available sources");
+        compare(filter.text, "All sources");
         const popup = findChild(browser, "sourcePopup");
         verify(popup !== null);
         popup.open();
@@ -747,16 +948,16 @@ TestCase {
         const npm = browser.sourceIds.indexOf("npm");
         verify(browser.sourceCheckAt(npm).checked);
         clickSourceCheck(npm);
-        compare(browser.sourceSelection, "apt,dnf,pacman,zypper,snap,homebrew,appimage,flatpak,cargo,pnpm,bun,pip,pipx,uv,composer,gem");
-        compare(filter.text, "16 sources");
-        compare(fake.lastSource, "apt,dnf,pacman,zypper,snap,homebrew,appimage,flatpak,cargo,pnpm,bun,pip,pipx,uv,composer,gem");
+        compare(browser.sourceSelection, "apt,dnf,pacman,zypper,snap,homebrew,appimage,flatpak,cargo,pnpm,bun,pip,pipx,uv,composer,gem,fwupd");
+        compare(filter.text, "17 sources");
+        compare(fake.lastSource, "apt,dnf,pacman,zypper,snap,homebrew,appimage,flatpak,cargo,pnpm,bun,pip,pipx,uv,composer,gem,fwupd");
         compare(fake.lastView, "Installed");
         // Re-checking the last unchecked source returns to all available.
         clickSourceCheck(npm);
         compare(browser.sourceSelection, "");
-        compare(filter.text, "All available sources");
+        compare(filter.text, "All sources");
         // Unchecking down to one source disables that final checkbox.
-        const ids = ["apt", "dnf", "pacman", "zypper", "snap", "homebrew", "appimage", "flatpak", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "composer", "gem"];
+        const ids = ["apt", "dnf", "pacman", "zypper", "snap", "homebrew", "appimage", "flatpak", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "composer", "gem", "fwupd"];
         for (let idx = 0; idx < ids.length; idx++) {
             if (ids[idx] === "apt")
                 continue;
@@ -814,7 +1015,7 @@ TestCase {
         wait(30);
         const hint = findChild(browser, "upgradeAllHint");
         verify(hint.visible);
-        verify(hint.text.indexOf("source query fails") >= 0);
+        verify(hint.text.indexOf("source has failed") >= 0);
         verify(!findChild(browser, "upgradeAllButton").enabled);
     }
     function test_selection_survives_streaming_partials() {

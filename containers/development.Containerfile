@@ -20,7 +20,7 @@ COPY scripts/setup-dev.sh scripts/dev-env.sh ./scripts/
 RUN cargo install --root /usr/local cargo-llvm-cov --version 0.9.1 --locked \
     && scripts/setup-dev.sh \
     && dpkg-query -W > /opt/pkgdeck-os-packages.txt
-RUN apt-get update && apt-get install -y --no-install-recommends xvfb xdotool fonts-dejavu-core qt6-svg-plugins && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends xvfb xdotool fonts-dejavu-core qt6-svg-plugins qt6-image-formats-plugins && rm -rf /var/lib/apt/lists/*
 WORKDIR /workspace
 ENV CARGO_HOME=/cache/cargo HOME=/tmp/pkgdeck-home
 CMD ["scripts/verify.sh", "full"]

@@ -11,8 +11,12 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+type SystemCall = (String, Vec<OsString>);
+
 #[derive(Clone, Default)]
 struct Fixture {
+    record_writes: bool,
+    writes: Arc<Mutex<Vec<SystemCall>>>,
     installed: Arc<Mutex<Option<String>>>,
     candidate: Arc<Mutex<String>>,
     failure: Arc<Mutex<Option<ExecutionError>>>,
@@ -158,8 +162,31 @@ impl Transport for Fixture {
         write: bool,
     ) -> Result<Completion, ExecutionError> {
         self.check(cancel)?;
-        assert_eq!(executable, "dnf");
+        if write && self.record_writes {
+            self.writes
+                .lock()
+                .unwrap()
+                .push((executable.into(), args.to_vec()));
+            return Ok(output(""));
+        }
         let args: Vec<_> = args.iter().map(|arg| arg.to_string_lossy()).collect();
+        if executable == "pacman" {
+            if write {
+                return Ok(output(""));
+            }
+            if args.contains(&"-Q".into()) {
+                return Ok(output(
+                    self.installed
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .map(|version| format!("synthetic-fixture {version}\n"))
+                        .unwrap_or_default(),
+                ));
+            }
+            return Ok(output("core/synthetic-fixture 1.0\nSynthetic package\n"));
+        }
+        assert_eq!(executable, "dnf");
         if write {
             match args.last().map(|arg| arg.as_ref()) {
                 Some("makecache") => *self.candidate.lock().unwrap() = "2.0".into(),
@@ -286,14 +313,38 @@ fn homebrew_lifecycle() {
 #[test]
 fn dnf_lifecycle() {
     lifecycle(Dnf::dnf(Fixture::new()));
+    let fixture = Fixture::new();
+    let mut backend = Dnf::dnf(fixture.clone());
+    let cancel = Cancellation::default();
+    let offer = backend
+        .search("synthetic-fixture", &cancel)
+        .unwrap()
+        .remove(0);
+    assert!(offer.installed_version.is_none());
+    *fixture.installed.lock().unwrap() = Some("0.9".into());
+    let installed = backend
+        .search("synthetic-fixture", &cancel)
+        .unwrap()
+        .remove(0);
+    assert_eq!(installed.installed_version.as_deref(), Some("0.9"));
+    assert_eq!(installed.candidate_version.as_deref(), Some("1.0"));
 }
 
 #[test]
 fn wave_three_parsers_preserve_system_identities() {
     let cancel = Cancellation::default();
-    let mut pacman = Pacman::pacman(Raw(output(
-        "core/synthetic-fixture 1.0\nSynthetic package\n",
-    )));
+    let fixture = Fixture::new();
+    let mut pacman = Pacman::pacman(fixture.clone());
+    assert!(pacman.search("synthetic-fixture", &cancel).unwrap()[0]
+        .installed_version
+        .is_none());
+    *fixture.installed.lock().unwrap() = Some("1.0".into());
+    assert_eq!(
+        pacman.search("synthetic-fixture", &cancel).unwrap()[0]
+            .installed_version
+            .as_deref(),
+        Some("1.0")
+    );
     let mut zypper = Zypper::zypper(Raw(output("<solvable name=\"synthetic-fixture\" edition=\"1.0\" arch=\"x86_64\" summary=\"Synthetic package\"/>")));
     let mut snap = Snap::snap(Raw(output("Name Version Rev Tracking Publisher Notes\nsynthetic-fixture 1.0 1 latest/stable synthetic -\n")));
     for backend in [&mut pacman as &mut dyn Backend, &mut zypper, &mut snap] {
@@ -405,7 +456,8 @@ impl Transport for FlatpakFixture {
                 "io.example.User"
             };
             return Ok(output(format!(
-                "{name}\tx86_64\tstable\t1.0\tSynthetic app\tflathub\tcurrent\n"
+                "{name}\t{}\tstable\t1.0\tSynthetic app\tflathub\tcurrent\n",
+                std::env::consts::ARCH
             )));
         }
         if args.contains(&"search".into()) {
@@ -435,7 +487,7 @@ fn flatpak_operations_keep_scope_and_noninteractive_arguments() {
         .unwrap()
         .id
         .clone();
-    assert_eq!(backend.search("io.example.User", &cancel).unwrap().len(), 1);
+    assert_eq!(backend.search("io.example.User", &cancel).unwrap().len(), 2);
     assert!(backend.search("--bad", &cancel).is_err());
     assert_eq!(backend.details(&user, &cancel).unwrap().package.id, user);
     for operation in [
@@ -854,18 +906,40 @@ fn flatpak_remote_search_details_and_upgrade_all() {
     let mut backend = Flatpak::new(fixture.clone());
     let cancel = Cancellation::default();
     let results = backend.search("io.example.User", &cancel).unwrap();
-    // The user and system catalog queries return the same remote entry;
-    // it must collapse to one identity so engine selection is unambiguous.
-    assert_eq!(results.len(), 1);
+    // Each installation offers its own target; installed state must not leak.
+    assert_eq!(results.len(), 2);
     assert!(matches!(results[0].id.scope, Scope::User { .. }));
-    assert!(results
+    assert_eq!(results[0].installed_version.as_deref(), Some("1.0"));
+    let system_offer = results
         .iter()
-        .all(|p| p.id.remote.as_deref() == Some("flathub")));
+        .find(|p| p.id.scope == Scope::System)
+        .unwrap();
+    assert!(system_offer.installed_version.is_none());
+    backend
+        .execute(
+            &Operation::Install(system_offer.id.clone()),
+            &cancel,
+            &mut |_| {},
+        )
+        .unwrap();
+    assert!(fixture
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|(args, write, system)| *write
+            && *system
+            && args.contains(&"install".into())
+            && args.contains(&"--system".into())));
     let id = results[0].id.clone();
-    assert!(id.remote.is_some());
+    assert!(id.remote.is_none());
     assert_eq!(backend.details(&id, &cancel).unwrap().package.id, id);
     let mut missing = id.clone();
     missing.name = "io.example.Missing".into();
+    missing.reference = Some(format!(
+        "app/io.example.Missing/{}/stable",
+        std::env::consts::ARCH
+    ));
     assert_eq!(
         backend.details(&missing, &cancel),
         Err(EngineError::NotFound)
@@ -922,9 +996,7 @@ fn flatpak_detect_reports_unavailable_backend() {
 }
 
 #[test]
-fn flatpak_remote_search_resolves_to_a_single_identity() {
-    // Mirrors `pkd --from flatpak info <app>`: engine selection must see one
-    // identity, not Ambiguous user/system duplicates, and details must follow.
+fn flatpak_remote_search_requires_explicit_installation_scope() {
     let cancel = Cancellation::default();
     let mut engine = Engine::default();
     engine
@@ -937,10 +1009,12 @@ fn flatpak_remote_search_resolves_to_a_single_identity() {
             name: "io.example.User".into(),
             backend: Some("flatpak".into()),
             architecture: None,
-            scope: None,
+            scope: Some(Scope::User {
+                uid: rustix::process::getuid().as_raw(),
+            }),
         })
         .unwrap();
-    assert!(id.remote.is_some());
+    assert!(id.remote.is_none());
     assert_eq!(engine.details(&id, &cancel).unwrap().package.id, id);
 }
 
@@ -971,11 +1045,14 @@ fn flatpak_search_survives_failing_system_scope() {
         }
         fn flatpak(
             &self,
-            _: &[OsString],
+            args: &[OsString],
             _: &Cancellation,
             _: bool,
             system: bool,
         ) -> Result<Completion, ExecutionError> {
+            if args.iter().any(|arg| arg == "list") {
+                return Ok(output(""));
+            }
             if system {
                 return Err(ExecutionError::TimedOut);
             }
@@ -3040,4 +3117,99 @@ fn flatpak_update_query_failures_are_not_reported_as_current() {
         .unwrap()
         .iter()
         .any(|(args, _, _)| args.contains(&"remote-ls".into())));
+}
+
+#[test]
+fn flatpak_search_preserves_branch_without_guessing_kind_or_fetching_updates() {
+    let fixture = FlatpakFixture {
+        installed: Some(String::new()),
+        ..Default::default()
+    };
+    let mut backend = Flatpak::new(fixture.clone());
+    let cancel = Cancellation::default();
+    let rows = backend.search("User", &cancel).unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_ne!(rows[0].id.scope, rows[1].id.scope);
+    let id = &rows[0].id;
+    assert!(rows[0].installed_version.is_none());
+    assert_eq!(
+        id.reference.as_deref(),
+        Some(format!("io.example.User/{}/stable", std::env::consts::ARCH).as_str())
+    );
+    backend
+        .execute(&Operation::Install(id.clone()), &cancel, &mut |_| {})
+        .unwrap();
+    let calls = fixture.calls.lock().unwrap();
+    assert!(!calls
+        .iter()
+        .any(|(args, _, _)| args.iter().any(|arg| arg == "remote-ls")));
+    let (args, _, system) = calls.iter().find(|(_, write, _)| *write).unwrap();
+    assert!(!system);
+    assert_eq!(args.last().map(String::as_str), id.reference.as_deref());
+    assert!(!args.iter().any(|arg| arg == "--app" || arg == "--runtime"));
+}
+
+#[test]
+fn system_manager_actions_preserve_native_target_and_noninteractive_mode() {
+    for source in ["dnf", "pacman", "zypper", "snap"] {
+        let fixture = Fixture {
+            record_writes: true,
+            ..Fixture::new()
+        };
+        let mut backend = match source {
+            "dnf" => Dnf::dnf(fixture.clone()),
+            "pacman" => Pacman::pacman(fixture.clone()),
+            "zypper" => Zypper::zypper(fixture.clone()),
+            _ => Snap::snap(fixture.clone()),
+        };
+        let id = PackageId {
+            backend: source.into(),
+            name: "synthetic-player".into(),
+            architecture: "x86_64".into(),
+            scope: Scope::System,
+            remote: None,
+            reference: None,
+        };
+        for operation in [
+            Operation::Install(id.clone()),
+            Operation::Remove(id.clone()),
+            Operation::Upgrade(id.clone()),
+            Operation::Refresh {
+                backend: source.into(),
+            },
+            Operation::UpgradeAll {
+                backend: source.into(),
+            },
+        ] {
+            backend
+                .execute(&operation, &Cancellation::default(), &mut |_| {})
+                .unwrap();
+            let writes = fixture.writes.lock().unwrap();
+            let (executable, args) = writes.last().unwrap();
+            assert_eq!(executable, source);
+            if matches!(
+                operation,
+                Operation::Install(_) | Operation::Remove(_) | Operation::Upgrade(_)
+            ) {
+                assert_eq!(args.last().unwrap(), "synthetic-player");
+            } else {
+                assert!(!args.iter().any(|arg| arg == "synthetic-player"));
+            }
+            if let Operation::Remove(_) = operation {
+                assert!(args
+                    .iter()
+                    .any(|arg| arg == if source == "pacman" { "-Rns" } else { "remove" }));
+            }
+            let noninteractive = match source {
+                "dnf" => Some("-y"),
+                "pacman" => Some("--noconfirm"),
+                "zypper" => Some("--non-interactive"),
+                _ => None,
+            };
+            if let Some(flag) = noninteractive {
+                assert!(args.iter().any(|arg| arg == flag));
+            }
+        }
+        assert_eq!(fixture.writes.lock().unwrap().len(), 5);
+    }
 }

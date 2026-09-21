@@ -184,7 +184,7 @@ impl Desktop {
                 );
                 let out = self
                     .xcommand()
-                    .args(["search", "--name", "^PkgDeck"])
+                    .args(["search", "--onlyvisible", "--name", "^PkgDeck"])
                     .output()
                     .unwrap();
                 if out.status.success() {
@@ -201,7 +201,17 @@ impl Desktop {
             },
             20,
         );
-        self.xdo(&["windowfocus", "--sync", &self.window]);
+        // XCreateWindow precedes mapping. Even a visible search can race with
+        // a resize/remap, so retry focus until X confirms the input target.
+        until(
+            || {
+                self.xcommand()
+                    .args(["windowfocus", &self.window])
+                    .output()
+                    .is_ok_and(|output| output.status.success())
+            },
+            20,
+        );
         self.idle();
     }
     fn logs(&self) -> String {

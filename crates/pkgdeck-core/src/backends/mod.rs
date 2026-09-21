@@ -1,5 +1,6 @@
 //! Native package-manager, Linux Homebrew formula, and local AppImage adapters.
 mod appimage;
+mod firmware;
 use crate::{
     engine::*,
     host::{AptAction, Authorization, Host},
@@ -7,6 +8,7 @@ use crate::{
     process::*,
 };
 pub use appimage::AppImage;
+pub use firmware::Firmware;
 use serde::Deserialize;
 use std::{ffi::OsString, path::PathBuf, time::Duration};
 
@@ -24,12 +26,17 @@ const CAPABILITIES: &[Capability] = &[
 /// backend means extending this list, the GUI `sourceIds`, and the CLI
 /// value parser together.
 pub const BACKEND_IDS: &[&str] = &[
-    "apt", "dnf", "pacman", "zypper", "snap", "homebrew", "appimage", "flatpak", "cargo", "npm",
-    "pnpm", "bun", "pip", "pipx", "uv", "composer", "gem",
+    "fwupd", "apt", "dnf", "pacman", "zypper", "snap", "homebrew", "appimage", "flatpak", "cargo",
+    "npm", "pnpm", "bun", "pip", "pipx", "uv", "composer", "gem",
 ];
 
 /// A narrow transport seam lets adapter tests supply synthetic native responses.
 pub trait Transport: Send {
+    fn repository_editor(&self) -> Result<(), ExecutionError> {
+        Err(ExecutionError::Disabled(
+            "Software Sources editor unavailable".into(),
+        ))
+    }
     fn apt_query(
         &self,
         mode: &str,
@@ -98,7 +105,28 @@ pub struct NativeTransport {
     pub host: Host,
     pub authorization: Authorization,
 }
+
+fn apt_query_executable(
+    executable: &std::path::Path,
+    built: Option<&str>,
+) -> Result<PathBuf, ExecutionError> {
+    let adjacent = executable.with_file_name("pkgdeck-apt-query");
+    if adjacent.is_file() {
+        return Ok(adjacent);
+    }
+    if let Some(path) = built.map(PathBuf::from).filter(|path| path.is_file()) {
+        return Ok(path);
+    }
+    Err(ExecutionError::Disabled(
+        "APT helper is missing. Rebuild with libapt-pkg-dev installed, or reinstall PkgDeck."
+            .into(),
+    ))
+}
+
 impl Transport for NativeTransport {
+    fn repository_editor(&self) -> Result<(), ExecutionError> {
+        self.host.open_source_editor()
+    }
     fn apt_query(
         &self,
         mode: &str,
@@ -109,9 +137,10 @@ impl Transport for NativeTransport {
         if self.host.resolve("apt-get")?.is_none() {
             return Err(ExecutionError::Disabled("APT not found".into()));
         }
-        let executable = std::env::current_exe()
-            .map_err(|e| ExecutionError::Io(e.to_string()))?
-            .with_file_name("pkgdeck-apt-query");
+        let executable = apt_query_executable(
+            &std::env::current_exe().map_err(|e| ExecutionError::Io(e.to_string()))?,
+            option_env!("PKGDECK_BUILT_APT_QUERY"),
+        )?;
         let result = self.host.read(
             &executable,
             &[mode.into(), query.into(), arch.into()],
@@ -217,6 +246,12 @@ pub struct Homebrew<T = NativeTransport> {
 pub struct Flatpak<T = NativeTransport> {
     transport: T,
 }
+fn flatpak_offer_reference(reference: &str) -> Option<(&str, &str, &str)> {
+    let mut parts = reference.split('/');
+    let (name, arch, branch) = (parts.next()?, parts.next()?, parts.next()?);
+    (flatpak_id(name) && flatpak_id(arch) && flatpak_id(branch) && parts.next().is_none())
+        .then_some((name, arch, branch))
+}
 impl<T: Transport> Flatpak<T> {
     pub fn new(transport: T) -> Self {
         Self { transport }
@@ -263,7 +298,12 @@ impl<T: Transport> Flatpak<T> {
             system,
         )?)
     }
-    fn list(&self, cancel: &Cancellation, system: bool) -> Result<Vec<Package>, EngineError> {
+    fn list(
+        &self,
+        cancel: &Cancellation,
+        system: bool,
+        updates: bool,
+    ) -> Result<Vec<Package>, EngineError> {
         let scope = if system {
             Scope::System
         } else {
@@ -327,7 +367,7 @@ impl<T: Transport> Flatpak<T> {
                 homepages: vec![],
             });
         }
-        if packages.is_empty() {
+        if packages.is_empty() || !updates {
             return Ok(packages);
         }
         // Flatpak compares commits, not version labels: rebuilds and runtimes
@@ -400,7 +440,11 @@ impl<T: Transport> Flatpak<T> {
                     .get(5)
                     .and_then(|value| value.split(',').next())
                     .filter(|value| flatpak_id(value));
-                if fields.len() != 6 || !flatpak_id(fields[2]) || remote.is_none() {
+                if fields.len() != 6
+                    || !flatpak_id(fields[2])
+                    || !flatpak_id(fields[4])
+                    || remote.is_none()
+                {
                     return Err(invalid("flatpak", "invalid remote search metadata"));
                 }
                 Ok(Package {
@@ -410,7 +454,12 @@ impl<T: Transport> Flatpak<T> {
                         architecture: std::env::consts::ARCH.into(),
                         scope: scope.clone(),
                         remote: remote.map(str::to_owned),
-                        reference: None,
+                        reference: Some(format!(
+                            "{}/{}/{}",
+                            fields[2],
+                            std::env::consts::ARCH,
+                            fields[4]
+                        )),
                     },
                     display_name: fields[0].into(),
                     summary: fields[1].into(),
@@ -429,7 +478,9 @@ impl<T: Transport> Flatpak<T> {
             return Err(invalid("flatpak", "foreign or invalid Flatpak identity"));
         }
         if let Some(reference) = &id.reference {
-            let (_, name, arch, _) = flatpak_reference(reference)
+            let (name, arch, _) = flatpak_reference(reference)
+                .map(|(_, name, arch, branch)| (name, arch, branch))
+                .or_else(|| flatpak_offer_reference(reference))
                 .ok_or_else(|| invalid("flatpak", "invalid native ref"))?;
             if name != id.name || arch != id.architecture {
                 return Err(invalid(
@@ -488,24 +539,43 @@ impl<T: Transport> Backend for Flatpak<T> {
         if let Ok(system) = self.search_scope(query, cancel, true) {
             result.extend(system);
         }
-        // Remote search results do not carry an installed scope: the user and
-        // system queries return the same catalog entries. Deduplicate them so
-        // a single remote application resolves unambiguously, preferring the
-        // unprivileged user scope used for installs by default.
+        // Offers in separate installations remain independently selectable.
         let mut seen = std::collections::BTreeSet::new();
-        result.retain(|package| {
-            seen.insert((
-                package.id.name.clone(),
-                package.id.architecture.clone(),
-                package.id.remote.clone(),
-            ))
-        });
-        Ok(result)
+        result.retain(|package| seen.insert(package.id.clone()));
+        // Local inventory is enough to choose Install versus Remove. Search
+        // must not fetch remote update metadata just to establish this state.
+        let mut installed = self.list(cancel, false, false)?;
+        installed.extend(self.list(cancel, true, false)?);
+        let mut offers = Vec::new();
+        for offer in result {
+            let matches: Vec<_> =
+                installed
+                    .iter()
+                    .filter(|package| {
+                        package.id.scope == offer.id.scope
+                            && package.id.reference.as_deref().and_then(|reference| {
+                                reference.split_once('/').map(|(_, rest)| rest)
+                            }) == offer.id.reference.as_deref()
+                    })
+                    .collect();
+            if matches.is_empty() {
+                offers.push(offer);
+            } else {
+                for package in matches {
+                    let mut row = offer.clone();
+                    row.id = package.id.clone();
+                    row.installed_version = package.installed_version.clone();
+                    offers.push(row);
+                }
+            }
+        }
+        offers.dedup_by(|a, b| a.id == b.id);
+        Ok(offers)
     }
     fn installed(&mut self, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
         let home = self.transport.env("HOME").map(PathBuf::from);
-        let mut result = self.list(cancel, false)?;
-        result.extend(self.list(cancel, true)?);
+        let mut result = self.list(cancel, false, true)?;
+        result.extend(self.list(cancel, true, true)?);
         for package in &mut result {
             // Exported icons double as the installed check per scope.
             let roots: Vec<PathBuf> = match &package.id.scope {
@@ -604,31 +674,18 @@ impl<T: Transport> Backend for Flatpak<T> {
             id.name
         )));
         let reference = id.reference.as_deref().unwrap_or(&id.name);
-        let kind = if reference.starts_with("runtime/") {
-            "--runtime"
-        } else {
-            "--app"
-        };
-        let args = if verb == "install" {
-            vec![
-                scope,
-                verb,
-                kind,
-                "--noninteractive",
-                "--assumeyes",
-                id.remote.as_deref().unwrap_or("flathub"),
-                reference,
-            ]
-        } else {
-            vec![
-                scope,
-                verb,
-                kind,
-                "--noninteractive",
-                "--assumeyes",
-                reference,
-            ]
-        };
+        let mut args = vec![scope, verb, "--noninteractive", "--assumeyes"];
+        if reference.starts_with("runtime/") {
+            args.push("--runtime");
+        } else if reference.starts_with("app/") || id.reference.is_none() {
+            args.push("--app");
+        }
+        // Search metadata does not identify app versus runtime. Preserve its
+        // name/architecture/branch and let Flatpak resolve the kind.
+        if verb == "install" {
+            args.push(id.remote.as_deref().unwrap_or("flathub"));
+        }
+        args.push(reference);
         let result = self.call(&args, cancel, true, system)?;
         Ok(OperationOutcome {
             cancellation_deferred: result.cancellation_deferred,
@@ -738,6 +795,11 @@ fn desktop_icon(home: Option<&std::path::Path>, desktop: &std::path::Path) -> Op
         .lines()
         .find_map(|line| line.strip_prefix("Icon="))?
         .trim();
+    themed_icon(home, name)
+}
+
+/// Resolve an exact desktop/AppStream icon name without network requests.
+pub fn themed_icon(home: Option<&std::path::Path>, name: &str) -> Option<PathBuf> {
     if name.is_empty() {
         return None;
     }
@@ -756,7 +818,7 @@ fn desktop_icon(home: Option<&std::path::Path>, desktop: &std::path::Path) -> Op
         dirs.insert(0, home.join(".local/share/icons"));
     }
     for dir in &dirs {
-        for size in ["64x64", "48x48", "32x32"] {
+        for size in ["128x128", "64x64", "48x48", "32x32", "scalable"] {
             if let Some(icon) = icon_file(&dir.join("hicolor").join(size).join("apps"), name) {
                 return Some(icon);
             }
@@ -896,7 +958,13 @@ impl<T: Transport> Backend for Apt<T> {
         Ok(self
             .query("search", query, "", cancel)?
             .into_iter()
-            .map(|d| d.package)
+            .map(|mut d| {
+                let home = self.transport.env("HOME").map(PathBuf::from);
+                if let Some(desktop) = self.desktop_entries().get(&d.package.id.name).cloned() {
+                    d.package.icon = desktop_icon(home.as_deref(), &desktop);
+                }
+                d.package
+            })
             .collect())
     }
     fn installed(&mut self, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
@@ -1529,7 +1597,25 @@ impl<T: Transport> Backend for SystemManager<T> {
         }
     }
     fn search(&mut self, query: &str, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
-        self.query(false, query, cancel)
+        let mut packages = self.query(false, query, cancel)?;
+        let installed = self.query(true, "", cancel)?;
+        let versions: std::collections::BTreeMap<_, _> = installed
+            .iter()
+            .map(|package| {
+                (
+                    (package.id.name.as_str(), package.id.architecture.as_str()),
+                    &package.installed_version,
+                )
+            })
+            .collect();
+        for package in &mut packages {
+            if let Some(version) =
+                versions.get(&(package.id.name.as_str(), package.id.architecture.as_str()))
+            {
+                package.installed_version = (*version).clone();
+            }
+        }
+        Ok(packages)
     }
     fn installed(&mut self, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
         let mut packages = self.query(true, "", cancel)?;
@@ -3108,6 +3194,17 @@ pub fn native_engine(
             }
         }
     }
+    if allowed("fwupd") {
+        let mut firmware = Firmware::new(NativeTransport {
+            host: Host::current(),
+            authorization,
+        });
+        let status = firmware.detect(cancel);
+        if discover || explicit || !matches!(status, Ok(Availability::Unavailable(_))) {
+            engine.note_detected("fwupd".into(), status);
+            engine.register(firmware)?;
+        }
+    }
     if allowed("appimage") {
         engine.register(AppImage::native())?;
     }
@@ -3174,6 +3271,36 @@ pub fn native_engine(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn apt_helper_supports_cargo_builds_and_relocated_bundles() {
+        let root = std::env::temp_dir().join(format!("pkgdeck-apt-helper-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("bundle")).unwrap();
+        let executable = root.join("bundle/pkgdeck");
+        let built = root.join("cargo-helper");
+        let adjacent = root.join("bundle/pkgdeck-apt-query");
+        assert!(matches!(
+            apt_query_executable(&executable, None),
+            Err(ExecutionError::Disabled(message)) if message.contains("APT helper is missing")
+        ));
+        assert!(apt_query_executable(&executable, built.to_str()).is_err());
+        std::fs::write(&built, "synthetic helper").unwrap();
+        assert_eq!(
+            apt_query_executable(&executable, built.to_str()).unwrap(),
+            built
+        );
+        std::fs::write(&adjacent, "packaged helper").unwrap();
+        assert_eq!(
+            apt_query_executable(&executable, built.to_str()).unwrap(),
+            adjacent
+        );
+        std::fs::remove_file(&built).unwrap();
+        assert_eq!(
+            apt_query_executable(&executable, built.to_str()).unwrap(),
+            adjacent
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn wave_five_name_policies() {

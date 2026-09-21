@@ -36,3 +36,20 @@ fn quick_controls_search_confirm_resize_and_cancel() {
 fn real_window_completes_synthetic_lifecycle() {
     pkgdeck_tools::gui_lifecycle(&[env!("CARGO_BIN_EXE_pkgdeck").into()]);
 }
+
+#[test]
+fn https_screenshots_persist_across_restarts_and_expire() {
+    let output = Command::new("bash")
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../scripts/tests/media-cache.sh"
+        ))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

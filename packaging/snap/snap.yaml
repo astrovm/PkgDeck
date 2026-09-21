@@ -11,6 +11,6 @@ architectures: [ARCHITECTURE]
 apps:
   pkgdeck:
     command: AppRun
-    plugs: [desktop, desktop-legacy, wayland, x11, opengl]
+    plugs: [network, desktop, desktop-legacy, wayland, x11, opengl]
   pkd:
     command: usr/bin/pkd

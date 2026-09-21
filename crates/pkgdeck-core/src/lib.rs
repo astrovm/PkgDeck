@@ -12,3 +12,5 @@ pub mod engine;
 pub mod package;
 
 pub mod backends;
+
+pub mod repositories;

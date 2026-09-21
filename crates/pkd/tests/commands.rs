@@ -167,3 +167,110 @@ fn terminal_confirmation_defaults_to_no_and_accepts_explicit_approval() {
         assert_eq!(state["installed"], "1.0");
     }
 }
+
+#[test]
+fn native_search_uses_installed_inventory_for_package_actions() {
+    let fixture = Fixture::new();
+    let executable = fixture.0.join("dnf");
+    fs::write(&executable, r#"#!/bin/sh
+case " $* " in
+  *" --installed "*)
+    if [ -f "$HOME/installed" ]; then
+      printf '%s\n' 'synthetic-player|x86_64|1.0|Synthetic installed player'
+    fi
+    ;;
+  *)
+    printf '%s\n' 'synthetic-player|x86_64|2.0|Synthetic player' 'synthetic-player-plugin|x86_64|1.0|Synthetic plugin'
+    ;;
+esac
+"#).unwrap();
+    fs::set_permissions(executable, fs::Permissions::from_mode(0o755)).unwrap();
+    let search = || {
+        let output = Command::new(env!("CARGO_BIN_EXE_pkd"))
+            .env("PATH", &fixture.0)
+            .env("HOME", &fixture.0)
+            .env_remove("SNAP")
+            .env_remove("FLATPAK_ID")
+            .args(["--json", "--from", "dnf", "search", "synthetic-player"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()["data"]["packages"].clone()
+    };
+    let offers = search();
+    assert_eq!(offers.as_array().unwrap().len(), 2);
+    assert!(offers
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|p| p["installed_version"].is_null()));
+    fs::write(fixture.0.join("installed"), "").unwrap();
+    let packages = search();
+    assert_eq!(packages[0]["id"]["name"], "synthetic-player");
+    assert_eq!(packages[0]["installed_version"], "1.0");
+    assert_eq!(packages[0]["candidate_version"], "2.0");
+    assert!(packages[1]["installed_version"].is_null());
+}
+
+#[test]
+fn repositories_use_selected_scope_and_require_noninteractive_consent() {
+    let fixture = Fixture::new();
+    let flatpak = fixture.0.join("flatpak");
+    fs::write(
+        &flatpak,
+        r#"#!/bin/sh
+case "$*" in
+  *remotes*) printf 'fixture\tFixture\thttps://example.invalid\t1\n' ;;
+  *) printf '%s\n' "$@" > "$HOME/repository-call" ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(flatpak, fs::Permissions::from_mode(0o755)).unwrap();
+    let command = || {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_pkd"));
+        command
+            .env("PATH", &fixture.0)
+            .env("HOME", &fixture.0)
+            .env_remove("SNAP")
+            .env_remove("FLATPAK_ID")
+            .args(["--json", "--from", "flatpak", "--scope", "user"]);
+        command
+    };
+    let listed = command().args(["repos", "list"]).output().unwrap();
+    assert!(
+        listed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    let data: Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(data["data"]["repositories"].as_array().unwrap().len(), 1);
+    assert!(data["data"]["repositories"][0]["scope"]
+        .get("user")
+        .is_some());
+    let declined = command()
+        .args(["repos", "disable", "fixture"])
+        .output()
+        .unwrap();
+    assert_eq!(declined.status.code(), Some(2));
+    assert!(!fixture.0.join("repository-call").exists());
+    if !rustix::process::geteuid().is_root() {
+        let approved = command()
+            .args(["--yes", "repos", "disable", "fixture"])
+            .output()
+            .unwrap();
+        assert!(
+            approved.status.success(),
+            "{}",
+            String::from_utf8_lossy(&approved.stdout)
+        );
+        let called = fs::read_to_string(fixture.0.join("repository-call")).unwrap();
+        assert!(called.contains("--user\n"));
+        assert!(called.contains("remote-modify\n--disable\nfixture\n"));
+        assert!(!called.contains("--system"));
+    }
+}

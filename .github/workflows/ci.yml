@@ -298,6 +298,7 @@ jobs:
           source scripts/dev-env.sh
           cargo build --locked -p pkgdeck-tools
           scripts/bundle.sh
+          scripts/tests/media-cache.sh "$PWD/build/AppDir/usr"
           test -x build/AppDir/usr/lib/pkgdeck/appimageupdatetool.AppImage
           desktop-file-validate assets/io.github.astrovm.PkgDeck.desktop
           unset LD_LIBRARY_PATH QML_IMPORT_PATH
@@ -343,7 +344,7 @@ jobs:
           run_flatpak list | tee /tmp/pkd-flatpak-list.json | jq -e 'any(.data.packages[]; .id.name == "org.kde.kcalc")'
           flatpak --user search --columns=name,description,application,version,branch,remotes org.kde.kcalc | tee /tmp/pkd-flatpak-search-user.txt
           flatpak --system search --columns=name,description,application,version,branch,remotes org.kde.kcalc | tee /tmp/pkd-flatpak-search-system.txt || true
-          check /tmp/pkd-flatpak-info.json '.exit_code == 0' run_flatpak info org.kde.kcalc
+          check /tmp/pkd-flatpak-info.json '.exit_code == 0' run_flatpak --scope user info org.kde.kcalc
           check /tmp/pkd-flatpak-update.json '.exit_code == 0' run_flatpak update
           check /tmp/pkd-flatpak-remove.json '.exit_code == 0' run_flatpak remove org.kde.kcalc
           ! flatpak --user list --app | grep -q org.kde.kcalc
