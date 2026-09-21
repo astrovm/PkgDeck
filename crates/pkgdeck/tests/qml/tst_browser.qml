@@ -163,7 +163,8 @@ TestCase {
         const dialog = findChild(browser, "confirmationDialog");
         tryCompare(dialog, "opened", true);
         compare(fake.writes, 0);
-        dialog.reject();
+        keyClick(Qt.Key_N, Qt.AltModifier);
+        tryCompare(dialog, "opened", false);
         compare(fake.writes, 0);
         waitForRendering(browser.contentItem);
         mouseClick(findChild(browser, "installButton"));
