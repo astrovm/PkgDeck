@@ -314,12 +314,17 @@ fn repositories_keep_scopes_and_apt_enabled_states() {
     std::fs::create_dir_all(root.join("etc/apt/sources.list.d")).unwrap();
     std::fs::write(
         root.join("etc/apt/sources.list"),
-        "deb https://example.invalid stable main\n# deb https://disabled.invalid stable main\n",
+        "# Native source comment\ndeb https://example.invalid stable main\n# deb https://disabled.invalid stable main\n",
     )
     .unwrap();
     std::fs::write(
         root.join("etc/apt/sources.list.d/test.sources"),
-        "Types: deb\nURIs: https://example.invalid/deb822\nSuites: stable\nEnabled: no\n",
+        "# Comment-only stanza\n\nTypes: deb\nURIs: https://example.invalid/deb822\nSuites: stable\nEnabled: no\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("etc/apt/sources.list.d/ignored.bak"),
+        "not an active source",
     )
     .unwrap();
     let report = repositories::list(&Fixture::default(), &root, &Cancellation::default());

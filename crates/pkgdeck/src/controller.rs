@@ -1353,6 +1353,129 @@ mod tests {
         assert!(controller.rust().worker.is_none());
         assert!(!*controller.busy());
     }
+    #[test]
+    fn qt_streamed_details_preserve_progress_and_finish_cleanly() {
+        let mut object = ffi::create_controller();
+        let mut controller = object.pin_mut();
+        let package = Package {
+            id: PackageId {
+                backend: "fwupd".into(),
+                name: "synthetic-device".into(),
+                architecture: "device".into(),
+                scope: Scope::System,
+                remote: None,
+                reference: None,
+            },
+            display_name: "Device".into(),
+            summary: "Firmware".into(),
+            installed_version: Some("1".into()),
+            candidate_version: Some("2".into()),
+            update: UpdateAvailability::Available,
+            icon: None,
+            component_ids: vec![],
+            homepages: vec![],
+        };
+        controller.as_mut().rust_mut().packages = vec![package.clone()];
+        controller.as_mut().rust_mut().selected = Some(package.id.clone());
+        controller
+            .as_mut()
+            .set_rows(encoded(vec![package_row(&package, &[], None)]));
+        let mut details = PackageDetails {
+            package: package.clone(),
+            description: "Synthetic firmware details".into(),
+            homepage: None,
+            dependencies: vec![],
+        };
+        details.package.display_name = "Synthetic BIOS".into();
+        let (sender, receiver) = mpsc::channel();
+        let (release, wait) = mpsc::channel();
+        controller.as_mut().rust_mut().worker = Some(Worker {
+            handle: thread::spawn(move || {
+                wait.recv_timeout(std::time::Duration::from_secs(10))
+                    .unwrap();
+            }),
+            receiver,
+            cancel: Cancellation::default(),
+            job: Job::Details(package.id.clone()),
+        });
+        controller.as_mut().set_busy(true);
+        sender
+            .send(Reply::DetailsPreview(Box::new(details.clone())))
+            .unwrap_or_else(|_| panic!("closed channel"));
+        sender
+            .send(Reply::Progress("Loading device metadata".into()))
+            .unwrap_or_else(|_| panic!("closed channel"));
+        controller.as_mut().poll();
+        assert_eq!(controller.status().to_string(), "Loading device metadata");
+        assert!(controller
+            .details()
+            .to_string()
+            .contains("Synthetic firmware details"));
+        assert!(controller.rows().to_string().contains("Synthetic BIOS"));
+        assert!(*controller.busy());
+        release.send(()).unwrap();
+        sender
+            .send(Reply::Done(Ok(Payload::Details(Box::new(details)))))
+            .unwrap_or_else(|_| panic!("closed channel"));
+        controller.as_mut().poll();
+        assert!(!*controller.busy());
+        assert!(controller.rust().worker.is_none());
+        controller
+            .as_mut()
+            .apply(Ok(Payload::Written(OperationOutcome {
+                cancellation_deferred: true,
+            })));
+        assert!(controller
+            .status()
+            .to_string()
+            .contains("Completed after cancellation"));
+    }
+    #[test]
+    fn qt_new_view_discards_superseded_reports_and_cancellation_errors() {
+        let mut object = ffi::create_controller();
+        let mut controller = object.pin_mut();
+        let (_sender, receiver) = mpsc::channel();
+        let cancel = Cancellation::default();
+        controller.as_mut().rust_mut().worker = Some(Worker {
+            handle: thread::spawn(|| {}),
+            receiver,
+            cancel: cancel.clone(),
+            job: Job::Load("Sources".into(), "".into()),
+        });
+        controller
+            .as_mut()
+            .load("Updates".into(), "".into(), "".into(), false, true);
+        assert!(cancel.requested());
+        assert!(matches!(&controller.rust().queued, Some(Job::Load(view, _)) if view == "Updates"));
+        let status = controller.status().to_string();
+        controller.as_mut().apply(Err(EngineError::Cancelled));
+        assert_eq!(controller.status().to_string(), status);
+        controller
+            .as_mut()
+            .apply(Ok(Payload::Packages(PackageReport::default())));
+        controller.as_mut().apply(Ok(Payload::Sources(vec![Source {
+            backend: "fwupd".into(),
+            capabilities: vec![],
+            availability: Ok(Availability::Available),
+        }])));
+        assert!(controller.rust().sources.is_empty());
+        assert_eq!(controller.rows().to_string(), "[]");
+        controller
+            .as_mut()
+            .rust_mut()
+            .worker
+            .take()
+            .unwrap()
+            .handle
+            .join()
+            .unwrap();
+        controller.as_mut().rust_mut().queued = None;
+        controller.as_mut().apply(Err(EngineError::NotFound));
+        assert!(controller
+            .status()
+            .to_string()
+            .contains("no package matches"));
+    }
     struct Fixture {
         package: Package,
         fail: bool,
