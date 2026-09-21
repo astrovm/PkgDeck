@@ -54,7 +54,7 @@ protected:
         auto request = original;
         request.setAttribute(QNetworkRequest::CacheLoadControlAttribute, QNetworkRequest::PreferCache);
         request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
-        request.setTransferTimeout(5000);
+        request.setTransferTimeout(15000);
         return QNetworkAccessManager::createRequest(operation, request, data);
     }
 };

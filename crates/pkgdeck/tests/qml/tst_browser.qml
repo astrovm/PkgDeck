@@ -766,6 +766,40 @@ TestCase {
         }
         compare(fake.writes, 0);
     }
+    function test_failed_screenshots_collapse_and_keep_working_images() {
+        populate();
+        browser.choose(0);
+        const row = JSON.parse(fake.rows)[0];
+        const good = Qt.resolvedUrl("../../assets/logo.svg").toString();
+        const bad = Qt.resolvedUrl("missing-synthetic-screenshot.png").toString();
+        fake.details = JSON.stringify({package: row, screenshots: [{url: bad}, {url: good}]});
+        const gallery = findChild(browser, "screenshotGallery");
+        tryCompare(gallery, "count", 1);
+        compare(browser.visibleScreenshots[0].url, good);
+        verify(gallery.visible);
+        fake.details = JSON.stringify({package: row, screenshots: [{url: bad}]});
+        tryCompare(gallery, "count", 0);
+        verify(!gallery.visible);
+        // Reopening details may retry images after a transient network failure.
+        browser.choose(1);
+        browser.choose(0);
+        fake.details = JSON.stringify({package: row, screenshots: [{url: good}]});
+        tryCompare(gallery, "count", 1);
+        verify(gallery.visible);
+    }
+    function test_compact_action_content_is_centered_and_inside_button() {
+        populate();
+        fake.busy = true;
+        const button = findChild(browser, "resultsCancel");
+        tryCompare(button, "visible", true);
+        waitForRendering(browser.contentItem);
+        const contents = button.contentItem.children[0];
+        const position = contents.mapToItem(button, 0, 0);
+        verify(position.y >= 0);
+        verify(position.y + contents.height <= button.height);
+        verify(Math.abs(position.y + contents.height / 2 - button.height / 2) <= 1);
+        verify(Math.abs(position.x + contents.width / 2 - button.width / 2) <= 1);
+    }
     function test_app_screenshots_follow_selected_identity_and_open_viewer() {
         populate();
         browser.choose(0);
@@ -780,6 +814,7 @@ TestCase {
         waitForRendering(browser.contentItem);
         const thumbnail = gallery.itemAtIndex(0);
         verify(thumbnail !== null);
+        tryCompare(thumbnail, "enabled", true);
         browser.width = 400;
         browser.height = 520;
         waitForRendering(browser.contentItem);

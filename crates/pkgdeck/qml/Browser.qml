@@ -51,6 +51,13 @@ Controls.ApplicationWindow {
     property var detail: JSON.parse(backend.details || "{}")
     readonly property bool detailMatchesSelection: selected !== null && detail.package !== undefined && rowIdentity(selected) === rowIdentity(detail.package)
     readonly property var screenshots: detailMatchesSelection ? (detail.screenshots || []) : []
+    property var failedScreenshots: []
+    readonly property var visibleScreenshots: screenshots.filter(image => failedScreenshots.indexOf(image.url) < 0)
+    onScreenshotsChanged: failedScreenshots = []
+    function hideFailedScreenshot(url, identity) {
+        if (rowIdentity(selected) === identity && failedScreenshots.indexOf(url) < 0)
+            failedScreenshots = failedScreenshots.concat([url]);
+    }
     property string screenshotUrl: ""
     property string screenshotCaption: ""
     property bool closePending: false
@@ -348,6 +355,7 @@ Controls.ApplicationWindow {
         Accessible.name: text
         implicitHeight: 38
         horizontalPadding: 16
+        verticalPadding: 4
         opacity: enabled ? 1 : 0.45
         scale: down ? 0.98 : 1
         Behavior on opacity { NumberAnimation { duration: root.feedbackDuration } }
@@ -359,24 +367,36 @@ Controls.ApplicationWindow {
             border.color: control.activeFocus ? root.accent : (control.navigation ? "transparent" : root.line)
             border.width: control.activeFocus ? 2 : 1
         }
-        contentItem: RowLayout {
-            spacing: 8
-            DeckIcon {
-                name: control.symbol
-                ink: control.primary && control.enabled ? (root.dark ? "#111820" : "#ffffff") : control.glyphColor
-                Layout.preferredWidth: 18
-                Layout.preferredHeight: 18
-            }
-            Text {
-                text: control.text
-                visible: text.length > 0
-                font: control.font
-                color: control.primary && control.enabled ? (root.dark ? "#111820" : "#ffffff") : root.ink
-                Layout.fillWidth: control.navigation
-                verticalAlignment: Text.AlignVCenter
+        contentItem: Item {
+            implicitWidth: buttonContents.implicitWidth
+            implicitHeight: buttonContents.implicitHeight
+            RowLayout {
+                id: buttonContents
+                x: control.navigation ? 0 : (parent.width - width) / 2
+                anchors.verticalCenter: parent.verticalCenter
+                width: control.navigation ? parent.width : implicitWidth
+                height: implicitHeight
+                spacing: 8
+                DeckIcon {
+                    name: control.symbol
+                    ink: control.primary && control.enabled ? (root.dark ? "#111820" : "#ffffff") : control.glyphColor
+                    Layout.preferredWidth: 18
+                    Layout.preferredHeight: 18
+                    Layout.alignment: Qt.AlignVCenter
+                }
+                Text {
+                    text: control.text
+                    visible: text.length > 0
+                    font: control.font
+                    color: control.primary && control.enabled ? (root.dark ? "#111820" : "#ffffff") : root.ink
+                    Layout.fillWidth: control.navigation
+                    Layout.alignment: Qt.AlignVCenter
+                    verticalAlignment: Text.AlignVCenter
+                }
             }
         }
     }
+
     // Shared checkbox indicator: transparent box with an accent check.
     // Both the source checklist and the Updates multi-select use it so the
     // two stay visually identical; positioning comes from the instance.
@@ -1395,7 +1415,7 @@ Controls.ApplicationWindow {
                 objectName: "detailsPanel"
                 visible: root.selected !== null && ["Search", "Installed", "Updates", "Sources"].indexOf(root.currentView) >= 0
                 Layout.fillWidth: true
-                Layout.preferredHeight: root.screenshots.length > 0 ? Math.min(root.height * (root.compact ? 0.35 : 0.42), 320) : Math.min(root.height * 0.27, 180)
+                Layout.preferredHeight: root.visibleScreenshots.length > 0 ? Math.min(root.height * (root.compact ? 0.35 : 0.42), 320) : Math.min(root.height * 0.27, 180)
                 color: root.surface
                 radius: 10
                 border.color: root.line
@@ -1463,19 +1483,20 @@ Controls.ApplicationWindow {
                             ListView {
                                 id: screenshotGallery
                                 objectName: "screenshotGallery"
-                                visible: root.screenshots.length > 0
+                                visible: root.visibleScreenshots.length > 0
                                 Layout.fillWidth: true
                                 Layout.preferredHeight: root.compact ? 72 : 130
                                 orientation: ListView.Horizontal
                                 spacing: 10
                                 clip: true
-                                model: root.screenshots
+                                model: root.visibleScreenshots
                                 cacheBuffer: 0
                                 reuseItems: true
                                 delegate: Controls.AbstractButton {
                                     required property var modelData
                                     width: root.compact ? 128 : 230
                                     height: screenshotGallery.height
+                                    enabled: preview.status === Image.Ready
                                     Accessible.name: modelData.caption || "View app screenshot"
                                     onClicked: {
                                         root.screenshotUrl = modelData.url;
@@ -1486,6 +1507,13 @@ Controls.ApplicationWindow {
                                     contentItem: Item {
                                         Image {
                                             id: preview
+                                            onStatusChanged: {
+                                                if (status === Image.Error) {
+                                                    const failedUrl = modelData.url;
+                                                    const identity = root.rowIdentity(root.selected);
+                                                    Qt.callLater(() => root.hideFailedScreenshot(failedUrl, identity));
+                                                }
+                                            }
                                             anchors.fill: parent
                                             source: root.detailMatchesSelection ? modelData.url : ""
                                             asynchronous: true
@@ -1506,8 +1534,8 @@ Controls.ApplicationWindow {
                                             horizontalAlignment: Text.AlignHCenter
                                             color: root.muted
                                             wrapMode: Text.WordWrap
-                                            text: preview.status === Image.Error ? "Screenshot unavailable" : "Loading…"
-                                            visible: preview.status === Image.Error || (preview.status === Image.Loading && !root.motionEnabled)
+                                            text: "Loading…"
+                                            visible: preview.status === Image.Loading && !root.motionEnabled
                                         }
                                     }
                                 }
