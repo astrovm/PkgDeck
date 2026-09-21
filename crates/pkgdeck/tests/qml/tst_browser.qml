@@ -472,10 +472,13 @@ TestCase {
         tryCompare(dialog, "opened", true);
         keyClick(Qt.Key_N, Qt.AltModifier);
         tryCompare(dialog, "visible", false);
-        compare(browser.versionText(runtime), "Update available");
+        compare(browser.versionText(runtime), "—");
         runtime.installed = "1.0";
         runtime.candidate = "1.0";
-        compare(browser.versionText(runtime), "1.0 · update available");
+        compare(browser.versionText(runtime), "1.0");
+        runtime.installed = "";
+        runtime.candidate = "2.0";
+        compare(browser.versionText(runtime), "2.0");
     }
     function test_completed_write_forces_current_view_refresh() {
         browser.openView("Installed");

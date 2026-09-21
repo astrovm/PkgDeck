@@ -493,7 +493,7 @@ Controls.ApplicationWindow {
             return row.available ? "Available" : "Unavailable";
         if (row.update === "available") {
             if (!row.installed || !row.candidate || row.installed === row.candidate)
-                return row.installed ? row.installed + " · update available" : "Update available";
+                return row.installed || row.candidate || "—";
             return row.installed + " → " + row.candidate;
         }
         if (isInstalled(row))
