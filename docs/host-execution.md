@@ -1,14 +1,13 @@
 # Host execution and authorization
 
-Step 2 establishes the execution boundary in `pkgdeck-core`. `pkd doctor` reports
-its runtime, executes a bounded, unprivileged host architecture probe, and locates
-backend executables in the invoking user's host PATH. Detection does not imply
-that a backend's package lifecycle is implemented. pip is deliberately omitted
-until an explicit virtual environment can be selected.
+`pkgdeck-core` provides the shared execution boundary. `pkd doctor` reports its
+runtime, executes a bounded unprivileged host architecture probe, and locates
+backend executables in the invoking user's PATH. Each adapter advertises its
+supported operations; detection alone does not imply every operation is supported.
 
 ## Format capabilities
 
-| Format | Host reads/detection | APT / Homebrew writes | Validation |
+| Format | Host reads/detection | Host writes | Validation |
 | --- | --- | --- | --- |
 | Native | Enabled | Enabled through the core and CLI | Synthetic process tests; real sudo/polkit and APT in a disposable Ubuntu x86_64 VM |
 | AppImage | Enabled, outside the bundle | Enabled through the same native boundary | Extract-and-run AppImage doctor probe, GUI and terminal smoke tests; environment-isolation tests |
@@ -43,12 +42,14 @@ PATH entries and executables resolving into APPDIR are excluded from discovery.
 AppRun sets APPDIR for both entry points, including extracted launches.
 
 User tools resolve from the invoking user's PATH and retain that user's HOME and
-XDG user directories. The only authorized write API is a typed APT request for a
-validated Debian package name and optional architecture, or metadata refresh. Homebrew and development tools have no elevation
-route. Frontends must stay unprivileged; the APT API rejects a root caller.
+XDG user directories. System operations use typed requests validated by the
+corresponding adapter.
+Native distro managers, Flatpak system operations, repository changes, and firmware
+updates retain their own authorization requirements. Homebrew and development tools
+run as the invoking user. Frontends must stay unprivileged.
 
 Authorized commands use a fixed system PATH, excluding user tool directories.
-The adapter invokes the fixed `/usr/bin/apt-get` path via either:
+For example, the APT adapter invokes the fixed `/usr/bin/apt-get` path via either:
 
 - `/usr/bin/pkexec --disable-internal-agent`, using an existing polkit agent/policy;
 - `/usr/bin/sudo -n --`, requiring an existing grant and never prompting.

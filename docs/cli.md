@@ -6,6 +6,8 @@ package operations remain explicitly disabled.
 `pkd` without a subcommand prints help and exits successfully, including with
 redirected input/output. Use `pkgdeck` to launch the GUI.
 
+![Read-only package details in the CLI](screenshots/cli.png)
+
 ## Commands and selection
 
 ```sh
@@ -24,7 +26,7 @@ missing optional managers are omitted, while detection/query failures remain
 visible. `sources` includes unavailable managers and their reasons. Search uses
 literal case-insensitive substrings: APT names/summaries and Homebrew formula names.
 Results rank best-match-first (exact name, name prefix, name substring, then
-summary matches); unverified name guesses sort last.
+summary matches). Unverified name guesses are omitted.
 Homebrew identities preserve tap-qualified names (for example
 `owner/tap/formula`). Aliases and fuzzy matches are not installation selectors.
 
@@ -40,6 +42,10 @@ any write; then execute each distinct operation in order. Execution failures do
 not roll back successful operations. `upgrade` without names selects all installed
 packages with native-reported updates, optionally restricted by `--from`/`--arch`.
 `update` refreshes metadata and never upgrades installed packages itself.
+
+For a named Flatpak present in both installations, choose `--scope user` or
+`--scope system`, for example `pkd --from flatpak --scope system install org.example.App`.
+Without a scope, ambiguous targets require an explicit choice.
 
 ## Confirmation and authorization
 
@@ -80,7 +86,8 @@ A failing source row means the underlying manager errored: the message carries
 the manager's own diagnostic where available, and the same command run directly
 in a terminal shows complete output. Failed sources block ambiguous selection
 and batch upgrades until every queried source answers.
-Package IDs always include `backend`, `name`, `architecture`, and `scope`.
+Package IDs include `backend`, `name`, `architecture`, and `scope`, with remote
+and reference fields where the manager needs them.
 Versions remain native strings and update availability is `unknown`, `current`,
 or `available`. Native version semantics determine update availability.
 
@@ -103,32 +110,6 @@ arguments supplied with `--json`.
 
 A batch where every operation fails returns the first operation's failure code.
 Source discovery reports unavailable managers as data; detection errors return 1.
-
-## Native metadata contracts and validation
-
-APT metadata comes from the companion `pkgdeck-apt-query` executable through
-libapt-pkg's read-only cache and native candidate policy. Packages include the
-helper and its shared-library dependencies. Source builds use `scripts/build-apt.sh`
-with the distribution's `libapt-pkg-dev` package. Keep the helper beside the
-frontend binaries. All APT writes use the fixed `/usr/bin/apt-get` authorization
-boundary; the helper only reads metadata and never requests elevated privileges.
-
-Homebrew formula metadata uses `brew formulae` and `brew info --json=v2 --formula`
-from the [Homebrew command interface](https://docs.brew.sh/Manpage). Casks are
-excluded. Reads have a 120-second deadline and a 32 MiB per-stream limit; truncated
-or malformed metadata is an error, not an empty result. Native write output is
-bounded while the child is drained to completion.
-
-Local adapter and CLI tests use synthetic metadata and executables. The disposable
-VM additionally installs synthetic APT and Homebrew packages at 1.0, refreshes to
-2.0, verifies update detection and upgrade, and removes them. Final state is
-checked through `dpkg-query`, `brew info`, and fixture-owned files. Homebrew 6.0.22
-runs unprivileged at its standard Linux prefix with a controlled local tap. The
-fixture trusts only that tap inside the guest. See [host execution validation](host-execution.md#reproducing-validation).
-
-For a named Flatpak present in both installations, choose `--scope user` or
-`--scope system`, for example `pkd --from flatpak --scope system install org.example.App`.
-Without a scope, ambiguous targets require an explicit choice.
 
 ## Repositories and firmware
 

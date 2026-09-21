@@ -1,0 +1,77 @@
+name: Homebrew
+on:
+  pull_request:
+    paths:
+      - 'Formula/**'
+      - '.github/workflows/homebrew.yml'
+      - 'Cargo.*'
+      - 'rust-toolchain.toml'
+      - 'crates/**'
+      - 'native/**'
+      - 'scripts/build-apt.sh'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package:
+    name: Package / Homebrew (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, macos-15]
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+      HOMEBREW_NO_INSTALL_CLEANUP: '1'
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Configure Homebrew
+        shell: bash
+        run: |
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            echo /home/linuxbrew/.linuxbrew/bin >> "$GITHUB_PATH"
+          fi
+      - name: Prepare formula for this checkout
+        shell: bash
+        run: |
+          # Use the PR source, never main or arbitrary mutable HEAD, for this test.
+          archive="$RUNNER_TEMP/pkgdeck-source.tar.gz"
+          git archive --format=tar.gz --output="$archive" HEAD
+          brew tap-new --no-git astrovm/pkgdeck
+          export PKGDECK_TEST_ARCHIVE="$archive"
+          export PKGDECK_TEST_FORMULA="$(brew --repository astrovm/pkgdeck)/Formula/pkgdeck.rb"
+          brew ruby -r digest -e '
+            source = ENV.fetch("PKGDECK_TEST_ARCHIVE")
+            recipe = File.read("Formula/pkgdeck.rb")
+            version = File.read("Cargo.toml")[/^version = "([^"]+)"$/, 1]
+            stable = "url #{("file://" + source).inspect}\n  version #{version.inspect}\n  sha256 #{Digest::SHA256.file(source).hexdigest.inspect}"
+            recipe.sub!(/^  head .*\n/, "")
+            recipe.sub!(/^  license /, "  #{stable}\n  license ")
+            File.write(ENV.fetch("PKGDECK_TEST_FORMULA"), recipe)
+          '
+      - name: Check formula style
+        run: brew style astrovm/pkgdeck/pkgdeck
+      - name: Build package
+        run: brew install --build-from-source --verbose astrovm/pkgdeck/pkgdeck
+      - name: Test installed commands and GUI startup
+        run: brew test astrovm/pkgdeck/pkgdeck
+      - name: Check CLI has no Qt linkage
+        shell: bash
+        run: |
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            links=$(otool -L "$(brew --prefix astrovm/pkgdeck/pkgdeck)/bin/pkd")
+          else
+            links=$(ldd "$(brew --prefix astrovm/pkgdeck/pkgdeck)/bin/pkd")
+          fi
+          if printf '%s\n' "$links" | grep -qi Qt; then
+            echo 'CLI unexpectedly links Qt' >&2
+            exit 1
+          fi
