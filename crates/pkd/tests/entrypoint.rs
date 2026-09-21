@@ -20,24 +20,17 @@ fn version_and_help_work_without_a_display() {
 }
 
 #[test]
-fn non_interactive_and_unsupported_commands_fail_clearly() {
+fn no_arguments_show_help_and_unsupported_commands_fail_clearly() {
     let result = pkd().stdin(Stdio::null()).output().unwrap();
-    assert_eq!(result.status.code(), Some(2));
-    assert!(result.stdout.is_empty());
-    assert!(String::from_utf8(result.stderr)
-        .unwrap()
-        .contains("requires a terminal"));
+    assert!(result.status.success());
+    assert!(result.stderr.is_empty());
+    assert!(String::from_utf8(result.stdout).unwrap().contains("Usage:"));
     let result = pkd()
         .arg("install")
         .arg("synthetic-fixture")
         .output()
         .unwrap();
     assert_eq!(result.status.code(), Some(2));
-}
-
-#[test]
-fn tui_renders_resizes_and_restores_terminal_on_exit() {
-    pkgdeck_tools::terminal(&[env!("CARGO_BIN_EXE_pkd").into()]);
 }
 
 #[test]
@@ -76,9 +69,4 @@ fn flatpak_doctor_does_not_enumerate_runtime_backends() {
     let text = String::from_utf8(output.stdout).unwrap();
     assert!(text.contains("Flatpak host execution is disabled"));
     assert!(!text.contains("APT:"));
-}
-
-#[test]
-fn tui_queries_sources_and_reports_unavailable_host_without_a_display() {
-    pkgdeck_tools::terminal_interactions(&[env!("CARGO_BIN_EXE_pkd").into()]);
 }

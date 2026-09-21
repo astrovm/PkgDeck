@@ -13,9 +13,9 @@ write() {
     if [[ $source == apt ]]; then user=pkgdeck-test; else user=linuxbrew; fi
     echo "LIFECYCLE ${PKGDECK_FRONTEND:-cli} $source $operation $name"
     case ${PKGDECK_FRONTEND:-cli} in
-        tui) /mnt/pkgdeck-tools tui-write "$operation" "$name" runuser -u "$user" -- env PATH=/home/linuxbrew/.linuxbrew/bin:/usr/bin:/bin /opt/pkgdeck-bin/pkd --from "$source" ;;
         gui) /mnt/pkgdeck-tools gui-write "$operation" "$name" runuser -u "$user" -- env -u XDG_CONFIG_HOME PATH=/home/linuxbrew/.linuxbrew/bin:/usr/bin:/bin /mnt/pkgdeck-app/AppRun --from "$source" --auth sudo ;;
-        *) if [[ -n $name ]]; then cli "$source" "$operation" "$name"; else cli "$source" "$operation"; fi ;;
+        cli) if [[ -n $name ]]; then cli "$source" "$operation" "$name"; else cli "$source" "$operation"; fi ;;
+        *) echo "Unknown frontend: $PKGDECK_FRONTEND (expected cli or gui)" >&2; return 2 ;;
     esac
 }
 apt_version() {

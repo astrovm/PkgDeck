@@ -2,7 +2,7 @@ name: pkgdeck
 version: '0.1.0'
 summary: Unified package manager interface for Linux
 description: |
-  GUI and terminal frontends for PkgDeck. Foundation build; package
+  GUI and CLI frontends for PkgDeck. Foundation build; package
   management operations are not implemented yet.
 base: core24
 grade: devel

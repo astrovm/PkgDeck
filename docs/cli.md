@@ -2,7 +2,8 @@
 
 Step 4 exposes the shared engine through `pkd`. Native and AppImage execution
 use the host boundary. Flatpak and Snap host operations remain explicitly disabled.
-The GUI and no-argument TUI are still application shells.
+`pkd` without a subcommand prints help and exits successfully, including with
+redirected input/output. Use `pkgdeck` to launch the GUI.
 
 ## Commands and selection
 

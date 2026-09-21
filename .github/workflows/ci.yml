@@ -109,7 +109,7 @@ jobs:
       - name: Run container workspace tests
         # Native jobs own lint/coverage; packaging owns release builds.
         run: scripts/verify.sh full --only tests --engine podman
-      - name: Run container CLI and TUI lifecycle tests
+      - name: Run container CLI lifecycle tests
         run: scripts/verify.sh containers --engine podman
       - name: Upload Podman logs
         if: always()
@@ -302,7 +302,7 @@ jobs:
           desktop-file-validate assets/io.github.astrovm.PkgDeck.desktop
           unset LD_LIBRARY_PATH QML_IMPORT_PATH
           scripts/xtask.sh gui build/AppDir/AppRun
-          scripts/xtask.sh terminal build/AppDir/AppRun --cli
+          build/AppDir/AppRun --cli </dev/null | grep -F 'Usage: pkd'
           build/AppDir/AppRun --cli --version
           build/AppDir/AppRun --cli doctor
       - name: Run packaged GUI lifecycle tests
@@ -320,7 +320,7 @@ jobs:
           unset LD_LIBRARY_PATH QML_IMPORT_PATH
           export APPIMAGE_EXTRACT_AND_RUN=1
           scripts/xtask.sh gui 'build/artifacts/PkgDeck-${{ matrix.arch }}.AppImage'
-          scripts/xtask.sh terminal 'build/artifacts/PkgDeck-${{ matrix.arch }}.AppImage' --cli
+          'build/artifacts/PkgDeck-${{ matrix.arch }}.AppImage' --cli </dev/null | grep -F 'Usage: pkd'
           'build/artifacts/PkgDeck-${{ matrix.arch }}.AppImage' --cli doctor
           appimage=$PWD/build/artifacts/PkgDeck-${{ matrix.arch }}.AppImage
           data=$PWD/build/appimage-backend-data
@@ -335,7 +335,7 @@ jobs:
           scripts/package.sh flatpak
           sudo flatpak install --system -y --noninteractive 'build/artifacts/PkgDeck-${{ matrix.arch }}.flatpak'
           scripts/xtask.sh gui flatpak run --env=QT_QPA_PLATFORM=offscreen --env=QT_QUICK_BACKEND=software io.github.astrovm.PkgDeck
-          scripts/xtask.sh terminal flatpak run --command=pkd io.github.astrovm.PkgDeck
+          flatpak run --command=pkd io.github.astrovm.PkgDeck </dev/null | grep -F 'Usage: pkd'
           flatpak --user remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
           flatpak --user install -y --noninteractive flathub org.kde.kcalc
           run_flatpak() { build/AppDir/usr/bin/pkd --json --yes --auth sudo --from flatpak "$@"; }
@@ -355,7 +355,7 @@ jobs:
           test -x build/snap-check/usr/bin/pkd
           unset LD_LIBRARY_PATH QML_IMPORT_PATH
           scripts/xtask.sh gui build/snap-check/AppRun
-          scripts/xtask.sh terminal build/snap-check/usr/bin/pkd
+          build/snap-check/usr/bin/pkd </dev/null | grep -F 'Usage: pkd'
       - name: Upload packages
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

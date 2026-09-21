@@ -1399,16 +1399,12 @@ Controls.ApplicationWindow {
         title: "Confirm package operation"
         modal: true
         standardButtons: Controls.Dialog.Yes | Controls.Dialog.No
-        onOpened: standardButton(Controls.Dialog.No).forceActiveFocus()
-        Shortcut {
-            sequence: "Alt+Y"
-            enabled: confirmation.opened
-            onActivated: confirmation.accept()
-        }
-        Shortcut {
-            sequence: "Alt+N"
-            enabled: confirmation.opened
-            onActivated: confirmation.reject()
+        onOpened: {
+            // Let the buttons own their mnemonics. Separate Shortcuts collide
+            // with the automatic button mnemonics in KDE styles.
+            standardButton(Controls.Dialog.Yes).text = "&Yes";
+            standardButton(Controls.Dialog.No).text = "&No";
+            standardButton(Controls.Dialog.No).forceActiveFocus();
         }
         onAccepted: backend.confirm(true)
         onRejected: backend.confirm(false)

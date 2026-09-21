@@ -1,10 +1,7 @@
-use std::io::{self, IsTerminal};
-
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 mod cli;
 use cli::{Args, Commands};
 mod presentation;
-mod tui;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
@@ -41,15 +38,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.command.is_some() {
         std::process::exit(cli::run(&args).into());
     }
-    if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
-        eprintln!(
-            "pkd requires a terminal when run without arguments; use --help for available options."
-        );
-        std::process::exit(2);
-    }
-    let mut terminal = ratatui::init();
-    let result = tui::run(&mut terminal, &args);
-    ratatui::restore();
-    result?;
+    Args::command().print_help()?;
+    println!();
     Ok(())
 }

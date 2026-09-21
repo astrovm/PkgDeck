@@ -163,13 +163,15 @@ TestCase {
         const dialog = findChild(browser, "confirmationDialog");
         tryCompare(dialog, "opened", true);
         compare(fake.writes, 0);
-        dialog.reject();
+        keyClick(Qt.Key_N, Qt.AltModifier);
+        tryCompare(dialog, "visible", false);
         compare(fake.writes, 0);
         waitForRendering(browser.contentItem);
         mouseClick(findChild(browser, "installButton"));
         tryCompare(dialog, "opened", true);
         keyClick(Qt.Key_Y, Qt.AltModifier);
         compare(fake.writes, 1);
+        tryCompare(dialog, "visible", false);
         list.forceActiveFocus();
         keyClick(Qt.Key_Down);
         compare(fake.selection, 1);
@@ -286,6 +288,7 @@ TestCase {
         tryCompare(dialog, "opened", true);
         verify(fake.confirmation.indexOf("upgrade-all") === 0);
         dialog.reject();
+        tryCompare(dialog, "visible", false);
         compare(fake.writes, 0);
         mouseClick(button);
         tryCompare(dialog, "opened", true);
