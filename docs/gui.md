@@ -15,21 +15,29 @@ The sidebar provides Search, Installed, Updates, Sources, Settings, and
 About. Sources reports actual source availability on the current computer;
 it does not invent recommendations or combine matching names across sources.
 Search submits on Enter or the Search button. Results use a virtualized ListView,
-ranked best-match-first (exact name, name prefix, name substring, then summary
-matches), with the selected package's description, scope, homepage, and dependencies below.
-Unverifiable offers sort last: a row with neither an installed nor a candidate
-version (for example a dev backend guessing an uninstalled name) never buries
-a real package. Submitting a search clears any column sort so the best match
-is always first.
-The VERSION column carries the state: a bare candidate means not installed,
-`· installed` marks installed packages outside the Installed view, and `→`
-marks an available update. Installed rows show only their version because the
-view already establishes their state.
+ranked best-match-first, with exact app names and Flatpak app-id suffixes together
+before plugins and libraries. Unverified development-manager placeholders are
+omitted. Submitting a search clears any column sort.
+
+Local AppStream catalogs supply friendly desktop app names, descriptions,
+homepages, and screenshots where available. Packages without desktop metadata
+keep their native names. Details retain the native identity, architecture, and
+scope. Screenshot thumbnails load asynchronously only for the selected app;
+clicking one opens a larger viewer. Qt caches loaded images in memory. Missing
+metadata leaves the gallery hidden, and failed images show a compact fallback.
+Catalogs are read once per GUI session on the worker; no metadata service is
+needed. Package identities and native operations remain unchanged.
+
+Rows show versions without repeating “installed”; an arrow between versions
+marks an available update. Search and Installed rows have an install or remove
+icon, while Updates rows have an update icon. Each action has an accessible name
+and opens the existing confirmation. The selected row uses a background highlight;
+keyboard focus has an outline, with no selection stripe.
 Matching names remain separate source/architecture/scope identities.
 Installed packages related to an installation from another manager are placed
 together under one compact family header. The header shows the number of exact
 package records and their managers; each package remains a separate selectable
-row with its own name, source, architecture, version, and summary. Two
+row with its own name, source, version, and summary. Two
 local-only signals feed the grouping: the AppStream component id (APT's
 DEP-11 data, Flatpak app ids, snap desktop entries, AppImage desktop
 entries) and the upstream homepage (APT control data, Homebrew formulae,
@@ -46,13 +54,13 @@ Space or Return sorts without a mouse. Sorting is display-only:
 selection and actions map the visible row back to backend order. Column
 widths and the active sort persist across restarts like the source filter.
 
-Install, Remove, Upgrade, and Refresh source operate on the selected identity.
+Row actions operate on the exact row identity. Refresh sources operates on the selected source.
 Updates checks every row by default. Uncheck rows to narrow the upgrade, or
-use Select none to start empty and Select all to re-check everything; the single **Upgrade** button (Ctrl+Shift+U)
-reads **Upgrade all** while everything is checked and **Upgrade selected**
+use Select none to start empty and Select all to re-check everything; the single **Update** button (Ctrl+Shift+U)
+reads **Update all** while everything is checked and **Update selected**
 otherwise. The all path batches per backend; the subset path confirms exactly
 the checked identities, which re-resolve against the current rows, so entries
-that moved on or vanished while streaming are skipped, never guessed. Upgrade
+that moved on or vanished while streaming are skipped, never guessed. Update
 all is disabled when there are no upgrades or any source query failed; a hint
 beside the button names the reason while it is unavailable. The batch reports
 every result, including partial failures and cancellation. Completed upgrades
@@ -60,7 +68,7 @@ are not rolled back; cancellation skips remaining writes once the active
 native transaction finishes. Reload reads the remaining updates and re-checks
 every row.
 
-![Upgrade all](screenshots/pkgdeck-updates-live.png)
+![Update all](screenshots/pkgdeck-updates-live.png)
 
 Each write requires confirmation, with No focused initially. Refresh changes
 source metadata only. Successful writes clear stale results; use Reload to read
@@ -73,7 +81,7 @@ updates Qt properties on its own thread. Search, Installed, and Updates
 results stream in per backend, so rows appear while slow sources still
 query; the selection follows the
 same package identity across partials. Upgrade availability still waits for
-the terminal report with complete failures. Selecting a row opens its details; Close details restores the table space. Finished views are cached, so switching
+the terminal report with complete failures. Selecting a row opens its details; the close icon restores the table space. Finished views are cached, so switching
 sections shows the last results instantly; only the first visit, a source
 change, or Reload queries native managers, and writes invalidate every cached
 view. Switching sections or the selected row during
@@ -114,8 +122,8 @@ cache. Background polling stops when work finishes.
 | Down in the search field | Jump to the results and select the first row |
 | PageUp/PageDown/Home/End | Move the selection in larger steps or to either end |
 | Ctrl+1 / Ctrl+2 / Ctrl+3 / Ctrl+4 | Search / Installed / Updates / Sources |
-| Ctrl+I / Ctrl+D / Ctrl+U | Propose install / remove / upgrade |
-| Ctrl+Shift+U in Updates | Confirm the checked upgrades (all by default) |
+| Ctrl+I / Ctrl+D / Ctrl+U | Propose install / remove / update |
+| Ctrl+Shift+U in Updates | Confirm the checked updates (all by default) |
 | Ctrl+M | Propose metadata refresh for the selected source |
 | Ctrl+R | Reload the current view |
 | Alt+Y / Alt+N in confirmation | Confirm / reject |
@@ -187,7 +195,7 @@ package details fade in; confirmation dialogs fade and scale gently. Actions sta
 immediately, and new interactions can interrupt animations.
 
 Refreshing keeps the previous results visible but inactive until fresh rows arrive.
-The details panel appears only after selecting a row and keeps its height across selections. After a package operation,
+The details panel appears only after selecting a row and expands when screenshots are available. After a package operation,
 rows whose version or installed state changed receive a brief highlight.
 
 Animations follow KDE's animation durations. Turn off **Settings → Animations**

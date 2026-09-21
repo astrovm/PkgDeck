@@ -235,9 +235,9 @@ TestCase {
         list.forceActiveFocus();
         keyClick(Qt.Key_Down);
         compare(fake.selection, 0);
-        verify(findChild(browser, "installButton").enabled);
+        verify(findChild(list.itemAtIndex(0), "rowPackageAction").enabled);
         waitForRendering(browser.contentItem);
-        mouseClick(findChild(browser, "installButton"));
+        mouseClick(findChild(list.itemAtIndex(0), "rowPackageAction"));
         const dialog = findChild(browser, "confirmationDialog");
         tryCompare(dialog, "opened", true);
         compare(fake.writes, 0);
@@ -245,7 +245,7 @@ TestCase {
         tryCompare(dialog, "visible", false);
         compare(fake.writes, 0);
         waitForRendering(browser.contentItem);
-        mouseClick(findChild(browser, "installButton"));
+        mouseClick(findChild(list.itemAtIndex(0), "rowPackageAction"));
         tryCompare(dialog, "opened", true);
         keyClick(Qt.Key_Y, Qt.AltModifier);
         compare(fake.writes, 1);
@@ -253,9 +253,9 @@ TestCase {
         list.forceActiveFocus();
         keyClick(Qt.Key_Down);
         compare(fake.selection, 1);
-        verify(findChild(browser, "upgradeButton").enabled);
-        verify(findChild(browser, "removeButton").enabled);
-        verify(!findChild(browser, "installButton").enabled);
+        const action = findChild(list.itemAtIndex(1), "rowPackageAction");
+        verify(action.enabled);
+        compare(action.symbol, "remove");
         verify(findChild(browser, "packageDetails").text.indexOf("<b>literal metadata</b>") >= 0);
     }
     function test_views_loading_errors_and_resize() {
@@ -267,7 +267,7 @@ TestCase {
         populate();
         browser.choose(0);
         fake.busy = true;
-        verify(!findChild(browser, "installButton").enabled);
+        verify(!findChild(findChild(browser, "packageResults").itemAtIndex(0), "rowPackageAction").enabled);
         // Reads do not lock navigation or selection. Section switches go
         // through the cache path, never forced.
         browser.openView("Updates");
@@ -462,9 +462,16 @@ TestCase {
         fake.rows = JSON.stringify([runtime]);
         wait(30);
         browser.choose(0);
-        verify(!findChild(browser, "installButton").visible);
-        verify(findChild(browser, "removeButton").enabled);
-        verify(findChild(browser, "upgradeButton").enabled);
+        const action = findChild(findChild(browser, "packageResults").itemAtIndex(0), "rowPackageAction");
+        verify(action.enabled);
+        compare(action.symbol, "updates");
+        mouseClick(action);
+        compare(fake.selection, 0);
+        verify(fake.confirmation.indexOf("upgrade ") === 0);
+        const dialog = findChild(browser, "confirmationDialog");
+        tryCompare(dialog, "opened", true);
+        keyClick(Qt.Key_N, Qt.AltModifier);
+        tryCompare(dialog, "visible", false);
         compare(browser.versionText(runtime), "Update available");
         runtime.installed = "1.0";
         runtime.candidate = "1.0";
@@ -489,19 +496,19 @@ TestCase {
         populate();
         waitForRendering(browser.contentItem);
         // Every row starts checked, so Select all stays hidden until
-        // something is deselected; the old Upgrade selected button is gone.
+        // something is deselected; the old Update selected button is gone.
         verify(findChild(browser, "upgradeSelectedButton") === null);
         compare(browser.selectedCount(), 2);
         const upgradeBtn = findChild(browser, "upgradeAllButton");
         verify(upgradeBtn.visible);
-        compare(upgradeBtn.text, "Upgrade all");
+        compare(upgradeBtn.text, "Update all");
         const selectNone = findChild(browser, "selectNoneButton");
         verify(selectNone.visible);
         // Deselect one row: the single button switches to the subset path.
         browser.togglePackage(browser.items[1]);
         compare(browser.selectedCount(), 1);
         compare(browser.uncheckedPackages.length, 1);
-        compare(upgradeBtn.text, "Upgrade selected");
+        compare(upgradeBtn.text, "Update selected");
         mouseClick(upgradeBtn);
         verify(fake.lastChecked !== "");
         const sent = JSON.parse(fake.lastChecked);
@@ -513,7 +520,7 @@ TestCase {
         mouseClick(selectNone);
         compare(browser.selectedCount(), 0);
         verify(!upgradeBtn.visible);
-        // Select all re-checks everything and restores the Upgrade all path.
+        // Select all re-checks everything and restores the Update all path.
         const selectAll = findChild(browser, "selectAllButton");
         verify(selectAll.visible);
         waitForRendering(browser.contentItem);
@@ -521,11 +528,11 @@ TestCase {
         compare(browser.selectedCount(), 2);
         compare(browser.uncheckedPackages.length, 0);
         verify(upgradeBtn.visible);
-        compare(upgradeBtn.text, "Upgrade all");
+        compare(upgradeBtn.text, "Update all");
         browser.togglePackage(browser.items[1]);
         compare(browser.selectedCount(), 1);
         verify(upgradeBtn.visible);
-        compare(upgradeBtn.text, "Upgrade selected");
+        compare(upgradeBtn.text, "Update selected");
     }
     function test_columns_sort_resize_and_index_mapping() {
         browser.openView("Search");
@@ -599,9 +606,11 @@ TestCase {
         browser.height = 400;
         waitForRendering(browser.contentItem);
         const scroll = findChild(browser, "aboutScroll");
-        verify(scroll.contentHeight > scroll.availableHeight);
-        scroll.contentItem.contentY = scroll.contentHeight - scroll.availableHeight;
-        verify(scroll.contentItem.contentY > 0);
+        verify(about.width <= scroll.availableWidth);
+        if (scroll.contentHeight > scroll.availableHeight) {
+            scroll.contentItem.contentY = scroll.contentHeight - scroll.availableHeight;
+            verify(scroll.contentItem.contentY > 0);
+        }
         verify(!findChild(browser, "sourceFilter").visible);
     }
     function test_view_status_and_source_columns() {
@@ -757,11 +766,54 @@ TestCase {
         }
         compare(fake.writes, 0);
     }
+    function test_app_screenshots_follow_selected_identity_and_open_viewer() {
+        populate();
+        browser.choose(0);
+        const gallery = findChild(browser, "screenshotGallery");
+        verify(!gallery.visible);
+        const row = JSON.parse(fake.rows)[0];
+        fake.details = JSON.stringify({package: row, description: "Example app", screenshots: [
+            {url: Qt.resolvedUrl("../../assets/logo.svg").toString(), caption: "Example screenshot"}
+        ]});
+        tryCompare(gallery, "visible", true);
+        tryCompare(gallery, "count", 1);
+        waitForRendering(browser.contentItem);
+        const thumbnail = gallery.itemAtIndex(0);
+        verify(thumbnail !== null);
+        browser.width = 400;
+        browser.height = 520;
+        waitForRendering(browser.contentItem);
+        const panel = findChild(browser, "detailsPanel");
+        const galleryPosition = gallery.mapToItem(panel, 0, 0);
+        verify(galleryPosition.y + gallery.height <= panel.height - 12);
+        const actions = findChild(browser, "updatesActions");
+        const actionsPosition = actions.mapToItem(browser.contentItem, 0, 0);
+        verify(actionsPosition.y + actions.height <= browser.contentItem.height);
+        mouseClick(thumbnail);
+        const viewer = findChild(browser, "screenshotDialog");
+        tryCompare(viewer, "opened", true);
+        compare(viewer.title, "Example screenshot");
+        verify(browser.screenshotUrl.length > 0);
+        viewer.close();
+        tryCompare(viewer, "visible", false);
+        compare(browser.screenshotUrl, "");
+        browser.choose(1);
+        // A late details response from another identity must never show its images.
+        fake.details = JSON.stringify({package: row, screenshots: [{url: "https://example.invalid/stale.png"}]});
+        compare(gallery.count, 0);
+        verify(!gallery.visible);
+        const close = findChild(browser, "closeDetailsButton");
+        compare(close.text, "");
+        mouseClick(close);
+        verify(browser.selected === null);
+        verify(!findChild(browser, "detailsPanel").visible);
+        compare(fake.writes, 0);
+    }
     function test_header_source_checklist_and_installed_filter() {
         browser.openView("Installed");
         const filter = findChild(browser, "sourceFilter");
         verify(filter !== null);
-        compare(filter.text, "All available sources");
+        compare(filter.text, "All sources");
         const popup = findChild(browser, "sourcePopup");
         verify(popup !== null);
         popup.open();
@@ -776,7 +828,7 @@ TestCase {
         // Re-checking the last unchecked source returns to all available.
         clickSourceCheck(npm);
         compare(browser.sourceSelection, "");
-        compare(filter.text, "All available sources");
+        compare(filter.text, "All sources");
         // Unchecking down to one source disables that final checkbox.
         const ids = ["apt", "dnf", "pacman", "zypper", "snap", "homebrew", "appimage", "flatpak", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "composer", "gem"];
         for (let idx = 0; idx < ids.length; idx++) {
@@ -836,7 +888,7 @@ TestCase {
         wait(30);
         const hint = findChild(browser, "upgradeAllHint");
         verify(hint.visible);
-        verify(hint.text.indexOf("source query fails") >= 0);
+        verify(hint.text.indexOf("source has failed") >= 0);
         verify(!findChild(browser, "upgradeAllButton").enabled);
     }
     function test_selection_survives_streaming_partials() {

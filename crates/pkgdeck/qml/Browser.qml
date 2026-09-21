@@ -49,6 +49,10 @@ Controls.ApplicationWindow {
         }
     }
     property var detail: JSON.parse(backend.details || "{}")
+    readonly property bool detailMatchesSelection: selected !== null && detail.package !== undefined && rowIdentity(selected) === rowIdentity(detail.package)
+    readonly property var screenshots: detailMatchesSelection ? (detail.screenshots || []) : []
+    property string screenshotUrl: ""
+    property string screenshotCaption: ""
     property bool closePending: false
     property bool queryDirty: false
     property var selectedIdentity: null
@@ -81,7 +85,7 @@ Controls.ApplicationWindow {
     function sourceSummary() {
         const checked = checkedSources();
         if (checked.length >= sourceIds.length)
-            return "All available sources";
+            return "All sources";
         if (checked.length === 1)
             return sourceNames[sourceIds.indexOf(checked[0])];
         return checked.length + " sources";
@@ -861,7 +865,7 @@ Controls.ApplicationWindow {
                     id: search
                     objectName: "searchField"
                     Layout.fillWidth: true
-                    placeholderText: "Search packages"
+                    placeholderText: "Search apps and packages"
                     Accessible.name: "Search packages"
                     enabled: !backend.writing
                     selectByMouse: true
@@ -976,7 +980,7 @@ Controls.ApplicationWindow {
                     Accessible.name: "Enable interface animations"
                 }
                 Controls.Label {
-                    text: "Privilege elevation"
+                    text: "Authentication"
                 }
                 ThemedComboBox {
                     objectName: "authorizationSetting"
@@ -986,14 +990,14 @@ Controls.ApplicationWindow {
                         root.useSudo = currentIndex === 1;
                         preferences.authorization = root.useSudo ? "sudo" : "polkit";
                     }
-                    Accessible.name: "Privilege elevation"
+                    Accessible.name: "Authentication"
                     Layout.fillWidth: true
                     Layout.maximumWidth: 420
                 }
                 Controls.Label {
                     Layout.fillWidth: true
                     wrapMode: Text.WordWrap
-                    text: "Polkit uses your host's authentication agent. Sudo requires an existing grant; passwords are never collected here. Homebrew and development managers always run unprivileged without elevation. Choose the appearance above, or follow your system theme."
+                    text: "Polkit opens your system authentication dialog. Sudo uses an existing authorization. Homebrew and development tools run without elevation."
                 }
                 // Absorbs leftover height so the settings stack stays top-anchored.
                 Item { Layout.fillHeight: true }
@@ -1011,7 +1015,7 @@ Controls.ApplicationWindow {
                     width: aboutScroll.availableWidth
                     verticalAlignment: Text.AlignTop
                     wrapMode: Text.WordWrap
-                    text: "PkgDeck " + backend.version + "\nA unified package interface for Linux.\n\nKeyboard shortcuts\nCtrl+1: Search • Ctrl+2: Installed • Ctrl+3: Updates • Ctrl+4: Sources\nCtrl+F: search • Ctrl+L: focus results • Up/Down: select • Ctrl+I: install • Ctrl+D: remove • Ctrl+U: upgrade • Ctrl+M: refresh source • Ctrl+R: reload\nEscape: cancel current work\n\nRefresh updates source metadata; Upgrade changes an installed package. Writes require confirmation and may change native dependencies. Cancellation waits for a native write already running.\n\nSearches show configured package sources. A failed source stays as a row in Sources and in the current results."
+                    text: "PkgDeck " + backend.version + "\nA unified package interface for Linux.\n\nKeyboard shortcuts\nCtrl+1: Search • Ctrl+2: Installed • Ctrl+3: Updates • Ctrl+4: Sources\nCtrl+F: search • Ctrl+L: focus results • Up/Down: select • Ctrl+I: install • Ctrl+D: remove • Ctrl+U: update • Ctrl+M: refresh source • Ctrl+R: reload\nEscape: cancel current work\n\nRefresh sources checks package metadata. Updating apps changes installed packages. Changes require confirmation."
                     textFormat: Text.PlainText
                 }
             }
@@ -1260,7 +1264,7 @@ Controls.ApplicationWindow {
                                     opacity: root.completedRows.indexOf(root.rowIdentity(packageRow.modelData)) >= 0 ? 0.18 : 0
                                     Behavior on opacity { NumberAnimation { duration: root.motionEnabled ? 240 : 0 } }
                                 }
-                                Rectangle { width: 3; height: parent.height; visible: packageRow.highlighted; color: root.accent }
+                                Rectangle { anchors.fill: parent; color: "transparent"; border.width: 1; border.color: root.accent; visible: packageRow.activeFocus || (results.activeFocus && packageRow.highlighted) }
                                 Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: root.line; opacity: 0.5 }
                             }
                             contentItem: RowLayout {
@@ -1314,7 +1318,7 @@ Controls.ApplicationWindow {
                                         }
                                         Controls.Label {
                                         objectName: "packageSourceLine"
-                                        text: modelData.source.toUpperCase() + (modelData.remote ? " · " + modelData.remote : "") + (modelData.architecture ? " · " + modelData.architecture : "")
+                                        text: modelData.source.toUpperCase() + (modelData.remote ? " · " + modelData.remote : "")
                                         color: root.muted
                                         font.pixelSize: 11
                                         elide: Text.ElideRight
@@ -1352,12 +1356,12 @@ Controls.ApplicationWindow {
                                     visible: modelData.kind === "package"
                                     enabled: !backend.busy && !root.retainingResults
                                     text: ""
-                                    symbol: root.isInstalled(modelData) ? "remove" : "install"
-                                    glyphColor: root.isInstalled(modelData) ? (root.dark ? "#f18b91" : "#b42332") : (root.dark ? "#77d6a0" : "#187442")
-                                    Accessible.name: (root.isInstalled(modelData) ? "Remove installed " : "Install ") + modelData.name + " from " + modelData.source
+                                    symbol: root.currentView === "Updates" ? "updates" : (root.isInstalled(modelData) ? "remove" : "install")
+                                    glyphColor: root.currentView === "Updates" ? root.accent : root.isInstalled(modelData) ? (root.dark ? "#f18b91" : "#b42332") : (root.dark ? "#77d6a0" : "#187442")
+                                    Accessible.name: (root.currentView === "Updates" ? "Update " : (root.isInstalled(modelData) ? "Remove " : "Install ")) + (modelData.display_name || modelData.name) + " from " + modelData.source
                                     Layout.preferredWidth: 38
                                     horizontalPadding: 8
-                                    onClicked: backend.propose(root.isInstalled(modelData) ? "remove" : "install", root.originalIndex(index))
+                                    onClicked: backend.propose(root.currentView === "Updates" ? "upgrade" : (root.isInstalled(modelData) ? "remove" : "install"), root.originalIndex(index))
                                 }
                             }
                         }
@@ -1380,7 +1384,7 @@ Controls.ApplicationWindow {
                                 wrapMode: Text.WordWrap
                                 color: root.muted
                                 visible: !backend.busy || !root.motionEnabled
-                                text: backend.busy ? "Working…" : root.currentView === "Search" ? (search.text.trim().length === 0 ? "Find your next package.\nSearch by name or description." : "No matching packages.\nTry a shorter search or another source.") : (root.currentView === "Updates" ? "You're up to date.\nNo updates reported by the selected sources." : (root.currentView === "Installed" && (root.installedFilter.length > 0 || root.multiSourceOnly) ? "No packages match these filters.\nClear the filter or include more sources." : "No results to show.\nCheck source availability or reload to try again."))
+                                text: backend.busy ? "Working…" : root.currentView === "Search" ? (search.text.trim().length === 0 ? "Search apps and packages" : "No matching packages.\nTry a shorter search or another source.") : (root.currentView === "Updates" ? "You're up to date" : (root.currentView === "Installed" && (root.installedFilter.length > 0 || root.multiSourceOnly) ? "No packages match these filters.\nClear the filter or include more sources." : "No results to show.\nCheck source availability or reload to try again."))
                             }
                         }
                     }
@@ -1391,7 +1395,7 @@ Controls.ApplicationWindow {
                 objectName: "detailsPanel"
                 visible: root.selected !== null && ["Search", "Installed", "Updates", "Sources"].indexOf(root.currentView) >= 0
                 Layout.fillWidth: true
-                Layout.preferredHeight: Math.min(root.height * 0.27, 180)
+                Layout.preferredHeight: root.screenshots.length > 0 ? Math.min(root.height * (root.compact ? 0.35 : 0.42), 320) : Math.min(root.height * 0.27, 180)
                 color: root.surface
                 radius: 10
                 border.color: root.line
@@ -1426,7 +1430,7 @@ Controls.ApplicationWindow {
                             Accessible.ignored: true
                         }
                         Controls.Label {
-                        text: root.selected ? (root.selected.reference || root.selected.name) : "Package details"
+                        text: root.selected ? (root.selected.display_name || root.selected.name) : ""
                         textFormat: Text.PlainText
                         color: root.ink
                         font.pixelSize: root.compact ? 18 : 22
@@ -1436,8 +1440,11 @@ Controls.ApplicationWindow {
                         }
                         ActionButton {
                             objectName: "closeDetailsButton"
-                            text: "Close details"
+                            text: ""
                             symbol: "cancel"
+                            Accessible.name: "Close details"
+                            Layout.preferredWidth: 38
+                            horizontalPadding: 8
                             onClicked: {
                                 results.currentIndex = -1;
                                 root.selectedIdentity = null;
@@ -1445,19 +1452,83 @@ Controls.ApplicationWindow {
                         }
                     }
                     Controls.ScrollView {
+                        id: detailScroll
                         Layout.fillWidth: true
                         Layout.fillHeight: true
-                        Controls.TextArea {
-                            objectName: "packageDetails"
-                            readOnly: true
-                            selectByMouse: true
-                            color: root.muted
-                            padding: 0
-                            background: null
-                            wrapMode: TextEdit.Wrap
-                            textFormat: TextEdit.PlainText
-                            text: root.selected === null ? "Select a row to see package details and available actions." : root.detail.package ? (root.detail.description || "") + "\n\nScope: " + (root.detail.package.scope_label || "Unknown") + "   ·   Homepage: " + (root.detail.homepage || "Unavailable") + (root.sameAppNames(root.detail.package).length > 0 ? "\nRelated install: " + root.sameAppNames(root.detail.package).join(", ") : "") + "\nDependencies: " + ((root.detail.dependencies || []).join(", ") || "None listed") : (root.detail.failure ? (root.detail.failure.error || "") + "\n\n" + (root.detail.hint || "") : (root.detail.availability || "") + "\n\nCapabilities: " + (root.detail.capabilities || []).join(", "))
-                            Accessible.name: "Selected package, source, or failure details"
+                        contentWidth: availableWidth
+                        clip: true
+                        ColumnLayout {
+                            width: detailScroll.availableWidth
+                            spacing: 10
+                            ListView {
+                                id: screenshotGallery
+                                objectName: "screenshotGallery"
+                                visible: root.screenshots.length > 0
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: root.compact ? 72 : 130
+                                orientation: ListView.Horizontal
+                                spacing: 10
+                                clip: true
+                                model: root.screenshots
+                                cacheBuffer: 0
+                                reuseItems: true
+                                delegate: Controls.AbstractButton {
+                                    required property var modelData
+                                    width: root.compact ? 128 : 230
+                                    height: screenshotGallery.height
+                                    Accessible.name: modelData.caption || "View app screenshot"
+                                    onClicked: {
+                                        root.screenshotUrl = modelData.url;
+                                        root.screenshotCaption = modelData.caption || "";
+                                        screenshotDialog.open();
+                                    }
+                                    background: Rectangle { color: root.canvas; radius: 6; border.color: parent.activeFocus ? root.accent : root.line }
+                                    contentItem: Item {
+                                        Image {
+                                            id: preview
+                                            anchors.fill: parent
+                                            source: root.detailMatchesSelection ? modelData.url : ""
+                                            asynchronous: true
+                                            cache: true
+                                            sourceSize.width: 960
+                                            sourceSize.height: 540
+                                            fillMode: Image.PreserveAspectFit
+                                        }
+                                        Controls.BusyIndicator {
+                                            anchors.centerIn: parent
+                                            width: 28; height: 28
+                                            visible: preview.status === Image.Loading && root.motionEnabled
+                                            running: visible
+                                        }
+                                        Controls.Label {
+                                            anchors.centerIn: parent
+                                            width: parent.width - 12
+                                            horizontalAlignment: Text.AlignHCenter
+                                            color: root.muted
+                                            wrapMode: Text.WordWrap
+                                            text: preview.status === Image.Error ? "Screenshot unavailable" : "Loading…"
+                                            visible: preview.status === Image.Error || (preview.status === Image.Loading && !root.motionEnabled)
+                                        }
+                                    }
+                                }
+                            }
+                            TextEdit {
+                                objectName: "packageDetails"
+                                Layout.fillWidth: true
+                                readOnly: true
+                                selectByMouse: true
+                                color: root.muted
+                                padding: 0
+                                font.pixelSize: 14
+                                wrapMode: TextEdit.Wrap
+                                textFormat: TextEdit.PlainText
+                                text: root.detailMatchesSelection ? [root.detail.description || "",
+                                    root.detail.package.reference || root.detail.package.name,
+                                    [root.detail.package.scope_label, root.detail.package.architecture].filter(Boolean).join(" · "),
+                                    root.detail.homepage || "",
+                                    (root.detail.dependencies || []).length ? "Dependencies: " + root.detail.dependencies.join(", ") : ""].filter(Boolean).join("\n\n") : root.detail.failure ? ((root.detail.failure.error || "") + "\n" + (root.detail.hint || "")) : (root.detail.availability || "")
+                                Accessible.name: "Package details"
+                            }
                         }
                     }
                 }
@@ -1470,7 +1541,7 @@ Controls.ApplicationWindow {
                 ActionButton {
                     objectName: "upgradeAllButton"
                     visible: root.currentView === "Updates" && (root.uncheckedPackages.length === 0 || root.selectedCount() > 0)
-                    text: root.uncheckedPackages.length === 0 ? "Upgrade all" : "Upgrade selected"
+                    text: root.uncheckedPackages.length === 0 ? "Update all" : "Update selected"
                     symbol: "updates"
                     primary: true
                     enabled: !backend.busy && (root.uncheckedPackages.length > 0 || backend.upgradable)
@@ -1495,42 +1566,16 @@ Controls.ApplicationWindow {
                 Controls.Label {
                     objectName: "upgradeAllHint"
                     visible: root.currentView === "Updates" && !backend.upgradable && !backend.busy && root.items.some((row) => row.kind === "failure")
-                    text: "Upgrade all is unavailable while a source query fails. Select a failed row for details."
+                    text: "Update all is unavailable while a source has failed."
                     color: root.muted
                     font.pixelSize: 12
                     wrapMode: Text.WordWrap
                     Layout.fillWidth: true
                 }
                 ActionButton {
-                    objectName: "installButton"
-                    visible: root.selected !== null && root.selected.kind === "package" && !root.isInstalled(root.selected)
-                    text: "Install"
-                    symbol: "install"
-                    primary: true
-                    enabled: !backend.busy && root.selected !== null && root.selected.kind === "package" && !root.isInstalled(root.selected)
-                    onClicked: root.propose("install")
-                }
-                ActionButton {
-                    objectName: "removeButton"
-                    visible: root.selected !== null && root.isInstalled(root.selected)
-                    text: "Remove"
-                    symbol: "remove"
-                    enabled: !backend.busy && root.selected !== null && root.isInstalled(root.selected)
-                    onClicked: root.propose("remove")
-                }
-                ActionButton {
-                    objectName: "upgradeButton"
-                    visible: root.selected !== null && root.selected.update === "available"
-                    text: "Upgrade"
-                    symbol: "updates"
-                    primary: true
-                    enabled: !backend.busy && root.selected !== null && root.selected.update === "available"
-                    onClicked: root.propose("upgrade")
-                }
-                ActionButton {
                     objectName: "refreshButton"
                     visible: root.selected !== null && root.selected.kind === "source"
-                    text: "Refresh source"
+                    text: "Refresh sources"
                     symbol: "refresh"
                     primary: true
                     enabled: !backend.busy && root.selected !== null && root.selected.kind === "source" && root.selected.available
@@ -1542,6 +1587,41 @@ Controls.ApplicationWindow {
                     enabled: !backend.writing
                     onClicked: root.reload(true)
                 }
+            }
+        }
+    }
+    Controls.Dialog {
+        id: screenshotDialog
+        objectName: "screenshotDialog"
+        anchors.centerIn: parent
+        width: Math.min(root.width - 32, 1040)
+        height: Math.min(root.height - 32, 720)
+        modal: true
+        title: root.screenshotCaption || "Screenshot"
+        standardButtons: Controls.Dialog.Close
+        onClosed: root.screenshotUrl = ""
+        background: Rectangle { color: root.surface; radius: 10; border.color: root.line }
+        contentItem: Item {
+            Image {
+                id: fullScreenshot
+                anchors.fill: parent
+                source: screenshotDialog.visible ? root.screenshotUrl : ""
+                asynchronous: true
+                cache: true
+                sourceSize.width: 960
+                sourceSize.height: 540
+                fillMode: Image.PreserveAspectFit
+            }
+            Controls.BusyIndicator {
+                anchors.centerIn: parent
+                running: fullScreenshot.status === Image.Loading && root.motionEnabled
+                visible: running
+            }
+            Controls.Label {
+                anchors.centerIn: parent
+                color: root.muted
+                text: fullScreenshot.status === Image.Error ? "Screenshot unavailable" : "Loading…"
+                visible: fullScreenshot.status === Image.Error || (fullScreenshot.status === Image.Loading && !root.motionEnabled)
             }
         }
     }
@@ -1575,7 +1655,13 @@ Controls.ApplicationWindow {
         onAccepted: backend.confirm(true)
         onRejected: backend.confirm(false)
         contentItem: Controls.ScrollView {
-            Controls.TextArea {
+            id: confirmationScroll
+            contentWidth: availableWidth
+            clip: true
+            TextEdit {
+                width: confirmationScroll.availableWidth
+                color: root.ink
+                font.pixelSize: 14
                 text: backend.confirmation
                 readOnly: true
                 selectByMouse: true

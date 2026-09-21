@@ -147,10 +147,7 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
                 }
             });
             let completed = results.iter().filter(|r| r.is_ok()).count();
-            let mut status = format!(
-                "Completed {completed} of {} upgrades. Reload to see current package state.",
-                operations.len()
-            );
+            let mut status = format!("Completed {completed} of {} updates.", operations.len());
             for (operation, result) in operations.iter().zip(results) {
                 let outcome = match result {
                     Ok(outcome) if outcome.cancellation_deferred => {
@@ -347,7 +344,7 @@ fn plan_checked_upgrade(packages: &[Package], identities: &str) -> CheckedPlan {
         return CheckedPlan {
             operations: vec![],
             confirmation: String::new(),
-            status: Some("No selected packages can be upgraded.".into()),
+            status: Some("No selected packages can be updated.".into()),
         };
     }
     let count = operations.len();
@@ -358,7 +355,7 @@ fn plan_checked_upgrade(packages: &[Package], identities: &str) -> CheckedPlan {
         .join("\n\n");
     CheckedPlan {
         operations,
-        confirmation: format!("Upgrade {count} selected packages?\n\n{labels}\n\nEach source runs as one transaction. Native dependency changes may follow. Successful upgrades are not rolled back if another fails. Continue?"),
+        confirmation: format!("Update {count} selected packages?\n\n{labels}\n\nEach source runs as one transaction. Native dependency changes may follow. Successful updates are not rolled back if another fails. Continue?"),
         status: None,
     }
 }
@@ -407,9 +404,9 @@ fn operation_label(operation: &Operation) -> String {
     let (action, id) = match operation {
         Operation::Install(id) => ("Install", id),
         Operation::Remove(id) => ("Remove", id),
-        Operation::Upgrade(id) => ("Upgrade", id),
+        Operation::Upgrade(id) => ("Update", id),
         Operation::Refresh { backend } => return format!("Refresh metadata for {backend}"),
-        Operation::UpgradeAll { backend } => return format!("Upgrade all packages from {backend}"),
+        Operation::UpgradeAll { backend } => return format!("Update all packages from {backend}"),
     };
     format!(
         "{action} {}\nSource: {}\nArchitecture: {}\nScope: {}",
@@ -445,7 +442,18 @@ impl ffi::PackageController {
         let cached = self.as_mut().rust_mut().engine.take();
         let handle = thread::spawn(move || {
             let sources_view = matches!(&job, Job::Load(view, _) if view == "Sources");
-            let mut send = |reply| {
+            let mut send = |mut reply| {
+                match &mut reply {
+                    Reply::Partial(report) | Reply::Done(Ok(Payload::Packages(report))) => {
+                        for package in &mut report.packages {
+                            crate::metadata::catalog().enrich(package);
+                        }
+                    }
+                    Reply::Done(Ok(Payload::Details(details))) => {
+                        crate::metadata::catalog().enrich(&mut details.package)
+                    }
+                    _ => {}
+                }
                 let _ = sender.send(reply);
             };
             // Fast path: Details against a warm engine reuse detected state
@@ -660,7 +668,7 @@ impl ffi::PackageController {
                 .map(operation_label)
                 .collect::<Vec<_>>()
                 .join("\n\n");
-            self.as_mut().set_confirmation(format!("Upgrade all {count} listed packages?\n\n{labels}\n\nEach source runs as one transaction. Native dependency changes may follow. Successful upgrades are not rolled back if another fails. Continue?").as_str().into());
+            self.as_mut().set_confirmation(format!("Update all {count} listed packages?\n\n{labels}\n\nEach source runs as one transaction. Native dependency changes may follow. Successful updates are not rolled back if another fails. Continue?").as_str().into());
             self.rust_mut().pending = Some(Job::UpgradeAll(operations));
             return;
         }
@@ -825,8 +833,9 @@ impl ffi::PackageController {
                 if matches!(self.rust().queued, Some(Job::Load(..))) {
                     return;
                 }
+                let info = crate::metadata::cached_info(&details.package);
                 let data = encoded(
-                    json!({"package": package_row(&details.package, &same_app_sources(&self.rust().packages, &details.package.id), None), "description": details.description, "homepage": details.homepage, "dependencies": details.dependencies}),
+                    json!({"package": package_row(&details.package, &same_app_sources(&self.rust().packages, &details.package.id), None), "description": info.filter(|i| !i.description.is_empty()).map(|i| &i.description).unwrap_or(&details.description), "homepage": details.homepage.as_ref().or_else(|| info.and_then(|i| i.homepage.as_ref())), "dependencies": details.dependencies, "screenshots": info.map(|i| &i.screenshots)}),
                 );
                 // Bound memory use for large searches; reload and writes invalidate this snapshot.
                 if self.rust().detail_cache.len() >= 128 {
@@ -1250,7 +1259,7 @@ mod tests {
         assert!(empty.confirmation.is_empty());
         assert_eq!(
             empty.status.as_deref(),
-            Some("No selected packages can be upgraded.")
+            Some("No selected packages can be updated.")
         );
         // One live identity plans a single-upgrade batch with confirmation.
         let plan = plan_checked_upgrade(
@@ -1260,8 +1269,8 @@ mod tests {
         assert_eq!(plan.operations.len(), 1);
         assert!(matches!(&plan.operations[0], Operation::Upgrade(id) if id.name == "upgradable"));
         assert!(plan.status.is_none());
-        assert!(plan.confirmation.contains("Upgrade 1 selected packages?"));
-        assert!(plan.confirmation.contains("Upgrade upgradable"));
+        assert!(plan.confirmation.contains("Update 1 selected packages?"));
+        assert!(plan.confirmation.contains("Update upgradable"));
     }
     #[test]
     fn failure_details_carry_backend_error_and_hint() {
@@ -1515,7 +1524,7 @@ mod tests {
                         } else {
                             "Completed 1 of 1"
                         }));
-                        assert!(status.contains("Upgrade all packages from fixture"));
+                        assert!(status.contains("Update all packages from fixture"));
                         assert!(status.contains(if fail { "authorization" } else { "cancel" }));
                     }
                     Reply::Done(Ok(Payload::Written(outcome))) => {
