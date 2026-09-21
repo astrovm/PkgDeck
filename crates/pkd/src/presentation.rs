@@ -1,7 +1,7 @@
-//! Human presentation shared by the command-line and terminal interfaces.
+//! Human-readable command-line presentation.
 use pkgdeck_core::package::{Operation, Scope};
-use ratatui::text::Span;
 use serde_json::Value;
+use unicode_width::UnicodeWidthStr;
 
 pub fn clean(text: &str) -> String {
     text.chars()
@@ -64,10 +64,10 @@ fn value(value: &Value) -> String {
 fn cell(text: &str, width: usize) -> String {
     let text = clean(text);
     let mut output = String::new();
-    let clipped = Span::raw(&text).width() > width;
+    let clipped = text.width() > width;
     let limit = width.saturating_sub(usize::from(clipped));
     for c in text.chars() {
-        if Span::raw(format!("{output}{c}")).width() > limit {
+        if format!("{output}{c}").width() > limit {
             break;
         }
         output.push(c);
@@ -75,7 +75,7 @@ fn cell(text: &str, width: usize) -> String {
     if clipped && width > 0 {
         output.push('…');
     }
-    let padding = width.saturating_sub(Span::raw(&output).width());
+    let padding = width.saturating_sub(output.width());
     format!("{output}{}", " ".repeat(padding))
 }
 fn table(headers: &[&str], rows: &[Vec<String>], width: usize) -> String {
@@ -240,7 +240,7 @@ mod tests {
             let output = human(&data, width, false);
             assert!(!output.contains('\u{001b}'));
             for line in output.lines().skip(2).take(3) {
-                assert!(Span::raw(line).width() <= width);
+                assert!(line.width() <= width);
             }
             assert!(output.contains("fixture"));
         }

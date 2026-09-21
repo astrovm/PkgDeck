@@ -1,7 +1,7 @@
 # Graphical package browser
 
 `pkgdeck` opens the Qt/Kirigami frontend. It uses the same shared engine and
-host authorization boundary as the terminal frontend.
+host authorization boundary as the CLI.
 
 ![Implemented GUI](screenshots/pkgdeck-gui-live.png)
 

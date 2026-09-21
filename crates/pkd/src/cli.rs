@@ -260,7 +260,7 @@ fn emit(args: &Args, data: Value, code: u8) -> u8 {
     } else {
         let terminal = io::stdout().is_terminal();
         let width = if terminal {
-            crossterm::terminal::size().map_or(100, |(w, _)| usize::from(w))
+            rustix::termios::tcgetwinsize(io::stdout()).map_or(100, |size| usize::from(size.ws_col))
         } else {
             100
         };

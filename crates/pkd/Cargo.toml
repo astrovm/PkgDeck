@@ -12,11 +12,8 @@ serde.workspace = true
 serde_json.workspace = true
 pkgdeck-core.workspace = true
 clap.workspace = true
-crossterm.workspace = true
-ratatui.workspace = true
+unicode-width.workspace = true
+rustix = { workspace = true, features = ["termios"] }
 
 [lints]
 workspace = true
-
-[dev-dependencies.pkgdeck-tools]
-path = "../pkgdeck-tools"

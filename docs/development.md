@@ -79,11 +79,11 @@ The workflow is named `CI`. Checks use `Category / Scope (architecture)`:
 
 | Check | Responsibility |
 | --- | --- |
-| `Test / Terminal (x86_64, aarch64)` | Fast checks and Qt-free CLI/TUI builds, one job per architecture |
+| `Test / Terminal (x86_64, aarch64)` | Fast checks and Qt-free CLI builds, one job per architecture |
 | `Lint / Workspace (x86_64, aarch64)` | Workspace Clippy, one job per architecture |
 | `Coverage / Workspace (x86_64)` | Workspace tests with the 95% coverage gate |
 | `Test / Workspace (aarch64)` | Native workspace tests without instrumentation |
-| `Test / Podman (x86_64, aarch64)` | Container workspace tests and CLI/TUI APT/Homebrew lifecycles, one job per architecture |
+| `Test / Podman (x86_64, aarch64)` | Container workspace tests and CLI APT/Homebrew lifecycles, one job per architecture |
 | `Test / VM (x86_64)` | VM lifecycles and authorization checks |
 | `Test / Backend / <backend> (x86_64)` | Real native/development-manager lifecycle tests |
 | `Package / Linux (x86_64, aarch64)` | Release build, package formats, and packaged GUI lifecycles, one job per architecture |
@@ -184,8 +184,8 @@ x86_64 only. No preparation or test script is intended to run directly on the ho
 
 ## Native tooling
 
-`cargo xtask` runs the Rust acceptance drivers (`terminal`, `terminal-interactions`,
-`gui`, `gui-failure`, `gui-lifecycle`, and `qml`). Build it once with
+`cargo xtask` runs the Rust acceptance drivers (`gui`, `gui-failure`,
+`gui-lifecycle`, `gui-write`, `apt-lock-probe`, and `qml`). Build it once with
 `cargo build -p pkgdeck-tools`; `scripts/xtask.sh` invokes that binary for package
 checks. GUI drivers use private Xvfb servers and temporary settings directories.
 The 95% coverage gate continues to measure application Rust code and its build

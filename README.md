@@ -5,20 +5,16 @@ A unified package manager interface for Linux, built with Rust and Qt/Kirigami.
 PkgDeck is built from one codebase with two frontends:
 
 - `pkgdeck` — GUI frontend using Qt/Kirigami.
-- `pkd` — terminal frontend without Qt:
-  - `pkd` opens the interactive TUI.
-  - `pkd <command>` runs a normal CLI command.
+- `pkd` — CLI frontend without Qt. Run `pkd <command>` for package operations.
 
 Both use the shared `pkgdeck-core` Rust library.
 
 ## Preview
 
 Real captures from the current app. See the [implemented GUI](docs/gui.md)
-and [terminal guide](docs/tui.md) for the current interface and supported behavior.
+and [CLI guide](docs/cli.md) for the current interface and supported behavior.
 
 ![PkgDeck GUI](docs/screenshots/pkgdeck-gui.png)
-
-![pkd TUI](docs/screenshots/pkd-tui.png)
 
 ![pkd CLI](docs/screenshots/pkd-cli.png)
 
@@ -37,9 +33,7 @@ AppImage support will initially cover importing local Type 2 AppImages, desktop 
 ```text
 pkgdeck-core   Shared package-management logic
 pkgdeck        GUI frontend, with Qt/Kirigami
-pkd            Terminal frontend, without Qt
-               ├── TUI
-               └── CLI
+pkd            CLI frontend, without Qt
 ```
 
 ```text
@@ -52,9 +46,9 @@ pkd ─────┘
 
 Each backend exposes the operations it actually supports, such as detection, search, package details, installed packages, install, remove, update, and upgrade. Unsupported operations are reported explicitly.
 
-## Terminal interface
+## Command-line interface
 
-Running `pkd` without arguments opens the interactive TUI:
+Running `pkd` without arguments prints CLI help and exits successfully:
 
 ```sh
 pkd
@@ -80,7 +74,7 @@ Commands support machine-readable `--json` output. Writes require `--yes` in
 non-interactive or JSON mode. See the [CLI contract](docs/cli.md) for source
 selection, authorization, exit codes, prerequisites, and examples.
 
-If stdin or stdout is not attached to a terminal, `pkd` without arguments must not attempt to start the TUI.
+Help and read commands work without a terminal or graphical session.
 
 ## Implementation plan
 
@@ -98,8 +92,8 @@ verifies the complete x86_64/aarch64 build, test, coverage, and package matrix.
 
 - Create the `pkgdeck-core`, `pkd`, and `pkgdeck` Cargo workspace.
 - Keep Qt entirely within `pkgdeck`; build `pkd` independently without Qt.
-- Pin Rust, Qt 6, Kirigami, CXX-Qt, and the terminal libraries.
-- Add minimal Qt/Kirigami and Ratatui/Crossterm application shells.
+- Pin Rust, Qt 6, Kirigami, CXX-Qt, and the CLI libraries.
+- Build the Qt/Kirigami GUI and Clap CLI entry points.
 - Build both executables and Flatpak, AppImage, and Snap packages in GitHub
   Actions on native x86_64 and aarch64 runners.
 - Enforce formatting, linting, behavioral smoke tests, and at least 95% Rust
@@ -158,29 +152,13 @@ JSON results, and explicit confirmation. See the [CLI contract](docs/cli.md).
 - Add the documented CLI commands, source selection, consistent exit codes,
   machine-readable JSON, and explicit non-interactive confirmation behavior.
 - Keep diagnostics and progress separate from machine-readable output.
-- Preserve the no-argument terminal check; never launch the TUI when stdin or
-  stdout is not a terminal.
+- Print CLI help when no subcommand is supplied, including with redirected input/output.
 
 **Acceptance:** synthetic versioned packages complete detect → search/details →
 install → detect update → upgrade → remove. Verify final state using the real
 underlying managers in isolated environments.
 
-### 5. Interactive TUI — implemented
-
-Search, installed packages, updates, sources, exact-identity confirmations, and
-background operations are implemented. See the [TUI guide](docs/tui.md).
-PTY tests exercise interaction and terminal restoration; disposable containers
-verify the APT/Homebrew lifecycle through the TUI against native package state.
-
-- Add search, results, package details, installed packages, updates, and sources.
-- Add confirmation, progress, cancellation, errors, and authentication failures.
-- Use the reference's results-above-details layout and shortcut footer; adapt to
-  narrow terminals and provide text fallbacks for icons.
-
-**Acceptance:** the APT/Homebrew lifecycle works without Qt or a graphical session;
-pseudo-terminal tests cover keyboard navigation, resize, and terminal restoration.
-
-### 6. GUI — implemented
+### 5. GUI — implemented
 
 The Qt/Kirigami browser now uses an asynchronous CXX-Qt facade over the shared
 engine. It provides source-aware package actions, persistent settings, responsive
@@ -200,20 +178,19 @@ Qt Quick tests and packaged-app end-to-end tests.
 
 ### Frontend polish — implemented
 
-The GUI, TUI, and CLI now share the references' results-first layout and clear
+The GUI and CLI present package results with clear
 source identity. The GUI adds light/dark/system appearance, contextual actions,
-and compact navigation. The TUI adds styled tables and readable operation
-confirmations. Human CLI output uses aligned tables and labeled details; `--json`
+and compact navigation. Human CLI output uses aligned tables and labeled details; `--json`
 retains its versioned contract. Terminal color is omitted when output is piped or
-`NO_COLOR` is set (CLI and TUI).
+`NO_COLOR` is set.
 
-Search results stream in per backend in both interactive frontends, and the
+Search results stream in per backend in the GUI, and the
 selection follows the same package identity across partials. Package details
 reuse a shared cache, each backend is detected at discovery time rather than
 on every selection and query, and failed source rows are selectable for diagnostics.
 
 GUI detail snapshots avoid repeated native queries and are invalidated on reload
-or writes. The TUI no longer redraws continuously while idle. Local checks cover
+or writes. Local checks cover
 keyboard flows, narrow layouts, cache reuse/invalidation, human output, and the
 existing synthetic/native lifecycle suites.
 
@@ -221,10 +198,10 @@ existing synthetic/native lifecycle suites.
 
 The GUI embeds its own vector icons for navigation, actions, package details, and
 sources. Every package carries them inside the executable; they do not depend on
-a host icon theme or icon font. The TUI and human CLI use portable ASCII state
+a host icon theme or icon font. The human CLI uses portable ASCII state
 symbols with text labels, retaining ordinary terminal-font support and unchanged
 JSON output. See the [GUI guide](docs/gui.md#bundled-icons) and
-[terminal guide](docs/tui.md#portable-status-symbols).
+[CLI guide](docs/cli.md).
 
 ### Upgrade all in the GUI — implemented
 
@@ -237,7 +214,7 @@ The sidebar now displays “Made with ♥ by astro” and a bundled GitHub link 
 
 - A separate native APT reader uses libapt-pkg for candidate policy and metadata.
   Packages include the helper, its library dependencies, and license notices.
-- Rust acceptance drivers cover terminal interaction, GUI behavior, and package
+- Rust acceptance drivers cover CLI output, GUI behavior, and package
   smoke tests. Shell scripts handle staging and disposable guest provisioning.
 - Qt and CMake install directly from archives with committed SHA-256 pins for
   x86_64 and aarch64; SDK setup no longer creates a language environment.
@@ -247,7 +224,7 @@ The sidebar now displays “Made with ♥ by astro” and a bundled GitHub link 
 Native APT searches scan compressed indexes in file-offset order to avoid repeated
 decompression. See [development and verification](docs/development.md#native-tooling).
 
-### 7. Additional backends — planned
+### 6. Additional backends — planned
 
 Add each wave only after its advertised capabilities pass integration tests.
 
@@ -265,7 +242,7 @@ selected virtual environments.
 **Acceptance:** each enabled capability has synthetic success/failure fixtures
 and lifecycle tests that confirm state through its underlying manager.
 
-### 8. Release automation and distribution validation — planned
+### 7. Release automation and distribution validation — planned
 
 - Validate both entry points, desktop integration, host access, authorization,
   and architecture-specific limitations in each installed package format.
@@ -291,7 +268,7 @@ and Homebrew tests. VM dependencies are cached separately from test overlays.
 The CLI supports package operations across all backends (system managers, Flatpak,
 Snap, Homebrew, AppImage, and development managers) and `pkd doctor` diagnostics.
 The core contains their adapters, the shared engine, and the host authorization
-boundary. Both the interactive TUI and GUI use the same engine. Release
+boundary. The GUI and CLI use the same engine. Release
 publication remains a later step.
 
 Pinned baseline:
@@ -303,7 +280,6 @@ Pinned baseline:
 | Kirigami / Extra CMake Modules | 6.24.0 |
 | CXX-Qt | 0.10.0 |
 | CXX / CXX generator | 1.0.202 / 0.7.202 |
-| Ratatui / Crossterm | 0.30.2 / 0.29.0 |
 | Clap | 4.6.6 |
 | Serde / serde_json | 1.0.229 / 1.0.151 |
 | signal-hook (CLI) | 0.4.4 |
@@ -316,7 +292,7 @@ Qt, KDE, CMake, and Ninja come from Ubuntu 26.04 packages. Project runtime, buil
 The operating system and independently installed package managers may have their
 own dependencies.
 
-Build and test the terminal frontend without installing Qt:
+Build and test the CLI without installing Qt:
 
 ```sh
 cargo build --locked -p pkd
@@ -327,10 +303,7 @@ cargo run --locked -p pkd -- doctor
 cargo run --locked -p pkd
 ```
 
-The last command opens the package browser in a terminal. See the
-[TUI shortcuts and authorization guide](docs/tui.md). Use `q` to exit when idle.
-With piped input/output, no-argument execution fails with exit code 2.
-Pseudo-terminal tests use the Rust acceptance driver and synthetic shell fixtures;
+The last command prints CLI help. CLI tests use synthetic shell fixtures;
 install jq for the fixtures.
 
 For the GUI, install the Ubuntu 26.04 Qt/KDE development packages, a C++ compiler, CMake, Ninja, and LLD:
@@ -368,19 +341,19 @@ only, not PkgDeck distribution.
 
 ## Packaging and releases
 
-Package `pkgdeck` and `pkd` together in every distribution format. There is no separate CLI or TUI release.
+Package `pkgdeck` and `pkd` together in every distribution format. There is no separate CLI release.
 
 All release formats must support **x86_64** and **aarch64**. Architecture-specific backend limitations must be detected and documented rather than silently falling back.
 
 The planned application ID is `io.github.astrovm.PkgDeck`.
 
-| Format   | GUI                                     | Terminal interface                                                |
+| Format   | GUI                                     | CLI                                                |
 | -------- | --------------------------------------- | ----------------------------------------------------------------- |
 | Flatpak  | `flatpak run io.github.astrovm.PkgDeck` | `flatpak run --command=pkd io.github.astrovm.PkgDeck [arguments]` |
 | AppImage | `./PkgDeck.AppImage`                    | `./PkgDeck.AppImage --cli [arguments]`                            |
 | Snap     | `pkgdeck`                               | `pkgdeck.pkd [arguments]`                                         |
 
-With no terminal arguments, the `pkd` entry point opens the TUI. With a subcommand, it behaves as a normal CLI.
+The `pkd` entry point prints help when no subcommand is supplied.
 
 ### Flatpak
 
@@ -433,7 +406,6 @@ Use real package-manager commands, synthetic versioned packages, and isolated en
 | AppImage                 | CI-built Type 2 fixtures; extraction-based tests in containers and FUSE launch in a VM.                   |
 | Development managers     | Disposable users, homes, prefixes, virtual environments, and controlled test registries.                  |
 | GUI                      | Qt Quick Test plus end-to-end packaged-app tests.                                                         |
-| TUI                      | Terminal interaction tests in a pseudo-terminal, including resize, keyboard navigation, and cancellation. |
 | CLI                      | Tests without a display server, including scripting, JSON output, exit codes, and non-interactive paths.  |
 | Architectures            | Build and run relevant tests on both x86_64 and aarch64.                                                  |
 | Coverage                 | `cargo llvm-cov` with a minimum 95% Rust line-coverage threshold.                                         |
