@@ -3,3 +3,6 @@
 mod controller;
 
 mod metadata;
+
+#[allow(unsafe_code)]
+pub mod network;

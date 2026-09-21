@@ -18,6 +18,7 @@ fn main() {
     }
     QGuiApplication::set_desktop_file_name(&pkgdeck_core::APP_ID.into());
     let mut engine = QQmlApplicationEngine::new();
+    pkgdeck::network::ffi::configure_network(engine.as_mut().unwrap());
     let _failure = engine.as_mut().unwrap().on_object_creation_failed(|_, _| {
         std::process::exit(1);
     });

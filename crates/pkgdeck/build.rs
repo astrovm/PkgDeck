@@ -9,5 +9,8 @@ fn main() {
     )
     .qrc("resources.qrc")
     .file("src/controller.rs")
+    .file("src/network.rs")
+    .qt_module("Network")
+    .cpp_files(["native/network.cpp", "native/providers.cpp"])
     .build();
 }

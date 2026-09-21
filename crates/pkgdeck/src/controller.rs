@@ -71,6 +71,7 @@ enum Payload {
 enum Reply {
     Progress(String),
     Partial(PackageReport),
+    DetailsPreview(Box<PackageDetails>),
     Done(Result<Payload, EngineError>),
     Engine(Engine),
 }
@@ -422,6 +423,27 @@ fn package_row(p: &Package, same_from: &[String], same_group: Option<&str>) -> V
         "candidate": p.candidate_version, "update": p.update, "kind": "package", "icon": p.icon,
         "same_app_from": same_from, "same_app_group": same_group})
 }
+fn update_detail_name(
+    packages: &mut [Package],
+    rows: &str,
+    detail: &Package,
+) -> Option<Vec<Value>> {
+    if detail.display_name.is_empty() {
+        return None;
+    }
+    let index = packages.iter().position(|package| {
+        package.id == detail.id && package.display_name != detail.display_name
+    })?;
+    let mut rows: Vec<Value> = serde_json::from_str(rows).ok()?;
+    rows.get_mut(index)?
+        .as_object_mut()?
+        .insert("display_name".into(), json!(detail.display_name));
+    packages[index]
+        .display_name
+        .clone_from(&detail.display_name);
+    Some(rows)
+}
+
 impl ffi::PackageController {
     fn start(mut self: Pin<&mut Self>, job: Job) {
         if self.rust().worker.is_some() {
@@ -446,11 +468,13 @@ impl ffi::PackageController {
                 match &mut reply {
                     Reply::Partial(report) | Reply::Done(Ok(Payload::Packages(report))) => {
                         for package in &mut report.packages {
-                            crate::metadata::catalog().enrich(package);
+                            crate::metadata::enrich(package);
                         }
                     }
                     Reply::Done(Ok(Payload::Details(details))) => {
-                        crate::metadata::catalog().enrich(&mut details.package)
+                        crate::metadata::enrich(&mut details.package);
+                        let _ = sender.send(Reply::DetailsPreview(details.clone()));
+                        crate::metadata::details(&mut details.package, &token)
                     }
                     _ => {}
                 }
@@ -558,6 +582,8 @@ impl ffi::PackageController {
         // Details survive view switches so re-selecting a package is
         // instant; only an explicit reload or a write may invalidate them.
         if force {
+            crate::metadata::invalidate();
+            self.as_mut().rust_mut().view_cache.clear();
             self.as_mut().rust_mut().detail_cache.clear();
         }
         self.as_mut().rust_mut().packages.clear();
@@ -833,9 +859,20 @@ impl ffi::PackageController {
                 if matches!(self.rust().queued, Some(Job::Load(..))) {
                     return;
                 }
+                // Provider metadata may improve a name after opening details.
+                // Preserve inventory state and only update presentation fields.
+                let rows = self.rows().to_string();
+                if let Some(rows) = update_detail_name(
+                    &mut self.as_mut().rust_mut().packages,
+                    &rows,
+                    &details.package,
+                ) {
+                    self.as_mut().set_rows(encoded(rows));
+                    self.as_mut().rust_mut().view_cache.clear();
+                }
                 let info = crate::metadata::cached_info(&details.package);
                 let data = encoded(
-                    json!({"package": package_row(&details.package, &same_app_sources(&self.rust().packages, &details.package.id), None), "description": info.filter(|i| !i.description.is_empty()).map(|i| &i.description).unwrap_or(&details.description), "homepage": details.homepage.as_ref().or_else(|| info.and_then(|i| i.homepage.as_ref())), "dependencies": details.dependencies, "screenshots": info.map(|i| &i.screenshots)}),
+                    json!({"package": package_row(&details.package, &same_app_sources(&self.rust().packages, &details.package.id), None), "description": info.as_ref().filter(|i| !i.description.is_empty()).map(|i| &i.description).unwrap_or(&details.description), "homepage": details.homepage.as_ref().or_else(|| info.as_ref().and_then(|i| i.homepage.as_ref())), "dependencies": details.dependencies, "screenshots": info.as_ref().map(|i| &i.screenshots)}),
                 );
                 // Bound memory use for large searches; reload and writes invalidate this snapshot.
                 if self.rust().detail_cache.len() >= 128 {
@@ -860,6 +897,7 @@ impl ffi::PackageController {
                 self.set_status(status.as_str().into());
             }
             Ok(Payload::Written(outcome)) => {
+                crate::metadata::invalidate();
                 self.as_mut().set_upgradable(false);
                 // Any native write may change dependencies belonging to
                 // another listed package: drop every cached view with them.
@@ -898,6 +936,9 @@ impl ffi::PackageController {
                         self.as_mut().rust_mut().engine = Some(engine);
                     }
                     Reply::Partial(report) => self.as_mut().apply(Ok(Payload::Packages(report))),
+                    Reply::DetailsPreview(details) => {
+                        self.as_mut().apply(Ok(Payload::Details(details)))
+                    }
                     Reply::Done(result) => {
                         // Snapshot terminal view reports for instant
                         // switching back, unless a newer load already
@@ -942,6 +983,9 @@ impl ffi::PackageController {
             for reply in replies {
                 match reply {
                     Reply::Partial(report) => self.as_mut().apply(Ok(Payload::Packages(report))),
+                    Reply::DetailsPreview(details) => {
+                        self.as_mut().apply(Ok(Payload::Details(details)))
+                    }
                     Reply::Progress(message) => {
                         self.as_mut().set_status(message.as_str().into());
                     }
@@ -1063,6 +1107,39 @@ mod tests {
         assert!(cache.get("a").is_none());
         cache.clear();
         assert!(cache.entries.is_empty());
+    }
+    #[test]
+    fn friendly_detail_names_preserve_exact_identity_and_inventory_state() {
+        let original: Package = serde_json::from_value(json!({
+            "id": {"backend":"snap", "name":"player", "architecture":"all", "scope":"system"},
+            "display_name":"player", "summary":"Local summary", "installed_version":"1",
+            "candidate_version":"2", "update":"available"
+        }))
+        .unwrap();
+        let mut packages = vec![original.clone()];
+        let rows = serde_json::to_string(&vec![package_row(&original, &[], None)]).unwrap();
+        let mut detail = original.clone();
+        detail.display_name = "Friendly Player".into();
+        detail.installed_version = None;
+        detail.candidate_version = Some("99".into());
+        let updated = update_detail_name(&mut packages, &rows, &detail).unwrap();
+        assert_eq!(updated[0]["display_name"], "Friendly Player");
+        assert_eq!(updated[0]["installed"], "1");
+        assert_eq!(updated[0]["candidate"], "2");
+        let mut expected = original.clone();
+        expected.display_name = "Friendly Player".into();
+        assert_eq!(packages, [expected]);
+        assert!(update_detail_name(&mut packages, &rows, &detail).is_none());
+        packages[0] = original.clone();
+        detail.id.scope = Scope::User { uid: 1000 };
+        assert!(update_detail_name(&mut packages, &rows, &detail).is_none());
+        detail.id = original.id.clone();
+        for malformed in ["broken", "[]", "[null]"] {
+            assert!(update_detail_name(&mut packages, malformed, &detail).is_none());
+            assert_eq!(packages[0], original);
+        }
+        detail.display_name.clear();
+        assert!(update_detail_name(&mut packages, &rows, &detail).is_none());
     }
     #[test]
     fn controller_version_tracks_package_metadata() {

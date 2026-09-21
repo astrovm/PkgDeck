@@ -298,6 +298,7 @@ jobs:
           source scripts/dev-env.sh
           cargo build --locked -p pkgdeck-tools
           scripts/bundle.sh
+          scripts/tests/media-cache.sh "$PWD/build/AppDir/usr"
           test -x build/AppDir/usr/lib/pkgdeck/appimageupdatetool.AppImage
           desktop-file-validate assets/io.github.astrovm.PkgDeck.desktop
           unset LD_LIBRARY_PATH QML_IMPORT_PATH

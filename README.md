@@ -314,7 +314,7 @@ install jq for the fixtures.
 For the GUI, install the Ubuntu 26.04 Qt/KDE development packages, a C++ compiler, CMake, Ninja, and LLD:
 
 ```sh
-sudo apt-get install qt6-base-dev qt6-declarative-dev qt6-declarative-dev-tools qt6-tools-dev qt6-shadertools-dev qt6-wayland libkirigami-dev extra-cmake-modules
+sudo apt-get install qt6-base-dev qt6-declarative-dev qt6-declarative-dev-tools qt6-tools-dev qt6-shadertools-dev qt6-wayland qt6-svg-plugins qt6-image-formats-plugins libkirigami-dev extra-cmake-modules
 source scripts/dev-env.sh
 cargo build --workspace --locked
 cargo test --workspace --locked

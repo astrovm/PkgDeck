@@ -23,10 +23,24 @@ Local AppStream catalogs supply friendly desktop app names, descriptions,
 homepages, and screenshots where available. Packages without desktop metadata
 keep their native names. Details retain the native identity, architecture, and
 scope. Screenshot thumbnails load asynchronously only for the selected app;
-clicking one opens a larger viewer. Qt caches loaded images in memory. Missing
+clicking one opens a larger viewer. Local desktop entries add fallback names for
+native apps, Snap, and Flatpak exports. Opening details can fill missing metadata
+from Snap Store or from Flathub for packages explicitly sourced from Flathub;
+searches do not issue per-result web requests. These optional requests check the
+returned package ID, allow cancellation, and have a four-second deadline. Missing
 metadata leaves the gallery hidden, and failed images show a compact fallback.
-Catalogs are read once per GUI session on the worker; no metadata service is
-needed. Package identities and native operations remain unchanged.
+Package identities and native operations remain unchanged.
+
+Catalogs are cached in memory and rebuilt on the worker after Reload or a package
+operation, including Refresh sources. View/detail snapshots are invalidated with
+them, so refreshed names and screenshots appear without restarting.
+
+Images use a persistent Qt disk cache under the user's standard cache directory,
+bounded to 64 MiB; provider JSON uses a separate 8 MiB cache. Server expiry is
+honored and capped at seven days (one day when unspecified). Another process
+holding the cache lock, an unwritable cache, offline providers, or invalid data
+does not prevent native package browsing. TLS certificates are validated normally.
+Flatpak and Snap GUI packages permit network access for this metadata and media.
 
 Rows show versions without repeating “installed”; an arrow between versions
 marks an available update. Search and Installed rows have an install or remove
@@ -155,7 +169,7 @@ without a local icon keep the generic source symbol.
 ## Local verification
 
 `scripts/verify.sh full --only tests --engine podman` runs Qt Quick tests against the actual Browser component,
-Rust worker tests, and a real-window lifecycle using a synthetic Homebrew
+Rust worker tests, an isolated HTTPS/WebP cache fixture, and a real-window lifecycle using a synthetic Homebrew
 executable. The real-window test creates a private Xvfb display; it does not use
 the user's display or package database. It verifies native fixture state after
 install, refresh, upgrade, and removal, and exercises resize and read cancellation.
@@ -207,3 +221,8 @@ main app from each source can be compared. Each package row has an install arrow
 or a remove icon, with an accessible action label and the usual confirmation.
 Installed versions no longer repeat an “installed” status label. Flatpak search
 uses local inventory to choose the action and preserves the native branch.
+
+`scripts/tests/media-cache.sh` uses a generated localhost certificate and synthetic
+WebP image to verify HTTPS loading, certificate rejection, cache expiry, and reuse
+across separate processes. Passing `build/AppDir/usr` runs the same check with the
+staged Qt libraries and plugins; packaging CI runs it before creating artifacts.

@@ -1,13 +1,19 @@
 //! Optional local AppStream presentation metadata. Native package identities
 //! remain authoritative; this catalog never supplies package operations.
-use pkgdeck_core::package::Package;
+use pkgdeck_core::{
+    package::{Package, PackageId},
+    process::Cancellation,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     io::Read,
     path::{Path, PathBuf},
-    sync::{Arc, OnceLock},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
 };
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -22,20 +28,245 @@ pub struct AppInfo {
     pub homepage: Option<String>,
     pub screenshots: Vec<Screenshot>,
 }
+impl AppInfo {
+    fn fill_missing(&mut self, other: &Self) {
+        if self.name.is_empty() {
+            self.name.clone_from(&other.name);
+        }
+        if self.description.is_empty() {
+            self.description.clone_from(&other.description);
+        }
+        if self.homepage.is_none() {
+            self.homepage.clone_from(&other.homepage);
+        }
+        if self.screenshots.is_empty() {
+            self.screenshots.clone_from(&other.screenshots);
+        }
+    }
+}
 #[derive(Default)]
-pub struct Catalog(BTreeMap<String, Arc<AppInfo>>);
-static CATALOG: OnceLock<Catalog> = OnceLock::new();
-
-pub fn catalog() -> &'static Catalog {
-    CATALOG.get_or_init(|| {
+pub struct Catalog {
+    aliases: BTreeMap<String, String>,
+    apps: BTreeMap<String, AppInfo>,
+}
+#[derive(Default)]
+struct CatalogCache {
+    generation: AtomicU64,
+    snapshot: Mutex<Option<(u64, Arc<Catalog>)>>,
+}
+static CATALOG: CatalogCache = CatalogCache {
+    generation: AtomicU64::new(0),
+    snapshot: Mutex::new(None),
+};
+impl CatalogCache {
+    fn invalidate(&self) {
+        self.generation.fetch_add(1, Ordering::AcqRel);
+    }
+    fn cached(&self) -> Option<Arc<Catalog>> {
+        let current = self.generation.load(Ordering::Acquire);
+        self.snapshot
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|(generation, _)| *generation == current)
+            .map(|(_, catalog)| catalog.clone())
+    }
+    fn get(&self, load: impl FnOnce() -> Catalog) -> Arc<Catalog> {
+        if let Some(catalog) = self.cached() {
+            return catalog;
+        }
+        let generation = self.generation.load(Ordering::Acquire);
+        // File reads and parsing run on the worker, outside the publication lock.
+        let catalog = Arc::new(load());
+        let mut snapshot = self.snapshot.lock().unwrap();
+        if self.generation.load(Ordering::Acquire) == generation {
+            *snapshot = Some((generation, catalog.clone()));
+        }
+        catalog
+    }
+}
+pub fn invalidate() {
+    CATALOG.invalidate();
+    REMOTE.lock().unwrap().clear();
+}
+pub fn catalog() -> Arc<Catalog> {
+    CATALOG.get(|| {
         Catalog::load(
             Path::new("/"),
             std::env::var_os("HOME").as_deref().map(Path::new),
         )
     })
 }
-pub fn cached_info(package: &Package) -> Option<&'static AppInfo> {
-    CATALOG.get()?.find(package)
+pub fn cached_info(package: &Package) -> Option<AppInfo> {
+    REMOTE
+        .lock()
+        .unwrap()
+        .get(&package.id)
+        .filter(|(generation, _)| *generation == CATALOG.generation.load(Ordering::Acquire))
+        .map(|(_, info)| info.clone())
+        .or_else(|| CATALOG.cached()?.find(package).cloned())
+}
+static REMOTE: Mutex<BTreeMap<PackageId, (u64, AppInfo)>> = Mutex::new(BTreeMap::new());
+pub fn enrich(package: &mut Package) {
+    catalog().enrich(package);
+    if let Some(info) = cached_info(package).filter(|info| !info.name.is_empty()) {
+        package.display_name = info.name;
+    }
+}
+pub fn details(package: &mut Package, cancel: &Cancellation) {
+    enrich(package);
+    let generation = CATALOG.generation.load(Ordering::Acquire);
+    if REMOTE
+        .lock()
+        .unwrap()
+        .get(&package.id)
+        .is_some_and(|(cached, _)| *cached == generation)
+    {
+        return;
+    }
+    let Some(info) = detail_info(
+        package,
+        cached_info(package).unwrap_or_default(),
+        cancel,
+        |url| {
+            crate::network::ffi::fetch_metadata(
+                &url.into(),
+                &crate::network::LookupCancellation(cancel.clone()),
+            )
+            .to_string()
+        },
+    ) else {
+        return;
+    };
+    if cancel.requested() || CATALOG.generation.load(Ordering::Acquire) != generation {
+        return;
+    }
+    if !info.name.is_empty() {
+        package.display_name.clone_from(&info.name);
+    }
+    let mut remote = REMOTE.lock().unwrap();
+    if remote.len() >= 128 {
+        remote.clear();
+    }
+    remote.insert(package.id.clone(), (generation, info));
+}
+fn detail_info(
+    package: &Package,
+    mut info: AppInfo,
+    cancel: &Cancellation,
+    fetch: impl FnOnce(&str) -> String,
+) -> Option<AppInfo> {
+    if cancel.requested() {
+        return None;
+    }
+    // Searches stay local. Only an opened detail view may use its own provider.
+    if info.screenshots.is_empty() {
+        if let Some(url) = provider_url(package) {
+            if let Some(remote) = provider_info(package, &fetch(&url)) {
+                info.fill_missing(&remote);
+            }
+        }
+    }
+    (!cancel.requested()).then_some(info)
+}
+fn provider_url(package: &Package) -> Option<String> {
+    let name = &package.id.name;
+    if name.is_empty()
+        || !name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b".-_".contains(&b))
+    {
+        return None;
+    }
+    match package.id.backend.as_str() {
+        "flatpak" if package.id.remote.as_deref() == Some("flathub") => {
+            Some(format!("https://flathub.org/api/v2/appstream/{name}"))
+        }
+        "snap" => Some(format!("https://api.snapcraft.io/v2/snaps/info/{name}")),
+        _ => None,
+    }
+}
+fn description(value: &str) -> String {
+    roxmltree::Document::parse(&format!("<description>{value}</description>"))
+        .map(|doc| plain(doc.root_element()))
+        .unwrap_or_else(|_| {
+            if value.contains('<') {
+                String::new()
+            } else {
+                value.into()
+            }
+        })
+}
+fn provider_info(package: &Package, text: &str) -> Option<AppInfo> {
+    let value: serde_json::Value = serde_json::from_str(text).ok()?;
+    let (name, summary, body, homepage, shots) = match package.id.backend.as_str() {
+        "flatpak" if value["id"].as_str() == Some(&package.id.name) => {
+            let shots = value["screenshots"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|shot| {
+                    let url = shot["sizes"]
+                        .as_array()?
+                        .iter()
+                        .filter_map(|image| {
+                            Some((
+                                image["width"].as_u64().unwrap_or(0),
+                                web_url(image["src"].as_str()?)?,
+                            ))
+                        })
+                        .max_by_key(|(width, _)| *width)?
+                        .1;
+                    Some(Screenshot {
+                        url,
+                        caption: shot["caption"].as_str().unwrap_or("").into(),
+                    })
+                })
+                .take(8)
+                .collect();
+            (
+                &value["name"],
+                &value["summary"],
+                &value["description"],
+                &value["urls"]["homepage"],
+                shots,
+            )
+        }
+        "snap" if value["snap"]["name"].as_str() == Some(&package.id.name) => {
+            let snap = &value["snap"];
+            let shots = snap["media"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|shot| shot["type"].as_str() == Some("screenshot"))
+                .filter_map(|shot| {
+                    Some(Screenshot {
+                        url: web_url(shot["url"].as_str()?)?,
+                        caption: String::new(),
+                    })
+                })
+                .take(8)
+                .collect();
+            (
+                &snap["title"],
+                &snap["summary"],
+                &snap["description"],
+                &snap["store-url"],
+                shots,
+            )
+        }
+        _ => return None,
+    };
+    let mut info = AppInfo {
+        name: name.as_str().unwrap_or("").into(),
+        description: description(body.as_str().unwrap_or("")),
+        homepage: homepage.as_str().and_then(web_url),
+        screenshots: shots,
+    };
+    if info.description.is_empty() {
+        info.description = summary.as_str().unwrap_or("").into();
+    }
+    Some(info)
 }
 fn web_url(value: &str) -> Option<String> {
     let value = value.trim();
@@ -112,17 +343,23 @@ impl Catalog {
         ) {
             return None;
         }
-        package
+        let key = package
             .component_ids
             .iter()
-            .chain(std::iter::once(&package.id.name))
-            .find_map(|id| self.0.get(&format!("id:{}", stem(id))))
+            .find_map(|id| self.aliases.get(&format!("id:{}", stem(id))))
+            .or_else(|| {
+                self.aliases.get(&format!(
+                    "source:{}:{}",
+                    package.id.backend, package.id.name
+                ))
+            })
+            .or_else(|| self.aliases.get(&format!("id:{}", stem(&package.id.name))))
             .or_else(|| {
                 (package.id.backend != "flatpak")
-                    .then(|| self.0.get(&format!("pkg:{}", package.id.name)))
+                    .then(|| self.aliases.get(&format!("pkg:{}", package.id.name)))
                     .flatten()
-            })
-            .map(Arc::as_ref)
+            })?;
+        self.apps.get(key)
     }
     pub fn enrich(&self, package: &mut Package) {
         if let Some(info) = self.find(package) {
@@ -143,23 +380,20 @@ impl Catalog {
                     .map(|name| format!("pkg:{name}")),
             )
             .collect();
-        if let Some(previous) = keys.iter().find_map(|key| self.0.get(key)) {
-            if info.name.is_empty() {
-                info.name.clone_from(&previous.name);
-            }
-            if info.description.is_empty() {
-                info.description.clone_from(&previous.description);
-            }
-            if info.homepage.is_none() {
-                info.homepage.clone_from(&previous.homepage);
-            }
-            if info.screenshots.is_empty() {
-                info.screenshots.clone_from(&previous.screenshots);
-            }
+        let Some(canonical) = keys
+            .iter()
+            .find_map(|key| self.aliases.get(key))
+            .cloned()
+            .or_else(|| keys.first().cloned())
+        else {
+            return;
+        };
+        if let Some(previous) = self.apps.get(&canonical) {
+            info.fill_missing(previous);
         }
-        let info = Arc::new(info);
+        self.apps.insert(canonical.clone(), info);
         for key in keys {
-            self.0.insert(key, info.clone());
+            self.aliases.insert(key, canonical.clone());
         }
     }
     fn xml(&mut self, text: &str) {
@@ -260,8 +494,17 @@ impl Catalog {
                 })
                 .take(8)
                 .collect();
+            let ids = std::iter::once(id.to_owned())
+                .chain(
+                    value["Launchable"]["desktop-id"]
+                        .as_sequence()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|id| id.as_str().map(str::to_owned)),
+                )
+                .collect();
             self.insert(
-                vec![id.to_owned()],
+                ids,
                 value["Package"]
                     .as_str()
                     .map(str::to_owned)
@@ -282,13 +525,101 @@ impl Catalog {
             );
         }
     }
+    fn desktop(&mut self, path: &Path) {
+        let Ok(file) = fs::File::open(path) else {
+            return;
+        };
+        let mut text = String::new();
+        if file.take(1024 * 1024).read_to_string(&mut text).is_err() {
+            return;
+        }
+        let mut fields = BTreeMap::new();
+        let mut entry = false;
+        for line in text.lines().map(str::trim) {
+            if line.starts_with('[') {
+                entry = line == "[Desktop Entry]";
+            } else if entry && !line.starts_with('#') {
+                if let Some((key, value)) = line.split_once('=') {
+                    fields.insert(key.trim(), value.trim());
+                }
+            }
+        }
+        if fields.get("Type") != Some(&"Application")
+            || fields.get("Hidden") == Some(&"true")
+            || fields.get("NoDisplay") == Some(&"true")
+        {
+            return;
+        }
+        let Some(name) = fields.get("Name").filter(|name| !name.is_empty()) else {
+            return;
+        };
+        let Some(id) = path.file_stem().and_then(|name| name.to_str()) else {
+            return;
+        };
+        let mut ids = vec![id.to_owned()];
+        if let Some(flatpak) = fields.get("X-Flatpak") {
+            ids.push((*flatpak).into());
+        }
+        self.insert(
+            ids,
+            vec![],
+            AppInfo {
+                name: (*name).into(),
+                description: fields.get("Comment").unwrap_or(&"").to_string(),
+                ..AppInfo::default()
+            },
+        );
+        if let Some(snap) = fields.get("X-SnapInstanceName") {
+            if let Some(key) = self.aliases.get(&format!("id:{id}")).cloned() {
+                self.aliases.insert(format!("source:snap:{snap}"), key);
+            }
+        }
+    }
     fn load(root: &Path, home: Option<&Path>) -> Self {
         let mut files = BTreeSet::new();
+        let mut catalog = Self::default();
+        let mut data_dirs = vec![
+            root.join("usr/share"),
+            root.join("usr/local/share"),
+            root.join("var/lib/flatpak/exports/share"),
+            root.join("var/lib/snapd/desktop"),
+        ];
+        if let Some(home) = home {
+            data_dirs.push(home.join(".local/share"));
+            data_dirs.push(home.join(".local/share/flatpak/exports/share"));
+        }
+        if root == Path::new("/") {
+            if let Some(path) = std::env::var_os("XDG_DATA_HOME")
+                .map(PathBuf::from)
+                .filter(|p| p.is_absolute())
+            {
+                data_dirs.push(path);
+            }
+            if let Some(paths) = std::env::var_os("XDG_DATA_DIRS") {
+                data_dirs.extend(std::env::split_paths(&paths).filter(|p| p.is_absolute()));
+            }
+        }
+        for dir in data_dirs {
+            for file in entries(&dir.join("applications")) {
+                if file
+                    .extension()
+                    .is_some_and(|extension| extension == "desktop")
+                {
+                    catalog.desktop(&file);
+                }
+            }
+            collect_files(&dir.join("metainfo"), &mut files);
+            collect_files(&dir.join("appdata"), &mut files);
+        }
         for dir in [
             "usr/share/metainfo",
             "usr/share/appdata",
             "var/lib/swcatalog/xml",
             "var/cache/swcatalog/xml",
+            "var/cache/swcatalog/yaml",
+            "usr/share/swcatalog/xml",
+            "usr/share/swcatalog/yaml",
+            "var/cache/app-info/yaml",
             "var/lib/app-info/xmls",
             "var/cache/app-info/xmls",
             "var/lib/apt/lists",
@@ -307,7 +638,6 @@ impl Catalog {
                 }
             }
         }
-        let mut catalog = Self::default();
         for path in files {
             if let Ok(file) = fs::File::open(&path) {
                 let reader: Box<dyn Read> = if path.extension().is_some_and(|ext| ext == "gz") {
@@ -349,7 +679,7 @@ fn collect_files(path: &Path, files: &mut BTreeSet<PathBuf>) {
             continue;
         }
         let name = file.to_string_lossy();
-        if [".xml", ".xml.gz", ".yml.gz", ".yaml.gz"]
+        if [".xml", ".xml.gz", ".yml", ".yaml", ".yml.gz", ".yaml.gz"]
             .iter()
             .any(|suffix| name.ends_with(suffix))
         {
@@ -445,7 +775,7 @@ mod tests {
         let mut catalog = Catalog::default();
         catalog.xml("not xml");
         catalog.xml(r#"<components><component type="addon"><id>addon</id></component><component type="desktop-application"><name>No ID</name></component></components>"#);
-        assert!(catalog.0.is_empty());
+        assert!(catalog.apps.is_empty());
         catalog.xml(APP);
         catalog.xml(r#"<component type="desktop-application"><id>org.example.Player</id><name xml:lang="en">Updated name</name></component>"#);
         let info = catalog
@@ -482,6 +812,7 @@ Name: missing id
 ---
 Type: desktop-application
 ID: org.example.Editor.desktop
+Launchable: {desktop-id: [editor-app.desktop]}
 Package: editor
 Name: {C: Example Editor, es: Editor de ejemplo}
 Description: {en: '<p>Edit <em>text</em>.</p>'}
@@ -502,6 +833,10 @@ Description: '&invalid;'
         );
         let info = catalog.find(&package("apt", "editor")).unwrap();
         assert_eq!(info.name, "Example Editor");
+        assert_eq!(
+            catalog.find(&package("apt", "editor-app")).unwrap().name,
+            "Example Editor"
+        );
         assert_eq!(info.description, "Edit text.");
         assert_eq!(
             info.homepage.as_deref(),
@@ -557,7 +892,7 @@ Description: '&invalid;'
             catalog.find(&package("apt", "dep")).unwrap().name,
             "Dependency Browser"
         );
-        assert!(Catalog::load(&temp.0.join("absent"), None).0.is_empty());
+        assert!(Catalog::load(&temp.0.join("absent"), None).apps.is_empty());
     }
     #[test]
     fn catalog_media_base_resolves_relative_screenshot_paths() {
@@ -588,6 +923,153 @@ Description: '&invalid;'
         ] {
             assert!(image_url(path, base).is_none());
         }
+    }
+    #[test]
+    fn refreshed_catalog_replaces_old_metadata_without_publishing_stale_loads() {
+        let cache = CatalogCache::default();
+        let first = cache.get(|| {
+            let mut c = Catalog::default();
+            c.xml(APP);
+            c
+        });
+        assert_eq!(
+            first.find(&package("apt", "player-bin")).unwrap().name,
+            "Example Player"
+        );
+        cache.get(|| panic!("unchanged catalog must be reused"));
+        cache.invalidate();
+        assert!(cache.cached().is_none());
+        let second = cache.get(|| {
+            let mut c = Catalog::default();
+            c.xml(&APP.replace("Example Player", "New Player"));
+            c
+        });
+        assert_eq!(
+            second.find(&package("apt", "player-bin")).unwrap().name,
+            "New Player"
+        );
+        assert!(!Arc::ptr_eq(&first, &second));
+        cache.invalidate();
+        cache.get(|| {
+            cache.invalidate();
+            Catalog::default()
+        });
+        assert!(
+            cache.cached().is_none(),
+            "a refresh during parsing must not publish the superseded catalog"
+        );
+    }
+    #[test]
+    fn desktop_fallback_matches_exact_sources_and_appstream_enriches_all_aliases() {
+        let temp = pkgdeck_tools::Temp::new();
+        let dir = temp.0.join("var/lib/snapd/desktop/applications");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("player.desktop"), "[Desktop Entry]\nType=Application\nName=Desktop Player\nComment=Local description\nX-SnapInstanceName=player-snap\nX-Flatpak=org.example.Player\n[Desktop Action Other]\nName=Wrong action name\n").unwrap();
+        for (name, text) in [
+            ("hidden", "Type=Application\nHidden=true\nName=Hidden"),
+            ("helper", "Type=Application\nNoDisplay=true\nName=Helper"),
+            ("link", "Type=Link\nName=Link"),
+            ("unnamed", "Type=Application"),
+        ] {
+            fs::write(
+                dir.join(format!("{name}.desktop")),
+                format!("[Desktop Entry]\n{text}"),
+            )
+            .unwrap();
+        }
+        let mut catalog = Catalog::load(&temp.0, None);
+        assert_eq!(
+            catalog.find(&package("snap", "player-snap")).unwrap().name,
+            "Desktop Player"
+        );
+        assert!(catalog.find(&package("apt", "player-snap")).is_none());
+        assert!(catalog.find(&package("apt", "hidden")).is_none());
+        catalog.xml(APP);
+        let info = catalog.find(&package("snap", "player-snap")).unwrap();
+        assert_eq!(info.name, "Example Player");
+        assert_eq!(
+            info.screenshots.len(),
+            1,
+            "aliases must resolve the richer AppStream record"
+        );
+        catalog.desktop(&temp.0.join("absent.desktop"));
+    }
+    #[test]
+    fn remote_providers_are_source_scoped_and_reject_foreign_identities() {
+        let mut flatpak = package("flatpak", "org.example.Player");
+        assert!(provider_url(&flatpak).is_none());
+        flatpak.id.remote = Some("private".into());
+        assert!(provider_url(&flatpak).is_none());
+        flatpak.id.remote = Some("flathub".into());
+        assert_eq!(
+            provider_url(&flatpak).as_deref(),
+            Some("https://flathub.org/api/v2/appstream/org.example.Player")
+        );
+        let json = r#"{"id":"org.example.Player","name":"Remote Player","summary":"Fallback","description":"<p>Play <em>media</em>.</p>","urls":{"homepage":"https://example.invalid"},"screenshots":[{"caption":"Library","sizes":[{"width":320,"src":"https://example.invalid/small.webp"},{"width":1280,"src":"https://example.invalid/large.webp"}]},{"sizes":[{"src":"file:///tmp/private"}]}]}"#;
+        let info = provider_info(&flatpak, json).unwrap();
+        assert_eq!(info.name, "Remote Player");
+        assert_eq!(info.description, "Play media.");
+        assert_eq!(
+            info.screenshots[0].url,
+            "https://example.invalid/large.webp"
+        );
+        assert_eq!(info.screenshots.len(), 1);
+        assert!(provider_info(&package("flatpak", "foreign"), json).is_none());
+        assert!(provider_info(&flatpak, "broken").is_none());
+        let snap = package("snap", "player");
+        assert_eq!(
+            provider_url(&snap).as_deref(),
+            Some("https://api.snapcraft.io/v2/snaps/info/player")
+        );
+        let info = provider_info(&snap, r#"{"snap":{"name":"player","title":"Snap Player","summary":"Summary","store-url":"https://example.invalid/store","media":[{"type":"icon","url":"https://example.invalid/icon"},{"type":"screenshot","url":"https://example.invalid/snap.png"}]}}"#).unwrap();
+        assert_eq!(info.name, "Snap Player");
+        assert_eq!(info.description, "Summary");
+        assert_eq!(info.screenshots.len(), 1);
+        assert!(
+            provider_info(&package("snap", "other"), r#"{"snap":{"name":"player"}}"#).is_none()
+        );
+        for p in [
+            package("snap", "../private"),
+            package("snap", ""),
+            package("npm", "player"),
+            package("apt", "player"),
+        ] {
+            assert!(provider_url(&p).is_none());
+        }
+        assert_eq!(description("Rock & roll"), "Rock & roll");
+        assert!(description("<broken>").is_empty());
+    }
+    #[test]
+    fn detail_fallback_keeps_local_data_and_cancellation_stops_optional_requests() {
+        let snap = package("snap", "player");
+        let cancel = Cancellation::default();
+        let local = AppInfo {
+            name: "Local Player".into(),
+            description: "Local description".into(),
+            ..AppInfo::default()
+        };
+        let info = detail_info(&snap, local.clone(), &cancel, |_| r#"{"snap":{"name":"player","title":"Remote Player","media":[{"type":"screenshot","url":"https://example.invalid/player.png"}]}}"#.into()).unwrap();
+        assert_eq!(info.name, "Local Player");
+        assert_eq!(info.screenshots.len(), 1);
+        detail_info(&snap, info, &cancel, |_| {
+            panic!("complete local metadata needs no request")
+        });
+        let fallback =
+            detail_info(&snap, local.clone(), &cancel, |_| "HTTP failure".into()).unwrap();
+        assert_eq!(fallback.description, local.description);
+        let unsupported = package("apt", "player");
+        detail_info(&unsupported, local.clone(), &cancel, |_| {
+            panic!("unsupported providers must stay local")
+        });
+        assert!(detail_info(&snap, local.clone(), &cancel, |_| {
+            cancel.cancel();
+            String::new()
+        })
+        .is_none());
+        assert!(detail_info(&snap, local, &cancel, |_| panic!(
+            "cancelled requests must not start"
+        ))
+        .is_none());
     }
     #[test]
     fn screenshot_urls_reject_local_files_and_invalid_addresses() {
