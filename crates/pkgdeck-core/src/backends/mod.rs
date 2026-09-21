@@ -98,6 +98,24 @@ pub struct NativeTransport {
     pub host: Host,
     pub authorization: Authorization,
 }
+
+fn apt_query_executable(
+    executable: &std::path::Path,
+    built: Option<&str>,
+) -> Result<PathBuf, ExecutionError> {
+    let adjacent = executable.with_file_name("pkgdeck-apt-query");
+    if adjacent.is_file() {
+        return Ok(adjacent);
+    }
+    if let Some(path) = built.map(PathBuf::from).filter(|path| path.is_file()) {
+        return Ok(path);
+    }
+    Err(ExecutionError::Disabled(
+        "APT helper is missing. Rebuild with libapt-pkg-dev installed, or reinstall PkgDeck."
+            .into(),
+    ))
+}
+
 impl Transport for NativeTransport {
     fn apt_query(
         &self,
@@ -109,9 +127,10 @@ impl Transport for NativeTransport {
         if self.host.resolve("apt-get")?.is_none() {
             return Err(ExecutionError::Disabled("APT not found".into()));
         }
-        let executable = std::env::current_exe()
-            .map_err(|e| ExecutionError::Io(e.to_string()))?
-            .with_file_name("pkgdeck-apt-query");
+        let executable = apt_query_executable(
+            &std::env::current_exe().map_err(|e| ExecutionError::Io(e.to_string()))?,
+            option_env!("PKGDECK_BUILT_APT_QUERY"),
+        )?;
         let result = self.host.read(
             &executable,
             &[mode.into(), query.into(), arch.into()],
@@ -3231,6 +3250,36 @@ pub fn native_engine(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn apt_helper_supports_cargo_builds_and_relocated_bundles() {
+        let root = std::env::temp_dir().join(format!("pkgdeck-apt-helper-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("bundle")).unwrap();
+        let executable = root.join("bundle/pkgdeck");
+        let built = root.join("cargo-helper");
+        let adjacent = root.join("bundle/pkgdeck-apt-query");
+        assert!(matches!(
+            apt_query_executable(&executable, None),
+            Err(ExecutionError::Disabled(message)) if message.contains("APT helper is missing")
+        ));
+        assert!(apt_query_executable(&executable, built.to_str()).is_err());
+        std::fs::write(&built, "synthetic helper").unwrap();
+        assert_eq!(
+            apt_query_executable(&executable, built.to_str()).unwrap(),
+            built
+        );
+        std::fs::write(&adjacent, "packaged helper").unwrap();
+        assert_eq!(
+            apt_query_executable(&executable, built.to_str()).unwrap(),
+            adjacent
+        );
+        std::fs::remove_file(&built).unwrap();
+        assert_eq!(
+            apt_query_executable(&executable, built.to_str()).unwrap(),
+            adjacent
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn wave_five_name_policies() {

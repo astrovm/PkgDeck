@@ -301,7 +301,6 @@ Build and test the CLI without installing Qt:
 
 ```sh
 cargo build --locked -p pkd
-scripts/build-apt.sh # Requires the distribution's libapt-pkg-dev package
 cargo test --locked -p pkgdeck-core -p pkd
 cargo run --locked -p pkd -- --help
 cargo run --locked -p pkd -- doctor
@@ -310,6 +309,9 @@ cargo run --locked -p pkd
 
 The last command prints CLI help. CLI tests use synthetic shell fixtures;
 install jq for the fixtures.
+On APT systems, install `libapt-pkg-dev` before building. Cargo automatically
+builds the separate APT query helper for both CLI and GUI development runs.
+Packaged applications use the helper shipped beside their executable.
 
 For the GUI, install the Ubuntu 26.04 Qt/KDE development packages, a C++ compiler, CMake, Ninja, and LLD:
 
