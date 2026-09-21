@@ -336,6 +336,8 @@ For local package staging, build the release workspace, run
 `scripts/bundle.sh`, then `scripts/package.sh appimage`, `flatpak`, or
 `snap` with the corresponding tools/runtime installed. The AppImage path requires
 `APPIMAGETOOL` pointing to appimagetool 1.9.1. All formats contain both executables.
+After changing Cargo dependencies, run `scripts/flatpak-sources.sh` and commit
+the updated offline source list. CI checks that it matches `Cargo.lock`.
 
 Initial CI checks cover extracted Snap contents and entry points. Installed Snap
 confinement, privileged host operations, FUSE-based AppImage launching, release

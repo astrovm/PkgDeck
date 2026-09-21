@@ -8,6 +8,7 @@ case "${1:?Usage: scripts/package.sh appimage|flatpak|snap}" in
         ARCH="$arch" "$APPIMAGETOOL" --appimage-extract-and-run build/AppDir "build/artifacts/PkgDeck-$arch.AppImage"
         ;;
     flatpak)
+        scripts/flatpak-sources.sh --check
         flatpak-builder --user --force-clean --repo=build/flatpak-repo build/flatpak packaging/flatpak/io.github.astrovm.PkgDeck.yml
         flatpak build-bundle build/flatpak-repo "build/artifacts/PkgDeck-$arch.flatpak" io.github.astrovm.PkgDeck
         ;;
