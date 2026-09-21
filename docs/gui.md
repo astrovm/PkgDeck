@@ -180,3 +180,16 @@ The native/AppImage execution path is enabled. Flatpak and Snap host operations
 remain explicitly disabled; their packaged GUI smoke checks do not claim a native
 package lifecycle. Polkit and manager-lock behavior retain the shared VM tests.
 Installed-format distribution validation remains a later release gate.
+
+## Motion and feedback
+
+Buttons and row selection use short transitions. New result rows and refreshed
+package details fade in; confirmation dialogs fade and scale gently. Actions start
+immediately, and new interactions can interrupt animations.
+
+Refreshing keeps the previous results visible but inactive until fresh rows arrive.
+The details panel keeps its height across selections. After a package operation,
+rows whose version or installed state changed receive a brief highlight.
+
+Animations follow KDE's animation durations. Turn off **Settings → Animations**
+for reduced motion; loading then uses static “Working…” text instead of a spinner.
