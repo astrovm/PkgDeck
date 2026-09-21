@@ -46,17 +46,16 @@ jobs:
           archive="$RUNNER_TEMP/pkgdeck-source.tar.gz"
           git archive --format=tar.gz --output="$archive" HEAD
           brew tap-new --no-git astrovm/pkgdeck
-          export PKGDECK_TEST_ARCHIVE="$archive"
-          export PKGDECK_TEST_FORMULA="$(brew --repository astrovm/pkgdeck)/Formula/pkgdeck.rb"
+          recipe="$(brew --repository astrovm/pkgdeck)/Formula/pkgdeck.rb"
           brew ruby -r digest -e '
-            source = ENV.fetch("PKGDECK_TEST_ARCHIVE")
+            source = ARGV.fetch(0)
             recipe = File.read("Formula/pkgdeck.rb")
             version = File.read("Cargo.toml")[/^version = "([^"]+)"$/, 1]
             stable = "url #{("file://" + source).inspect}\n  version #{version.inspect}\n  sha256 #{Digest::SHA256.file(source).hexdigest.inspect}"
             recipe.sub!(/^  head .*\n/, "")
             recipe.sub!(/^  license /, "  #{stable}\n  license ")
-            File.write(ENV.fetch("PKGDECK_TEST_FORMULA"), recipe)
-          '
+            File.write(ARGV.fetch(1), recipe)
+          ' "$archive" "$recipe"
       - name: Check formula style
         run: brew style astrovm/pkgdeck/pkgdeck
       - name: Build package

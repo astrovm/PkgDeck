@@ -35,6 +35,7 @@ class Pkgdeck < Formula
         system "cmake", "--install", "build"
       end
       resource("kirigami").stage do
+        (pkgshare/"licenses/kirigami").install Dir["LICENSES/*"]
         system "cmake", "-S", ".", "-B", "build", "-G", "Ninja",
                *std_cmake_args(install_prefix: libexec/"kirigami"),
                "-DECM_DIR=#{buildpath}/ecm/share/ECM/cmake",
@@ -74,6 +75,7 @@ class Pkgdeck < Formula
       # Preserve the optional distro APT reader outside Cargo's temporary build tree.
       Dir["target/release/build/pkgdeck-core-*/out/pkgdeck-apt-query"].each do |helper|
         bin.install helper
+        (pkgshare/"licenses").install "native/COPYING" => "APT-HELPER-GPL-2"
       end
     end
   end
