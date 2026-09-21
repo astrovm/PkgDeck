@@ -140,6 +140,7 @@ pub fn dispatch(
         }
         Commands::Search { query } => {
             let mut report = engine.search(query, cancel);
+            report.packages.retain(|p| !unverified_search_offer(p));
             rank_search_matches(&mut report.packages, query);
             let code = if report.failures.is_empty() { 0 } else { 8 };
             return (json!(report), code);
@@ -337,6 +338,8 @@ mod tests {
         backend: String,
         installed: bool,
         fail: Option<EngineError>,
+        read_failure: Option<EngineError>,
+        verified: bool,
     }
     impl Fixture {
         fn package(&self) -> Package {
@@ -352,7 +355,7 @@ mod tests {
                 display_name: "Fixture".into(),
                 summary: "Synthetic".into(),
                 installed_version: self.installed.then(|| "1.0".into()),
-                candidate_version: Some("2.0".into()),
+                candidate_version: self.verified.then(|| "2.0".into()),
                 update: UpdateAvailability::Available,
                 icon: None,
                 component_ids: vec![],
@@ -379,9 +382,15 @@ mod tests {
             Ok(Availability::Available)
         }
         fn search(&mut self, _: &str, _: &Cancellation) -> Result<Vec<Package>, EngineError> {
+            if let Some(error) = &self.read_failure {
+                return Err(error.clone());
+            }
             Ok(vec![self.package()])
         }
         fn installed(&mut self, _: &Cancellation) -> Result<Vec<Package>, EngineError> {
+            if let Some(error) = &self.read_failure {
+                return Err(error.clone());
+            }
             Ok(if self.installed {
                 vec![self.package()]
             } else {
@@ -418,6 +427,8 @@ mod tests {
         let mut engine = Engine::default();
         engine
             .register(Fixture {
+                read_failure: None,
+                verified: true,
                 backend: "apt".into(),
                 installed: true,
                 fail: None,
@@ -482,6 +493,8 @@ mod tests {
         let mut engine = engine();
         engine
             .register(Fixture {
+                read_failure: None,
+                verified: true,
                 backend: "homebrew".into(),
                 installed: true,
                 fail: Some(ExecutionError::AuthorizationDenied.into()),
@@ -514,10 +527,54 @@ mod tests {
     }
 
     #[test]
+    fn search_hides_guesses_preserves_partial_results_and_keeps_explicit_install() {
+        let mut engine = engine();
+        engine
+            .register(Fixture {
+                backend: "cargo".into(),
+                installed: false,
+                fail: None,
+                read_failure: None,
+                verified: false,
+            })
+            .unwrap();
+        let (report, code) = call(&mut engine, &["search", "fixture"], false);
+        assert_eq!(code, 0);
+        assert_eq!(report["packages"].as_array().unwrap().len(), 1);
+        assert_eq!(report["packages"][0]["id"]["backend"], "apt");
+        assert_eq!(
+            call(
+                &mut engine,
+                &["--from", "cargo", "install", "fixture"],
+                true
+            )
+            .1,
+            0
+        );
+        engine
+            .register(Fixture {
+                backend: "flatpak".into(),
+                installed: false,
+                fail: None,
+                read_failure: Some(ExecutionError::TimedOut.into()),
+                verified: true,
+            })
+            .unwrap();
+        let (report, code) = call(&mut engine, &["search", "fixture"], false);
+        assert_eq!(code, 8);
+        assert_eq!(report["packages"].as_array().unwrap().len(), 2);
+        assert_eq!(report["failures"].as_array().unwrap().len(), 1);
+        assert_eq!(report["failures"][0]["backend"], "flatpak");
+        assert_eq!(call(&mut engine, &["upgrade"], true).1, 4);
+    }
+
+    #[test]
     fn upgrade_all_handles_empty_and_incomplete_installed_reports() {
         let mut empty = Engine::default();
         empty
             .register(Fixture {
+                read_failure: None,
+                verified: true,
                 backend: "apt".into(),
                 installed: false,
                 fail: None,
@@ -530,6 +587,8 @@ mod tests {
         let mut failed = Engine::default();
         failed
             .register(Fixture {
+                read_failure: None,
+                verified: true,
                 backend: "apt".into(),
                 installed: true,
                 fail: Some(ExecutionError::TimedOut.into()),

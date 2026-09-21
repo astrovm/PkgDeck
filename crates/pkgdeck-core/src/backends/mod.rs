@@ -217,6 +217,12 @@ pub struct Homebrew<T = NativeTransport> {
 pub struct Flatpak<T = NativeTransport> {
     transport: T,
 }
+fn flatpak_offer_reference(reference: &str) -> Option<(&str, &str, &str)> {
+    let mut parts = reference.split('/');
+    let (name, arch, branch) = (parts.next()?, parts.next()?, parts.next()?);
+    (flatpak_id(name) && flatpak_id(arch) && flatpak_id(branch) && parts.next().is_none())
+        .then_some((name, arch, branch))
+}
 impl<T: Transport> Flatpak<T> {
     pub fn new(transport: T) -> Self {
         Self { transport }
@@ -263,7 +269,12 @@ impl<T: Transport> Flatpak<T> {
             system,
         )?)
     }
-    fn list(&self, cancel: &Cancellation, system: bool) -> Result<Vec<Package>, EngineError> {
+    fn list(
+        &self,
+        cancel: &Cancellation,
+        system: bool,
+        updates: bool,
+    ) -> Result<Vec<Package>, EngineError> {
         let scope = if system {
             Scope::System
         } else {
@@ -327,7 +338,7 @@ impl<T: Transport> Flatpak<T> {
                 homepages: vec![],
             });
         }
-        if packages.is_empty() {
+        if packages.is_empty() || !updates {
             return Ok(packages);
         }
         // Flatpak compares commits, not version labels: rebuilds and runtimes
@@ -400,7 +411,11 @@ impl<T: Transport> Flatpak<T> {
                     .get(5)
                     .and_then(|value| value.split(',').next())
                     .filter(|value| flatpak_id(value));
-                if fields.len() != 6 || !flatpak_id(fields[2]) || remote.is_none() {
+                if fields.len() != 6
+                    || !flatpak_id(fields[2])
+                    || !flatpak_id(fields[4])
+                    || remote.is_none()
+                {
                     return Err(invalid("flatpak", "invalid remote search metadata"));
                 }
                 Ok(Package {
@@ -410,7 +425,12 @@ impl<T: Transport> Flatpak<T> {
                         architecture: std::env::consts::ARCH.into(),
                         scope: scope.clone(),
                         remote: remote.map(str::to_owned),
-                        reference: None,
+                        reference: Some(format!(
+                            "{}/{}/{}",
+                            fields[2],
+                            std::env::consts::ARCH,
+                            fields[4]
+                        )),
                     },
                     display_name: fields[0].into(),
                     summary: fields[1].into(),
@@ -429,7 +449,9 @@ impl<T: Transport> Flatpak<T> {
             return Err(invalid("flatpak", "foreign or invalid Flatpak identity"));
         }
         if let Some(reference) = &id.reference {
-            let (_, name, arch, _) = flatpak_reference(reference)
+            let (name, arch, _) = flatpak_reference(reference)
+                .map(|(_, name, arch, branch)| (name, arch, branch))
+                .or_else(|| flatpak_offer_reference(reference))
                 .ok_or_else(|| invalid("flatpak", "invalid native ref"))?;
             if name != id.name || arch != id.architecture {
                 return Err(invalid(
@@ -498,14 +520,44 @@ impl<T: Transport> Backend for Flatpak<T> {
                 package.id.name.clone(),
                 package.id.architecture.clone(),
                 package.id.remote.clone(),
+                package.id.reference.clone(),
             ))
         });
-        Ok(result)
+        // Local inventory is enough to choose Install versus Remove. Search
+        // must not fetch remote update metadata just to establish this state.
+        let mut installed = self.list(cancel, false, false)?;
+        installed.extend(self.list(cancel, true, false)?);
+        let mut offers = Vec::new();
+        for offer in result {
+            let matches: Vec<_> = installed
+                .iter()
+                .filter(|package| {
+                    package
+                        .id
+                        .reference
+                        .as_deref()
+                        .and_then(|reference| reference.split_once('/').map(|(_, rest)| rest))
+                        == offer.id.reference.as_deref()
+                })
+                .collect();
+            if matches.is_empty() {
+                offers.push(offer);
+            } else {
+                for package in matches {
+                    let mut row = offer.clone();
+                    row.id = package.id.clone();
+                    row.installed_version = package.installed_version.clone();
+                    offers.push(row);
+                }
+            }
+        }
+        offers.dedup_by(|a, b| a.id == b.id);
+        Ok(offers)
     }
     fn installed(&mut self, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
         let home = self.transport.env("HOME").map(PathBuf::from);
-        let mut result = self.list(cancel, false)?;
-        result.extend(self.list(cancel, true)?);
+        let mut result = self.list(cancel, false, true)?;
+        result.extend(self.list(cancel, true, true)?);
         for package in &mut result {
             // Exported icons double as the installed check per scope.
             let roots: Vec<PathBuf> = match &package.id.scope {
@@ -604,31 +656,18 @@ impl<T: Transport> Backend for Flatpak<T> {
             id.name
         )));
         let reference = id.reference.as_deref().unwrap_or(&id.name);
-        let kind = if reference.starts_with("runtime/") {
-            "--runtime"
-        } else {
-            "--app"
-        };
-        let args = if verb == "install" {
-            vec![
-                scope,
-                verb,
-                kind,
-                "--noninteractive",
-                "--assumeyes",
-                id.remote.as_deref().unwrap_or("flathub"),
-                reference,
-            ]
-        } else {
-            vec![
-                scope,
-                verb,
-                kind,
-                "--noninteractive",
-                "--assumeyes",
-                reference,
-            ]
-        };
+        let mut args = vec![scope, verb, "--noninteractive", "--assumeyes"];
+        if reference.starts_with("runtime/") {
+            args.push("--runtime");
+        } else if reference.starts_with("app/") || id.reference.is_none() {
+            args.push("--app");
+        }
+        // Search metadata does not identify app versus runtime. Preserve its
+        // name/architecture/branch and let Flatpak resolve the kind.
+        if verb == "install" {
+            args.push(id.remote.as_deref().unwrap_or("flathub"));
+        }
+        args.push(reference);
         let result = self.call(&args, cancel, true, system)?;
         Ok(OperationOutcome {
             cancellation_deferred: result.cancellation_deferred,
@@ -1529,7 +1568,25 @@ impl<T: Transport> Backend for SystemManager<T> {
         }
     }
     fn search(&mut self, query: &str, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
-        self.query(false, query, cancel)
+        let mut packages = self.query(false, query, cancel)?;
+        let installed = self.query(true, "", cancel)?;
+        let versions: std::collections::BTreeMap<_, _> = installed
+            .iter()
+            .map(|package| {
+                (
+                    (package.id.name.as_str(), package.id.architecture.as_str()),
+                    &package.installed_version,
+                )
+            })
+            .collect();
+        for package in &mut packages {
+            if let Some(version) =
+                versions.get(&(package.id.name.as_str(), package.id.architecture.as_str()))
+            {
+                package.installed_version = (*version).clone();
+            }
+        }
+        Ok(packages)
     }
     fn installed(&mut self, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
         let mut packages = self.query(true, "", cancel)?;

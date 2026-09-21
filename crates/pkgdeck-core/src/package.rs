@@ -18,7 +18,8 @@ pub struct PackageId {
     /// Source-specific repository identity, such as a Flatpak remote.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote: Option<String>,
-    /// Exact native ref, including Flatpak kind, architecture, and branch.
+    /// Native ref: installed Flatpaks include kind/name/architecture/branch;
+    /// remote search offers omit the kind, which search metadata does not report.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reference: Option<String>,
 }
@@ -207,7 +208,8 @@ fn backends_sharing(
 /// Best-match-first ordering for search results, shared by the terminal
 /// frontends (the GUI ranks in QML for live keystrokes; same rule, see
 /// Browser.qml relevanceScore): exact name, name prefix, name substring,
-/// summary prefix, summary substring, then the rest. Unverifiable offers
+/// summary prefix, summary substring, then the rest. Display names and
+/// Flatpak app-id suffixes count as exact matches. Unverifiable offers
 /// (no version either way) sink below verified rows, and name/source
 /// ties break deterministically. Display-only: engine order is untouched.
 pub fn rank_search_matches(packages: &mut [Package], query: &str) {
@@ -216,20 +218,25 @@ pub fn rank_search_matches(packages: &mut [Package], query: &str) {
         return;
     }
     packages.sort_by(|a, b| {
-        fabricated(a)
-            .cmp(&fabricated(b))
+        unverified_search_offer(a)
+            .cmp(&unverified_search_offer(b))
             .then(score(a, &query).cmp(&score(b, &query)))
             .then(a.id.name.cmp(&b.id.name))
             .then(a.id.backend.cmp(&b.id.backend))
     });
 }
-fn fabricated(package: &Package) -> bool {
+/// Explicit-install placeholders are not catalog matches and must not be
+/// advertised by GUI/CLI search. An empty native version is still metadata.
+pub fn unverified_search_offer(package: &Package) -> bool {
     package.installed_version.is_none() && package.candidate_version.is_none()
 }
 fn score(package: &Package, query: &str) -> u8 {
     let name = package.id.name.to_lowercase();
     let summary = package.summary.to_lowercase();
-    if name == query {
+    if name == query
+        || package.display_name.to_lowercase() == query
+        || (package.id.backend == "flatpak" && name.rsplit('.').next() == Some(query))
+    {
         0
     } else if name.starts_with(query) {
         1
@@ -432,6 +439,24 @@ mod tests {
         let mut same = packages.clone();
         rank_search_matches(&mut same, "   ");
         assert_eq!(same, packages);
+    }
+    #[test]
+    fn search_compares_app_sources_before_plugins() {
+        let mut packages = vec![
+            package("apt", "player-plugin", true, &[]),
+            package("flatpak", "org.example.Player", true, &[]),
+            package("apt", "player", true, &[]),
+            package("snap", "player", true, &[]),
+        ];
+        rank_search_matches(&mut packages, "player");
+        assert_eq!(packages[3].id.name, "player-plugin");
+        assert_eq!(
+            packages[..3]
+                .iter()
+                .map(|p| p.id.backend.as_str())
+                .collect::<std::collections::BTreeSet<_>>(),
+            ["apt", "flatpak", "snap"].into_iter().collect()
+        );
     }
     #[test]
     fn rank_search_matches_sinks_unverified_guesses() {

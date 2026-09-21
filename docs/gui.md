@@ -192,3 +192,10 @@ rows whose version or installed state changed receive a brief highlight.
 
 Animations follow KDE's animation durations. Turn off **Settings → Animations**
 for reduced motion; loading then uses static “Working…” text instead of a spinner.
+
+Search omits unverified development-manager install placeholders. Exact app names
+and Flatpak app-id suffixes rank together before plugins and libraries, so the
+main app from each source can be compared. Each package row has an install arrow
+or a remove icon, with an accessible action label and the usual confirmation.
+Installed versions no longer repeat an “installed” status label. Flatpak search
+uses local inventory to choose the action and preserves the native branch.

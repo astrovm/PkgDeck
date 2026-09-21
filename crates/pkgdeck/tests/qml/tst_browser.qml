@@ -47,6 +47,7 @@ TestCase {
             });
         }
         function propose(action, index) {
+            selection = index;
             confirmation = action + " synthetic-tool from apt, all, system";
         }
         function proposeChecked(identities) {
@@ -447,7 +448,7 @@ TestCase {
         const installed = {kind: "package", name: "tool", source: "apt", architecture: "amd64", installed: "1.2.3", candidate: "1.2.3", scope: "system", summary: "Tool"};
         compare(browser.versionText(installed), "1.2.3");
         browser.openView("Search");
-        compare(browser.versionText(installed), "1.2.3 · installed");
+        compare(browser.versionText(installed), "1.2.3");
         installed.candidate = "2.0.0";
         installed.update = "available";
         browser.openView("Updates");
@@ -702,30 +703,21 @@ TestCase {
             {kind: "failure", name: "bun", source: "bun", summary: "boom", available: false}
         ]);
         waitForRendering(browser.contentItem);
-        compare(browser.viewItems.length, 6);
+        compare(browser.viewItems.length, 5);
         compare(browser.viewItems[0].name, "fire");
         compare(browser.viewItems[0].source, "apt");
         compare(browser.viewItems[1].name, "firefox");
         compare(browser.viewItems[2].name, "x-fire-helper");
         compare(browser.viewItems[3].name, "zzz");
-        // A failed source stays above unverified guesses; the guess with an
-        // exact name but no version at all sinks to the bottom.
+        // Failed sources stay visible; guessed offers are excluded entirely.
         compare(browser.viewItems[4].kind, "failure");
-        compare(browser.viewItems[5].name, "fire");
-        compare(browser.viewItems[5].source, "npm");
-        // Actions map the visible row back to backend order.
         browser.choose(0);
         compare(fake.selection, 2);
-        browser.choose(5);
-        compare(fake.selection, 4);
-        // An explicit column sort wins over relevance ranking.
         browser.cycleSort("name");
         compare(browser.viewItems[0].name, "bun");
         compare(browser.viewItems[1].name, "fire");
-        // The direction-aware tiebreak makes equal names deterministic.
         compare(browser.viewItems[1].source, "apt");
-        compare(browser.viewItems[2].source, "npm");
-        compare(browser.viewItems[5].name, "zzz");
+        compare(browser.viewItems[4].name, "zzz");
         // Submitting a fresh search resets to best-match order and forces
         // a native query instead of serving the cached snapshot.
         search.forceActiveFocus();
@@ -734,6 +726,36 @@ TestCase {
         compare(browser.viewItems[0].name, "fire");
         compare(fake.lastForce, true);
         compare(fake.lastView, "Search");
+    }
+    function test_search_compares_sources_and_actions_without_opening_details() {
+        const field = findChild(browser, "searchField");
+        field.text = "player";
+        fake.rows = JSON.stringify([
+            {kind: "package", name: "player-plugin", source: "apt", installed: null, candidate: "1", scope: "system"},
+            {kind: "package", name: "org.example.Player", source: "flatpak", installed: null, candidate: "1", scope: "system"},
+            {kind: "package", name: "player", source: "apt", installed: "1", candidate: "1", scope: "system"},
+            {kind: "package", name: "player", source: "snap", installed: null, candidate: "1", scope: "system"},
+            {kind: "package", name: "player", source: "npm", installed: null, candidate: null, scope: "system"}
+        ]);
+        waitForRendering(browser.contentItem);
+        compare(browser.viewItems.length, 4);
+        compare(browser.viewItems[3].name, "player-plugin");
+        const list = findChild(browser, "packageResults");
+        for (let i = 0; i < 3; ++i) {
+            const row = browser.viewItems[i];
+            const action = findChild(list.itemAtIndex(i), "rowPackageAction");
+            verify(action !== null);
+            compare(action.symbol, row.installed ? "remove" : "install");
+            mouseClick(action);
+            compare(fake.selection, browser.originalIndex(i));
+            verify(fake.confirmation.indexOf(row.installed ? "remove" : "install") === 0);
+            verify(browser.selected === null);
+            const dialog = findChild(browser, "confirmationDialog");
+            tryCompare(dialog, "opened", true);
+            keyClick(Qt.Key_N, Qt.AltModifier);
+            tryCompare(dialog, "visible", false);
+        }
+        compare(fake.writes, 0);
     }
     function test_header_source_checklist_and_installed_filter() {
         browser.openView("Installed");

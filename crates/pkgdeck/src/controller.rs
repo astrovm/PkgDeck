@@ -100,8 +100,12 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
                 // Stream cumulative partials so fast backends render while
                 // slow ones still query; the terminal emission below carries
                 // the same deterministic report as a synchronous query.
-                let mut send_partial = |partial| send(Reply::Partial(partial));
-                let report = engine.search_stream(&query, cancel, &mut send_partial);
+                let mut send_partial = |mut partial: PackageReport| {
+                    partial.packages.retain(|p| !unverified_search_offer(p));
+                    send(Reply::Partial(partial));
+                };
+                let mut report = engine.search_stream(&query, cancel, &mut send_partial);
+                report.packages.retain(|p| !unverified_search_offer(p));
                 Ok(Payload::Packages(report))
             } else {
                 // Installed and Updates stream like Search so rows appear
@@ -416,7 +420,7 @@ fn operation_label(operation: &Operation) -> String {
     )
 }
 fn package_row(p: &Package, same_from: &[String], same_group: Option<&str>) -> Value {
-    json!({"name": p.id.name, "source": p.id.backend, "architecture": p.id.architecture,
+    json!({"name": p.id.name, "display_name": p.display_name, "source": p.id.backend, "architecture": p.id.architecture,
         "remote": p.id.remote, "reference": p.id.reference, "scope": p.id.scope, "scope_label": scope_label(&p.id.scope), "summary": p.summary, "installed": p.installed_version,
         "candidate": p.candidate_version, "update": p.update, "kind": "package", "icon": p.icon,
         "same_app_from": same_from, "same_app_group": same_group})
@@ -1109,6 +1113,36 @@ mod tests {
             .is_empty());
         // Updates never narrows by the query; stale field text is ignored.
         assert_eq!(load(&mut engine, "Updates", "missing").packages.len(), 1);
+        // Search must exclude install placeholders in every streamed report,
+        // but retain genuine catalog entries with an empty version label.
+        for candidate in [None, Some(""), Some("2")] {
+            let mut offer = package.clone();
+            offer.installed_version = None;
+            offer.candidate_version = candidate.map(str::to_owned);
+            let mut engine = Engine::default();
+            engine
+                .register(Fixture {
+                    package: offer,
+                    fail: false,
+                })
+                .unwrap();
+            let mut reports = Vec::new();
+            execute(
+                &mut engine,
+                Job::Load("Search".into(), "synthetic".into()),
+                &Cancellation::default(),
+                &mut |reply| match reply {
+                    Reply::Partial(report) | Reply::Done(Ok(Payload::Packages(report))) => {
+                        reports.push(report)
+                    }
+                    _ => {}
+                },
+            );
+            assert!(reports.len() >= 2);
+            assert!(reports
+                .iter()
+                .all(|report| report.packages.len() == usize::from(candidate.is_some())));
+        }
     }
     #[test]
     fn checked_identities_resolve_only_to_upgradable_packages() {

@@ -209,19 +209,19 @@ Controls.ApplicationWindow {
     // real packages are never buried under names that may not exist. Ties
     // break by name and source so streaming partials settle into a stable
     // order.
-    // A package row is an unverified guess when no backend reported a
-    // version for it either way. If a future source legitimately returns
-    // version-less rows, they will sink here too by design.
+    // Missing metadata identifies explicit-install placeholders. Empty
+    // version strings from native catalogs are valid search results.
     function isInstalled(row) {
         return row && row.installed !== null && row.installed !== undefined;
     }
     function isFabricated(row) {
-        return row.kind === "package" && !isInstalled(row) && !row.candidate;
+        return row.kind === "package" && !isInstalled(row) && (row.candidate === null || row.candidate === undefined);
     }
     function relevanceScore(row, query) {
         const name = (row.name || "").toLowerCase();
         const summary = (row.summary || "").toLowerCase();
-        if (name === query)
+        if (name === query || (row.display_name || "").toLowerCase() === query
+                || (row.source === "flatpak" && name.split(".").pop() === query))
             return 0;
         if (name.indexOf(query) === 0)
             return 1;
@@ -269,7 +269,7 @@ Controls.ApplicationWindow {
         return grouped;
     }
     property var viewItems: {
-        let rows = items.slice();
+        let rows = root.currentView === "Search" ? items.filter((row) => !isFabricated(row)) : items.slice();
         // The Installed filter narrows the loaded rows as you type; the
         // backend is queried once with an empty query (see reload).
         if (root.currentView === "Installed") {
@@ -337,6 +337,7 @@ Controls.ApplicationWindow {
 
     component ActionButton: Controls.Button {
         id: control
+        property color glyphColor: root.ink
         property bool primary: false
         property bool navigation: false
         property string symbol: "package"
@@ -358,12 +359,13 @@ Controls.ApplicationWindow {
             spacing: 8
             DeckIcon {
                 name: control.symbol
-                ink: control.primary && control.enabled ? (root.dark ? "#111820" : "#ffffff") : root.ink
+                ink: control.primary && control.enabled ? (root.dark ? "#111820" : "#ffffff") : control.glyphColor
                 Layout.preferredWidth: 18
                 Layout.preferredHeight: 18
             }
             Text {
                 text: control.text
+                visible: text.length > 0
                 font: control.font
                 color: control.primary && control.enabled ? (root.dark ? "#111820" : "#ffffff") : root.ink
                 Layout.fillWidth: control.navigation
@@ -471,7 +473,7 @@ Controls.ApplicationWindow {
             return row.installed + " → " + row.candidate;
         }
         if (isInstalled(row))
-            return row.installed ? (root.currentView === "Installed" ? row.installed : row.installed + " · installed") : "Installed";
+            return row.installed || "—";
         return row.candidate || "Unknown";
     }
     // Local icon files become file:// URLs. Paths come from the backend and
@@ -1283,7 +1285,7 @@ Controls.ApplicationWindow {
                                     Layout.preferredWidth: root.compact ? -1 : root.nameWidth
                                     Layout.fillWidth: root.compact
                                     Controls.Label {
-                                        text: modelData.name
+                                        text: modelData.display_name || modelData.name
                                         color: root.ink
                                         font.bold: true
                                         textFormat: Text.PlainText
@@ -1344,6 +1346,18 @@ Controls.ApplicationWindow {
                                     color: root.muted
                                     textFormat: Text.PlainText
                                     elide: Text.ElideRight
+                                }
+                                ActionButton {
+                                    objectName: "rowPackageAction"
+                                    visible: modelData.kind === "package"
+                                    enabled: !backend.busy && !root.retainingResults
+                                    text: ""
+                                    symbol: root.isInstalled(modelData) ? "remove" : "install"
+                                    glyphColor: root.isInstalled(modelData) ? (root.dark ? "#f18b91" : "#b42332") : (root.dark ? "#77d6a0" : "#187442")
+                                    Accessible.name: (root.isInstalled(modelData) ? "Remove installed " : "Install ") + modelData.name + " from " + modelData.source
+                                    Layout.preferredWidth: 38
+                                    horizontalPadding: 8
+                                    onClicked: backend.propose(root.isInstalled(modelData) ? "remove" : "install", root.originalIndex(index))
                                 }
                             }
                         }
