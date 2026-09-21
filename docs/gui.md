@@ -73,8 +73,7 @@ updates Qt properties on its own thread. Search, Installed, and Updates
 results stream in per backend, so rows appear while slow sources still
 query; the selection follows the
 same package identity across partials. Upgrade availability still waits for
-the terminal report with complete failures. Hovering a package row shows its full
-untruncated versions and summary. Finished views are cached, so switching
+the terminal report with complete failures. Selecting a row opens its details; Close details restores the table space. Finished views are cached, so switching
 sections shows the last results instantly; only the first visit, a source
 change, or Reload queries native managers, and writes invalidate every cached
 view. Switching sections or the selected row during
@@ -188,7 +187,7 @@ package details fade in; confirmation dialogs fade and scale gently. Actions sta
 immediately, and new interactions can interrupt animations.
 
 Refreshing keeps the previous results visible but inactive until fresh rows arrive.
-The details panel keeps its height across selections. After a package operation,
+The details panel appears only after selecting a row and keeps its height across selections. After a package operation,
 rows whose version or installed state changed receive a brief highlight.
 
 Animations follow KDE's animation durations. Turn off **Settings → Animations**

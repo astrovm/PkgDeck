@@ -63,5 +63,17 @@ Pin: version 1.0
 Pin-Priority: 1001
 PINS
 query details pkgdeck-fixture amd64 | jq -e '.[0].package.candidate_version=="1.0" and .[0].package.update=="current"'
+# Phase eligibility comes from APT itself, including administrator overrides.
+rm "$work/etc/apt/preferences"
+sed -i '/^Version: 2.0$/a Phased-Update-Percentage: 0' "$work/repo/Packages"
+rm -f "$work/var/lib/apt/lists/"*Packages*
+APT_CONFIG="$work/config" apt-get update -qq
+rm -f "$work/var/cache/apt/"*.bin
+printf '\nAPT::Get::Never-Include-Phased-Updates "true";\n' >>"$work/config"
+query installed '' '' | jq -e '.[0].package.candidate_version=="2.0" and .[0].package.update=="current"'
+printf '\nAPT::Get::Always-Include-Phased-Updates "true";\n' >>"$work/config"
+query installed '' '' | jq -e '.[0].package.update=="available"'
+sed -i 's/^Status: install ok installed$/Status: hold ok installed/' "$work/var/lib/dpkg/status"
+query installed '' '' | jq -e '.[0].package.update=="current"'
 [[ ! -e $work/var/cache/apt/pkgcache.bin && ! -e $work/var/cache/apt/srcpkgcache.bin ]]
-echo 'PASS native APT candidates, pinning, multiarch, installed state and JSON escaping'
+echo 'PASS native APT candidates, pinning, phasing, holds, multiarch, installed state and JSON escaping'

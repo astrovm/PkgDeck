@@ -238,6 +238,16 @@ fn flatpak_id(value: &str) -> bool {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
 }
+fn flatpak_reference(reference: &str) -> Option<(&str, &str, &str, &str)> {
+    let mut parts = reference.split('/');
+    let (kind, name, arch, branch) = (parts.next()?, parts.next()?, parts.next()?, parts.next()?);
+    (matches!(kind, "app" | "runtime")
+        && flatpak_id(name)
+        && flatpak_id(arch)
+        && flatpak_id(branch)
+        && parts.next().is_none())
+    .then_some((kind, name, arch, branch))
+}
 impl<T: Transport> Flatpak<T> {
     fn call(
         &self,
@@ -268,8 +278,7 @@ impl<T: Transport> Flatpak<T> {
                 &[
                     prefix,
                     "list",
-                    "--app",
-                    "--columns=application,arch,branch,version,description",
+                    "--columns=application,arch,branch,version,description,origin,options",
                 ],
                 cancel,
                 false,
@@ -277,36 +286,81 @@ impl<T: Transport> Flatpak<T> {
             )?,
         )?;
         let text = String::from_utf8(output).map_err(|e| invalid("flatpak", e))?;
-        text.lines()
-            .filter(|line| !line.trim().is_empty())
-            .map(|line| {
-                let fields: Vec<_> = line.split('\t').collect();
-                if fields.len() != 5
-                    || !flatpak_id(fields[0])
-                    || !flatpak_id(fields[1])
-                    || !flatpak_id(fields[2])
-                {
-                    return Err(invalid("flatpak", "invalid list metadata"));
+        let mut packages = Vec::new();
+        let mut origins = Vec::new();
+        for line in text.lines().filter(|line| !line.trim().is_empty()) {
+            let fields: Vec<_> = line.split('\t').collect();
+            if fields.len() != 7
+                || !flatpak_id(fields[0])
+                || !flatpak_id(fields[1])
+                || !flatpak_id(fields[2])
+                || (!fields[5].is_empty() && !flatpak_id(fields[5]))
+            {
+                return Err(invalid("flatpak", "invalid list metadata"));
+            }
+            let runtime = fields[6]
+                .split(',')
+                .any(|option| option.trim() == "runtime");
+            let kind = if runtime { "runtime" } else { "app" };
+            let reference = format!("{kind}/{}/{}/{}", fields[0], fields[1], fields[2]);
+            origins.push(fields[5].to_owned());
+            packages.push(Package {
+                id: PackageId {
+                    backend: "flatpak".into(),
+                    name: fields[0].into(),
+                    architecture: fields[1].into(),
+                    scope: scope.clone(),
+                    remote: None,
+                    reference: Some(reference),
+                },
+                display_name: fields[0].into(),
+                summary: if runtime {
+                    format!("Runtime · {} · {}", fields[2], fields[4])
+                } else {
+                    fields[4].into()
+                },
+                installed_version: Some(fields[3].into()),
+                candidate_version: Some(fields[3].into()),
+                update: UpdateAvailability::Current,
+                icon: None,
+                component_ids: vec![],
+                homepages: vec![],
+            });
+        }
+        if packages.is_empty() {
+            return Ok(packages);
+        }
+        // Flatpak compares commits, not version labels: rebuilds and runtimes
+        // can have an update even when the version is unchanged or empty.
+        let output = bytes(
+            "flatpak",
+            self.call(
+                &[
+                    prefix,
+                    "remote-ls",
+                    "--updates",
+                    "--columns=ref,version,origin",
+                ],
+                cancel,
+                false,
+                system,
+            )?,
+        )?;
+        let updates = String::from_utf8(output).map_err(|e| invalid("flatpak", e))?;
+        for line in updates.lines().filter(|line| !line.trim().is_empty()) {
+            let fields: Vec<_> = line.split('\t').collect();
+            if fields.len() != 3 || flatpak_reference(fields[0]).is_none() || !flatpak_id(fields[2])
+            {
+                return Err(invalid("flatpak", "invalid update metadata"));
+            }
+            for (package, origin) in packages.iter_mut().zip(&origins) {
+                if package.id.reference.as_deref() == Some(fields[0]) && origin == fields[2] {
+                    package.candidate_version = Some(fields[1].into());
+                    package.update = UpdateAvailability::Available;
                 }
-                Ok(Package {
-                    id: PackageId {
-                        backend: "flatpak".into(),
-                        name: fields[0].into(),
-                        architecture: fields[1].into(),
-                        scope: scope.clone(),
-                        remote: None,
-                    },
-                    display_name: fields[0].into(),
-                    summary: fields[4].into(),
-                    installed_version: Some(fields[3].into()),
-                    candidate_version: Some(fields[3].into()),
-                    update: UpdateAvailability::Unknown,
-                    icon: None,
-                    component_ids: vec![],
-                    homepages: vec![],
-                })
-            })
-            .collect()
+            }
+        }
+        Ok(packages)
     }
     fn search_scope(
         &self,
@@ -356,6 +410,7 @@ impl<T: Transport> Flatpak<T> {
                         architecture: std::env::consts::ARCH.into(),
                         scope: scope.clone(),
                         remote: remote.map(str::to_owned),
+                        reference: None,
                     },
                     display_name: fields[0].into(),
                     summary: fields[1].into(),
@@ -372,6 +427,16 @@ impl<T: Transport> Flatpak<T> {
     fn target(&self, id: &PackageId) -> Result<(bool, &'static str), EngineError> {
         if id.backend != "flatpak" || !flatpak_id(&id.name) || !flatpak_id(&id.architecture) {
             return Err(invalid("flatpak", "foreign or invalid Flatpak identity"));
+        }
+        if let Some(reference) = &id.reference {
+            let (_, name, arch, _) = flatpak_reference(reference)
+                .ok_or_else(|| invalid("flatpak", "invalid native ref"))?;
+            if name != id.name || arch != id.architecture {
+                return Err(invalid(
+                    "flatpak",
+                    "native ref does not match package identity",
+                ));
+            }
         }
         match id.scope {
             Scope::System => Ok((true, "--system")),
@@ -407,6 +472,14 @@ impl<T: Transport> Backend for Flatpak<T> {
     fn search(&mut self, query: &str, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
         if query.trim().is_empty() || query.starts_with('-') {
             return Err(invalid("flatpak", "expected a search term"));
+        }
+        if flatpak_reference(query).is_some() {
+            return self.installed(cancel).map(|packages| {
+                packages
+                    .into_iter()
+                    .filter(|package| package.id.reference.as_deref() == Some(query))
+                    .collect()
+            });
         }
         // The user catalog is the primary source; a failing system query
         // (for example, a machine with no system remotes) must not fail
@@ -448,7 +521,12 @@ impl<T: Transport> Backend for Flatpak<T> {
                 package.icon = flatpak_icon(&roots, &package.id.name);
             }
             // The Flatpak application id is itself the AppStream component id.
-            if flatpak_id(&package.id.name) {
+            if package
+                .id
+                .reference
+                .as_deref()
+                .is_some_and(|reference| reference.starts_with("app/"))
+            {
                 package.component_ids = vec![package.id.name.clone()];
             }
         }
@@ -497,7 +575,6 @@ impl<T: Transport> Backend for Flatpak<T> {
                         &[
                             scope,
                             "update",
-                            "--app",
                             "--no-deploy",
                             "--noninteractive",
                             "--assumeyes",
@@ -526,24 +603,30 @@ impl<T: Transport> Backend for Flatpak<T> {
             "Running Flatpak {verb} for {}.",
             id.name
         )));
+        let reference = id.reference.as_deref().unwrap_or(&id.name);
+        let kind = if reference.starts_with("runtime/") {
+            "--runtime"
+        } else {
+            "--app"
+        };
         let args = if verb == "install" {
             vec![
                 scope,
                 verb,
-                "--app",
+                kind,
                 "--noninteractive",
                 "--assumeyes",
                 id.remote.as_deref().unwrap_or("flathub"),
-                &id.name,
+                reference,
             ]
         } else {
             vec![
                 scope,
                 verb,
-                "--app",
+                kind,
                 "--noninteractive",
                 "--assumeyes",
-                &id.name,
+                reference,
             ]
         };
         let result = self.call(&args, cancel, true, system)?;
@@ -974,6 +1057,7 @@ impl<T: Transport> Homebrew<T> {
                                 path: prefix.clone(),
                             },
                             remote: None,
+                            reference: None,
                         },
                         display_name: f.full_name,
                         summary: f.desc.clone().unwrap_or_default(),
@@ -1272,6 +1356,7 @@ impl<T: Transport> SystemManager<T> {
                 architecture: arch.into(),
                 scope: Scope::System,
                 remote: None,
+                reference: None,
             },
             display_name: name.into(),
             summary: summary.into(),
@@ -2083,6 +2168,7 @@ impl<T: Transport> DevTool<T> {
                         path: home.to_path_buf(),
                     },
                     remote: None,
+                    reference: None,
                 },
                 display_name: name,
                 summary: summary.clone(),
@@ -2835,6 +2921,7 @@ impl<T: Transport> Backend for DevTool<T> {
                     architecture: std::env::consts::ARCH.into(),
                     scope: Scope::Environment { path: home },
                     remote: None,
+                    reference: None,
                 },
                 display_name: query.into(),
                 summary: format!("Install {query} with {}", self.kind.id()),

@@ -154,7 +154,8 @@ impl PackageReport {
             .iter()
             .map(|p| &p.id)
             .filter(|id| {
-                id.name == selector.name
+                (id.name == selector.name
+                    || id.reference.as_deref() == Some(selector.name.as_str()))
                     && selector.backend.as_ref().is_none_or(|b| b == &id.backend)
                     && selector
                         .architecture

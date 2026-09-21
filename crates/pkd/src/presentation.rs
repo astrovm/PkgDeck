@@ -39,7 +39,7 @@ pub fn operation(op: &Operation) -> String {
     };
     format!(
         "{verb} {}\n  Source: {} · Architecture: {} · Scope: {}",
-        clean(&id.name),
+        clean(id.reference.as_deref().unwrap_or(&id.name)),
         clean(&id.backend),
         clean(&id.architecture),
         clean(&scope(&id.scope))
@@ -169,6 +169,7 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
         ));
         for (label, field) in [
             ("Source", &p["id"]["backend"]),
+            ("Reference", &p["id"]["reference"]),
             ("Architecture", &p["id"]["architecture"]),
             ("Scope", &p["id"]["scope"]),
             ("Installed", &p["installed_version"]),
@@ -177,6 +178,9 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
             ("Homepage", &data["homepage"]),
             ("Dependencies", &data["dependencies"]),
         ] {
+            if label == "Reference" && field.is_null() {
+                continue;
+            }
             // A missing installed version means not installed, matching the
             // state legend; every other null stays a plain Unavailable.
             let text = if label == "Installed" && field.is_null() {

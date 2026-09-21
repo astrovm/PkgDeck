@@ -35,6 +35,7 @@ impl Fixture {
                     architecture: "all".into(),
                     scope: Scope::System,
                     remote: None,
+                    reference: None,
                 },
                 display_name: "Synthetic fixture".into(),
                 summary: "Synthetic package".into(),
@@ -329,11 +330,10 @@ fn snap_search_keeps_store_summaries_for_ranking() {
 #[test]
 fn flatpak_lists_user_and_system_applications_without_collapsing_scope() {
     let cancel = Cancellation::default();
-    let metadata = "io.example.User\tx86_64\tstable\t1.0\tUser app\nio.example.System\tx86_64\tstable\t2.0\tSystem app\n";
-    let mut backend = Flatpak::new(Raw(output(metadata)));
+    let mut backend = Flatpak::new(FlatpakFixture::default());
     assert_eq!(backend.detect(&cancel), Ok(Availability::Available));
     let packages = backend.installed(&cancel).unwrap();
-    assert_eq!(packages.len(), 4);
+    assert_eq!(packages.len(), 2);
     assert!(packages
         .iter()
         .any(|package| package.id.scope == Scope::System));
@@ -345,7 +345,12 @@ fn flatpak_lists_user_and_system_applications_without_collapsing_scope() {
 type FlatpakCall = (Vec<String>, bool, bool);
 
 #[derive(Clone, Default)]
-struct FlatpakFixture(Arc<Mutex<Vec<FlatpakCall>>>);
+struct FlatpakFixture {
+    calls: Arc<Mutex<Vec<FlatpakCall>>>,
+    installed: Option<String>,
+    user_updates: Option<Completion>,
+    system_updates: Option<Completion>,
+}
 impl Transport for FlatpakFixture {
     fn apt_query(
         &self,
@@ -378,15 +383,29 @@ impl Transport for FlatpakFixture {
             .iter()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
-        self.0.lock().unwrap().push((args.clone(), write, system));
+        self.calls
+            .lock()
+            .unwrap()
+            .push((args.clone(), write, system));
+        if args.contains(&"remote-ls".into()) {
+            return Ok(if system {
+                self.system_updates.clone()
+            } else {
+                self.user_updates.clone()
+            }
+            .unwrap_or_else(|| output("")));
+        }
         if args.contains(&"list".into()) {
+            if let Some(installed) = &self.installed {
+                return Ok(output(installed));
+            }
             let name = if system {
                 "io.example.System"
             } else {
                 "io.example.User"
             };
             return Ok(output(format!(
-                "{name}\tx86_64\tstable\t1.0\tSynthetic app\n"
+                "{name}\tx86_64\tstable\t1.0\tSynthetic app\tflathub\tcurrent\n"
             )));
         }
         if args.contains(&"search".into()) {
@@ -435,7 +454,7 @@ fn flatpak_operations_keep_scope_and_noninteractive_arguments() {
             &mut |_| {},
         )
         .unwrap();
-    let calls = fixture.0.lock().unwrap();
+    let calls = fixture.calls.lock().unwrap();
     assert!(calls
         .iter()
         .any(|(args, write, system)| *write && !*system && args.contains(&"flathub".into())));
@@ -457,6 +476,7 @@ fn flatpak_rejects_malformed_metadata_and_foreign_operations() {
             path: "/synthetic".into(),
         },
         remote: None,
+        reference: None,
     };
     assert!(backend
         .execute(&Operation::Install(foreign), &cancel, &mut |_| {})
@@ -537,6 +557,7 @@ fn backend_validation_preserves_invalid_and_transport_failures() {
         architecture: "x86_64".into(),
         scope: Scope::User { uid: 1 },
         remote: None,
+        reference: None,
     };
     assert!(flatpak
         .execute(&Operation::Install(foreign), &cancel, &mut |_| {})
@@ -551,6 +572,7 @@ fn backend_validation_preserves_invalid_and_transport_failures() {
             path: "/synthetic".into(),
         },
         remote: None,
+        reference: None,
     };
     assert_eq!(brew.details(&missing, &cancel), Err(EngineError::NotFound));
 }
@@ -857,7 +879,7 @@ fn flatpak_remote_search_details_and_upgrade_all() {
             &mut |_| {},
         )
         .unwrap();
-    let calls = fixture.0.lock().unwrap();
+    let calls = fixture.calls.lock().unwrap();
     assert!(calls
         .iter()
         .any(|(args, write, system)| *write && !*system && args.contains(&"update".into())));
@@ -1256,6 +1278,7 @@ fn dev_id(backend: &str, name: &str, home: &str) -> PackageId {
         architecture: std::env::consts::ARCH.into(),
         scope: Scope::Environment { path: home.into() },
         remote: None,
+        reference: None,
     }
 }
 
@@ -2905,4 +2928,116 @@ fn native_venv_pip_transport_uses_the_selected_environment() {
         Err(ExecutionError::Disabled(_))
     ));
     std::fs::remove_dir_all(&base).unwrap();
+}
+
+#[test]
+fn flatpak_updates_match_commits_by_scope_origin_kind_and_branch() {
+    let fixture = FlatpakFixture {
+        installed: Some("io.example.App\tx86_64\tstable\t1\tApp\tflathub\tcurrent\nio.example.App\tx86_64\tbeta\t1\tApp beta\tflathub\t\norg.example.Platform\tx86_64\t50\t\tPlatform\tflathub\truntime\n".into()),
+        user_updates: Some(output("app/io.example.App/x86_64/stable\t1\tflathub\napp/io.example.App/x86_64/beta\t2\tother-remote\nruntime/org.example.Platform/x86_64/50\t\tflathub\nruntime/org.example.Platform/x86_64/49\t\tflathub\n")),
+        ..Default::default()
+    };
+    let mut backend = Flatpak::new(fixture.clone());
+    let cancel = Cancellation::default();
+    let packages = backend.installed(&cancel).unwrap();
+    assert_eq!(packages.len(), 6);
+    assert!(packages
+        .iter()
+        .filter(|p| p.id.scope == Scope::System)
+        .all(|p| p.update == UpdateAvailability::Current));
+    let updates: Vec<_> = packages
+        .iter()
+        .filter(|p| p.update == UpdateAvailability::Available)
+        .collect();
+    assert_eq!(updates.len(), 2);
+    assert_eq!(updates[0].installed_version, updates[0].candidate_version);
+    let runtime = updates[1];
+    assert!(runtime.component_ids.is_empty());
+    assert_eq!(
+        runtime.id.reference.as_deref(),
+        Some("runtime/org.example.Platform/x86_64/50")
+    );
+    assert_eq!(runtime.candidate_version.as_deref(), Some(""));
+    let exact = backend
+        .search("runtime/org.example.Platform/x86_64/50", &cancel)
+        .unwrap();
+    assert_eq!(exact.len(), 2);
+    assert!(exact
+        .iter()
+        .all(|package| package.id.reference == runtime.id.reference));
+    assert_eq!(
+        backend.details(&runtime.id, &cancel).unwrap().package.id,
+        runtime.id
+    );
+
+    backend
+        .execute(
+            &Operation::Upgrade(runtime.id.clone()),
+            &cancel,
+            &mut |_| {},
+        )
+        .unwrap();
+    let calls = fixture.calls.lock().unwrap();
+    assert!(calls.iter().any(|(args, write, system)| *write
+        && !*system
+        && args.contains(&"--runtime".into())
+        && args.last().unwrap() == "runtime/org.example.Platform/x86_64/50"));
+    drop(calls);
+    let mut wrong = runtime.id.clone();
+    wrong.reference = Some("runtime/org.other.Platform/x86_64/50".into());
+    assert!(backend
+        .execute(&Operation::Upgrade(wrong), &cancel, &mut |_| {})
+        .is_err());
+    let report = PackageReport {
+        packages,
+        failures: vec![],
+    };
+    assert_eq!(
+        report
+            .select(&Selector {
+                name: "app/io.example.App/x86_64/stable".into(),
+                backend: Some("flatpak".into()),
+                architecture: None,
+                scope: Some(Scope::System),
+            })
+            .unwrap()
+            .reference
+            .as_deref(),
+        Some("app/io.example.App/x86_64/stable")
+    );
+}
+
+#[test]
+fn flatpak_update_query_failures_are_not_reported_as_current() {
+    let cancel = Cancellation::default();
+    let mut failed = output("");
+    failed.code = Some(1);
+    let mut truncated = output("");
+    truncated.truncated = true;
+    for updates in [
+        output("broken"),
+        output("app/--bad/x86_64/stable\t1\tflathub"),
+        failed,
+        truncated,
+    ] {
+        let mut backend = Flatpak::new(FlatpakFixture {
+            user_updates: Some(updates),
+            ..Default::default()
+        });
+        assert!(backend.installed(&cancel).is_err());
+    }
+    let fixture = FlatpakFixture {
+        installed: Some(String::new()),
+        ..Default::default()
+    };
+    assert!(Flatpak::new(fixture.clone())
+        .installed(&cancel)
+        .unwrap()
+        .is_empty());
+    assert!(!fixture
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|(args, _, _)| args.contains(&"remote-ls".into())));
 }

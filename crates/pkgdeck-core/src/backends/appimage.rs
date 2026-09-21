@@ -110,6 +110,7 @@ impl AppImage {
                 architecture,
                 scope: self.scope(),
                 remote: None,
+                reference: None,
             },
             display_name: "Imported AppImage".into(),
             summary: format!("PkgDeck-managed local Type 2 AppImage ({digest})"),
@@ -224,6 +225,7 @@ impl AppImage {
                             architecture,
                             scope: self.scope(),
                             remote: None,
+                            reference: None,
                         },
                         display_name,
                         summary: "Externally managed local Type 2 AppImage".into(),
@@ -366,6 +368,7 @@ impl Backend for AppImage {
                         path: self.root.clone(),
                     },
                     remote: None,
+                    reference: None,
                 },
                 display_name: source
                     .file_name()
@@ -797,6 +800,7 @@ mod tests {
             architecture: "x86_64".into(),
             scope: Scope::Environment { path: root },
             remote: None,
+            reference: None,
         };
         assert!(backend
             .execute(&Operation::Install(foreign), &cancel, &mut |_| {})
@@ -871,6 +875,7 @@ mod tests {
             architecture: "aarch64".into(),
             scope: Scope::Environment { path: root.clone() },
             remote: None,
+            reference: None,
         };
         assert!(backend
             .execute(

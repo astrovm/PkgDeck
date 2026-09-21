@@ -172,12 +172,18 @@ TestCase {
         compare(browser.items.length, 0);
     }
     function test_motion_can_be_disabled_without_delaying_interactions() {
+        const panel = findChild(browser, "detailsPanel");
+        verify(!panel.visible);
         populate();
         browser.choose(0);
-        const panel = findChild(browser, "detailsPanel");
+        verify(panel.visible);
         const panelHeight = panel.height;
         browser.choose(1);
         compare(panel.height, panelHeight);
+        mouseClick(findChild(browser, "closeDetailsButton"));
+        verify(!panel.visible);
+        browser.choose(1);
+        verify(panel.visible);
         browser.openView("Settings");
         const animations = findChild(browser, "animationsSetting");
         verify(animations.checked);
@@ -446,6 +452,22 @@ TestCase {
         installed.update = "available";
         browser.openView("Updates");
         compare(browser.versionText(installed), "1.2.3 → 2.0.0");
+    }
+    function test_versionless_runtime_actions_and_rebuild_labels() {
+        browser.openView("Updates");
+        const runtime = {kind: "package", name: "org.example.Platform", source: "flatpak",
+            architecture: "x86_64", scope: "system", installed: "", candidate: "",
+            reference: "runtime/org.example.Platform/x86_64/stable", update: "available"};
+        fake.rows = JSON.stringify([runtime]);
+        wait(30);
+        browser.choose(0);
+        verify(!findChild(browser, "installButton").visible);
+        verify(findChild(browser, "removeButton").enabled);
+        verify(findChild(browser, "upgradeButton").enabled);
+        compare(browser.versionText(runtime), "Update available");
+        runtime.installed = "1.0";
+        runtime.candidate = "1.0";
+        compare(browser.versionText(runtime), "1.0 · update available");
     }
     function test_completed_write_forces_current_view_refresh() {
         browser.openView("Installed");

@@ -303,7 +303,7 @@ fn checked_upgrades(packages: &[Package], identities: &str) -> Vec<Operation> {
     };
     raw.into_iter()
         .filter_map(|parts| {
-            let [backend, name, architecture, remote, scope] = parts.as_slice() else {
+            let [backend, name, architecture, remote, scope, rest @ ..] = parts.as_slice() else {
                 return None;
             };
             let id = PackageId {
@@ -312,6 +312,11 @@ fn checked_upgrades(packages: &[Package], identities: &str) -> Vec<Operation> {
                 architecture: architecture.as_str()?.to_owned(),
                 scope: serde_json::from_value(scope.clone()).ok()?,
                 remote: remote.as_str().map(str::to_owned),
+                reference: match rest {
+                    [] | [Value::Null] => None,
+                    [Value::String(reference)] => Some(reference.clone()),
+                    _ => return None,
+                },
             };
             packages
                 .iter()
@@ -404,7 +409,7 @@ fn operation_label(operation: &Operation) -> String {
     };
     format!(
         "{action} {}\nSource: {}\nArchitecture: {}\nScope: {}",
-        id.name,
+        id.reference.as_deref().unwrap_or(&id.name),
         id.backend,
         id.architecture,
         scope_label(&id.scope)
@@ -412,7 +417,7 @@ fn operation_label(operation: &Operation) -> String {
 }
 fn package_row(p: &Package, same_from: &[String], same_group: Option<&str>) -> Value {
     json!({"name": p.id.name, "source": p.id.backend, "architecture": p.id.architecture,
-        "remote": p.id.remote, "scope": p.id.scope, "scope_label": scope_label(&p.id.scope), "summary": p.summary, "installed": p.installed_version,
+        "remote": p.id.remote, "reference": p.id.reference, "scope": p.id.scope, "scope_label": scope_label(&p.id.scope), "summary": p.summary, "installed": p.installed_version,
         "candidate": p.candidate_version, "update": p.update, "kind": "package", "icon": p.icon,
         "same_app_from": same_from, "same_app_group": same_group})
 }
@@ -1075,6 +1080,7 @@ mod tests {
                 architecture: "all".into(),
                 scope: Scope::System,
                 remote: None,
+                reference: None,
             },
             display_name: "Synthetic".into(),
             summary: "Fixture".into(),
@@ -1114,6 +1120,7 @@ mod tests {
                     architecture: "all".into(),
                     scope: Scope::System,
                     remote: None,
+                    reference: None,
                 },
                 display_name: name.into(),
                 summary: "Fixture".into(),
@@ -1130,7 +1137,7 @@ mod tests {
             package("current", true, UpdateAvailability::Current),
             package("uninstalled", false, UpdateAvailability::Available),
         ];
-        // Identity shape mirrors QML rowIdentity: [source, name, arch, remote, scope].
+        // Identity shape mirrors QML rowIdentity: [source, name, arch, remote, scope, reference].
         let row = |name: &str| {
             vec![
                 serde_json::json!("fixture"),
@@ -1138,6 +1145,7 @@ mod tests {
                 serde_json::json!("all"),
                 serde_json::json!(null),
                 serde_json::json!("system"),
+                serde_json::json!(null),
             ]
         };
         let identities = serde_json::to_string(&vec![
@@ -1152,6 +1160,20 @@ mod tests {
         assert_eq!(operations.len(), 1);
         assert!(matches!(&operations[0], Operation::Upgrade(id) if id.name == "upgradable"));
         assert!(checked_upgrades(&packages, "not json").is_empty());
+        let mut runtime = package("org.example.Platform", true, UpdateAvailability::Available);
+        runtime.id.reference = Some("runtime/org.example.Platform/all/stable".into());
+        let mut identity = row("org.example.Platform");
+        identity[5] = serde_json::json!(runtime.id.reference);
+        let encoded = serde_json::to_string(&vec![identity.clone()]).unwrap();
+        assert_eq!(
+            checked_upgrades(&[runtime.clone()], &encoded),
+            vec![Operation::Upgrade(runtime.id.clone())]
+        );
+        identity[5] = serde_json::json!("runtime/org.example.Platform/all/beta");
+        assert!(
+            checked_upgrades(&[runtime], &serde_json::to_string(&vec![identity]).unwrap())
+                .is_empty()
+        );
     }
     #[test]
     fn checked_proposals_plan_selected_upgrades() {
@@ -1163,6 +1185,7 @@ mod tests {
                     architecture: "all".into(),
                     scope: Scope::System,
                     remote: None,
+                    reference: None,
                 },
                 display_name: name.into(),
                 summary: "Fixture".into(),
@@ -1174,7 +1197,7 @@ mod tests {
                 homepages: vec![],
             }
         }
-        // Identity shape mirrors QML rowIdentity: [source, name, arch, remote, scope].
+        // Identity shape mirrors QML rowIdentity: [source, name, arch, remote, scope, reference].
         let row = |name: &str| {
             serde_json::to_string(&vec![
                 serde_json::json!("fixture"),
@@ -1182,6 +1205,7 @@ mod tests {
                 serde_json::json!("all"),
                 serde_json::json!(null),
                 serde_json::json!("system"),
+                serde_json::json!(null),
             ])
             .unwrap()
         };
@@ -1226,6 +1250,7 @@ mod tests {
             architecture: "all".into(),
             scope: Scope::System,
             remote: None,
+            reference: None,
         };
         assert_eq!(
             engine_source(&Job::Details(id.clone()), &[]),
@@ -1255,6 +1280,7 @@ mod tests {
             architecture: "all".into(),
             scope: Scope::System,
             remote: None,
+            reference: None,
         };
         let mut other = id.clone();
         other.name = "other".into();
@@ -1287,6 +1313,7 @@ mod tests {
                 architecture: "all".into(),
                 scope: Scope::System,
                 remote: None,
+                reference: None,
             },
             display_name: "Synthetic".into(),
             summary: "Fixture".into(),
@@ -1330,6 +1357,7 @@ mod tests {
                 architecture: "all".into(),
                 scope: Scope::System,
                 remote: None,
+                reference: None,
             },
             display_name: "Synthetic".into(),
             summary: "Fixture".into(),
@@ -1377,6 +1405,7 @@ mod tests {
             architecture: "all".into(),
             scope: Scope::System,
             remote: None,
+            reference: None,
         };
         let package = Package {
             id: id.clone(),

@@ -53,7 +53,7 @@ Controls.ApplicationWindow {
     property bool queryDirty: false
     property var selectedIdentity: null
     function rowIdentity(row) {
-        return row ? JSON.stringify([row.source, row.name, row.architecture, row.remote || null, row.scope]) : "";
+        return row ? JSON.stringify([row.source, row.name, row.architecture, row.remote || null, row.scope, row.reference || null]) : "";
     }
     property var selected: !retainingResults && results.currentIndex >= 0 && results.currentIndex < viewItems.length ? viewItems[results.currentIndex] : null
     // Explicitly checked source ids, comma-joined; empty means every
@@ -212,8 +212,11 @@ Controls.ApplicationWindow {
     // A package row is an unverified guess when no backend reported a
     // version for it either way. If a future source legitimately returns
     // version-less rows, they will sink here too by design.
+    function isInstalled(row) {
+        return row && row.installed !== null && row.installed !== undefined;
+    }
     function isFabricated(row) {
-        return row.kind === "package" && !row.installed && !row.candidate;
+        return row.kind === "package" && !isInstalled(row) && !row.candidate;
     }
     function relevanceScore(row, query) {
         const name = (row.name || "").toLowerCase();
@@ -444,10 +447,6 @@ Controls.ApplicationWindow {
         }
     }
 
-    function rowTooltip(data) {
-        const same = sameAppNames(data).length > 0 ? "\nRelated install: " + sameAppNames(data).join(", ") : "";
-        return data.name + "\n" + (data.installed || "not installed") + " → " + (data.candidate || "unknown") + "\n" + (data.summary || "") + same;
-    }
     // Display names for backend ids used by related-install indicators without
     // changing the rows' exact identities.
     function sourceDisplayName(id) {
@@ -466,10 +465,13 @@ Controls.ApplicationWindow {
             return "Failed";
         if (row.kind === "source")
             return row.available ? "Available" : "Unavailable";
-        if (row.update === "available")
+        if (row.update === "available") {
+            if (!row.installed || !row.candidate || row.installed === row.candidate)
+                return row.installed ? row.installed + " · update available" : "Update available";
             return row.installed + " → " + row.candidate;
-        if (row.installed)
-            return root.currentView === "Installed" ? row.installed : row.installed + " · installed";
+        }
+        if (isInstalled(row))
+            return row.installed ? (root.currentView === "Installed" ? row.installed : row.installed + " · installed") : "Installed";
         return row.candidate || "Unknown";
     }
     // Local icon files become file:// URLs. Paths come from the backend and
@@ -738,8 +740,6 @@ Controls.ApplicationWindow {
                         implicitWidth: 28
                         implicitHeight: 28
                         Accessible.name: "Open PkgDeck on GitHub"
-                        Controls.ToolTip.visible: hovered
-                        Controls.ToolTip.text: root.repositoryUrl
                         onClicked: Qt.openUrlExternally(root.repositoryUrl)
                         background: Rectangle {
                             radius: 5
@@ -1219,16 +1219,8 @@ Controls.ApplicationWindow {
                             rightPadding: 16
                             highlighted: results.currentIndex === index
                             enabled: !backend.writing
-                            Accessible.name: (modelData.kind === "package" ? (modelData.update === "available" ? "Update available. " : (modelData.installed ? "Installed. " : "Not installed. ")) : "") + modelData.name + ", " + modelData.source + ", " + (modelData.summary || "")
+                            Accessible.name: (modelData.kind === "package" ? (modelData.update === "available" ? "Update available. " : (root.isInstalled(modelData) ? "Installed. " : "Not installed. ")) : "") + modelData.name + ", " + modelData.source + ", " + (modelData.summary || "")
                             onClicked: { results.forceActiveFocus(); root.choose(index); }
-                            // Framework tooltip: single Overlay instance per
-                            // hover, positioned by Qt, with text bound to the
-                            // current row. The previous per-delegate card
-                            // could show one row's versions with another
-                            // row's summary under item reuse.
-                            Controls.ToolTip.visible: packageRow.hovered && modelData.kind === "package"
-                            Controls.ToolTip.delay: 400
-                            Controls.ToolTip.text: root.rowTooltip(modelData)
                             Rectangle {
                                 visible: !!modelData.groupStart
                                 anchors.top: parent.top
@@ -1383,7 +1375,7 @@ Controls.ApplicationWindow {
             Rectangle {
                 id: detailsPanel
                 objectName: "detailsPanel"
-                visible: ["Search", "Installed", "Updates", "Sources"].indexOf(root.currentView) >= 0
+                visible: root.selected !== null && ["Search", "Installed", "Updates", "Sources"].indexOf(root.currentView) >= 0
                 Layout.fillWidth: true
                 Layout.preferredHeight: Math.min(root.height * 0.27, 180)
                 color: root.surface
@@ -1420,13 +1412,22 @@ Controls.ApplicationWindow {
                             Accessible.ignored: true
                         }
                         Controls.Label {
-                        text: root.selected ? root.selected.name : "Package details"
+                        text: root.selected ? (root.selected.reference || root.selected.name) : "Package details"
                         textFormat: Text.PlainText
                         color: root.ink
                         font.pixelSize: root.compact ? 18 : 22
                         font.bold: true
                         elide: Text.ElideRight
                         Layout.fillWidth: true
+                        }
+                        ActionButton {
+                            objectName: "closeDetailsButton"
+                            text: "Close details"
+                            symbol: "cancel"
+                            onClicked: {
+                                results.currentIndex = -1;
+                                root.selectedIdentity = null;
+                            }
                         }
                     }
                     Controls.ScrollView {
@@ -1488,19 +1489,19 @@ Controls.ApplicationWindow {
                 }
                 ActionButton {
                     objectName: "installButton"
-                    visible: root.selected !== null && root.selected.kind === "package" && !root.selected.installed
+                    visible: root.selected !== null && root.selected.kind === "package" && !root.isInstalled(root.selected)
                     text: "Install"
                     symbol: "install"
                     primary: true
-                    enabled: !backend.busy && root.selected !== null && root.selected.kind === "package" && !root.selected.installed
+                    enabled: !backend.busy && root.selected !== null && root.selected.kind === "package" && !root.isInstalled(root.selected)
                     onClicked: root.propose("install")
                 }
                 ActionButton {
                     objectName: "removeButton"
-                    visible: root.selected !== null && !!root.selected.installed
+                    visible: root.selected !== null && root.isInstalled(root.selected)
                     text: "Remove"
                     symbol: "remove"
-                    enabled: !backend.busy && root.selected !== null && !!root.selected.installed
+                    enabled: !backend.busy && root.selected !== null && root.isInstalled(root.selected)
                     onClicked: root.propose("remove")
                 }
                 ActionButton {
