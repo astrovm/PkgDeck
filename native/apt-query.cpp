@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <apt-pkg/cachefile.h>
 #include <apt-pkg/configuration.h>
+#include <apt-pkg/depcache.h>
 #include <apt-pkg/error.h>
 #include <apt-pkg/init.h>
 #include <apt-pkg/pkgrecords.h>
@@ -134,7 +135,9 @@ int main(int argc, char **argv) {
       continue;
     const bool upgradable =
         !installed.end() && !candidate.end() &&
-        cache.VS->CmpVersion(candidate.VerStr(), installed.VerStr()) > 0;
+        cache.VS->CmpVersion(candidate.VerStr(), installed.VerStr()) > 0 &&
+        item->SelectedState != pkgCache::State::Hold &&
+        !file.GetDepCache()->PhasingApplied(item);
     if (!first)
       std::cout << ',';
     first = false;

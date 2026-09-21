@@ -16,6 +16,7 @@ TestCase {
         property string status: "Ready"
         property string confirmation: ""
         property string version: "9.9.9-test"
+        property bool simulateLoading: false
         property bool busy: false
         property bool writing: false
         property bool upgradable: false
@@ -32,6 +33,10 @@ TestCase {
             lastQuery = query;
             lastSource = source;
             lastForce = !!force;
+            if (simulateLoading) {
+                rows = "[]";
+                busy = true;
+            }
         }
         function select(index) {
             selection = index;
@@ -76,6 +81,7 @@ TestCase {
         fake.details = "{}";
         fake.status = "Ready";
         fake.confirmation = "";
+        fake.simulateLoading = false;
         fake.busy = false;
         fake.writing = false;
         fake.upgradable = false;
@@ -88,6 +94,7 @@ TestCase {
         browser.requestActivate();
         // Fresh checklist and column layout per test: QSettings persist
         // across tests in one run.
+        browser.reduceMotion = false;
         browser.sourceSelection = "";
         browser.sortColumn = "";
         browser.sortAscending = true;
@@ -142,6 +149,76 @@ TestCase {
             }
         ]);
         wait(30);
+    }
+    function test_refresh_retains_inactive_results_until_fresh_data_arrives() {
+        populate();
+        const previous = browser.items;
+        fake.simulateLoading = true;
+        browser.reload(true);
+        compare(browser.items.length, previous.length);
+        verify(browser.retainingResults);
+        verify(!findChild(browser, "packageResults").enabled);
+        browser.choose(0);
+        compare(browser.selected, null);
+        browser.propose("install");
+        compare(fake.confirmation, "");
+        fake.rows = JSON.stringify([previous[0]]);
+        compare(browser.items.length, 1);
+        verify(!browser.retainingResults);
+        verify(findChild(browser, "packageResults").enabled);
+        fake.busy = false;
+        browser.reload(true);
+        fake.busy = false; // Empty completion must discard the old snapshot.
+        compare(browser.items.length, 0);
+    }
+    function test_motion_can_be_disabled_without_delaying_interactions() {
+        const panel = findChild(browser, "detailsPanel");
+        verify(!panel.visible);
+        populate();
+        browser.choose(0);
+        verify(panel.visible);
+        const panelHeight = panel.height;
+        browser.choose(1);
+        compare(panel.height, panelHeight);
+        mouseClick(findChild(browser, "closeDetailsButton"));
+        verify(!panel.visible);
+        browser.choose(1);
+        verify(panel.visible);
+        browser.openView("Settings");
+        const animations = findChild(browser, "animationsSetting");
+        verify(animations.checked);
+        mouseClick(animations);
+        verify(!animations.checked);
+        verify(browser.reduceMotion);
+        verify(!browser.motionEnabled);
+        compare(browser.feedbackDuration, 0);
+        compare(browser.revealDuration, 0);
+        compare(findChild(browser, "detailsContent").opacity, 1);
+        browser.openView("Search");
+        browser.choose(0);
+        browser.propose("install");
+        const dialog = findChild(browser, "confirmationDialog");
+        tryCompare(dialog, "opened", true);
+        keyClick(Qt.Key_Y, Qt.AltModifier);
+        compare(fake.writes, 1);
+        tryCompare(dialog, "visible", false);
+    }
+    function test_completion_highlights_only_changed_package_identities() {
+        populate();
+        const rows = JSON.parse(fake.rows);
+        fake.writing = true;
+        fake.busy = true;
+        fake.rows = "[]";
+        fake.writing = false;
+        fake.simulateLoading = true;
+        fake.busy = false;
+        tryCompare(fake, "busy", true); // Scheduled post-write reload.
+        rows[0].installed = "2.0";
+        fake.rows = JSON.stringify(rows);
+        fake.busy = false;
+        compare(browser.completedRows.length, 1);
+        compare(browser.completedRows[0], browser.rowIdentity(rows[0]));
+        tryCompare(browser, "completedRows", [], 2000);
     }
     function test_search_navigation_and_confirmation() {
         browser.openView("Search");
@@ -375,6 +452,22 @@ TestCase {
         installed.update = "available";
         browser.openView("Updates");
         compare(browser.versionText(installed), "1.2.3 → 2.0.0");
+    }
+    function test_versionless_runtime_actions_and_rebuild_labels() {
+        browser.openView("Updates");
+        const runtime = {kind: "package", name: "org.example.Platform", source: "flatpak",
+            architecture: "x86_64", scope: "system", installed: "", candidate: "",
+            reference: "runtime/org.example.Platform/x86_64/stable", update: "available"};
+        fake.rows = JSON.stringify([runtime]);
+        wait(30);
+        browser.choose(0);
+        verify(!findChild(browser, "installButton").visible);
+        verify(findChild(browser, "removeButton").enabled);
+        verify(findChild(browser, "upgradeButton").enabled);
+        compare(browser.versionText(runtime), "Update available");
+        runtime.installed = "1.0";
+        runtime.candidate = "1.0";
+        compare(browser.versionText(runtime), "1.0 · update available");
     }
     function test_completed_write_forces_current_view_refresh() {
         browser.openView("Installed");
@@ -695,6 +788,8 @@ TestCase {
         compare(browser.viewItems.length, 2);
     }
     function test_failure_rows_show_diagnostics() {
+        fake.rows = JSON.stringify([{kind: "failure", name: "npm", source: "npm", summary: "Source failed"}]);
+        browser.choose(0);
         fake.details = JSON.stringify({
             failure: {backend: "npm", error: "invalid response from npm: npm ls failed: boom"},
             hint: "Check the npm source in the Sources view."

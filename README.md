@@ -268,7 +268,12 @@ and Homebrew tests. VM dependencies are cached separately from test overlays.
 The CLI supports package operations across all backends (system managers, Flatpak,
 Snap, Homebrew, AppImage, and development managers) and `pkd doctor` diagnostics.
 The core contains their adapters, the shared engine, and the host authorization
-boundary. The GUI and CLI use the same engine. Release
+boundary. The GUI and CLI use the same engine. APT update availability respects phased
+rollouts and held packages. Flatpak updates include apps and runtimes in both
+user and system installations, including rebuilds with unchanged version labels.
+Flatpak JSON identities include the full native `reference` (kind/name/architecture/branch);
+use that reference as a package name to select a specific installed branch.
+Release
 publication remains a later step.
 
 Pinned baseline:

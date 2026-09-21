@@ -18,6 +18,9 @@ pub struct PackageId {
     /// Source-specific repository identity, such as a Flatpak remote.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote: Option<String>,
+    /// Exact native ref, including Flatpak kind, architecture, and branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq)]
@@ -330,6 +333,7 @@ mod tests {
                 architecture: "amd64".into(),
                 scope: Scope::System,
                 remote: None,
+                reference: None,
             },
             display_name: name.into(),
             summary: String::new(),
@@ -348,6 +352,7 @@ mod tests {
             architecture: "amd64".into(),
             scope: Scope::System,
             remote: None,
+            reference: None,
         }
     }
     #[test]
@@ -389,6 +394,7 @@ mod tests {
                 architecture: "amd64".into(),
                 scope: Scope::System,
                 remote: None,
+                reference: None,
             }
         )
         .is_empty());
@@ -400,6 +406,7 @@ mod tests {
                 architecture: "amd64".into(),
                 scope: Scope::System,
                 remote: None,
+                reference: None,
             }
         )
         .is_empty());
@@ -471,6 +478,7 @@ mod tests {
             architecture: "amd64".into(),
             scope: Scope::System,
             remote: None,
+            reference: None,
         };
         // Trailing-slash variants still match after normalization.
         assert_eq!(
@@ -506,6 +514,7 @@ mod tests {
                 architecture: "amd64".into(),
                 scope: Scope::System,
                 remote: None,
+                reference: None,
             }
         )
         .is_empty());

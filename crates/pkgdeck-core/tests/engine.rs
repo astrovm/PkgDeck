@@ -27,6 +27,7 @@ fn id(backend: &str) -> PackageId {
         architecture: "x86_64".into(),
         scope: Scope::System,
         remote: None,
+        reference: None,
     }
 }
 fn package(id: PackageId) -> Package {

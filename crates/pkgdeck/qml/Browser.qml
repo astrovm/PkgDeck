@@ -9,15 +9,53 @@ Controls.ApplicationWindow {
     required property var backend
     property string currentView: "Search"
     property string resultView: "Search"
-    property var items: currentView === resultView ? JSON.parse(backend.rows || "[]") : []
+    property var liveItems: JSON.parse(backend.rows || "[]")
+    property var retainedItems: []
+    property bool retainingResults: false
+    property var items: currentView === resultView ? (retainingResults ? retainedItems : liveItems) : []
+    property bool reduceMotion: preferences.reduceMotion
+    readonly property bool motionEnabled: !reduceMotion && Kirigami.Units.shortDuration > 0
+    readonly property int feedbackDuration: motionEnabled ? Math.round(Kirigami.Units.shortDuration * 0.8) : 0
+    readonly property int revealDuration: motionEnabled ? Math.round(Kirigami.Units.shortDuration * 1.2) : 0
+    property var revealedRows: new Set()
+    property var beforeWrite: null
+    property var completedRows: []
+    function revealRow(row) {
+        const identity = rowIdentity(row);
+        if (revealedRows.has(identity))
+            return false;
+        revealedRows.add(identity);
+        return motionEnabled;
+    }
+    function packageState(row) {
+        return JSON.stringify([row.installed, row.candidate, row.update]);
+    }
+    function markChangedRows() {
+        if (beforeWrite === null)
+            return;
+        const changed = liveItems.filter((row) => row.kind === "package"
+            && beforeWrite[rowIdentity(row)] !== undefined
+            && beforeWrite[rowIdentity(row)] !== packageState(row)).map(rowIdentity);
+        if (changed.length > 0) {
+            completedRows = changed;
+            completionHold.restart();
+        }
+    }
+    onReduceMotionChanged: preferences.reduceMotion = reduceMotion
+    onMotionEnabledChanged: {
+        if (!motionEnabled) {
+            detailsReveal.complete();
+            completedRows = [];
+        }
+    }
     property var detail: JSON.parse(backend.details || "{}")
     property bool closePending: false
     property bool queryDirty: false
     property var selectedIdentity: null
     function rowIdentity(row) {
-        return row ? JSON.stringify([row.source, row.name, row.architecture, row.remote || null, row.scope]) : "";
+        return row ? JSON.stringify([row.source, row.name, row.architecture, row.remote || null, row.scope, row.reference || null]) : "";
     }
-    property var selected: results.currentIndex >= 0 && results.currentIndex < viewItems.length ? viewItems[results.currentIndex] : null
+    property var selected: !retainingResults && results.currentIndex >= 0 && results.currentIndex < viewItems.length ? viewItems[results.currentIndex] : null
     // Explicitly checked source ids, comma-joined; empty means every
     // available source. Unchecking hides a source from all queries, which
     // is how backends you never use stay silent.
@@ -174,8 +212,11 @@ Controls.ApplicationWindow {
     // A package row is an unverified guess when no backend reported a
     // version for it either way. If a future source legitimately returns
     // version-less rows, they will sink here too by design.
+    function isInstalled(row) {
+        return row && row.installed !== null && row.installed !== undefined;
+    }
     function isFabricated(row) {
-        return row.kind === "package" && !row.installed && !row.candidate;
+        return row.kind === "package" && !isInstalled(row) && !row.candidate;
     }
     function relevanceScore(row, query) {
         const name = (row.name || "").toLowerCase();
@@ -303,8 +344,12 @@ Controls.ApplicationWindow {
         implicitHeight: 38
         horizontalPadding: 16
         opacity: enabled ? 1 : 0.45
+        scale: down ? 0.98 : 1
+        Behavior on opacity { NumberAnimation { duration: root.feedbackDuration } }
+        Behavior on scale { NumberAnimation { duration: root.feedbackDuration; easing.type: Easing.OutCubic } }
         background: Rectangle {
             radius: 7
+            Behavior on color { ColorAnimation { duration: root.feedbackDuration } }
             color: control.primary && control.enabled ? root.accent : (control.hovered ? root.selection : root.surface)
             border.color: control.activeFocus ? root.accent : (control.navigation ? "transparent" : root.line)
             border.width: control.activeFocus ? 2 : 1
@@ -402,10 +447,6 @@ Controls.ApplicationWindow {
         }
     }
 
-    function rowTooltip(data) {
-        const same = sameAppNames(data).length > 0 ? "\nRelated install: " + sameAppNames(data).join(", ") : "";
-        return data.name + "\n" + (data.installed || "not installed") + " → " + (data.candidate || "unknown") + "\n" + (data.summary || "") + same;
-    }
     // Display names for backend ids used by related-install indicators without
     // changing the rows' exact identities.
     function sourceDisplayName(id) {
@@ -424,10 +465,13 @@ Controls.ApplicationWindow {
             return "Failed";
         if (row.kind === "source")
             return row.available ? "Available" : "Unavailable";
-        if (row.update === "available")
+        if (row.update === "available") {
+            if (!row.installed || !row.candidate || row.installed === row.candidate)
+                return row.installed ? row.installed + " · update available" : "Update available";
             return row.installed + " → " + row.candidate;
-        if (row.installed)
-            return root.currentView === "Installed" ? row.installed : row.installed + " · installed";
+        }
+        if (isInstalled(row))
+            return row.installed ? (root.currentView === "Installed" ? row.installed : row.installed + " · installed") : "Installed";
         return row.candidate || "Unknown";
     }
     // Local icon files become file:// URLs. Paths come from the backend and
@@ -467,6 +511,12 @@ Controls.ApplicationWindow {
         queryDirty = false;
         selectedIdentity = null;
         uncheckedPackages = [];
+        if (currentView !== view) {
+            retainingResults = false;
+            retainedItems = [];
+            revealedRows = new Set();
+            completedRows = [];
+        }
         currentView = view;
         results.currentIndex = -1;
         if (view === "Search")
@@ -477,6 +527,9 @@ Controls.ApplicationWindow {
     // Reload the current view. Without force, a cached snapshot serves
     // instantly with no worker; force always queries native managers.
     function reload(force) {
+        retainedItems = currentView === resultView ? items.slice() : [];
+        retainingResults = retainedItems.length > 0;
+        revealedRows = new Set(retainedItems.map(rowIdentity));
         resultView = currentView;
         results.currentIndex = -1;
         selectedIdentity = null;
@@ -485,16 +538,19 @@ Controls.ApplicationWindow {
         // viewItems), so the backend always returns the full installed set
         // and typing never triggers a native query.
         backend.load(currentView, currentView === "Installed" ? "" : search.text, checkedCsv(), useSudo, force === true);
+        if (!backend.busy)
+            retainingResults = false;
     }
     function choose(index) {
-        if (index < 0 || index >= viewItems.length)
+        if (retainingResults || index < 0 || index >= viewItems.length)
             return;
         results.currentIndex = index;
         selectedIdentity = rowIdentity(viewItems[index]);
         backend.select(originalIndex(index));
     }
     function propose(action) {
-        backend.propose(action, originalIndex(results.currentIndex));
+        if (!retainingResults)
+            backend.propose(action, originalIndex(results.currentIndex));
     }
     function focusResultsAfterLoad() {
         if (!queryDirty && !installedFilterField.activeFocus && !sourcePopup.opened && !confirmation.opened
@@ -505,6 +561,7 @@ Controls.ApplicationWindow {
         id: preferences
         category: "Browser"
         property int appearance: 0
+        property bool reduceMotion: false
         property string sourceList: ""
         property string source: ""
         property string authorization: "polkit"
@@ -522,17 +579,39 @@ Controls.ApplicationWindow {
     }
     Connections {
         target: backend
+        function onDetailsChanged() {
+            if (root.motionEnabled && root.selected !== null && backend.details !== "{}")
+                detailsReveal.restart();
+        }
         function onBusyChanged() {
+            if (!backend.busy) {
+                root.retainingResults = false;
+                root.markChangedRows();
+                if (!backend.writing && !postWriteReload.running)
+                    root.beforeWrite = null;
+            }
             if (!backend.busy && root.closePending)
                 root.close();
             else if (!backend.busy && root.selected !== null)
                 root.focusResultsAfterLoad();
         }
         function onWritingChanged() {
+            if (backend.writing) {
+                const snapshot = {};
+                for (const row of root.liveItems)
+                    snapshot[root.rowIdentity(row)] = root.packageState(row);
+                root.beforeWrite = snapshot;
+                root.completedRows = [];
+            }
             if (!backend.writing && ["Search", "Installed", "Updates", "Sources"].indexOf(root.currentView) >= 0)
                 postWriteReload.restart();
         }
         function onRowsChanged() {
+            if (root.liveItems.length > 0) {
+                root.retainingResults = false;
+                if (!backend.writing)
+                    root.markChangedRows();
+            }
             // Streaming partials re-sort rows around the selection: follow
             // the selected identity instead of the row index.
             results.currentIndex = -1;
@@ -553,6 +632,20 @@ Controls.ApplicationWindow {
             else
                 confirmation.close();
         }
+    }
+    Timer {
+        id: completionHold
+        interval: 1000
+        onTriggered: root.completedRows = []
+    }
+    NumberAnimation {
+        id: detailsReveal
+        target: detailsContent
+        property: "opacity"
+        from: 0.55
+        to: 1
+        duration: root.revealDuration
+        easing.type: Easing.OutCubic
     }
     Timer {
         interval: 40
@@ -647,8 +740,6 @@ Controls.ApplicationWindow {
                         implicitWidth: 28
                         implicitHeight: 28
                         Accessible.name: "Open PkgDeck on GitHub"
-                        Controls.ToolTip.visible: hovered
-                        Controls.ToolTip.text: root.repositoryUrl
                         onClicked: Qt.openUrlExternally(root.repositoryUrl)
                         background: Rectangle {
                             radius: 5
@@ -875,6 +966,13 @@ Controls.ApplicationWindow {
                     Layout.fillWidth: true
                     Layout.maximumWidth: 420
                 }
+                Controls.CheckBox {
+                    objectName: "animationsSetting"
+                    text: "Animations"
+                    checked: !root.reduceMotion
+                    onToggled: root.reduceMotion = !checked
+                    Accessible.name: "Enable interface animations"
+                }
                 Controls.Label {
                     text: "Privilege elevation"
                 }
@@ -940,10 +1038,16 @@ Controls.ApplicationWindow {
                         }
                         Controls.BusyIndicator {
                             objectName: "resultsBusy"
-                            running: backend.busy
+                            running: backend.busy && root.motionEnabled
                             visible: running && results.count > 0
                             Layout.preferredWidth: 18
                             Layout.preferredHeight: 18
+                        }
+                        Controls.Label {
+                            text: "Working…"
+                            visible: backend.busy && !root.motionEnabled
+                            color: root.muted
+                            font.pixelSize: 12
                         }
                         ActionButton {
                             objectName: "resultsCancel"
@@ -1057,6 +1161,9 @@ Controls.ApplicationWindow {
                         model: root.viewItems
                         clip: true
                         reuseItems: true
+                        enabled: !root.retainingResults
+                        opacity: root.retainingResults ? 0.65 : 1
+                        Behavior on opacity { NumberAnimation { duration: root.feedbackDuration } }
                         currentIndex: -1
                         onCountChanged: currentIndex = -1
                         keyNavigationEnabled: false
@@ -1081,6 +1188,30 @@ Controls.ApplicationWindow {
                             id: packageRow
                             required property var modelData
                             required property int index
+                            function reveal() {
+                                rowReveal.complete();
+                                opacity = 1;
+                                if (root.revealRow(modelData))
+                                    rowReveal.restart();
+                            }
+                            Component.onCompleted: reveal()
+                            ListView.onReused: reveal()
+                            Connections {
+                                target: root
+                                function onMotionEnabledChanged() {
+                                    if (!root.motionEnabled)
+                                        rowReveal.complete();
+                                }
+                            }
+                            NumberAnimation {
+                                id: rowReveal
+                                target: packageRow
+                                property: "opacity"
+                                from: 0.65
+                                to: 1
+                                duration: root.revealDuration
+                                easing.type: Easing.OutCubic
+                            }
                             width: ListView.view.width
                             height: (root.compact ? 78 : 56) + (modelData.groupStart ? 38 : 0)
                             topPadding: modelData.groupStart ? 38 : 0
@@ -1088,16 +1219,8 @@ Controls.ApplicationWindow {
                             rightPadding: 16
                             highlighted: results.currentIndex === index
                             enabled: !backend.writing
-                            Accessible.name: (modelData.kind === "package" ? (modelData.update === "available" ? "Update available. " : (modelData.installed ? "Installed. " : "Not installed. ")) : "") + modelData.name + ", " + modelData.source + ", " + (modelData.summary || "")
+                            Accessible.name: (modelData.kind === "package" ? (modelData.update === "available" ? "Update available. " : (root.isInstalled(modelData) ? "Installed. " : "Not installed. ")) : "") + modelData.name + ", " + modelData.source + ", " + (modelData.summary || "")
                             onClicked: { results.forceActiveFocus(); root.choose(index); }
-                            // Framework tooltip: single Overlay instance per
-                            // hover, positioned by Qt, with text bound to the
-                            // current row. The previous per-delegate card
-                            // could show one row's versions with another
-                            // row's summary under item reuse.
-                            Controls.ToolTip.visible: packageRow.hovered && modelData.kind === "package"
-                            Controls.ToolTip.delay: 400
-                            Controls.ToolTip.text: root.rowTooltip(modelData)
                             Rectangle {
                                 visible: !!modelData.groupStart
                                 anchors.top: parent.top
@@ -1127,7 +1250,14 @@ Controls.ApplicationWindow {
                                 }
                             }
                             background: Rectangle {
+                                Behavior on color { ColorAnimation { duration: root.feedbackDuration } }
                                 color: packageRow.highlighted ? root.selection : (packageRow.hovered ? root.canvas : "transparent")
+                                Rectangle {
+                                    anchors.fill: parent
+                                    color: root.accent
+                                    opacity: root.completedRows.indexOf(root.rowIdentity(packageRow.modelData)) >= 0 ? 0.18 : 0
+                                    Behavior on opacity { NumberAnimation { duration: root.motionEnabled ? 240 : 0 } }
+                                }
                                 Rectangle { width: 3; height: parent.height; visible: packageRow.highlighted; color: root.accent }
                                 Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: root.line; opacity: 0.5 }
                             }
@@ -1223,7 +1353,7 @@ Controls.ApplicationWindow {
                             spacing: 8
                             visible: results.count === 0
                             Controls.BusyIndicator {
-                                running: backend.busy
+                                running: backend.busy && root.motionEnabled
                                 visible: running
                                 anchors.horizontalCenter: parent.horizontalCenter
                                 width: 32
@@ -1235,14 +1365,16 @@ Controls.ApplicationWindow {
                                 horizontalAlignment: Text.AlignHCenter
                                 wrapMode: Text.WordWrap
                                 color: root.muted
-                                visible: !backend.busy
-                                text: root.currentView === "Search" ? (search.text.trim().length === 0 ? "Find your next package.\nSearch by name or description." : "No matching packages.\nTry a shorter search or another source.") : (root.currentView === "Updates" ? "You're up to date.\nNo updates reported by the selected sources." : (root.currentView === "Installed" && (root.installedFilter.length > 0 || root.multiSourceOnly) ? "No packages match these filters.\nClear the filter or include more sources." : "No results to show.\nCheck source availability or reload to try again."))
+                                visible: !backend.busy || !root.motionEnabled
+                                text: backend.busy ? "Working…" : root.currentView === "Search" ? (search.text.trim().length === 0 ? "Find your next package.\nSearch by name or description." : "No matching packages.\nTry a shorter search or another source.") : (root.currentView === "Updates" ? "You're up to date.\nNo updates reported by the selected sources." : (root.currentView === "Installed" && (root.installedFilter.length > 0 || root.multiSourceOnly) ? "No packages match these filters.\nClear the filter or include more sources." : "No results to show.\nCheck source availability or reload to try again."))
                             }
                         }
                     }
                 }
             }
             Rectangle {
+                id: detailsPanel
+                objectName: "detailsPanel"
                 visible: root.selected !== null && ["Search", "Installed", "Updates", "Sources"].indexOf(root.currentView) >= 0
                 Layout.fillWidth: true
                 Layout.preferredHeight: Math.min(root.height * 0.27, 180)
@@ -1250,6 +1382,8 @@ Controls.ApplicationWindow {
                 radius: 10
                 border.color: root.line
                 ColumnLayout {
+                    id: detailsContent
+                    objectName: "detailsContent"
                     anchors.fill: parent
                     anchors.margins: 16
                     spacing: 6
@@ -1278,13 +1412,22 @@ Controls.ApplicationWindow {
                             Accessible.ignored: true
                         }
                         Controls.Label {
-                        text: root.selected ? root.selected.name : ""
+                        text: root.selected ? (root.selected.reference || root.selected.name) : "Package details"
                         textFormat: Text.PlainText
                         color: root.ink
                         font.pixelSize: root.compact ? 18 : 22
                         font.bold: true
                         elide: Text.ElideRight
                         Layout.fillWidth: true
+                        }
+                        ActionButton {
+                            objectName: "closeDetailsButton"
+                            text: "Close details"
+                            symbol: "cancel"
+                            onClicked: {
+                                results.currentIndex = -1;
+                                root.selectedIdentity = null;
+                            }
                         }
                     }
                     Controls.ScrollView {
@@ -1299,7 +1442,7 @@ Controls.ApplicationWindow {
                             background: null
                             wrapMode: TextEdit.Wrap
                             textFormat: TextEdit.PlainText
-                            text: root.detail.package ? (root.detail.description || "") + "\n\nScope: " + (root.detail.package.scope_label || "Unknown") + "   ·   Homepage: " + (root.detail.homepage || "Unavailable") + (root.sameAppNames(root.detail.package).length > 0 ? "\nRelated install: " + root.sameAppNames(root.detail.package).join(", ") : "") + "\nDependencies: " + ((root.detail.dependencies || []).join(", ") || "None listed") : (root.detail.failure ? (root.detail.failure.error || "") + "\n\n" + (root.detail.hint || "") : (root.detail.availability || "") + "\n\nCapabilities: " + (root.detail.capabilities || []).join(", "))
+                            text: root.selected === null ? "Select a row to see package details and available actions." : root.detail.package ? (root.detail.description || "") + "\n\nScope: " + (root.detail.package.scope_label || "Unknown") + "   ·   Homepage: " + (root.detail.homepage || "Unavailable") + (root.sameAppNames(root.detail.package).length > 0 ? "\nRelated install: " + root.sameAppNames(root.detail.package).join(", ") : "") + "\nDependencies: " + ((root.detail.dependencies || []).join(", ") || "None listed") : (root.detail.failure ? (root.detail.failure.error || "") + "\n\n" + (root.detail.hint || "") : (root.detail.availability || "") + "\n\nCapabilities: " + (root.detail.capabilities || []).join(", "))
                             Accessible.name: "Selected package, source, or failure details"
                         }
                     }
@@ -1346,19 +1489,19 @@ Controls.ApplicationWindow {
                 }
                 ActionButton {
                     objectName: "installButton"
-                    visible: root.selected !== null && root.selected.kind === "package" && !root.selected.installed
+                    visible: root.selected !== null && root.selected.kind === "package" && !root.isInstalled(root.selected)
                     text: "Install"
                     symbol: "install"
                     primary: true
-                    enabled: !backend.busy && root.selected !== null && root.selected.kind === "package" && !root.selected.installed
+                    enabled: !backend.busy && root.selected !== null && root.selected.kind === "package" && !root.isInstalled(root.selected)
                     onClicked: root.propose("install")
                 }
                 ActionButton {
                     objectName: "removeButton"
-                    visible: root.selected !== null && !!root.selected.installed
+                    visible: root.selected !== null && root.isInstalled(root.selected)
                     text: "Remove"
                     symbol: "remove"
-                    enabled: !backend.busy && root.selected !== null && !!root.selected.installed
+                    enabled: !backend.busy && root.selected !== null && root.isInstalled(root.selected)
                     onClicked: root.propose("remove")
                 }
                 ActionButton {
@@ -1398,6 +1541,15 @@ Controls.ApplicationWindow {
         background: Rectangle { color: root.surface; radius: 12; border.color: root.line }
         title: "Confirm package operation"
         modal: true
+        enter: Transition {
+            ParallelAnimation {
+                NumberAnimation { property: "opacity"; from: 0; to: 1; duration: root.revealDuration; easing.type: Easing.OutCubic }
+                NumberAnimation { property: "scale"; from: root.motionEnabled ? 0.97 : 1; to: 1; duration: root.revealDuration; easing.type: Easing.OutCubic }
+            }
+        }
+        exit: Transition {
+            NumberAnimation { property: "opacity"; to: 0; duration: root.feedbackDuration; easing.type: Easing.OutCubic }
+        }
         standardButtons: Controls.Dialog.Yes | Controls.Dialog.No
         onOpened: {
             // Let the buttons own their mnemonics. Separate Shortcuts collide
