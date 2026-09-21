@@ -70,3 +70,17 @@ fn flatpak_doctor_does_not_enumerate_runtime_backends() {
     assert!(text.contains("Flatpak host execution is disabled"));
     assert!(!text.contains("APT:"));
 }
+
+#[test]
+fn repository_commands_respect_packaged_host_boundary() {
+    let output = pkd()
+        .args(["--json", "repos"])
+        .env("FLATPAK_ID", "synthetic.fixture")
+        .env_remove("SNAP")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8(output.stdout)
+        .unwrap()
+        .contains("disabled"));
+}

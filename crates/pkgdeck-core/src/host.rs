@@ -408,6 +408,22 @@ impl Host {
         }
     }
 
+    /// Open the distro editor as the current user; its native policy handles writes.
+    pub fn open_source_editor(&self) -> Result<(), ExecutionError> {
+        self.enabled()?;
+        let path = ["/usr/bin/software-properties-qt", "/usr/bin/software-properties-gtk"]
+            .into_iter().map(PathBuf::from).find(|path| path.is_file())
+            .ok_or_else(|| ExecutionError::Disabled("Install software-properties-qt or software-properties-gtk to manage APT repositories".into()))?;
+        let mut child = self
+            .command(&path, &[])?
+            .spawn()
+            .map_err(|error| ExecutionError::Io(error.to_string()))?;
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
+        Ok(())
+    }
+
     /// Runs a distro package manager. Writes always use a fixed system path before
     /// entering the authorization boundary, never an executable found in PATH.
     pub fn system_manager(
@@ -437,7 +453,7 @@ impl Host {
         if write {
             self.privileged(&path, args, authorization, cancel)
         } else {
-            let timeout = if executable == "snap" {
+            let timeout = if matches!(executable, "snap" | "fwupdmgr") {
                 std::time::Duration::from_secs(60)
             } else {
                 Limits::default().timeout

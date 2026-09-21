@@ -134,7 +134,11 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
                             !p["installed_version"].is_null(),
                             p["update"] == "available"
                         ),
-                        value(&p["id"]["name"])
+                        value(if p["id"]["backend"] == "fwupd" {
+                            &p["display_name"]
+                        } else {
+                            &p["id"]["name"]
+                        })
                     ),
                     value(&p["id"]["backend"]),
                     value(if p["installed_version"].is_null() {
@@ -190,6 +194,32 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
             };
             output.push_str(&format!("{label:>12}  {text}\n"));
         }
+    } else if let Some(repositories) = data["repositories"].as_array() {
+        let rows = repositories
+            .iter()
+            .map(|r| {
+                vec![
+                    format!(
+                        "{} {}",
+                        if r["enabled"] == true { "[x]" } else { "[ ]" },
+                        value(&r["title"])
+                    ),
+                    value(&r["backend"]),
+                    value(&r["scope"]),
+                    value(&r["url"]),
+                ]
+            })
+            .collect::<Vec<_>>();
+        output.push_str(&table(
+            &["REPOSITORY", "SOURCE", "SCOPE", "URL"],
+            &rows,
+            width,
+        ));
+        if let Some(errors) = data["errors"].as_array() {
+            for error in errors {
+                output.push_str(&format!("\n[!] {}", value(error)));
+            }
+        }
     } else if let Some(sources) = data["sources"].as_array() {
         let rows = sources
             .iter()
@@ -237,6 +267,28 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn repository_and_firmware_labels_are_human_readable() {
+        let output = human(
+            &json!({"repositories":[
+            {"title":"Synthetic", "backend":"flatpak", "scope":"system", "enabled":true, "url":"https://example.invalid"},
+            {"title":"Disabled", "backend":"fwupd", "scope":"system", "enabled":false, "url":"https://example.invalid"}
+        ], "errors":["Synthetic failure"]}),
+            120,
+            false,
+        );
+        assert!(output.contains("[x] Synthetic"));
+        assert!(output.contains("[ ] Disabled"));
+        assert!(output.contains("system"));
+        assert!(output.contains("Synthetic failure"));
+        let output = human(
+            &json!({"packages":[{"id":{"name":"opaque-id","backend":"fwupd"},"display_name":"Synthetic BIOS", "installed_version":"1"}]}),
+            120,
+            false,
+        );
+        assert!(output.contains("Synthetic BIOS"));
+        assert!(!output.contains("opaque-id"));
+    }
     #[test]
     fn tables_fit_narrow_unicode_terminals_and_strip_control_sequences() {
         let data = json!({"packages":[{"id":{"name":"工具-package-with-a-long-name", "backend":"fixture"}, "candidate_version":"2", "summary":"hello\u{001b}[31m\nworld"}],"failures":[]});

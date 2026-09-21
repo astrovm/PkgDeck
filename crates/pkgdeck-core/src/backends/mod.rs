@@ -1,5 +1,6 @@
 //! Native package-manager, Linux Homebrew formula, and local AppImage adapters.
 mod appimage;
+mod firmware;
 use crate::{
     engine::*,
     host::{AptAction, Authorization, Host},
@@ -7,6 +8,7 @@ use crate::{
     process::*,
 };
 pub use appimage::AppImage;
+pub use firmware::Firmware;
 use serde::Deserialize;
 use std::{ffi::OsString, path::PathBuf, time::Duration};
 
@@ -24,12 +26,17 @@ const CAPABILITIES: &[Capability] = &[
 /// backend means extending this list, the GUI `sourceIds`, and the CLI
 /// value parser together.
 pub const BACKEND_IDS: &[&str] = &[
-    "apt", "dnf", "pacman", "zypper", "snap", "homebrew", "appimage", "flatpak", "cargo", "npm",
-    "pnpm", "bun", "pip", "pipx", "uv", "composer", "gem",
+    "fwupd", "apt", "dnf", "pacman", "zypper", "snap", "homebrew", "appimage", "flatpak", "cargo",
+    "npm", "pnpm", "bun", "pip", "pipx", "uv", "composer", "gem",
 ];
 
 /// A narrow transport seam lets adapter tests supply synthetic native responses.
 pub trait Transport: Send {
+    fn repository_editor(&self) -> Result<(), ExecutionError> {
+        Err(ExecutionError::Disabled(
+            "Software Sources editor unavailable".into(),
+        ))
+    }
     fn apt_query(
         &self,
         mode: &str,
@@ -117,6 +124,9 @@ fn apt_query_executable(
 }
 
 impl Transport for NativeTransport {
+    fn repository_editor(&self) -> Result<(), ExecutionError> {
+        self.host.open_source_editor()
+    }
     fn apt_query(
         &self,
         mode: &str,
@@ -3182,6 +3192,17 @@ pub fn native_engine(
                 engine.note_detected(backend.into(), status);
                 engine.register(manager)?;
             }
+        }
+    }
+    if allowed("fwupd") {
+        let mut firmware = Firmware::new(NativeTransport {
+            host: Host::current(),
+            authorization,
+        });
+        let status = firmware.detect(cancel);
+        if discover || explicit || !matches!(status, Ok(Availability::Unavailable(_))) {
+            engine.note_detected("fwupd".into(), status);
+            engine.register(firmware)?;
         }
     }
     if allowed("appimage") {

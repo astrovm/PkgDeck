@@ -7,6 +7,11 @@ import org.kde.kirigami as Kirigami
 Controls.ApplicationWindow {
     id: root
     required property var backend
+    readonly property var repositoryReport: JSON.parse(backend.repositories || "{}")
+    function repositoryChange(row, action, extra) {
+        const request = Object.assign({backend: row.backend, name: row.name, scope: row.scope, action: action}, extra || {});
+        backend.changeRepository(JSON.stringify(request));
+    }
     property string currentView: "Search"
     property string resultView: "Search"
     property var liveItems: JSON.parse(backend.rows || "[]")
@@ -78,8 +83,8 @@ Controls.ApplicationWindow {
     // persisted preference.
     property bool multiSourceOnly: false
     property bool useSudo: argument("--auth", preferences.authorization) === "sudo"
-    readonly property var sourceIds: ["apt", "dnf", "pacman", "zypper", "snap", "homebrew", "appimage", "flatpak", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "composer", "gem"]
-    readonly property var sourceNames: ["APT", "DNF", "Pacman", "Zypper", "Snap", "Homebrew", "AppImage", "Flatpak", "Cargo", "npm", "pnpm", "Bun", "pip", "pipx", "uv", "Composer", "RubyGems"]
+    readonly property var sourceIds: ["apt", "dnf", "pacman", "zypper", "snap", "homebrew", "appimage", "flatpak", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "composer", "gem", "fwupd"]
+    readonly property var sourceNames: ["APT", "DNF", "Pacman", "Zypper", "Snap", "Homebrew", "AppImage", "Flatpak", "Cargo", "npm", "pnpm", "Bun", "pip", "pipx", "uv", "Composer", "RubyGems", "Firmware"]
     function checkedSources() {
         if (sourceSelection === "")
             return sourceIds.slice();
@@ -1378,15 +1383,15 @@ Controls.ApplicationWindow {
                                 }
                                 ActionButton {
                                     objectName: "rowPackageAction"
-                                    visible: modelData.kind === "package"
+                                    visible: modelData.kind === "package" && (modelData.source !== "fwupd" || modelData.update === "available")
                                     enabled: !backend.busy && !root.retainingResults
                                     text: ""
-                                    symbol: root.currentView === "Updates" ? "updates" : (root.isInstalled(modelData) ? "remove" : "install")
-                                    glyphColor: root.currentView === "Updates" ? root.accent : root.isInstalled(modelData) ? (root.dark ? "#f18b91" : "#b42332") : (root.dark ? "#77d6a0" : "#187442")
-                                    Accessible.name: (root.currentView === "Updates" ? "Update " : (root.isInstalled(modelData) ? "Remove " : "Install ")) + (modelData.display_name || modelData.name) + " from " + modelData.source
+                                    symbol: (root.currentView === "Updates" || modelData.source === "fwupd") ? "updates" : (root.isInstalled(modelData) ? "remove" : "install")
+                                    glyphColor: (root.currentView === "Updates" || modelData.source === "fwupd") ? root.accent : root.isInstalled(modelData) ? (root.dark ? "#f18b91" : "#b42332") : (root.dark ? "#77d6a0" : "#187442")
+                                    Accessible.name: ((root.currentView === "Updates" || modelData.source === "fwupd") ? "Update " : (root.isInstalled(modelData) ? "Remove " : "Install ")) + (modelData.display_name || modelData.name) + " from " + modelData.source
                                     Layout.preferredWidth: 38
                                     horizontalPadding: 8
-                                    onClicked: backend.propose(root.currentView === "Updates" ? "upgrade" : (root.isInstalled(modelData) ? "remove" : "install"), root.originalIndex(index))
+                                    onClicked: backend.propose((root.currentView === "Updates" || modelData.source === "fwupd") ? "upgrade" : (root.isInstalled(modelData) ? "remove" : "install"), root.originalIndex(index))
                                 }
                             }
                         }
@@ -1608,6 +1613,14 @@ Controls.ApplicationWindow {
                     Layout.fillWidth: true
                 }
                 ActionButton {
+                    objectName: "repositoriesButton"
+                    visible: root.currentView === "Sources"
+                    text: "Repositories"
+                    symbol: "sources"
+                    enabled: !backend.busy
+                    onClicked: repositoriesDialog.open()
+                }
+                ActionButton {
                     objectName: "refreshButton"
                     visible: root.selected !== null && root.selected.kind === "source"
                     text: "Refresh sources"
@@ -1623,6 +1636,112 @@ Controls.ApplicationWindow {
                     onClicked: root.reload(true)
                 }
             }
+        }
+    }
+    Controls.Dialog {
+        id: repositoriesDialog
+        objectName: "repositoriesDialog"
+        parent: Controls.Overlay.overlay
+        anchors.centerIn: parent
+        width: Math.min(root.width - 32, 850)
+        height: Math.min(root.height - 40, 640)
+        title: "Repositories"
+        modal: true
+        standardButtons: Controls.Dialog.Close
+        onOpened: backend.loadRepositories()
+        contentItem: ColumnLayout {
+            spacing: 12
+            Flow {
+                Layout.fillWidth: true
+                spacing: 8
+                ActionButton {
+                    text: "Add Flatpak repository"; symbol: "install"
+                    enabled: !backend.busy
+                    onClicked: addRepositoryDialog.open()
+                }
+                ActionButton {
+                    text: "Software Sources"; symbol: "settings"
+                    enabled: !backend.busy
+                    onClicked: root.repositoryChange({backend: "apt", name: "sources", scope: "system"}, "open_editor")
+                }
+                ActionButton { text: ""; symbol: "refresh"; Accessible.name: "Reload repositories"; enabled: !backend.busy; onClicked: backend.loadRepositories() }
+            }
+            Controls.BusyIndicator { visible: backend.busy; running: visible; Layout.alignment: Qt.AlignHCenter }
+            ListView {
+                objectName: "repositoryList"
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                clip: true
+                spacing: 8
+                model: root.repositoryReport.repositories || []
+                Controls.ScrollBar.vertical: Controls.ScrollBar {}
+                delegate: Rectangle {
+                    required property var modelData
+                    width: ListView.view.width
+                    height: 76
+                    color: root.surface
+                    radius: 6
+                    RowLayout {
+                        anchors.fill: parent; anchors.margins: 8; spacing: 10
+                        Controls.CheckBox {
+                            objectName: "repositoryEnabled"
+                            checked: modelData.enabled
+                            enabled: !backend.busy && modelData.backend !== "apt"
+                            Accessible.name: "Enable " + (modelData.title || modelData.name)
+                            onClicked: {
+                                root.repositoryChange(modelData, "set_enabled", {enabled: checked});
+                                checked = Qt.binding(() => modelData.enabled);
+                            }
+                        }
+                        ColumnLayout {
+                            Layout.fillWidth: true; spacing: 3
+                            Controls.Label { text: modelData.title || modelData.name; textFormat: Text.PlainText; color: root.ink; elide: Text.ElideRight; Layout.fillWidth: true }
+                            Controls.Label { text: modelData.backend.toUpperCase() + " · " + (modelData.scope === "system" ? "System" : "User") + (modelData.url ? " · " + modelData.url : ""); textFormat: Text.PlainText; color: root.muted; elide: Text.ElideRight; Layout.fillWidth: true; font.pixelSize: 11 }
+                        }
+                        Controls.Label { visible: modelData.priority !== null; text: "Priority " + modelData.priority; color: root.muted; font.pixelSize: 11 }
+                        ActionButton {
+                            text: ""; symbol: "up"; visible: modelData.backend === "flatpak"
+                            Accessible.name: "Increase repository priority"; enabled: !backend.busy && modelData.priority < 9999
+                            onClicked: root.repositoryChange(modelData, "set_priority", {priority: modelData.priority + 1})
+                        }
+                        ActionButton {
+                            text: ""; symbol: "down"; visible: modelData.backend === "flatpak"
+                            Accessible.name: "Decrease repository priority"; enabled: !backend.busy && modelData.priority > 0
+                            onClicked: root.repositoryChange(modelData, "set_priority", {priority: modelData.priority - 1})
+                        }
+                        ActionButton {
+                            text: ""; symbol: "settings"; visible: modelData.backend === "apt"
+                            Accessible.name: "Edit software sources"; enabled: !backend.busy
+                            onClicked: root.repositoryChange({backend: "apt", name: "sources", scope: "system"}, "open_editor")
+                        }
+                        ActionButton {
+                            objectName: "removeRepositoryButton"
+                            text: ""; symbol: "remove"; visible: modelData.backend === "flatpak"
+                            Accessible.name: "Remove " + modelData.name; enabled: !backend.busy
+                            onClicked: root.repositoryChange(modelData, "remove")
+                        }
+                    }
+                }
+            }
+            Controls.Label { Layout.fillWidth: true; color: root.muted; textFormat: Text.PlainText; wrapMode: Text.WordWrap; text: (root.repositoryReport.errors || []).join("\n"); visible: text.length > 0 }
+            Controls.Label { Layout.fillWidth: true; color: root.muted; textFormat: Text.PlainText; wrapMode: Text.WordWrap; text: backend.status }
+        }
+    }
+    Controls.Dialog {
+        id: addRepositoryDialog
+        objectName: "addRepositoryDialog"
+        parent: Controls.Overlay.overlay
+        anchors.centerIn: parent
+        width: Math.min(root.width - 48, 560)
+        title: "Add Flatpak repository"
+        modal: true
+        standardButtons: Controls.Dialog.Ok | Controls.Dialog.Cancel
+        onOpened: { repositoryName.text = ""; repositoryUrl.text = ""; repositoryName.forceActiveFocus(); }
+        onAccepted: root.repositoryChange({backend: "flatpak", name: repositoryName.text.trim(), scope: repositoryScope.currentIndex === 0 ? "user" : "system"}, "add", {url: repositoryUrl.text.trim()})
+        contentItem: ColumnLayout {
+            Controls.TextField { id: repositoryName; objectName: "repositoryName"; placeholderText: "Name"; Accessible.name: "Repository name"; Layout.fillWidth: true }
+            Controls.TextField { id: repositoryUrl; objectName: "repositoryUrl"; placeholderText: "https://…/repository.flatpakrepo"; Accessible.name: "Repository URL"; Layout.fillWidth: true }
+            Controls.ComboBox { id: repositoryScope; objectName: "repositoryScope"; model: ["User", "System"]; Accessible.name: "Installation scope"; Layout.fillWidth: true }
         }
     }
     Controls.Dialog {
@@ -1668,7 +1787,7 @@ Controls.ApplicationWindow {
         width: Math.min(root.width - 32, 600)
         height: Math.min(root.height - 32, 340)
         background: Rectangle { color: root.surface; radius: 12; border.color: root.line }
-        title: "Confirm package operation"
+        title: "Confirm changes"
         modal: true
         enter: Transition {
             ParallelAnimation {

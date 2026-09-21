@@ -23,10 +23,18 @@ and [CLI guide](docs/cli.md) for the current interface and supported behavior.
 - **System:** APT, DNF, Pacman, Zypper.
 - **Applications:** Flatpak, Snap, Homebrew (Linux formulae), AppImage.
 - **Development:** Cargo, npm, pnpm, Bun, pip, pipx, uv, Composer, RubyGems.
+- **Firmware:** fwupd device updates.
 
 Development package managers focus on user-installed command-line tools rather than project dependencies. pip support is restricted to explicitly selected virtual environments.
 
 AppImage support will initially cover importing local Type 2 AppImages, desktop integration, launching, and removal.
+
+Repository controls are available under **Sources → Repositories** and `pkd repos`:
+Flatpak User/System remotes, configured firmware remotes, and the native APT
+Software Sources editor. Firmware from fwupd joins the regular **Updates** list
+and **Update all**, with device requirements shown before confirmation. See the
+[GUI guide](docs/gui.md#repositories-and-firmware) and
+[CLI guide](docs/cli.md#repositories-and-firmware).
 
 ## Architecture
 

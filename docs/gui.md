@@ -229,3 +229,24 @@ uses local inventory to choose the action and preserves the native branch.
 WebP image to verify HTTPS loading, certificate rejection, cache expiry, and reuse
 across separate processes. Passing `build/AppDir/usr` runs the same check with the
 staged Qt libraries and plugins; packaging CI runs it before creating artifacts.
+
+## Repositories and firmware
+
+Open **Sources → Repositories** to manage Flatpak remotes separately for User and
+System installations. Add an HTTPS `.flatpakrepo` definition, enable or disable a
+remote, adjust its priority, or remove it. Changes show the exact scope in the
+confirmation and use native authorization and signature verification. Removing a
+remote does not force removal of installed applications.
+
+Configured fwupd repositories can be enabled or disabled in the same dialog.
+APT repositories are listed there; the Software Sources button (or the settings
+icon on an APT row) opens the distro's native editor. Install
+`software-properties-qt` or `software-properties-gtk` if that editor is unavailable.
+Reload after saving changes in the external editor.
+
+When `fwupdmgr` is available, device firmware appears alongside applications in
+**Updates**, including device names and installed/candidate versions. Per-row
+Update and Update all use the displayed device identities. Confirmation includes
+reported AC power, restart, or shutdown requirements. Native fwupd policy remains
+in effect; PkgDeck does not reboot automatically or force unsupported updates.
+Firmware devices have no Install or Remove action.

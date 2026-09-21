@@ -1,6 +1,7 @@
 //! Thin Qt facade: native work runs on a worker; Qt properties change only on the GUI thread.
 use cxx_qt::CxxQtType;
 use cxx_qt_lib::QString;
+use pkgdeck_core::repositories::{self, Action as RepositoryAction};
 use pkgdeck_core::{engine::*, host::Authorization, package::*, process::Cancellation};
 use serde_json::{json, Value};
 use std::{collections::BTreeMap, pin::Pin, sync::mpsc, thread};
@@ -10,6 +11,9 @@ use std::{collections::BTreeMap, pin::Pin, sync::mpsc, thread};
 pub mod ffi {
     unsafe extern "C++" {
         include!("cxx-qt-lib/qstring.h");
+        include!("pkgdeck/native/controller.h");
+        #[allow(dead_code)] // Test constructor; QML constructs production instances.
+        fn create_controller() -> UniquePtr<PackageController>;
         type QString = cxx_qt_lib::QString;
     }
     extern "RustQt" {
@@ -18,6 +22,7 @@ pub mod ffi {
         #[qproperty(QString, rows)]
         #[qproperty(QString, details)]
         #[qproperty(QString, status)]
+        #[qproperty(QString, repositories)]
         #[qproperty(QString, confirmation)]
         #[qproperty(QString, version)]
         #[qproperty(bool, busy)]
@@ -38,6 +43,12 @@ pub mod ffi {
         #[qinvokable]
         fn propose(self: Pin<&mut PackageController>, action: QString, index: i32);
         #[qinvokable]
+        #[cxx_name = "loadRepositories"]
+        fn load_repositories(self: Pin<&mut PackageController>);
+        #[qinvokable]
+        #[cxx_name = "changeRepository"]
+        fn change_repository(self: Pin<&mut PackageController>, action: QString);
+        #[qinvokable]
         #[cxx_name = "proposeChecked"]
         fn propose_checked(self: Pin<&mut PackageController>, identities: QString);
         #[qinvokable]
@@ -51,6 +62,7 @@ pub mod ffi {
 
 #[derive(Clone)]
 enum Job {
+    Repositories(Option<RepositoryAction>),
     Load(String, String),
     Details(PackageId),
     Write(Operation),
@@ -58,10 +70,14 @@ enum Job {
 }
 impl Job {
     fn writes(&self) -> bool {
-        matches!(self, Self::Write(_) | Self::UpgradeAll(_))
+        matches!(
+            self,
+            Self::Write(_) | Self::UpgradeAll(_) | Self::Repositories(Some(_))
+        )
     }
 }
 enum Payload {
+    Repositories(repositories::Report),
     Packages(PackageReport),
     Sources(Vec<Source>),
     Details(Box<PackageDetails>),
@@ -94,6 +110,7 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
         }
     }
     let result = match job {
+        Job::Repositories(_) => Err(EngineError::NotFound),
         Job::Load(view, query) => {
             if view == "Sources" {
                 Ok(Payload::Sources(engine.discover(cancel)))
@@ -159,6 +176,9 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
                 };
                 status.push_str(&format!("\n{}: {outcome}", operation_label(operation)));
             }
+            if operations.iter().any(|op| matches!(op, Operation::Upgrade(id) if id.backend == "fwupd")) {
+                status.push_str("\nFirmware: follow the device restart or shutdown requirements shown before updating.");
+            }
             Ok(Payload::Batch(status))
         }
         Job::Write(op) => engine
@@ -173,7 +193,15 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
                     }));
                 }
             })
-            .map(Payload::Written),
+            .map(|outcome| {
+                if matches!(&op, Operation::Upgrade(id) if id.backend == "fwupd") {
+                    Payload::Batch(if outcome.cancellation_deferred {
+                        "Firmware completed after cancellation. Follow the device restart or shutdown requirements.".into()
+                    } else {
+                        "Firmware completed. Follow the device restart or shutdown requirements.".into()
+                    })
+                } else { Payload::Written(outcome) }
+            }),
     };
     send(Reply::Done(result));
 }
@@ -197,6 +225,7 @@ pub struct Controller {
     details: QString,
     status: QString,
     confirmation: QString,
+    repositories: QString,
     version: QString,
     busy: bool,
     writing: bool,
@@ -222,6 +251,7 @@ impl Default for Controller {
             details: "{}".into(),
             status: "Choose a view or search for a package.".into(),
             confirmation: QString::default(),
+            repositories: "{}".into(),
             version: pkgdeck_core::VERSION.into(),
             busy: false,
             writing: false,
@@ -246,11 +276,18 @@ fn upgrade_plan(packages: &[Package]) -> Vec<Operation> {
     let backends: std::collections::BTreeSet<_> = packages
         .iter()
         .filter(|p| p.installed_version.is_some() && p.update == UpdateAvailability::Available)
+        .filter(|p| p.id.backend != "fwupd")
         .map(|p| p.id.backend.clone())
         .collect();
     backends
         .into_iter()
         .map(|backend| Operation::UpgradeAll { backend })
+        .chain(
+            packages
+                .iter()
+                .filter(|p| p.id.backend == "fwupd" && p.update == UpdateAvailability::Available)
+                .map(|p| Operation::Upgrade(p.id.clone())),
+        )
         .collect()
 }
 fn encoded(value: impl serde::Serialize) -> QString {
@@ -351,12 +388,12 @@ fn plan_checked_upgrade(packages: &[Package], identities: &str) -> CheckedPlan {
     let count = operations.len();
     let labels = operations
         .iter()
-        .map(operation_label)
+        .map(|operation| confirmation_label(operation, packages))
         .collect::<Vec<_>>()
         .join("\n\n");
     CheckedPlan {
         operations,
-        confirmation: format!("Update {count} selected packages?\n\n{labels}\n\nEach source runs as one transaction. Native dependency changes may follow. Successful updates are not rolled back if another fails. Continue?"),
+        confirmation: format!("Update {count} selected packages?\n\n{labels}\n\nUpdates use each source’s native updater. Native dependency changes may follow. Successful updates are not rolled back if another fails. Continue?"),
         status: None,
     }
 }
@@ -400,6 +437,20 @@ impl ViewCache {
     fn clear(&mut self) {
         self.entries.clear();
     }
+}
+fn confirmation_label(operation: &Operation, packages: &[Package]) -> String {
+    let mut label = operation_label(operation);
+    if operation.backend() == "fwupd" {
+        for package in packages.iter().filter(|package| {
+            package.id.backend == "fwupd" && package.update == UpdateAvailability::Available
+        }) {
+            if matches!(operation, Operation::Upgrade(id) if *id != package.id) {
+                continue;
+            }
+            label.push_str(&format!("\n{}: {}", package.display_name, package.summary));
+        }
+    }
+    label
 }
 fn operation_label(operation: &Operation) -> String {
     let (action, id) = match operation {
@@ -480,6 +531,29 @@ impl ffi::PackageController {
                 }
                 let _ = sender.send(reply);
             };
+            if let Job::Repositories(action) = &job {
+                let transport = pkgdeck_core::backends::NativeTransport {
+                    host: pkgdeck_core::host::Host::current(),
+                    authorization,
+                };
+                let result = if let Some(reason) = transport.host.runtime.disabled_reason() {
+                    Err(pkgdeck_core::process::ExecutionError::Disabled(reason.into()).into())
+                } else {
+                    action
+                        .as_ref()
+                        .map(|action| repositories::apply(&transport, action, &token))
+                        .transpose()
+                        .map(|_| {
+                            Payload::Repositories(repositories::list(
+                                &transport,
+                                std::path::Path::new("/"),
+                                &token,
+                            ))
+                        })
+                };
+                send(Reply::Done(result));
+                return;
+            }
             // Fast path: Details against a warm engine reuse detected state
             // outright. A filter change since discovery surfaces as
             // UnknownBackend and falls through to the scoped rebuild below.
@@ -670,6 +744,41 @@ impl ffi::PackageController {
             self.set_details(encoded(detail));
         }
     }
+    pub fn load_repositories(self: Pin<&mut Self>) {
+        if self.rust().worker.is_none() {
+            self.start(Job::Repositories(None));
+        }
+    }
+    pub fn change_repository(mut self: Pin<&mut Self>, action: QString) {
+        if self.rust().worker.is_some() {
+            return;
+        }
+        let action = match repositories::parse_action(&action.to_string()) {
+            Ok(action) => action,
+            Err(error) => {
+                self.set_status(
+                    format!("Invalid repository request: {error}")
+                        .as_str()
+                        .into(),
+                );
+                return;
+            }
+        };
+        if let Err(error) = action.validate() {
+            self.set_status(error.to_string().as_str().into());
+            return;
+        }
+        if matches!(action.change, repositories::Change::OpenEditor) {
+            self.start(Job::Repositories(Some(action)));
+            return;
+        }
+        self.as_mut().set_confirmation(
+            format!("{}\n\nApply this repository change?", action.label())
+                .as_str()
+                .into(),
+        );
+        self.rust_mut().pending = Some(Job::Repositories(Some(action)));
+    }
     pub fn propose(mut self: Pin<&mut Self>, action: QString, index: i32) {
         if self.rust().worker.is_some() {
             return;
@@ -691,10 +800,10 @@ impl ffi::PackageController {
                 .count();
             let labels = operations
                 .iter()
-                .map(operation_label)
+                .map(|operation| confirmation_label(operation, &self.rust().packages))
                 .collect::<Vec<_>>()
                 .join("\n\n");
-            self.as_mut().set_confirmation(format!("Update all {count} listed packages?\n\n{labels}\n\nEach source runs as one transaction. Native dependency changes may follow. Successful updates are not rolled back if another fails. Continue?").as_str().into());
+            self.as_mut().set_confirmation(format!("Update all {count} listed packages?\n\n{labels}\n\nUpdates use each source’s native updater. Native dependency changes may follow. Successful updates are not rolled back if another fails. Continue?").as_str().into());
             self.rust_mut().pending = Some(Job::UpgradeAll(operations));
             return;
         }
@@ -715,10 +824,10 @@ impl ffi::PackageController {
                     .packages
                     .get(i)
                     .and_then(|p| match action.as_str() {
-                        "install" if p.installed_version.is_none() => {
+                        "install" if p.id.backend != "fwupd" && p.installed_version.is_none() => {
                             Some(Operation::Install(p.id.clone()))
                         }
-                        "remove" if p.installed_version.is_some() => {
+                        "remove" if p.id.backend != "fwupd" && p.installed_version.is_some() => {
                             Some(Operation::Remove(p.id.clone()))
                         }
                         "upgrade" if p.update == UpdateAvailability::Available => {
@@ -729,10 +838,11 @@ impl ffi::PackageController {
             }
         });
         if let Some(op) = &operation {
+            let label = confirmation_label(op, &self.rust().packages);
             self.as_mut().set_confirmation(
                 format!(
                     "{}\n\nNative dependency changes may follow. Continue?",
-                    operation_label(op)
+                    label
                 )
                 .as_str()
                 .into(),
@@ -752,6 +862,7 @@ impl ffi::PackageController {
         }
         let plan = plan_checked_upgrade(&self.rust().packages, &identities.to_string());
         if plan.operations.is_empty() {
+            self.as_mut().rust_mut().pending = None;
             self.as_mut().set_confirmation(QString::default());
         } else {
             self.as_mut()
@@ -845,6 +956,13 @@ impl ffi::PackageController {
                 self.as_mut().rust_mut().failures = report.failures;
                 self.as_mut().set_rows(encoded(rows));
                 self.set_status(status.as_str().into());
+            }
+            Ok(Payload::Repositories(report)) => {
+                self.as_mut().rust_mut().view_cache.clear();
+                self.as_mut().rust_mut().detail_cache.clear();
+                crate::metadata::invalidate();
+                self.as_mut().set_repositories(encoded(report));
+                self.set_status("Repositories loaded.".into());
             }
             Ok(Payload::Sources(sources)) => {
                 if matches!(self.rust().queued, Some(Job::Load(..))) {
@@ -999,13 +1117,249 @@ impl ffi::PackageController {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn qt_repository_confirmation_and_refresh_invalidate_cached_state() {
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().change_repository("broken".into());
+        assert!(controller
+            .status()
+            .to_string()
+            .contains("Invalid repository request"));
+        controller.as_mut().change_repository(
+            r#"{"backend":"flatpak","name":"--all","scope":"system","action":"remove"}"#.into(),
+        );
+        assert!(controller
+            .status()
+            .to_string()
+            .contains("invalid repository name"));
+        let request =
+            r#"{"backend":"flatpak","name":"fixture","scope":"system","action":"remove"}"#;
+        controller.as_mut().change_repository(request.into());
+        assert!(controller.confirmation().to_string().contains("System"));
+        assert!(controller.confirmation().to_string().contains("fixture"));
+        assert!(matches!(
+            controller.rust().pending,
+            Some(Job::Repositories(Some(_)))
+        ));
+        assert!(!*controller.busy());
+        controller.as_mut().confirm(false);
+        assert!(controller.rust().pending.is_none());
+        assert!(controller.confirmation().to_string().is_empty());
+        controller
+            .as_mut()
+            .rust_mut()
+            .view_cache
+            .insert("old".into(), cached_view("old"));
+        let key = cache_key("Sources", "", &[], false);
+        controller
+            .as_mut()
+            .rust_mut()
+            .view_cache
+            .insert(key, cached_view("cached sources"));
+        controller
+            .as_mut()
+            .load("Sources".into(), "".into(), "".into(), false, false);
+        assert!(!*controller.busy());
+        assert!(controller.rows().to_string().contains("cached sources"));
+        controller
+            .as_mut()
+            .apply(Ok(Payload::Repositories(repositories::Report {
+                repositories: vec![repositories::Repository {
+                    backend: "flatpak".into(),
+                    name: "fixture".into(),
+                    title: "Fixture".into(),
+                    url: "https://example.invalid".into(),
+                    scope: Scope::System,
+                    enabled: true,
+                    priority: Some(1),
+                }],
+                errors: vec!["Synthetic partial failure".into()],
+            })));
+        let report: Value = serde_json::from_str(&controller.repositories().to_string()).unwrap();
+        assert_eq!(report["repositories"][0]["scope"], "system");
+        assert_eq!(report["errors"][0], "Synthetic partial failure");
+        assert!(controller.rust().view_cache.get("old").is_none());
+    }
+    #[test]
+    fn qt_firmware_actions_require_confirmation_and_never_offer_removal() {
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        let package = Package {
+            id: PackageId {
+                backend: "fwupd".into(),
+                name: "synthetic-device".into(),
+                architecture: "device".into(),
+                scope: Scope::System,
+                remote: None,
+                reference: None,
+            },
+            display_name: "Synthetic BIOS".into(),
+            summary: "Firmware · AC power required · Restart required".into(),
+            installed_version: Some("1".into()),
+            candidate_version: Some("2".into()),
+            update: UpdateAvailability::Available,
+            icon: None,
+            component_ids: vec![],
+            homepages: vec![],
+        };
+        controller.as_mut().rust_mut().packages = vec![package.clone()];
+        controller.as_mut().rust_mut().detail_cache.insert(
+            package.id.clone(),
+            encoded(json!({"description": "Synthetic cached firmware details"})),
+        );
+        controller.as_mut().select(0);
+        assert!(controller
+            .details()
+            .to_string()
+            .contains("Synthetic cached firmware details"));
+        assert!(!*controller.busy());
+
+        controller.as_mut().rust_mut().detail_cache.clear();
+        let (_sender, receiver) = mpsc::channel();
+        let cancelled = Cancellation::default();
+        let mut previous = package.id.clone();
+        previous.name = "previous-device".into();
+        controller.as_mut().rust_mut().worker = Some(Worker {
+            handle: thread::spawn(|| {}),
+            receiver,
+            cancel: cancelled.clone(),
+            job: Job::Details(previous),
+        });
+        controller.as_mut().select(0);
+        assert!(cancelled.requested());
+        assert!(matches!(&controller.rust().queued, Some(Job::Details(id)) if *id == package.id));
+        controller
+            .as_mut()
+            .rust_mut()
+            .worker
+            .take()
+            .unwrap()
+            .handle
+            .join()
+            .unwrap();
+        controller.as_mut().rust_mut().queued = None;
+        controller.as_mut().rust_mut().updates_view = true;
+        controller.as_mut().set_upgradable(true);
+        for action in ["install", "remove"] {
+            controller.as_mut().propose(action.into(), 0);
+            assert!(controller.rust().pending.is_none());
+        }
+        for action in ["upgrade", "upgrade-all"] {
+            controller.as_mut().propose(action.into(), 0);
+            let confirmation = controller.confirmation().to_string();
+            assert!(confirmation.contains("Synthetic BIOS"));
+            assert!(confirmation.contains("AC power required"));
+            assert!(confirmation.contains("Restart required"));
+            assert!(!*controller.writing());
+            controller.as_mut().confirm(false);
+        }
+        let identity = json!([[
+            package.id.backend,
+            package.id.name,
+            package.id.architecture,
+            null,
+            package.id.scope
+        ]])
+        .to_string();
+        controller
+            .as_mut()
+            .propose_checked(identity.as_str().into());
+        assert!(controller
+            .confirmation()
+            .to_string()
+            .contains("Synthetic BIOS"));
+        controller.as_mut().propose_checked("[]".into());
+        assert!(controller.rust().pending.is_none());
+        assert!(controller.status().to_string().contains("No selected"));
+        controller.as_mut().apply(Ok(Payload::Batch(
+            "Firmware completed. Restart required.".into(),
+        )));
+        assert!(controller.status().to_string().contains("Restart required"));
+        assert!(controller.rust().packages.is_empty());
+        assert!(!*controller.upgradable());
+    }
+    #[test]
+    fn qt_source_failures_and_busy_requests_preserve_the_active_operation() {
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller
+            .as_mut()
+            .load("Sources".into(), "".into(), "unknown".into(), false, false);
+        assert_eq!(controller.status().to_string(), "Unknown source.");
+        assert!(!*controller.busy());
+        controller
+            .as_mut()
+            .rust_mut()
+            .failures
+            .push(BackendFailure {
+                backend: "fwupd".into(),
+                error: EngineError::Unavailable {
+                    backend: "fwupd".into(),
+                    reason: "Synthetic daemon offline".into(),
+                },
+            });
+        controller.as_mut().select(0);
+        assert!(controller
+            .details()
+            .to_string()
+            .contains("Synthetic daemon offline"));
+        controller.as_mut().rust_mut().failures.clear();
+        controller.as_mut().rust_mut().sources.push(Source {
+            backend: "fwupd".into(),
+            capabilities: vec![Capability::Refresh],
+            availability: Ok(Availability::Unavailable("Synthetic unavailable".into())),
+        });
+        controller.as_mut().select(0);
+        assert!(controller
+            .details()
+            .to_string()
+            .contains("Synthetic unavailable"));
+        controller.as_mut().propose("refresh".into(), 0);
+        assert!(controller.rust().pending.is_none());
+        let (sender, receiver) = mpsc::channel();
+        let cancel = Cancellation::default();
+        controller.as_mut().rust_mut().worker = Some(Worker {
+            handle: thread::spawn(|| {}),
+            receiver,
+            cancel: cancel.clone(),
+            job: Job::Repositories(Some(RepositoryAction {
+                backend: "flatpak".into(),
+                name: "fixture".into(),
+                scope: Scope::System,
+                change: repositories::Change::Remove,
+            })),
+        });
+        controller.as_mut().load_repositories();
+        controller.as_mut().change_repository("invalid".into());
+        controller.as_mut().propose_checked("[]".into());
+        controller
+            .as_mut()
+            .load("Sources".into(), "".into(), "".into(), false, true);
+        assert!(!cancel.requested());
+        assert!(controller.rust().queued.is_none());
+        controller.as_mut().cancel();
+        assert!(cancel.requested());
+        assert!(controller
+            .status()
+            .to_string()
+            .contains("waiting for the native operation"));
+        sender
+            .send(Reply::Done(Ok(Payload::Repositories(
+                repositories::Report::default(),
+            ))))
+            .unwrap_or_else(|_| panic!("worker channel closed"));
+        controller.as_mut().poll();
+        assert!(controller.rust().worker.is_none());
+        assert!(!*controller.busy());
+    }
     struct Fixture {
         package: Package,
         fail: bool,
     }
     impl Backend for Fixture {
         fn id(&self) -> &str {
-            "fixture"
+            &self.package.id.backend
         }
         fn capabilities(&self) -> &[Capability] {
             &[
@@ -1542,6 +1896,55 @@ mod tests {
         assert!(encoded(package_row(&package, &[], None))
             .to_string()
             .contains("synthetic"));
+        let mut firmware = package.clone();
+        firmware.id.backend = "fwupd".into();
+        firmware.display_name = "Synthetic BIOS".into();
+        firmware.summary = "Firmware · AC power required · Restart required".into();
+        let mixed = upgrade_plan(&[package.clone(), firmware.clone()]);
+        assert!(mixed.contains(&Operation::Upgrade(firmware.id.clone())));
+        let label = confirmation_label(
+            &Operation::Upgrade(firmware.id.clone()),
+            &[firmware.clone()],
+        );
+        assert!(label.contains("Synthetic BIOS"));
+        assert!(label.contains("AC power required"));
+        assert!(label.contains("Restart required"));
+        let checked = plan_checked_upgrade(
+            &[firmware.clone()],
+            &json!([[
+                firmware.id.backend,
+                firmware.id.name,
+                firmware.id.architecture,
+                null,
+                firmware.id.scope
+            ]])
+            .to_string(),
+        );
+        assert!(checked.confirmation.contains("Synthetic BIOS"));
+        let mut firmware_engine = Engine::default();
+        firmware_engine
+            .register(Fixture {
+                package: firmware.clone(),
+                fail: false,
+            })
+            .unwrap();
+        for job in [
+            Job::Write(Operation::Upgrade(firmware.id.clone())),
+            Job::UpgradeAll(vec![Operation::Upgrade(firmware.id.clone())]),
+        ] {
+            let mut replies = vec![];
+            execute(
+                &mut firmware_engine,
+                job,
+                &Cancellation::default(),
+                &mut |reply| replies.push(reply),
+            );
+            let Reply::Done(Ok(Payload::Batch(status))) = replies.pop().unwrap() else {
+                panic!("firmware completion status missing")
+            };
+            assert!(status.contains("restart or shutdown"));
+        }
+
         let mut other = package.clone();
         other.id.backend = "other-source".into();
         let mut current = package.clone();

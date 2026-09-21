@@ -215,3 +215,62 @@ esac
     assert_eq!(packages[0]["candidate_version"], "2.0");
     assert!(packages[1]["installed_version"].is_null());
 }
+
+#[test]
+fn repositories_use_selected_scope_and_require_noninteractive_consent() {
+    let fixture = Fixture::new();
+    let flatpak = fixture.0.join("flatpak");
+    fs::write(
+        &flatpak,
+        r#"#!/bin/sh
+case "$*" in
+  *remotes*) printf 'fixture\tFixture\thttps://example.invalid\t1\n' ;;
+  *) printf '%s\n' "$@" > "$HOME/repository-call" ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(flatpak, fs::Permissions::from_mode(0o755)).unwrap();
+    let command = || {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_pkd"));
+        command
+            .env("PATH", &fixture.0)
+            .env("HOME", &fixture.0)
+            .env_remove("SNAP")
+            .env_remove("FLATPAK_ID")
+            .args(["--json", "--from", "flatpak", "--scope", "user"]);
+        command
+    };
+    let listed = command().args(["repos", "list"]).output().unwrap();
+    assert!(
+        listed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    let data: Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(data["data"]["repositories"].as_array().unwrap().len(), 1);
+    assert!(data["data"]["repositories"][0]["scope"]
+        .get("user")
+        .is_some());
+    let declined = command()
+        .args(["repos", "disable", "fixture"])
+        .output()
+        .unwrap();
+    assert_eq!(declined.status.code(), Some(2));
+    assert!(!fixture.0.join("repository-call").exists());
+    if !rustix::process::geteuid().is_root() {
+        let approved = command()
+            .args(["--yes", "repos", "disable", "fixture"])
+            .output()
+            .unwrap();
+        assert!(
+            approved.status.success(),
+            "{}",
+            String::from_utf8_lossy(&approved.stdout)
+        );
+        let called = fs::read_to_string(fixture.0.join("repository-call")).unwrap();
+        assert!(called.contains("--user\n"));
+        assert!(called.contains("remote-modify\n--disable\nfixture\n"));
+        assert!(!called.contains("--system"));
+    }
+}

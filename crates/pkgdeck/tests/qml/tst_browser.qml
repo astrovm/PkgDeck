@@ -11,6 +11,10 @@ TestCase {
     property var browser
     QtObject {
         id: fake
+        property string repositories: "{}"
+        property string lastRepositoryChange: ""
+        function loadRepositories() {}
+        function changeRepository(request) { lastRepositoryChange = request; }
         property string rows: "[]"
         property string details: "{}"
         property string status: "Ready"
@@ -78,6 +82,8 @@ TestCase {
         Qt.application.domain = "example.invalid";
     }
     function init() {
+        fake.repositories = "{}";
+        fake.lastRepositoryChange = "";
         fake.rows = "[]";
         fake.details = "{}";
         fake.status = "Ready";
@@ -888,6 +894,48 @@ TestCase {
         verify(!findChild(browser, "detailsPanel").visible);
         compare(fake.writes, 0);
     }
+    function test_repository_scopes_and_actions() {
+        browser.openView("Sources");
+        const rows = [
+            {backend: "flatpak", name: "fixture", title: "Fixture", url: "https://example.invalid", scope: {user: {uid: 1000}}, enabled: true, priority: 1},
+            {backend: "flatpak", name: "fixture", title: "Fixture", url: "https://example.invalid", scope: "system", enabled: false, priority: 2}
+        ];
+        fake.repositories = JSON.stringify({repositories: rows, errors: []});
+        waitForRendering(browser.contentItem);
+        clickDelegate(findChild(browser, "repositoriesButton"));
+        const dialog = findChild(browser, "repositoriesDialog");
+        tryCompare(dialog, "visible", true);
+        const list = findChild(browser, "repositoryList");
+        tryCompare(list, "count", 2);
+        tryVerify(() => list.itemAtIndex(1) !== null);
+        clickDelegate(findChild(list.itemAtIndex(1), "repositoryEnabled"));
+        let request = JSON.parse(fake.lastRepositoryChange);
+        compare(request.scope, "system");
+        compare(request.action, "set_enabled");
+        compare(request.enabled, true);
+        clickDelegate(findChild(list.itemAtIndex(0), "removeRepositoryButton"));
+        request = JSON.parse(fake.lastRepositoryChange);
+        compare(request.scope.user.uid, 1000);
+        compare(request.action, "remove");
+        compare(fake.writes, 0);
+        dialog.close();
+        browser.repositoryChange({backend: "flatpak", name: "new", scope: "system"}, "add", {url: "https://example.invalid/new.flatpakrepo"});
+        request = JSON.parse(fake.lastRepositoryChange);
+        compare(request.url, "https://example.invalid/new.flatpakrepo");
+        compare(request.scope, "system");
+    }
+    function test_firmware_row_updates_instead_of_removing() {
+        browser.openView("Installed");
+        fake.rows = JSON.stringify([{kind: "package", name: "synthetic-device", display_name: "Synthetic BIOS", source: "fwupd", architecture: "device", installed: "1", candidate: "2", update: "available", scope: "system", summary: "Firmware · AC power required"}]);
+        const list = findChild(browser, "packageResults");
+        tryVerify(() => list.itemAtIndex(0) !== null);
+        const action = findChild(list.itemAtIndex(0), "rowPackageAction");
+        compare(action.symbol, "updates");
+        waitForRendering(browser.contentItem);
+        clickDelegate(action);
+        verify(fake.confirmation.indexOf("upgrade") === 0);
+        compare(fake.writes, 0);
+    }
     function test_header_source_checklist_and_installed_filter() {
         browser.openView("Installed");
         const filter = findChild(browser, "sourceFilter");
@@ -900,16 +948,16 @@ TestCase {
         const npm = browser.sourceIds.indexOf("npm");
         verify(browser.sourceCheckAt(npm).checked);
         clickSourceCheck(npm);
-        compare(browser.sourceSelection, "apt,dnf,pacman,zypper,snap,homebrew,appimage,flatpak,cargo,pnpm,bun,pip,pipx,uv,composer,gem");
-        compare(filter.text, "16 sources");
-        compare(fake.lastSource, "apt,dnf,pacman,zypper,snap,homebrew,appimage,flatpak,cargo,pnpm,bun,pip,pipx,uv,composer,gem");
+        compare(browser.sourceSelection, "apt,dnf,pacman,zypper,snap,homebrew,appimage,flatpak,cargo,pnpm,bun,pip,pipx,uv,composer,gem,fwupd");
+        compare(filter.text, "17 sources");
+        compare(fake.lastSource, "apt,dnf,pacman,zypper,snap,homebrew,appimage,flatpak,cargo,pnpm,bun,pip,pipx,uv,composer,gem,fwupd");
         compare(fake.lastView, "Installed");
         // Re-checking the last unchecked source returns to all available.
         clickSourceCheck(npm);
         compare(browser.sourceSelection, "");
         compare(filter.text, "All sources");
         // Unchecking down to one source disables that final checkbox.
-        const ids = ["apt", "dnf", "pacman", "zypper", "snap", "homebrew", "appimage", "flatpak", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "composer", "gem"];
+        const ids = ["apt", "dnf", "pacman", "zypper", "snap", "homebrew", "appimage", "flatpak", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "composer", "gem", "fwupd"];
         for (let idx = 0; idx < ids.length; idx++) {
             if (ids[idx] === "apt")
                 continue;

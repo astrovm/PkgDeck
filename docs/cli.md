@@ -1,7 +1,8 @@
-# APT and Homebrew CLI
+# Command-line interface
 
-Step 4 exposes the shared engine through `pkd`. Native and AppImage execution
-use the host boundary. Flatpak and Snap host operations remain explicitly disabled.
+The `pkd` command exposes the shared engine. Native and AppImage execution
+use the host boundary. When PkgDeck itself runs inside Flatpak or Snap, host
+package operations remain explicitly disabled.
 `pkd` without a subcommand prints help and exits successfully, including with
 redirected input/output. Use `pkgdeck` to launch the GUI.
 
@@ -18,7 +19,7 @@ pkd upgrade neovim --from apt --yes
 pkd remove neovim --from apt --yes
 ```
 
-`--from` accepts `apt`, `dnf`, `pacman`, `zypper`, `snap`, `homebrew`, `appimage`, `flatpak`, `cargo`, `npm`, `pnpm`, `bun`, `pip`, `pipx`, `uv`, `composer`, or `gem`, and repeats to select several sources. Without it, queries cover detected managers;
+`--from` accepts `fwupd`, `apt`, `dnf`, `pacman`, `zypper`, `snap`, `homebrew`, `appimage`, `flatpak`, `cargo`, `npm`, `pnpm`, `bun`, `pip`, `pipx`, `uv`, `composer`, or `gem`, and repeats to select several sources. Without it, queries cover detected managers;
 missing optional managers are omitted, while detection/query failures remain
 visible. `sources` includes unavailable managers and their reasons. Search uses
 literal case-insensitive substrings: APT names/summaries and Homebrew formula names.
@@ -128,3 +129,29 @@ fixture trusts only that tap inside the guest. See [host execution validation](h
 For a named Flatpak present in both installations, choose `--scope user` or
 `--scope system`, for example `pkd --from flatpak --scope system install org.example.App`.
 Without a scope, ambiguous targets require an explicit choice.
+
+## Repositories and firmware
+
+```sh
+pkd repos
+pkd repos list --from flatpak --scope system
+pkd repos add example https://example.org/example.flatpakrepo --from flatpak --scope user
+pkd repos disable example --from flatpak --scope user
+pkd repos enable example --from flatpak --scope user
+pkd repos priority example 10 --from flatpak --scope user
+pkd repos remove example --from flatpak --scope user
+pkd repos edit --from apt
+pkd repos enable lvfs --from fwupd
+pkd list --from fwupd
+pkd upgrade --from fwupd
+```
+
+Repository writes require one `--from` and confirmation (or `--yes`). Flatpak
+repository operations default to User; specify `--scope system` for system remotes.
+APT editing launches the native Software Sources editor. fwupd supports toggling
+configured remotes. Repository definitions retain native signature verification.
+
+With `fwupdmgr` installed, normal `pkd upgrade` includes available firmware updates.
+A named firmware update uses the exact device ID from `pkd list --from fwupd --json`.
+Device power and restart requirements are printed before confirmation. PkgDeck
+never automatically reboots, downgrades, or forces firmware updates.
