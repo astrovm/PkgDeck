@@ -276,7 +276,7 @@ fn upgrade_plan(packages: &[Package]) -> Vec<Operation> {
     let backends: std::collections::BTreeSet<_> = packages
         .iter()
         .filter(|p| p.installed_version.is_some() && p.update == UpdateAvailability::Available)
-        .filter(|p| p.id.backend != "fwupd")
+        .filter(|p| !pkgdeck_core::backends::update_only(&p.id.backend))
         .map(|p| p.id.backend.clone())
         .collect();
     backends
@@ -285,7 +285,10 @@ fn upgrade_plan(packages: &[Package]) -> Vec<Operation> {
         .chain(
             packages
                 .iter()
-                .filter(|p| p.id.backend == "fwupd" && p.update == UpdateAvailability::Available)
+                .filter(|p| {
+                    pkgdeck_core::backends::update_only(&p.id.backend)
+                        && p.update == UpdateAvailability::Available
+                })
                 .map(|p| Operation::Upgrade(p.id.clone())),
         )
         .collect()
@@ -824,10 +827,16 @@ impl ffi::PackageController {
                     .packages
                     .get(i)
                     .and_then(|p| match action.as_str() {
-                        "install" if p.id.backend != "fwupd" && p.installed_version.is_none() => {
+                        "install"
+                            if !pkgdeck_core::backends::update_only(&p.id.backend)
+                                && p.installed_version.is_none() =>
+                        {
                             Some(Operation::Install(p.id.clone()))
                         }
-                        "remove" if p.id.backend != "fwupd" && p.installed_version.is_some() => {
+                        "remove"
+                            if !pkgdeck_core::backends::update_only(&p.id.backend)
+                                && p.installed_version.is_some() =>
+                        {
                             Some(Operation::Remove(p.id.clone()))
                         }
                         "upgrade" if p.update == UpdateAvailability::Available => {
@@ -2023,6 +2032,15 @@ mod tests {
         firmware.id.backend = "fwupd".into();
         firmware.display_name = "Synthetic BIOS".into();
         firmware.summary = "Firmware · AC power required · Restart required".into();
+        for tool in pkgdeck_core::backends::StandaloneTool::ALL {
+            let mut standalone = package.clone();
+            standalone.id.backend = tool.id().into();
+            standalone.id.reference = Some("/synthetic/bin/tool".into());
+            assert_eq!(
+                upgrade_plan(&[standalone.clone()]),
+                vec![Operation::Upgrade(standalone.id)]
+            );
+        }
         let mixed = upgrade_plan(&[package.clone(), firmware.clone()]);
         assert!(mixed.contains(&Operation::Upgrade(firmware.id.clone())));
         let label = confirmation_label(

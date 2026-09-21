@@ -24,6 +24,7 @@ and [CLI guide](docs/cli.md) for the current interface and supported behavior.
 - **Applications:** Flatpak, Snap, Homebrew (Linux formulae), AppImage.
 - **Development:** Cargo, npm, pnpm, Bun, pip, pipx, uv, Composer, RubyGems.
 - **Firmware:** fwupd device updates.
+- **Standalone CLI updates:** Codex, Claude Code, Grok, and OpenCode.
 
 Development package managers focus on user-installed command-line tools rather than project dependencies. pip support is restricted to explicitly selected virtual environments.
 
