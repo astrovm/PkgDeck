@@ -1,6 +1,7 @@
 //! Native package-manager, Linux Homebrew formula, and local AppImage adapters.
 mod appimage;
 mod firmware;
+mod standalone;
 use crate::{
     engine::*,
     host::{AptAction, Authorization, Host},
@@ -10,6 +11,7 @@ use crate::{
 pub use appimage::AppImage;
 pub use firmware::Firmware;
 use serde::Deserialize;
+pub use standalone::{Standalone, StandaloneTool};
 use std::{ffi::OsString, path::PathBuf, time::Duration};
 
 const CAPABILITIES: &[Capability] = &[
@@ -27,8 +29,14 @@ const CAPABILITIES: &[Capability] = &[
 /// value parser together.
 pub const BACKEND_IDS: &[&str] = &[
     "fwupd", "apt", "dnf", "pacman", "zypper", "snap", "homebrew", "appimage", "flatpak", "cargo",
-    "npm", "pnpm", "bun", "pip", "pipx", "uv", "composer", "gem",
+    "npm", "pnpm", "bun", "pip", "pipx", "uv", "composer", "gem", "codex", "claude", "grok",
+    "opencode",
 ];
+
+/// These sources update existing installations but do not install or remove them.
+pub fn update_only(id: &str) -> bool {
+    matches!(id, "fwupd" | "codex" | "claude" | "grok" | "opencode")
+}
 
 /// A narrow transport seam lets adapter tests supply synthetic native responses.
 pub trait Transport: Send {
@@ -3207,6 +3215,16 @@ pub fn native_engine(
     }
     if allowed("appimage") {
         engine.register(AppImage::native())?;
+    }
+    for tool in StandaloneTool::ALL {
+        if allowed(tool.id()) {
+            let mut backend = Standalone::native(tool);
+            let status = backend.detect(cancel);
+            if discover || explicit || !matches!(status, Ok(Availability::Unavailable(_))) {
+                engine.note_detected(tool.id().into(), status);
+                engine.register(backend)?;
+            }
+        }
     }
     if allowed("flatpak") {
         engine.register(Flatpak::new(NativeTransport {

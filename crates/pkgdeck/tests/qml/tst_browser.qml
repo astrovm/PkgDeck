@@ -936,6 +936,22 @@ TestCase {
         verify(fake.confirmation.indexOf("upgrade") === 0);
         compare(fake.writes, 0);
     }
+    function test_standalone_rows_offer_only_updates() {
+        browser.openView("Installed");
+        fake.rows = JSON.stringify([{kind: "package", name: "codex", display_name: "Codex", source: "codex", architecture: "x86_64", installed: "1.0.0", candidate: "2.0.0", update: "available", scope: {user: {uid: 1000}}, summary: "Standalone CLI"}]);
+        const list = findChild(browser, "packageResults");
+        tryVerify(() => list.itemAtIndex(0) !== null);
+        const action = findChild(list.itemAtIndex(0), "rowPackageAction");
+        compare(action.symbol, "updates");
+        waitForRendering(browser.contentItem);
+        clickDelegate(action);
+        verify(fake.confirmation.indexOf("upgrade") === 0);
+        fake.confirmation = "";
+        fake.rows = JSON.stringify([{kind: "package", name: "codex", display_name: "Codex", source: "codex", installed: "2.0.0", candidate: "2.0.0", update: "current", scope: {user: {uid: 1000}}}]);
+        tryVerify(() => list.itemAtIndex(0) !== null);
+        tryVerify(() => !findChild(list.itemAtIndex(0), "rowPackageAction").visible);
+        compare(fake.writes, 0);
+    }
     function test_header_source_checklist_and_installed_filter() {
         browser.openView("Installed");
         const filter = findChild(browser, "sourceFilter");
@@ -948,16 +964,16 @@ TestCase {
         const npm = browser.sourceIds.indexOf("npm");
         verify(browser.sourceCheckAt(npm).checked);
         clickSourceCheck(npm);
-        compare(browser.sourceSelection, "apt,dnf,pacman,zypper,snap,homebrew,appimage,flatpak,cargo,pnpm,bun,pip,pipx,uv,composer,gem,fwupd");
-        compare(filter.text, "17 sources");
-        compare(fake.lastSource, "apt,dnf,pacman,zypper,snap,homebrew,appimage,flatpak,cargo,pnpm,bun,pip,pipx,uv,composer,gem,fwupd");
+        compare(browser.sourceSelection, "apt,dnf,pacman,zypper,snap,homebrew,appimage,flatpak,cargo,pnpm,bun,pip,pipx,uv,composer,gem,fwupd,codex,claude,grok,opencode");
+        compare(filter.text, "21 sources");
+        compare(fake.lastSource, "apt,dnf,pacman,zypper,snap,homebrew,appimage,flatpak,cargo,pnpm,bun,pip,pipx,uv,composer,gem,fwupd,codex,claude,grok,opencode");
         compare(fake.lastView, "Installed");
         // Re-checking the last unchecked source returns to all available.
         clickSourceCheck(npm);
         compare(browser.sourceSelection, "");
         compare(filter.text, "All sources");
         // Unchecking down to one source disables that final checkbox.
-        const ids = ["apt", "dnf", "pacman", "zypper", "snap", "homebrew", "appimage", "flatpak", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "composer", "gem", "fwupd"];
+        const ids = ["apt", "dnf", "pacman", "zypper", "snap", "homebrew", "appimage", "flatpak", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "composer", "gem", "fwupd", "codex", "claude", "grok", "opencode"];
         for (let idx = 0; idx < ids.length; idx++) {
             if (ids[idx] === "apt")
                 continue;

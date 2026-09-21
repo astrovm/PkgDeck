@@ -250,3 +250,17 @@ Update and Update all use the displayed device identities. Confirmation includes
 reported AC power, restart, or shutdown requirements. Native fwupd policy remains
 in effect; PkgDeck does not reboot automatically or force unsupported updates.
 Firmware devices have no Install or Remove action.
+
+## Standalone CLI updates
+
+Supported standalone Codex, Claude Code, Grok, and OpenCode installations appear
+in **Installed** and join the normal **Updates** list, row Update actions, selected
+updates, and **Update all**. The source filter labels these as standalone sources.
+Rows show installed and available versions; current installations have no Remove
+button. Search only returns an already detected installation, never an unverified
+install offer.
+
+Update confirmation identifies the installation, and execution uses the upstream
+updater without administrator privileges. Installation paths are checked again
+before execution. Package-manager installations continue to use their original
+source. See [supported layouts and updater behavior](cli.md#standalone-cli-tools).

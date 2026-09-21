@@ -102,6 +102,11 @@ impl Host {
             "UV_TOOL_DIR",
             "COMPOSER_HOME",
             "GEM_HOME",
+            "CODEX_HOME",
+            "CODEX_INSTALL_DIR",
+            "CLAUDE_CONFIG_DIR",
+            "GROK_BIN_DIR",
+            "DISABLE_UPDATES",
         ] {
             if let Some(value) = source.get(&OsString::from(name)) {
                 env.insert(name.into(), value.clone());
@@ -195,6 +200,33 @@ impl Host {
         cancel: &Cancellation,
     ) -> Result<Completion, ExecutionError> {
         process::run(self.command(executable, args)?, limits, cancel, false)
+    }
+
+    /// Run an already identified standalone installation as its owner. The
+    /// adapter supplies fixed updater arguments, never a user shell command.
+    pub(crate) fn standalone_write(
+        &self,
+        executable: &Path,
+        args: &[OsString],
+        env: &[(&str, OsString)],
+        cancel: &Cancellation,
+    ) -> Result<Completion, ExecutionError> {
+        if rustix::process::geteuid().is_root() {
+            return Err(ExecutionError::Invalid(
+                "run the frontend as an unprivileged user".into(),
+            ));
+        }
+        let mut command = self.command(executable, args)?;
+        command.envs(env.iter().map(|(key, value)| (key, value)));
+        process::run(
+            command,
+            Limits {
+                timeout: std::time::Duration::from_secs(300),
+                output_bytes: 1024 * 1024,
+            },
+            cancel,
+            true,
+        )
     }
 
     /// Homebrew always runs as the invoking user, with automatic unrelated work disabled.
