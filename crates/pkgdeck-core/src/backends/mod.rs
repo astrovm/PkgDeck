@@ -529,36 +529,25 @@ impl<T: Transport> Backend for Flatpak<T> {
         if let Ok(system) = self.search_scope(query, cancel, true) {
             result.extend(system);
         }
-        // Remote search results do not carry an installed scope: the user and
-        // system queries return the same catalog entries. Deduplicate them so
-        // a single remote application resolves unambiguously, preferring the
-        // unprivileged user scope used for installs by default.
+        // Offers in separate installations remain independently selectable.
         let mut seen = std::collections::BTreeSet::new();
-        result.retain(|package| {
-            seen.insert((
-                package.id.name.clone(),
-                package.id.architecture.clone(),
-                package.id.remote.clone(),
-                package.id.reference.clone(),
-            ))
-        });
+        result.retain(|package| seen.insert(package.id.clone()));
         // Local inventory is enough to choose Install versus Remove. Search
         // must not fetch remote update metadata just to establish this state.
         let mut installed = self.list(cancel, false, false)?;
         installed.extend(self.list(cancel, true, false)?);
         let mut offers = Vec::new();
         for offer in result {
-            let matches: Vec<_> = installed
-                .iter()
-                .filter(|package| {
-                    package
-                        .id
-                        .reference
-                        .as_deref()
-                        .and_then(|reference| reference.split_once('/').map(|(_, rest)| rest))
-                        == offer.id.reference.as_deref()
-                })
-                .collect();
+            let matches: Vec<_> =
+                installed
+                    .iter()
+                    .filter(|package| {
+                        package.id.scope == offer.id.scope
+                            && package.id.reference.as_deref().and_then(|reference| {
+                                reference.split_once('/').map(|(_, rest)| rest)
+                            }) == offer.id.reference.as_deref()
+                    })
+                    .collect();
             if matches.is_empty() {
                 offers.push(offer);
             } else {
@@ -796,6 +785,11 @@ fn desktop_icon(home: Option<&std::path::Path>, desktop: &std::path::Path) -> Op
         .lines()
         .find_map(|line| line.strip_prefix("Icon="))?
         .trim();
+    themed_icon(home, name)
+}
+
+/// Resolve an exact desktop/AppStream icon name without network requests.
+pub fn themed_icon(home: Option<&std::path::Path>, name: &str) -> Option<PathBuf> {
     if name.is_empty() {
         return None;
     }
@@ -814,7 +808,7 @@ fn desktop_icon(home: Option<&std::path::Path>, desktop: &std::path::Path) -> Op
         dirs.insert(0, home.join(".local/share/icons"));
     }
     for dir in &dirs {
-        for size in ["64x64", "48x48", "32x32"] {
+        for size in ["128x128", "64x64", "48x48", "32x32", "scalable"] {
             if let Some(icon) = icon_file(&dir.join("hicolor").join(size).join("apps"), name) {
                 return Some(icon);
             }
@@ -954,7 +948,13 @@ impl<T: Transport> Backend for Apt<T> {
         Ok(self
             .query("search", query, "", cancel)?
             .into_iter()
-            .map(|d| d.package)
+            .map(|mut d| {
+                let home = self.transport.env("HOME").map(PathBuf::from);
+                if let Some(desktop) = self.desktop_entries().get(&d.package.id.name).cloned() {
+                    d.package.icon = desktop_icon(home.as_deref(), &desktop);
+                }
+                d.package
+            })
             .collect())
     }
     fn installed(&mut self, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {

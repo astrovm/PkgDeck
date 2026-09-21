@@ -23,6 +23,7 @@ pub struct Screenshot {
 }
 #[derive(Clone, Default)]
 pub struct AppInfo {
+    pub icon: Option<PathBuf>,
     pub name: String,
     pub description: String,
     pub homepage: Option<String>,
@@ -30,6 +31,9 @@ pub struct AppInfo {
 }
 impl AppInfo {
     fn fill_missing(&mut self, other: &Self) {
+        if self.icon.is_none() {
+            self.icon.clone_from(&other.icon);
+        }
         if self.name.is_empty() {
             self.name.clone_from(&other.name);
         }
@@ -46,6 +50,7 @@ impl AppInfo {
 }
 #[derive(Default)]
 pub struct Catalog {
+    metadata_dir: Option<PathBuf>,
     aliases: BTreeMap<String, String>,
     apps: BTreeMap<String, AppInfo>,
 }
@@ -262,6 +267,7 @@ fn provider_info(package: &Package, text: &str) -> Option<AppInfo> {
         description: description(body.as_str().unwrap_or("")),
         homepage: homepage.as_str().and_then(web_url),
         screenshots: shots,
+        icon: None,
     };
     if info.description.is_empty() {
         info.description = summary.as_str().unwrap_or("").into();
@@ -363,6 +369,9 @@ impl Catalog {
     }
     pub fn enrich(&self, package: &mut Package) {
         if let Some(info) = self.find(package) {
+            if package.icon.is_none() {
+                package.icon.clone_from(&info.icon);
+            }
             if !info.name.is_empty() {
                 package.display_name.clone_from(&info.name);
             }
@@ -394,6 +403,29 @@ impl Catalog {
         self.apps.insert(canonical.clone(), info);
         for key in keys {
             self.aliases.insert(key, canonical.clone());
+        }
+    }
+    fn resolve_icon(&self, name: &str, kind: &str) -> Option<PathBuf> {
+        match kind {
+            "remote" => web_url(name).map(PathBuf::from),
+            "cached" => {
+                if Path::new(name).components().count() != 1 || name == ".." {
+                    return None;
+                }
+                let directory = self.metadata_dir.as_ref()?;
+                for size in ["128x128", "64x64", "48x48"] {
+                    let path = directory.join("icons").join(size).join(name);
+                    if path.is_file() {
+                        return Some(path);
+                    }
+                }
+                None
+            }
+            "stock" | "local" => pkgdeck_core::backends::themed_icon(
+                std::env::var_os("HOME").as_deref().map(Path::new),
+                name,
+            ),
+            _ => None,
         }
     }
     fn xml(&mut self, text: &str) {
@@ -458,6 +490,15 @@ impl Catalog {
                         .find(|n| n.has_tag_name("url") && n.attribute("type") == Some("homepage"))
                         .and_then(|n| n.text())
                         .and_then(web_url),
+                    icon: component
+                        .children()
+                        .filter(|node| node.has_tag_name("icon"))
+                        .find_map(|node| {
+                            self.resolve_icon(
+                                node.text()?,
+                                node.attribute("type").unwrap_or("stock"),
+                            )
+                        }),
                     screenshots,
                 },
             );
@@ -520,6 +561,18 @@ impl Catalog {
                     .map(|d| plain(d.root_element()))
                     .unwrap_or_default(),
                     homepage: value["Url"]["homepage"].as_str().and_then(web_url),
+                    icon: value["Icon"]["stock"]
+                        .as_str()
+                        .and_then(|name| self.resolve_icon(name, "stock"))
+                        .or_else(|| {
+                            value["Icon"]["cached"]
+                                .as_sequence()
+                                .into_iter()
+                                .flatten()
+                                .find_map(|icon| {
+                                    self.resolve_icon(icon["name"].as_str()?, "cached")
+                                })
+                        }),
                     screenshots,
                 },
             );
@@ -564,6 +617,9 @@ impl Catalog {
             ids,
             vec![],
             AppInfo {
+                icon: fields
+                    .get("Icon")
+                    .and_then(|name| self.resolve_icon(name, "stock")),
                 name: (*name).into(),
                 description: fields.get("Comment").unwrap_or(&"").to_string(),
                 ..AppInfo::default()
@@ -655,6 +711,7 @@ impl Catalog {
                 {
                     continue;
                 }
+                catalog.metadata_dir = path.parent().map(Path::to_path_buf);
                 if path.to_string_lossy().contains(".xml") {
                     catalog.xml(&text);
                 } else {
@@ -695,6 +752,33 @@ mod tests {
     use super::*;
     use pkgdeck_core::package::{PackageId, Scope, UpdateAvailability};
     use std::io::Write;
+
+    #[test]
+    fn appstream_icons_resolve_cached_remote_and_missing_assets() {
+        let dir =
+            std::env::temp_dir().join(format!("pkgdeck-catalog-icons-{}", std::process::id()));
+        fs::create_dir_all(dir.join("icons/128x128")).unwrap();
+        let icon = dir.join("icons/128x128/player.png");
+        fs::write(&icon, "synthetic icon").unwrap();
+        let mut catalog = Catalog {
+            metadata_dir: Some(dir.clone()),
+            ..Catalog::default()
+        };
+        catalog.xml(r#"<component type="desktop-application"><id>org.example.Player</id><name>Player</name><icon type="cached">player.png</icon></component>"#);
+        let mut app = package("flatpak", "org.example.Player");
+        catalog.enrich(&mut app);
+        assert_eq!(app.icon, Some(icon));
+        assert!(catalog.resolve_icon("../player.png", "cached").is_none());
+        assert!(catalog.resolve_icon("missing.png", "cached").is_none());
+        assert!(catalog
+            .resolve_icon("http://example.invalid/icon.png", "remote")
+            .is_none());
+        assert_eq!(
+            catalog.resolve_icon("https://example.invalid/icon.png", "remote"),
+            Some(PathBuf::from("https://example.invalid/icon.png"))
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     const APP: &str = r#"<component type="desktop-application">
       <id>org.example.Player</id><launchable type="desktop-id">player.desktop</launchable>

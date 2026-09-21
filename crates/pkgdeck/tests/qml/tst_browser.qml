@@ -769,6 +769,47 @@ TestCase {
         }
         compare(fake.writes, 0);
     }
+    function test_package_icon_loads_and_falls_back_on_error() {
+        populate();
+        const rows = JSON.parse(fake.rows);
+        rows[0].icon = Qt.resolvedUrl("../../assets/logo.svg").toString().replace("file://", "");
+        fake.rows = JSON.stringify(rows);
+        const results = findChild(browser, "packageResults");
+        waitForRendering(browser.contentItem);
+        let row = results.itemAtIndex(0);
+        tryCompare(findChild(row, "packageIcon"), "visible", true);
+        verify(!findChild(row, "packageIconFallback").visible);
+        rows[0].icon = "/missing/synthetic-icon.png";
+        fake.rows = JSON.stringify(rows);
+        waitForRendering(browser.contentItem);
+        row = results.itemAtIndex(0);
+        tryCompare(findChild(row, "packageIconFallback"), "visible", true);
+        verify(!findChild(row, "packageIcon").visible);
+    }
+    function test_flatpak_installation_scopes_are_visible_and_selectable() {
+        populate();
+        const app = {kind: "package", name: "org.example.Player", display_name: "Player",
+            source: "flatpak", remote: "flathub", architecture: "x86_64", candidate: "1",
+            reference: "org.example.Player/x86_64/stable", installed: null, update: "unknown"};
+        fake.rows = JSON.stringify([
+            Object.assign({}, app, {scope: {user: {uid: 1000}}}),
+            Object.assign({}, app, {scope: "system"})
+        ]);
+        const results = findChild(browser, "packageResults");
+        tryCompare(results, "count", 2);
+        waitForRendering(browser.contentItem);
+        const userRow = results.itemAtIndex(0);
+        const systemRow = results.itemAtIndex(1);
+        compare(findChild(userRow, "packageSourceLine").text, "FLATPAK · flathub · User");
+        compare(findChild(systemRow, "packageSourceLine").text, "FLATPAK · flathub · System");
+        mouseClick(findChild(systemRow, "rowPackageAction"));
+        compare(fake.selection, 1);
+        const dialog = findChild(browser, "confirmationDialog");
+        tryCompare(dialog, "opened", true);
+        keyClick(Qt.Key_N, Qt.AltModifier);
+        tryCompare(dialog, "visible", false);
+        compare(fake.writes, 0);
+    }
     function test_failed_screenshots_collapse_and_keep_working_images() {
         populate();
         browser.choose(0);

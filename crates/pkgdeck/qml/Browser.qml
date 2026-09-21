@@ -58,6 +58,7 @@ Controls.ApplicationWindow {
         if (rowIdentity(selected) === identity && failedScreenshots.indexOf(url) < 0)
             failedScreenshots = failedScreenshots.concat([url]);
     }
+    readonly property string selectedIcon: (detailMatchesSelection && detail.package.icon) || (selected && selected.icon) || ""
     property string screenshotUrl: ""
     property string screenshotCaption: ""
     property bool closePending: false
@@ -504,7 +505,7 @@ Controls.ApplicationWindow {
     // may contain spaces, which raw concatenation would leave unencoded and
     // unloadable (hiding the fallback source icon with a blank gap).
     function iconUrl(path) {
-        return path ? "file://" + encodeURI(path) : "";
+        return path ? (path.indexOf("https://") === 0 ? path : "file://" + encodeURI(path)) : "";
     }
 
     property url repositoryIconSource: root.dark ? "qrc:/pkgdeck/github-dark.png" : "qrc:/pkgdeck/github.png"
@@ -1320,14 +1321,18 @@ Controls.ApplicationWindow {
                                         Layout.fillWidth: true
                                         spacing: 6
                                         DeckIcon {
-                                            visible: !modelData.icon
+                                            objectName: "packageIconFallback"
+                                            visible: rowIcon.status !== Image.Ready
                                             name: modelData.source
                                             ink: root.muted
                                             Layout.preferredWidth: 14
                                             Layout.preferredHeight: 14
                                         }
                                         Image {
-                                            visible: !!modelData.icon
+                                            id: rowIcon
+                                            objectName: "packageIcon"
+                                            visible: status === Image.Ready
+                                            asynchronous: true
                                             source: root.iconUrl(modelData.icon || "")
                                             sourceSize.width: 14
                                             sourceSize.height: 14
@@ -1338,7 +1343,7 @@ Controls.ApplicationWindow {
                                         }
                                         Controls.Label {
                                         objectName: "packageSourceLine"
-                                        text: modelData.source.toUpperCase() + (modelData.remote ? " · " + modelData.remote : "")
+                                        text: modelData.source.toUpperCase() + (modelData.remote ? " · " + modelData.remote : "") + (modelData.source === "flatpak" ? " · " + (modelData.scope === "system" ? "System" : "User") : "")
                                         color: root.muted
                                         font.pixelSize: 11
                                         elide: Text.ElideRight
@@ -1428,7 +1433,7 @@ Controls.ApplicationWindow {
                     RowLayout {
                         Layout.fillWidth: true
                         Item {
-                            visible: !(root.selected && root.selected.icon)
+                            visible: detailIcon.status !== Image.Ready
                             Layout.preferredWidth: 40
                             Layout.preferredHeight: 40
                             DeckIcon {
@@ -1440,8 +1445,10 @@ Controls.ApplicationWindow {
                             }
                         }
                         Image {
-                            visible: !!(root.selected && root.selected.icon)
-                            source: root.iconUrl((root.selected && root.selected.icon) || "")
+                            id: detailIcon
+                            visible: status === Image.Ready
+                            asynchronous: true
+                            source: root.iconUrl(root.selectedIcon)
                             sourceSize.width: 40
                             sourceSize.height: 40
                             fillMode: Image.PreserveAspectFit

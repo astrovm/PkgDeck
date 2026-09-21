@@ -21,6 +21,9 @@ pub struct Args {
     /// Select the package architecture when a name is ambiguous.
     #[arg(long, global = true)]
     pub arch: Option<String>,
+    /// Select the package installation (user or system).
+    #[arg(long, global = true, value_enum)]
+    pub scope: Option<InstallScope>,
     /// Approve native package and dependency changes without prompting.
     #[arg(long, short = 'y', global = true)]
     pub yes: bool,
@@ -29,6 +32,21 @@ pub struct Args {
     pub auth: Auth,
     #[command(subcommand)]
     pub command: Option<Commands>,
+}
+#[derive(Clone, Copy, ValueEnum)]
+pub enum InstallScope {
+    User,
+    System,
+}
+impl InstallScope {
+    fn native(self) -> Scope {
+        match self {
+            Self::User => Scope::User {
+                uid: rustix::process::getuid().as_raw(),
+            },
+            Self::System => Scope::System,
+        }
+    }
 }
 #[derive(Clone, Copy, ValueEnum)]
 pub enum Auth {
@@ -116,7 +134,7 @@ fn select(
             _ => None,
         },
         architecture: args.arch.clone(),
-        scope: None,
+        scope: args.scope.map(InstallScope::native),
     })
 }
 
@@ -128,6 +146,17 @@ pub fn dispatch(
     events: &mut dyn FnMut(Event),
 ) -> (Value, u8) {
     let command = args.command.as_ref().expect("CLI command");
+    if args.scope.is_some()
+        && matches!(
+            command,
+            Commands::Update | Commands::Sources | Commands::Doctor
+        )
+    {
+        return (
+            json!({"error": "--scope applies to package queries and operations, not source operations"}),
+            2,
+        );
+    }
     match command {
         Commands::Sources => {
             let sources = engine.discover(cancel);
@@ -140,13 +169,19 @@ pub fn dispatch(
         }
         Commands::Search { query } => {
             let mut report = engine.search(query, cancel);
-            report.packages.retain(|p| !unverified_search_offer(p));
+            report.packages.retain(|p| {
+                !unverified_search_offer(p)
+                    && args.scope.is_none_or(|scope| scope.native() == p.id.scope)
+            });
             rank_search_matches(&mut report.packages, query);
             let code = if report.failures.is_empty() { 0 } else { 8 };
             return (json!(report), code);
         }
         Commands::List => {
-            let report = engine.installed(cancel);
+            let mut report = engine.installed(cancel);
+            report
+                .packages
+                .retain(|p| args.scope.is_none_or(|scope| scope.native() == p.id.scope));
             let code = if report.failures.is_empty() { 0 } else { 8 };
             return (json!(report), code);
         }
@@ -186,13 +221,14 @@ pub fn dispatch(
                 if !report.failures.is_empty() {
                     return Err(EngineError::Incomplete(report.failures));
                 }
-                if args.arch.is_some() {
+                if args.arch.is_some() || args.scope.is_some() {
                     return Ok(report
                         .packages
                         .into_iter()
                         .filter(|p| {
                             p.update == UpdateAvailability::Available
-                                && args.arch.as_ref().is_some_and(|a| a == &p.id.architecture)
+                                && args.arch.as_ref().is_none_or(|a| a == &p.id.architecture)
+                                && args.scope.is_none_or(|scope| scope.native() == p.id.scope)
                         })
                         .map(|p| Operation::Upgrade(p.id))
                         .collect());
@@ -334,6 +370,26 @@ pub fn run(args: &Args) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn named_package_scope_is_honored() {
+        let cancel = Cancellation::default();
+        let mut engine = engine();
+        let system = Args::try_parse_from(["pkd", "--scope", "system", "info", "fixture"]).unwrap();
+        assert_eq!(
+            select(&mut engine, &system, "fixture", false, &cancel)
+                .unwrap()
+                .scope,
+            Scope::System
+        );
+        let user = Args::try_parse_from(["pkd", "--scope", "user", "info", "fixture"]).unwrap();
+        assert!(select(&mut engine, &user, "fixture", false, &cancel).is_err());
+        assert!(Args::try_parse_from(["pkd", "--scope", "invalid", "info", "fixture"]).is_err());
+        assert_eq!(
+            call(&mut engine, &["--scope", "user", "upgrade"], true).0["operations"],
+            json!([])
+        );
+        assert_eq!(call(&mut engine, &["--scope", "user", "update"], true).1, 2);
+    }
     struct Fixture {
         backend: String,
         installed: bool,

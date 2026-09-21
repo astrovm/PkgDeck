@@ -487,7 +487,7 @@ fn flatpak_operations_keep_scope_and_noninteractive_arguments() {
         .unwrap()
         .id
         .clone();
-    assert_eq!(backend.search("io.example.User", &cancel).unwrap().len(), 1);
+    assert_eq!(backend.search("io.example.User", &cancel).unwrap().len(), 2);
     assert!(backend.search("--bad", &cancel).is_err());
     assert_eq!(backend.details(&user, &cancel).unwrap().package.id, user);
     for operation in [
@@ -906,13 +906,31 @@ fn flatpak_remote_search_details_and_upgrade_all() {
     let mut backend = Flatpak::new(fixture.clone());
     let cancel = Cancellation::default();
     let results = backend.search("io.example.User", &cancel).unwrap();
-    // The user and system catalog queries return the same remote entry;
-    // it must collapse to one identity so engine selection is unambiguous.
-    assert_eq!(results.len(), 1);
+    // Each installation offers its own target; installed state must not leak.
+    assert_eq!(results.len(), 2);
     assert!(matches!(results[0].id.scope, Scope::User { .. }));
-    assert!(results
+    assert_eq!(results[0].installed_version.as_deref(), Some("1.0"));
+    let system_offer = results
         .iter()
-        .all(|p| p.installed_version.as_deref() == Some("1.0")));
+        .find(|p| p.id.scope == Scope::System)
+        .unwrap();
+    assert!(system_offer.installed_version.is_none());
+    backend
+        .execute(
+            &Operation::Install(system_offer.id.clone()),
+            &cancel,
+            &mut |_| {},
+        )
+        .unwrap();
+    assert!(fixture
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|(args, write, system)| *write
+            && *system
+            && args.contains(&"install".into())
+            && args.contains(&"--system".into())));
     let id = results[0].id.clone();
     assert!(id.remote.is_none());
     assert_eq!(backend.details(&id, &cancel).unwrap().package.id, id);
@@ -978,9 +996,7 @@ fn flatpak_detect_reports_unavailable_backend() {
 }
 
 #[test]
-fn flatpak_remote_search_resolves_to_a_single_identity() {
-    // Mirrors `pkd --from flatpak info <app>`: engine selection must see one
-    // identity, not Ambiguous user/system duplicates, and details must follow.
+fn flatpak_remote_search_requires_explicit_installation_scope() {
     let cancel = Cancellation::default();
     let mut engine = Engine::default();
     engine
@@ -993,7 +1009,9 @@ fn flatpak_remote_search_resolves_to_a_single_identity() {
             name: "io.example.User".into(),
             backend: Some("flatpak".into()),
             architecture: None,
-            scope: None,
+            scope: Some(Scope::User {
+                uid: rustix::process::getuid().as_raw(),
+            }),
         })
         .unwrap();
     assert!(id.remote.is_none());
@@ -3110,7 +3128,8 @@ fn flatpak_search_preserves_branch_without_guessing_kind_or_fetching_updates() {
     let mut backend = Flatpak::new(fixture.clone());
     let cancel = Cancellation::default();
     let rows = backend.search("User", &cancel).unwrap();
-    assert_eq!(rows.len(), 1);
+    assert_eq!(rows.len(), 2);
+    assert_ne!(rows[0].id.scope, rows[1].id.scope);
     let id = &rows[0].id;
     assert!(rows[0].installed_version.is_none());
     assert_eq!(

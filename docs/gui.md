@@ -18,9 +18,12 @@ Search submits on Enter or the Search button. Results use a virtualized ListView
 ranked best-match-first, with exact app names and Flatpak app-id suffixes together
 before plugins and libraries. Unverified development-manager placeholders are
 omitted. Submitting a search clears any column sort.
+Flatpak offers remain separate for User and System installations. The source
+line labels each scope, and its row action targets that installation; installed
+state in one scope does not hide the install option in the other.
 
 Local AppStream catalogs supply friendly desktop app names, descriptions,
-homepages, and screenshots where available. Packages without desktop metadata
+homepages, icons, and screenshots where available. Packages without desktop metadata
 keep their native names. Details retain the native identity, architecture, and
 scope. Screenshot thumbnails load asynchronously only for the selected app;
 clicking one opens a larger viewer. Local desktop entries add fallback names for
@@ -162,9 +165,9 @@ Icons follow the light/dark palette and disabled states. Text labels remain the
 accessible names; decorative icons are ignored by accessibility tools.
 
 Package rows and the details header additionally show the application's own
-icon where the host already has one: Snap metadata, Flatpak exports, and APT
-desktop entries are read from local files only, never downloaded. Results
-without a local icon keep the generic source symbol.
+icon from installed desktop entries or AppStream metadata. Search resolves APT
+desktop icons and available cached, stock, or HTTPS AppStream icons. Local icons
+need no network request; missing or failed images keep the source symbol visible.
 
 ## Local verification
 

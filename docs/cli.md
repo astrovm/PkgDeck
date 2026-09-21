@@ -124,3 +124,7 @@ VM additionally installs synthetic APT and Homebrew packages at 1.0, refreshes t
 checked through `dpkg-query`, `brew info`, and fixture-owned files. Homebrew 6.0.22
 runs unprivileged at its standard Linux prefix with a controlled local tap. The
 fixture trusts only that tap inside the guest. See [host execution validation](host-execution.md#reproducing-validation).
+
+For a named Flatpak present in both installations, choose `--scope user` or
+`--scope system`, for example `pkd --from flatpak --scope system install org.example.App`.
+Without a scope, ambiguous targets require an explicit choice.
