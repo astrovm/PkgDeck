@@ -92,6 +92,14 @@ pub enum Commands {
     Update,
     /// Upgrade named packages, or all available updates if no names are supplied.
     Upgrade { names: Vec<String> },
+    /// Find safe manager-native cleanup plans, or run selected plan keys.
+    Clean {
+        /// Cleanup keys shown by `pkd clean` (for example apt:autoremove).
+        targets: Vec<String>,
+        /// Run every discovered cleanup plan.
+        #[arg(long)]
+        all: bool,
+    },
 }
 #[derive(Subcommand)]
 pub enum RepoCommand {
@@ -117,6 +125,7 @@ impl Commands {
                 self,
                 Self::Install { .. } | Self::Remove { .. } | Self::Update | Self::Upgrade { .. }
             )
+            || matches!(self, Self::Clean { targets, all } if *all || !targets.is_empty())
     }
 }
 fn error_code(error: &EngineError) -> u8 {
@@ -172,11 +181,11 @@ pub fn dispatch(
     if args.scope.is_some()
         && matches!(
             command,
-            Commands::Update | Commands::Sources | Commands::Doctor
+            Commands::Update | Commands::Sources | Commands::Doctor | Commands::Clean { .. }
         )
     {
         return (
-            json!({"error": "--scope applies to package queries and operations, not source operations"}),
+            json!({"error": "--scope applies to package queries and operations, not source or cleanup operations"}),
             2,
         );
     }
@@ -227,6 +236,19 @@ pub fn dispatch(
                 json!({"error": "doctor is a text-only diagnostic; omit --json"}),
                 2,
             )
+        }
+        Commands::Clean { targets, all } if targets.is_empty() && !all => {
+            let report = engine.cleanup(cancel);
+            let code = if report
+                .failures
+                .iter()
+                .any(|failure| !matches!(failure.error, EngineError::Unsupported { .. }))
+            {
+                8
+            } else {
+                0
+            };
+            return (json!(report), code);
         }
         _ => (),
     }
@@ -301,6 +323,30 @@ pub fn dispatch(
                     if !operations.contains(&operation) {
                         operations.push(operation);
                     }
+                }
+                Ok(operations)
+            }
+            Commands::Clean { targets, all } => {
+                let report = engine.cleanup(cancel);
+                let hard_failures: Vec<_> = report
+                    .failures
+                    .into_iter()
+                    .filter(|failure| !matches!(failure.error, EngineError::Unsupported { .. }))
+                    .collect();
+                if !hard_failures.is_empty() {
+                    return Err(EngineError::Incomplete(hard_failures));
+                }
+                let requested: std::collections::BTreeSet<_> = targets.iter().cloned().collect();
+                let operations: Vec<_> = report
+                    .items
+                    .into_iter()
+                    .filter(|item| {
+                        *all || requested.contains(&format!("{}:{}", item.id.backend, item.id.key))
+                    })
+                    .map(|item| Operation::Clean(item.id))
+                    .collect();
+                if !*all && operations.len() != requested.len() {
+                    return Err(EngineError::NotFound);
                 }
                 Ok(operations)
             }
@@ -761,6 +807,7 @@ mod tests {
                 Capability::Remove,
                 Capability::Refresh,
                 Capability::Upgrade,
+                Capability::Clean,
             ]
         }
         fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
@@ -793,6 +840,21 @@ mod tests {
                 homepage: None,
                 dependencies: vec![],
             })
+        }
+        fn cleanup(&mut self, _: &Cancellation) -> Result<Vec<CleanupItem>, EngineError> {
+            if let Some(error) = &self.read_failure {
+                return Err(error.clone());
+            }
+            Ok(vec![CleanupItem {
+                id: CleanupId {
+                    backend: self.backend.clone(),
+                    key: "orphans".into(),
+                },
+                kind: CleanupKind::OrphanDependencies,
+                title: "Synthetic cleanup".into(),
+                summary: "One synthetic dependency".into(),
+                preview: "synthetic-runtime".into(),
+            }])
         }
         fn execute(
             &mut self,
@@ -844,10 +906,21 @@ mod tests {
             vec!["upgrade"],
             vec!["update"],
             vec!["remove", "fixture"],
+            vec!["clean"],
+            vec!["clean", "apt:orphans"],
         ] {
             assert_eq!(call(&mut engine, &args, true).1, 0, "{args:?}");
         }
         assert_eq!(call(&mut engine, &["install", "fixture"], false).1, 7);
+        assert_eq!(call(&mut engine, &["clean", "apt:orphans"], false).1, 7);
+        assert_eq!(call(&mut engine, &["clean", "missing:plan"], true).1, 3);
+        let cleaned = call(&mut engine, &["clean", "--all"], true);
+        assert_eq!(cleaned.1, 0);
+        assert_eq!(
+            cleaned.0["operations"][0]["operation"],
+            json!({"clean":{"backend":"apt","key":"orphans"}})
+        );
+        assert_eq!(call(&mut engine, &["--scope", "user", "clean"], true).1, 2);
         assert_eq!(
             call(&mut engine, &["--yes", "install", "fixture"], false).1,
             0
@@ -872,6 +945,31 @@ mod tests {
             Authorization::from(Auth::Sudo),
             Authorization::SudoNonInteractive
         ));
+
+        let mut failed_discovery = Engine::default();
+        failed_discovery
+            .register(Fixture {
+                read_failure: Some(ExecutionError::TimedOut.into()),
+                verified: true,
+                backend: "apt".into(),
+                installed: true,
+                fail: None,
+            })
+            .unwrap();
+        assert_eq!(call(&mut failed_discovery, &["clean"], true).1, 8);
+        assert_ne!(call(&mut failed_discovery, &["clean", "--all"], true).1, 0);
+
+        let mut failed_write = Engine::default();
+        failed_write
+            .register(Fixture {
+                read_failure: None,
+                verified: true,
+                backend: "apt".into(),
+                installed: true,
+                fail: Some(ExecutionError::LockBusy.into()),
+            })
+            .unwrap();
+        assert_ne!(call(&mut failed_write, &["clean", "--all"], true).1, 0);
     }
     #[test]
     fn source_ambiguity_partial_results_and_exit_codes() {

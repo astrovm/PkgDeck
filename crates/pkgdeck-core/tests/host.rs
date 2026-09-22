@@ -446,6 +446,13 @@ fn apt_refresh_upgrade_and_multiarch_keep_native_safety_options() {
     let upgrade_all = AptAction::UpgradeAll.arguments().unwrap();
     assert_eq!(upgrade_all.last().unwrap(), "upgrade");
     assert!(!upgrade_all.contains(&"--only-upgrade".into()));
+    let autoremove = AptAction::Autoremove.arguments().unwrap();
+    assert_eq!(autoremove.last().unwrap(), "autoremove");
+    assert!(autoremove.contains(&"--assume-yes".into()));
+    assert!(autoremove.contains(&"--purge".into()));
+    let autoclean = AptAction::Autoclean.arguments().unwrap();
+    assert_eq!(autoclean.last().unwrap(), "autoclean");
+    assert!(autoclean.contains(&"DPkg::Lock::Timeout=0".into()));
     for name in ["fixture:", "fixture:amd64:foreign", "fixture:../amd64"] {
         assert!(AptAction::Install(name.into()).arguments().is_err());
     }

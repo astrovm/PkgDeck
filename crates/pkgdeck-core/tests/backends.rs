@@ -110,6 +110,7 @@ impl Transport for Fixture {
                 *self.installed.lock().unwrap() = Some(self.candidate.lock().unwrap().clone())
             }
             AptAction::Remove(_) => *self.installed.lock().unwrap() = None,
+            AptAction::Autoremove | AptAction::Autoclean => {}
         }
         Ok(output(""))
     }
@@ -128,6 +129,7 @@ impl Transport for Fixture {
                     *self.installed.lock().unwrap() = Some(self.candidate.lock().unwrap().clone())
                 }
                 "uninstall" => *self.installed.lock().unwrap() = None,
+                "autoremove" | "cleanup" => {}
                 _ => panic!("unexpected native operation"),
             }
             return Ok(output(""));
@@ -147,6 +149,8 @@ impl Transport for Fixture {
                 let formula = json!({"full_name":"synthetic-fixture","desc":"Synthetic package","homepage":"https://example.invalid","versions":{"stable":candidate},"revision":0,"installed":installed.iter().map(|v| json!({"version":v})).collect::<Vec<_>>(),"outdated":outdated,"dependencies":[]});
                 Ok(output(json!({"formulae": if args.contains(&"--installed") && installed.is_none() { vec![] } else { vec![formula] }}).to_string()))
             }
+            "autoremove" => Ok(output("unused-formula\n")),
+            "cleanup" => Ok(output("Would remove: /tmp/synthetic-cache (1MB)\n")),
             _ => panic!("unexpected metadata query"),
         }
     }
@@ -176,6 +180,14 @@ impl Transport for Fixture {
             return Ok(output(""));
         }
         let args: Vec<_> = args.iter().map(|arg| arg.to_string_lossy()).collect();
+        if executable == "apt-get" {
+            if args.contains(&"autoremove".into()) {
+                return Ok(output("Remv synthetic-orphan [1.0]\n"));
+            }
+            if args.contains(&"autoclean".into()) {
+                return Ok(output("Del synthetic-cache 1.0 [1024 B]\n"));
+            }
+        }
         if executable == "pacman" {
             if write {
                 return Ok(output(""));
@@ -224,7 +236,17 @@ impl Transport for Fixture {
 }
 fn lifecycle(mut backend: impl Backend) {
     let cancel = Cancellation::default();
-    assert_eq!(backend.capabilities().len(), 7);
+    for capability in [
+        Capability::Search,
+        Capability::Details,
+        Capability::Installed,
+        Capability::Install,
+        Capability::Remove,
+        Capability::Refresh,
+        Capability::Upgrade,
+    ] {
+        assert!(backend.capabilities().contains(&capability));
+    }
     assert_eq!(backend.detect(&cancel).unwrap(), Availability::Available);
     assert!(backend
         .search("no-such-fixture", &cancel)
@@ -315,6 +337,36 @@ fn apt_lifecycle() {
 #[test]
 fn homebrew_lifecycle() {
     lifecycle(Homebrew::new(Fixture::new()));
+}
+
+#[test]
+fn apt_cleanup_uses_dry_run_plans_and_fixed_operations() {
+    let fixture = Fixture::new();
+    let mut apt = Apt::new(fixture);
+    let cancel = Cancellation::default();
+    let items = apt.cleanup(&cancel).unwrap();
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0].id.backend, "apt");
+    for item in items {
+        apt.execute(&Operation::Clean(item.id), &cancel, &mut |_| {})
+            .unwrap();
+    }
+}
+
+#[test]
+fn homebrew_cleanup_uses_native_dry_run_plans() {
+    let fixture = Fixture::new();
+    let mut brew = Homebrew::new(fixture);
+    let cancel = Cancellation::default();
+    brew.detect(&cancel).unwrap();
+    let items = brew.cleanup(&cancel).unwrap();
+    assert_eq!(items.len(), 2);
+    assert!(items.iter().any(|item| item.id.key == "autoremove"));
+    assert!(items.iter().any(|item| item.id.key == "cleanup"));
+    for item in items {
+        brew.execute(&Operation::Clean(item.id), &cancel, &mut |_| {})
+            .unwrap();
+    }
 }
 #[test]
 fn homebrew_cask_lifecycle() {

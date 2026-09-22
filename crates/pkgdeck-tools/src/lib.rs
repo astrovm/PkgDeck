@@ -260,7 +260,7 @@ impl Desktop {
     }
     pub fn write(&mut self, op: &str, name: &str) {
         if op == "update" {
-            self.key("ctrl+4");
+            self.key("ctrl+5");
             self.key("ctrl+l");
             self.key("Down");
             self.key("ctrl+m");

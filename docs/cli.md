@@ -72,6 +72,22 @@ Ctrl-C cancels reads and pending operations. A native write already in progress
 finishes before cancellation takes effect; its result records
 `cancellation_deferred`. Inspect individual results after any failed batch.
 
+## Cleaning unused files and dependencies
+
+`pkd clean` asks supported managers for their native dry-run cleanup plans and
+does not change the system. Each result has a stable key such as
+`apt:autoremove` and includes the exact bounded preview returned by the manager.
+
+Run selected plans with `pkd clean apt:autoremove` or every discovered plan with
+`pkd clean --all`. Writes use the same confirmation, authorization, cancellation,
+and partial-failure rules as package operations. `--yes` skips the interactive
+confirmation; `--json` exposes typed items and per-source failures.
+
+APT exposes unused dependencies with leftover configuration and obsolete package downloads. Homebrew exposes
+unused formula dependencies and stale downloads/old versions. Other managers are
+reported as unsupported until they offer a stable dry-run contract PkgDeck can
+validate safely.
+
 ## Output contract, version 1
 
 `--json` emits exactly one document to stdout for application results:
@@ -81,7 +97,8 @@ finishes before cancellation takes effect; its result records
 ```
 
 Search/list data contain `packages` and per-backend `failures`; info returns package
-details; sources returns `sources`; writes return `operations`, each with its
+details; sources returns `sources`; clean discovery returns typed `items` and
+per-backend `failures`; writes return `operations`, each with its
 operation and `result` (`{"Ok":...}` or `{"Err":...}`). Selection and other top-level
 failures contain `error` and, when available, a human-readable `message`.
 A failing source row means the underlying manager errored: the message carries
