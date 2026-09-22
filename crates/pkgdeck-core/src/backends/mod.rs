@@ -950,7 +950,10 @@ pub fn themed_icon(home: Option<&std::path::Path>, name: &str) -> Option<PathBuf
             }
         }
     }
-    icon_file(&host_metadata_path(std::path::Path::new("/usr/share/pixmaps")), name)
+    icon_file(
+        &host_metadata_path(std::path::Path::new("/usr/share/pixmaps")),
+        name,
+    )
 }
 
 /// Strip one trailing `.desktop` suffix so DEP-11 component ids
@@ -2813,7 +2816,8 @@ impl<T: Transport> DevTool<T> {
         Ok(details)
     }
     fn bun_package(&self, home: &std::path::Path, dir: &std::path::Path) -> Option<PackageDetails> {
-        let manifest = std::fs::read_to_string(host_metadata_path(&dir.join("package.json"))).ok()?;
+        let manifest =
+            std::fs::read_to_string(host_metadata_path(&dir.join("package.json"))).ok()?;
         let manifest: BunManifest = serde_json::from_str(&manifest).ok()?;
         if manifest.version.is_empty() {
             return None;

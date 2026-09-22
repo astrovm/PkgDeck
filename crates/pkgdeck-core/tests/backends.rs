@@ -3666,5 +3666,14 @@ fn flatpak_refresh_does_not_hide_failed_privileged_completion() {
     let mut failed = output("authorization failed");
     failed.code = Some(1);
     let mut backend = Flatpak::new(Raw(failed));
-    assert!(matches!(backend.execute(&Operation::Refresh { backend: "flatpak".into() }, &Cancellation::default(), &mut |_| {}), Err(EngineError::Execution(ExecutionError::Failed(_)))));
+    assert!(matches!(
+        backend.execute(
+            &Operation::Refresh {
+                backend: "flatpak".into()
+            },
+            &Cancellation::default(),
+            &mut |_| {}
+        ),
+        Err(EngineError::Execution(ExecutionError::Failed(_)))
+    ));
 }

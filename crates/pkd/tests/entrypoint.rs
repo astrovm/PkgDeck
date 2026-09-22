@@ -63,7 +63,10 @@ fn flatpak_doctor_requires_a_working_host_bridge() {
         .arg("doctor")
         .env_remove("SNAP")
         .env("FLATPAK_ID", "synthetic.fixture")
-        .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/pkgdeck-synthetic-missing-bus")
+        .env(
+            "DBUS_SESSION_BUS_ADDRESS",
+            "unix:path=/pkgdeck-synthetic-missing-bus",
+        )
         .output()
         .unwrap();
     assert!(!output.status.success());
@@ -77,7 +80,10 @@ fn repository_commands_respect_packaged_host_boundary() {
     let output = pkd()
         .args(["--json", "repos"])
         .env("FLATPAK_ID", "synthetic.fixture")
-        .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/pkgdeck-synthetic-missing-bus")
+        .env(
+            "DBUS_SESSION_BUS_ADDRESS",
+            "unix:path=/pkgdeck-synthetic-missing-bus",
+        )
         .env_remove("SNAP")
         .output()
         .unwrap();
@@ -87,6 +93,9 @@ fn repository_commands_respect_packaged_host_boundary() {
     // sandbox /etc sources must never be substituted for the host namespace.
     for repository in repositories {
         assert_eq!(repository["backend"], "apt");
-        assert!(repository["name"].as_str().unwrap().starts_with("/run/host/etc/apt/"));
+        assert!(repository["name"]
+            .as_str()
+            .unwrap()
+            .starts_with("/run/host/etc/apt/"));
     }
 }

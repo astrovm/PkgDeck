@@ -546,6 +546,11 @@ impl ffi::PackageController {
             if self.rust().background {
                 worker.cancel.cancel();
                 self.as_mut().rust_mut().queued = Some(job);
+                // A confirmed foreground request preempts background
+                // loading: report busy at once so the UI waits for the
+                // queued job instead of reading idle state while the
+                // background worker winds down.
+                self.as_mut().set_busy(true);
             }
             return;
         }
@@ -647,7 +652,8 @@ impl ffi::PackageController {
             }
         });
         let writing = worker_job.writes();
-        self.as_mut().set_inspecting(matches!(worker_job, Job::InspectCleanup));
+        self.as_mut()
+            .set_inspecting(matches!(worker_job, Job::InspectCleanup));
         self.as_mut().rust_mut().worker = Some(Worker {
             handle,
             receiver,
@@ -764,10 +770,13 @@ impl ffi::PackageController {
         self.as_mut().set_rows("[]".into());
         self.as_mut().set_details("{}".into());
         // Reads are preemptible: cancel the in-flight load or details
-        // query and run this one next. Native writes keep the lock.
+        // query and run this one next. Native writes keep the lock. Report
+        // busy at once: the fresh rows are not on screen yet, and a silent
+        // gap here reads as idle while the requested view is still pending.
         if self.rust().worker.is_some() {
             self.rust().worker.as_ref().unwrap().cancel.cancel();
             self.as_mut().rust_mut().queued = Some(Job::Load(view, query));
+            self.as_mut().set_busy(true);
             return;
         }
         self.start(Job::Load(view, query));
@@ -1489,6 +1498,56 @@ mod tests {
         assert!(controller.rows().to_string().contains("cached cleanup"));
         assert!(cancel.requested());
         assert!(matches!(&controller.rust().queued, Some(Job::Load(view, _)) if view == "Clean"));
+    }
+
+    #[test]
+    fn confirmed_write_queued_over_background_worker_reports_busy() {
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        let (_sender, receiver) = mpsc::channel();
+        controller.as_mut().rust_mut().background = true;
+        controller.as_mut().rust_mut().worker = Some(Worker {
+            handle: thread::spawn(|| {}),
+            receiver,
+            cancel: Cancellation::default(),
+            job: Job::Load("Sources".into(), "".into()),
+        });
+        controller.as_mut().rust_mut().pending = Some(Job::Write(Operation::Refresh {
+            backend: "fixture".into(),
+        }));
+        controller.as_mut().confirm(true);
+        // The write waits for the background worker to wind down, but the
+        // UI must already report busy so confirmed work is never read as
+        // idle before it starts.
+        assert!(matches!(
+            &controller.rust().queued,
+            Some(Job::Write(Operation::Refresh { backend })) if backend == "fixture"
+        ));
+        assert!(*controller.busy());
+    }
+
+    #[test]
+    fn preempting_read_reports_busy_until_fresh_rows_land() {
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        let (_sender, receiver) = mpsc::channel();
+        controller.as_mut().rust_mut().background = true;
+        controller.as_mut().rust_mut().worker = Some(Worker {
+            handle: thread::spawn(|| {}),
+            receiver,
+            cancel: Cancellation::default(),
+            job: Job::Load("Installed".into(), "".into()),
+        });
+        controller
+            .as_mut()
+            .load("Search".into(), "fixture".into(), "".into(), false, true);
+        // The new view cancels the in-flight load and waits behind it; the
+        // table is empty until it runs, so idle must not be reported.
+        assert!(matches!(
+            &controller.rust().queued,
+            Some(Job::Load(view, query)) if view == "Search" && query == "fixture"
+        ));
+        assert!(*controller.busy());
     }
 
     #[test]

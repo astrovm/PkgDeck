@@ -610,7 +610,12 @@ Controls.ApplicationWindow {
             backend.propose(action, originalIndex(results.currentIndex));
     }
     function focusResultsAfterLoad() {
-        if (!queryDirty && !installedFilterField.activeFocus && !sourcePopup.opened && !confirmation.opened
+        // Background completions land at any time: never yank focus out of
+        // a search field holding text, or mid-typing keystrokes (and the
+        // Return that submits the search) are lost to the results list. An
+        // empty, untouched field still yields so fresh rows stay
+        // keyboard-navigable right after a load.
+        if (!queryDirty && (!search.activeFocus || search.text.length === 0) && !installedFilterField.activeFocus && !sourcePopup.opened && !confirmation.opened
                 && ["Search", "Installed", "Updates", "Clean", "Sources"].indexOf(currentView) >= 0)
             results.forceActiveFocus();
     }
