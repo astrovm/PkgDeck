@@ -341,7 +341,7 @@ jobs:
           flatpak --user install -y --noninteractive flathub org.kde.kcalc
           run_flatpak() { flatpak run --command=pkd io.github.astrovm.PkgDeck --json --yes --auth sudo --from flatpak "$@"; }
           check() { local file=$1 filter=$2; shift 2; "$@" | tee "$file" | jq -e "$filter" || { echo "--- $file ---"; cat "$file"; exit 1; }; }
-          run_flatpak list | tee /tmp/pkd-flatpak-list.json | jq -e 'any(.data.packages[]; .id.name == "org.kde.kcalc")'
+          check /tmp/pkd-flatpak-list.json 'any(.data.packages[]; .id.name == "org.kde.kcalc")' run_flatpak list
           flatpak --user search --columns=name,description,application,version,branch,remotes org.kde.kcalc | tee /tmp/pkd-flatpak-search-user.txt
           flatpak --system search --columns=name,description,application,version,branch,remotes org.kde.kcalc | tee /tmp/pkd-flatpak-search-system.txt || true
           check /tmp/pkd-flatpak-info.json '.exit_code == 0' run_flatpak --scope user info org.kde.kcalc

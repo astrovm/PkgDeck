@@ -84,14 +84,9 @@ impl Host {
             .map(PathBuf::from)
             .map(|path| fs::canonicalize(&path).unwrap_or(path))
             .collect::<Vec<_>>();
-        let sandbox_xdg_root = (runtime == Runtime::Flatpak)
-            .then(|| source.get(&OsString::from("HOME")))
-            .flatten()
-            .map(PathBuf::from)
-            .map(|home| home.join(".var/app"));
         let mut env = BTreeMap::new();
         // No LD_*, PYTHONPATH, NODE_OPTIONS, APT_CONFIG, shell startup files,
-        // Qt plugins, or sandbox XDG directories are inherited by host tools.
+        // or Qt plugin variables are inherited by host tools.
         // The second list carries explicit manager homes/selections only.
         for name in [
             "HOME",
@@ -120,13 +115,6 @@ impl Host {
             "DISABLE_UPDATES",
         ] {
             if let Some(value) = source.get(&OsString::from(name)) {
-                if matches!(name, "XDG_CONFIG_HOME" | "XDG_DATA_HOME" | "XDG_CACHE_HOME")
-                    && sandbox_xdg_root
-                        .as_ref()
-                        .is_some_and(|root| Path::new(value).starts_with(root))
-                {
-                    continue;
-                }
                 env.insert(name.into(), value.clone());
             }
         }
@@ -492,6 +480,16 @@ impl Host {
         let mut command = Command::new(bridge);
         command.args(["--host", "--clear-env", "--directory=/"]);
         for (name, value) in &self.env {
+            // The bridge runs as the host user. Let libc/GLib resolve that
+            // user's home and XDG stores instead of carrying sandbox paths
+            // across the boundary. Session variables such as the D-Bus and
+            // runtime-directory addresses still need to be forwarded.
+            if matches!(
+                name.to_str(),
+                Some("HOME" | "XDG_CONFIG_HOME" | "XDG_DATA_HOME" | "XDG_CACHE_HOME")
+            ) {
+                continue;
+            }
             let mut assignment = OsString::from("--env=");
             assignment.push(name);
             assignment.push("=");
@@ -677,9 +675,11 @@ mod flatpak_bridge_tests {
             "--clear-env".into(),
             "--directory=/".into()
         ]));
-        assert!(args.contains(&"--env=HOME=/home/fixture".into()));
-        assert!(args.contains(&"--env=XDG_CACHE_HOME=/home/fixture/.cache-alt".into()));
         assert!(args.contains(&"--env=XDG_RUNTIME_DIR=/run/user/1000".into()));
+        assert!(!args.iter().any(|arg| arg.starts_with("--env=HOME=")));
+        assert!(!args
+            .iter()
+            .any(|arg| arg.starts_with("--env=XDG_CACHE_HOME=")));
         assert!(!args
             .iter()
             .any(|arg| arg.starts_with("--env=XDG_CONFIG_HOME=")));
