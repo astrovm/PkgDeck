@@ -75,7 +75,7 @@ Run selected plans with `pkd clean apt:autoremove` or every discovered plan with
 and partial-failure rules as package operations. `--yes` skips the interactive
 confirmation; `--json` exposes typed items and per-source failures.
 
-APT exposes unused dependencies and obsolete package downloads. Homebrew exposes
+APT exposes unused dependencies with leftover configuration and obsolete package downloads. Homebrew exposes
 unused formula dependencies and stale downloads/old versions. Other managers are
 reported as unsupported until they offer a stable dry-run contract PkgDeck can
 validate safely.

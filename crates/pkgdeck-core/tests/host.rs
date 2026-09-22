@@ -438,6 +438,7 @@ fn apt_refresh_upgrade_and_multiarch_keep_native_safety_options() {
     let autoremove = AptAction::Autoremove.arguments().unwrap();
     assert_eq!(autoremove.last().unwrap(), "autoremove");
     assert!(autoremove.contains(&"--assume-yes".into()));
+    assert!(autoremove.contains(&"--purge".into()));
     let autoclean = AptAction::Autoclean.arguments().unwrap();
     assert_eq!(autoclean.last().unwrap(), "autoclean");
     assert!(autoclean.contains(&"DPkg::Lock::Timeout=0".into()));

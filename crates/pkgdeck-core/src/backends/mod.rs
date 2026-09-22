@@ -1041,14 +1041,24 @@ impl<T: Transport> Backend for Apt<T> {
                 String::from_utf8(completion.stdout).map_err(|error| invalid("apt", error))?;
             let actionable: Vec<_> = output
                 .lines()
-                .filter(|line| line.starts_with("Remv ") || line.starts_with("Del "))
+                .filter(|line| {
+                    line.starts_with("Remv ")
+                        || line.starts_with("Purg ")
+                        || line.starts_with("Del ")
+                })
                 .map(str::trim)
                 .collect();
             Ok((!actionable.is_empty()).then(|| actionable.join("\n")))
         }
         let mut items = Vec::new();
-        let orphan_args =
-            ["--simulate", "-o", "Debug::NoLocking=1", "autoremove"].map(OsString::from);
+        let orphan_args = [
+            "--simulate",
+            "-o",
+            "Debug::NoLocking=1",
+            "--purge",
+            "autoremove",
+        ]
+        .map(OsString::from);
         if let Some(plan) =
             preview(
                 self.transport
@@ -1064,8 +1074,8 @@ impl<T: Transport> Backend for Apt<T> {
                 kind: CleanupKind::OrphanDependencies,
                 title: "Unused dependencies".into(),
                 summary: format!(
-                    "APT can remove {count} unused package{}",
-                    if count == 1 { "" } else { "s" }
+                    "APT can remove {count} unused package entr{} and leftover configuration",
+                    if count == 1 { "y" } else { "ies" }
                 ),
                 preview: plan,
             });

@@ -594,11 +594,15 @@ impl AptAction {
                     .to_vec());
             }
             Self::Autoremove => {
-                return Ok(
-                    ["--assume-yes", "-o", "DPkg::Lock::Timeout=0", "autoremove"]
-                        .map(OsString::from)
-                        .to_vec(),
-                );
+                return Ok([
+                    "--assume-yes",
+                    "-o",
+                    "DPkg::Lock::Timeout=0",
+                    "--purge",
+                    "autoremove",
+                ]
+                .map(OsString::from)
+                .to_vec());
             }
             Self::Autoclean => {
                 return Ok(["--assume-yes", "-o", "DPkg::Lock::Timeout=0", "autoclean"]
