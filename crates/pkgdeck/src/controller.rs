@@ -1527,6 +1527,60 @@ mod tests {
     }
 
     #[test]
+    fn label_helpers_cover_scopes_sources_and_cleanup_operations() {
+        use std::path::PathBuf;
+        assert_eq!(scope_label(&Scope::System), "System");
+        assert_eq!(scope_label(&Scope::User { uid: 1000 }), "User 1000");
+        assert_eq!(
+            scope_label(&Scope::Environment {
+                path: PathBuf::from("/tmp/fixture")
+            }),
+            "/tmp/fixture"
+        );
+        let unavailable = Source {
+            backend: "apt".into(),
+            capabilities: vec![],
+            availability: Ok(Availability::Unavailable("locked".into())),
+        };
+        assert_eq!(source_status(&unavailable), "Unavailable: locked");
+        let failed = Source {
+            backend: "apt".into(),
+            capabilities: vec![],
+            availability: Err(EngineError::Cancelled),
+        };
+        assert_eq!(source_status(&failed), "operation cancelled");
+        let clean = Operation::Clean(CleanupId {
+            backend: "apt".into(),
+            key: "autoremove".into(),
+        });
+        assert_eq!(operation_label(&clean), "Clean autoremove with apt");
+        assert!(confirmation_label(&clean, &[]).contains("Clean autoremove with apt"));
+        let firmware = |name: &str| Package {
+            id: PackageId {
+                backend: "fwupd".into(),
+                name: name.into(),
+                architecture: "all".into(),
+                scope: Scope::System,
+                remote: None,
+                reference: None,
+            },
+            display_name: name.into(),
+            summary: "synthetic firmware".into(),
+            installed_version: Some("1".into()),
+            candidate_version: Some("2".into()),
+            update: UpdateAvailability::Available,
+            icon: None,
+            component_ids: vec![],
+            homepages: vec![],
+        };
+        let other = firmware("other-device");
+        let target = firmware("target-device");
+        let label = confirmation_label(&Operation::Upgrade(target.id.clone()), &[other, target]);
+        assert!(label.contains("target-device: synthetic firmware"));
+        assert!(!label.contains("other-device: synthetic firmware"));
+    }
+
+    #[test]
     fn preempting_read_reports_busy_until_fresh_rows_land() {
         let mut controller = ffi::create_controller();
         let mut controller = controller.pin_mut();
