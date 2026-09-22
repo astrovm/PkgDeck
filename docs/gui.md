@@ -42,6 +42,14 @@ Cancel stops pending work. If a native transaction has already started, it finis
 before cancellation takes effect. Successful changes are not rolled back after a
 later failure. Reload to inspect the resulting state.
 
+## Standalone CLI tools
+
+Supported standalone Codex, Claude Code, Grok, and OpenCode installations appear
+in Installed and Updates. They use their upstream updaters without administrator
+privileges. Installations managed by npm or Homebrew stay with that manager.
+These sources update existing tools; they do not install or remove them. See
+[supported layouts](cli.md#standalone-cli-tools).
+
 ## Repositories and firmware
 
 Open **Sources → Repositories** to inspect configured repositories.

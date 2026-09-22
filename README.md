@@ -58,6 +58,8 @@ PkgDeck detects the managers available on the host. Supported adapters include
 APT, DNF, Pacman, Zypper, Flatpak, Snap, Homebrew formulae, AppImage, Cargo, npm,
 pnpm, Bun, pip, pipx, uv, Composer, RubyGems, and fwupd. Capabilities vary by
 manager; `pkd sources` reports availability and unsupported operations.
+Standalone Codex, Claude Code, Grok, and OpenCode installations also support
+updates through their upstream updaters; see the [CLI guide](docs/cli.md#standalone-cli-tools).
 Homebrew casks are not currently managed. Linux-specific managers and firmware
 support are not available on macOS.
 

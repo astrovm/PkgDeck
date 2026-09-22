@@ -16,7 +16,7 @@ pub struct Args {
     pub json: bool,
     /// Restrict operations to the given sources. Repeatable; empty means
     /// every available source.
-    #[arg(long, global = true, value_parser = ["fwupd", "apt", "dnf", "pacman", "zypper", "snap", "homebrew", "appimage", "flatpak", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "composer", "gem"])]
+    #[arg(long, global = true, value_parser = ["fwupd", "apt", "dnf", "pacman", "zypper", "snap", "homebrew", "appimage", "flatpak", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "composer", "gem", "codex", "claude", "grok", "opencode"])]
     pub from: Vec<String>,
     /// Select the package architecture when a name is ambiguous.
     #[arg(long, global = true)]
@@ -268,7 +268,7 @@ pub fn dispatch(
                     .into_iter()
                     .filter(|p| p.update == UpdateAvailability::Available)
                 {
-                    let operation = if package.id.backend == "fwupd" {
+                    let operation = if pkgdeck_core::backends::update_only(&package.id.backend) {
                         Operation::Upgrade(package.id)
                     } else {
                         Operation::UpgradeAll {
@@ -626,6 +626,36 @@ mod tests {
             0
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn standalone_update_all_uses_exact_installations() {
+        for tool in pkgdeck_core::backends::StandaloneTool::ALL {
+            let mut engine = Engine::default();
+            engine
+                .register(Fixture {
+                    backend: tool.id().into(),
+                    installed: true,
+                    fail: None,
+                    read_failure: None,
+                    verified: true,
+                })
+                .unwrap();
+            let args = Args::try_parse_from(["pkd", "--from", tool.id(), "upgrade"]).unwrap();
+            let (_, code) = dispatch(
+                &mut engine,
+                &args,
+                &Cancellation::default(),
+                &mut |operations| {
+                    assert_eq!(operations.len(), 1);
+                    assert!(
+                        matches!(&operations[0], Operation::Upgrade(id) if id.backend == tool.id())
+                    );
+                    false
+                },
+                &mut |_| {},
+            );
+            assert_eq!(code, 7);
+        }
     }
     #[test]
     fn mixed_firmware_update_plan_pins_device_and_shows_requirements() {

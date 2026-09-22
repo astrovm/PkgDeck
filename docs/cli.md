@@ -136,3 +136,50 @@ With `fwupdmgr` installed, normal `pkd upgrade` includes available firmware upda
 A named firmware update uses the exact device ID from `pkd list --from fwupd --json`.
 Device power and restart requirements are printed before confirmation. PkgDeck
 never automatically reboots, downgrades, or forces firmware updates.
+
+## Standalone CLI tools
+
+PkgDeck detects upstream standalone installations of Codex, Claude Code, Grok,
+and OpenCode. They appear in `pkd list` and normal `pkd upgrade` plans. Source IDs
+are `codex`, `claude`, `grok`, and `opencode`:
+
+```sh
+pkd list --from codex --json
+pkd info codex --from codex
+pkd upgrade codex --from codex
+pkd upgrade --from claude --from grok --from opencode
+```
+
+These sources update existing installations only; they do not install or remove
+tools. npm/Homebrew installations remain with those package managers. Detection
+requires an executable owned by the current user in the upstream install layout;
+arbitrary PATH wrappers and binaries elsewhere are not adopted. Supported layouts:
+
+- Codex: `~/.local/bin/codex` pointing into
+  `~/.codex/packages/standalone/releases`, with its package manifest.
+  `CODEX_HOME` and `CODEX_INSTALL_DIR` overrides are supported.
+- Claude Code: `~/.local/bin/claude` pointing into
+  `$XDG_DATA_HOME/claude/versions` (default `~/.local/share/claude/versions`).
+  `CLAUDE_CONFIG_DIR` is respected when reading the update channel.
+- Grok: `~/.grok/bin/grok` pointing into `~/.grok/downloads`;
+  `GROK_BIN_DIR` overrides are supported.
+- OpenCode: `~/.opencode/bin/opencode`.
+
+Checks are read-only and bounded. Codex and OpenCode use upstream stable release
+metadata; Claude uses the configured stable/latest channel from user/managed
+settings; Grok uses `update --check --json`. A failed check is a source error,
+not an invented update or an “up to date” result. `curl` is required for the
+HTTP metadata checks and Codex installer download.
+
+Updates require normal confirmation or `--yes`, run without privilege escalation,
+and revalidate the installation before writing. Codex uses its official installer,
+downloaded to a private temporary directory and given the selected release;
+Claude uses `claude update`; Grok uses its native versioned updater; OpenCode uses
+`upgrade VERSION --method curl`. Native update policies remain effective. A newer
+installed version is never downgraded. PkgDeck verifies the version after the
+updater completes; existing CLI sessions may need restarting.
+
+Upstream contracts: [Codex](https://learn.chatgpt.com/docs/codex/cli),
+[Claude Code](https://code.claude.com/docs/en/setup),
+[Grok](https://docs.x.ai/build/enterprise), and
+[OpenCode](https://opencode.ai/docs/cli/#upgrade).

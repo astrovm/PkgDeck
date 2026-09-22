@@ -83,8 +83,11 @@ Controls.ApplicationWindow {
     // persisted preference.
     property bool multiSourceOnly: false
     property bool useSudo: argument("--auth", preferences.authorization) === "sudo"
-    readonly property var sourceIds: ["apt", "dnf", "pacman", "zypper", "snap", "homebrew", "appimage", "flatpak", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "composer", "gem", "fwupd"]
-    readonly property var sourceNames: ["APT", "DNF", "Pacman", "Zypper", "Snap", "Homebrew", "AppImage", "Flatpak", "Cargo", "npm", "pnpm", "Bun", "pip", "pipx", "uv", "Composer", "RubyGems", "Firmware"]
+    function updateOnly(source) {
+        return ["fwupd", "codex", "claude", "grok", "opencode"].indexOf(source) >= 0;
+    }
+    readonly property var sourceIds: ["apt", "dnf", "pacman", "zypper", "snap", "homebrew", "appimage", "flatpak", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "composer", "gem", "fwupd", "codex", "claude", "grok", "opencode"]
+    readonly property var sourceNames: ["APT", "DNF", "Pacman", "Zypper", "Snap", "Homebrew", "AppImage", "Flatpak", "Cargo", "npm", "pnpm", "Bun", "pip", "pipx", "uv", "Composer", "RubyGems", "Firmware", "Codex (standalone)", "Claude Code (standalone)", "Grok (standalone)", "OpenCode (standalone)"]
     function checkedSources() {
         if (sourceSelection === "")
             return sourceIds.slice();
@@ -1383,15 +1386,15 @@ Controls.ApplicationWindow {
                                 }
                                 ActionButton {
                                     objectName: "rowPackageAction"
-                                    visible: modelData.kind === "package" && (modelData.source !== "fwupd" || modelData.update === "available")
+                                    visible: modelData.kind === "package" && (!root.updateOnly(modelData.source) || modelData.update === "available")
                                     enabled: !backend.busy && !root.retainingResults
                                     text: ""
-                                    symbol: (root.currentView === "Updates" || modelData.source === "fwupd") ? "updates" : (root.isInstalled(modelData) ? "remove" : "install")
-                                    glyphColor: (root.currentView === "Updates" || modelData.source === "fwupd") ? root.accent : root.isInstalled(modelData) ? (root.dark ? "#f18b91" : "#b42332") : (root.dark ? "#77d6a0" : "#187442")
-                                    Accessible.name: ((root.currentView === "Updates" || modelData.source === "fwupd") ? "Update " : (root.isInstalled(modelData) ? "Remove " : "Install ")) + (modelData.display_name || modelData.name) + " from " + modelData.source
+                                    symbol: (root.currentView === "Updates" || root.updateOnly(modelData.source)) ? "updates" : (root.isInstalled(modelData) ? "remove" : "install")
+                                    glyphColor: (root.currentView === "Updates" || root.updateOnly(modelData.source)) ? root.accent : root.isInstalled(modelData) ? (root.dark ? "#f18b91" : "#b42332") : (root.dark ? "#77d6a0" : "#187442")
+                                    Accessible.name: ((root.currentView === "Updates" || root.updateOnly(modelData.source)) ? "Update " : (root.isInstalled(modelData) ? "Remove " : "Install ")) + (modelData.display_name || modelData.name) + " from " + modelData.source
                                     Layout.preferredWidth: 38
                                     horizontalPadding: 8
-                                    onClicked: backend.propose((root.currentView === "Updates" || modelData.source === "fwupd") ? "upgrade" : (root.isInstalled(modelData) ? "remove" : "install"), root.originalIndex(index))
+                                    onClicked: backend.propose((root.currentView === "Updates" || root.updateOnly(modelData.source)) ? "upgrade" : (root.isInstalled(modelData) ? "remove" : "install"), root.originalIndex(index))
                                 }
                             }
                         }
@@ -1523,7 +1526,7 @@ Controls.ApplicationWindow {
                                                 if (status === Image.Error) {
                                                     const failedUrl = modelData.url;
                                                     const identity = root.rowIdentity(root.selected);
-                                                    Qt.callLater(() => root.hideFailedScreenshot(failedUrl, identity));
+                                                    Qt.callLater(root.hideFailedScreenshot, failedUrl, identity);
                                                 }
                                             }
                                             anchors.fill: parent
