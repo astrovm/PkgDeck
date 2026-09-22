@@ -1567,7 +1567,7 @@ Controls.ApplicationWindow {
                                 font.pixelSize: 14
                                 wrapMode: TextEdit.Wrap
                                 textFormat: TextEdit.PlainText
-                                text: root.detail.cleanup ? [root.detail.cleanup.summary || "", root.detail.cleanup.preview || ""].filter(Boolean).join("\n\n") : root.detailMatchesSelection ? [root.detail.description || "",
+                                text: root.detail.cleanup !== undefined ? [root.detail.cleanup.summary || "", root.detail.cleanup.preview || ""].filter(Boolean).join("\n\n") : root.detailMatchesSelection ? [root.detail.description || "",
                                     root.detail.package.reference || root.detail.package.name,
                                     [root.detail.package.scope_label, root.detail.package.architecture].filter(Boolean).join(" · "),
                                     root.detail.homepage || "",

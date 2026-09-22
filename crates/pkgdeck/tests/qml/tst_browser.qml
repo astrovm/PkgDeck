@@ -318,6 +318,8 @@ TestCase {
         compare(findChild(list.itemAtIndex(0), "rowPackageAction").symbol, "remove");
         mouseClick(findChild(list.itemAtIndex(0), "rowPackageAction"));
         verify(fake.confirmation.indexOf("clean") >= 0);
+        fake.confirm(false);
+        wait(20);
         const all = findChild(browser, "cleanAllButton");
         verify(all.visible);
         mouseClick(all);
