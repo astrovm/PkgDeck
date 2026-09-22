@@ -1,16 +1,15 @@
 name: pkgdeck
-version: '0.1.0'
-summary: Unified package manager interface for Linux
+version: 'VERSION'
+summary: Manage software from one fast GUI and CLI
 description: |
-  GUI and CLI frontends for PkgDeck. Foundation build; package
-  management operations are not implemented yet.
+  Search, install, remove, and update software across native Linux package
+  managers, Flatpak, Snap, AppImage, firmware, and developer package sources.
 base: core24
-grade: devel
-confinement: strict
+grade: stable
+confinement: classic
 architectures: [ARCHITECTURE]
 apps:
   pkgdeck:
     command: AppRun
-    plugs: [network, desktop, desktop-legacy, wayland, x11, opengl]
   pkd:
     command: usr/bin/pkd

@@ -33,8 +33,7 @@ impl Runtime {
     pub fn disabled_reason(self) -> Option<&'static str> {
         match self {
             Self::Flatpak => Some("Flatpak host execution is disabled: flatpak-spawn --host and org.freedesktop.Flatpak D-Bus permission require installed-format validation"),
-            Self::Snap => Some("Snap host execution is disabled: strict confinement has no validated host package-manager bridge"),
-            Self::Native | Self::AppImage => None,
+            Self::Snap | Self::Native | Self::AppImage => None,
         }
     }
 }
@@ -44,7 +43,7 @@ impl Runtime {
 pub struct Host {
     pub runtime: Runtime,
     env: BTreeMap<OsString, OsString>,
-    excluded: Option<PathBuf>,
+    excluded: Vec<PathBuf>,
 }
 
 pub const BACKENDS: &[(&str, &str)] = &[
@@ -68,19 +67,26 @@ pub const BACKENDS: &[(&str, &str)] = &[
 
 impl Host {
     pub fn current() -> Self {
-        let env = std::env::vars_os().collect();
+        let mut env = std::env::vars_os().collect();
         let runtime = Runtime::detect(&env, Path::new("/.flatpak-info").exists());
+        if runtime == Runtime::Flatpak {
+            if let Some(host_env) = flatpak_host_environment() {
+                env = host_env;
+            }
+        }
         Self::new(runtime, env)
     }
 
     pub fn new(runtime: Runtime, source: BTreeMap<OsString, OsString>) -> Self {
-        let excluded = source
-            .get(&OsString::from("APPDIR"))
+        let excluded = ["APPDIR", "SNAP"]
+            .into_iter()
+            .filter_map(|name| source.get(&OsString::from(name)))
             .map(PathBuf::from)
-            .map(|path| fs::canonicalize(&path).unwrap_or(path));
+            .map(|path| fs::canonicalize(&path).unwrap_or(path))
+            .collect::<Vec<_>>();
         let mut env = BTreeMap::new();
         // No LD_*, PYTHONPATH, NODE_OPTIONS, APT_CONFIG, shell startup files,
-        // Qt plugins, or sandbox XDG directories are inherited by host tools.
+        // or Qt plugin variables are inherited by host tools.
         // The second list carries explicit manager homes/selections only.
         for name in [
             "HOME",
@@ -119,9 +125,7 @@ impl Host {
                 "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".into()
             });
         let dirs: Vec<_> = std::env::split_paths(&path)
-            .filter(|p| {
-                p.is_absolute() && !excluded.as_ref().is_some_and(|root| p.starts_with(root))
-            })
+            .filter(|p| p.is_absolute() && !excluded.iter().any(|root| p.starts_with(root)))
             .collect();
         env.insert(
             "PATH".into(),
@@ -161,11 +165,7 @@ impl Host {
         Ok(std::env::split_paths(path).find_map(|dir| {
             let candidate = dir.join(name);
             let target = fs::canonicalize(&candidate).ok()?;
-            if self
-                .excluded
-                .as_ref()
-                .is_some_and(|root| target.starts_with(root))
-            {
+            if self.excluded.iter().any(|root| target.starts_with(root)) {
                 return None;
             }
             let metadata = fs::metadata(&target).ok()?;
@@ -351,8 +351,8 @@ impl Host {
         }
         if self
             .excluded
-            .as_ref()
-            .is_some_and(|root| venv.starts_with(root) || python.starts_with(root))
+            .iter()
+            .any(|root| venv.starts_with(root) || python.starts_with(root))
         {
             return Err(ExecutionError::Disabled(
                 "pip virtual environment not found".to_string(),
@@ -415,20 +415,33 @@ impl Host {
         system: bool,
         authorization: Authorization,
     ) -> Result<Completion, ExecutionError> {
-        self.enabled()?;
         if write && rustix::process::geteuid().is_root() {
             return Err(ExecutionError::Invalid(
                 "run the frontend as an unprivileged user".into(),
             ));
         }
+        if self.runtime == Runtime::Flatpak {
+            let path = Path::new("/usr/bin/flatpak");
+            let (program, mut full) = if write && system {
+                let (program, prefixed) = authorization.prefix(path);
+                (Path::new(program), prefixed)
+            } else {
+                (path, Vec::new())
+            };
+            full.extend(args.iter().cloned());
+            let command = self.flatpak_host_command(program, &full)?;
+            let result = process::run(command, Limits::default(), cancel, write)?;
+            return if result.code == Some(0) {
+                Ok(result)
+            } else {
+                Err(ExecutionError::Failed(result))
+            };
+        }
+        self.enabled()?;
         let path = if write && system {
             // System writes cross an authorization boundary. Never derive this
             // executable from the invoking user's PATH.
-            let path = PathBuf::from("/usr/bin/flatpak");
-            if !path.is_file() {
-                return Err(ExecutionError::Disabled("system Flatpak not found".into()));
-            }
-            path
+            system_flatpak_path(Path::new("/usr/bin/flatpak"))?
         } else {
             self.resolve("flatpak")?
                 .ok_or_else(|| ExecutionError::Disabled("Flatpak not found".into()))?
@@ -438,6 +451,53 @@ impl Host {
         } else {
             self.run(&path, args, cancel, write)
         }
+    }
+
+    fn flatpak_host_command(
+        &self,
+        executable: &Path,
+        args: &[OsString],
+    ) -> Result<Command, ExecutionError> {
+        self.flatpak_host_command_with_bridge(Path::new("/usr/bin/flatpak-spawn"), executable, args)
+    }
+
+    fn flatpak_host_command_with_bridge(
+        &self,
+        bridge: &Path,
+        executable: &Path,
+        args: &[OsString],
+    ) -> Result<Command, ExecutionError> {
+        if !executable.is_absolute() {
+            return Err(ExecutionError::Invalid(
+                "host executable must be absolute".into(),
+            ));
+        }
+        if !bridge.is_file() {
+            return Err(ExecutionError::Disabled(
+                "Flatpak host bridge is unavailable".into(),
+            ));
+        }
+        let mut command = Command::new(bridge);
+        command.args(["--host", "--clear-env", "--directory=/"]);
+        for (name, value) in &self.env {
+            // The bridge runs as the host user. Let libc/GLib resolve that
+            // user's home and XDG stores instead of carrying sandbox paths
+            // across the boundary. Session variables such as the D-Bus and
+            // runtime-directory addresses still need to be forwarded.
+            if matches!(
+                name.to_str(),
+                Some("HOME" | "XDG_CONFIG_HOME" | "XDG_DATA_HOME" | "XDG_CACHE_HOME")
+            ) {
+                continue;
+            }
+            let mut assignment = OsString::from("--env=");
+            assignment.push(name);
+            assignment.push("=");
+            assignment.push(value);
+            command.arg(assignment);
+        }
+        command.arg(executable).args(args);
+        Ok(command)
     }
 
     /// Open the distro editor as the current user; its native policy handles writes.
@@ -536,6 +596,149 @@ impl Host {
         let mut command = self.command(Path::new(program), &prefixed)?;
         command.env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin");
         process::run(command, Limits::default(), cancel, true)
+    }
+}
+
+fn flatpak_host_environment() -> Option<BTreeMap<OsString, OsString>> {
+    flatpak_host_environment_from(Path::new("/usr/bin/flatpak-spawn"))
+}
+
+fn system_flatpak_path(path: &Path) -> Result<PathBuf, ExecutionError> {
+    if !path.is_file() {
+        return Err(ExecutionError::Disabled("system Flatpak not found".into()));
+    }
+    Ok(path.to_owned())
+}
+
+fn flatpak_host_environment_from(bridge: &Path) -> Option<BTreeMap<OsString, OsString>> {
+    let output = Command::new(bridge)
+        .args(["--host", "/usr/bin/env", "-0"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let mut env = BTreeMap::new();
+    for entry in output.stdout.split(|byte| *byte == 0) {
+        if entry.is_empty() {
+            continue;
+        }
+        let split = entry.iter().position(|byte| *byte == b'=')?;
+        use std::os::unix::ffi::OsStringExt;
+        env.insert(
+            OsString::from_vec(entry[..split].to_vec()),
+            OsString::from_vec(entry[split + 1..].to_vec()),
+        );
+    }
+    Some(env)
+}
+
+#[cfg(test)]
+mod flatpak_bridge_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn bridge_commands_pin_the_host_program_and_forward_only_sanitized_values() {
+        let host = Host::new(
+            Runtime::Flatpak,
+            [
+                ("HOME".into(), "/home/fixture".into()),
+                ("PATH".into(), "/usr/bin".into()),
+                (
+                    "XDG_CONFIG_HOME".into(),
+                    "/home/fixture/.var/app/io.github.astrovm.PkgDeck/config".into(),
+                ),
+                (
+                    "XDG_DATA_HOME".into(),
+                    "/home/fixture/.var/app/io.github.astrovm.PkgDeck/data".into(),
+                ),
+                ("XDG_CACHE_HOME".into(), "/home/fixture/.cache-alt".into()),
+                ("XDG_RUNTIME_DIR".into(), "/run/user/1000".into()),
+            ]
+            .into(),
+        );
+        let command = host
+            .flatpak_host_command_with_bridge(
+                Path::new("/bin/true"),
+                Path::new("/usr/bin/flatpak"),
+                &["--user".into(), "list".into()],
+            )
+            .unwrap();
+        assert_eq!(command.get_program(), "/bin/true");
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(args.starts_with(&[
+            "--host".into(),
+            "--clear-env".into(),
+            "--directory=/".into()
+        ]));
+        assert!(args.contains(&"--env=XDG_RUNTIME_DIR=/run/user/1000".into()));
+        assert!(!args.iter().any(|arg| arg.starts_with("--env=HOME=")));
+        assert!(!args
+            .iter()
+            .any(|arg| arg.starts_with("--env=XDG_CACHE_HOME=")));
+        assert!(!args
+            .iter()
+            .any(|arg| arg.starts_with("--env=XDG_CONFIG_HOME=")));
+        assert!(!args
+            .iter()
+            .any(|arg| arg.starts_with("--env=XDG_DATA_HOME=")));
+        assert!(args.ends_with(&["/usr/bin/flatpak".into(), "--user".into(), "list".into()]));
+        assert!(matches!(
+            host.flatpak_host_command_with_bridge(
+                Path::new("/bin/true"),
+                Path::new("flatpak"),
+                &[]
+            ),
+            Err(ExecutionError::Invalid(_))
+        ));
+        assert!(matches!(
+            host.flatpak_host_command(Path::new("flatpak"), &[]),
+            Err(ExecutionError::Invalid(_))
+        ));
+        assert!(matches!(
+            host.flatpak_host_command_with_bridge(
+                Path::new("/missing-flatpak-spawn"),
+                Path::new("/usr/bin/flatpak"),
+                &[]
+            ),
+            Err(ExecutionError::Disabled(_))
+        ));
+        assert_eq!(
+            system_flatpak_path(Path::new("/bin/true")).unwrap(),
+            Path::new("/bin/true")
+        );
+        assert!(matches!(
+            system_flatpak_path(Path::new("/missing-system-flatpak")),
+            Err(ExecutionError::Disabled(_))
+        ));
+    }
+
+    #[test]
+    fn host_environment_probe_parses_nul_records_and_rejects_failures() {
+        let path =
+            std::env::temp_dir().join(format!("pkgdeck-flatpak-spawn-{}", std::process::id()));
+        fs::write(
+            &path,
+            b"#!/bin/sh\nprintf 'HOME=/home/fixture\\0PATH=/usr/bin\\0'\n",
+        )
+        .unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        let env = flatpak_host_environment_from(&path).unwrap();
+        assert_eq!(
+            env.get(&OsString::from("HOME")),
+            Some(&"/home/fixture".into())
+        );
+        assert_eq!(env.get(&OsString::from("PATH")), Some(&"/usr/bin".into()));
+        fs::write(&path, b"#!/bin/sh\nexit 7\n").unwrap();
+        assert!(flatpak_host_environment_from(&path).is_none());
+        fs::write(&path, b"#!/bin/sh\nprintf malformed\n").unwrap();
+        assert!(flatpak_host_environment_from(&path).is_none());
+        fs::remove_file(path).unwrap();
+        assert!(flatpak_host_environment_from(Path::new("/missing-flatpak-spawn")).is_none());
     }
 }
 

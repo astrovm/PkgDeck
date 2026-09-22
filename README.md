@@ -9,14 +9,41 @@ PkgDeck is built from one codebase with two frontends:
 
 Both use the shared `pkgdeck-core` Rust library.
 
+## Install
+
+| Platform | Homebrew package | Other options |
+| --- | --- | --- |
+| macOS | GUI (`pkgdeck`) and CLI (`pkd`) | Build from source |
+| Linux | CLI (`pkd`) | Build the GUI from source; Linux packaging scripts below |
+
+Until the first tagged release is published, install the development recipe with:
+
+```sh
+brew tap astrovm/pkgdeck https://github.com/astrovm/PkgDeck
+brew install --HEAD astrovm/pkgdeck/pkgdeck
+```
+
+For a Linux source build, install the [development prerequisites](docs/development.md#sdk-and-prerequisites), then:
+
+```sh
+source scripts/dev-env.sh
+cargo run --locked -p pkgdeck
+```
+
+The CLI works without Qt:
+
+```sh
+cargo run --locked -p pkd -- sources
+```
+
 ## Preview
 
 Real captures from the current app. See the [implemented GUI](docs/gui.md)
 and [CLI guide](docs/cli.md) for the current interface and supported behavior.
 
-![PkgDeck GUI](docs/screenshots/pkgdeck-gui.png)
+![PkgDeck GUI](docs/screenshots/search.png)
 
-![pkd CLI](docs/screenshots/pkd-cli.png)
+![pkd CLI](docs/screenshots/cli.png)
 
 ## Planned initial support
 

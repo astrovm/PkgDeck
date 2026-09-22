@@ -69,7 +69,7 @@ fn link_executable(dir: &Path, name: &str, target: &str) -> PathBuf {
 }
 
 #[test]
-fn formats_and_nested_sandbox_markers_fail_closed() {
+fn formats_and_flatpak_sandbox_fail_closed() {
     assert_eq!(Runtime::detect(&env(&[]), false), Runtime::Native);
     assert_eq!(
         Runtime::detect(&env(&[("APPIMAGE", "/tmp/example")]), false),
@@ -88,32 +88,33 @@ fn formats_and_nested_sandbox_markers_fail_closed() {
         Runtime::detect(&env(&[("SNAP", "fixture"), ("APPIMAGE", "fixture")]), true),
         Runtime::Snap
     );
-    for runtime in [Runtime::Flatpak, Runtime::Snap] {
-        let h = Host::new(runtime, env(&[]));
-        assert!(matches!(
-            h.resolve("apt-get"),
-            Err(ExecutionError::Disabled(_))
-        ));
-        assert!(matches!(
-            h.read(
-                Path::new("/bin/true"),
-                &[],
-                Limits::default(),
-                &Cancellation::default()
-            ),
-            Err(ExecutionError::Disabled(_))
-        ));
-        assert!(matches!(
-            h.apt(
-                AptAction::Remove("fixture".into()),
-                Authorization::Polkit,
-                &Cancellation::default()
-            ),
-            Err(ExecutionError::Disabled(_))
-        ));
-    }
+    let h = Host::new(Runtime::Flatpak, env(&[]));
+    assert!(matches!(
+        h.resolve("apt-get"),
+        Err(ExecutionError::Disabled(_))
+    ));
+    assert!(matches!(
+        h.read(
+            Path::new("/bin/true"),
+            &[],
+            Limits::default(),
+            &Cancellation::default()
+        ),
+        Err(ExecutionError::Disabled(_))
+    ));
+    assert!(matches!(
+        h.apt(
+            AptAction::Remove("fixture".into()),
+            Authorization::Polkit,
+            &Cancellation::default()
+        ),
+        Err(ExecutionError::Disabled(_))
+    ));
+    let snap = Host::new(Runtime::Snap, env(&[("PATH", "/usr/bin:/bin")]));
+    assert!(snap.resolve("sh").unwrap().is_some());
     assert!(Runtime::Native.disabled_reason().is_none());
     assert!(Runtime::AppImage.disabled_reason().is_none());
+    assert!(Runtime::Snap.disabled_reason().is_none());
     let _ = Host::current();
 }
 
@@ -142,6 +143,16 @@ fn detection_skips_relative_empty_nonexecutable_and_bundled_paths() {
         .resolve("sh")
         .unwrap()
         .is_some());
+
+    let snap = Host::new(
+        Runtime::Snap,
+        env(&[
+            ("PATH", &format!("{}:/usr/bin", bundle.0.display())),
+            ("SNAP", bundle.0.to_str().unwrap()),
+        ]),
+    );
+    assert!(snap.resolve("bundled").unwrap().is_none());
+    assert!(snap.resolve("sh").unwrap().is_some());
 }
 
 #[test]
@@ -566,8 +577,8 @@ fn venv_pip_runs_only_inside_explicit_absolute_environments() {
         host.venv_pip(&fixture.0, &[], &cancel, false),
         Err(ExecutionError::Disabled(_))
     ));
-    // Sandboxed runtimes disable venv execution like every other host call.
-    let sandbox = Host::new(Runtime::Snap, env(&[]));
+    // Flatpak disables venv execution like every other host call.
+    let sandbox = Host::new(Runtime::Flatpak, env(&[]));
     assert!(matches!(
         sandbox.venv_pip(&venv, &[], &cancel, false),
         Err(ExecutionError::Disabled(_))

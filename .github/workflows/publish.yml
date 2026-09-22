@@ -1,0 +1,92 @@
+name: Publish
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag (for example v0.1.0)
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  formula:
+    name: Homebrew
+    permissions:
+      contents: write
+      pull-requests: write
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Resolve release tag
+        id: release
+        env:
+          EVENT_TAG: ${{ github.event.release.tag_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          tag=${EVENT_TAG:-$INPUT_TAG}
+          test "${tag#v}" != "$tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+      - name: Check out main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+      - name: Add stable release to formula
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          archive="$RUNNER_TEMP/pkgdeck-$TAG.tar.gz"
+          curl -fL --retry 3 "https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/$TAG.tar.gz" -o "$archive"
+          sha=$(sha256sum "$archive" | cut -d' ' -f1)
+          URL="https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/$TAG.tar.gz" SHA="$sha" \
+            ruby -e 'path="Formula/pkgdeck.rb"; text=File.read(path); stable="  url #{ENV.fetch("URL").inspect}\n  version #{ENV.fetch("VERSION").inspect}\n  sha256 #{ENV.fetch("SHA").inspect}\n"; text.sub!(/^  (url .*\n  version .*\n  sha256 .*\n)?  head /, stable + "  head "); File.write(path, text)'
+      - name: Open formula update
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          branch="release/homebrew-$VERSION"
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git fetch origin "$branch:refs/remotes/origin/$branch" || true
+          git checkout -b "$branch"
+          git add Formula/pkgdeck.rb
+          if git diff --cached --quiet; then
+            echo "Formula already publishes $TAG"
+            exit 0
+          fi
+          git commit -m "Publish Homebrew formula for $TAG"
+          git push --force-with-lease origin "$branch"
+          existing=$(gh pr list --head "$branch" --state open --json url --jq '.[0].url // empty')
+          if [[ -n "$existing" ]]; then
+            echo "Updated $existing"
+          else
+            gh pr create --base main --head "$branch" --title "Publish Homebrew formula for $TAG" \
+              --body "Adds the immutable release archive and SHA-256 for $TAG. CI will build and test it on Linux and macOS before merge."
+          fi
+
+  flatpak:
+    name: Flatpak
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Trigger astrovm Flatpak repository publication
+        env:
+          GH_TOKEN: ${{ secrets.FLATPAK_REPO_TOKEN }}
+          EVENT_TAG: ${{ github.event.release.tag_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          if [[ -z "$GH_TOKEN" ]]; then
+            echo '::error::FLATPAK_REPO_TOKEN is required to publish to astrovm/flatpak'
+            exit 1
+          fi
+          tag=${EVENT_TAG:-$INPUT_TAG}
+          gh api \
+            --method POST \
+            repos/astrovm/flatpak/dispatches \
+            -f event_type=publish-app \
+            -f "client_payload[repository]=$GITHUB_REPOSITORY" \
+            -f "client_payload[tag]=$tag"

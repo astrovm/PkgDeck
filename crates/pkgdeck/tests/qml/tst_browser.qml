@@ -986,16 +986,16 @@ TestCase {
         const npm = browser.sourceIds.indexOf("npm");
         verify(browser.sourceCheckAt(npm).checked);
         clickSourceCheck(npm);
-        compare(browser.sourceSelection, "apt,dnf,pacman,zypper,snap,homebrew,appimage,flatpak,cargo,pnpm,bun,pip,pipx,uv,composer,gem,fwupd,codex,claude,grok,opencode");
-        compare(filter.text, "21 sources");
-        compare(fake.lastSource, "apt,dnf,pacman,zypper,snap,homebrew,appimage,flatpak,cargo,pnpm,bun,pip,pipx,uv,composer,gem,fwupd,codex,claude,grok,opencode");
+        compare(browser.sourceSelection, "apt,dnf,pacman,zypper,snap,homebrew,homebrew-cask,appimage,flatpak,cargo,pnpm,bun,pip,pipx,uv,composer,gem,fwupd,codex,claude,grok,opencode");
+        compare(filter.text, "22 sources");
+        compare(fake.lastSource, "apt,dnf,pacman,zypper,snap,homebrew,homebrew-cask,appimage,flatpak,cargo,pnpm,bun,pip,pipx,uv,composer,gem,fwupd,codex,claude,grok,opencode");
         compare(fake.lastView, "Installed");
         // Re-checking the last unchecked source returns to all available.
         clickSourceCheck(npm);
         compare(browser.sourceSelection, "");
         compare(filter.text, "All sources");
         // Unchecking down to one source disables that final checkbox.
-        const ids = ["apt", "dnf", "pacman", "zypper", "snap", "homebrew", "appimage", "flatpak", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "composer", "gem", "fwupd", "codex", "claude", "grok", "opencode"];
+        const ids = ["apt", "dnf", "pacman", "zypper", "snap", "homebrew", "homebrew-cask", "appimage", "flatpak", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "composer", "gem", "fwupd", "codex", "claude", "grok", "opencode"];
         for (let idx = 0; idx < ids.length; idx++) {
             if (ids[idx] === "apt")
                 continue;

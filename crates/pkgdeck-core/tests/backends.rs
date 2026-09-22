@@ -137,10 +137,16 @@ impl Transport for Fixture {
         match args[0] {
             "--prefix" => Ok(output("/home/linuxbrew/.linuxbrew\n")),
             "formulae" => Ok(output("synthetic-fixture\n")),
+            "casks" => Ok(output("synthetic-fixture\n")),
             "info" => {
                 let installed = self.installed.lock().unwrap().clone();
                 let candidate = self.candidate.lock().unwrap().clone();
-                let formula = json!({"full_name":"synthetic-fixture","desc":"Synthetic package","homepage":"https://example.invalid","versions":{"stable":candidate},"revision":0,"installed":installed.iter().map(|v| json!({"version":v})).collect::<Vec<_>>(),"outdated":installed.as_ref().is_some_and(|v| v != &candidate),"dependencies":[]});
+                let outdated = installed.as_ref().is_some_and(|v| v != &candidate);
+                if args.contains(&"--cask") {
+                    let cask = json!({"full_token":"synthetic-fixture","name":["Synthetic Fixture"],"desc":"Synthetic package","homepage":"https://example.invalid","version":candidate,"installed":installed,"outdated":outdated});
+                    return Ok(output(json!({"casks": if args.contains(&"--installed") && !outdated && json!(cask["installed"]).is_null() { vec![] } else { vec![cask] }}).to_string()));
+                }
+                let formula = json!({"full_name":"synthetic-fixture","desc":"Synthetic package","homepage":"https://example.invalid","versions":{"stable":candidate},"revision":0,"installed":installed.iter().map(|v| json!({"version":v})).collect::<Vec<_>>(),"outdated":outdated,"dependencies":[]});
                 Ok(output(json!({"formulae": if args.contains(&"--installed") && installed.is_none() { vec![] } else { vec![formula] }}).to_string()))
             }
             "autoremove" => Ok(output("unused-formula\n")),
@@ -363,6 +369,17 @@ fn homebrew_cleanup_uses_native_dry_run_plans() {
     }
 }
 #[test]
+fn homebrew_cask_lifecycle() {
+    let fixture = Fixture::new();
+    let mut backend = HomebrewCask::new(fixture.clone());
+    let cancel = Cancellation::default();
+    assert_eq!(backend.detect(&cancel).unwrap(), Availability::Available);
+    let package = backend.search("fixture", &cancel).unwrap().remove(0);
+    assert_eq!(package.id.backend, "homebrew-cask");
+    assert_eq!(package.display_name, "Synthetic Fixture");
+    lifecycle(backend);
+}
+#[test]
 fn dnf_lifecycle() {
     lifecycle(Dnf::dnf(Fixture::new()));
     let fixture = Fixture::new();
@@ -443,6 +460,27 @@ fn flatpak_lists_user_and_system_applications_without_collapsing_scope() {
     assert!(packages
         .iter()
         .any(|package| matches!(package.id.scope, Scope::User { .. })));
+}
+
+#[test]
+fn flatpak_list_accepts_an_omitted_empty_options_column() {
+    let cancel = Cancellation::default();
+    let installed = format!(
+        "io.example.App\t{}\tstable\t1.0\tSynthetic app\tflathub\n",
+        std::env::consts::ARCH
+    );
+    let mut backend = Flatpak::new(FlatpakFixture {
+        installed: Some(installed),
+        ..FlatpakFixture::default()
+    });
+    let packages = backend.installed(&cancel).unwrap();
+    assert_eq!(packages.len(), 2);
+    assert!(packages
+        .iter()
+        .all(|package| package.display_name == "io.example.App"));
+    assert!(packages
+        .iter()
+        .all(|package| package.summary == "Synthetic app"));
 }
 
 type FlatpakCall = (Vec<String>, bool, bool);
@@ -539,7 +577,15 @@ fn flatpak_operations_keep_scope_and_noninteractive_arguments() {
         .unwrap()
         .id
         .clone();
-    assert_eq!(backend.search("io.example.User", &cancel).unwrap().len(), 2);
+    let offers = backend.search("io.example.User", &cancel).unwrap();
+    assert_eq!(offers.len(), 2);
+    let offer = offers
+        .into_iter()
+        .find(|package| package.id.remote.as_deref() == Some("flathub"))
+        .unwrap();
+    let offered_details = backend.details(&offer.id, &cancel).unwrap();
+    assert_eq!(offered_details.package.id, offer.id);
+    assert_eq!(offered_details.description, "Synthetic description");
     assert!(backend.search("--bad", &cancel).is_err());
     assert_eq!(backend.details(&user, &cancel).unwrap().package.id, user);
     for operation in [
@@ -572,6 +618,15 @@ fn flatpak_rejects_malformed_metadata_and_foreign_operations() {
     let cancel = Cancellation::default();
     let mut backend = Flatpak::new(Raw(output("bad\tmetadata\n")));
     assert!(backend.installed(&cancel).is_err());
+    let mut invalid_utf8 = Flatpak::new(Raw(Completion {
+        code: Some(0),
+        signal: None,
+        stdout: vec![0xff],
+        stderr: vec![],
+        truncated: false,
+        cancellation_deferred: false,
+    }));
+    assert!(invalid_utf8.installed(&cancel).is_err());
     let foreign = PackageId {
         backend: "flatpak".into(),
         name: "io.example.App".into(),
@@ -921,7 +976,7 @@ fn native_apt_transport_reads_host_metadata_or_reports_prerequisites() {
         Err(ExecutionError::Disabled(_))
     ));
     let sandbox = NativeTransport {
-        host: Host::new(Runtime::Snap, Default::default()),
+        host: Host::new(Runtime::Flatpak, Default::default()),
         authorization: Authorization::Polkit,
     };
     assert!(sandbox.apt_query("detect", "", "", &cancel).is_err());

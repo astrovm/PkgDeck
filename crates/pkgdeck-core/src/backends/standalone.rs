@@ -674,6 +674,10 @@ mod tests {
             path
         }
         fn native(&self) -> NativeStandalone {
+            // The curl shim is invariant, so install it once before any spawn:
+            // rewriting an executable right before executing it trips an
+            // ETXTBSY race under parallel test churn (see tests/host.rs).
+            self.script("bin/curl", "#!/bin/sh\nfor arg do url=$arg; done\nprintf '%s' \"$url\" > \"$HOME/request\"\ncase \"$url\" in */install.sh) cat \"$HOME/installer\";; *) cat \"$HOME/release\";; esac\n");
             NativeStandalone {
                 host: Host::new(
                     Runtime::Native,
@@ -730,8 +734,9 @@ mod tests {
             launcher
         }
         fn network(&self, release: &str) {
+            // Only release metadata varies per check; the curl shim is
+            // installed once by native() and never rewritten (see above).
             self.write("release", release);
-            self.script("bin/curl", "#!/bin/sh\nfor arg do url=$arg; done\nprintf '%s' \"$url\" > \"$HOME/request\"\ncase \"$url\" in */install.sh) cat \"$HOME/installer\";; *) cat \"$HOME/release\";; esac\n");
         }
     }
     impl Drop for Temp {
@@ -941,6 +946,23 @@ mod tests {
             .is_none());
         cancel.cancel();
         assert!(native.locate(StandaloneTool::Codex, &cancel).is_err());
+    }
+    #[test]
+    fn network_checks_never_rewrite_the_curl_shim() {
+        let temp = Temp::new();
+        let _native = temp.native();
+        let shim = temp.0.join("bin/curl");
+        let before = fs::metadata(&shim).unwrap();
+        let content = fs::read(&shim).unwrap();
+        temp.network(r#"{"tag_name":"v2.0.0"}"#);
+        temp.network("invalid");
+        let after = fs::metadata(&shim).unwrap();
+        assert_eq!(
+            (before.ino(), before.mtime(), before.mtime_nsec()),
+            (after.ino(), after.mtime(), after.mtime_nsec())
+        );
+        assert_eq!(content, fs::read(&shim).unwrap());
+        assert_eq!(fs::read(temp.0.join("release")).unwrap(), b"invalid");
     }
     #[test]
     fn native_latest_checks_are_read_only_and_fail_on_bad_metadata() {

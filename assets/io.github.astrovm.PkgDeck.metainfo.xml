@@ -5,7 +5,7 @@
   <summary>Unified package manager interface for Linux</summary>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>MIT</project_license>
-  <description><p>PkgDeck provides graphical and terminal frontends for a shared package-management engine. This foundation build does not yet manage packages.</p></description>
+  <description><p>PkgDeck provides graphical and terminal frontends for a shared package-management engine. Search across package sources, compare installations, manage repositories, and apply package and firmware updates.</p></description>
   <launchable type="desktop-id">io.github.astrovm.PkgDeck.desktop</launchable>
   <url type="homepage">https://github.com/astrovm/PkgDeck</url>
   <content_rating type="oars-1.1"/>

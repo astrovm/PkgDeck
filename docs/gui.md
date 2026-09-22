@@ -3,13 +3,15 @@
 `pkgdeck` opens the Qt/Kirigami frontend. It uses the same shared engine and
 host authorization boundary as the CLI.
 
-![Implemented GUI](screenshots/pkgdeck-gui-live.png)
-
-[Light appearance](screenshots/pkgdeck-gui-light-live.png) ·
-[Compact layout](screenshots/pkgdeck-gui-compact-live.png)
+![Implemented GUI](screenshots/search.png)
 
 Captures show real local packages in the true-black dark theme.
 The default appearance follows the system; Settings also offers explicit Dark and Light modes.
+
+The GUI runs natively on Linux and is packaged with the CLI by Homebrew on macOS.
+Available sources depend on the platform and installed managers. Experimental
+Flatpak and Snap builds cannot currently manage host packages. See
+[distribution](distribution.md) and [authorization](host-execution.md).
 
 The sidebar provides Search, Installed, Updates, Clean, Sources, Settings, and
 About. Sources reports actual source availability on the current computer;
