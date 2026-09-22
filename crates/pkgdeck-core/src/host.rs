@@ -462,12 +462,20 @@ impl Host {
         executable: &Path,
         args: &[OsString],
     ) -> Result<Command, ExecutionError> {
+        self.flatpak_host_command_with_bridge(Path::new("/usr/bin/flatpak-spawn"), executable, args)
+    }
+
+    fn flatpak_host_command_with_bridge(
+        &self,
+        bridge: &Path,
+        executable: &Path,
+        args: &[OsString],
+    ) -> Result<Command, ExecutionError> {
         if !executable.is_absolute() {
             return Err(ExecutionError::Invalid(
                 "host executable must be absolute".into(),
             ));
         }
-        let bridge = Path::new("/usr/bin/flatpak-spawn");
         if !bridge.is_file() {
             return Err(ExecutionError::Disabled(
                 "Flatpak host bridge is unavailable".into(),
@@ -586,7 +594,11 @@ impl Host {
 }
 
 fn flatpak_host_environment() -> Option<BTreeMap<OsString, OsString>> {
-    let output = Command::new("/usr/bin/flatpak-spawn")
+    flatpak_host_environment_from(Path::new("/usr/bin/flatpak-spawn"))
+}
+
+fn flatpak_host_environment_from(bridge: &Path) -> Option<BTreeMap<OsString, OsString>> {
+    let output = Command::new(bridge)
         .args(["--host", "/usr/bin/env", "-0"])
         .output()
         .ok()?;
@@ -606,6 +618,83 @@ fn flatpak_host_environment() -> Option<BTreeMap<OsString, OsString>> {
         );
     }
     Some(env)
+}
+
+#[cfg(test)]
+mod flatpak_bridge_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn bridge_commands_pin_the_host_program_and_forward_only_sanitized_values() {
+        let host = Host::new(
+            Runtime::Flatpak,
+            [
+                ("HOME".into(), "/home/fixture".into()),
+                ("PATH".into(), "/usr/bin".into()),
+            ]
+            .into(),
+        );
+        let command = host
+            .flatpak_host_command_with_bridge(
+                Path::new("/bin/true"),
+                Path::new("/usr/bin/flatpak"),
+                &["--user".into(), "list".into()],
+            )
+            .unwrap();
+        assert_eq!(command.get_program(), "/bin/true");
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(args.starts_with(&[
+            "--host".into(),
+            "--clear-env".into(),
+            "--directory=/".into()
+        ]));
+        assert!(args.contains(&"--env=HOME=/home/fixture".into()));
+        assert!(args.ends_with(&["/usr/bin/flatpak".into(), "--user".into(), "list".into()]));
+        assert!(matches!(
+            host.flatpak_host_command_with_bridge(
+                Path::new("/bin/true"),
+                Path::new("flatpak"),
+                &[]
+            ),
+            Err(ExecutionError::Invalid(_))
+        ));
+        assert!(matches!(
+            host.flatpak_host_command_with_bridge(
+                Path::new("/missing-flatpak-spawn"),
+                Path::new("/usr/bin/flatpak"),
+                &[]
+            ),
+            Err(ExecutionError::Disabled(_))
+        ));
+    }
+
+    #[test]
+    fn host_environment_probe_parses_nul_records_and_rejects_failures() {
+        let path =
+            std::env::temp_dir().join(format!("pkgdeck-flatpak-spawn-{}", std::process::id()));
+        fs::write(
+            &path,
+            b"#!/bin/sh\nprintf 'HOME=/home/fixture\\0PATH=/usr/bin\\0'\n",
+        )
+        .unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        let env = flatpak_host_environment_from(&path).unwrap();
+        assert_eq!(
+            env.get(&OsString::from("HOME")),
+            Some(&"/home/fixture".into())
+        );
+        assert_eq!(env.get(&OsString::from("PATH")), Some(&"/usr/bin".into()));
+        fs::write(&path, b"#!/bin/sh\nexit 7\n").unwrap();
+        assert!(flatpak_host_environment_from(&path).is_none());
+        fs::write(&path, b"#!/bin/sh\nprintf malformed\n").unwrap();
+        assert!(flatpak_host_environment_from(&path).is_none());
+        fs::remove_file(path).unwrap();
+        assert!(flatpak_host_environment_from(Path::new("/missing-flatpak-spawn")).is_none());
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
