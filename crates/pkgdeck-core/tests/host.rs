@@ -616,3 +616,33 @@ fn venv_pip_runs_only_inside_explicit_absolute_environments() {
         Err(ExecutionError::Disabled(_))
     ));
 }
+
+#[test]
+fn venv_pip_rejects_malformed_and_packaged_environments() {
+    let fixture = Fixture::new();
+    let interpreter = fixture.0.join("bin/python");
+    fs::create_dir_all(&interpreter).unwrap();
+    let cancel = Cancellation::default();
+    let rejected = |h: &Host| {
+        assert!(matches!(
+            h.venv_pip(&fixture.0, &[], &cancel, false),
+            Err(ExecutionError::Disabled(_))
+        ));
+    };
+    rejected(&host());
+    fs::remove_dir(&interpreter).unwrap();
+    symlink("/bin/true", &interpreter).unwrap();
+    fs::create_dir(fixture.0.join("pyvenv.cfg")).unwrap();
+    rejected(&host());
+    fs::remove_dir(fixture.0.join("pyvenv.cfg")).unwrap();
+    fs::write(fixture.0.join("pyvenv.cfg"), "home = /synthetic\n").unwrap();
+    let packaged = Host::new(
+        Runtime::AppImage,
+        env(&[("APPDIR", fixture.0.to_str().unwrap())]),
+    );
+    rejected(&packaged);
+    fs::remove_file(&interpreter).unwrap();
+    fs::write(&interpreter, "not an executable").unwrap();
+    fs::set_permissions(&interpreter, fs::Permissions::from_mode(0o644)).unwrap();
+    rejected(&host());
+}
