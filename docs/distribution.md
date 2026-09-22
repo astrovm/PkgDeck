@@ -54,8 +54,10 @@ supported; a successful Linux build does not establish macOS compatibility.
    the tested pull request and publishes only after that check and packaging pass.
 3. Publishing the GitHub release triggers `Publish / Homebrew`, which opens a PR
    with the immutable archive URL and SHA-256 while retaining `head` for development.
-4. Let CI test that PR with Homebrew on both platforms before merging. After users run
-   `brew update`, `brew install astrovm/pkgdeck/pkgdeck` installs the stable version.
+   It dispatches a Homebrew-only CI run on the formula branch to test the
+   published URL and checksum on Linux and macOS.
+4. Review both Homebrew results before merging. After users run `brew update`,
+   `brew install astrovm/pkgdeck/pkgdeck` installs the stable version.
 
 No release archive, checksum, bottle, signing identity, or notarization result is
 assumed by the initial recipe. The `.app` uses Homebrew dependencies and is not a
@@ -74,9 +76,10 @@ See [`scripts/package.sh`](../scripts/package.sh),
 [`scripts/bundle.sh`](../scripts/bundle.sh), and the packaging jobs in
 [CI](../.github/workflows/ci.yml) for the supported invocations and artifact checks.
 
-Pull request CI runs the full test matrix and builds and smoke-tests the Linux
-packages on both architectures. A `v*` tag must point to a merged pull request
-commit on `main` with the same source tree and a successful pull request CI run.
+Ordinary pull request CI runs the full test matrix and builds and smoke-tests
+the Linux packages on both architectures. A `v*` tag must point to a merged
+pull request commit on `main` with the same source tree and a successful
+pull request CI run.
 The tag workflow then builds and tests the release packages, creates a GitHub
 release with AppImage update metadata, Flatpak bundles, Snap packages,
 checksums, and provenance. It does not repeat the full test matrix or Homebrew
