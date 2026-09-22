@@ -1245,6 +1245,33 @@ mod tests {
             controller.rust().pending,
             Some(Job::Write(Operation::Clean(_)))
         ));
+        controller.as_mut().propose("clean-all".into(), 0);
+        assert!(controller
+            .confirmation()
+            .to_string()
+            .contains("Run 1 cleanup tasks"));
+        assert!(matches!(controller.rust().pending, Some(Job::CleanAll(_))));
+        controller.as_mut().confirm(false);
+
+        let failure = BackendFailure {
+            backend: "homebrew".into(),
+            error: EngineError::Unavailable {
+                backend: "homebrew".into(),
+                reason: "synthetic executable missing".into(),
+            },
+        };
+        controller
+            .as_mut()
+            .apply(Ok(Payload::Cleanup(CleanupReport {
+                items: vec![],
+                failures: vec![failure],
+            })));
+        assert!(controller.status().to_string().contains("Nothing to clean"));
+        assert!(controller.rows().to_string().contains("failure"));
+        controller.as_mut().select(0);
+        assert!(controller.details().to_string().contains("homebrew"));
+        controller.as_mut().propose("clean-all".into(), 0);
+        assert!(controller.confirmation().is_empty());
     }
     #[test]
     fn qt_repository_confirmation_and_refresh_invalidate_cached_state() {

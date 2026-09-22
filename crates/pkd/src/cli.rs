@@ -842,6 +842,9 @@ mod tests {
             })
         }
         fn cleanup(&mut self, _: &Cancellation) -> Result<Vec<CleanupItem>, EngineError> {
+            if let Some(error) = &self.read_failure {
+                return Err(error.clone());
+            }
             Ok(vec![CleanupItem {
                 id: CleanupId {
                     backend: self.backend.clone(),
@@ -911,6 +914,13 @@ mod tests {
         assert_eq!(call(&mut engine, &["install", "fixture"], false).1, 7);
         assert_eq!(call(&mut engine, &["clean", "apt:orphans"], false).1, 7);
         assert_eq!(call(&mut engine, &["clean", "missing:plan"], true).1, 3);
+        let cleaned = call(&mut engine, &["clean", "--all"], true);
+        assert_eq!(cleaned.1, 0);
+        assert_eq!(
+            cleaned.0["operations"][0]["operation"],
+            json!({"clean":{"backend":"apt","key":"orphans"}})
+        );
+        assert_eq!(call(&mut engine, &["--scope", "user", "clean"], true).1, 2);
         assert_eq!(
             call(&mut engine, &["--yes", "install", "fixture"], false).1,
             0
@@ -935,6 +945,31 @@ mod tests {
             Authorization::from(Auth::Sudo),
             Authorization::SudoNonInteractive
         ));
+
+        let mut failed_discovery = Engine::default();
+        failed_discovery
+            .register(Fixture {
+                read_failure: Some(ExecutionError::TimedOut.into()),
+                verified: true,
+                backend: "apt".into(),
+                installed: true,
+                fail: None,
+            })
+            .unwrap();
+        assert_eq!(call(&mut failed_discovery, &["clean"], true).1, 8);
+        assert_ne!(call(&mut failed_discovery, &["clean", "--all"], true).1, 0);
+
+        let mut failed_write = Engine::default();
+        failed_write
+            .register(Fixture {
+                read_failure: None,
+                verified: true,
+                backend: "apt".into(),
+                installed: true,
+                fail: Some(ExecutionError::LockBusy.into()),
+            })
+            .unwrap();
+        assert_ne!(call(&mut failed_write, &["clean", "--all"], true).1, 0);
     }
     #[test]
     fn source_ambiguity_partial_results_and_exit_codes() {

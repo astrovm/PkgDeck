@@ -357,6 +357,10 @@ fn homebrew_cleanup_uses_native_dry_run_plans() {
     assert_eq!(items.len(), 2);
     assert!(items.iter().any(|item| item.id.key == "autoremove"));
     assert!(items.iter().any(|item| item.id.key == "cleanup"));
+    for item in items {
+        brew.execute(&Operation::Clean(item.id), &cancel, &mut |_| {})
+            .unwrap();
+    }
 }
 #[test]
 fn dnf_lifecycle() {

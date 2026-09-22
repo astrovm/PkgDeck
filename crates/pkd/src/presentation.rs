@@ -357,6 +357,42 @@ mod tests {
         assert!(!output.contains('\u{1b}'));
     }
     #[test]
+    fn cleanup_plans_and_failures_are_concise_and_actionable() {
+        assert_eq!(
+            operation(&Operation::Clean(pkgdeck_core::package::CleanupId {
+                backend: "apt".into(),
+                key: "autoremove".into(),
+            })),
+            "Clean autoremove with apt"
+        );
+        assert_eq!(
+            operation(&Operation::UpgradeAll {
+                backend: "homebrew".into(),
+            }),
+            "Upgrade all packages from homebrew"
+        );
+        let plans = json!({
+            "items": [{
+                "id": {"backend": "apt", "key": "autoremove"},
+                "title": "Unused dependencies",
+                "summary": "One package"
+            }],
+            "failures": [
+                {"backend": "snap", "error": {"unsupported": {"capability": "clean"}}},
+                {"backend": "homebrew", "error": "synthetic failure"}
+            ]
+        });
+        let output = human(&plans, 100, false);
+        assert!(output.contains("apt:autoremove"));
+        assert!(output.contains("Unused dependencies"));
+        assert!(output.contains("Review a plan with --json"));
+        assert!(output.contains("Unsupported:"));
+        assert!(output.contains("Failed:"));
+
+        let empty = human(&json!({"items": [], "failures": []}), 80, false);
+        assert!(empty.contains("Nothing to clean"));
+    }
+    #[test]
     fn package_table_shows_the_installed_version_when_present() {
         let output = human(
             &json!({"packages":[

@@ -243,6 +243,38 @@ impl Backend for Cleaner {
     }
 }
 
+struct BrokenCleaner {
+    name: &'static str,
+    result: Result<Vec<CleanupItem>, EngineError>,
+}
+impl Backend for BrokenCleaner {
+    fn id(&self) -> &str {
+        self.name
+    }
+    fn capabilities(&self) -> &[Capability] {
+        &[Capability::Clean]
+    }
+    fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
+        Ok(Availability::Available)
+    }
+    fn cleanup(&mut self, _: &Cancellation) -> Result<Vec<CleanupItem>, EngineError> {
+        self.result.clone()
+    }
+}
+
+fn cleanup_item(backend: &str, key: &str, title: &str) -> CleanupItem {
+    CleanupItem {
+        id: CleanupId {
+            backend: backend.into(),
+            key: key.into(),
+        },
+        kind: CleanupKind::PackageCache,
+        title: title.into(),
+        summary: "Synthetic cache".into(),
+        preview: "/tmp/synthetic-cache".into(),
+    }
+}
+
 #[test]
 fn cleanup_discovery_is_typed_and_unsupported_sources_are_explicit() {
     let mut engine = engine(Fault::None);
@@ -265,6 +297,44 @@ fn cleanup_discovery_is_typed_and_unsupported_sources_are_explicit() {
             &mut |_| {}
         )
         .is_ok());
+}
+
+#[test]
+fn cleanup_rejects_invalid_plans_and_preserves_backend_failures() {
+    for (name, result) in [
+        (
+            "foreign",
+            Ok(vec![cleanup_item("other", "cache", "Foreign cache")]),
+        ),
+        (
+            "duplicate",
+            Ok(vec![
+                cleanup_item("duplicate", "cache", "Cache"),
+                cleanup_item("duplicate", "cache", "Cache again"),
+            ]),
+        ),
+        ("incomplete", Ok(vec![cleanup_item("incomplete", "", "")])),
+        ("failed", Err(ExecutionError::TimedOut.into())),
+    ] {
+        let mut engine = Engine::default();
+        engine
+            .register(BrokenCleaner { name, result })
+            .expect("unique synthetic backend");
+        let report = engine.cleanup(&Cancellation::default());
+        assert!(report.items.is_empty());
+        assert_eq!(report.failures.len(), 1);
+        if name == "failed" {
+            assert_eq!(
+                report.failures[0].error,
+                EngineError::Execution(ExecutionError::TimedOut)
+            );
+        } else {
+            assert!(matches!(
+                report.failures[0].error,
+                EngineError::InvalidResponse { .. }
+            ));
+        }
+    }
 }
 
 #[test]
