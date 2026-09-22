@@ -314,7 +314,7 @@ fn reads_time_out_and_cancel_without_waiting_for_descendants() {
     assert_eq!(
         host().read(
             Path::new("/bin/sh"),
-            &shell("exec sleep 30"),
+            &shell("exec /bin/sleep 30"),
             Limits::default(),
             &cancel
         ),
@@ -645,4 +645,82 @@ fn venv_pip_rejects_malformed_and_packaged_environments() {
     fs::write(&interpreter, "not an executable").unwrap();
     fs::set_permissions(&interpreter, fs::Permissions::from_mode(0o644)).unwrap();
     rejected(&host());
+}
+
+#[test]
+fn flatpak_remote_queries_allow_slow_and_large_catalogs() {
+    let fixture = Fixture::new();
+    link_executable(&fixture.0, "flatpak", "/bin/sh");
+    let h = Host::new(
+        Runtime::Native,
+        env(&[("PATH", fixture.0.to_str().unwrap())]),
+    );
+    let output = h
+        .flatpak(
+            &shell("/bin/sleep 11; /usr/bin/head -c 262144 /dev/zero"),
+            &Cancellation::default(),
+            false,
+            false,
+            Authorization::SudoNonInteractive,
+        )
+        .unwrap();
+    assert_eq!(output.code, Some(0));
+    assert_eq!(output.stdout.len(), 262144);
+    assert!(!output.truncated);
+}
+
+#[test]
+fn flatpak_failures_missing_tools_and_cancellation_are_diagnostic() {
+    let fixture = Fixture::new();
+    link_executable(&fixture.0, "flatpak", "/bin/false");
+    let host = Host::new(
+        Runtime::Native,
+        env(&[("PATH", fixture.0.to_str().unwrap())]),
+    );
+    let cancel = Cancellation::default();
+    assert!(matches!(
+        host.flatpak(
+            &["--user".into(), "list".into()],
+            &cancel,
+            false,
+            false,
+            Authorization::SudoNonInteractive,
+        ),
+        Err(ExecutionError::Failed(result)) if result.code == Some(1)
+    ));
+
+    let missing = Host::new(
+        Runtime::Native,
+        env(&[("PATH", fixture.0.join("missing").to_str().unwrap())]),
+    );
+    assert!(matches!(
+        missing.flatpak(
+            &["--user".into(), "list".into()],
+            &cancel,
+            false,
+            false,
+            Authorization::SudoNonInteractive,
+        ),
+        Err(ExecutionError::Disabled(reason)) if reason == "Flatpak not found"
+    ));
+
+    fs::remove_file(fixture.0.join("flatpak")).unwrap();
+    link_executable(&fixture.0, "flatpak", "/bin/sh");
+    let cancelling = Cancellation::default();
+    let requested = cancelling.clone();
+    let thread = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(30));
+        requested.cancel();
+    });
+    assert_eq!(
+        host.flatpak(
+            &shell("exec /bin/sleep 30"),
+            &cancelling,
+            false,
+            false,
+            Authorization::SudoNonInteractive,
+        ),
+        Err(ExecutionError::Cancelled)
+    );
+    thread.join().unwrap();
 }
