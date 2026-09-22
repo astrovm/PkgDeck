@@ -525,7 +525,15 @@ fn flatpak_operations_keep_scope_and_noninteractive_arguments() {
         .unwrap()
         .id
         .clone();
-    assert_eq!(backend.search("io.example.User", &cancel).unwrap().len(), 2);
+    let offers = backend.search("io.example.User", &cancel).unwrap();
+    assert_eq!(offers.len(), 2);
+    let offer = offers
+        .into_iter()
+        .find(|package| package.id.remote.as_deref() == Some("flathub"))
+        .unwrap();
+    let offered_details = backend.details(&offer.id, &cancel).unwrap();
+    assert_eq!(offered_details.package.id, offer.id);
+    assert_eq!(offered_details.description, "Synthetic description");
     assert!(backend.search("--bad", &cancel).is_err());
     assert_eq!(backend.details(&user, &cancel).unwrap().package.id, user);
     for operation in [
@@ -558,6 +566,15 @@ fn flatpak_rejects_malformed_metadata_and_foreign_operations() {
     let cancel = Cancellation::default();
     let mut backend = Flatpak::new(Raw(output("bad\tmetadata\n")));
     assert!(backend.installed(&cancel).is_err());
+    let mut invalid_utf8 = Flatpak::new(Raw(Completion {
+        code: Some(0),
+        signal: None,
+        stdout: vec![0xff],
+        stderr: vec![],
+        truncated: false,
+        cancellation_deferred: false,
+    }));
+    assert!(invalid_utf8.installed(&cancel).is_err());
     let foreign = PackageId {
         backend: "flatpak".into(),
         name: "io.example.App".into(),

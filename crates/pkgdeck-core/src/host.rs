@@ -441,11 +441,7 @@ impl Host {
         let path = if write && system {
             // System writes cross an authorization boundary. Never derive this
             // executable from the invoking user's PATH.
-            let path = PathBuf::from("/usr/bin/flatpak");
-            if !path.is_file() {
-                return Err(ExecutionError::Disabled("system Flatpak not found".into()));
-            }
-            path
+            system_flatpak_path(Path::new("/usr/bin/flatpak"))?
         } else {
             self.resolve("flatpak")?
                 .ok_or_else(|| ExecutionError::Disabled("Flatpak not found".into()))?
@@ -597,6 +593,13 @@ fn flatpak_host_environment() -> Option<BTreeMap<OsString, OsString>> {
     flatpak_host_environment_from(Path::new("/usr/bin/flatpak-spawn"))
 }
 
+fn system_flatpak_path(path: &Path) -> Result<PathBuf, ExecutionError> {
+    if !path.is_file() {
+        return Err(ExecutionError::Disabled("system Flatpak not found".into()));
+    }
+    Ok(path.to_owned())
+}
+
 fn flatpak_host_environment_from(bridge: &Path) -> Option<BTreeMap<OsString, OsString>> {
     let output = Command::new(bridge)
         .args(["--host", "/usr/bin/env", "-0"])
@@ -672,6 +675,14 @@ mod flatpak_bridge_tests {
                 Path::new("/usr/bin/flatpak"),
                 &[]
             ),
+            Err(ExecutionError::Disabled(_))
+        ));
+        assert_eq!(
+            system_flatpak_path(Path::new("/bin/true")).unwrap(),
+            Path::new("/bin/true")
+        );
+        assert!(matches!(
+            system_flatpak_path(Path::new("/missing-system-flatpak")),
             Err(ExecutionError::Disabled(_))
         ));
     }
