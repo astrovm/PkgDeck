@@ -33,7 +33,8 @@ an additional candidate.
 | `search` | Structured package results for a search term |
 | `installed` | Structured package results with installed versions |
 | `details` | Details for exactly the requested identity |
-| `execute` | A typed install, remove, metadata refresh, or package upgrade, with progress |
+| `cleanup` | Safe manager-native cleanup plans obtained through dry-run/list operations |
+| `execute` | A typed install, remove, metadata refresh, package upgrade, or cleanup, with progress |
 
 Methods other than detection have explicit unsupported defaults. Before dispatch,
 the engine checks cancellation, registration, capabilities, and availability.
@@ -97,6 +98,12 @@ events. Cancellation during a native write is controlled by the host boundary:
 a completed write with deferred cancellation stays a successful completion,
 not a claimed rollback. Backends must forward the cancellation token to their
 underlying operations and preserve this distinction.
+
+Cleanup identities contain a backend and a fixed backend-defined key. They never
+contain shell fragments or arbitrary paths. A backend advertises `Clean` only
+when it can discover a plan without writing and map that key back to a fixed
+native command. Frontends display the preview and require confirmation before
+dispatch. Sources without those guarantees return `Unsupported` explicitly.
 
 ## Local verification
 

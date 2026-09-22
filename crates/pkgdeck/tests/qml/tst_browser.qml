@@ -265,7 +265,7 @@ TestCase {
         verify(findChild(browser, "packageDetails").text.indexOf("<b>literal metadata</b>") >= 0);
     }
     function test_views_loading_errors_and_resize() {
-        for (const view of ["Search", "Installed", "Updates", "Sources", "Settings", "About"]) {
+        for (const view of ["Search", "Installed", "Updates", "Clean", "Sources", "Settings", "About"]) {
             browser.openView(view);
             compare(browser.currentView, view);
         }
@@ -303,6 +303,25 @@ TestCase {
         verify(findChild(browser, "packageResults").height >= 78);
         browser.width = 1100;
         browser.height = 760;
+    }
+    function test_clean_view_actions() {
+        browser.openView("Clean");
+        compare(fake.lastView, "Clean");
+        fake.rows = JSON.stringify([{
+            kind: "cleanup", name: "Unused dependencies", display_name: "Unused dependencies",
+            source: "apt", summary: "One package", cleanup_key: "autoremove",
+            cleanup_kind: "orphan_dependencies", preview: "Remv synthetic-runtime [1.0]"
+        }]);
+        wait(20);
+        const list = findChild(browser, "packageResults");
+        compare(list.count, 1);
+        compare(findChild(list.itemAtIndex(0), "rowPackageAction").symbol, "remove");
+        mouseClick(findChild(list.itemAtIndex(0), "rowPackageAction"));
+        verify(fake.confirmation.indexOf("clean") >= 0);
+        const all = findChild(browser, "cleanAllButton");
+        verify(all.visible);
+        mouseClick(all);
+        verify(fake.confirmation.indexOf("clean-all") >= 0);
     }
     function test_appearance_and_search_does_not_relabel_old_results() {
         browser.openView("Installed");

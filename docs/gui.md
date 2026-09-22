@@ -11,7 +11,7 @@ host authorization boundary as the CLI.
 Captures show real local packages in the true-black dark theme.
 The default appearance follows the system; Settings also offers explicit Dark and Light modes.
 
-The sidebar provides Search, Installed, Updates, Sources, Settings, and
+The sidebar provides Search, Installed, Updates, Clean, Sources, Settings, and
 About. Sources reports actual source availability on the current computer;
 it does not invent recommendations or combine matching names across sources.
 Search submits on Enter or the Search button. Results use a virtualized ListView,
@@ -138,7 +138,7 @@ cache. Background polling stops when work finishes.
 | Up/Down | Select a result and load its details |
 | Down in the search field | Jump to the results and select the first row |
 | PageUp/PageDown/Home/End | Move the selection in larger steps or to either end |
-| Ctrl+1 / Ctrl+2 / Ctrl+3 / Ctrl+4 | Search / Installed / Updates / Sources |
+| Ctrl+1 / Ctrl+2 / Ctrl+3 / Ctrl+4 / Ctrl+5 | Search / Installed / Updates / Clean / Sources |
 | Ctrl+I / Ctrl+D / Ctrl+U | Propose install / remove / update |
 | Ctrl+Shift+U in Updates | Confirm the checked updates (all by default) |
 | Ctrl+M | Propose metadata refresh for the selected source |
@@ -204,6 +204,14 @@ The native/AppImage execution path is enabled. Flatpak and Snap host operations
 remain explicitly disabled; their packaged GUI smoke checks do not claim a native
 package lifecycle. Polkit and manager-lock behavior retain the shared VM tests.
 Installed-format distribution validation remains a later release gate.
+
+## Clean
+
+Clean lists manager-native maintenance plans only after a successful dry run.
+Select a row to inspect the native preview, use its row button to run one task,
+or choose **Clean all** to run every listed task. Every write shows the complete
+plan for confirmation first. Unsupported and failed sources stay visible, so an
+empty list never implies that every package manager was checked.
 
 ## Motion and feedback
 

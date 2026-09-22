@@ -77,6 +77,9 @@ pkd list
 pkd sources
 pkd update
 pkd upgrade
+pkd clean
+# Review the dry-run plan, then run selected maintenance:
+pkd clean apt:autoremove
 ```
 
 Commands support machine-readable `--json` output. Writes require `--yes` in

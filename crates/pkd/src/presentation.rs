@@ -33,6 +33,9 @@ pub fn operation(op: &Operation) -> String {
         Operation::UpgradeAll { backend } => {
             return format!("Upgrade all packages from {}", clean(backend))
         }
+        Operation::Clean(id) => {
+            return format!("Clean {} with {}", clean(&id.key), clean(&id.backend))
+        }
         Operation::Install(id) => ("Install", id),
         Operation::Remove(id) => ("Remove", id),
         Operation::Upgrade(id) => ("Upgrade", id),
@@ -123,7 +126,43 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
         "PkgDeck"
     };
     let mut output = format!("{heading}\n\n");
-    if let Some(packages) = data["packages"].as_array() {
+    if let Some(items) = data["items"].as_array() {
+        if items.is_empty() {
+            output.push_str("Nothing to clean.");
+        } else {
+            let rows = items
+                .iter()
+                .map(|item| {
+                    vec![
+                        format!(
+                            "{}:{}",
+                            value(&item["id"]["backend"]),
+                            value(&item["id"]["key"])
+                        ),
+                        value(&item["title"]),
+                        value(&item["summary"]),
+                    ]
+                })
+                .collect::<Vec<_>>();
+            output.push_str(&table(&["KEY", "CLEANUP", "SUMMARY"], &rows, width));
+            output.push_str("\n\nReview a plan with --json. Run selected keys with `pkd clean <key>` or every plan with `pkd clean --all`.");
+        }
+        if let Some(failures) = data["failures"].as_array() {
+            for failure in failures {
+                let unsupported = failure["error"].get("Unsupported").is_some()
+                    || failure["error"].get("unsupported").is_some();
+                output.push_str(&format!(
+                    "\n{} {}",
+                    if unsupported {
+                        "[-] Unsupported:"
+                    } else {
+                        "[!] Failed:"
+                    },
+                    value(failure)
+                ));
+            }
+        }
+    } else if let Some(packages) = data["packages"].as_array() {
         let rows = packages
             .iter()
             .map(|p| {

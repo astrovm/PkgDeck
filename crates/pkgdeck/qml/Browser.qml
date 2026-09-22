@@ -120,7 +120,7 @@ Controls.ApplicationWindow {
         sourceSelection = checked.length >= sourceIds.length ? "" : checked.join(",");
         preferences.sourceList = sourceSelection;
         preferences.source = "";
-        if (["Search", "Installed", "Updates", "Sources"].indexOf(root.currentView) >= 0)
+        if (["Search", "Installed", "Updates", "Clean", "Sources"].indexOf(root.currentView) >= 0)
             root.reload();
     }
     // Delegate lookup by position in sourceIds. Popup content reparents to
@@ -496,6 +496,8 @@ Controls.ApplicationWindow {
         return names.length > 0 ? "Also installed from: " + names.join(", ") : "";
     }
     function versionText(row) {
+        if (row.kind === "cleanup")
+            return row.cleanup_kind === "orphan_dependencies" ? "Dependencies" : "Cache";
         if (row.kind === "failure")
             return "Failed";
         if (row.kind === "source")
@@ -541,7 +543,7 @@ Controls.ApplicationWindow {
         return found;
     }
     function openView(view) {
-        if (backend.writing && ["Search", "Installed", "Updates", "Sources"].indexOf(view) >= 0)
+        if (backend.writing && ["Search", "Installed", "Updates", "Clean", "Sources"].indexOf(view) >= 0)
             return;
         queryDirty = false;
         selectedIdentity = null;
@@ -556,7 +558,7 @@ Controls.ApplicationWindow {
         results.currentIndex = -1;
         if (view === "Search")
             search.forceActiveFocus();
-        else if (["Search", "Installed", "Updates", "Sources"].indexOf(view) >= 0)
+        else if (["Search", "Installed", "Updates", "Clean", "Sources"].indexOf(view) >= 0)
             reload();
     }
     // Reload the current view. Without force, a cached snapshot serves
@@ -589,7 +591,7 @@ Controls.ApplicationWindow {
     }
     function focusResultsAfterLoad() {
         if (!queryDirty && !installedFilterField.activeFocus && !sourcePopup.opened && !confirmation.opened
-                && ["Search", "Installed", "Updates", "Sources"].indexOf(currentView) >= 0)
+                && ["Search", "Installed", "Updates", "Clean", "Sources"].indexOf(currentView) >= 0)
             results.forceActiveFocus();
     }
     Settings {
@@ -638,7 +640,7 @@ Controls.ApplicationWindow {
                 root.beforeWrite = snapshot;
                 root.completedRows = [];
             }
-            if (!backend.writing && ["Search", "Installed", "Updates", "Sources"].indexOf(root.currentView) >= 0)
+            if (!backend.writing && ["Search", "Installed", "Updates", "Clean", "Sources"].indexOf(root.currentView) >= 0)
                 postWriteReload.restart();
         }
         function onRowsChanged() {
@@ -751,12 +753,12 @@ Controls.ApplicationWindow {
                 }
                 Item { Layout.preferredHeight: 24 }
                 Repeater {
-                    model: ["Search", "Installed", "Updates", "Sources", "Settings", "About"]
+                    model: ["Search", "Installed", "Updates", "Clean", "Sources", "Settings", "About"]
                     delegate: ActionButton {
                         required property string modelData
                         Layout.fillWidth: true
                         text: modelData
-                        symbol: ({"Search":"search", "Installed":"installed", "Updates":"updates", "Sources":"sources", "Settings":"settings", "About":"help"})[modelData]
+                        symbol: ({"Search":"search", "Installed":"installed", "Updates":"updates", "Clean":"remove", "Sources":"sources", "Settings":"settings", "About":"help"})[modelData]
                         enabled: !backend.writing
                         navigation: true
                         primary: root.currentView === modelData
@@ -803,7 +805,7 @@ Controls.ApplicationWindow {
                 Layout.fillWidth: true
                 ThemedComboBox {
                     visible: root.compact
-                    model: ["Search", "Installed", "Updates", "Sources", "Settings", "About"]
+                    model: ["Search", "Installed", "Updates", "Clean", "Sources", "Settings", "About"]
                     currentIndex: model.indexOf(root.currentView)
                     enabled: !backend.writing
                     onActivated: root.openView(currentText)
@@ -822,7 +824,7 @@ Controls.ApplicationWindow {
                 ActionButton {
                     objectName: "sourceFilter"
                     id: sourceFilterButton
-                    visible: ["Search", "Installed", "Updates", "Sources"].indexOf(root.currentView) >= 0
+                    visible: ["Search", "Installed", "Updates", "Clean", "Sources"].indexOf(root.currentView) >= 0
                     text: root.sourceSummary()
                     symbol: "sources"
                     enabled: !backend.writing
@@ -1044,7 +1046,7 @@ Controls.ApplicationWindow {
                     width: aboutScroll.availableWidth
                     verticalAlignment: Text.AlignTop
                     wrapMode: Text.WordWrap
-                    text: "PkgDeck " + backend.version + "\nA unified package interface for Linux.\n\nKeyboard shortcuts\nCtrl+1: Search • Ctrl+2: Installed • Ctrl+3: Updates • Ctrl+4: Sources\nCtrl+F: search • Ctrl+L: focus results • Up/Down: select • Ctrl+I: install • Ctrl+D: remove • Ctrl+U: update • Ctrl+M: refresh source • Ctrl+R: reload\nEscape: cancel current work\n\nRefresh sources checks package metadata. Updating apps changes installed packages. Changes require confirmation."
+                    text: "PkgDeck " + backend.version + "\nA unified package interface for Linux.\n\nKeyboard shortcuts\nCtrl+1: Search • Ctrl+2: Installed • Ctrl+3: Updates • Ctrl+4: Clean • Ctrl+5: Sources\nCtrl+F: search • Ctrl+L: focus results • Up/Down: select • Ctrl+I: install • Ctrl+D: remove • Ctrl+U: update • Ctrl+M: refresh source • Ctrl+R: reload\nEscape: cancel current work\n\nRefresh sources checks package metadata. Updating apps and cleaning change installed files. Changes require confirmation."
                     textFormat: Text.PlainText
                 }
             }
@@ -1065,7 +1067,7 @@ Controls.ApplicationWindow {
                         Layout.fillWidth: true
                         Layout.margins: 14
                         Controls.Label {
-                            text: backend.writing && backend.status.length ? backend.status : root.viewItems.length + (root.currentView === "Sources" ? (root.viewItems.length === 1 ? " source" : " sources") : (root.viewItems.length === 1 ? " package" : " packages")) + (root.currentView === "Updates" ? " · " + root.selectedCount() + " selected" : "")
+                            text: backend.writing && backend.status.length ? backend.status : root.viewItems.length + (root.currentView === "Sources" ? (root.viewItems.length === 1 ? " source" : " sources") : root.currentView === "Clean" ? (root.viewItems.length === 1 ? " cleanup task" : " cleanup tasks") : (root.viewItems.length === 1 ? " package" : " packages")) + (root.currentView === "Updates" ? " · " + root.selectedCount() + " selected" : "")
                             color: root.muted
                             font.pixelSize: 12
                             elide: Text.ElideRight
@@ -1137,7 +1139,7 @@ Controls.ApplicationWindow {
                         }
                         Controls.Label {
                             objectName: "columnHeader1"
-                            text: (root.currentView === "Sources" ? "STATUS" : "VERSION") + root.sortArrow(root.currentView === "Sources" ? "status" : "version")
+                            text: (root.currentView === "Sources" ? "STATUS" : root.currentView === "Clean" ? "TYPE" : "VERSION") + root.sortArrow(root.currentView === "Sources" ? "status" : "version")
                             color: root.muted
                             font.pixelSize: 11
                             font.underline: sortVersionArea.activeFocus
@@ -1386,15 +1388,15 @@ Controls.ApplicationWindow {
                                 }
                                 ActionButton {
                                     objectName: "rowPackageAction"
-                                    visible: modelData.kind === "package" && (!root.updateOnly(modelData.source) || modelData.update === "available")
+                                    visible: (modelData.kind === "package" && (!root.updateOnly(modelData.source) || modelData.update === "available")) || modelData.kind === "cleanup"
                                     enabled: !backend.busy && !root.retainingResults
                                     text: ""
-                                    symbol: (root.currentView === "Updates" || root.updateOnly(modelData.source)) ? "updates" : (root.isInstalled(modelData) ? "remove" : "install")
+                                    symbol: modelData.kind === "cleanup" ? "remove" : (root.currentView === "Updates" || root.updateOnly(modelData.source)) ? "updates" : (root.isInstalled(modelData) ? "remove" : "install")
                                     glyphColor: (root.currentView === "Updates" || root.updateOnly(modelData.source)) ? root.accent : root.isInstalled(modelData) ? (root.dark ? "#f18b91" : "#b42332") : (root.dark ? "#77d6a0" : "#187442")
-                                    Accessible.name: ((root.currentView === "Updates" || root.updateOnly(modelData.source)) ? "Update " : (root.isInstalled(modelData) ? "Remove " : "Install ")) + (modelData.display_name || modelData.name) + " from " + modelData.source
+                                    Accessible.name: (modelData.kind === "cleanup" ? "Run cleanup " : ((root.currentView === "Updates" || root.updateOnly(modelData.source)) ? "Update " : (root.isInstalled(modelData) ? "Remove " : "Install "))) + (modelData.display_name || modelData.name) + " from " + modelData.source
                                     Layout.preferredWidth: 38
                                     horizontalPadding: 8
-                                    onClicked: backend.propose((root.currentView === "Updates" || root.updateOnly(modelData.source)) ? "upgrade" : (root.isInstalled(modelData) ? "remove" : "install"), root.originalIndex(index))
+                                    onClicked: backend.propose(modelData.kind === "cleanup" ? "clean" : ((root.currentView === "Updates" || root.updateOnly(modelData.source)) ? "upgrade" : (root.isInstalled(modelData) ? "remove" : "install")), root.originalIndex(index))
                                 }
                             }
                         }
@@ -1417,7 +1419,7 @@ Controls.ApplicationWindow {
                                 wrapMode: Text.WordWrap
                                 color: root.muted
                                 visible: !backend.busy || !root.motionEnabled
-                                text: backend.busy ? "Working…" : root.currentView === "Search" ? (search.text.trim().length === 0 ? "Search apps and packages" : "No matching packages.\nTry a shorter search or another source.") : (root.currentView === "Updates" ? "You're up to date" : (root.currentView === "Installed" && (root.installedFilter.length > 0 || root.multiSourceOnly) ? "No packages match these filters.\nClear the filter or include more sources." : "No results to show.\nCheck source availability or reload to try again."))
+                                text: backend.busy ? "Working…" : root.currentView === "Search" ? (search.text.trim().length === 0 ? "Search apps and packages" : "No matching packages.\nTry a shorter search or another source.") : (root.currentView === "Updates" ? "You're up to date" : root.currentView === "Clean" ? "Nothing to clean" : (root.currentView === "Installed" && (root.installedFilter.length > 0 || root.multiSourceOnly) ? "No packages match these filters.\nClear the filter or include more sources." : "No results to show.\nCheck source availability or reload to try again."))
                             }
                         }
                     }
@@ -1426,7 +1428,7 @@ Controls.ApplicationWindow {
             Rectangle {
                 id: detailsPanel
                 objectName: "detailsPanel"
-                visible: root.selected !== null && ["Search", "Installed", "Updates", "Sources"].indexOf(root.currentView) >= 0
+                visible: root.selected !== null && ["Search", "Installed", "Updates", "Clean", "Sources"].indexOf(root.currentView) >= 0
                 Layout.fillWidth: true
                 Layout.preferredHeight: root.visibleScreenshots.length > 0 ? Math.min(root.height * (root.compact ? 0.35 : 0.42), 320) : Math.min(root.height * 0.27, 180)
                 color: root.surface
@@ -1565,7 +1567,7 @@ Controls.ApplicationWindow {
                                 font.pixelSize: 14
                                 wrapMode: TextEdit.Wrap
                                 textFormat: TextEdit.PlainText
-                                text: root.detailMatchesSelection ? [root.detail.description || "",
+                                text: root.detail.cleanup ? [root.detail.cleanup.summary || "", root.detail.cleanup.preview || ""].filter(Boolean).join("\n\n") : root.detailMatchesSelection ? [root.detail.description || "",
                                     root.detail.package.reference || root.detail.package.name,
                                     [root.detail.package.scope_label, root.detail.package.architecture].filter(Boolean).join(" · "),
                                     root.detail.homepage || "",
@@ -1580,7 +1582,16 @@ Controls.ApplicationWindow {
                 objectName: "updatesActions"
                 Layout.fillWidth: true
                 spacing: 8
-                visible: ["Search", "Installed", "Updates", "Sources"].indexOf(root.currentView) >= 0
+                visible: ["Search", "Installed", "Updates", "Clean", "Sources"].indexOf(root.currentView) >= 0
+                ActionButton {
+                    objectName: "cleanAllButton"
+                    visible: root.currentView === "Clean" && root.items.some((row) => row.kind === "cleanup")
+                    text: "Clean all"
+                    symbol: "remove"
+                    primary: true
+                    enabled: !backend.busy
+                    onClicked: backend.propose("clean-all", -1)
+                }
                 ActionButton {
                     objectName: "upgradeAllButton"
                     visible: root.currentView === "Updates" && (root.uncheckedPackages.length === 0 || root.selectedCount() > 0)
@@ -1858,6 +1869,10 @@ Controls.ApplicationWindow {
     }
     Shortcut {
         sequence: "Ctrl+4"
+        onActivated: root.openView("Clean")
+    }
+    Shortcut {
+        sequence: "Ctrl+5"
         onActivated: root.openView("Sources")
     }
     Shortcut {
