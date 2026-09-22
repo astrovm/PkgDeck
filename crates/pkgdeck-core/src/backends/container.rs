@@ -642,6 +642,9 @@ impl<T: Transport> Backend for Container<T> {
             ),
         }));
         let result = self.call(&args, cancel, true)?;
+        if result.code != Some(0) {
+            return Err(ExecutionError::Failed(result).into());
+        }
         Ok(OperationOutcome {
             cancellation_deferred: result.cancellation_deferred,
         })
@@ -801,6 +804,44 @@ mod tests {
         // The Podman backend on the same host is unaffected.
         let mut podman = Container::podman(Fixture::new(""));
         assert_eq!(podman.detect(&cancel).unwrap(), Availability::Available);
+    }
+
+    #[test]
+    fn image_writes_reject_nonzero_manager_completion() {
+        for kind in [ContainerKind::Docker, ContainerKind::Podman] {
+            let mut backend = match kind {
+                ContainerKind::Docker => Container::docker(Fixture::new("").with_code(23)),
+                ContainerKind::Podman => Container::podman(Fixture::new("").with_code(23)),
+            };
+            let scope = kind.scope();
+            let local = PackageId {
+                backend: kind.id().into(),
+                name: "sha256:0123456789abcdef".into(),
+                architecture: std::env::consts::ARCH.into(),
+                scope: scope.clone(),
+                remote: Some(kind.store().into()),
+                reference: Some("registry.example/app:tag".into()),
+            };
+            let offer = PackageId {
+                backend: kind.id().into(),
+                name: "registry.example/app:tag".into(),
+                architecture: std::env::consts::ARCH.into(),
+                scope,
+                remote: Some("Container registry".into()),
+                reference: Some("registry.example/app:tag".into()),
+            };
+            for operation in [
+                Operation::Install(offer),
+                Operation::Upgrade(local.clone()),
+                Operation::Remove(local),
+            ] {
+                assert!(matches!(
+                    backend.execute(&operation, &Cancellation::default(), &mut |_| {}),
+                    Err(EngineError::Execution(ExecutionError::Failed(result)))
+                        if result.code == Some(23)
+                ));
+            }
+        }
     }
 
     #[test]
