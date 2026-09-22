@@ -1,4 +1,4 @@
-name: CI / Homebrew
+name: Package
 on:
   pull_request:
     paths:
@@ -20,7 +20,7 @@ concurrency:
 
 jobs:
   package:
-    name: Package / Homebrew (${{ matrix.runner }})
+    name: Homebrew (${{ matrix.runner }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     strategy:
