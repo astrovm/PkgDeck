@@ -32,7 +32,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
             }
         }
-        println!("APT, Homebrew, Flatpak, Cargo, npm, pnpm, Bun, pip, pipx, uv, Composer, RubyGems, and local AppImage imports are available; pip requires an explicitly selected virtual environment (VIRTUAL_ENV).");
+        println!("APT, Homebrew, Flatpak, Docker, Podman, Cargo, npm, pnpm, Bun, pip, pipx, uv, Composer, RubyGems, and local AppImage imports are available; pip requires an explicitly selected virtual environment (VIRTUAL_ENV).");
         return Ok(());
     }
     if args.command.is_some() {

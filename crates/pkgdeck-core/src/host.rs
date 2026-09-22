@@ -55,6 +55,8 @@ pub const BACKENDS: &[(&str, &str)] = &[
     ("Flatpak", "flatpak"),
     ("Snap", "snap"),
     ("Homebrew", "brew"),
+    ("Docker", "docker"),
+    ("Podman", "podman"),
     ("Cargo", "cargo"),
     ("npm", "npm"),
     ("pnpm", "pnpm"),
@@ -296,6 +298,47 @@ impl Host {
             command,
             Limits {
                 timeout: std::time::Duration::from_secs(300),
+                output_bytes: 32 * 1024 * 1024,
+            },
+            cancel,
+            write,
+        )?;
+        if result.code == Some(0) {
+            Ok(result)
+        } else {
+            Err(ExecutionError::Failed(result))
+        }
+    }
+
+    /// Run Docker or Podman as the invoking user. Reads use a short deadline so
+    /// a stopped daemon cannot stall every package view; pulls and removals keep
+    /// the normal deferred-cancellation write contract.
+    pub fn container_engine(
+        &self,
+        executable: &str,
+        label: &str,
+        args: &[OsString],
+        cancel: &Cancellation,
+        write: bool,
+    ) -> Result<Completion, ExecutionError> {
+        self.enabled()?;
+        if write && rustix::process::geteuid().is_root() {
+            return Err(ExecutionError::Invalid(
+                "run the frontend as an unprivileged user".into(),
+            ));
+        }
+        let path = self
+            .resolve(executable)?
+            .ok_or_else(|| ExecutionError::Disabled(format!("{label} not found")))?;
+        let command = self.command(&path, args)?;
+        let result = process::run(
+            command,
+            Limits {
+                timeout: if write {
+                    std::time::Duration::from_secs(300)
+                } else {
+                    std::time::Duration::from_secs(8)
+                },
                 output_bytes: 32 * 1024 * 1024,
             },
             cancel,

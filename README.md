@@ -65,7 +65,8 @@ pkd
 
 Package lifecycle commands are implemented for every supported backend
 (`apt`, `dnf`, `pacman`, `zypper`, `snap`, `homebrew`, `appimage`, `flatpak`,
-`cargo`, `npm`, `pnpm`, `bun`, `pip`, `pipx`, `uv`, `composer`, `gem`):
+`docker`, `podman`, `cargo`, `npm`, `pnpm`, `bun`, `pip`, `pipx`, `uv`,
+`composer`, `gem`):
 
 ```sh
 pkd search neovim
@@ -78,6 +79,11 @@ pkd sources
 pkd update
 pkd upgrade
 ```
+
+Docker daemon images and rootless Podman images appear as separate sources.
+PkgDeck can search the local image inventory, pull a tagged image again to
+refresh it, pull a new registry reference when that image source is selected
+alone, and remove tagged or dangling images after explicit confirmation.
 
 Commands support machine-readable `--json` output. Writes require `--yes` in
 non-interactive or JSON mode. See the [CLI contract](docs/cli.md) for source

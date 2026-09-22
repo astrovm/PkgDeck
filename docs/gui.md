@@ -22,6 +22,15 @@ Flatpak offers remain separate for User and System installations. The source
 line labels each scope, and its row action targets that installation; installed
 state in one scope does not hide the install option in the other.
 
+Docker and Podman image stores are separate sources. Image rows show their tags,
+digests, size, creation status, immutable short ID, and daemon or rootless-user
+scope. Tagged images have a pull action beside the remove action; dangling images
+only offer removal. Both actions use the standard confirmation dialog. Pulling
+refreshes the stored tag without asserting that an update exists, while removal
+targets the immutable image ID and leaves dependency checks to the container
+engine. To pull a new image, select only Docker images or Podman images in the
+source menu, search its exact registry reference, and use the install action.
+
 Local AppStream catalogs supply friendly desktop app names, descriptions,
 homepages, icons, and screenshots where available. Packages without desktop metadata
 keep their native names. Details retain the native identity, architecture, and
@@ -117,7 +126,7 @@ across restarts. The Installed view has its own filter
 field that narrows the loaded rows as you type, without a new native query.
 Enter jumps to the first match. The default GUI authorization uses the host polkit agent.
 Existing sudo credentials are also supported; passwords are never collected by
-PkgDeck. Homebrew and the development managers (Cargo, npm, pnpm, Bun, pip, pipx, uv, Composer, RubyGems) remain unprivileged. `pkgdeck --from apt|homebrew|cargo|npm|pnpm|bun|pip|pipx|uv|composer|gem --auth
+PkgDeck. Homebrew, Docker, Podman, and the development managers (Cargo, npm, pnpm, Bun, pip, pipx, uv, Composer, RubyGems) remain unprivileged. `pkgdeck --from apt|homebrew|docker|podman|cargo|npm|pnpm|bun|pip|pipx|uv|composer|gem --auth
 sudo|polkit` overrides the saved settings for the current session.
 
 The interface uses a consistent surface, border, and accent palette in both light
@@ -153,7 +162,7 @@ Navigation, package actions, source rows, details, and the sidebar heart use ori
 in `DeckIcon.qml`. CXX-Qt embeds this component in the application's Qt resources,
 so native, AppImage, Flatpak, and Snap builds carry the same icons inside the
 executable. They use the already-required Qt Quick Canvas renderer: no runtime downloads, host icon theme, or icon font is required. Source symbols
-are generic archive/mug illustrations, not third-party logos. The original artwork follows
+are generic archive, container-engine, and package-manager illustrations, not third-party logos. The original artwork follows
 the repository's MIT license. The sidebar's GitHub mark is bundled from
 [GitHub Octicons](https://github.com/primer/octicons) with its MIT license;
 it uses the Qt SVG plugin already included in the packages. The sidebar links to

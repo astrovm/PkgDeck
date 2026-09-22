@@ -134,11 +134,16 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
                             !p["installed_version"].is_null(),
                             p["update"] == "available"
                         ),
-                        value(if p["id"]["backend"] == "fwupd" {
-                            &p["display_name"]
-                        } else {
-                            &p["id"]["name"]
-                        })
+                        value(
+                            if matches!(
+                                p["id"]["backend"].as_str(),
+                                Some("fwupd" | "docker" | "podman")
+                            ) {
+                                &p["display_name"]
+                            } else {
+                                &p["id"]["name"]
+                            }
+                        )
                     ),
                     value(&p["id"]["backend"]),
                     value(if p["installed_version"].is_null() {

@@ -839,7 +839,12 @@ impl ffi::PackageController {
                         {
                             Some(Operation::Remove(p.id.clone()))
                         }
-                        "upgrade" if p.update == UpdateAvailability::Available => {
+                        "upgrade"
+                            if p.update == UpdateAvailability::Available
+                                || (matches!(p.id.backend.as_str(), "docker" | "podman")
+                                    && p.installed_version.is_some()
+                                    && p.id.reference.is_some()) =>
+                        {
                             Some(Operation::Upgrade(p.id.clone()))
                         }
                         _ => None,
@@ -1287,6 +1292,43 @@ mod tests {
         assert!(controller.status().to_string().contains("Restart required"));
         assert!(controller.rust().packages.is_empty());
         assert!(!*controller.upgradable());
+    }
+    #[test]
+    fn qt_container_pull_is_explicit_and_requires_a_stored_tag() {
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        let package = Package {
+            id: PackageId {
+                backend: "docker".into(),
+                name: "sha256:0123456789abcdef".into(),
+                architecture: "x86_64".into(),
+                scope: Scope::System,
+                remote: Some("Docker daemon".into()),
+                reference: Some("example/app:latest".into()),
+            },
+            display_name: "example/app:latest".into(),
+            summary: "Tags: example/app:latest · 42MB".into(),
+            installed_version: Some("0123456789ab".into()),
+            candidate_version: None,
+            update: UpdateAvailability::Unknown,
+            icon: None,
+            component_ids: vec![],
+            homepages: vec![],
+        };
+        controller.as_mut().rust_mut().packages = vec![package];
+        controller.as_mut().propose("upgrade".into(), 0);
+        assert!(matches!(
+            &controller.rust().pending,
+            Some(Job::Write(Operation::Upgrade(_)))
+        ));
+        assert!(controller
+            .confirmation()
+            .to_string()
+            .contains("example/app:latest"));
+        controller.as_mut().confirm(false);
+        controller.as_mut().rust_mut().packages[0].id.reference = None;
+        controller.as_mut().propose("upgrade".into(), 0);
+        assert!(controller.rust().pending.is_none());
     }
     #[test]
     fn qt_source_failures_and_busy_requests_preserve_the_active_operation() {
