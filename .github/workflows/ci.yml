@@ -314,6 +314,7 @@ jobs:
             recipe = File.read("Formula/pkgdeck.rb")
             version = File.read("Cargo.toml")[/^version = "([^"]+)"$/, 1]
             stable = "url #{("file://" + source).inspect}\n  version #{version.inspect}\n  sha256 #{Digest::SHA256.file(source).hexdigest.inspect}"
+            recipe.sub!(/^  url .*\n  version .*\n  sha256 .*\n/, "")
             recipe.sub!(/^  head .*\n/, "")
             recipe.sub!(/^  license /, "  #{stable}\n  license ")
             File.write(ARGV.fetch(1), recipe)
