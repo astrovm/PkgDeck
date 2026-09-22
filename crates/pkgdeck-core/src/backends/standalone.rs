@@ -394,7 +394,9 @@ impl StandaloneIo for NativeStandalone {
             let config = self.setting_path("CLAUDE_CONFIG_DIR", home.join(".claude"))?;
             for path in [
                 config.join("settings.json"),
-                PathBuf::from("/etc/claude-code/managed-settings.json"),
+                self.host.filesystem_path(std::path::Path::new(
+                    "/etc/claude-code/managed-settings.json",
+                )),
             ] {
                 if let Some(text) = read_text(&path)? {
                     let settings: Value =

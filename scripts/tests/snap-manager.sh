@@ -13,7 +13,14 @@ install -m 755 "$pkd" /tmp/pkgdeck-pkd
 if ! id pkgdeck-test >/dev/null 2>&1; then sudo useradd -m pkgdeck-test; fi
 echo 'pkgdeck-test ALL=(root) NOPASSWD: /usr/bin/snap' | sudo tee /etc/sudoers.d/pkgdeck-snap >/dev/null
 run() { sudo -u pkgdeck-test /tmp/pkgdeck-pkd --json --yes --auth sudo --from snap "$@"; }
-success() { run "$@" | grep -q '"exit_code":0'; }
+success() {
+    local result
+    if ! result=$(run "$@"); then
+        printf '%s\n' "$result" >&2
+        return 1
+    fi
+    printf '%s\n' "$result" | jq -e '.exit_code == 0' >/dev/null || { printf '%s\n' "$result" >&2; return 1; }
+}
 success sources
 success search hello-world
 success info hello-world

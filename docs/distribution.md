@@ -74,13 +74,15 @@ See [`scripts/package.sh`](../scripts/package.sh),
 
 Tags matching `v*` build both Linux architectures, run the required checks, create
 a GitHub release with AppImage update metadata, Flatpak bundles, Snap packages,
-checksums, and provenance, then upload Snap packages when
-`SNAPCRAFT_STORE_CREDENTIALS` is configured. Snap uses classic confinement and
-requires Snap Store approval. `Publish Flatpak repository` dispatches the immutable
+checksums, and provenance. Snap packages are published on GitHub only; no Snap
+Store upload runs. `Publish Flatpak repository` dispatches the immutable
 release bundles to [`astrovm/flatpak`](https://github.com/astrovm/flatpak) when
-`FLATPAK_REPO_TOKEN` is configured, matching the AdventureMods release flow.
-Flatpak packages include the narrow host bridge used for Flatpak lifecycle
-operations; all other host managers continue to fail closed.
+`FLATPAK_REPO_TOKEN` is configured and `FLATPAK_REPO_AUTOMATIC=true` is set
+as a repository variable. Until then, the automatic Flatpak check is skipped;
+manually dispatch `publish.yml` in `astrovm/flatpak` with
+`repository=astrovm/PkgDeck` and the release tag. Flatpak packages use the host bridge for
+all supported managers, with explicit host filesystem access and the same
+confirmation and authorization rules as native execution.
 
 The APT reader and bundled libraries keep their original licenses. Package
 scripts include dependency notices alongside PkgDeck's MIT license.

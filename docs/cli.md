@@ -2,8 +2,7 @@
 
 The `pkd` command exposes the shared engine. Native and AppImage execution
 use the host boundary. Classic Snap uses that same boundary. The Flatpak build can
-manage host Flatpak installations through its explicit host bridge; other host
-package managers remain disabled there.
+manage host package managers through its explicit host bridge.
 `pkd` without a subcommand prints help and exits successfully, including with
 redirected input/output. Use `pkgdeck` to launch the GUI.
 
@@ -98,10 +97,16 @@ Run selected plans with `pkd clean apt:autoremove` or every discovered plan with
 and partial-failure rules as package operations. `--yes` skips the interactive
 confirmation; `--json` exposes typed items and per-source failures.
 
-APT exposes unused dependencies with leftover configuration and obsolete package downloads. Homebrew exposes
-unused formula dependencies and stale downloads/old versions. Other managers are
-reported as unsupported until they offer a stable dry-run contract PkgDeck can
-validate safely.
+Cleanup includes APT unused dependencies and obsolete downloads; Homebrew unused
+formulae and old downloads; Docker/Podman dangling images; Docker Buildx reclaimable immutable cache; and
+npm, pip, and uv caches. Volumes are never included. pip requires an explicit
+virtual environment, as with its other operations. pnpm pruning and Podman build
+cache cleanup and Flatpak unused-runtime removal are not offered because an accurate native preview is unavailable.
+
+Use `pkd clean --authenticate` to inspect protected APT cache files. This only
+runs a privileged simulation; removing files requires a separate cleanup command
+and confirmation. Each confirmed preview is revalidated before execution; changed
+plans require another review. Sources without a supported preview are omitted.
 
 ## Output contract, version 1
 

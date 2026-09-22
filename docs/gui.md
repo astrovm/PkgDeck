@@ -34,7 +34,16 @@ search for the exact tagged reference.
 
 Clean lists manager-native maintenance plans after a successful dry run. Inspect
 one task or choose **Clean all**; every write requires confirmation of the plan.
-Unsupported and failed sources remain visible.
+Sources without cleanup support are omitted. Failed checks appear separately from
+cleanup tasks, with diagnostic details available from the notice. **Check APT**
+authenticates for a read-only preview of protected cache files. It does not remove
+anything.
+
+Views show cached results immediately for up to 60 seconds and refresh expired
+results while keeping them visible. Installed and Updates share one inventory.
+Sources, Installed, Updates, and Clean preload sequentially in the background;
+foreground requests take priority. Package and repository changes invalidate the
+cache. Cleanup always checks the confirmed plan again before execution.
 
 ## Updates
 
@@ -92,5 +101,5 @@ column headings also support Space or Return to sort.
 ## Availability
 
 The GUI runs natively on Linux and is packaged with the CLI by Homebrew on macOS.
-Available sources depend on the platform and installed managers. The Flatpak build manages host Flatpak installations; classic Snap manages host packages. See
+Available sources depend on the platform and installed managers. The Flatpak and classic Snap builds manage host packages. See
 [distribution](distribution.md) and [authorization](host-execution.md).

@@ -7,7 +7,7 @@ case "${1:?Usage: scripts/package.sh appimage|flatpak|snap}" in
         : "${APPIMAGETOOL:?Set APPIMAGETOOL to the appimagetool executable}"
         update_information="gh-releases-zsync|astrovm|PkgDeck|latest|PkgDeck-$arch.AppImage.zsync"
         ARCH="$arch" "$APPIMAGETOOL" --appimage-extract-and-run \
-            -u "$update_information" build/AppDir "build/artifacts/PkgDeck-$arch.AppImage"
+            -u "$update_information" "$PWD/build/AppDir" "$PWD/build/artifacts/PkgDeck-$arch.AppImage"
         ;;
     flatpak)
         scripts/flatpak-sources.sh --check

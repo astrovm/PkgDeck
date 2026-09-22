@@ -58,16 +58,20 @@ fn doctor_is_noninteractive_and_reports_packaged_capabilities() {
 }
 
 #[test]
-fn flatpak_doctor_does_not_enumerate_runtime_backends() {
+fn flatpak_doctor_requires_a_working_host_bridge() {
     let output = pkd()
         .arg("doctor")
         .env_remove("SNAP")
         .env("FLATPAK_ID", "synthetic.fixture")
+        .env(
+            "DBUS_SESSION_BUS_ADDRESS",
+            "unix:path=/pkgdeck-synthetic-missing-bus",
+        )
         .output()
         .unwrap();
-    assert!(output.status.success());
+    assert!(!output.status.success());
     let text = String::from_utf8(output.stdout).unwrap();
-    assert!(text.contains("Flatpak host execution is disabled"));
+    assert!(text.contains("Runtime: Flatpak"));
     assert!(!text.contains("APT:"));
 }
 
@@ -76,11 +80,22 @@ fn repository_commands_respect_packaged_host_boundary() {
     let output = pkd()
         .args(["--json", "repos"])
         .env("FLATPAK_ID", "synthetic.fixture")
+        .env(
+            "DBUS_SESSION_BUS_ADDRESS",
+            "unix:path=/pkgdeck-synthetic-missing-bus",
+        )
         .env_remove("SNAP")
         .output()
         .unwrap();
-    assert_eq!(output.status.code(), Some(1));
-    assert!(String::from_utf8(output.stdout)
-        .unwrap()
-        .contains("disabled"));
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let repositories = value["data"]["repositories"].as_array().unwrap();
+    // Even without command access, readable host source files may be listed;
+    // sandbox /etc sources must never be substituted for the host namespace.
+    for repository in repositories {
+        assert_eq!(repository["backend"], "apt");
+        assert!(repository["name"]
+            .as_str()
+            .unwrap()
+            .starts_with("/run/host/etc/apt/"));
+    }
 }

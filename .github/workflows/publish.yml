@@ -7,7 +7,7 @@ on:
         required: true
     secrets:
       FLATPAK_REPO_TOKEN:
-        required: true
+        required: false
   release:
     types: [published]
   workflow_dispatch:
@@ -79,6 +79,9 @@ jobs:
 
   flatpak:
     name: Flatpak
+    # With no cross-repository token, publication is a separate manual run in
+    # astrovm/flatpak. Keep this check skipped rather than reporting success.
+    if: vars.FLATPAK_REPO_AUTOMATIC == 'true'
     runs-on: ubuntu-26.04
     steps:
       - name: Trigger astrovm Flatpak repository publication
@@ -88,7 +91,7 @@ jobs:
           INPUT_TAG: ${{ inputs.tag }}
         run: |
           if [[ -z "$GH_TOKEN" ]]; then
-            echo '::error::FLATPAK_REPO_TOKEN is required to publish to astrovm/flatpak'
+            echo '::error::FLATPAK_REPO_TOKEN is required when FLATPAK_REPO_AUTOMATIC is enabled.'
             exit 1
           fi
           tag=${EVENT_TAG:-$INPUT_TAG}

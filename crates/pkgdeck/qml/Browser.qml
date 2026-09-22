@@ -305,8 +305,11 @@ Controls.ApplicationWindow {
         }
         return grouped;
     }
+    readonly property var cleanupFailures: currentView === "Clean" ? items.filter(row => row.kind === "failure") : []
     property var viewItems: {
         let rows = root.currentView === "Search" ? items.filter((row) => !isFabricated(row)) : items.slice();
+        if (root.currentView === "Clean")
+            rows = rows.filter(row => row.kind === "cleanup");
         // The Installed filter narrows the loaded rows as you type; the
         // backend is queried once with an empty query (see reload).
         if (root.currentView === "Installed") {
@@ -607,7 +610,12 @@ Controls.ApplicationWindow {
             backend.propose(action, originalIndex(results.currentIndex));
     }
     function focusResultsAfterLoad() {
-        if (!queryDirty && !installedFilterField.activeFocus && !sourcePopup.opened && !confirmation.opened
+        // Background completions land at any time: never yank focus out of
+        // a search field holding text, or mid-typing keystrokes (and the
+        // Return that submits the search) are lost to the results list. An
+        // empty, untouched field still yields so fresh rows stay
+        // keyboard-navigable right after a load.
+        if (!queryDirty && (!search.activeFocus || search.text.length === 0) && !installedFilterField.activeFocus && !sourcePopup.opened && !confirmation.opened
                 && ["Search", "Installed", "Updates", "Clean", "Sources"].indexOf(currentView) >= 0)
             results.forceActiveFocus();
     }
@@ -657,7 +665,7 @@ Controls.ApplicationWindow {
                 root.beforeWrite = snapshot;
                 root.completedRows = [];
             }
-            if (!backend.writing && ["Search", "Installed", "Updates", "Clean", "Sources"].indexOf(root.currentView) >= 0)
+            if (!backend.writing && !backend.inspecting && ["Search", "Installed", "Updates", "Clean", "Sources"].indexOf(root.currentView) >= 0)
                 postWriteReload.restart();
         }
         function onRowsChanged() {
@@ -702,8 +710,8 @@ Controls.ApplicationWindow {
         easing.type: Easing.OutCubic
     }
     Timer {
-        interval: 40
-        running: backend.busy
+        interval: backend.busy ? 40 : 200
+        running: true
         repeat: true
         onTriggered: backend.poll()
     }
@@ -1065,6 +1073,34 @@ Controls.ApplicationWindow {
                     wrapMode: Text.WordWrap
                     text: "PkgDeck " + backend.version + "\nA unified package interface for Linux.\n\nKeyboard shortcuts\nCtrl+1: Search • Ctrl+2: Installed • Ctrl+3: Updates • Ctrl+4: Clean • Ctrl+5: Sources\nCtrl+F: search • Ctrl+L: focus results • Up/Down: select • Ctrl+I: install • Ctrl+D: remove • Ctrl+U: update • Ctrl+M: refresh source • Ctrl+R: reload\nEscape: cancel current work\n\nRefresh sources checks package metadata. Updating apps and cleaning change installed files. Changes require confirmation."
                     textFormat: Text.PlainText
+                }
+            }
+            RowLayout {
+                visible: root.currentView === "Clean" && (root.cleanupFailures.length > 0 || root.checkedSources().indexOf("apt") >= 0)
+                Layout.fillWidth: true
+                DeckIcon { name: "warning"; ink: root.muted; Layout.preferredWidth: 20; Layout.preferredHeight: 20; visible: root.cleanupFailures.length > 0 }
+                Controls.Label {
+                    objectName: "cleanupFailureNotice"
+                    visible: root.cleanupFailures.length > 0
+                    text: "Could not check: " + root.cleanupFailures.map(row => root.sourceDisplayName(row.source)).join(", ")
+                    color: root.muted
+                    wrapMode: Text.WordWrap
+                    Layout.fillWidth: true
+                }
+                ActionButton {
+                    objectName: "cleanupAuthenticate"
+                    visible: root.currentView === "Clean" && root.checkedSources().indexOf("apt") >= 0
+                    text: "Check APT"
+                    symbol: "refresh"
+                    enabled: !backend.busy
+                    onClicked: backend.propose("inspect-clean", -1)
+                }
+                ActionButton {
+                    objectName: "cleanupFailureDetails"
+                    visible: root.cleanupFailures.length > 0
+                    text: "Details"
+                    symbol: "help"
+                    onClicked: cleanupErrorsDialog.open()
                 }
             }
             Rectangle {
@@ -1448,7 +1484,7 @@ Controls.ApplicationWindow {
                                 wrapMode: Text.WordWrap
                                 color: root.muted
                                 visible: !backend.busy || !root.motionEnabled
-                                text: backend.busy ? "Working…" : root.currentView === "Search" ? (search.text.trim().length === 0 ? "Search apps and packages" : "No matching packages.\nTry a shorter search or another source.") : (root.currentView === "Updates" ? "You're up to date" : root.currentView === "Clean" ? "Nothing to clean" : (root.currentView === "Installed" && (root.installedFilter.length > 0 || root.multiSourceOnly) ? "No packages match these filters.\nClear the filter or include more sources." : "No results to show.\nCheck source availability or reload to try again."))
+                                text: backend.busy ? "Working…" : root.currentView === "Search" ? (search.text.trim().length === 0 ? "Search apps and packages" : "No matching packages.\nTry a shorter search or another source.") : (root.currentView === "Updates" ? "You're up to date" : root.currentView === "Clean" ? (root.cleanupFailures.length > 0 ? "Cleanup check incomplete" : "Nothing to clean") : (root.currentView === "Installed" && (root.installedFilter.length > 0 || root.multiSourceOnly) ? "No packages match these filters.\nClear the filter or include more sources." : "No results to show.\nCheck source availability or reload to try again."))
                             }
                         }
                     }
@@ -1781,6 +1817,20 @@ Controls.ApplicationWindow {
             Controls.TextField { id: repositoryName; objectName: "repositoryName"; placeholderText: "Name"; Accessible.name: "Repository name"; Layout.fillWidth: true }
             Controls.TextField { id: repositoryUrl; objectName: "repositoryUrl"; placeholderText: "https://…/repository.flatpakrepo"; Accessible.name: "Repository URL"; Layout.fillWidth: true }
             Controls.ComboBox { id: repositoryScope; objectName: "repositoryScope"; model: ["User", "System"]; Accessible.name: "Installation scope"; Layout.fillWidth: true }
+        }
+    }
+    Controls.Dialog {
+        id: cleanupErrorsDialog
+        objectName: "cleanupErrorsDialog"
+        anchors.centerIn: parent
+        width: Math.min(root.width - 32, 680)
+        modal: true
+        title: "Cleanup checks"
+        standardButtons: Controls.Dialog.Close
+        contentItem: Controls.Label {
+            text: root.cleanupFailures.map(row => root.sourceDisplayName(row.source) + "\n" + row.summary).join("\n\n")
+            wrapMode: Text.Wrap
+            color: root.muted
         }
     }
     Controls.Dialog {

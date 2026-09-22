@@ -26,3 +26,17 @@ impl LookupCancellation {
         self.0.requested()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lookup_cancellation_reports_requested_state() {
+        let cancel = Cancellation::default();
+        let lookup = LookupCancellation(cancel.clone());
+        assert!(!lookup.cancelled());
+        cancel.cancel();
+        assert!(lookup.cancelled());
+    }
+}

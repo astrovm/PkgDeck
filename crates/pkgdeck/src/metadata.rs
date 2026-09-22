@@ -96,10 +96,8 @@ pub fn invalidate() {
 }
 pub fn catalog() -> Arc<Catalog> {
     CATALOG.get(|| {
-        Catalog::load(
-            Path::new("/"),
-            std::env::var_os("HOME").as_deref().map(Path::new),
-        )
+        let host = pkgdeck_core::host::Host::current();
+        Catalog::load(Path::new("/"), host.var("HOME").as_deref().map(Path::new))
     })
 }
 pub fn cached_info(package: &Package) -> Option<AppInfo> {
@@ -634,25 +632,37 @@ impl Catalog {
     fn load(root: &Path, home: Option<&Path>) -> Self {
         let mut files = BTreeSet::new();
         let mut catalog = Self::default();
+        let host = (root == Path::new("/")).then(pkgdeck_core::host::Host::current);
+        let path = |relative: &str| {
+            let path = root.join(relative);
+            host.as_ref()
+                .map_or_else(|| path.clone(), |host| host.filesystem_path(&path))
+        };
         let mut data_dirs = vec![
-            root.join("usr/share"),
-            root.join("usr/local/share"),
-            root.join("var/lib/flatpak/exports/share"),
-            root.join("var/lib/snapd/desktop"),
+            path("usr/share"),
+            path("usr/local/share"),
+            path("var/lib/flatpak/exports/share"),
+            path("var/lib/snapd/desktop"),
         ];
         if let Some(home) = home {
             data_dirs.push(home.join(".local/share"));
             data_dirs.push(home.join(".local/share/flatpak/exports/share"));
         }
         if root == Path::new("/") {
-            if let Some(path) = std::env::var_os("XDG_DATA_HOME")
+            if let Some(path) = host
+                .as_ref()
+                .and_then(|host| host.var("XDG_DATA_HOME"))
                 .map(PathBuf::from)
                 .filter(|p| p.is_absolute())
             {
                 data_dirs.push(path);
             }
-            if let Some(paths) = std::env::var_os("XDG_DATA_DIRS") {
-                data_dirs.extend(std::env::split_paths(&paths).filter(|p| p.is_absolute()));
+            if let Some(paths) = host.as_ref().and_then(|host| host.var("XDG_DATA_DIRS")) {
+                data_dirs.extend(
+                    std::env::split_paths(&paths)
+                        .filter(|p| p.is_absolute())
+                        .map(|path| host.as_ref().unwrap().filesystem_path(&path)),
+                );
             }
         }
         for dir in data_dirs {
@@ -680,9 +690,9 @@ impl Catalog {
             "var/cache/app-info/xmls",
             "var/lib/apt/lists",
         ] {
-            collect_files(&root.join(dir), &mut files);
+            collect_files(&path(dir), &mut files);
         }
-        let mut flatpak = vec![root.join("var/lib/flatpak/appstream")];
+        let mut flatpak = vec![path("var/lib/flatpak/appstream")];
         if let Some(home) = home {
             collect_files(&home.join(".local/share/metainfo"), &mut files);
             flatpak.push(home.join(".local/share/flatpak/appstream"));

@@ -11,6 +11,7 @@ const CAPABILITIES: &[Capability] = &[
     Capability::Install,
     Capability::Remove,
     Capability::Upgrade,
+    Capability::Clean,
 ];
 const IMAGE_FORMAT: &str = r#"{"ID":{{json .ID}},"Repository":{{json .Repository}},"Tag":{{json .Tag}},"Digest":{{json .Digest}},"Size":{{json .Size}},"CreatedSince":{{json .CreatedSince}}}"#;
 
@@ -55,6 +56,8 @@ pub struct Container<T> {
     transport: T,
     kind: ContainerKind,
     remote_offers: bool,
+    cleanup_images: Option<Vec<String>>,
+    cleanup_build_cache: Option<Vec<String>>,
 }
 
 impl<T> Container<T> {
@@ -63,6 +66,8 @@ impl<T> Container<T> {
             transport,
             kind: ContainerKind::Docker,
             remote_offers: false,
+            cleanup_images: None,
+            cleanup_build_cache: None,
         }
     }
     pub fn podman(transport: T) -> Self {
@@ -70,6 +75,8 @@ impl<T> Container<T> {
             transport,
             kind: ContainerKind::Podman,
             remote_offers: false,
+            cleanup_images: None,
+            cleanup_build_cache: None,
         }
     }
     pub fn with_remote_offers(mut self, enabled: bool) -> Self {
@@ -127,6 +134,84 @@ impl<T: Transport> Container<T> {
             cancel,
             write,
         )?)
+    }
+
+    // Pin the default builder for both preview and execution; changing the user's
+    // selected builder must never redirect an already approved cleanup.
+    fn build_cache(&self, cancel: &Cancellation) -> Result<Vec<String>, EngineError> {
+        let result = self.call(
+            &["buildx", "du", "--builder", "default", "--format=json"],
+            cancel,
+            false,
+        )?;
+        if result.code != Some(0) || result.truncated {
+            return Err(ExecutionError::Failed(result).into());
+        }
+        let text =
+            String::from_utf8(result.stdout).map_err(|error| EngineError::InvalidResponse {
+                backend: self.kind.id().into(),
+                reason: error.to_string(),
+            })?;
+        let mut ids = Vec::new();
+        for line in text.lines().filter(|line| !line.trim().is_empty()) {
+            let value: Value =
+                serde_json::from_str(line).map_err(|error| EngineError::InvalidResponse {
+                    backend: self.kind.id().into(),
+                    reason: error.to_string(),
+                })?;
+            if value.get("Reclaimable").and_then(Value::as_bool) != Some(true)
+                || value.get("Mutable").and_then(Value::as_bool) != Some(false)
+                || matches!(field(&value, &["Type"]), Some("internal" | "frontend"))
+            {
+                continue;
+            }
+            let id = field(&value, &["ID"])
+                .filter(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric()))
+                .ok_or_else(|| EngineError::InvalidResponse {
+                    backend: self.kind.id().into(),
+                    reason: "invalid build cache ID".into(),
+                })?;
+            ids.push(id.to_owned());
+        }
+        ids.sort();
+        ids.dedup();
+        Ok(ids)
+    }
+
+    fn dangling_images(&self, cancel: &Cancellation) -> Result<Vec<String>, EngineError> {
+        let result = self.call(
+            &[
+                "image",
+                "ls",
+                "--filter",
+                "dangling=true",
+                "--no-trunc",
+                "--quiet",
+            ],
+            cancel,
+            false,
+        )?;
+        if result.code != Some(0) || result.truncated {
+            return Err(ExecutionError::Failed(result).into());
+        }
+        let text =
+            String::from_utf8(result.stdout).map_err(|error| EngineError::InvalidResponse {
+                backend: self.kind.id().into(),
+                reason: error.to_string(),
+            })?;
+        let mut ids = Vec::new();
+        for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
+            if !safe_id(line) {
+                return Err(EngineError::InvalidResponse {
+                    backend: self.kind.id().into(),
+                    reason: "invalid dangling image ID".into(),
+                });
+            }
+            ids.push(line.to_owned());
+        }
+        ids.sort();
+        ids.dedup();
+        Ok(ids)
     }
 
     fn inventory(&self, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
@@ -276,6 +361,16 @@ impl<T: Transport> Backend for Container<T> {
         CAPABILITIES
     }
     fn detect(&mut self, cancel: &Cancellation) -> Result<Availability, EngineError> {
+        // A Podman-provided `docker` wrapper shares Podman's image store.
+        // Registering both would duplicate every image and fail Docker-only
+        // probes (for example `buildx du --builder`); stay unregistered so
+        // Podman remains the single source of truth. Explicit `--from docker`
+        // still surfaces this status instead of failing each query.
+        if self.kind == ContainerKind::Docker && self.transport.docker_is_podman() {
+            return Ok(Availability::Unavailable(
+                "Docker CLI is emulated by Podman on this host; use the Podman source".into(),
+            ));
+        }
         match self.call(&["info", "--format", "{{json .}}"], cancel, false) {
             Ok(_) => Ok(Availability::Available),
             Err(EngineError::Execution(ExecutionError::Disabled(reason))) => {
@@ -339,6 +434,51 @@ impl<T: Transport> Backend for Container<T> {
     fn installed(&mut self, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
         self.inventory(cancel)
     }
+    fn cleanup(&mut self, cancel: &Cancellation) -> Result<Vec<CleanupItem>, EngineError> {
+        self.cleanup_images = None;
+        let images = self.dangling_images(cancel)?;
+        let mut items = if images.is_empty() {
+            vec![]
+        } else {
+            vec![CleanupItem {
+            id: CleanupId { backend: self.kind.id().into(), key: "dangling-images".into() },
+            kind: CleanupKind::PackageCache,
+            title: format!("Dangling {} images", self.kind.label()),
+            summary: format!("{} untagged images · {}", images.len(), self.kind.store()),
+            preview: format!("Remove these untagged images without force. Images used by containers are protected by the engine. Shared layers may remain.\n{}", images.join("\n")),
+        }]
+        };
+        self.cleanup_images = Some(images);
+        self.cleanup_build_cache = None;
+        // Buildx is an optional Docker plugin. Older installations retain image
+        // cleanup without claiming unsupported cache cleanup is available, and
+        // a failing cache probe (for example a Podman-backed `docker` whose
+        // `buildx version` succeeds but rejects `--builder`) must never
+        // discard the dangling-image plan either.
+        if self.kind == ContainerKind::Docker
+            && self
+                .call(&["buildx", "version"], cancel, false)
+                .is_ok_and(|result| result.code == Some(0))
+        {
+            match self.build_cache(cancel) {
+                Ok(ids) => {
+                    if !ids.is_empty() {
+                        items.push(CleanupItem {
+                            id: CleanupId { backend: self.kind.id().into(), key: "build-cache".into() },
+                            kind: CleanupKind::PackageCache,
+                            title: "Docker build cache".into(),
+                            summary: format!("{} unused immutable records · default builder", ids.len()),
+                            preview: format!("Remove these unused build-cache records from the default builder. Later builds may need to rebuild layers. Shared storage may remain.\n{}", ids.join("\n")),
+                        });
+                    }
+                    self.cleanup_build_cache = Some(ids);
+                }
+                Err(EngineError::Cancelled) => return Err(EngineError::Cancelled),
+                Err(_) => {}
+            }
+        }
+        Ok(items)
+    }
     fn details(
         &mut self,
         id: &PackageId,
@@ -392,6 +532,77 @@ impl<T: Transport> Backend for Container<T> {
         cancel: &Cancellation,
         progress: &mut dyn FnMut(Progress),
     ) -> Result<OperationOutcome, EngineError> {
+        if let Operation::Clean(id) = operation {
+            if id.backend == self.kind.id()
+                && id.key == "build-cache"
+                && self.kind == ContainerKind::Docker
+            {
+                let planned = self
+                    .cleanup_build_cache
+                    .clone()
+                    .ok_or(EngineError::NotFound)?;
+                if planned.is_empty() || self.build_cache(cancel)? != planned {
+                    return Err(EngineError::InvalidResponse {
+                        backend: self.kind.id().into(),
+                        reason: "Build cache changed; reload and review the preview".into(),
+                    });
+                }
+                self.cleanup_build_cache = None;
+                let mut deferred = false;
+                for record in planned {
+                    let filter = format!("id={record}");
+                    let result = self.call(
+                        &[
+                            "buildx",
+                            "prune",
+                            "--builder",
+                            "default",
+                            "--force",
+                            "--filter",
+                            &filter,
+                            "--filter",
+                            "immutable=true",
+                            "--filter",
+                            "inuse=false",
+                        ],
+                        cancel,
+                        true,
+                    )?;
+                    if result.code != Some(0) {
+                        return Err(ExecutionError::Failed(result).into());
+                    }
+                    deferred |= result.cancellation_deferred;
+                }
+                return Ok(OperationOutcome {
+                    cancellation_deferred: deferred,
+                });
+            }
+            if id.backend != self.kind.id() || id.key != "dangling-images" {
+                return Err(EngineError::NotFound);
+            }
+            let planned = self.cleanup_images.clone().ok_or(EngineError::NotFound)?;
+            let current = self.dangling_images(cancel)?;
+            if current != planned || planned.is_empty() {
+                return Err(EngineError::InvalidResponse {
+                    backend: self.kind.id().into(),
+                    reason: "Cleanup candidates changed; reload and review the preview".into(),
+                });
+            }
+            self.cleanup_images = None;
+            progress(Progress::Message(format!(
+                "Removing dangling {} images",
+                self.kind.label()
+            )));
+            let mut args = vec!["image", "rm"];
+            args.extend(planned.iter().map(String::as_str));
+            let result = self.call(&args, cancel, true)?;
+            if result.code != Some(0) {
+                return Err(ExecutionError::Failed(result).into());
+            }
+            return Ok(OperationOutcome {
+                cancellation_deferred: result.cancellation_deferred,
+            });
+        }
         let id = match operation {
             Operation::Install(id) | Operation::Remove(id) | Operation::Upgrade(id) => id,
             _ => return Err(self.unsupported(operation.capability())),
@@ -431,6 +642,9 @@ impl<T: Transport> Backend for Container<T> {
             ),
         }));
         let result = self.call(&args, cancel, true)?;
+        if result.code != Some(0) {
+            return Err(ExecutionError::Failed(result).into());
+        }
         Ok(OperationOutcome {
             cancellation_deferred: result.cancellation_deferred,
         })
@@ -448,17 +662,25 @@ mod tests {
     #[derive(Clone)]
     struct Fixture {
         output: Vec<u8>,
+        build_cache: Option<String>,
         code: Option<i32>,
         failure: Option<ExecutionError>,
         calls: Arc<Mutex<Vec<RecordedCall>>>,
+        shim: bool,
+        fail_du: bool,
+        cancel_du: bool,
     }
     impl Fixture {
         fn new(output: &str) -> Self {
             Self {
                 output: output.as_bytes().into(),
+                build_cache: None,
                 code: Some(0),
                 failure: None,
                 calls: Arc::new(Mutex::new(vec![])),
+                shim: false,
+                fail_du: false,
+                cancel_du: false,
             }
         }
         fn bytes(output: &[u8]) -> Self {
@@ -489,6 +711,9 @@ mod tests {
         }
     }
     impl Transport for Fixture {
+        fn docker_is_podman(&self) -> bool {
+            self.shim
+        }
         fn apt_query(
             &self,
             _: &str,
@@ -531,6 +756,23 @@ mod tests {
             if let Some(error) = &self.failure {
                 return Err(error.clone());
             }
+            if args == ["buildx", "version"] && self.build_cache.is_none() {
+                return Err(ExecutionError::Disabled("buildx unavailable".into()));
+            }
+            if self.cancel_du && args.len() > 2 && args[0] == "buildx" && args[1] == "du" {
+                // Cancellation arriving mid-discovery aborts instead of
+                // degrading to a partial plan.
+                cancel.cancel();
+                return Err(ExecutionError::Cancelled);
+            }
+            if self.fail_du && args.len() > 2 && args[0] == "buildx" && args[1] == "du" {
+                // A Podman-backed `docker` answers `buildx version` but
+                // rejects Docker-only probe flags.
+                return Err(ExecutionError::Failed(completed(
+                    b"Error: unknown flag: --builder",
+                    Some(125),
+                )));
+            }
             self.calls
                 .lock()
                 .unwrap()
@@ -538,12 +780,225 @@ mod tests {
             Ok(completed(
                 if write || args.first().is_some_and(|arg| arg == "info") {
                     &[]
+                } else if args.first().is_some_and(|arg| arg == "buildx") {
+                    self.build_cache.as_deref().unwrap_or("").as_bytes()
                 } else {
                     &self.output
                 },
                 self.code,
             ))
         }
+    }
+
+    #[test]
+    fn docker_podman_shim_is_unavailable_to_queries() {
+        let cancel = Cancellation::default();
+        let mut shim = Fixture::new("");
+        shim.shim = true;
+        let mut backend = Container::docker(shim);
+        assert!(matches!(
+            backend.detect(&cancel),
+            Ok(Availability::Unavailable(reason))
+                if reason.contains("Podman")
+        ));
+        // The Podman backend on the same host is unaffected.
+        let mut podman = Container::podman(Fixture::new(""));
+        assert_eq!(podman.detect(&cancel).unwrap(), Availability::Available);
+    }
+
+    #[test]
+    fn image_writes_reject_nonzero_manager_completion() {
+        for kind in [ContainerKind::Docker, ContainerKind::Podman] {
+            let mut backend = match kind {
+                ContainerKind::Docker => Container::docker(Fixture::new("").with_code(23)),
+                ContainerKind::Podman => Container::podman(Fixture::new("").with_code(23)),
+            };
+            let scope = kind.scope();
+            let local = PackageId {
+                backend: kind.id().into(),
+                name: "sha256:0123456789abcdef".into(),
+                architecture: std::env::consts::ARCH.into(),
+                scope: scope.clone(),
+                remote: Some(kind.store().into()),
+                reference: Some("registry.example/app:tag".into()),
+            };
+            let offer = PackageId {
+                backend: kind.id().into(),
+                name: "registry.example/app:tag".into(),
+                architecture: std::env::consts::ARCH.into(),
+                scope,
+                remote: Some("Container registry".into()),
+                reference: Some("registry.example/app:tag".into()),
+            };
+            for operation in [
+                Operation::Install(offer),
+                Operation::Upgrade(local.clone()),
+                Operation::Remove(local),
+            ] {
+                assert!(matches!(
+                    backend.execute(&operation, &Cancellation::default(), &mut |_| {}),
+                    Err(EngineError::Execution(ExecutionError::Failed(result)))
+                        if result.code == Some(23)
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn docker_build_cache_probe_failure_keeps_dangling_images() {
+        let mut fixture = Fixture::new("sha256:0123456789abcdef\n");
+        fixture.build_cache = Some(String::new());
+        fixture.fail_du = true;
+        let mut backend = Container::docker(fixture);
+        let cancel = Cancellation::default();
+        let plans = backend.cleanup(&cancel).unwrap();
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].id.key, "dangling-images");
+        // The cache plan was never offered, so it cannot execute.
+        assert!(backend
+            .execute(
+                &Operation::Clean(CleanupId {
+                    backend: "docker".into(),
+                    key: "build-cache".into()
+                }),
+                &cancel,
+                &mut |_| {}
+            )
+            .is_err());
+        backend
+            .execute(&Operation::Clean(plans[0].id.clone()), &cancel, &mut |_| {})
+            .unwrap();
+    }
+
+    #[test]
+    fn docker_build_cache_cancellation_aborts_discovery() {
+        let mut fixture = Fixture::new("sha256:0123456789abcdef\n");
+        fixture.build_cache = Some(String::new());
+        fixture.cancel_du = true;
+        let mut backend = Container::docker(fixture);
+        assert_eq!(
+            backend.cleanup(&Cancellation::default()),
+            Err(EngineError::Cancelled)
+        );
+    }
+
+    #[test]
+    fn docker_build_cache_pins_builder_and_filters_each_reviewed_record() {
+        let mut fixture = Fixture::new("");
+        fixture.build_cache = Some(
+            r#"{"ID":"cache1","Reclaimable":true,"Mutable":false,"Type":"regular"}
+{"ID":"busy","Reclaimable":false,"Mutable":false}
+{"ID":"mutable","Reclaimable":true,"Mutable":true}
+{"ID":"frontend","Reclaimable":true,"Mutable":false,"Type":"frontend"}"#
+                .into(),
+        );
+        let calls = fixture.calls.clone();
+        let mut backend = Container::docker(fixture);
+        let cancel = Cancellation::default();
+        let plan = backend.cleanup(&cancel).unwrap().remove(0);
+        assert_eq!(plan.id.key, "build-cache");
+        assert!(plan.summary.starts_with("1 unused"));
+        backend
+            .execute(&Operation::Clean(plan.id.clone()), &cancel, &mut |_| {})
+            .unwrap();
+        let writes: Vec<_> = calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| call.2)
+            .cloned()
+            .collect();
+        assert_eq!(writes.len(), 1);
+        assert_eq!(
+            writes[0].1,
+            [
+                "buildx",
+                "prune",
+                "--builder",
+                "default",
+                "--force",
+                "--filter",
+                "id=cache1",
+                "--filter",
+                "immutable=true",
+                "--filter",
+                "inuse=false"
+            ]
+        );
+        backend.cleanup(&cancel).unwrap();
+        backend.transport.build_cache = Some(String::new());
+        assert!(backend
+            .execute(&Operation::Clean(plan.id), &cancel, &mut |_| {})
+            .is_err());
+        assert_eq!(
+            calls.lock().unwrap().iter().filter(|call| call.2).count(),
+            1
+        );
+    }
+
+    #[test]
+    fn cleanup_revalidates_exact_images_and_never_forces_removal() {
+        for kind in [ContainerKind::Docker, ContainerKind::Podman] {
+            let fixture = Fixture::new("sha256:0123456789abcdef\nsha256:0123456789abcdef\n");
+            let calls = fixture.calls.clone();
+            let mut backend = Container::docker(fixture);
+            backend.kind = kind;
+            let cancel = Cancellation::default();
+            let plans = backend.cleanup(&cancel).unwrap();
+            assert_eq!(plans.len(), 1);
+            assert!(plans[0].summary.starts_with("1 untagged"));
+            backend
+                .execute(&Operation::Clean(plans[0].id.clone()), &cancel, &mut |_| {})
+                .unwrap();
+            let calls = calls.lock().unwrap();
+            assert_eq!(calls.len(), 3);
+            assert_eq!(calls[0].1, calls[1].1);
+            assert_eq!(calls[2].1, ["image", "rm", "sha256:0123456789abcdef"]);
+            assert!(calls[2].2);
+        }
+    }
+
+    #[test]
+    fn cleanup_rejects_stale_missing_foreign_and_invalid_plans() {
+        let cancel = Cancellation::default();
+        let mut backend = Container::docker(Fixture::new("0123456789abcdef\n"));
+        let id = CleanupId {
+            backend: "docker".into(),
+            key: "dangling-images".into(),
+        };
+        assert!(backend
+            .execute(&Operation::Clean(id.clone()), &cancel, &mut |_| {})
+            .is_err());
+        backend.cleanup(&cancel).unwrap();
+        backend.transport.output = b"fedcba9876543210\n".to_vec();
+        assert!(backend
+            .execute(&Operation::Clean(id.clone()), &cancel, &mut |_| {})
+            .is_err());
+        assert!(backend
+            .transport
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|call| !call.2));
+        let foreign = CleanupId {
+            backend: "podman".into(),
+            ..id
+        };
+        assert!(backend
+            .execute(&Operation::Clean(foreign), &cancel, &mut |_| {})
+            .is_err());
+        for fixture in [
+            Fixture::new("--force"),
+            Fixture::bytes(&[0xff]),
+            Fixture::new("").with_code(1),
+        ] {
+            assert!(Container::docker(fixture).cleanup(&cancel).is_err());
+        }
+        assert!(Container::docker(Fixture::new(""))
+            .cleanup(&cancel)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

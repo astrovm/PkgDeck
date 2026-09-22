@@ -65,7 +65,7 @@ updates through their upstream updaters; see the [CLI guide](docs/cli.md#standal
 Linux-specific managers and firmware support are not available on macOS.
 
 Native, AppImage, and classic Snap builds can manage host packages. The Flatpak
-build manages host Flatpak installations through its explicit host bridge.
+build manages host packages through its explicit host bridge.
 
 ## Documentation
 
