@@ -10,6 +10,7 @@ class Pkgdeck < Formula
     depends_on "cmake" => :build
     depends_on "ninja" => :build
     depends_on "qtshadertools" => :build
+    depends_on "qttools" => :build
     depends_on "qtbase"
     depends_on "qtdeclarative"
     depends_on "qtimageformats"
