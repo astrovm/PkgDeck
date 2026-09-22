@@ -447,22 +447,42 @@ mod tests {
 
     #[derive(Clone)]
     struct Fixture {
-        output: String,
+        output: Vec<u8>,
+        code: Option<i32>,
+        failure: Option<ExecutionError>,
         calls: Arc<Mutex<Vec<RecordedCall>>>,
     }
     impl Fixture {
         fn new(output: &str) -> Self {
             Self {
-                output: output.into(),
+                output: output.as_bytes().into(),
+                code: Some(0),
+                failure: None,
                 calls: Arc::new(Mutex::new(vec![])),
             }
         }
+        fn bytes(output: &[u8]) -> Self {
+            Self {
+                output: output.into(),
+                ..Self::new("")
+            }
+        }
+        fn failed(error: ExecutionError) -> Self {
+            Self {
+                failure: Some(error),
+                ..Self::new("")
+            }
+        }
+        fn with_code(mut self, code: i32) -> Self {
+            self.code = Some(code);
+            self
+        }
     }
-    fn completed(output: &str) -> Completion {
+    fn completed(output: &[u8], code: Option<i32>) -> Completion {
         Completion {
-            code: Some(0),
+            code,
             signal: None,
-            stdout: output.as_bytes().into(),
+            stdout: output.into(),
             stderr: vec![],
             truncated: false,
             cancellation_deferred: false,
@@ -508,16 +528,20 @@ mod tests {
             if cancel.requested() {
                 return Err(ExecutionError::Cancelled);
             }
+            if let Some(error) = &self.failure {
+                return Err(error.clone());
+            }
             self.calls
                 .lock()
                 .unwrap()
                 .push((executable.into(), args.into(), write));
             Ok(completed(
                 if write || args.first().is_some_and(|arg| arg == "info") {
-                    ""
+                    &[]
                 } else {
                     &self.output
                 },
+                self.code,
             ))
         }
     }
@@ -614,5 +638,139 @@ mod tests {
         let (_, args, write) = calls.last().unwrap();
         assert_eq!(args, &["pull", "registry.example/team/App:Preview"]);
         assert!(*write);
+    }
+
+    #[test]
+    fn detection_distinguishes_missing_stopped_and_broken_engines() {
+        let cancel = Cancellation::default();
+        let mut missing = Container::docker(Fixture::failed(ExecutionError::Disabled(
+            "Docker not found".into(),
+        )));
+        assert_eq!(
+            missing.detect(&cancel).unwrap(),
+            Availability::Unavailable("Docker not found".into())
+        );
+
+        let mut stopped_result = completed(&[], Some(1));
+        stopped_result.stderr = b"cannot connect to daemon\nmore detail".into();
+        let mut stopped =
+            Container::docker(Fixture::failed(ExecutionError::Failed(stopped_result)));
+        assert!(matches!(
+            stopped.detect(&cancel).unwrap(),
+            Availability::Unavailable(reason)
+                if reason == "Docker is installed but unavailable: cannot connect to daemon"
+        ));
+
+        let mut broken = Container::podman(Fixture::failed(ExecutionError::Io(
+            "synthetic transport failure".into(),
+        )));
+        assert!(matches!(
+            broken.detect(&cancel),
+            Err(EngineError::Execution(ExecutionError::Io(message)))
+                if message == "synthetic transport failure"
+        ));
+    }
+
+    #[test]
+    fn malformed_inventory_is_never_an_empty_success() {
+        let cancel = Cancellation::default();
+        let cases = [
+            Fixture::new("").with_code(1),
+            Fixture::bytes(&[0xff, 0xfe]),
+            Fixture::new("not-json"),
+            Fixture::new(r#"{"Repository":"example/app","Tag":"latest"}"#),
+        ];
+        for fixture in cases {
+            let mut backend = Container::docker(fixture);
+            assert!(backend.installed(&cancel).is_err());
+        }
+    }
+
+    #[test]
+    fn details_search_and_operations_preserve_exact_local_identity() {
+        let fixture = Fixture::new(
+            r#"{"ID":"sha256:0123456789abcdef","Repository":"example/app","Tag":"latest","Digest":"sha256:aaaa","Size":"42MB","CreatedSince":"2 days ago"}"#,
+        );
+        let calls = fixture.calls.clone();
+        let mut backend = Container::docker(fixture).with_remote_offers(true);
+        let cancel = Cancellation::default();
+        assert!(backend.search("does-not-match", &cancel).unwrap().len() == 1);
+        let packages = backend.search("example/app:latest", &cancel).unwrap();
+        assert_eq!(
+            packages.len(),
+            1,
+            "an installed exact tag is not offered twice"
+        );
+        let package = packages[0].clone();
+        let details = backend.details(&package.id, &cancel).unwrap();
+        assert!(details.description.contains("Immutable ID"));
+        assert!(details.description.contains("example/app:latest"));
+
+        let mut progress = vec![];
+        backend
+            .execute(
+                &Operation::Remove(package.id.clone()),
+                &cancel,
+                &mut |message| progress.push(message),
+            )
+            .unwrap();
+        assert!(
+            matches!(&progress[0], Progress::Message(message) if message == "Removing Docker image")
+        );
+        let (_, args, write) = calls.lock().unwrap().last().unwrap().clone();
+        assert_eq!(args, &["image", "rm", "sha256:0123456789abcdef"]);
+        assert!(write);
+
+        let mut untagged = package.id.clone();
+        untagged.reference = None;
+        assert!(matches!(
+            backend.execute(&Operation::Upgrade(untagged), &cancel, &mut |_| {}),
+            Err(EngineError::InvalidResponse { reason, .. })
+                if reason == "a tagged image is required for pull"
+        ));
+        assert!(matches!(
+            backend.execute(
+                &Operation::Refresh {
+                    backend: "docker".into()
+                },
+                &cancel,
+                &mut |_| {}
+            ),
+            Err(EngineError::Unsupported { .. })
+        ));
+    }
+
+    #[test]
+    fn foreign_and_option_like_operations_fail_before_transport() {
+        let mut backend = Container::podman(Fixture::new(""));
+        let cancel = Cancellation::default();
+        let base = PackageId {
+            backend: "podman".into(),
+            name: "0123456789abcdef".into(),
+            architecture: "x86_64".into(),
+            scope: Scope::User {
+                uid: rustix::process::getuid().as_raw(),
+            },
+            remote: Some("rootless Podman storage".into()),
+            reference: Some("example/app:latest".into()),
+        };
+        for id in [
+            PackageId {
+                backend: "docker".into(),
+                ..base.clone()
+            },
+            PackageId {
+                reference: Some("--all".into()),
+                ..base.clone()
+            },
+            PackageId {
+                name: "--force".into(),
+                ..base
+            },
+        ] {
+            assert!(backend
+                .execute(&Operation::Remove(id), &cancel, &mut |_| {})
+                .is_err());
+        }
     }
 }

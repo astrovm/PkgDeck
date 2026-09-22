@@ -508,6 +508,38 @@ fn dev_tool_runs_unprivileged_and_reports_status() {
 }
 
 #[test]
+fn container_engine_uses_bounded_user_commands_and_preserves_failures() {
+    let fixture = Fixture::new();
+    link_executable(&fixture.0, "synthetic-ok", "/bin/true");
+    link_executable(&fixture.0, "synthetic-fail", "/bin/false");
+    let host = Host::new(
+        Runtime::Native,
+        env(&[("PATH", fixture.0.to_str().unwrap())]),
+    );
+    let cancel = Cancellation::default();
+    assert_eq!(
+        host.container_engine("synthetic-ok", "Synthetic", &[], &cancel, false)
+            .unwrap()
+            .code,
+        Some(0)
+    );
+    assert_eq!(
+        host.container_engine("synthetic-ok", "Synthetic", &[], &cancel, true)
+            .unwrap()
+            .code,
+        Some(0)
+    );
+    assert!(matches!(
+        host.container_engine("synthetic-fail", "Synthetic", &[], &cancel, false),
+        Err(ExecutionError::Failed(_))
+    ));
+    assert!(matches!(
+        host.container_engine("missing", "Synthetic", &[], &cancel, false),
+        Err(ExecutionError::Disabled(reason)) if reason == "Synthetic not found"
+    ));
+}
+
+#[test]
 fn venv_pip_runs_only_inside_explicit_absolute_environments() {
     let fixture = Fixture::new();
     let venv = fixture.0.join("venv");
