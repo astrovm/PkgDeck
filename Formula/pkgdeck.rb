@@ -2,6 +2,9 @@ class Pkgdeck < Formula
   desc "Browse and manage packages across native package managers"
   homepage "https://github.com/astrovm/PkgDeck"
   license "MIT"
+  url "https://github.com/astrovm/PkgDeck/archive/refs/tags/v0.1.0.tar.gz"
+  version "0.1.0"
+  sha256 "a13234413c193b590735b1c9f2792ab78e44299037b3e3f166b3fef48503bdc8"
   head "https://github.com/astrovm/PkgDeck.git", branch: "main"
 
   depends_on "rust" => :build
