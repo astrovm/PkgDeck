@@ -663,6 +663,10 @@ mod flatpak_bridge_tests {
             Err(ExecutionError::Invalid(_))
         ));
         assert!(matches!(
+            host.flatpak_host_command(Path::new("flatpak"), &[]),
+            Err(ExecutionError::Invalid(_))
+        ));
+        assert!(matches!(
             host.flatpak_host_command_with_bridge(
                 Path::new("/missing-flatpak-spawn"),
                 Path::new("/usr/bin/flatpak"),
