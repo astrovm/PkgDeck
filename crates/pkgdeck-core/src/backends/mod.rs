@@ -370,7 +370,7 @@ impl<T: Transport> Flatpak<T> {
         let mut origins = Vec::new();
         for line in text.lines().filter(|line| !line.trim().is_empty()) {
             let fields: Vec<_> = line.split('\t').collect();
-            if fields.len() != 7
+            if !(6..=7).contains(&fields.len())
                 || !flatpak_id(fields[0])
                 || !flatpak_id(fields[1])
                 || !flatpak_id(fields[2])
@@ -378,9 +378,9 @@ impl<T: Transport> Flatpak<T> {
             {
                 return Err(invalid("flatpak", "invalid list metadata"));
             }
-            let runtime = fields[6]
-                .split(',')
-                .any(|option| option.trim() == "runtime");
+            let runtime = fields
+                .get(6)
+                .is_some_and(|options| options.split(',').any(|option| option.trim() == "runtime"));
             let kind = if runtime { "runtime" } else { "app" };
             let reference = format!("{kind}/{}/{}/{}", fields[0], fields[1], fields[2]);
             origins.push(fields[5].to_owned());

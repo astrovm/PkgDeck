@@ -410,6 +410,27 @@ fn flatpak_lists_user_and_system_applications_without_collapsing_scope() {
         .any(|package| matches!(package.id.scope, Scope::User { .. })));
 }
 
+#[test]
+fn flatpak_list_accepts_an_omitted_empty_options_column() {
+    let cancel = Cancellation::default();
+    let installed = format!(
+        "io.example.App\t{}\tstable\t1.0\tSynthetic app\tflathub\n",
+        std::env::consts::ARCH
+    );
+    let mut backend = Flatpak::new(FlatpakFixture {
+        installed: Some(installed),
+        ..FlatpakFixture::default()
+    });
+    let packages = backend.installed(&cancel).unwrap();
+    assert_eq!(packages.len(), 2);
+    assert!(packages
+        .iter()
+        .all(|package| package.display_name == "io.example.App"));
+    assert!(packages
+        .iter()
+        .all(|package| package.summary == "Synthetic app"));
+}
+
 type FlatpakCall = (Vec<String>, bool, bool);
 
 #[derive(Clone, Default)]
