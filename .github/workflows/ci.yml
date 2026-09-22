@@ -4,6 +4,11 @@ on:
   push:
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      homebrew_only:
+        description: Validate a published Homebrew formula on Linux and macOS only
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -13,8 +18,11 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # PR and ordinary manual runs validate the full matrix. Formula updates use
+  # a targeted manual run; tags reuse the PR run after release-gate verifies it.
   test-terminal:
     name: Test / Terminal (${{ matrix.arch }})
+    if: github.event_name != 'push' && !inputs.homebrew_only
     timeout-minutes: 10
     strategy:
       fail-fast: false
@@ -42,6 +50,7 @@ jobs:
 
   test-vm:
     name: Test / VM (x86_64)
+    if: github.event_name != 'push' && !inputs.homebrew_only
     runs-on: ubuntu-26.04
     timeout-minutes: 35
     env:
@@ -77,6 +86,7 @@ jobs:
 
   test-podman:
     name: Test / Podman (${{ matrix.arch }})
+    if: github.event_name != 'push' && !inputs.homebrew_only
     timeout-minutes: 35
     strategy:
       fail-fast: false
@@ -120,6 +130,7 @@ jobs:
 
   test-native-backends:
     name: Test / Backend / ${{ matrix.backend }} (x86_64)
+    if: github.event_name != 'push' && !inputs.homebrew_only
     timeout-minutes: 25
     strategy:
       fail-fast: false
@@ -144,6 +155,7 @@ jobs:
 
   test-snap:
     name: Test / Backend / snap (x86_64)
+    if: github.event_name != 'push' && !inputs.homebrew_only
     timeout-minutes: 25
     runs-on: ubuntu-26.04
     steps:
@@ -168,6 +180,7 @@ jobs:
 
   test-dev-backends:
     name: Test / Backend / ${{ matrix.backend }} (x86_64)
+    if: github.event_name != 'push' && !inputs.homebrew_only
     timeout-minutes: 25
     strategy:
       fail-fast: false
@@ -190,6 +203,7 @@ jobs:
 
   lint-workspace:
     name: Lint / Workspace (${{ matrix.arch }})
+    if: github.event_name != 'push' && !inputs.homebrew_only
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -218,6 +232,7 @@ jobs:
 
   coverage-workspace:
     name: Coverage / Workspace (x86_64)
+    if: github.event_name != 'push' && !inputs.homebrew_only
     timeout-minutes: 20
     runs-on: ubuntu-26.04
     env:
@@ -246,6 +261,7 @@ jobs:
 
   test-workspace:
     name: Test / Workspace (aarch64)
+    if: github.event_name != 'push' && !inputs.homebrew_only
     timeout-minutes: 20
     runs-on: ubuntu-26.04-arm
     env:
@@ -266,6 +282,7 @@ jobs:
 
   package-homebrew:
     name: Package / Homebrew (${{ matrix.runner }})
+    if: github.event_name != 'push'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     strategy:
@@ -285,6 +302,7 @@ jobs:
             echo /home/linuxbrew/.linuxbrew/bin >> "$GITHUB_PATH"
           fi
       - name: Prepare formula for this checkout
+        if: '!inputs.homebrew_only'
         shell: bash
         run: |
           archive="$RUNNER_TEMP/pkgdeck-source.tar.gz"
@@ -296,10 +314,17 @@ jobs:
             recipe = File.read("Formula/pkgdeck.rb")
             version = File.read("Cargo.toml")[/^version = "([^"]+)"$/, 1]
             stable = "url #{("file://" + source).inspect}\n  version #{version.inspect}\n  sha256 #{Digest::SHA256.file(source).hexdigest.inspect}"
+            recipe.sub!(/^  url .*\n  version .*\n  sha256 .*\n/, "")
             recipe.sub!(/^  head .*\n/, "")
             recipe.sub!(/^  license /, "  #{stable}\n  license ")
             File.write(ARGV.fetch(1), recipe)
           ' "$archive" "$recipe"
+      - name: Use published formula from this checkout
+        if: inputs.homebrew_only
+        shell: bash
+        run: |
+          brew tap-new --no-git astrovm/pkgdeck
+          cp Formula/pkgdeck.rb "$(brew --repository astrovm/pkgdeck)/Formula/pkgdeck.rb"
       - name: Check formula style
         run: brew style astrovm/pkgdeck/pkgdeck
       - name: Build package
@@ -321,6 +346,7 @@ jobs:
 
   package:
     name: Package / Linux (${{ matrix.arch }})
+    if: '!inputs.homebrew_only'
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -416,10 +442,63 @@ jobs:
           path: build/artifacts/*
           if-no-files-found: error
 
+  release-gate:
+    name: Release / Verify reviewed commit
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-26.04
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Check out tagged source and main history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Verify tag matches a merged, CI-tested pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo '::error::Release tag must point to a commit on main.'
+            exit 1
+          fi
+
+          pr=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls" |
+            jq -r --arg sha "$GITHUB_SHA" \
+              '[.[] | select(.merged_at != null and .base.ref == "main" and .merge_commit_sha == $sha)] | first | if . == null then empty else [.number, .head.sha, .head.repo.full_name] | @tsv end')
+          if [[ -z "$pr" ]]; then
+            echo '::error::Release tag must point to a pull request merge commit on main.'
+            exit 1
+          fi
+          IFS=$'\t' read -r pr_number head_sha head_repo <<< "$pr"
+          test -n "$head_sha"
+          test -n "$head_repo"
+
+          head_tree=$(gh api "repos/$GITHUB_REPOSITORY/git/commits/$head_sha" --jq '.tree.sha')
+          if [[ "$head_tree" != "$(git rev-parse 'HEAD^{tree}')" ]]; then
+            echo '::error::Tagged tree differs from the reviewed pull request head.'
+            exit 1
+          fi
+
+          run=$(gh api --method GET "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs" \
+            -f event=pull_request -f "head_sha=$head_sha" -f per_page=100 |
+            jq -r --arg sha "$head_sha" --arg repo "$head_repo" \
+              '[.workflow_runs[] | select(.event == "pull_request" and .head_sha == $sha and .head_repository.full_name == $repo and .status == "completed" and .conclusion == "success" and .path == ".github/workflows/ci.yml")] | first | .html_url // empty')
+          if [[ -z "$run" ]]; then
+            echo "::error::PR #$pr_number has no successful CI run for its merged head commit."
+            exit 1
+          fi
+          echo "Release tag matches PR #$pr_number and successful CI run $run"
+
   release:
     name: Publish / Release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [test-terminal, test-vm, test-podman, test-native-backends, test-snap, test-dev-backends, lint-workspace, coverage-workspace, test-workspace, package-homebrew, package]
+    needs: [release-gate, package]
     runs-on: ubuntu-26.04
     permissions:
       contents: write
@@ -459,6 +538,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: release
     permissions:
+      actions: write
       contents: write
       pull-requests: write
     uses: ./.github/workflows/publish.yml

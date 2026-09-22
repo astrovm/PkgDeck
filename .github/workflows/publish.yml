@@ -23,6 +23,7 @@ jobs:
   formula:
     name: Homebrew
     permissions:
+      actions: write
       contents: write
       pull-requests: write
     runs-on: ubuntu-26.04
@@ -52,15 +53,20 @@ jobs:
           URL="https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/$TAG.tar.gz" SHA="$sha" \
             ruby -e 'path="Formula/pkgdeck.rb"; text=File.read(path); stable="  url #{ENV.fetch("URL").inspect}\n  version #{ENV.fetch("VERSION").inspect}\n  sha256 #{ENV.fetch("SHA").inspect}\n"; abort "Formula head entry missing" unless text.sub!(/^(?:  url .*\n  version .*\n  sha256 .*\n)?  head /, stable + "  head "); File.write(path, text)'
       - name: Open formula update
+        id: formula_pr
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.release.outputs.tag }}
           VERSION: ${{ steps.release.outputs.version }}
         run: |
+          set -euo pipefail
           branch="release/homebrew-$VERSION"
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git fetch origin "$branch:refs/remotes/origin/$branch" || true
+          remote_sha=$(git ls-remote --heads origin "refs/heads/$branch" | cut -f1)
+          if [[ -n "$remote_sha" ]]; then
+            git fetch --no-tags origin "refs/heads/$branch"
+          fi
           git checkout -b "$branch"
           git add Formula/pkgdeck.rb
           if git diff --cached --quiet; then
@@ -68,14 +74,39 @@ jobs:
             exit 0
           fi
           git commit -m "Publish Homebrew formula for $TAG"
-          git push --force-with-lease origin "$branch"
           existing=$(gh pr list --head "$branch" --state open --json url --jq '.[0].url // empty')
+          if [[ -z "$existing" ]]; then
+            closed=$(gh pr list --head "$branch" --state closed --json url --jq '.[0].url // empty')
+            if [[ -n "$closed" ]]; then
+              echo "::error::Formula PR $closed is closed; review it before republishing $TAG."
+              exit 1
+            fi
+          fi
+
+          updated=false
+          if [[ -n "$remote_sha" ]] &&
+             [[ "$(git rev-parse 'HEAD^{tree}')" == "$(git rev-parse "$remote_sha^{tree}")" ]]; then
+            echo "Formula branch already matches $TAG"
+          else
+            git push --force-with-lease="refs/heads/$branch:$remote_sha" origin "HEAD:refs/heads/$branch"
+            updated=true
+          fi
           if [[ -n "$existing" ]]; then
             echo "Updated $existing"
           else
             gh pr create --base main --head "$branch" --title "Publish Homebrew formula for $TAG" \
               --body "Adds the immutable release archive and SHA-256 for $TAG. CI will build and test it on Linux and macOS before merge."
+            updated=true
           fi
+          if [[ "$updated" == true ]]; then
+            echo 'updated=true' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Validate published formula on Linux and macOS
+        if: steps.formula_pr.outputs.updated == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: gh workflow run ci.yml --ref "release/homebrew-$VERSION" -f homebrew_only=true
 
   flatpak:
     name: Flatpak
