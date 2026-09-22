@@ -208,6 +208,14 @@ impl<T: Transport> Apt<T> {
     ) -> CleanupReport {
         let mut report = CleanupReport::default();
         for key in ["autoremove", "autoclean"] {
+            // Unauthenticated `autoclean` always fails for unprivileged users
+            // (`/var/cache/apt/archives/partial` is `_apt:root`), which would
+            // bury the actionable `autoremove` plan under a permission error.
+            // Skip the cache probe until the explicit authenticated "Check APT"
+            // preview; it runs the same `--simulate` through the auth boundary.
+            if key == "autoclean" && !authenticated {
+                continue;
+            }
             match self.cleanup_apt_task(key, cancel, authenticated && key == "autoclean") {
                 Ok(Some(item)) => report.items.push(item),
                 Ok(None) => {}

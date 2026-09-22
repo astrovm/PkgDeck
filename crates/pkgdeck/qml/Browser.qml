@@ -1076,11 +1076,12 @@ Controls.ApplicationWindow {
                 }
             }
             RowLayout {
-                visible: root.cleanupFailures.length > 0
+                visible: root.currentView === "Clean" && (root.cleanupFailures.length > 0 || root.checkedSources().indexOf("apt") >= 0)
                 Layout.fillWidth: true
-                DeckIcon { name: "warning"; ink: root.muted; Layout.preferredWidth: 20; Layout.preferredHeight: 20 }
+                DeckIcon { name: "warning"; ink: root.muted; Layout.preferredWidth: 20; Layout.preferredHeight: 20; visible: root.cleanupFailures.length > 0 }
                 Controls.Label {
                     objectName: "cleanupFailureNotice"
+                    visible: root.cleanupFailures.length > 0
                     text: "Could not check: " + root.cleanupFailures.map(row => root.sourceDisplayName(row.source)).join(", ")
                     color: root.muted
                     wrapMode: Text.WordWrap
@@ -1088,7 +1089,7 @@ Controls.ApplicationWindow {
                 }
                 ActionButton {
                     objectName: "cleanupAuthenticate"
-                    visible: root.cleanupFailures.some(row => row.source === "apt")
+                    visible: root.currentView === "Clean" && root.checkedSources().indexOf("apt") >= 0
                     text: "Check APT"
                     symbol: "refresh"
                     enabled: !backend.busy
@@ -1096,6 +1097,7 @@ Controls.ApplicationWindow {
                 }
                 ActionButton {
                     objectName: "cleanupFailureDetails"
+                    visible: root.cleanupFailures.length > 0
                     text: "Details"
                     symbol: "help"
                     onClicked: cleanupErrorsDialog.open()

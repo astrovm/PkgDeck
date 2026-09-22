@@ -17,7 +17,7 @@ case "$mode" in
     *) echo 'Expected flatpak or direct' >&2; exit 2 ;;
 esac
 [[ $# -gt 0 ]] || { echo 'Packaged CLI command required' >&2; exit 2; }
-python3 "$(dirname "$0")/apt-python.py"
+# Sandboxed APT query parsing and bridge fixtures are covered by pkgdeck-core tests.
 fixture=$(mktemp -d /tmp/pkgdeck-host-parity.XXXXXX)
 trap 'rm -rf "$fixture"' EXIT
 mkdir -p "$fixture/bin" "$fixture/prefix"

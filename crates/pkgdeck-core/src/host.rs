@@ -367,6 +367,59 @@ impl Host {
         }
     }
 
+    /// True when the `docker` executable is emulated by Podman (the
+    /// `/usr/bin/docker` wrapper script or a symlink to `podman`). The Docker
+    /// backend stays unregistered on such hosts so Podman remains the single
+    /// source of truth for the shared image store.
+    pub fn docker_is_podman_shim(&self) -> bool {
+        let path = match self.resolve("docker").ok().flatten() {
+            Some(path) => path,
+            None => return false,
+        };
+        let probe = self.filesystem_path(&path);
+        // Symlink directly to the podman binary.
+        if fs::read_link(&probe)
+            .ok()
+            .is_some_and(|target| target.file_name().is_some_and(|name| name == "podman"))
+        {
+            return true;
+        }
+        // Same file as podman (hardlink or chained symlinks). Path
+        // canonicalization is meaningless across the Flatpak host boundary.
+        if self.runtime != Runtime::Flatpak {
+            if let Some(podman) = self.resolve("podman").ok().flatten() {
+                if let (Ok(docker), Ok(podman)) =
+                    (fs::canonicalize(&path), fs::canonicalize(&podman))
+                {
+                    if docker == podman {
+                        return true;
+                    }
+                }
+            }
+        }
+        // Wrapper script that execs podman; ELF binaries are never parsed.
+        if fs::metadata(&probe)
+            .ok()
+            .is_some_and(|meta| meta.len() < 65536)
+        {
+            if let Ok(bytes) = fs::read(&probe) {
+                let text = String::from_utf8_lossy(&bytes);
+                if text.starts_with("#!")
+                    && text.lines().any(|line| {
+                        let line = line.trim();
+                        line.starts_with("exec ")
+                            && line.split_whitespace().any(|word| {
+                                word.trim_matches('"').rsplit('/').next() == Some("podman")
+                            })
+                    })
+                {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     /// Run Docker or Podman as the invoking user. Reads use a short deadline so
     /// a stopped daemon cannot stall every package view; pulls and removals keep
     /// the normal deferred-cancellation write contract.
@@ -556,40 +609,9 @@ impl Host {
             Err(ExecutionError::Failed(result))
         }
     }
+}
 
-    /// Query libflatpak's dependency and pin aware unused set without creating
-    /// a transaction. The optional host typelib is never loaded from user PATH.
-    pub fn flatpak_unused(&self, cancel: &Cancellation) -> Result<Completion, ExecutionError> {
-        let path = Path::new("/usr/bin/python3");
-        let args = [
-            OsString::from("-I"),
-            OsString::from("-c"),
-            OsString::from(include_str!("flatpak-unused.py")),
-        ];
-        let command = if self.runtime == Runtime::Flatpak {
-            self.flatpak_host_command(path, &args)?
-        } else {
-            self.enabled()?;
-            self.command(path, &args)?
-        };
-        let result = process::run(
-            command,
-            Limits {
-                timeout: std::time::Duration::from_secs(120),
-                output_bytes: 4 * 1024 * 1024,
-            },
-            cancel,
-            false,
-        )?;
-        match result.code {
-            Some(0) => Ok(result),
-            Some(78) => Err(ExecutionError::Disabled(
-                "Flatpak cleanup requires Python GObject and the Flatpak typelib".into(),
-            )),
-            _ => Err(ExecutionError::Failed(result)),
-        }
-    }
-
+impl Host {
     fn flatpak_host_command(
         &self,
         executable: &Path,
@@ -597,7 +619,6 @@ impl Host {
     ) -> Result<Command, ExecutionError> {
         self.flatpak_host_command_with_bridge(&self.bridge, executable, args)
     }
-
     fn flatpak_host_command_with_bridge(
         &self,
         bridge: &Path,
@@ -964,6 +985,226 @@ mod flatpak_bridge_tests {
         assert!(flatpak_host_environment_from(&path).is_none());
         fs::remove_file(path).unwrap();
         assert!(flatpak_host_environment_from(Path::new("/missing-flatpak-spawn")).is_none());
+    }
+}
+
+#[cfg(test)]
+mod docker_shim_tests {
+    use super::*;
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    fn host_with_bin(entries: &[(&str, &str)]) -> (Host, PathBuf) {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SERIAL: AtomicU64 = AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "pkgdeck-docker-shim-{}-{}",
+            std::process::id(),
+            SERIAL.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        for (name, body) in entries {
+            let path = root.join("bin").join(name);
+            std::fs::write(&path, body).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let mut env = BTreeMap::new();
+        env.insert("PATH".into(), root.join("bin").into());
+        (Host::new(Runtime::Native, env), root)
+    }
+
+    #[test]
+    fn docker_symlinked_to_podman_is_a_shim() {
+        let (host, root) = host_with_bin(&[("podman", "#!/bin/sh\nexit 0\n")]);
+        symlink(root.join("bin/podman"), root.join("bin/docker")).unwrap();
+        assert!(host.docker_is_podman_shim());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn docker_wrapper_script_execing_podman_is_a_shim() {
+        let (host, root) = host_with_bin(&[
+            ("podman", "#!/bin/sh\nexit 0\n"),
+            ("docker", "#!/bin/sh\nexec /usr/bin/podman \"$@\"\n"),
+        ]);
+        assert!(host.docker_is_podman_shim());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn real_docker_and_missing_docker_are_not_shims() {
+        let (host, root) = host_with_bin(&[
+            ("podman", "#!/bin/sh\nexit 0\n"),
+            (
+                "docker",
+                "#!/bin/sh\n# podman is also installed, but this is a separate Docker CLI\necho Docker version 99.0\n",
+            ),
+        ]);
+        assert!(!host.docker_is_podman_shim());
+        std::fs::remove_dir_all(root).unwrap();
+        let (lonely, root) = host_with_bin(&[("podman", "#!/bin/sh\nexit 0\n")]);
+        assert!(!lonely.docker_is_podman_shim());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod apt_sandboxed_tests {
+    use super::*;
+    use crate::backends::{NativeTransport, Transport};
+    use std::os::unix::fs::PermissionsExt;
+
+    const BRIDGE: &str = r#"#!/bin/sh
+exe=""
+trailing=""
+collect=0
+for arg in "$@"; do
+  if [ "$collect" = "0" ]; then
+    if [ "$arg" = "--directory=/" ]; then collect=1; fi
+    continue
+  fi
+  case "$arg" in --env=*) continue;; esac
+  if [ -z "$exe" ]; then exe=$arg; else trailing="$trailing $arg"; fi
+done
+case "$exe" in
+  /usr/bin/test)
+    flag=""
+    target=""
+    for token in $trailing; do
+      case "$token" in -*) flag=$token;; *) target=$token;; esac
+    done
+    if [ "$flag" = "-x" ]; then test -f "$target" -a -x "$target"; else test -f "$target"; fi
+    exit $?;;
+  *dpkg-query) cat "$(dirname "$exe")/dpkg.txt";;
+  *apt-cache)
+    case "$trailing" in
+      *policy*) cat "$(dirname "$exe")/policy.txt";;
+      *search*) cat "$(dirname "$exe")/search.txt";;
+      *show*) cat "$(dirname "$exe")/show.txt";;
+      *) exit 99;;
+    esac;;
+  *) exit 99;;
+esac
+"#;
+
+    fn sandboxed_transport() -> (NativeTransport, PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "pkgdeck-apt-sandbox-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let bin = root.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        for name in ["apt-get", "dpkg-query", "apt-cache", "fake-spawn"] {
+            let path = bin.join(name);
+            let body = if name == "fake-spawn" {
+                BRIDGE.into()
+            } else {
+                "#!/bin/sh\nexit 0\n".to_owned()
+            };
+            std::fs::write(&path, body).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        std::fs::write(
+            bin.join("dpkg.txt"),
+            "bash\tamd64\t5.3-2ubuntu1\tinstall ok installed\n\
+             oldpkg\tamd64\t1.0\thold ok installed\n",
+        )
+        .unwrap();
+        std::fs::write(
+            bin.join("policy.txt"),
+            "bash:\n  Installed: 5.3-2ubuntu1\n  Candidate: 5.3-2ubuntu1\n  Version table:\n *** 5.3-2ubuntu1 500\n\
+             oldpkg:\n  Installed: 1.0\n  Candidate: 2.0\n  Version table:\n     2.0 500\n *** 1.0 500\n",
+        )
+        .unwrap();
+        std::fs::write(
+            bin.join("search.txt"),
+            "bash - Bourne Again SHell\noldpkg - Old package\n",
+        )
+        .unwrap();
+        std::fs::write(
+            bin.join("show.txt"),
+            "Package: bash\nArchitecture: amd64\nVersion: 5.3-2ubuntu1\nDescription-en: Bourne Again SHell\n\n\
+             Package: oldpkg\nArchitecture: amd64\nVersion: 2.0\nDescription-en: Old package\n",
+        )
+        .unwrap();
+        let mut env = BTreeMap::new();
+        env.insert("PATH".into(), bin.as_os_str().into());
+        let host = Host {
+            runtime: Runtime::Flatpak,
+            env,
+            excluded: Vec::new(),
+            bridge: bin.join("fake-spawn"),
+        };
+        (
+            NativeTransport {
+                host,
+                authorization: Authorization::Polkit,
+            },
+            root,
+        )
+    }
+
+    fn records(completion: Completion) -> Vec<serde_json::Value> {
+        assert_eq!(completion.code, Some(0));
+        let details: Vec<crate::package::PackageDetails> =
+            serde_json::from_slice(&completion.stdout).unwrap();
+        details
+            .into_iter()
+            .map(|details| serde_json::to_value(details).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn sandboxed_modes_match_native_records() {
+        let (transport, root) = sandboxed_transport();
+        let cancel = Cancellation::default();
+        let installed = transport
+            .apt_query("installed", "", "", &cancel)
+            .map(records)
+            .unwrap();
+        assert_eq!(installed.len(), 2);
+        assert_eq!(installed[0]["package"]["id"]["name"], "bash");
+        assert_eq!(installed[0]["package"]["update"], "current");
+        // Held packages never report an upgrade end to end.
+        assert_eq!(installed[1]["package"]["id"]["name"], "oldpkg");
+        assert_eq!(installed[1]["package"]["update"], "current");
+        let found = transport
+            .apt_query("search", "bash", "", &cancel)
+            .map(records)
+            .unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0]["package"]["id"]["name"], "bash");
+        let details = transport
+            .apt_query("details", "bash", "amd64", &cancel)
+            .map(records)
+            .unwrap();
+        assert_eq!(details.len(), 1);
+        assert_eq!(details[0]["package"]["summary"], "Bourne Again SHell");
+        // Unknown identities and architectures read as empty records, which
+        // the backend reports as NotFound like the native helper.
+        assert!(transport
+            .apt_query("details", "bash", "i386", &cancel)
+            .map(records)
+            .unwrap()
+            .is_empty());
+        assert!(transport
+            .apt_query("details", "ghost", "amd64", &cancel)
+            .map(records)
+            .unwrap()
+            .is_empty());
+        assert!(transport
+            .apt_query("detect", "", "", &cancel)
+            .map(records)
+            .unwrap()
+            .is_empty());
+        assert!(matches!(
+            transport.apt_query("erase", "", "", &cancel),
+            Err(ExecutionError::Invalid(_))
+        ));
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
 

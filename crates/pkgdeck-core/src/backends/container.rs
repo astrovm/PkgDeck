@@ -361,6 +361,16 @@ impl<T: Transport> Backend for Container<T> {
         CAPABILITIES
     }
     fn detect(&mut self, cancel: &Cancellation) -> Result<Availability, EngineError> {
+        // A Podman-provided `docker` wrapper shares Podman's image store.
+        // Registering both would duplicate every image and fail Docker-only
+        // probes (for example `buildx du --builder`); stay unregistered so
+        // Podman remains the single source of truth. Explicit `--from docker`
+        // still surfaces this status instead of failing each query.
+        if self.kind == ContainerKind::Docker && self.transport.docker_is_podman() {
+            return Ok(Availability::Unavailable(
+                "Docker CLI is emulated by Podman on this host; use the Podman source".into(),
+            ));
+        }
         match self.call(&["info", "--format", "{{json .}}"], cancel, false) {
             Ok(_) => Ok(Availability::Available),
             Err(EngineError::Execution(ExecutionError::Disabled(reason))) => {
@@ -441,23 +451,31 @@ impl<T: Transport> Backend for Container<T> {
         self.cleanup_images = Some(images);
         self.cleanup_build_cache = None;
         // Buildx is an optional Docker plugin. Older installations retain image
-        // cleanup without claiming unsupported cache cleanup is available.
+        // cleanup without claiming unsupported cache cleanup is available, and
+        // a failing cache probe (for example a Podman-backed `docker` whose
+        // `buildx version` succeeds but rejects `--builder`) must never
+        // discard the dangling-image plan either.
         if self.kind == ContainerKind::Docker
             && self
                 .call(&["buildx", "version"], cancel, false)
                 .is_ok_and(|result| result.code == Some(0))
         {
-            let ids = self.build_cache(cancel)?;
-            if !ids.is_empty() {
-                items.push(CleanupItem {
-                    id: CleanupId { backend: self.kind.id().into(), key: "build-cache".into() },
-                    kind: CleanupKind::PackageCache,
-                    title: "Docker build cache".into(),
-                    summary: format!("{} unused immutable records · default builder", ids.len()),
-                    preview: format!("Remove these unused build-cache records from the default builder. Later builds may need to rebuild layers. Shared storage may remain.\n{}", ids.join("\n")),
-                });
+            match self.build_cache(cancel) {
+                Ok(ids) => {
+                    if !ids.is_empty() {
+                        items.push(CleanupItem {
+                            id: CleanupId { backend: self.kind.id().into(), key: "build-cache".into() },
+                            kind: CleanupKind::PackageCache,
+                            title: "Docker build cache".into(),
+                            summary: format!("{} unused immutable records · default builder", ids.len()),
+                            preview: format!("Remove these unused build-cache records from the default builder. Later builds may need to rebuild layers. Shared storage may remain.\n{}", ids.join("\n")),
+                        });
+                    }
+                    self.cleanup_build_cache = Some(ids);
+                }
+                Err(EngineError::Cancelled) => return Err(EngineError::Cancelled),
+                Err(_) => {}
             }
-            self.cleanup_build_cache = Some(ids);
         }
         Ok(items)
     }
@@ -645,6 +663,9 @@ mod tests {
         code: Option<i32>,
         failure: Option<ExecutionError>,
         calls: Arc<Mutex<Vec<RecordedCall>>>,
+        shim: bool,
+        fail_du: bool,
+        cancel_du: bool,
     }
     impl Fixture {
         fn new(output: &str) -> Self {
@@ -654,6 +675,9 @@ mod tests {
                 code: Some(0),
                 failure: None,
                 calls: Arc::new(Mutex::new(vec![])),
+                shim: false,
+                fail_du: false,
+                cancel_du: false,
             }
         }
         fn bytes(output: &[u8]) -> Self {
@@ -684,6 +708,9 @@ mod tests {
         }
     }
     impl Transport for Fixture {
+        fn docker_is_podman(&self) -> bool {
+            self.shim
+        }
         fn apt_query(
             &self,
             _: &str,
@@ -729,6 +756,20 @@ mod tests {
             if args == ["buildx", "version"] && self.build_cache.is_none() {
                 return Err(ExecutionError::Disabled("buildx unavailable".into()));
             }
+            if self.cancel_du && args.len() > 2 && args[0] == "buildx" && args[1] == "du" {
+                // Cancellation arriving mid-discovery aborts instead of
+                // degrading to a partial plan.
+                cancel.cancel();
+                return Err(ExecutionError::Cancelled);
+            }
+            if self.fail_du && args.len() > 2 && args[0] == "buildx" && args[1] == "du" {
+                // A Podman-backed `docker` answers `buildx version` but
+                // rejects Docker-only probe flags.
+                return Err(ExecutionError::Failed(completed(
+                    b"Error: unknown flag: --builder",
+                    Some(125),
+                )));
+            }
             self.calls
                 .lock()
                 .unwrap()
@@ -744,6 +785,60 @@ mod tests {
                 self.code,
             ))
         }
+    }
+
+    #[test]
+    fn docker_podman_shim_is_unavailable_to_queries() {
+        let cancel = Cancellation::default();
+        let mut shim = Fixture::new("");
+        shim.shim = true;
+        let mut backend = Container::docker(shim);
+        assert!(matches!(
+            backend.detect(&cancel),
+            Ok(Availability::Unavailable(reason))
+                if reason.contains("Podman")
+        ));
+        // The Podman backend on the same host is unaffected.
+        let mut podman = Container::podman(Fixture::new(""));
+        assert_eq!(podman.detect(&cancel).unwrap(), Availability::Available);
+    }
+
+    #[test]
+    fn docker_build_cache_probe_failure_keeps_dangling_images() {
+        let mut fixture = Fixture::new("sha256:0123456789abcdef\n");
+        fixture.build_cache = Some(String::new());
+        fixture.fail_du = true;
+        let mut backend = Container::docker(fixture);
+        let cancel = Cancellation::default();
+        let plans = backend.cleanup(&cancel).unwrap();
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].id.key, "dangling-images");
+        // The cache plan was never offered, so it cannot execute.
+        assert!(backend
+            .execute(
+                &Operation::Clean(CleanupId {
+                    backend: "docker".into(),
+                    key: "build-cache".into()
+                }),
+                &cancel,
+                &mut |_| {}
+            )
+            .is_err());
+        backend
+            .execute(&Operation::Clean(plans[0].id.clone()), &cancel, &mut |_| {})
+            .unwrap();
+    }
+
+    #[test]
+    fn docker_build_cache_cancellation_aborts_discovery() {
+        let mut fixture = Fixture::new("sha256:0123456789abcdef\n");
+        fixture.build_cache = Some(String::new());
+        fixture.cancel_du = true;
+        let mut backend = Container::docker(fixture);
+        assert_eq!(
+            backend.cleanup(&Cancellation::default()),
+            Err(EngineError::Cancelled)
+        );
     }
 
     #[test]

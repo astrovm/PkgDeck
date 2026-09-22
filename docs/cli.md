@@ -98,11 +98,10 @@ and partial-failure rules as package operations. `--yes` skips the interactive
 confirmation; `--json` exposes typed items and per-source failures.
 
 Cleanup includes APT unused dependencies and obsolete downloads; Homebrew unused
-formulae and old downloads; Flatpak unused runtimes/extensions per installation;
-Docker/Podman dangling images; Docker Buildx reclaimable immutable cache; and
+formulae and old downloads; Docker/Podman dangling images; Docker Buildx reclaimable immutable cache; and
 npm, pip, and uv caches. Volumes are never included. pip requires an explicit
 virtual environment, as with its other operations. pnpm pruning and Podman build
-cache cleanup are not offered because an accurate native preview is unavailable.
+cache cleanup and Flatpak unused-runtime removal are not offered because an accurate native preview is unavailable.
 
 Use `pkd clean --authenticate` to inspect protected APT cache files. This only
 runs a privileged simulation; removing files requires a separate cleanup command

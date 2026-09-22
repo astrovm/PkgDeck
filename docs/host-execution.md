@@ -22,9 +22,10 @@ Classic Snap executes host tools after removing paths inside `$SNAP` from discov
 Flatpak uses `flatpak-spawn --host`, with access to `org.freedesktop.Flatpak` on
 the session bus. It reads the host environment once, applies the same allowlist
 as native execution, and clears the environment before invoking each host executable.
-Pinned privileged paths stay pinned; missing host access fails closed. APT metadata
-uses the host’s `python3-apt`; unused Flatpak runtime previews require host Python GI
-and the Flatpak typelib. Neither dependency is installed automatically. See the
+Pinned privileged paths stay pinned; missing host access fails closed. Sandboxed APT
+metadata is read through the host's `dpkg-query` and `apt-cache`; native builds use
+the bundled libapt helper. Flatpak unused-runtime cleanup is not offered until an
+authoritative native preview can be implemented without a Python dependency. See the
 [Flatpak command reference](https://docs.flatpak.org/en/latest/flatpak-command-reference.html#flatpak-spawn).
 
 Snap uses classic confinement because its purpose requires discovering and invoking

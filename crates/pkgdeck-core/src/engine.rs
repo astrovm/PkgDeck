@@ -586,12 +586,11 @@ impl Engine {
             .ready(operation.backend(), operation.capability(), cancel)
             .and_then(|backend| {
                 if let Operation::Clean(id) = operation {
-                    let current = backend.cleanup(cancel)?;
-                    if expected.as_ref().is_none_or(|expected| {
-                        !current
-                            .iter()
-                            .any(|item| item.id == *id && item == expected)
-                    }) {
+                    // Backends may need an explicitly authorized preview for
+                    // this exact task (APT autoclean, for example). A general
+                    // discovery would omit it and reject a valid reviewed plan.
+                    let current = backend.cleanup_plan(id, cancel)?;
+                    if expected.as_ref() != Some(&current) {
                         return Err(EngineError::InvalidResponse {
                             backend: id.backend.clone(),
                             reason: "Cleanup plan changed or expired; reload and review it again."

@@ -1,5 +1,6 @@
 //! Native package-manager, container image, Homebrew formula/cask, and local AppImage adapters.
 mod appimage;
+mod apt_cli;
 mod cleanup;
 mod container;
 mod firmware;
@@ -105,11 +106,33 @@ pub trait Transport: Send {
         write: bool,
         system: bool,
     ) -> Result<Completion, ExecutionError>;
+    /// An unused-ref preview is only supported by transports with an
+    /// authoritative native libflatpak implementation. A CLI approximation
+    /// must never authorize `uninstall --unused`.
+    fn supports_flatpak_cleanup(&self) -> bool {
+        true
+    }
     /// Read-only libflatpak inventory; never runs an uninstall as a preview.
     fn flatpak_unused(&self, _cancel: &Cancellation) -> Result<Completion, ExecutionError> {
         Err(ExecutionError::Disabled(
-            "Flatpak cleanup requires Python GObject and the Flatpak typelib".into(),
+            "An authoritative Flatpak unused-ref preview is unavailable".into(),
         ))
+    }
+    /// True when the host `docker` executable is emulated by Podman.
+    /// Fixtures keep the default; the native transport probes the host.
+    fn docker_is_podman(&self) -> bool {
+        false
+    }
+    /// Sandboxed host APT query; only the native transport implements it.
+    /// Fixtures keep the default because they bypass host execution.
+    fn apt_query_sandboxed(
+        &self,
+        _mode: &str,
+        _query: &str,
+        _arch: &str,
+        _cancel: &Cancellation,
+    ) -> Result<Completion, ExecutionError> {
+        Err(ExecutionError::Disabled("APT not found".into()))
     }
     /// Read one sanitized host environment value, if the fixture provides it.
     fn env(&self, _name: &str) -> Option<OsString> {
@@ -196,26 +219,7 @@ impl Transport for NativeTransport {
             return Err(ExecutionError::Disabled("APT not found".into()));
         }
         if self.host.runtime == crate::host::Runtime::Flatpak {
-            let result = self.host.read(
-                std::path::Path::new("/usr/bin/python3"),
-                &[
-                    "-c".into(),
-                    include_str!("../apt-query.py").into(),
-                    mode.into(),
-                    query.into(),
-                    arch.into(),
-                ],
-                Limits {
-                    timeout: Duration::from_secs(120),
-                    output_bytes: 32 * 1024 * 1024,
-                },
-                cancel,
-            )?;
-            return if result.code == Some(0) {
-                Ok(result)
-            } else {
-                Err(ExecutionError::Failed(result))
-            };
+            return self.apt_query_sandboxed(mode, query, arch, cancel);
         }
         let executable = apt_query_executable(
             &std::env::current_exe().map_err(|e| ExecutionError::Io(e.to_string()))?,
@@ -234,6 +238,144 @@ impl Transport for NativeTransport {
             Ok(result)
         } else {
             Err(ExecutionError::Failed(result))
+        }
+    }
+    /// Sandboxed host APT query without interpreter payloads: drives the
+    /// host's `dpkg-query`/`apt-cache` through the host bridge and assembles
+    /// the same records as the native helper. Read-only; never writes cache.
+    fn apt_query_sandboxed(
+        &self,
+        mode: &str,
+        query: &str,
+        arch: &str,
+        cancel: &Cancellation,
+    ) -> Result<Completion, ExecutionError> {
+        fn finish(details: Vec<PackageDetails>) -> Result<Completion, ExecutionError> {
+            Ok(Completion {
+                code: Some(0),
+                signal: None,
+                stdout: serde_json::to_vec(&details)
+                    .map_err(|error| ExecutionError::Io(error.to_string()))?,
+                stderr: vec![],
+                truncated: false,
+                cancellation_deferred: false,
+            })
+        }
+        let limits = Limits {
+            timeout: Duration::from_secs(120),
+            output_bytes: 32 * 1024 * 1024,
+        };
+        let missing = || ExecutionError::Disabled("APT not found".into());
+        let dpkg = self.host.resolve("dpkg-query")?.ok_or_else(missing)?;
+        let cache = self.host.resolve("apt-cache")?.ok_or_else(missing)?;
+        let output = |executable: &std::path::Path, args: &[OsString]| {
+            let result = self.host.read(executable, args, limits, cancel)?;
+            if result.code == Some(0) && !result.truncated {
+                Ok(String::from_utf8_lossy(&result.stdout).into_owned())
+            } else {
+                Err(ExecutionError::Failed(result))
+            }
+        };
+        let installed_rows = || {
+            output(
+                &dpkg,
+                &[
+                    OsString::from("-W"),
+                    OsString::from("-f${Package}\t${Architecture}\t${Version}\t${Status}\n"),
+                ],
+            )
+            .map(|text| apt_cli::parse_dpkg_table(&text))
+        };
+        match mode {
+            "detect" => finish(vec![]),
+            "installed" => {
+                let rows = installed_rows()?;
+                if rows.is_empty() {
+                    return finish(vec![]);
+                }
+                let mut names: Vec<OsString> = rows
+                    .iter()
+                    .map(|row| {
+                        if row.arch == "all" {
+                            OsString::from(&row.name)
+                        } else {
+                            OsString::from(format!("{}:{}", row.name, row.arch))
+                        }
+                    })
+                    .collect();
+                names.sort();
+                names.dedup();
+                let policy = output(&cache, &[&[OsString::from("policy")], &names[..]].concat())?;
+                let show = output(&cache, &[&[OsString::from("show")], &names[..]].concat())?;
+                finish(apt_cli::installed_packages(
+                    &rows,
+                    &apt_cli::parse_policy_dump(&policy),
+                    &apt_cli::parse_show_dump(&show),
+                ))
+            }
+            "search" => {
+                // Literal-substring semantics without handing user text to the
+                // native matcher: narrow server-side with an escaped pattern,
+                // then filter on name plus short description in Rust.
+                let escaped: String = query
+                    .chars()
+                    .flat_map(|char| {
+                        if ".[{()*+?^$|\\".contains(char) {
+                            vec!['\\', char]
+                        } else {
+                            vec![char]
+                        }
+                    })
+                    .collect();
+                let dump = output(&cache, &[OsString::from("search"), OsString::from(escaped)])?;
+                let candidates = apt_cli::parse_search_dump(&dump);
+                let folded = query.to_lowercase();
+                let mut names: Vec<OsString> = candidates
+                    .iter()
+                    .filter(|(name, summary)| {
+                        format!("{name} {summary}").to_lowercase().contains(&folded)
+                    })
+                    .map(|(name, _)| OsString::from(name))
+                    .collect();
+                names.sort();
+                names.dedup();
+                if names.is_empty() {
+                    return finish(vec![]);
+                }
+                let policy = output(&cache, &[&[OsString::from("policy")], &names[..]].concat())?;
+                let show = output(&cache, &[&[OsString::from("show")], &names[..]].concat())?;
+                finish(apt_cli::search_packages(
+                    query,
+                    &apt_cli::parse_search_dump(&dump),
+                    &apt_cli::parse_policy_dump(&policy),
+                    &apt_cli::parse_show_dump(&show),
+                    &installed_rows()?,
+                ))
+            }
+            "details" => {
+                let target = if arch == "all" {
+                    query.to_owned()
+                } else {
+                    format!("{query}:{arch}")
+                };
+                let policy = output(&cache, &[OsString::from("policy"), OsString::from(&target)])?;
+                let show = output(&cache, &[OsString::from("show"), OsString::from(&target)])?;
+                let parsed = apt_cli::parse_policy_dump(&policy);
+                // An empty record lets the backend report NotFound exactly
+                // like the native helper does for unknown identities.
+                finish(
+                    apt_cli::details_package(
+                        query,
+                        arch,
+                        &parsed,
+                        &apt_cli::parse_show_dump(&show),
+                        &installed_rows()?,
+                    )
+                    .into_iter()
+                    .collect(),
+                )
+            }
+            _ => Err(ExecutionError::Invalid("unknown APT query".into())),
         }
     }
     fn apt_write(
@@ -262,7 +404,16 @@ impl Transport for NativeTransport {
             .flatpak(args, cancel, write, system, self.authorization)
     }
     fn flatpak_unused(&self, cancel: &Cancellation) -> Result<Completion, ExecutionError> {
-        self.host.flatpak_unused(cancel)
+        let _ = cancel;
+        Err(ExecutionError::Disabled(
+            "An authoritative Flatpak unused-ref preview is unavailable".into(),
+        ))
+    }
+    fn supports_flatpak_cleanup(&self) -> bool {
+        false
+    }
+    fn docker_is_podman(&self) -> bool {
+        self.host.docker_is_podman_shim()
     }
     fn env(&self, name: &str) -> Option<OsString> {
         self.host.var(name)
@@ -618,7 +769,11 @@ impl<T: Transport> Backend for Flatpak<T> {
         "flatpak"
     }
     fn capabilities(&self) -> &[Capability] {
-        CLEAN_CAPABILITIES
+        if self.transport.supports_flatpak_cleanup() {
+            CLEAN_CAPABILITIES
+        } else {
+            CAPABILITIES
+        }
     }
     fn detect(&mut self, cancel: &Cancellation) -> Result<Availability, EngineError> {
         match self.call(
@@ -747,6 +902,9 @@ impl<T: Transport> Backend for Flatpak<T> {
         })
     }
     fn cleanup(&mut self, cancel: &Cancellation) -> Result<Vec<CleanupItem>, EngineError> {
+        if !self.transport.supports_flatpak_cleanup() {
+            return Err(self.unsupported(Capability::Clean));
+        }
         self.cleanup_unused(cancel)
     }
     fn execute(
@@ -756,6 +914,9 @@ impl<T: Transport> Backend for Flatpak<T> {
         progress: &mut dyn FnMut(Progress),
     ) -> Result<OperationOutcome, EngineError> {
         if let Operation::Clean(id) = operation {
+            if !self.transport.supports_flatpak_cleanup() {
+                return Err(self.unsupported(Capability::Clean));
+            }
             return self.clean_unused(id, cancel);
         }
         let (id, verb) = match operation {
@@ -3668,6 +3829,16 @@ pub fn native_engine(
         ),
     ] {
         if allowed(id) {
+            // A Podman compatibility wrapper does not represent a second
+            // image store. Leave it out of automatic and multi-source views;
+            // an explicit Docker-only selection still explains why it cannot
+            // be queried.
+            if id == "docker"
+                && Host::current().docker_is_podman_shim()
+                && !(explicit && sources.len() == 1)
+            {
+                continue;
+            }
             let mut backend = make(NativeTransport {
                 host: Host::current(),
                 authorization,

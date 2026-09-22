@@ -344,13 +344,40 @@ fn apt_cleanup_uses_dry_run_plans_and_fixed_operations() {
     let fixture = Fixture::new();
     let mut apt = Apt::new(fixture);
     let cancel = Cancellation::default();
+    // Unauthenticated discovery offers the orphan plan while the cache probe
+    // waits for the explicit authenticated preview.
     let items = apt.cleanup(&cancel).unwrap();
-    assert_eq!(items.len(), 2);
+    assert_eq!(items.len(), 1);
     assert_eq!(items[0].id.backend, "apt");
-    for item in items {
+    assert_eq!(items[0].id.key, "autoremove");
+    let report = apt.cleanup_authenticated(&cancel);
+    assert_eq!(report.items.len(), 2);
+    assert!(report.failures.is_empty());
+    for item in report.items {
         apt.execute(&Operation::Clean(item.id), &cancel, &mut |_| {})
             .unwrap();
     }
+}
+
+#[test]
+fn authenticated_apt_cache_plan_survives_engine_revalidation() {
+    let cancel = Cancellation::default();
+    let mut engine = Engine::default();
+    engine.register(Apt::new(Fixture::new())).unwrap();
+    let report = engine.cleanup_authenticated(&cancel);
+    assert!(report.failures.is_empty());
+    let cache = report
+        .items
+        .into_iter()
+        .find(|item| item.id.key == "autoclean")
+        .unwrap();
+    engine
+        .execute(&Operation::Clean(cache.id.clone()), &cancel, &mut |_| {})
+        .unwrap();
+    // The reviewed task is single-use, including after a successful write.
+    assert!(engine
+        .execute(&Operation::Clean(cache.id), &cancel, &mut |_| {})
+        .is_err());
 }
 
 #[test]
@@ -3421,6 +3448,7 @@ fn flatpak_cleanup_is_scope_specific_and_revalidated() {
     assert_eq!(items.len(), 2);
     assert_eq!(items[0].id.key, "unused-user");
     assert_eq!(items[1].id.key, "unused-system");
+    assert!(items[0].preview.contains("4096 bytes installed"));
     for item in items {
         backend
             .execute(
@@ -3443,6 +3471,33 @@ fn flatpak_cleanup_is_scope_specific_and_revalidated() {
     );
     assert_eq!(calls[1].1[0], "--system");
     assert!(calls.iter().all(|(_, _, write)| *write));
+}
+
+#[test]
+fn native_flatpak_cleanup_is_unavailable_without_an_authoritative_preview() {
+    let mut backend = Flatpak::new(NativeTransport {
+        host: pkgdeck_core::host::Host::new(
+            pkgdeck_core::host::Runtime::Native,
+            Default::default(),
+        ),
+        authorization: Authorization::Polkit,
+    });
+    assert!(!backend.capabilities().contains(&Capability::Clean));
+    assert!(matches!(
+        backend.cleanup(&Cancellation::default()),
+        Err(EngineError::Unsupported { .. })
+    ));
+    assert!(matches!(
+        backend.execute(
+            &Operation::Clean(CleanupId {
+                backend: "flatpak".into(),
+                key: "unused-user".into(),
+            }),
+            &Cancellation::default(),
+            &mut |_| {},
+        ),
+        Err(EngineError::Unsupported { .. })
+    ));
 }
 
 #[test]
@@ -3587,10 +3642,12 @@ fn apt_cleanup_preserves_orphans_and_authenticates_only_explicit_cache_preview()
         ..Default::default()
     };
     let mut backend = Apt::new(fixture.clone());
+    // Unauthenticated discovery skips the cache probe (it needs the auth
+    // boundary) instead of reporting a permission failure.
     let report = backend.cleanup_report(&Cancellation::default());
     assert_eq!(report.items.len(), 1);
     assert_eq!(report.items[0].id.key, "autoremove");
-    assert_eq!(report.failures.len(), 1);
+    assert!(report.failures.is_empty());
     assert!(fixture
         .calls
         .lock()

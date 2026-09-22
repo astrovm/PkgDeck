@@ -326,6 +326,13 @@ TestCase {
         verify(all.visible);
         mouseClick(all);
         verify(fake.confirmation.indexOf("clean-all") >= 0);
+        // The unauthenticated cache probe is skipped, so an APT task alone
+        // must still offer the authenticated "Check APT" preview.
+        verify(!findChild(browser, "cleanupFailureNotice").visible);
+        verify(findChild(browser, "cleanupAuthenticate").visible);
+        fake.rows = "[]";
+        wait(20);
+        verify(findChild(browser, "cleanupAuthenticate").visible);
     }
     function test_authenticated_cleanup_does_not_reload_unprivileged() {
         browser.openView("Clean");
