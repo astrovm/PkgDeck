@@ -20,6 +20,16 @@ const ALL: &[Capability] = &[
     Capability::Refresh,
     Capability::Upgrade,
 ];
+const ALL_WITH_CLEAN: &[Capability] = &[
+    Capability::Search,
+    Capability::Details,
+    Capability::Installed,
+    Capability::Install,
+    Capability::Remove,
+    Capability::Refresh,
+    Capability::Upgrade,
+    Capability::Clean,
+];
 fn id(backend: &str) -> PackageId {
     PackageId {
         backend: backend.into(),
@@ -619,7 +629,7 @@ impl Backend for Defaults {
         "defaults"
     }
     fn capabilities(&self) -> &[Capability] {
-        ALL
+        ALL_WITH_CLEAN
     }
     fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
         Ok(Availability::Available)
@@ -655,6 +665,32 @@ fn unimplemented_backend_methods_explicitly_report_unsupported() {
         engine.execute(&Operation::Upgrade(id("defaults")), &cancel, &mut |_| {}),
         Err(EngineError::Unsupported {
             capability: Capability::Upgrade,
+            ..
+        })
+    ));
+    let cleanup = engine.cleanup(&cancel);
+    assert!(cleanup.items.is_empty());
+    assert!(matches!(
+        cleanup.failures.as_slice(),
+        [BackendFailure {
+            backend,
+            error: EngineError::Unsupported {
+                capability: Capability::Clean,
+                ..
+            }
+        }] if backend == "defaults"
+    ));
+    assert!(matches!(
+        engine.execute(
+            &Operation::Clean(CleanupId {
+                backend: "defaults".into(),
+                key: "missing".into(),
+            }),
+            &cancel,
+            &mut |_| {}
+        ),
+        Err(EngineError::Unsupported {
+            capability: Capability::Clean,
             ..
         })
     ));
@@ -776,6 +812,23 @@ fn streaming_reports_cumulative_partials_equal_to_the_sync_query() {
     // The engine reassembles itself and stays usable afterwards.
     let report = dead.search("fixture", &Cancellation::default());
     assert!(report.failures.is_empty());
+
+    // Detection can cancel before a query starts. The cancellation is
+    // preserved as a backend failure rather than being mistaken for an empty
+    // successful report.
+    let cancelled = Cancellation::default();
+    let mut detecting = Engine::default();
+    detecting
+        .register(Synthetic::new("cancel-detect", Fault::CancelDetect))
+        .unwrap();
+    let report = detecting.search("fixture", &cancelled);
+    assert!(matches!(
+        report.failures.as_slice(),
+        [BackendFailure {
+            error: EngineError::Cancelled,
+            ..
+        }]
+    ));
 }
 
 #[test]
@@ -799,4 +852,30 @@ fn installed_stream_reports_cumulative_partials_equal_to_the_sync_query() {
     assert_eq!(partials.last().unwrap(), &final_report);
     // The terminal emission matches a synchronous query on the same state.
     assert_eq!(live.installed(&cancel), final_report);
+}
+
+#[test]
+fn cleanup_revalidates_confirmed_preview_before_writing() {
+    let mut engine = Engine::default();
+    engine.register(Cleaner).unwrap();
+    let cancel = Cancellation::default();
+    let mut plan = engine.cleanup(&cancel).items.remove(0);
+    let operation = Operation::Clean(plan.id.clone());
+    plan.preview = "a different previously confirmed target".into();
+    engine.remember_cleanup_plan(plan);
+    let mut events = Vec::new();
+    assert!(matches!(
+        engine.execute(&operation, &cancel, &mut |event| events.push(event)),
+        Err(EngineError::InvalidResponse { reason, .. }) if reason.contains("reload")
+    ));
+    assert_eq!(events.len(), 2);
+    let plan = engine.cleanup(&cancel).items.remove(0);
+    assert!(engine
+        .execute(&Operation::Clean(plan.id), &cancel, &mut |_| {})
+        .is_ok());
+    // A used confirmation cannot be replayed without a new preview.
+    assert!(matches!(
+        engine.execute(&operation, &cancel, &mut |_| {}),
+        Err(EngineError::InvalidResponse { .. })
+    ));
 }

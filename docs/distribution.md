@@ -79,8 +79,11 @@ checksums, and provenance, then upload Snap packages when
 requires Snap Store approval. `Publish Flatpak repository` dispatches the immutable
 release bundles to [`astrovm/flatpak`](https://github.com/astrovm/flatpak) when
 `FLATPAK_REPO_TOKEN` is configured, matching the AdventureMods release flow.
-Flatpak packages include the narrow host bridge used for Flatpak lifecycle
-operations; all other host managers continue to fail closed.
+Without that token, manually dispatch `publish.yml` in `astrovm/flatpak` with
+`repository=astrovm/PkgDeck` and the release tag. Snap files remain downloadable
+from GitHub without Store credentials. Flatpak packages use the host bridge for
+all supported managers, with explicit host filesystem access and the same
+confirmation and authorization rules as native execution.
 
 The APT reader and bundled libraries keep their original licenses. Package
 scripts include dependency notices alongside PkgDeck's MIT license.

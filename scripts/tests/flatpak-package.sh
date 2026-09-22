@@ -4,6 +4,9 @@ set -euo pipefail
 if [[ ${1:-} != --session ]]; then
     exec dbus-run-session -- bash "$0" --session
 fi
+# A separate private bus lets this test supply a disposable host manager without
+# contaminating the real Flatpak lifecycle's host environment.
+bash "$(dirname "$0")/host-package.sh" flatpak flatpak run --command=pkd io.github.astrovm.PkgDeck
 log_dir=$(mktemp -d)
 trap 'rm -rf "$log_dir"' EXIT
 flatpak --user remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo

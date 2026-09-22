@@ -107,6 +107,35 @@ pub trait Backend: Send {
     fn cleanup(&mut self, _cancel: &Cancellation) -> Result<Vec<CleanupItem>, EngineError> {
         Err(self.unsupported(Capability::Clean))
     }
+    fn cleanup_report(&mut self, cancel: &Cancellation) -> CleanupReport {
+        match self.cleanup(cancel) {
+            Ok(items) => CleanupReport {
+                items,
+                failures: vec![],
+            },
+            Err(error) => CleanupReport {
+                items: vec![],
+                failures: vec![BackendFailure {
+                    backend: self.id().into(),
+                    error,
+                }],
+            },
+        }
+    }
+    /// Explicitly authorized read-only discovery; never used by background loads.
+    fn cleanup_authenticated(&mut self, cancel: &Cancellation) -> CleanupReport {
+        self.cleanup_report(cancel)
+    }
+    fn cleanup_plan(
+        &mut self,
+        id: &CleanupId,
+        cancel: &Cancellation,
+    ) -> Result<CleanupItem, EngineError> {
+        self.cleanup(cancel)?
+            .into_iter()
+            .find(|item| item.id == *id)
+            .ok_or(EngineError::NotFound)
+    }
     fn execute(
         &mut self,
         operation: &Operation,
@@ -204,6 +233,7 @@ pub struct Engine {
     /// Failed detections are never cached: the query retries them. Engines
     /// are short-lived per query, so entries cannot go stale.
     detected: BTreeMap<String, Availability>,
+    cleanup_plans: BTreeMap<CleanupId, CleanupItem>,
 }
 impl Engine {
     pub fn register(&mut self, backend: impl Backend + 'static) -> Result<(), EngineError> {
@@ -277,6 +307,13 @@ impl Engine {
     /// Discover cleanup plans independently per backend. Sources without a
     /// cleanup capability are omitted; they have nothing to show on this view.
     pub fn cleanup(&mut self, cancel: &Cancellation) -> CleanupReport {
+        self.cleanup_inner(cancel, false)
+    }
+    pub fn cleanup_authenticated(&mut self, cancel: &Cancellation) -> CleanupReport {
+        self.cleanup_inner(cancel, true)
+    }
+    fn cleanup_inner(&mut self, cancel: &Cancellation, authenticated: bool) -> CleanupReport {
+        self.cleanup_plans.clear();
         let mut report = CleanupReport::default();
         let ids: Vec<_> = self.backends.keys().cloned().collect();
         for id in ids {
@@ -288,19 +325,25 @@ impl Engine {
                 continue;
             }
             let mut seen = BTreeSet::new();
-            let result = self
-                .ready(&id, Capability::Clean, cancel)
-                .and_then(|backend| backend.cleanup(cancel));
+            let result = self.ready(&id, Capability::Clean, cancel).map(|backend| {
+                if authenticated {
+                    backend.cleanup_authenticated(cancel)
+                } else {
+                    backend.cleanup_report(cancel)
+                }
+            });
             match result {
-                Ok(items)
-                    if items.iter().all(|item| {
-                        item.id.backend == id
-                            && !item.id.key.is_empty()
-                            && !item.title.trim().is_empty()
-                            && seen.insert(item.id.clone())
-                    }) =>
+                Ok(partial)
+                    if partial.failures.iter().all(|failure| failure.backend == id)
+                        && partial.items.iter().all(|item| {
+                            item.id.backend == id
+                                && !item.id.key.is_empty()
+                                && !item.title.trim().is_empty()
+                                && seen.insert(item.id.clone())
+                        }) =>
                 {
-                    report.items.extend(items)
+                    report.items.extend(partial.items);
+                    report.failures.extend(partial.failures);
                 }
                 Ok(_) => report.failures.push(BackendFailure {
                     backend: id.clone(),
@@ -313,7 +356,16 @@ impl Engine {
             }
         }
         report.items.sort_by(|a, b| a.id.cmp(&b.id));
+        for item in &report.items {
+            self.remember_cleanup_plan(item.clone());
+        }
         report
+    }
+
+    /// Preserve the preview a frontend showed for confirmation. Execution
+    /// checks it against a fresh native preview before allowing a cleanup write.
+    pub fn remember_cleanup_plan(&mut self, item: CleanupItem) {
+        self.cleanup_plans.insert(item.id.clone(), item);
     }
     fn query(&mut self, query: Option<&str>, cancel: &Cancellation) -> PackageReport {
         let mut report = PackageReport::default();
@@ -526,9 +578,27 @@ impl Engine {
         events: &mut dyn FnMut(Event),
     ) -> Result<OperationOutcome, EngineError> {
         events(Event::Started(operation.clone()));
+        let expected = match operation {
+            Operation::Clean(id) => self.cleanup_plans.remove(id),
+            _ => None,
+        };
         let result = self
             .ready(operation.backend(), operation.capability(), cancel)
             .and_then(|backend| {
+                if let Operation::Clean(id) = operation {
+                    let current = backend.cleanup(cancel)?;
+                    if expected.as_ref().is_none_or(|expected| {
+                        !current
+                            .iter()
+                            .any(|item| item.id == *id && item == expected)
+                    }) {
+                        return Err(EngineError::InvalidResponse {
+                            backend: id.backend.clone(),
+                            reason: "Cleanup plan changed or expired; reload and review it again."
+                                .into(),
+                        });
+                    }
+                }
                 backend.execute(operation, cancel, &mut |progress| {
                     events(Event::Progress {
                         operation: operation.clone(),

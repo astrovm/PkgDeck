@@ -379,6 +379,7 @@ jobs:
           'build/artifacts/PkgDeck-${{ matrix.arch }}.AppImage' --cli </dev/null | grep -F 'Usage: pkd'
           'build/artifacts/PkgDeck-${{ matrix.arch }}.AppImage' --cli doctor
           appimage=$PWD/build/artifacts/PkgDeck-${{ matrix.arch }}.AppImage
+          scripts/tests/host-package.sh direct "$appimage" --cli
           data=$PWD/build/appimage-backend-data
           XDG_DATA_HOME="$data" "$appimage" --cli --json --yes --from appimage search "$appimage" | jq -e '.exit_code == 0'
           XDG_DATA_HOME="$data" "$appimage" --cli --json --yes --from appimage install "$appimage" | jq -e '.exit_code == 0'
@@ -407,6 +408,7 @@ jobs:
           sudo snap install --dangerous --classic build/artifacts/*.snap
           snap run pkgdeck.pkd --version
           snap run pkgdeck.pkd doctor
+          scripts/tests/host-package.sh direct snap run pkgdeck.pkd
       - name: Upload packages
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

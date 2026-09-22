@@ -3320,3 +3320,351 @@ fn system_manager_actions_preserve_native_target_and_noninteractive_mode() {
         assert_eq!(fixture.writes.lock().unwrap().len(), 5);
     }
 }
+
+#[derive(Clone, Default)]
+struct CleanupFixture {
+    preview: String,
+    truncated: bool,
+    apt_cache_denied: bool,
+    calls: Arc<Mutex<Vec<DevCall>>>,
+}
+impl Transport for CleanupFixture {
+    fn apt_query(
+        &self,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: &Cancellation,
+    ) -> Result<Completion, ExecutionError> {
+        unreachable!()
+    }
+    fn apt_write(&self, _: AptAction, _: &Cancellation) -> Result<Completion, ExecutionError> {
+        unreachable!()
+    }
+    fn brew(
+        &self,
+        _: &[OsString],
+        _: &Cancellation,
+        _: bool,
+    ) -> Result<Completion, ExecutionError> {
+        unreachable!()
+    }
+    fn system_manager(
+        &self,
+        exe: &str,
+        args: &[OsString],
+        cancel: &Cancellation,
+        authenticated: bool,
+    ) -> Result<Completion, ExecutionError> {
+        self.dev_tool(exe, args, cancel, authenticated)?;
+        let cache = args.iter().any(|arg| arg == "autoclean");
+        if cache && self.apt_cache_denied && !authenticated {
+            return Err(ExecutionError::Io("Permission denied".into()));
+        }
+        Ok(output(if cache {
+            "Del obsolete-package 1.0 [1 kB]\n"
+        } else {
+            "Remv unused-package [1.0]\n"
+        }))
+    }
+    fn flatpak_unused(&self, _: &Cancellation) -> Result<Completion, ExecutionError> {
+        let mut result = output(&self.preview);
+        result.truncated = self.truncated;
+        Ok(result)
+    }
+    fn flatpak(
+        &self,
+        args: &[OsString],
+        cancel: &Cancellation,
+        write: bool,
+        _: bool,
+    ) -> Result<Completion, ExecutionError> {
+        self.dev_tool("flatpak", args, cancel, write)
+    }
+    fn env(&self, name: &str) -> Option<OsString> {
+        (name == "VIRTUAL_ENV").then(|| "/tmp/synthetic-venv".into())
+    }
+    fn venv_pip(
+        &self,
+        _: &std::path::Path,
+        args: &[OsString],
+        cancel: &Cancellation,
+        write: bool,
+    ) -> Result<Completion, ExecutionError> {
+        self.dev_tool("pip", args, cancel, write)
+    }
+    fn dev_tool(
+        &self,
+        exe: &str,
+        args: &[OsString],
+        _: &Cancellation,
+        write: bool,
+    ) -> Result<Completion, ExecutionError> {
+        self.calls.lock().unwrap().push((
+            exe.into(),
+            args.iter()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect(),
+            write,
+        ));
+        let mut result = output(if write { "" } else { &self.preview });
+        result.truncated = self.truncated;
+        Ok(result)
+    }
+}
+
+#[test]
+fn flatpak_cleanup_is_scope_specific_and_revalidated() {
+    let fixture = CleanupFixture { preview: r#"[{"scope":"user","reference":"runtime/org.example.Runtime/x86_64/stable","bytes":4096},{"scope":"system","reference":"runtime/org.example.Extension/x86_64/stable","bytes":2048}]"#.into(), ..Default::default() };
+    let mut backend = Flatpak::new(fixture.clone());
+    let items = backend.cleanup(&Cancellation::default()).unwrap();
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0].id.key, "unused-user");
+    assert_eq!(items[1].id.key, "unused-system");
+    for item in items {
+        backend
+            .execute(
+                &Operation::Clean(item.id),
+                &Cancellation::default(),
+                &mut |_| {},
+            )
+            .unwrap();
+    }
+    let calls = fixture.calls.lock().unwrap();
+    assert_eq!(
+        calls[0].1,
+        [
+            "--user",
+            "uninstall",
+            "--unused",
+            "--noninteractive",
+            "--assumeyes"
+        ]
+    );
+    assert_eq!(calls[1].1[0], "--system");
+    assert!(calls.iter().all(|(_, _, write)| *write));
+}
+
+#[test]
+fn flatpak_cleanup_rejects_invalid_or_disappeared_candidates() {
+    for preview in [
+        "[]",
+        r#"[{"scope":"user","reference":"app/org.example.App/x86_64/stable","bytes":1}]"#,
+        r#"[{"scope":"other","reference":"runtime/org.example.Runtime/x86_64/stable","bytes":1}]"#,
+        "broken",
+    ] {
+        let fixture = CleanupFixture {
+            preview: preview.into(),
+            ..Default::default()
+        };
+        let mut backend = Flatpak::new(fixture.clone());
+        assert!(backend
+            .execute(
+                &Operation::Clean(CleanupId {
+                    backend: "flatpak".into(),
+                    key: "unused-user".into()
+                }),
+                &Cancellation::default(),
+                &mut |_| {}
+            )
+            .is_err());
+        assert!(fixture.calls.lock().unwrap().is_empty());
+    }
+    let mut backend = Flatpak::new(CleanupFixture::default());
+    assert!(backend
+        .execute(
+            &Operation::Clean(CleanupId {
+                backend: "flatpak".into(),
+                key: "all".into()
+            }),
+            &Cancellation::default(),
+            &mut |_| {}
+        )
+        .is_err());
+}
+
+#[test]
+fn development_cache_cleanup_uses_native_previews_and_fixed_commands() {
+    for (name, preview, expected) in [
+        (
+            "npm",
+            "make-fetch-happen:request-cache:https://registry.npmjs.org/example\n",
+            vec!["cache", "clean", "--force"],
+        ),
+        ("uv", "4096\n", vec!["cache", "clean"]),
+        (
+            "pip",
+            "Number of HTTP files: 2\nNumber of locally built wheels: 1\n",
+            vec!["cache", "purge"],
+        ),
+    ] {
+        let fixture = CleanupFixture {
+            preview: preview.into(),
+            ..Default::default()
+        };
+        let mut backend = match name {
+            "npm" => DevTool::npm(fixture.clone()),
+            "uv" => DevTool::uv(fixture.clone()),
+            _ => DevTool::pip(fixture.clone()),
+        };
+        if name == "pip" {
+            backend.detect(&Cancellation::default()).unwrap();
+        }
+        assert!(backend.capabilities().contains(&Capability::Clean));
+        let tasks = backend.cleanup(&Cancellation::default()).unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert!(fixture
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|(_, _, write)| !write));
+        backend
+            .execute(
+                &Operation::Clean(tasks[0].id.clone()),
+                &Cancellation::default(),
+                &mut |_| {},
+            )
+            .unwrap();
+        assert_eq!(fixture.calls.lock().unwrap().last().unwrap().1, expected);
+        assert!(backend
+            .execute(
+                &Operation::Clean(CleanupId {
+                    backend: name.into(),
+                    key: "arbitrary".into()
+                }),
+                &Cancellation::default(),
+                &mut |_| {}
+            )
+            .is_err());
+    }
+}
+
+#[test]
+fn cache_cleanup_does_not_offer_empty_or_invalid_inventories() {
+    for (preview, error) in [("0", false), ("nonsense", true)] {
+        let mut backend = DevTool::uv(CleanupFixture {
+            preview: preview.into(),
+            ..Default::default()
+        });
+        let result = backend.cleanup(&Cancellation::default());
+        if error {
+            assert!(result.is_err());
+        } else {
+            assert!(result.unwrap().is_empty());
+        }
+    }
+    let mut backend = DevTool::npm(CleanupFixture::default());
+    assert!(backend
+        .cleanup(&Cancellation::default())
+        .unwrap()
+        .is_empty());
+    assert!(backend
+        .execute(
+            &Operation::Clean(CleanupId {
+                backend: "npm".into(),
+                key: "cache".into()
+            }),
+            &Cancellation::default(),
+            &mut |_| {}
+        )
+        .is_err());
+    let mut backend = DevTool::npm(CleanupFixture {
+        preview: "partial".into(),
+        truncated: true,
+        ..Default::default()
+    });
+    assert!(backend.cleanup(&Cancellation::default()).is_err());
+    let mut backend = DevTool::pnpm(CleanupFixture::default());
+    assert!(!backend.capabilities().contains(&Capability::Clean));
+    assert!(backend.cleanup(&Cancellation::default()).is_err());
+}
+
+#[test]
+fn apt_cleanup_preserves_orphans_and_authenticates_only_explicit_cache_preview() {
+    let fixture = CleanupFixture {
+        apt_cache_denied: true,
+        ..Default::default()
+    };
+    let mut backend = Apt::new(fixture.clone());
+    let report = backend.cleanup_report(&Cancellation::default());
+    assert_eq!(report.items.len(), 1);
+    assert_eq!(report.items[0].id.key, "autoremove");
+    assert_eq!(report.failures.len(), 1);
+    assert!(fixture
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|(_, _, authenticated)| !authenticated));
+    let report = backend.cleanup_authenticated(&Cancellation::default());
+    assert_eq!(report.items.len(), 2);
+    assert!(report.failures.is_empty());
+    let plan = backend
+        .cleanup_plan(
+            &CleanupId {
+                backend: "apt".into(),
+                key: "autoclean".into(),
+            },
+            &Cancellation::default(),
+        )
+        .unwrap();
+    assert_eq!(plan.id.key, "autoclean");
+    for (_, args, authenticated) in fixture.calls.lock().unwrap().iter() {
+        assert!(args.contains(&"--simulate".into()));
+        if *authenticated {
+            assert!(args.contains(&"autoclean".into()));
+        }
+    }
+    assert!(backend
+        .cleanup_plan(
+            &CleanupId {
+                backend: "apt".into(),
+                key: "arbitrary".into()
+            },
+            &Cancellation::default()
+        )
+        .is_err());
+}
+
+#[test]
+fn snap_failed_native_completion_cannot_report_success() {
+    let mut failed = output("synthetic manager output");
+    failed.code = Some(1);
+    failed.stderr = b"synthetic permission denied".to_vec();
+    let mut backend = Snap::snap(Raw(failed.clone()));
+    let package = PackageId {
+        backend: "snap".into(),
+        name: "synthetic-fixture".into(),
+        architecture: "x86_64".into(),
+        scope: Scope::System,
+        remote: None,
+        reference: None,
+    };
+    for operation in [
+        Operation::Install(package.clone()),
+        Operation::Remove(package.clone()),
+        Operation::Upgrade(package),
+        Operation::Refresh {
+            backend: "snap".into(),
+        },
+        Operation::UpgradeAll {
+            backend: "snap".into(),
+        },
+    ] {
+        assert_eq!(
+            backend.execute(&operation, &Cancellation::default(), &mut |_| {}),
+            Err(EngineError::Execution(ExecutionError::Failed(
+                failed.clone()
+            )))
+        );
+    }
+}
+
+#[test]
+fn flatpak_refresh_does_not_hide_failed_privileged_completion() {
+    let mut failed = output("authorization failed");
+    failed.code = Some(1);
+    let mut backend = Flatpak::new(Raw(failed));
+    assert!(matches!(backend.execute(&Operation::Refresh { backend: "flatpak".into() }, &Cancellation::default(), &mut |_| {}), Err(EngineError::Execution(ExecutionError::Failed(_)))));
+}

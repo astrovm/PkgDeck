@@ -316,6 +316,11 @@ pub fn list_selected(
         return report;
     }
     let apt = root.join("etc/apt");
+    let apt = if root == Path::new("/") {
+        crate::host::Host::current().filesystem_path(&apt)
+    } else {
+        apt
+    };
     let mut files = vec![apt.join("sources.list")];
     match std::fs::read_dir(apt.join("sources.list.d")) {
         Ok(entries) => {

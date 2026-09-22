@@ -12,6 +12,12 @@ finish-args:
   - --socket=fallback-x11
   - --device=dri
   - --talk-name=org.freedesktop.Flatpak
+  # PkgDeck manages host installations; reserved OS paths are exposed under /run/host.
+  - --filesystem=host
+  - --filesystem=host-os:ro
+  - --filesystem=host-etc:ro
+  - --filesystem=/var
+  - --filesystem=/tmp
 modules:
   - name: pkgdeck
     buildsystem: simple

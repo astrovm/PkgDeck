@@ -11,18 +11,20 @@ supported operations; detection alone does not imply every operation is supporte
 | --- | --- | --- | --- |
 | Native | Enabled | Enabled through the core and CLI | Synthetic process tests; real sudo/polkit and APT in a disposable Ubuntu x86_64 VM |
 | AppImage | Enabled, outside the bundle | Enabled through the same native boundary | Extract-and-run AppImage doctor probe, GUI and terminal smoke tests; environment-isolation tests |
-| Flatpak | Flatpak only, through `flatpak-spawn --host` | Flatpak only, preserving user/system scope and authorization | Installed bundle lifecycle test; every other host backend fails closed |
+| Flatpak | Host managers through `flatpak-spawn --host` | Same typed operations and authorization as native | Installed host APT query, synthetic Homebrew lifecycle, and Flatpak lifecycle |
 | Snap (classic) | Enabled, outside `$SNAP` | Enabled through the same native boundary | Runtime isolation tests and installed package smoke tests in CI |
 
 The format gate is checked for reads, executable discovery, and authorized writes.
 Snap and Flatpak markers take precedence over AppImage markers. The Flatpak build
-only bridges typed Flatpak operations; other host backends remain unavailable.
+bridges host-manager operations and reads host metadata through filesystem permissions.
 Classic Snap executes host tools after removing paths inside `$SNAP` from discovery.
 
 Flatpak uses `flatpak-spawn --host`, with access to `org.freedesktop.Flatpak` on
 the session bus. It reads the host environment once, applies the same allowlist
-as native execution, and clears that environment before invoking `/usr/bin/flatpak`.
-No generic command, shell, or fallback to in-sandbox APT is exposed. See the
+as native execution, and clears the environment before invoking each host executable.
+Pinned privileged paths stay pinned; missing host access fails closed. APT metadata
+uses the host’s `python3-apt`; unused Flatpak runtime previews require host Python GI
+and the Flatpak typelib. Neither dependency is installed automatically. See the
 [Flatpak command reference](https://docs.flatpak.org/en/latest/flatpak-command-reference.html#flatpak-spawn).
 
 Snap uses classic confinement because its purpose requires discovering and invoking

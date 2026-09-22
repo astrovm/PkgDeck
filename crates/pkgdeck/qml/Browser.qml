@@ -660,7 +660,7 @@ Controls.ApplicationWindow {
                 root.beforeWrite = snapshot;
                 root.completedRows = [];
             }
-            if (!backend.writing && ["Search", "Installed", "Updates", "Clean", "Sources"].indexOf(root.currentView) >= 0)
+            if (!backend.writing && !backend.inspecting && ["Search", "Installed", "Updates", "Clean", "Sources"].indexOf(root.currentView) >= 0)
                 postWriteReload.restart();
         }
         function onRowsChanged() {
@@ -705,8 +705,8 @@ Controls.ApplicationWindow {
         easing.type: Easing.OutCubic
     }
     Timer {
-        interval: 40
-        running: backend.busy
+        interval: backend.busy ? 40 : 200
+        running: true
         repeat: true
         onTriggered: backend.poll()
     }
@@ -1082,8 +1082,17 @@ Controls.ApplicationWindow {
                     Layout.fillWidth: true
                 }
                 ActionButton {
+                    objectName: "cleanupAuthenticate"
+                    visible: root.cleanupFailures.some(row => row.source === "apt")
+                    text: "Check APT"
+                    symbol: "refresh"
+                    enabled: !backend.busy
+                    onClicked: backend.propose("inspect-clean", -1)
+                }
+                ActionButton {
                     objectName: "cleanupFailureDetails"
                     text: "Details"
+                    symbol: "help"
                     onClicked: cleanupErrorsDialog.open()
                 }
             }
@@ -1813,7 +1822,7 @@ Controls.ApplicationWindow {
         standardButtons: Controls.Dialog.Close
         contentItem: Controls.Label {
             text: root.cleanupFailures.map(row => root.sourceDisplayName(row.source) + "\n" + row.summary).join("\n\n")
-            wrapMode: Text.WrapAnywhere
+            wrapMode: Text.Wrap
             color: root.muted
         }
     }

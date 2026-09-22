@@ -69,7 +69,7 @@ fn link_executable(dir: &Path, name: &str, target: &str) -> PathBuf {
 }
 
 #[test]
-fn formats_and_flatpak_sandbox_fail_closed() {
+fn formats_detect_native_and_bridged_runtimes() {
     assert_eq!(Runtime::detect(&env(&[]), false), Runtime::Native);
     assert_eq!(
         Runtime::detect(&env(&[("APPIMAGE", "/tmp/example")]), false),
@@ -88,28 +88,7 @@ fn formats_and_flatpak_sandbox_fail_closed() {
         Runtime::detect(&env(&[("SNAP", "fixture"), ("APPIMAGE", "fixture")]), true),
         Runtime::Snap
     );
-    let h = Host::new(Runtime::Flatpak, env(&[]));
-    assert!(matches!(
-        h.resolve("apt-get"),
-        Err(ExecutionError::Disabled(_))
-    ));
-    assert!(matches!(
-        h.read(
-            Path::new("/bin/true"),
-            &[],
-            Limits::default(),
-            &Cancellation::default()
-        ),
-        Err(ExecutionError::Disabled(_))
-    ));
-    assert!(matches!(
-        h.apt(
-            AptAction::Remove("fixture".into()),
-            Authorization::Polkit,
-            &Cancellation::default()
-        ),
-        Err(ExecutionError::Disabled(_))
-    ));
+    assert!(Runtime::Flatpak.disabled_reason().is_none());
     let snap = Host::new(Runtime::Snap, env(&[("PATH", "/usr/bin:/bin")]));
     assert!(snap.resolve("sh").unwrap().is_some());
     assert!(Runtime::Native.disabled_reason().is_none());
@@ -607,12 +586,6 @@ fn venv_pip_runs_only_inside_explicit_absolute_environments() {
     ));
     assert!(matches!(
         host.venv_pip(&fixture.0, &[], &cancel, false),
-        Err(ExecutionError::Disabled(_))
-    ));
-    // Flatpak disables venv execution like every other host call.
-    let sandbox = Host::new(Runtime::Flatpak, env(&[]));
-    assert!(matches!(
-        sandbox.venv_pip(&venv, &[], &cancel, false),
         Err(ExecutionError::Disabled(_))
     ));
 }

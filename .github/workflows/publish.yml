@@ -7,7 +7,7 @@ on:
         required: true
     secrets:
       FLATPAK_REPO_TOKEN:
-        required: true
+        required: false
   release:
     types: [published]
   workflow_dispatch:
@@ -88,8 +88,8 @@ jobs:
           INPUT_TAG: ${{ inputs.tag }}
         run: |
           if [[ -z "$GH_TOKEN" ]]; then
-            echo '::error::FLATPAK_REPO_TOKEN is required to publish to astrovm/flatpak'
-            exit 1
+            echo '::notice::Run astrovm/flatpak publish.yml with repository=astrovm/PkgDeck and this release tag; configure FLATPAK_REPO_TOKEN for automatic dispatch.'
+            exit 0
           fi
           tag=${EVENT_TAG:-$INPUT_TAG}
           gh api \

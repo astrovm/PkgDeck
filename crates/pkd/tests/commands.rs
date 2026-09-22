@@ -163,7 +163,7 @@ esac
     assert_eq!(image["id"]["scope"], "system");
 }
 #[test]
-fn flatpak_disallows_non_flatpak_host_commands() {
+fn flatpak_fails_closed_without_host_bridge() {
     for args in [
         vec!["--json", "--from", "apt", "search", "fixture"],
         vec!["--json", "--from", "homebrew", "list"],
@@ -171,12 +171,13 @@ fn flatpak_disallows_non_flatpak_host_commands() {
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_pkd"))
             .env("FLATPAK_ID", "io.github.astrovm.PkgDeck")
+            .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/pkgdeck-synthetic-missing-bus")
             .args(args)
             .output()
             .unwrap();
         assert!(!output.status.success());
         let value: Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert!(value.to_string().contains("disabled"));
+        assert!(value.to_string().to_lowercase().contains("unavailable"));
     }
 }
 
