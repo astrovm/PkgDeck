@@ -128,6 +128,7 @@ pub(crate) fn parse_policy_dump(text: &str) -> BTreeMap<(String, Option<String>)
 /// One version record from `apt-cache show`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ShowRecord {
+    pub name: String,
     pub version: String,
     pub arch: String,
     pub summary: String,
@@ -152,8 +153,9 @@ pub(crate) fn parse_show_dump(text: &str) -> Vec<ShowRecord> {
                 .find(|(key, _)| key == name)
                 .map(|(_, value)| value.clone())
         };
+        let name = get("Package").unwrap_or_default();
         let version = get("Version").unwrap_or_default();
-        if version.is_empty() {
+        if name.is_empty() || version.is_empty() {
             fields.clear();
             return;
         }
@@ -172,6 +174,7 @@ pub(crate) fn parse_show_dump(text: &str) -> Vec<ShowRecord> {
         let phased_percent =
             get("Phased-Update-Percentage").and_then(|value| value.trim().parse().ok());
         records.push(ShowRecord {
+            name,
             version,
             arch: get("Architecture").unwrap_or_default(),
             summary,
@@ -219,16 +222,21 @@ pub(crate) fn parse_show_dump(text: &str) -> Vec<ShowRecord> {
     records
 }
 
-/// First record for `version`, preferring an architecture match.
+/// First record for a package and version, preferring an architecture match.
 pub(crate) fn select_record<'a>(
     records: &'a [ShowRecord],
+    name: &str,
     version: &str,
     arch: &str,
 ) -> Option<&'a ShowRecord> {
     records
         .iter()
-        .find(|record| record.version == version && record.arch == arch)
-        .or_else(|| records.iter().find(|record| record.version == version))
+        .find(|record| record.name == name && record.version == version && record.arch == arch)
+        .or_else(|| {
+            records
+                .iter()
+                .find(|record| record.name == name && record.version == version)
+        })
 }
 
 fn order_value(byte: Option<u8>) -> i32 {
@@ -422,7 +430,7 @@ pub(crate) fn installed_packages(
         let chosen = candidate.clone().or(Some(row.version.clone()));
         let record = chosen
             .as_deref()
-            .and_then(|version| select_record(show, version, &row.arch));
+            .and_then(|version| select_record(show, &row.name, version, &row.arch));
         let phased = entry.map(|entry| phased_candidate(entry, candidate.as_deref(), record));
         details.push(build_details(
             &row.name,
@@ -491,7 +499,10 @@ pub(crate) fn search_packages(
             let resolved = arch.clone().or_else(|| {
                 candidate
                     .as_deref()
-                    .and_then(|version| show.iter().find(|record| record.version == version))
+                    .and_then(|version| {
+                        show.iter()
+                            .find(|record| record.name == *name && record.version == version)
+                    })
                     .map(|record| record.arch.clone())
                     .filter(|arch| !arch.is_empty())
             });
@@ -502,7 +513,7 @@ pub(crate) fn search_packages(
             let chosen = candidate.clone().or(installed.clone());
             let record = chosen
                 .as_deref()
-                .and_then(|version| select_record(show, version, &arch));
+                .and_then(|version| select_record(show, name, version, &arch));
             let phased = phased_candidate(entry, candidate.as_deref(), record);
             let held = installed_rows
                 .iter()
@@ -534,7 +545,10 @@ pub(crate) fn details_package(
             entry
                 .candidate
                 .as_deref()
-                .and_then(|version| show.iter().find(|record| record.version == version))
+                .and_then(|version| {
+                    show.iter()
+                        .find(|record| record.name == name && record.version == version)
+                })
                 .map(|record| record.arch.clone())
                 .filter(|candidate| candidate == arch)
         })?;
@@ -549,7 +563,7 @@ pub(crate) fn details_package(
     let chosen = candidate.clone().or(installed.clone());
     let record = chosen
         .as_deref()
-        .and_then(|version| select_record(show, version, arch));
+        .and_then(|version| select_record(show, name, version, arch));
     let phased = phased_candidate(entry, candidate.as_deref(), record);
     let held = installed_rows
         .iter()
@@ -645,12 +659,12 @@ mod tests {
         assert_eq!(records[1].homepage, None);
         assert!(records[1].depends.is_empty());
         assert_eq!(
-            select_record(&records, "5.3-2ubuntu1", "amd64")
+            select_record(&records, "bash", "5.3-2ubuntu1", "amd64")
                 .unwrap()
                 .summary,
             "GNU Bourne Again SHell"
         );
-        assert!(select_record(&records, "9.9", "amd64").is_none());
+        assert!(select_record(&records, "bash", "9.9", "amd64").is_none());
     }
 
     #[test]
@@ -694,6 +708,44 @@ mod tests {
         assert_eq!(details.len(), 1);
         assert_eq!(details[0].package.update, UpdateAvailability::Available);
         assert_eq!(details[0].package.candidate_version.as_deref(), Some("2.0"));
+    }
+
+    #[test]
+    fn batched_show_records_never_cross_package_names() {
+        let rows = parse_dpkg_table(
+            "alpha\tamd64\t1.0\tinstall ok installed\n\
+             beta\tamd64\t1.0\tinstall ok installed\n",
+        );
+        let policy = parse_policy_dump(
+            "alpha:\n  Installed: 1.0\n  Candidate: 1.0\n\
+             beta:\n  Installed: 1.0\n  Candidate: 1.0\n",
+        );
+        let show = parse_show_dump(
+            "Package: alpha\nArchitecture: amd64\nVersion: 1.0\nDescription: Alpha description\n\n\
+             Package: beta\nArchitecture: amd64\nVersion: 1.0\nDescription: Beta description\n",
+        );
+        let installed = installed_packages(&rows, &policy, &show);
+        assert_eq!(installed[0].package.summary, "Alpha description");
+        assert_eq!(installed[1].package.summary, "Beta description");
+        let search = search_packages(
+            "beta",
+            &[
+                ("alpha".into(), "Alpha".into()),
+                ("beta".into(), "Beta".into()),
+            ],
+            &policy,
+            &show,
+            &rows,
+        );
+        assert_eq!(search.len(), 1);
+        assert_eq!(search[0].package.summary, "Beta description");
+        assert_eq!(
+            details_package("beta", "amd64", &policy, &show, &rows)
+                .unwrap()
+                .package
+                .summary,
+            "Beta description"
+        );
     }
 
     #[test]

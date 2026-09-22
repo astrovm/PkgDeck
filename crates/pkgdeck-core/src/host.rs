@@ -99,6 +99,7 @@ impl Host {
             "XDG_RUNTIME_DIR",
             "XDG_CONFIG_HOME",
             "XDG_DATA_HOME",
+            "XDG_DATA_DIRS",
             "XDG_CACHE_HOME",
             "SSH_AUTH_SOCK",
             "VIRTUAL_ENV",
@@ -899,6 +900,7 @@ mod flatpak_bridge_tests {
                     "XDG_DATA_HOME".into(),
                     "/home/fixture/.local/share-custom".into(),
                 ),
+                ("XDG_DATA_DIRS".into(), "/opt/apps/share:/usr/share".into()),
                 ("XDG_CACHE_HOME".into(), "/home/fixture/.cache-alt".into()),
                 ("XDG_RUNTIME_DIR".into(), "/run/user/1000".into()),
             ]
@@ -932,6 +934,7 @@ mod flatpak_bridge_tests {
         assert!(args
             .iter()
             .any(|arg| arg.starts_with("--env=XDG_DATA_HOME=")));
+        assert!(args.contains(&"--env=XDG_DATA_DIRS=/opt/apps/share:/usr/share".into()));
         assert!(args.ends_with(&["/usr/bin/flatpak".into(), "--user".into(), "list".into()]));
         assert!(matches!(
             host.flatpak_host_command_with_bridge(
