@@ -21,10 +21,11 @@ pkd upgrade neovim --from apt --yes
 pkd remove neovim --from apt --yes
 ```
 
-`--from` accepts `fwupd`, `apt`, `dnf`, `pacman`, `zypper`, `snap`, `homebrew`, `appimage`, `flatpak`, `cargo`, `npm`, `pnpm`, `bun`, `pip`, `pipx`, `uv`, `composer`, or `gem`, and repeats to select several sources. Without it, queries cover detected managers;
+`--from` accepts `fwupd`, `apt`, `dnf`, `pacman`, `zypper`, `snap`, `homebrew`, `homebrew-cask`, `appimage`, `flatpak`, `cargo`, `npm`, `pnpm`, `bun`, `pip`, `pipx`, `uv`, `composer`, `gem`, `codex`, `claude`, `grok`, or `opencode`, and repeats to select several sources. Without it, queries cover detected managers;
 missing optional managers are omitted, while detection/query failures remain
 visible. `sources` includes unavailable managers and their reasons. Search uses
-literal case-insensitive substrings: APT names/summaries and Homebrew formula names.
+literal case-insensitive substrings: APT names/summaries, Homebrew formula names,
+and cask tokens.
 Results rank best-match-first (exact name, name prefix, name substring, then
 summary matches). Unverified name guesses are omitted.
 Homebrew identities preserve tap-qualified names (for example

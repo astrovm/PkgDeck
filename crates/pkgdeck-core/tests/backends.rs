@@ -135,10 +135,16 @@ impl Transport for Fixture {
         match args[0] {
             "--prefix" => Ok(output("/home/linuxbrew/.linuxbrew\n")),
             "formulae" => Ok(output("synthetic-fixture\n")),
+            "casks" => Ok(output("synthetic-fixture\n")),
             "info" => {
                 let installed = self.installed.lock().unwrap().clone();
                 let candidate = self.candidate.lock().unwrap().clone();
-                let formula = json!({"full_name":"synthetic-fixture","desc":"Synthetic package","homepage":"https://example.invalid","versions":{"stable":candidate},"revision":0,"installed":installed.iter().map(|v| json!({"version":v})).collect::<Vec<_>>(),"outdated":installed.as_ref().is_some_and(|v| v != &candidate),"dependencies":[]});
+                let outdated = installed.as_ref().is_some_and(|v| v != &candidate);
+                if args.contains(&"--cask") {
+                    let cask = json!({"full_token":"synthetic-fixture","name":["Synthetic Fixture"],"desc":"Synthetic package","homepage":"https://example.invalid","version":candidate,"installed":installed,"outdated":outdated});
+                    return Ok(output(json!({"casks": if args.contains(&"--installed") && outdated == false && json!(cask["installed"]).is_null() { vec![] } else { vec![cask] }}).to_string()));
+                }
+                let formula = json!({"full_name":"synthetic-fixture","desc":"Synthetic package","homepage":"https://example.invalid","versions":{"stable":candidate},"revision":0,"installed":installed.iter().map(|v| json!({"version":v})).collect::<Vec<_>>(),"outdated":outdated,"dependencies":[]});
                 Ok(output(json!({"formulae": if args.contains(&"--installed") && installed.is_none() { vec![] } else { vec![formula] }}).to_string()))
             }
             _ => panic!("unexpected metadata query"),
@@ -309,6 +315,17 @@ fn apt_lifecycle() {
 #[test]
 fn homebrew_lifecycle() {
     lifecycle(Homebrew::new(Fixture::new()));
+}
+#[test]
+fn homebrew_cask_lifecycle() {
+    let fixture = Fixture::new();
+    let mut backend = HomebrewCask::new(fixture.clone());
+    let cancel = Cancellation::default();
+    assert_eq!(backend.detect(&cancel).unwrap(), Availability::Available);
+    let package = backend.search("fixture", &cancel).unwrap().remove(0);
+    assert_eq!(package.id.backend, "homebrew-cask");
+    assert_eq!(package.display_name, "Synthetic Fixture");
+    lifecycle(backend);
 }
 #[test]
 fn dnf_lifecycle() {
