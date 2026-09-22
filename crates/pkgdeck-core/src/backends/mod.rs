@@ -1,4 +1,4 @@
-//! Native package-manager, container image, Homebrew, and local AppImage adapters.
+//! Native package-manager, container image, Homebrew formula/cask, and local AppImage adapters.
 mod appimage;
 mod container;
 mod firmware;
@@ -30,9 +30,31 @@ const CAPABILITIES: &[Capability] = &[
 /// backend means extending this list, the GUI `sourceIds`, and the CLI
 /// value parser together.
 pub const BACKEND_IDS: &[&str] = &[
-    "fwupd", "apt", "dnf", "pacman", "zypper", "snap", "homebrew", "appimage", "flatpak", "docker",
-    "podman", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "composer", "gem", "codex",
-    "claude", "grok", "opencode",
+    "fwupd",
+    "apt",
+    "dnf",
+    "pacman",
+    "zypper",
+    "snap",
+    "homebrew",
+    "homebrew-cask",
+    "appimage",
+    "flatpak",
+    "docker",
+    "podman",
+    "cargo",
+    "npm",
+    "pnpm",
+    "bun",
+    "pip",
+    "pipx",
+    "uv",
+    "composer",
+    "gem",
+    "codex",
+    "claude",
+    "grok",
+    "opencode",
 ];
 
 /// These sources update existing installations but do not install or remove them.
@@ -277,6 +299,10 @@ pub struct Homebrew<T = NativeTransport> {
     pub transport: T,
     prefix: Option<PathBuf>,
 }
+pub struct HomebrewCask<T = NativeTransport> {
+    pub transport: T,
+    prefix: Option<PathBuf>,
+}
 pub struct Flatpak<T = NativeTransport> {
     transport: T,
 }
@@ -292,6 +318,14 @@ impl<T: Transport> Flatpak<T> {
     }
 }
 impl<T: Transport> Homebrew<T> {
+    pub fn new(transport: T) -> Self {
+        Self {
+            transport,
+            prefix: None,
+        }
+    }
+}
+impl<T: Transport> HomebrewCask<T> {
     pub fn new(transport: T) -> Self {
         Self {
             transport,
@@ -364,7 +398,7 @@ impl<T: Transport> Flatpak<T> {
         let mut origins = Vec::new();
         for line in text.lines().filter(|line| !line.trim().is_empty()) {
             let fields: Vec<_> = line.split('\t').collect();
-            if fields.len() != 7
+            if !(6..=7).contains(&fields.len())
                 || !flatpak_id(fields[0])
                 || !flatpak_id(fields[1])
                 || !flatpak_id(fields[2])
@@ -372,9 +406,9 @@ impl<T: Transport> Flatpak<T> {
             {
                 return Err(invalid("flatpak", "invalid list metadata"));
             }
-            let runtime = fields[6]
-                .split(',')
-                .any(|option| option.trim() == "runtime");
+            let runtime = fields
+                .get(6)
+                .is_some_and(|options| options.split(',').any(|option| option.trim() == "runtime"));
             let kind = if runtime { "runtime" } else { "app" };
             let reference = format!("{kind}/{}/{}/{}", fields[0], fields[1], fields[2]);
             origins.push(fields[5].to_owned());
@@ -1108,6 +1142,25 @@ fn formula_name(name: &str) -> bool {
                 && *s != ".."
         })
 }
+/// Cask tokens share the formula policy: bare tokens and tap-qualified full
+/// tokens, including versioned `@` tokens (for example `firefox@esr`).
+fn cask_token(name: &str) -> bool {
+    formula_name(name)
+}
+#[derive(Deserialize)]
+struct CaskReport {
+    casks: Vec<Cask>,
+}
+#[derive(Deserialize)]
+struct Cask {
+    full_token: String,
+    name: Vec<String>,
+    desc: Option<String>,
+    homepage: String,
+    version: String,
+    installed: Option<String>,
+    outdated: bool,
+}
 impl<T: Transport> Homebrew<T> {
     fn call(
         &self,
@@ -1289,6 +1342,189 @@ impl<T: Transport> Backend for Homebrew<T> {
                 vec!["upgrade", "--formula"]
             }
             _ => return Err(invalid("homebrew", "foreign operation")),
+        };
+        progress(Progress::Message(
+            "Running brew as the invoking user; cancellation waits for completion.".into(),
+        ));
+        let result = self.call(&args, cancel, true)?;
+        Ok(OperationOutcome {
+            cancellation_deferred: result.cancellation_deferred,
+        })
+    }
+}
+
+impl<T: Transport> HomebrewCask<T> {
+    fn call(
+        &self,
+        args: &[&str],
+        cancel: &Cancellation,
+        write: bool,
+    ) -> Result<Completion, EngineError> {
+        Ok(self.transport.brew(
+            &args.iter().map(OsString::from).collect::<Vec<_>>(),
+            cancel,
+            write,
+        )?)
+    }
+    fn parse(&self, result: Completion) -> Result<Vec<PackageDetails>, EngineError> {
+        let report: CaskReport = serde_json::from_slice(&bytes("homebrew-cask", result)?)
+            .map_err(|e| invalid("homebrew-cask", e))?;
+        let prefix = self
+            .prefix
+            .as_ref()
+            .ok_or_else(|| invalid("homebrew-cask", "prefix not detected"))?;
+        report
+            .casks
+            .into_iter()
+            .map(|c| {
+                if !cask_token(&c.full_token) {
+                    return Err(invalid("homebrew-cask", "invalid cask token"));
+                }
+                let installed = c.installed.filter(|v| !v.is_empty());
+                let display = c
+                    .name
+                    .iter()
+                    .find(|n| !n.trim().is_empty())
+                    .cloned()
+                    .unwrap_or_else(|| c.full_token.clone());
+                Ok(PackageDetails {
+                    package: Package {
+                        id: PackageId {
+                            backend: "homebrew-cask".into(),
+                            name: c.full_token.clone(),
+                            architecture: std::env::consts::ARCH.into(),
+                            scope: Scope::Environment {
+                                path: prefix.clone(),
+                            },
+                            remote: None,
+                            reference: None,
+                        },
+                        display_name: display,
+                        summary: c.desc.clone().unwrap_or_default(),
+                        update: if c.outdated {
+                            UpdateAvailability::Available
+                        } else if installed.is_some() {
+                            UpdateAvailability::Current
+                        } else {
+                            UpdateAvailability::Unknown
+                        },
+                        installed_version: installed,
+                        candidate_version: Some(c.version),
+                        icon: None,
+                        component_ids: vec![],
+                        homepages: if c.homepage.is_empty() {
+                            vec![]
+                        } else {
+                            vec![c.homepage.clone()]
+                        },
+                    },
+                    description: c.desc.unwrap_or_default(),
+                    homepage: (!c.homepage.is_empty()).then_some(c.homepage),
+                    dependencies: vec![],
+                })
+            })
+            .collect()
+    }
+    fn target<'a>(&self, id: &'a PackageId) -> Result<&'a str, EngineError> {
+        if id.backend != "homebrew-cask"
+            || id.architecture != std::env::consts::ARCH
+            || !cask_token(&id.name)
+            || self
+                .prefix
+                .as_ref()
+                .is_none_or(|p| id.scope != (Scope::Environment { path: p.clone() }))
+        {
+            return Err(invalid(
+                "homebrew-cask",
+                "foreign identity or invalid cask token",
+            ));
+        }
+        Ok(&id.name)
+    }
+}
+impl<T: Transport> Backend for HomebrewCask<T> {
+    fn id(&self) -> &str {
+        "homebrew-cask"
+    }
+    fn capabilities(&self) -> &[Capability] {
+        CAPABILITIES
+    }
+    fn detect(&mut self, cancel: &Cancellation) -> Result<Availability, EngineError> {
+        let result = self.transport.brew(&["--prefix".into()], cancel, false);
+        if let Ok(result) = &result {
+            let value = String::from_utf8(bytes("homebrew-cask", result.clone())?)
+                .map_err(|e| invalid("homebrew-cask", e))?;
+            let path = PathBuf::from(value.trim());
+            if !path.is_absolute() {
+                return Err(invalid("homebrew-cask", "prefix must be absolute"));
+            }
+            self.prefix = Some(path);
+        }
+        availability(result)
+    }
+    fn search(&mut self, query: &str, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
+        let data = bytes("homebrew-cask", self.call(&["casks"], cancel, false)?)?;
+        let names = String::from_utf8(data).map_err(|e| invalid("homebrew-cask", e))?;
+        let matches: Vec<_> = names
+            .lines()
+            .filter(|n| !n.trim().is_empty() && n.to_lowercase().contains(&query.to_lowercase()))
+            .collect();
+        let mut packages = Vec::new();
+        for chunk in matches.chunks(100) {
+            if chunk.iter().any(|n| !cask_token(n)) {
+                return Err(invalid("homebrew-cask", "invalid cask token"));
+            }
+            let mut args = vec!["info", "--json=v2", "--cask", "--"];
+            args.extend(chunk);
+            packages.extend(
+                self.parse(self.call(&args, cancel, false)?)?
+                    .into_iter()
+                    .map(|d| d.package),
+            );
+        }
+        Ok(packages)
+    }
+    fn installed(&mut self, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
+        Ok(self
+            .parse(self.call(
+                &["info", "--json=v2", "--cask", "--installed"],
+                cancel,
+                false,
+            )?)?
+            .into_iter()
+            .map(|d| d.package)
+            .collect())
+    }
+    fn details(
+        &mut self,
+        id: &PackageId,
+        cancel: &Cancellation,
+    ) -> Result<PackageDetails, EngineError> {
+        let name = self.target(id)?;
+        self.parse(self.call(&["info", "--json=v2", "--cask", "--", name], cancel, false)?)?
+            .into_iter()
+            .find(|d| d.package.id == *id)
+            .ok_or(EngineError::NotFound)
+    }
+    fn execute(
+        &mut self,
+        operation: &Operation,
+        cancel: &Cancellation,
+        progress: &mut dyn FnMut(Progress),
+    ) -> Result<OperationOutcome, EngineError> {
+        let args = match operation {
+            // brew update refreshes formulae and casks together; both Homebrew
+            // backends run it so each Refresh honestly refreshes its metadata.
+            Operation::Refresh { backend } if backend == "homebrew-cask" => vec!["update"],
+            Operation::Install(id) => vec!["install", "--cask", "--", self.target(id)?],
+            Operation::Remove(id) => {
+                vec!["uninstall", "--cask", "--force", "--", self.target(id)?]
+            }
+            Operation::Upgrade(id) => vec!["upgrade", "--cask", "--", self.target(id)?],
+            Operation::UpgradeAll { backend } if backend == "homebrew-cask" => {
+                vec!["upgrade", "--cask"]
+            }
+            _ => return Err(invalid("homebrew-cask", "foreign operation")),
         };
         progress(Progress::Message(
             "Running brew as the invoking user; cancellation waits for completion.".into(),
@@ -3187,6 +3423,10 @@ pub fn native_engine(
         authorization,
     });
     let mut brew = Homebrew::new(NativeTransport {
+        host: host.clone(),
+        authorization,
+    });
+    let mut cask = HomebrewCask::new(NativeTransport {
         host,
         authorization,
     });
@@ -3202,6 +3442,13 @@ pub fn native_engine(
         if discover || explicit || !matches!(status, Ok(Availability::Unavailable(_))) {
             engine.note_detected("homebrew".into(), status);
             engine.register(brew)?;
+        }
+    }
+    if cfg!(target_os = "macos") && allowed("homebrew-cask") {
+        let status = cask.detect(cancel);
+        if discover || explicit || !matches!(status, Ok(Availability::Unavailable(_))) {
+            engine.note_detected("homebrew-cask".into(), status);
+            engine.register(cask)?;
         }
     }
     for backend in ["dnf", "pacman", "zypper", "snap"] {
@@ -3253,10 +3500,18 @@ pub fn native_engine(
         }
     }
     if allowed("flatpak") {
-        engine.register(Flatpak::new(NativeTransport {
+        let mut flatpak = Flatpak::new(NativeTransport {
             host: Host::current(),
             authorization,
-        }))?;
+        });
+        // Like every other optional manager, an absent Flatpak stays out of
+        // automatic queries instead of failing each one; explicit selections
+        // and discovery still report its status.
+        let status = flatpak.detect(cancel);
+        if discover || explicit || !matches!(status, Ok(Availability::Unavailable(_))) {
+            engine.note_detected("flatpak".into(), status);
+            engine.register(flatpak)?;
+        }
     }
     for (id, make) in [
         (

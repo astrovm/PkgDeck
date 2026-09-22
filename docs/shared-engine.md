@@ -1,16 +1,15 @@
 # Shared package engine
 
-Step 3 adds the package model and backend contract to `pkgdeck-core`, with no Qt,
-CLI parsing, or new dependencies. The engine is synchronous and owns `Send`
-backends; frontends should run it on a worker and consume its typed results/events.
-Step 4 adds real APT/Homebrew adapters and public package commands; see the
-[CLI contract](cli.md).
+`pkgdeck-core` owns package identity, backend discovery, selection, and operations.
+It has no Qt or CLI parsing dependency. The synchronous engine owns `Send` backends;
+the GUI runs queries on workers and consumes typed results and progress events.
+See the [CLI contract](cli.md) for selection and output behavior.
 
 ## Identity and metadata
 
 `PackageId` consists of backend ID, backend package identifier, architecture, and
-installation scope. Scopes distinguish the system, a user UID, and an explicitly
-selected environment path. Adapters must supply stable identifiers and canonical
+installation scope, plus optional remote and native reference fields. Scopes
+distinguish the system, a user UID, and an explicitly selected environment path. Adapters must supply stable identifiers and canonical
 host environment paths. Display names are presentation data, not identity.
 
 `Package` carries summary information, optional installed/candidate versions, and

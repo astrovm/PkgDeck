@@ -163,14 +163,14 @@ esac
     assert_eq!(image["id"]["scope"], "system");
 }
 #[test]
-fn sandbox_commands_fail_closed() {
+fn flatpak_disallows_non_flatpak_host_commands() {
     for args in [
         vec!["--json", "--from", "apt", "search", "fixture"],
         vec!["--json", "--from", "homebrew", "list"],
         vec!["--json", "--yes", "--from", "apt", "install", "fixture"],
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_pkd"))
-            .env("SNAP", "/synthetic")
+            .env("FLATPAK_ID", "io.github.astrovm.PkgDeck")
             .args(args)
             .output()
             .unwrap();

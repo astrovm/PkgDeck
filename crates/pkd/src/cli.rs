@@ -16,7 +16,7 @@ pub struct Args {
     pub json: bool,
     /// Restrict operations to the given sources. Repeatable; empty means
     /// every available source.
-    #[arg(long, global = true, value_parser = ["fwupd", "apt", "dnf", "pacman", "zypper", "snap", "homebrew", "appimage", "flatpak", "docker", "podman", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "composer", "gem", "codex", "claude", "grok", "opencode"])]
+    #[arg(long, global = true, value_parser = ["fwupd", "apt", "dnf", "pacman", "zypper", "snap", "homebrew", "homebrew-cask", "appimage", "flatpak", "docker", "podman", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "composer", "gem", "codex", "claude", "grok", "opencode"])]
     pub from: Vec<String>,
     /// Select the package architecture when a name is ambiguous.
     #[arg(long, global = true)]
