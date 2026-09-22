@@ -1088,12 +1088,14 @@ fn flatpak_remote_search_details_and_upgrade_all() {
         )
         .unwrap();
     let calls = fixture.calls.lock().unwrap();
-    assert!(calls
-        .iter()
-        .any(|(args, write, system)| *write && !*system && args.contains(&"update".into())));
-    assert!(calls
-        .iter()
-        .any(|(args, write, system)| *write && *system && args.contains(&"update".into())));
+    assert!(calls.iter().any(|(args, write, system)| *write
+        && !*system
+        && args.contains(&"update".into())
+        && args.contains(&"--assumeyes".into())));
+    assert!(calls.iter().any(|(args, write, system)| *write
+        && *system
+        && args.contains(&"update".into())
+        && args.contains(&"--assumeyes".into())));
     assert!(backend
         .execute(
             &Operation::UpgradeAll {

@@ -942,7 +942,12 @@ impl<T: Transport> Backend for Flatpak<T> {
             Operation::Upgrade(id) => (id, "update"),
             Operation::UpgradeAll { backend } if backend == "flatpak" => {
                 for (system, scope) in [(false, "--user"), (true, "--system")] {
-                    self.call(&[scope, "update", "--noninteractive"], cancel, true, system)?;
+                    self.call(
+                        &[scope, "update", "--noninteractive", "--assumeyes"],
+                        cancel,
+                        true,
+                        system,
+                    )?;
                 }
                 progress(Progress::Message("Updated Flatpak packages.".into()));
                 return Ok(OperationOutcome::default());
