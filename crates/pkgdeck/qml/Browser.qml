@@ -64,6 +64,20 @@ Controls.ApplicationWindow {
             failedScreenshots = failedScreenshots.concat([url]);
     }
     readonly property string selectedIcon: (detailMatchesSelection && detail.package.icon) || (selected && selected.icon) || ""
+    function detailText() {
+        if (detail && detail.cleanup)
+            return [detail.cleanup.summary || "", detail.cleanup.preview || ""].filter(Boolean).join("\n\n");
+        if (detailMatchesSelection) {
+            const pkg = detail.package || {};
+            return [detail.description || "", pkg.reference || pkg.name || "",
+                [pkg.scope_label, pkg.architecture].filter(Boolean).join(" · "),
+                detail.homepage || "",
+                (detail.dependencies || []).length ? "Dependencies: " + detail.dependencies.join(", ") : ""].filter(Boolean).join("\n\n");
+        }
+        if (detail && detail.failure)
+            return (detail.failure.error || "") + "\n" + (detail.hint || "");
+        return (detail && detail.availability) || "";
+    }
     property string screenshotUrl: ""
     property string screenshotCaption: ""
     property bool closePending: false
@@ -1567,11 +1581,7 @@ Controls.ApplicationWindow {
                                 font.pixelSize: 14
                                 wrapMode: TextEdit.Wrap
                                 textFormat: TextEdit.PlainText
-                                text: root.detail.cleanup !== undefined ? [root.detail.cleanup.summary || "", root.detail.cleanup.preview || ""].filter(Boolean).join("\n\n") : root.detailMatchesSelection ? [root.detail.description || "",
-                                    root.detail.package.reference || root.detail.package.name,
-                                    [root.detail.package.scope_label, root.detail.package.architecture].filter(Boolean).join(" · "),
-                                    root.detail.homepage || "",
-                                    (root.detail.dependencies || []).length ? "Dependencies: " + root.detail.dependencies.join(", ") : ""].filter(Boolean).join("\n\n") : root.detail.failure ? ((root.detail.failure.error || "") + "\n" + (root.detail.hint || "")) : (root.detail.availability || "")
+                                text: root.detailText()
                                 Accessible.name: "Package details"
                             }
                         }
