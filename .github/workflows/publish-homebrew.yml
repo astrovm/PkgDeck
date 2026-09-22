@@ -1,4 +1,4 @@
-name: Publish Homebrew
+name: Publish / Homebrew
 on:
   release:
     types: [published]
@@ -14,6 +14,7 @@ permissions:
 
 jobs:
   formula:
+    name: Publish / Homebrew
     runs-on: ubuntu-26.04
     steps:
       - name: Resolve release tag

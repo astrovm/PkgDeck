@@ -370,7 +370,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    name: Publish release
+    name: Publish / Release
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [test-terminal, test-vm, test-podman, test-native-backends, test-snap, test-dev-backends, lint-workspace, coverage-workspace, test-workspace, package]
     runs-on: ubuntu-26.04

@@ -1,4 +1,4 @@
-name: Homebrew
+name: CI / Homebrew
 on:
   pull_request:
     paths:

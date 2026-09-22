@@ -1,4 +1,4 @@
-name: Publish Flatpak repository
+name: Publish / Flatpak
 on:
   release:
     types: [published]
@@ -13,6 +13,7 @@ permissions:
 
 jobs:
   publish:
+    name: Publish / Flatpak
     runs-on: ubuntu-26.04
     steps:
       - name: Trigger astrovm Flatpak repository publication
