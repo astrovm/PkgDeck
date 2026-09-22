@@ -49,9 +49,19 @@ jobs:
           branch="release/homebrew-$VERSION"
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git fetch origin "$branch:refs/remotes/origin/$branch" || true
           git checkout -b "$branch"
           git add Formula/pkgdeck.rb
+          if git diff --cached --quiet; then
+            echo "Formula already publishes $TAG"
+            exit 0
+          fi
           git commit -m "Publish Homebrew formula for $TAG"
           git push --force-with-lease origin "$branch"
-          gh pr create --base main --head "$branch" --title "Publish Homebrew formula for $TAG" \
-            --body "Adds the immutable release archive and SHA-256 for $TAG. The Homebrew workflow will build and test it on Linux and macOS before merge."
+          existing=$(gh pr list --head "$branch" --state open --json url --jq '.[0].url // empty')
+          if [[ -n "$existing" ]]; then
+            echo "Updated $existing"
+          else
+            gh pr create --base main --head "$branch" --title "Publish Homebrew formula for $TAG" \
+              --body "Adds the immutable release archive and SHA-256 for $TAG. The Homebrew workflow will build and test it on Linux and macOS before merge."
+          fi

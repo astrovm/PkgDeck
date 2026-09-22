@@ -24,7 +24,7 @@ case "${1:?Usage: scripts/package.sh appimage|flatpak|snap}" in
         sed -e "s/ARCHITECTURE/$snap_arch/" -e "s/^version: .*/version: '$version'/" \
             packaging/snap/snap.yaml > build/snap/meta/snap.yaml
         cp assets/io.github.astrovm.PkgDeck.svg build/snap/meta/gui/icon.svg
-        # shellcheck disable=SC2016 -- SNAP must expand when the desktop file is launched.
+        # shellcheck disable=SC2016
         sed 's|Exec=pkgdeck|Exec=pkgdeck|; s|Icon=io.github.astrovm.PkgDeck|Icon=${SNAP}/meta/gui/icon.svg|' \
             assets/io.github.astrovm.PkgDeck.desktop > build/snap/meta/gui/pkgdeck.desktop
         snap pack build/snap build/artifacts

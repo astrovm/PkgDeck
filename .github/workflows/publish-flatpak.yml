@@ -41,7 +41,7 @@ jobs:
           TAG: ${{ steps.release.outputs.tag }}
         run: |
           owner=$(gh api user --jq .login)
-          gh repo fork flathub/flathub --clone=false
+          gh repo fork flathub/flathub --clone=false || true
           git clone "https://x-access-token:${GH_TOKEN}@github.com/$owner/flathub.git" flathub
           cd flathub
           git remote add upstream https://github.com/flathub/flathub.git
@@ -53,8 +53,17 @@ jobs:
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git add io.github.astrovm.PkgDeck.yml cargo-sources.json
+          if git diff --cached --quiet; then
+            echo "Flathub already contains $TAG"
+            exit 0
+          fi
           git commit -m "Update io.github.astrovm.PkgDeck to $TAG"
           git push --force origin "$branch"
-          gh pr create --repo flathub/flathub --head "$owner:$branch" --base master \
-            --title "Update io.github.astrovm.PkgDeck to $TAG" \
-            --body "Release manifest generated from the immutable $TAG archive and Cargo lockfile."
+          existing=$(gh pr list --repo flathub/flathub --head "$owner:$branch" --state open --json url --jq '.[0].url // empty')
+          if [[ -n "$existing" ]]; then
+            echo "Updated $existing"
+          else
+            gh pr create --repo flathub/flathub --head "$owner:$branch" --base master \
+              --title "Update io.github.astrovm.PkgDeck to $TAG" \
+              --body "Release manifest generated from the immutable $TAG archive and Cargo lockfile."
+          fi
