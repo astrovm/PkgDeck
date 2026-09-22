@@ -51,7 +51,7 @@ jobs:
           curl -fL --retry 3 "https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/$TAG.tar.gz" -o "$archive"
           sha=$(sha256sum "$archive" | cut -d' ' -f1)
           URL="https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/$TAG.tar.gz" SHA="$sha" \
-            ruby -e 'path="Formula/pkgdeck.rb"; text=File.read(path); stable="  url #{ENV.fetch("URL").inspect}\n  version #{ENV.fetch("VERSION").inspect}\n  sha256 #{ENV.fetch("SHA").inspect}\n"; abort "Formula head entry missing" unless text.sub!(/^(?:  url .*\n  version .*\n  sha256 .*\n)?  head /, stable + "  head "); File.write(path, text)'
+            ruby -e 'path="Formula/pkgdeck.rb"; text=File.read(path); stable="  url #{ENV.fetch("URL").inspect}\n  version #{ENV.fetch("VERSION").inspect}\n  sha256 #{ENV.fetch("SHA").inspect}\n"; text.sub!(/^  url .*\n  version .*\n  sha256 .*\n/, ""); abort "Formula license entry missing" unless text.sub!(/^  license /, stable + "  license "); File.write(path, text)'
       - name: Open formula update
         id: formula_pr
         env:
