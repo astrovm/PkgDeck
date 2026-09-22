@@ -84,6 +84,11 @@ impl Host {
             .map(PathBuf::from)
             .map(|path| fs::canonicalize(&path).unwrap_or(path))
             .collect::<Vec<_>>();
+        let sandbox_xdg_root = (runtime == Runtime::Flatpak)
+            .then(|| source.get(&OsString::from("HOME")))
+            .flatten()
+            .map(PathBuf::from)
+            .map(|home| home.join(".var/app"));
         let mut env = BTreeMap::new();
         // No LD_*, PYTHONPATH, NODE_OPTIONS, APT_CONFIG, shell startup files,
         // Qt plugins, or sandbox XDG directories are inherited by host tools.
@@ -115,6 +120,13 @@ impl Host {
             "DISABLE_UPDATES",
         ] {
             if let Some(value) = source.get(&OsString::from(name)) {
+                if matches!(name, "XDG_CONFIG_HOME" | "XDG_DATA_HOME" | "XDG_CACHE_HOME")
+                    && sandbox_xdg_root
+                        .as_ref()
+                        .is_some_and(|root| Path::new(value).starts_with(root))
+                {
+                    continue;
+                }
                 env.insert(name.into(), value.clone());
             }
         }
@@ -635,6 +647,16 @@ mod flatpak_bridge_tests {
             [
                 ("HOME".into(), "/home/fixture".into()),
                 ("PATH".into(), "/usr/bin".into()),
+                (
+                    "XDG_CONFIG_HOME".into(),
+                    "/home/fixture/.var/app/io.github.astrovm.PkgDeck/config".into(),
+                ),
+                (
+                    "XDG_DATA_HOME".into(),
+                    "/home/fixture/.var/app/io.github.astrovm.PkgDeck/data".into(),
+                ),
+                ("XDG_CACHE_HOME".into(), "/home/fixture/.cache-alt".into()),
+                ("XDG_RUNTIME_DIR".into(), "/run/user/1000".into()),
             ]
             .into(),
         );
@@ -656,6 +678,14 @@ mod flatpak_bridge_tests {
             "--directory=/".into()
         ]));
         assert!(args.contains(&"--env=HOME=/home/fixture".into()));
+        assert!(args.contains(&"--env=XDG_CACHE_HOME=/home/fixture/.cache-alt".into()));
+        assert!(args.contains(&"--env=XDG_RUNTIME_DIR=/run/user/1000".into()));
+        assert!(!args
+            .iter()
+            .any(|arg| arg.starts_with("--env=XDG_CONFIG_HOME=")));
+        assert!(!args
+            .iter()
+            .any(|arg| arg.starts_with("--env=XDG_DATA_HOME=")));
         assert!(args.ends_with(&["/usr/bin/flatpak".into(), "--user".into(), "list".into()]));
         assert!(matches!(
             host.flatpak_host_command_with_bridge(
