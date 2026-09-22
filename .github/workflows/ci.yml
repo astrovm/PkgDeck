@@ -264,6 +264,61 @@ jobs:
       - name: Run workspace tests
         run: scripts/verify.sh full --only tests
 
+  package-homebrew:
+    name: Package / Homebrew (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-26.04, macos-26]
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+      HOMEBREW_NO_INSTALL_CLEANUP: '1'
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Configure Homebrew
+        shell: bash
+        run: |
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            echo /home/linuxbrew/.linuxbrew/bin >> "$GITHUB_PATH"
+          fi
+      - name: Prepare formula for this checkout
+        shell: bash
+        run: |
+          archive="$RUNNER_TEMP/pkgdeck-source.tar.gz"
+          git archive --format=tar.gz --output="$archive" HEAD
+          brew tap-new --no-git astrovm/pkgdeck
+          recipe="$(brew --repository astrovm/pkgdeck)/Formula/pkgdeck.rb"
+          brew ruby -r digest -e '
+            source = ARGV.fetch(0)
+            recipe = File.read("Formula/pkgdeck.rb")
+            version = File.read("Cargo.toml")[/^version = "([^"]+)"$/, 1]
+            stable = "url #{("file://" + source).inspect}\n  version #{version.inspect}\n  sha256 #{Digest::SHA256.file(source).hexdigest.inspect}"
+            recipe.sub!(/^  head .*\n/, "")
+            recipe.sub!(/^  license /, "  #{stable}\n  license ")
+            File.write(ARGV.fetch(1), recipe)
+          ' "$archive" "$recipe"
+      - name: Check formula style
+        run: brew style astrovm/pkgdeck/pkgdeck
+      - name: Build package
+        run: brew install --build-from-source --verbose astrovm/pkgdeck/pkgdeck
+      - name: Test installed commands and GUI startup
+        run: brew test astrovm/pkgdeck/pkgdeck
+      - name: Check CLI has no Qt linkage
+        shell: bash
+        run: |
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            links=$(otool -L "$(brew --prefix astrovm/pkgdeck/pkgdeck)/bin/pkd")
+          else
+            links=$(ldd "$(brew --prefix astrovm/pkgdeck/pkgdeck)/bin/pkd")
+          fi
+          if printf '%s\n' "$links" | grep -qi Qt; then
+            echo 'CLI unexpectedly links Qt' >&2
+            exit 1
+          fi
+
   package:
     name: Package / Linux (${{ matrix.arch }})
     timeout-minutes: 30
@@ -337,17 +392,7 @@ jobs:
           sudo flatpak install --system -y --noninteractive 'build/artifacts/PkgDeck-${{ matrix.arch }}.flatpak'
           scripts/xtask.sh gui flatpak run --env=QT_QPA_PLATFORM=offscreen --env=QT_QUICK_BACKEND=software io.github.astrovm.PkgDeck
           flatpak run --command=pkd io.github.astrovm.PkgDeck </dev/null | grep -F 'Usage: pkd'
-          flatpak --user remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
-          flatpak --user install -y --noninteractive flathub org.kde.kcalc
-          run_flatpak() { flatpak run --command=pkd io.github.astrovm.PkgDeck --json --yes --auth sudo --from flatpak "$@"; }
-          check() { local file=$1 filter=$2; shift 2; "$@" | tee "$file" | jq -e "$filter" || { echo "--- $file ---"; cat "$file"; exit 1; }; }
-          check /tmp/pkd-flatpak-list.json 'any(.data.packages[]; .id.name == "org.kde.kcalc")' run_flatpak list
-          flatpak --user search --columns=name,description,application,version,branch,remotes org.kde.kcalc | tee /tmp/pkd-flatpak-search-user.txt
-          flatpak --system search --columns=name,description,application,version,branch,remotes org.kde.kcalc | tee /tmp/pkd-flatpak-search-system.txt || true
-          check /tmp/pkd-flatpak-info.json '.exit_code == 0' run_flatpak --scope user info org.kde.kcalc
-          check /tmp/pkd-flatpak-update.json '.exit_code == 0' run_flatpak update
-          check /tmp/pkd-flatpak-remove.json '.exit_code == 0' run_flatpak remove org.kde.kcalc
-          ! flatpak --user list --app | grep -q org.kde.kcalc
+          scripts/tests/flatpak-package.sh
       - name: Build and test Snap
         run: |
           scripts/package.sh snap
@@ -372,7 +417,7 @@ jobs:
   release:
     name: Publish / Release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [test-terminal, test-vm, test-podman, test-native-backends, test-snap, test-dev-backends, lint-workspace, coverage-workspace, test-workspace, package]
+    needs: [test-terminal, test-vm, test-podman, test-native-backends, test-snap, test-dev-backends, lint-workspace, coverage-workspace, test-workspace, package-homebrew, package]
     runs-on: ubuntu-26.04
     permissions:
       contents: write
@@ -400,7 +445,7 @@ jobs:
           for image in dist/*.AppImage; do zsyncmake -u "$(basename "$image")" -o "$image.zsync" "$image"; done
           scripts/flatpak-release-manifest.sh "$GITHUB_REF_NAME" dist/io.github.astrovm.PkgDeck.yml
           cp packaging/flatpak/cargo-sources.json dist/cargo-sources.json
-          (cd dist && sha256sum * > SHA256SUMS)
+          (cd dist && sha256sum -- * > SHA256SUMS)
       - name: Attest release packages
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:

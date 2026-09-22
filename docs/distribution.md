@@ -40,19 +40,19 @@ present at build time, the formula installs the reader beside `pkd`. Without it,
 APT is unavailable; other detected managers remain usable. The formula does not
 install distribution development packages or elevate Homebrew.
 
-The Homebrew workflow builds and smoke-tests the recipe on Linux and macOS in
-isolated CI runners. macOS validation must pass before treating that package as
+The CI workflow builds and smoke-tests the Homebrew recipe on Linux and macOS in
+isolated runners. macOS validation must pass before treating that package as
 supported; a successful Linux build does not establish macOS compatibility.
 
 ### Publishing a stable version
 
-1. Run the project checks and Homebrew workflow. Review the macOS GUI smoke result
+1. Run the project CI checks. Review the macOS Homebrew GUI smoke result
    and the Linux check that no GUI command is installed.
 2. Set the workspace version, tag the reviewed commit, and follow the existing
    Linux packaging workflow. Do not reuse or move a published tag.
-3. Publishing the GitHub release triggers `Publish Homebrew`, which opens a PR
+3. Publishing the GitHub release triggers `Publish / Homebrew`, which opens a PR
    with the immutable archive URL and SHA-256 while retaining `head` for development.
-4. Let the Homebrew workflow test that PR on both platforms before merging. After users run
+4. Let CI test that PR with Homebrew on both platforms before merging. After users run
    `brew update`, `brew install astrovm/pkgdeck/pkgdeck` installs the stable version.
 
 No release archive, checksum, bottle, signing identity, or notarization result is

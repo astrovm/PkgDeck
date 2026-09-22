@@ -66,7 +66,7 @@ jobs:
             echo "Updated $existing"
           else
             gh pr create --base main --head "$branch" --title "Publish Homebrew formula for $TAG" \
-              --body "Adds the immutable release archive and SHA-256 for $TAG. The Homebrew workflow will build and test it on Linux and macOS before merge."
+              --body "Adds the immutable release archive and SHA-256 for $TAG. CI will build and test it on Linux and macOS before merge."
           fi
 
   flatpak:
