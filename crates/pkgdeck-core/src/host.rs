@@ -752,8 +752,12 @@ fn flatpak_host_environment_from(bridge: &Path) -> Option<BTreeMap<OsString, OsS
     if output.code != Some(0) || output.truncated {
         return None;
     }
+    parse_flatpak_host_environment(&output.stdout)
+}
+
+fn parse_flatpak_host_environment(output: &[u8]) -> Option<BTreeMap<OsString, OsString>> {
     let mut env = BTreeMap::new();
-    for entry in output.stdout.split(|byte| *byte == 0) {
+    for entry in output.split(|byte| *byte == 0) {
         if entry.is_empty() {
             continue;
         }
@@ -968,23 +972,18 @@ mod flatpak_bridge_tests {
 
     #[test]
     fn host_environment_probe_parses_nul_records_and_rejects_failures() {
-        let path =
-            std::env::temp_dir().join(format!("pkgdeck-flatpak-spawn-{}", std::process::id()));
-        fs::write(
-            &path,
-            b"#!/bin/sh\nprintf 'HOME=/home/fixture\\0PATH=/usr/bin\\0'\n",
-        )
-        .unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
-        let env = flatpak_host_environment_from(&path).unwrap();
+        let env = parse_flatpak_host_environment(b"HOME=/home/fixture\0PATH=/usr/bin\0").unwrap();
         assert_eq!(
             env.get(&OsString::from("HOME")),
             Some(&"/home/fixture".into())
         );
         assert_eq!(env.get(&OsString::from("PATH")), Some(&"/usr/bin".into()));
+        assert!(parse_flatpak_host_environment(b"malformed").is_none());
+
+        let path =
+            std::env::temp_dir().join(format!("pkgdeck-flatpak-spawn-{}", std::process::id()));
         fs::write(&path, b"#!/bin/sh\nexit 7\n").unwrap();
-        assert!(flatpak_host_environment_from(&path).is_none());
-        fs::write(&path, b"#!/bin/sh\nprintf malformed\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
         assert!(flatpak_host_environment_from(&path).is_none());
         fs::remove_file(path).unwrap();
         assert!(flatpak_host_environment_from(Path::new("/missing-flatpak-spawn")).is_none());
