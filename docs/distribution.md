@@ -46,10 +46,12 @@ supported; a successful Linux build does not establish macOS compatibility.
 
 ### Publishing a stable version
 
-1. Run the project CI checks. Review the macOS Homebrew GUI smoke result
-   and the Linux check that no GUI command is installed.
-2. Set the workspace version, tag the reviewed commit, and follow the existing
-   Linux packaging workflow. Do not reuse or move a published tag.
+1. Set the workspace version in a pull request and let CI pass. Review the
+   macOS Homebrew GUI smoke result and the Linux check that no GUI command is
+   installed.
+2. Tag that pull request's merged commit on `main`. Do not reuse or move a
+   published tag. The tag workflow checks that the merged source tree matches
+   the tested pull request and publishes only after that check and packaging pass.
 3. Publishing the GitHub release triggers `Publish / Homebrew`, which opens a PR
    with the immutable archive URL and SHA-256 while retaining `head` for development.
 4. Let CI test that PR with Homebrew on both platforms before merging. After users run
@@ -72,10 +74,14 @@ See [`scripts/package.sh`](../scripts/package.sh),
 [`scripts/bundle.sh`](../scripts/bundle.sh), and the packaging jobs in
 [CI](../.github/workflows/ci.yml) for the supported invocations and artifact checks.
 
-Tags matching `v*` build both Linux architectures, run the required checks, create
-a GitHub release with AppImage update metadata, Flatpak bundles, Snap packages,
-checksums, and provenance. Snap packages are published on GitHub only; no Snap
-Store upload runs. `Publish Flatpak repository` dispatches the immutable
+Pull request CI runs the full test matrix and builds and smoke-tests the Linux
+packages on both architectures. A `v*` tag must point to a merged pull request
+commit on `main` with the same source tree and a successful pull request CI run.
+The tag workflow then builds and tests the release packages, creates a GitHub
+release with AppImage update metadata, Flatpak bundles, Snap packages,
+checksums, and provenance. It does not repeat the full test matrix or Homebrew
+builds. Snap packages are published on GitHub only; no Snap Store upload runs.
+`Publish Flatpak repository` dispatches the immutable
 release bundles to [`astrovm/flatpak`](https://github.com/astrovm/flatpak) when
 `FLATPAK_REPO_TOKEN` is configured and `FLATPAK_REPO_AUTOMATIC=true` is set
 as a repository variable. Until then, the automatic Flatpak check is skipped;
