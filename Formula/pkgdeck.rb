@@ -8,6 +8,7 @@ class Pkgdeck < Formula
 
   on_macos do
     depends_on "cmake" => :build
+    depends_on "librsvg" => :build
     depends_on "ninja" => :build
     depends_on "qtshadertools" => :build
     depends_on "qttools" => :build
@@ -49,6 +50,16 @@ class Pkgdeck < Formula
       system "cargo", "install", *std_cargo_args(path: "crates/pkgdeck", root: buildpath/"gui")
       app = prefix/"PkgDeck.app/Contents"
       (app/"MacOS").install "gui/bin/pkgdeck" => "pkgdeck-bin"
+      iconset = buildpath/"PkgDeck.iconset"
+      iconset.mkpath
+      [[16, "16x16"], [32, "16x16@2x"], [32, "32x32"], [64, "32x32@2x"],
+       [128, "128x128"], [256, "128x128@2x"], [256, "256x256"],
+       [512, "256x256@2x"], [512, "512x512"], [1024, "512x512@2x"]].each do |size, name|
+        system "rsvg-convert", "-w", size.to_s, "-h", size.to_s,
+               "assets/io.github.astrovm.PkgDeck.svg", "-o", iconset/"icon_#{name}.png"
+      end
+      (app/"Resources").mkpath
+      system "iconutil", "-c", "icns", iconset, "-o", app/"Resources/PkgDeck.icns"
       (app/"Info.plist").write <<~XML
         <?xml version="1.0" encoding="UTF-8"?>
         <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -56,6 +67,7 @@ class Pkgdeck < Formula
           <key>CFBundleIdentifier</key><string>io.github.astrovm.PkgDeck</string>
           <key>CFBundleName</key><string>PkgDeck</string>
           <key>CFBundleExecutable</key><string>pkgdeck</string>
+          <key>CFBundleIconFile</key><string>PkgDeck</string>
           <key>CFBundlePackageType</key><string>APPL</string>
           <key>CFBundleShortVersionString</key><string>#{File.read("Cargo.toml")[/^version = "([^"]+)"$/, 1]}</string>
           <key>NSHighResolutionCapable</key><true/>

@@ -10,8 +10,7 @@ The repository doubles as a third-party Homebrew tap. Its formula lives in
 | macOS | `pkd`, `pkgdeck` | `PkgDeck.app` |
 | Linux | `pkd` | Not installed by Homebrew |
 
-The initial recipe builds from main and has no stable release stanza. After the
-recipe is merged, install it with:
+Before the first tagged release, install the development recipe with:
 
 ```sh
 brew tap astrovm/pkgdeck https://github.com/astrovm/PkgDeck
@@ -51,11 +50,9 @@ supported; a successful Linux build does not establish macOS compatibility.
    and the Linux check that no GUI command is installed.
 2. Set the workspace version, tag the reviewed commit, and follow the existing
    Linux packaging workflow. Do not reuse or move a published tag.
-3. Download the tagged source archive from
-   `https://github.com/astrovm/PkgDeck/archive/refs/tags/vVERSION.tar.gz` and compute
-   its SHA-256. Add its actual `url` and `sha256` below `homepage` in the formula,
-   keeping `head` for development installations. Submit this change through a PR.
-4. Test the stable formula on both platforms before merging. After users run
+3. Publishing the GitHub release triggers `Publish Homebrew`, which opens a PR
+   with the immutable archive URL and SHA-256 while retaining `head` for development.
+4. Let the Homebrew workflow test that PR on both platforms before merging. After users run
    `brew update`, `brew install astrovm/pkgdeck/pkgdeck` installs the stable version.
 
 No release archive, checksum, bottle, signing identity, or notarization result is
@@ -75,10 +72,14 @@ See [`scripts/package.sh`](../scripts/package.sh),
 [`scripts/bundle.sh`](../scripts/bundle.sh), and the packaging jobs in
 [CI](../.github/workflows/ci.yml) for the supported invocations and artifact checks.
 
-Native packages and AppImage can manage host packages. Flatpak and strict Snap
-builds currently fail closed for host operations. They remain experimental until
-installed-package tests validate a host bridge; network access for icons and
-screenshots does not enable package-manager access.
+Tags matching `v*` build both Linux architectures, run the required checks, create
+a GitHub release with AppImage update metadata, Flatpak bundles, Snap packages,
+checksums, and provenance, then upload Snap packages when
+`SNAPCRAFT_STORE_CREDENTIALS` is configured. Snap uses classic confinement and
+requires Snap Store approval. `Publish Flatpak` submits the immutable manifest to
+Flathub when `FLATHUB_TOKEN` is configured; the initial app submission still needs
+Flathub review. Flatpak packages include the narrow host bridge used for Flatpak
+lifecycle operations; all other host managers continue to fail closed.
 
 The APT reader and bundled libraries keep their original licenses. Package
 scripts include dependency notices alongside PkgDeck's MIT license.

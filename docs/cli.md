@@ -1,8 +1,9 @@
 # Command-line interface
 
 The `pkd` command exposes the shared engine. Native and AppImage execution
-use the host boundary. When PkgDeck itself runs inside Flatpak or Snap, host
-package operations remain explicitly disabled.
+use the host boundary. Classic Snap uses that same boundary. The Flatpak build can
+manage host Flatpak installations through its explicit host bridge; other host
+package managers remain disabled there.
 `pkd` without a subcommand prints help and exits successfully, including with
 redirected input/output. Use `pkgdeck` to launch the GUI.
 

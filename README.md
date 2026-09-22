@@ -13,8 +13,7 @@ frontends use the same Rust engine and your existing package managers.
 | macOS | GUI (`pkgdeck`) and CLI (`pkd`) | Build from source |
 | Linux | CLI (`pkd`) | Build the GUI from source; Linux packaging scripts below |
 
-The Homebrew recipe is initially **HEAD-only**; a stable release has not been
-published yet. Once this recipe is merged into main:
+Until the first tagged release is published, install the development recipe with:
 
 ```sh
 brew tap astrovm/pkgdeck https://github.com/astrovm/PkgDeck
@@ -55,17 +54,15 @@ Writes require confirmation. Native managers handle dependencies and authorizati
 ## Package sources
 
 PkgDeck detects the managers available on the host. Supported adapters include
-APT, DNF, Pacman, Zypper, Flatpak, Snap, Homebrew formulae, AppImage, Cargo, npm,
+APT, DNF, Pacman, Zypper, Flatpak, Snap, Homebrew formulae and macOS casks, AppImage, Cargo, npm,
 pnpm, Bun, pip, pipx, uv, Composer, RubyGems, and fwupd. Capabilities vary by
 manager; `pkd sources` reports availability and unsupported operations.
 Standalone Codex, Claude Code, Grok, and OpenCode installations also support
 updates through their upstream updaters; see the [CLI guide](docs/cli.md#standalone-cli-tools).
-Homebrew casks are not currently managed. Linux-specific managers and firmware
-support are not available on macOS.
+Linux-specific managers and firmware support are not available on macOS.
 
-Native and AppImage builds can manage host packages. The experimental Flatpak
-and strict Snap packages currently disable host package operations; they are
-not substitutes for a native installation.
+Native, AppImage, and classic Snap builds can manage host packages. The Flatpak
+build manages host Flatpak installations through its explicit host bridge.
 
 ## Documentation
 

@@ -34,7 +34,7 @@ fn no_arguments_show_help_and_unsupported_commands_fail_clearly() {
 }
 
 #[test]
-fn doctor_is_noninteractive_and_reports_sandbox_capabilities() {
+fn doctor_is_noninteractive_and_reports_packaged_capabilities() {
     let output = pkd()
         .arg("doctor")
         .env("SNAP", "/synthetic-snap")
@@ -44,7 +44,7 @@ fn doctor_is_noninteractive_and_reports_sandbox_capabilities() {
     assert!(output.status.success());
     let text = String::from_utf8(output.stdout).unwrap();
     assert!(text.contains("Runtime: Snap"));
-    assert!(text.contains("disabled"));
+    assert!(text.contains("APT:"));
     let output = pkd()
         .arg("doctor")
         .env_remove("SNAP")

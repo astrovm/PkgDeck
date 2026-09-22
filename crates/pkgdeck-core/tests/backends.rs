@@ -142,7 +142,7 @@ impl Transport for Fixture {
                 let outdated = installed.as_ref().is_some_and(|v| v != &candidate);
                 if args.contains(&"--cask") {
                     let cask = json!({"full_token":"synthetic-fixture","name":["Synthetic Fixture"],"desc":"Synthetic package","homepage":"https://example.invalid","version":candidate,"installed":installed,"outdated":outdated});
-                    return Ok(output(json!({"casks": if args.contains(&"--installed") && outdated == false && json!(cask["installed"]).is_null() { vec![] } else { vec![cask] }}).to_string()));
+                    return Ok(output(json!({"casks": if args.contains(&"--installed") && !outdated && json!(cask["installed"]).is_null() { vec![] } else { vec![cask] }}).to_string()));
                 }
                 let formula = json!({"full_name":"synthetic-fixture","desc":"Synthetic package","homepage":"https://example.invalid","versions":{"stable":candidate},"revision":0,"installed":installed.iter().map(|v| json!({"version":v})).collect::<Vec<_>>(),"outdated":outdated,"dependencies":[]});
                 Ok(output(json!({"formulae": if args.contains(&"--installed") && installed.is_none() { vec![] } else { vec![formula] }}).to_string()))
@@ -886,7 +886,7 @@ fn native_apt_transport_reads_host_metadata_or_reports_prerequisites() {
         Err(ExecutionError::Disabled(_))
     ));
     let sandbox = NativeTransport {
-        host: Host::new(Runtime::Snap, Default::default()),
+        host: Host::new(Runtime::Flatpak, Default::default()),
         authorization: Authorization::Polkit,
     };
     assert!(sandbox.apt_query("detect", "", "", &cancel).is_err());
