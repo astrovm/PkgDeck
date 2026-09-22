@@ -5,7 +5,9 @@ mkdir -p build/artifacts
 case "${1:?Usage: scripts/package.sh appimage|flatpak|snap}" in
     appimage)
         : "${APPIMAGETOOL:?Set APPIMAGETOOL to the appimagetool executable}"
-        ARCH="$arch" "$APPIMAGETOOL" --appimage-extract-and-run build/AppDir "build/artifacts/PkgDeck-$arch.AppImage"
+        update_information="gh-releases-zsync|astrovm|PkgDeck|latest|PkgDeck-$arch.AppImage.zsync"
+        ARCH="$arch" "$APPIMAGETOOL" --appimage-extract-and-run \
+            -u "$update_information" build/AppDir "build/artifacts/PkgDeck-$arch.AppImage"
         ;;
     flatpak)
         scripts/flatpak-sources.sh --check
@@ -18,8 +20,11 @@ case "${1:?Usage: scripts/package.sh appimage|flatpak|snap}" in
         mkdir -p build/snap
         cp -a build/AppDir/. build/snap/
         mkdir -p build/snap/meta/gui
-        sed "s/ARCHITECTURE/$snap_arch/" packaging/snap/snap.yaml > build/snap/meta/snap.yaml
+        version=${PKGDECK_VERSION:-$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)}
+        sed -e "s/ARCHITECTURE/$snap_arch/" -e "s/^version: .*/version: '$version'/" \
+            packaging/snap/snap.yaml > build/snap/meta/snap.yaml
         cp assets/io.github.astrovm.PkgDeck.svg build/snap/meta/gui/icon.svg
+        # shellcheck disable=SC2016
         sed 's|Exec=pkgdeck|Exec=pkgdeck|; s|Icon=io.github.astrovm.PkgDeck|Icon=${SNAP}/meta/gui/icon.svg|' \
             assets/io.github.astrovm.PkgDeck.desktop > build/snap/meta/gui/pkgdeck.desktop
         snap pack build/snap build/artifacts

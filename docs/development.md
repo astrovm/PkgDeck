@@ -36,6 +36,9 @@ installing the prerequisites below and running `scripts/setup-dev.sh`.
 For direct GUI Cargo tests, first `source scripts/dev-env.sh` to select system
 Qt 6.10.2 and Kirigami. Qt-free Cargo tests do not need that environment.
 
+For macOS packaging and the Linux CLI-only Homebrew build, see
+[distribution](distribution.md). The native full verifier below targets Linux.
+
 ## SDK and prerequisites
 
 Ubuntu 26.04 supplies Qt 6.10.2, Kirigami/ECM 6.24.0, CMake 4.2.3, and Ninja

@@ -1,36 +1,33 @@
 # Host execution and authorization
 
-Step 2 establishes the execution boundary in `pkgdeck-core`. `pkd doctor` reports
-its runtime, executes a bounded, unprivileged host architecture probe, and locates
-backend executables in the invoking user's host PATH. Detection does not imply
-that a backend's package lifecycle is implemented. pip is deliberately omitted
-until an explicit virtual environment can be selected.
+`pkgdeck-core` provides the shared execution boundary. `pkd doctor` reports its
+runtime, executes a bounded unprivileged host architecture probe, and locates
+backend executables in the invoking user's PATH. Each adapter advertises its
+supported operations; detection alone does not imply every operation is supported.
 
 ## Format capabilities
 
-| Format | Host reads/detection | APT / Homebrew writes | Validation |
+| Format | Host reads/detection | Host writes | Validation |
 | --- | --- | --- | --- |
 | Native | Enabled | Enabled through the core and CLI | Synthetic process tests; real sudo/polkit and APT in a disposable Ubuntu x86_64 VM |
 | AppImage | Enabled, outside the bundle | Enabled through the same native boundary | Extract-and-run AppImage doctor probe, GUI and terminal smoke tests; environment-isolation tests |
-| Flatpak | **Disabled** | **Disabled** | Runtime detection fails closed before executable lookup or spawning; no host D-Bus permission is shipped |
-| Snap | **Disabled** | **Disabled** | Strict confinement remains the packaging default; runtime detection fails closed |
+| Flatpak | Flatpak only, through `flatpak-spawn --host` | Flatpak only, preserving user/system scope and authorization | Installed bundle lifecycle test; every other host backend fails closed |
+| Snap (classic) | Enabled, outside `$SNAP` | Enabled through the same native boundary | Runtime isolation tests and installed package smoke tests in CI |
 
 The format gate is checked for reads, executable discovery, and authorized writes.
-Snap and Flatpak markers take precedence over AppImage markers. Installed Flatpak
-and Snap host operations are intentionally unavailable, even when an executable
-with the same name exists inside their runtime.
+Snap and Flatpak markers take precedence over AppImage markers. The Flatpak build
+only bridges typed Flatpak operations; other host backends remain unavailable.
+Classic Snap executes host tools after removing paths inside `$SNAP` from discovery.
 
-Flatpak's future route is `flatpak-spawn --host`, which requires access to
-`org.freedesktop.Flatpak` on the session bus. Before enabling it, an installed
-bundle must prove host identity, host HOME/PATH resolution, permission denial,
-authorization, and cancellation. Forwarding the sandbox's environment is not an
-acceptable host environment. No fallback to in-sandbox APT is permitted. See the
+Flatpak uses `flatpak-spawn --host`, with access to `org.freedesktop.Flatpak` on
+the session bus. It reads the host environment once, applies the same allowlist
+as native execution, and clears that environment before invoking `/usr/bin/flatpak`.
+No generic command, shell, or fallback to in-sandbox APT is exposed. See the
 [Flatpak command reference](https://docs.flatpak.org/en/latest/flatpak-command-reference.html#flatpak-spawn).
 
-Snap's strict confinement does not provide this project with a tested route to
-host system package managers. A separately reviewed host service or distribution
-change would need its own installed-Snap tests. Classic confinement is not enabled
-as a workaround. See [Snap confinement](https://snapcraft.io/docs/explanation/security/snap-confinement/).
+Snap uses classic confinement because its purpose requires discovering and invoking
+the package managers already installed on the host. The Snap Store requires manual
+approval for classic confinement. See [Snap confinement](https://snapcraft.io/docs/explanation/security/snap-confinement/).
 
 ## Environment and authorization
 
@@ -39,16 +36,18 @@ working directory. The executor clears inherited variables and supplies only
 selected user/session variables and the host PATH, with the C locale for diagnostics.
 It does not pass Qt library/plugin paths, loader injection variables, APT_CONFIG,
 Python paths, Node options, or shell startup configuration. Empty and relative
-PATH entries and executables resolving into APPDIR are excluded from discovery.
+PATH entries and executables resolving into APPDIR or `$SNAP` are excluded from discovery.
 AppRun sets APPDIR for both entry points, including extracted launches.
 
 User tools resolve from the invoking user's PATH and retain that user's HOME and
-XDG user directories. The only authorized write API is a typed APT request for a
-validated Debian package name and optional architecture, or metadata refresh. Homebrew and development tools have no elevation
-route. Frontends must stay unprivileged; the APT API rejects a root caller.
+XDG user directories. System operations use typed requests validated by the
+corresponding adapter.
+Native distro managers, Flatpak system operations, repository changes, and firmware
+updates retain their own authorization requirements. Homebrew and development tools
+run as the invoking user. Frontends must stay unprivileged.
 
 Authorized commands use a fixed system PATH, excluding user tool directories.
-The adapter invokes the fixed `/usr/bin/apt-get` path via either:
+For example, the APT adapter invokes the fixed `/usr/bin/apt-get` path via either:
 
 - `/usr/bin/pkexec --disable-internal-agent`, using an existing polkit agent/policy;
 - `/usr/bin/sudo -n --`, requiring an existing grant and never prompting.
@@ -119,6 +118,6 @@ remain in `build/host-vm/logs/`. See [prepared guests and Podman](development.md
 for cache invalidation and the faster container lifecycle checks. The development `apt-probe` executable is never packaged.
 
 The VM test runs in a separate x86_64 CI job. Synthetic boundary tests run on both
-native CI architectures. Real ARM authorization, installed Flatpak/Snap host
-bridges, interactive auth-dialog dismissal, and FUSE-based AppImage launching
+native CI architectures. Real ARM authorization, an installed Flatpak host bridge,
+interactive auth-dialog dismissal, and FUSE-based AppImage launching
 remain explicit release gates; they are not claimed by the local VM result.

@@ -13,7 +13,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             let result = host.read(
                 std::path::Path::new("/usr/bin/uname"),
-                &["--machine".into()],
+                &["-m".into()],
                 pkgdeck_core::process::Limits::default(),
                 &pkgdeck_core::process::Cancellation::default(),
             )?;
@@ -32,7 +32,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
             }
         }
-        println!("APT, Homebrew, Flatpak, Cargo, npm, pnpm, Bun, pip, pipx, uv, Composer, RubyGems, and local AppImage imports are available; pip requires an explicitly selected virtual environment (VIRTUAL_ENV).");
+        println!("APT, Homebrew formulae and casks, Flatpak, Cargo, npm, pnpm, Bun, pip, pipx, uv, Composer, RubyGems, and local AppImage imports are used when their executables are found above; pip requires an explicitly selected virtual environment (VIRTUAL_ENV).");
         return Ok(());
     }
     if args.command.is_some() {

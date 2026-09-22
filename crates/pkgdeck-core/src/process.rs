@@ -139,12 +139,14 @@ pub(crate) fn run(
     if cancel.requested() {
         return Err(ExecutionError::Cancelled);
     }
+    let program = command.get_program().to_string_lossy().into_owned();
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0)
-        .spawn()?;
+        .spawn()
+        .map_err(|error| ExecutionError::Io(format!("spawn {program}: {error}")))?;
     let mut stdout = child.stdout.take().expect("stdout was piped");
     let mut stderr = child.stderr.take().expect("stderr was piped");
     let start = Instant::now();

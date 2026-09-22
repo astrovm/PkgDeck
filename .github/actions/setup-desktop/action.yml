@@ -27,7 +27,7 @@ runs:
           libxtst6 libwayland-cursor0 libwayland-egl1 xvfb xdotool fonts-dejavu-core
         )
         if [[ "$PACKAGING" == true ]]; then
-          packages+=(flatpak flatpak-builder snapd squashfs-tools zsync desktop-file-utils podman)
+          packages+=(flatpak flatpak-builder dbus-daemon snapd squashfs-tools zsync desktop-file-utils podman)
         fi
         sudo apt-get update
         sudo apt-get install -y "${packages[@]}"
