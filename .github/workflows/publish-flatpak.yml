@@ -1,69 +1,34 @@
-name: Publish Flatpak
+name: Publish Flatpak repository
 on:
   release:
     types: [published]
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing release tag (for example v0.1.0)
+        description: Existing immutable release tag (for example v0.1.0)
         required: true
 
 permissions:
   contents: read
 
 jobs:
-  flathub:
+  publish:
     runs-on: ubuntu-24.04
-    env:
-      GH_TOKEN: ${{ secrets.FLATHUB_TOKEN }}
     steps:
-      - name: Explain missing publishing credential
-        if: env.GH_TOKEN == ''
-        run: echo 'Set FLATHUB_TOKEN to submit release manifests to Flathub.'
-      - name: Resolve release tag
-        if: env.GH_TOKEN != ''
-        id: release
+      - name: Trigger astrovm Flatpak repository publication
         env:
+          GH_TOKEN: ${{ secrets.FLATPAK_REPO_TOKEN }}
           EVENT_TAG: ${{ github.event.release.tag_name }}
           INPUT_TAG: ${{ inputs.tag }}
-        run: echo "tag=${EVENT_TAG:-$INPUT_TAG}" >> "$GITHUB_OUTPUT"
-      - name: Download immutable release manifest
-        if: env.GH_TOKEN != ''
-        env:
-          TAG: ${{ steps.release.outputs.tag }}
         run: |
-          mkdir release
-          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir release \
-            --pattern io.github.astrovm.PkgDeck.yml --pattern cargo-sources.json
-      - name: Open Flathub update
-        if: env.GH_TOKEN != ''
-        env:
-          TAG: ${{ steps.release.outputs.tag }}
-        run: |
-          owner=$(gh api user --jq .login)
-          gh repo fork flathub/flathub --clone=false || true
-          git clone "https://x-access-token:${GH_TOKEN}@github.com/$owner/flathub.git" flathub
-          cd flathub
-          git remote add upstream https://github.com/flathub/flathub.git
-          git fetch upstream master
-          branch="pkgdeck-${TAG#v}"
-          git checkout -B "$branch" upstream/master
-          cp ../release/io.github.astrovm.PkgDeck.yml .
-          cp ../release/cargo-sources.json .
-          git config user.name github-actions[bot]
-          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add io.github.astrovm.PkgDeck.yml cargo-sources.json
-          if git diff --cached --quiet; then
-            echo "Flathub already contains $TAG"
-            exit 0
+          if [[ -z "$GH_TOKEN" ]]; then
+            echo '::error::FLATPAK_REPO_TOKEN is required to publish to astrovm/flatpak'
+            exit 1
           fi
-          git commit -m "Update io.github.astrovm.PkgDeck to $TAG"
-          git push --force origin "$branch"
-          existing=$(gh pr list --repo flathub/flathub --head "$owner:$branch" --state open --json url --jq '.[0].url // empty')
-          if [[ -n "$existing" ]]; then
-            echo "Updated $existing"
-          else
-            gh pr create --repo flathub/flathub --head "$owner:$branch" --base master \
-              --title "Update io.github.astrovm.PkgDeck to $TAG" \
-              --body "Release manifest generated from the immutable $TAG archive and Cargo lockfile."
-          fi
+          tag=${EVENT_TAG:-$INPUT_TAG}
+          gh api \
+            --method POST \
+            repos/astrovm/flatpak/dispatches \
+            -f event_type=publish-app \
+            -f "client_payload[repository]=$GITHUB_REPOSITORY" \
+            -f "client_payload[tag]=$tag"
