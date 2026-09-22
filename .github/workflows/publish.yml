@@ -9,12 +9,14 @@ on:
         required: true
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 jobs:
   formula:
     name: Homebrew
+    permissions:
+      contents: write
+      pull-requests: write
     runs-on: ubuntu-26.04
     steps:
       - name: Resolve release tag
@@ -66,3 +68,25 @@ jobs:
             gh pr create --base main --head "$branch" --title "Publish Homebrew formula for $TAG" \
               --body "Adds the immutable release archive and SHA-256 for $TAG. The Homebrew workflow will build and test it on Linux and macOS before merge."
           fi
+
+  flatpak:
+    name: Flatpak
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Trigger astrovm Flatpak repository publication
+        env:
+          GH_TOKEN: ${{ secrets.FLATPAK_REPO_TOKEN }}
+          EVENT_TAG: ${{ github.event.release.tag_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          if [[ -z "$GH_TOKEN" ]]; then
+            echo '::error::FLATPAK_REPO_TOKEN is required to publish to astrovm/flatpak'
+            exit 1
+          fi
+          tag=${EVENT_TAG:-$INPUT_TAG}
+          gh api \
+            --method POST \
+            repos/astrovm/flatpak/dispatches \
+            -f event_type=publish-app \
+            -f "client_payload[repository]=$GITHUB_REPOSITORY" \
+            -f "client_payload[tag]=$tag"
