@@ -54,6 +54,8 @@ pub const BACKENDS: &[(&str, &str)] = &[
     ("Flatpak", "flatpak"),
     ("Snap", "snap"),
     ("Homebrew", "brew"),
+    ("Docker", "docker"),
+    ("Podman", "podman"),
     ("Cargo", "cargo"),
     ("npm", "npm"),
     ("pnpm", "pnpm"),
@@ -308,6 +310,47 @@ impl Host {
         }
     }
 
+    /// Run Docker or Podman as the invoking user. Reads use a short deadline so
+    /// a stopped daemon cannot stall every package view; pulls and removals keep
+    /// the normal deferred-cancellation write contract.
+    pub fn container_engine(
+        &self,
+        executable: &str,
+        label: &str,
+        args: &[OsString],
+        cancel: &Cancellation,
+        write: bool,
+    ) -> Result<Completion, ExecutionError> {
+        self.enabled()?;
+        if write && rustix::process::geteuid().is_root() {
+            return Err(ExecutionError::Invalid(
+                "run the frontend as an unprivileged user".into(),
+            ));
+        }
+        let path = self
+            .resolve(executable)?
+            .ok_or_else(|| ExecutionError::Disabled(format!("{label} not found")))?;
+        let command = self.command(&path, args)?;
+        let result = process::run(
+            command,
+            Limits {
+                timeout: if write {
+                    std::time::Duration::from_secs(300)
+                } else {
+                    std::time::Duration::from_secs(8)
+                },
+                output_bytes: 32 * 1024 * 1024,
+            },
+            cancel,
+            write,
+        )?;
+        if result.code == Some(0) {
+            Ok(result)
+        } else {
+            Err(ExecutionError::Failed(result))
+        }
+    }
+
     /// pip inside an explicitly selected virtual environment. `venv` must be
     /// the environment root; `<venv>/bin/python -m pip` is the only entry
     /// point so system pip is never touched. User-scoped like `dev_tool`.
@@ -420,7 +463,7 @@ impl Host {
                 "run the frontend as an unprivileged user".into(),
             ));
         }
-        if self.runtime == Runtime::Flatpak {
+        let command = if self.runtime == Runtime::Flatpak {
             let path = Path::new("/usr/bin/flatpak");
             let (program, mut full) = if write && system {
                 let (program, prefixed) = authorization.prefix(path);
@@ -429,27 +472,36 @@ impl Host {
                 (path, Vec::new())
             };
             full.extend(args.iter().cloned());
-            let command = self.flatpak_host_command(program, &full)?;
-            let result = process::run(command, Limits::default(), cancel, write)?;
-            return if result.code == Some(0) {
-                Ok(result)
+            self.flatpak_host_command(program, &full)?
+        } else {
+            self.enabled()?;
+            let path = if write && system {
+                // System writes must not resolve the executable through user PATH.
+                system_flatpak_path(Path::new("/usr/bin/flatpak"))?
             } else {
-                Err(ExecutionError::Failed(result))
+                self.resolve("flatpak")?
+                    .ok_or_else(|| ExecutionError::Disabled("Flatpak not found".into()))?
             };
-        }
-        self.enabled()?;
-        let path = if write && system {
-            // System writes cross an authorization boundary. Never derive this
-            // executable from the invoking user's PATH.
-            system_flatpak_path(Path::new("/usr/bin/flatpak"))?
-        } else {
-            self.resolve("flatpak")?
-                .ok_or_else(|| ExecutionError::Disabled("Flatpak not found".into()))?
+            if write && system {
+                return self.privileged(&path, args, authorization, cancel);
+            }
+            self.command(&path, args)?
         };
-        if write && system {
-            self.privileged(&path, args, authorization, cancel)
+        // Remote catalog queries can download metadata on their first call.
+        // Keep these cancellable, but allow more time and output than local reads.
+        let result = process::run(
+            command,
+            Limits {
+                timeout: std::time::Duration::from_secs(120),
+                output_bytes: 32 * 1024 * 1024,
+            },
+            cancel,
+            write,
+        )?;
+        if result.code == Some(0) {
+            Ok(result)
         } else {
-            self.run(&path, args, cancel, write)
+            Err(ExecutionError::Failed(result))
         }
     }
 
@@ -565,22 +617,6 @@ impl Host {
             } else {
                 Err(ExecutionError::Failed(result))
             }
-        }
-    }
-
-    fn run(
-        &self,
-        executable: &Path,
-        args: &[OsString],
-        cancel: &Cancellation,
-        write: bool,
-    ) -> Result<Completion, ExecutionError> {
-        let command = self.command(executable, args)?;
-        let result = process::run(command, Limits::default(), cancel, write)?;
-        if result.code == Some(0) {
-            Ok(result)
-        } else {
-            Err(ExecutionError::Failed(result))
         }
     }
 

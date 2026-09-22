@@ -125,6 +125,43 @@ fn commands_use_sanitized_host_transport_and_one_json_document() {
 fn rustix_root() -> bool {
     std::env::var("USER").is_ok_and(|v| v == "root")
 }
+
+#[test]
+fn container_images_keep_stable_ids_and_friendly_cli_names() {
+    let fixture = Fixture::new();
+    let docker = fixture.0.join("docker");
+    fs::write(
+        &docker,
+        r#"#!/bin/sh
+case "$1" in
+  info) printf '%s\n' '{}' ;;
+  image) printf '%s\n' '{"ID":"sha256:0123456789abcdef","Repository":"example/app","Tag":"latest","Digest":"sha256:aaaa","Size":"42MB","CreatedSince":"2 days ago"}' ;;
+  *) exit 64 ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&docker, fs::Permissions::from_mode(0o755)).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_pkd"))
+        .env("PATH", &fixture.0)
+        .env("HOME", &fixture.0)
+        .env_remove("SNAP")
+        .env_remove("FLATPAK_ID")
+        .args(["--json", "--from", "docker", "list"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let image = &value["data"]["packages"][0];
+    assert_eq!(image["id"]["name"], "sha256:0123456789abcdef");
+    assert_eq!(image["id"]["reference"], "example/app:latest");
+    assert_eq!(image["display_name"], "example/app:latest");
+    assert_eq!(image["id"]["scope"], "system");
+}
 #[test]
 fn flatpak_disallows_non_flatpak_host_commands() {
     for args in [

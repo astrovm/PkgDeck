@@ -100,8 +100,11 @@ Controls.ApplicationWindow {
     function updateOnly(source) {
         return ["fwupd", "codex", "claude", "grok", "opencode"].indexOf(source) >= 0;
     }
-    readonly property var sourceIds: ["apt", "dnf", "pacman", "zypper", "snap", "homebrew", "homebrew-cask", "appimage", "flatpak", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "composer", "gem", "fwupd", "codex", "claude", "grok", "opencode"]
-    readonly property var sourceNames: ["APT", "DNF", "Pacman", "Zypper", "Snap", "Homebrew", "Homebrew Casks", "AppImage", "Flatpak", "Cargo", "npm", "pnpm", "Bun", "pip", "pipx", "uv", "Composer", "RubyGems", "Firmware", "Codex (standalone)", "Claude Code (standalone)", "Grok (standalone)", "OpenCode (standalone)"]
+    readonly property var sourceIds: ["apt", "dnf", "pacman", "zypper", "snap", "homebrew", "homebrew-cask", "appimage", "flatpak", "docker", "podman", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "composer", "gem", "fwupd", "codex", "claude", "grok", "opencode"]
+    readonly property var sourceNames: ["APT", "DNF", "Pacman", "Zypper", "Snap", "Homebrew", "Homebrew Casks", "AppImage", "Flatpak", "Docker images", "Podman images", "Cargo", "npm", "pnpm", "Bun", "pip", "pipx", "uv", "Composer", "RubyGems", "Firmware", "Codex (standalone)", "Claude Code (standalone)", "Grok (standalone)", "OpenCode (standalone)"]
+    function containerSource(source) {
+        return source === "docker" || source === "podman";
+    }
     function checkedSources() {
         if (sourceSelection === "")
             return sourceIds.slice();
@@ -1367,7 +1370,7 @@ Controls.ApplicationWindow {
                                         }
                                         Controls.Label {
                                         objectName: "packageSourceLine"
-                                        text: modelData.source.toUpperCase() + (modelData.remote ? " · " + modelData.remote : "") + (modelData.source === "flatpak" ? " · " + (modelData.scope === "system" ? "System" : "User") : "")
+                                        text: modelData.source.toUpperCase() + (modelData.remote ? " · " + modelData.remote : "") + ((modelData.source === "flatpak" || root.containerSource(modelData.source)) ? " · " + (modelData.scope === "system" ? "System" : "User") : "")
                                         color: root.muted
                                         font.pixelSize: 11
                                         elide: Text.ElideRight
@@ -1399,6 +1402,18 @@ Controls.ApplicationWindow {
                                     color: root.muted
                                     textFormat: Text.PlainText
                                     elide: Text.ElideRight
+                                }
+                                ActionButton {
+                                    objectName: "rowContainerPull"
+                                    visible: modelData.kind === "package" && root.containerSource(modelData.source) && root.isInstalled(modelData) && !!modelData.reference
+                                    enabled: !backend.busy && !root.retainingResults
+                                    text: ""
+                                    symbol: "updates"
+                                    glyphColor: root.accent
+                                    Accessible.name: "Pull " + (modelData.display_name || modelData.name) + " from " + modelData.source
+                                    Layout.preferredWidth: 38
+                                    horizontalPadding: 8
+                                    onClicked: backend.propose("upgrade", root.originalIndex(index))
                                 }
                                 ActionButton {
                                     objectName: "rowPackageAction"

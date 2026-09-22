@@ -22,7 +22,7 @@ pkd upgrade neovim --from apt --yes
 pkd remove neovim --from apt --yes
 ```
 
-`--from` accepts `fwupd`, `apt`, `dnf`, `pacman`, `zypper`, `snap`, `homebrew`, `homebrew-cask`, `appimage`, `flatpak`, `cargo`, `npm`, `pnpm`, `bun`, `pip`, `pipx`, `uv`, `composer`, `gem`, `codex`, `claude`, `grok`, or `opencode`, and repeats to select several sources. Without it, queries cover detected managers;
+`--from` accepts `fwupd`, `apt`, `dnf`, `pacman`, `zypper`, `snap`, `homebrew`, `homebrew-cask`, `appimage`, `flatpak`, `docker`, `podman`, `cargo`, `npm`, `pnpm`, `bun`, `pip`, `pipx`, `uv`, `composer`, `gem`, `codex`, `claude`, `grok`, or `opencode`, and repeats to select several sources. Without it, queries cover detected managers;
 missing optional managers are omitted, while detection/query failures remain
 visible. `sources` includes unavailable managers and their reasons. Search uses
 literal case-insensitive substrings: APT names/summaries, Homebrew formula names,
@@ -67,6 +67,21 @@ formula, including older kegs retained after an upgrade; it does not pass
 [documented removal behavior](https://docs.brew.sh/FAQ#how-do-i-uninstall-a-formula). Automatic
 Homebrew updates and post-install cleanup are disabled for package operations;
 explicit `update` still refreshes Homebrew and tap metadata.
+
+Docker and Podman expose the local image inventory through their structured CLI
+format. The immutable image ID is the package identity; tags and digests remain
+display metadata and the first sorted tag is the pull reference. Docker images
+use the system daemon scope. Podman images use the invoking user's rootless
+scope. A tagged image can be refreshed with `pkd --from docker upgrade IMAGE_ID`
+or `pkd --from podman upgrade IMAGE_ID`; PkgDeck passes the exact stored tag to
+`pull`. `pkd --from docker install registry.example/team/image:tag` (or the
+equivalent Podman command) pulls a new exact reference. Registry offers are only
+created when one container source is explicitly selected, so ordinary package
+searches never invent container results. Removing an image passes its exact immutable ID to `image rm`, including
+dangling images shown as cleanup candidates. Pull and removal require the normal
+interactive confirmation or `--yes`. PkgDeck never invokes a shell, silently
+forces dependent-container removal, prunes volumes, or claims a mutable tag has
+an update without checking a registry digest.
 
 Ctrl-C cancels reads and pending operations. A native write already in progress
 finishes before cancellation takes effect; its result records

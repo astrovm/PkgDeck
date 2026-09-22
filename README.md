@@ -39,6 +39,7 @@ cargo run --locked -p pkgdeck
 - **Updates:** update individual packages or a selection, including firmware on Linux.
 - **Clean:** preview and confirm manager-native cleanup tasks.
 - **Sources:** choose managers and manage Flatpak repositories and firmware remotes.
+- **Container images:** inspect, pull, refresh, and remove Docker or rootless Podman images.
 
 The CLI works without Qt:
 
@@ -55,8 +56,9 @@ Writes require confirmation. Native managers handle dependencies and authorizati
 ## Package sources
 
 PkgDeck detects the managers available on the host. Supported adapters include
-APT, DNF, Pacman, Zypper, Flatpak, Snap, Homebrew formulae and macOS casks, AppImage, Cargo, npm,
-pnpm, Bun, pip, pipx, uv, Composer, RubyGems, and fwupd. Capabilities vary by
+APT, DNF, Pacman, Zypper, Flatpak, Snap, Homebrew formulae and macOS casks,
+AppImage, Docker, Podman, Cargo, npm, pnpm, Bun, pip, pipx, uv, Composer,
+RubyGems, and fwupd. Capabilities vary by
 manager; `pkd sources` reports availability and unsupported operations.
 Standalone Codex, Claude Code, Grok, and OpenCode installations also support
 updates through their upstream updaters; see the [CLI guide](docs/cli.md#standalone-cli-tools).

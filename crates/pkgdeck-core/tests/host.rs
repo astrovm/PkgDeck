@@ -314,7 +314,7 @@ fn reads_time_out_and_cancel_without_waiting_for_descendants() {
     assert_eq!(
         host().read(
             Path::new("/bin/sh"),
-            &shell("exec sleep 30"),
+            &shell("exec /bin/sleep 30"),
             Limits::default(),
             &cancel
         ),
@@ -526,6 +526,38 @@ fn dev_tool_runs_unprivileged_and_reports_status() {
 }
 
 #[test]
+fn container_engine_uses_bounded_user_commands_and_preserves_failures() {
+    let fixture = Fixture::new();
+    link_executable(&fixture.0, "synthetic-ok", "/bin/true");
+    link_executable(&fixture.0, "synthetic-fail", "/bin/false");
+    let host = Host::new(
+        Runtime::Native,
+        env(&[("PATH", fixture.0.to_str().unwrap())]),
+    );
+    let cancel = Cancellation::default();
+    assert_eq!(
+        host.container_engine("synthetic-ok", "Synthetic", &[], &cancel, false)
+            .unwrap()
+            .code,
+        Some(0)
+    );
+    assert_eq!(
+        host.container_engine("synthetic-ok", "Synthetic", &[], &cancel, true)
+            .unwrap()
+            .code,
+        Some(0)
+    );
+    assert!(matches!(
+        host.container_engine("synthetic-fail", "Synthetic", &[], &cancel, false),
+        Err(ExecutionError::Failed(_))
+    ));
+    assert!(matches!(
+        host.container_engine("missing", "Synthetic", &[], &cancel, false),
+        Err(ExecutionError::Disabled(reason)) if reason == "Synthetic not found"
+    ));
+}
+
+#[test]
 fn venv_pip_runs_only_inside_explicit_absolute_environments() {
     let fixture = Fixture::new();
     let venv = fixture.0.join("venv");
@@ -583,4 +615,112 @@ fn venv_pip_runs_only_inside_explicit_absolute_environments() {
         sandbox.venv_pip(&venv, &[], &cancel, false),
         Err(ExecutionError::Disabled(_))
     ));
+}
+
+#[test]
+fn venv_pip_rejects_malformed_and_packaged_environments() {
+    let fixture = Fixture::new();
+    let interpreter = fixture.0.join("bin/python");
+    fs::create_dir_all(&interpreter).unwrap();
+    let cancel = Cancellation::default();
+    let rejected = |h: &Host| {
+        assert!(matches!(
+            h.venv_pip(&fixture.0, &[], &cancel, false),
+            Err(ExecutionError::Disabled(_))
+        ));
+    };
+    rejected(&host());
+    fs::remove_dir(&interpreter).unwrap();
+    symlink("/bin/true", &interpreter).unwrap();
+    fs::create_dir(fixture.0.join("pyvenv.cfg")).unwrap();
+    rejected(&host());
+    fs::remove_dir(fixture.0.join("pyvenv.cfg")).unwrap();
+    fs::write(fixture.0.join("pyvenv.cfg"), "home = /synthetic\n").unwrap();
+    let packaged = Host::new(
+        Runtime::AppImage,
+        env(&[("APPDIR", fixture.0.to_str().unwrap())]),
+    );
+    rejected(&packaged);
+    fs::remove_file(&interpreter).unwrap();
+    fs::write(&interpreter, "not an executable").unwrap();
+    fs::set_permissions(&interpreter, fs::Permissions::from_mode(0o644)).unwrap();
+    rejected(&host());
+}
+
+#[test]
+fn flatpak_remote_queries_allow_slow_and_large_catalogs() {
+    let fixture = Fixture::new();
+    link_executable(&fixture.0, "flatpak", "/bin/sh");
+    let h = Host::new(
+        Runtime::Native,
+        env(&[("PATH", fixture.0.to_str().unwrap())]),
+    );
+    let output = h
+        .flatpak(
+            &shell("/bin/sleep 11; /usr/bin/head -c 262144 /dev/zero"),
+            &Cancellation::default(),
+            false,
+            false,
+            Authorization::SudoNonInteractive,
+        )
+        .unwrap();
+    assert_eq!(output.code, Some(0));
+    assert_eq!(output.stdout.len(), 262144);
+    assert!(!output.truncated);
+}
+
+#[test]
+fn flatpak_failures_missing_tools_and_cancellation_are_diagnostic() {
+    let fixture = Fixture::new();
+    link_executable(&fixture.0, "flatpak", "/bin/false");
+    let host = Host::new(
+        Runtime::Native,
+        env(&[("PATH", fixture.0.to_str().unwrap())]),
+    );
+    let cancel = Cancellation::default();
+    assert!(matches!(
+        host.flatpak(
+            &["--user".into(), "list".into()],
+            &cancel,
+            false,
+            false,
+            Authorization::SudoNonInteractive,
+        ),
+        Err(ExecutionError::Failed(result)) if result.code == Some(1)
+    ));
+
+    let missing = Host::new(
+        Runtime::Native,
+        env(&[("PATH", fixture.0.join("missing").to_str().unwrap())]),
+    );
+    assert!(matches!(
+        missing.flatpak(
+            &["--user".into(), "list".into()],
+            &cancel,
+            false,
+            false,
+            Authorization::SudoNonInteractive,
+        ),
+        Err(ExecutionError::Disabled(reason)) if reason == "Flatpak not found"
+    ));
+
+    fs::remove_file(fixture.0.join("flatpak")).unwrap();
+    link_executable(&fixture.0, "flatpak", "/bin/sh");
+    let cancelling = Cancellation::default();
+    let requested = cancelling.clone();
+    let thread = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(30));
+        requested.cancel();
+    });
+    assert_eq!(
+        host.flatpak(
+            &shell("exec /bin/sleep 30"),
+            &cancelling,
+            false,
+            false,
+            Authorization::SudoNonInteractive,
+        ),
+        Err(ExecutionError::Cancelled)
+    );
+    thread.join().unwrap();
 }

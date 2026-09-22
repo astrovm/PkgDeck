@@ -24,6 +24,12 @@ Click column headings to sort; drag the name and version dividers to resize.
 Source filters and column preferences persist between sessions. **Reload** reads
 fresh package state.
 
+Docker daemon images and rootless Podman images are separate sources. Rows show
+tags, digests, size, age, immutable short ID, and storage scope. A tagged image
+can be pulled again or removed after confirmation; dangling images can only be
+removed. To pull a new registry reference, select only Docker or Podman and
+search for the exact tagged reference.
+
 ## Clean
 
 Clean lists manager-native maintenance plans after a successful dry run. Inspect

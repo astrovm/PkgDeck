@@ -655,8 +655,8 @@ fn flatpak_rejects_malformed_metadata_and_foreign_operations() {
 fn explicit_optional_sources_remain_discoverable_when_unavailable() {
     let cancel = Cancellation::default();
     for source in [
-        "appimage", "flatpak", "dnf", "pacman", "zypper", "snap", "cargo", "npm", "pnpm", "bun",
-        "pip", "pipx", "uv", "composer", "gem",
+        "appimage", "flatpak", "dnf", "pacman", "zypper", "snap", "docker", "podman", "cargo",
+        "npm", "pnpm", "bun", "pip", "pipx", "uv", "composer", "gem",
     ] {
         let mut engine = native_engine(
             &[source.to_string()],

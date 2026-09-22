@@ -1,5 +1,6 @@
-//! Native package-manager, Homebrew formula/cask, and local AppImage adapters.
+//! Native package-manager, container image, Homebrew formula/cask, and local AppImage adapters.
 mod appimage;
+mod container;
 mod firmware;
 mod standalone;
 use crate::{
@@ -9,6 +10,7 @@ use crate::{
     process::*,
 };
 pub use appimage::AppImage;
+pub use container::{Container, ContainerKind};
 pub use firmware::Firmware;
 use serde::Deserialize;
 pub use standalone::{Standalone, StandaloneTool};
@@ -48,6 +50,8 @@ pub const BACKEND_IDS: &[&str] = &[
     "homebrew-cask",
     "appimage",
     "flatpak",
+    "docker",
+    "podman",
     "cargo",
     "npm",
     "pnpm",
@@ -137,6 +141,15 @@ pub trait Transport: Send {
     ) -> Result<Completion, ExecutionError> {
         let _ = (args, cancel, write);
         Err(ExecutionError::Disabled(format!("{executable} not found")))
+    }
+    fn container(
+        &self,
+        executable: &str,
+        args: &[OsString],
+        cancel: &Cancellation,
+        write: bool,
+    ) -> Result<Completion, ExecutionError> {
+        self.dev_tool(executable, args, cancel, write)
     }
 }
 pub struct NativeTransport {
@@ -260,6 +273,21 @@ impl Transport for NativeTransport {
     ) -> Result<Completion, ExecutionError> {
         self.host
             .system_manager(executable, args, cancel, write, self.authorization)
+    }
+    fn container(
+        &self,
+        executable: &str,
+        args: &[OsString],
+        cancel: &Cancellation,
+        write: bool,
+    ) -> Result<Completion, ExecutionError> {
+        let label = if executable == "docker" {
+            "Docker"
+        } else {
+            "Podman"
+        };
+        self.host
+            .container_engine(executable, label, args, cancel, write)
     }
 }
 
@@ -3615,6 +3643,29 @@ pub fn native_engine(
         if discover || explicit || !matches!(status, Ok(Availability::Unavailable(_))) {
             engine.note_detected("flatpak".into(), status);
             engine.register(flatpak)?;
+        }
+    }
+    for (id, make) in [
+        (
+            "docker",
+            Container::docker as fn(NativeTransport) -> Container<NativeTransport>,
+        ),
+        (
+            "podman",
+            Container::podman as fn(NativeTransport) -> Container<NativeTransport>,
+        ),
+    ] {
+        if allowed(id) {
+            let mut backend = make(NativeTransport {
+                host: Host::current(),
+                authorization,
+            })
+            .with_remote_offers(explicit && sources.len() == 1);
+            let status = backend.detect(cancel);
+            if discover || explicit || !matches!(status, Ok(Availability::Unavailable(_))) {
+                engine.note_detected(id.into(), status);
+                engine.register(backend)?;
+            }
         }
     }
     for (id, make) in [

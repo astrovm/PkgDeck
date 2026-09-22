@@ -974,6 +974,28 @@ TestCase {
         tryVerify(() => !findChild(list.itemAtIndex(0), "rowPackageAction").visible);
         compare(fake.writes, 0);
     }
+    function test_container_rows_offer_separate_pull_and_cleanup_actions() {
+        browser.openView("Installed");
+        fake.rows = JSON.stringify([
+            {kind: "package", name: "sha256:0123456789abcdef", display_name: "example/app:latest", source: "docker", architecture: "x86_64", installed: "0123456789ab", candidate: null, update: "unknown", scope: "system", remote: "Docker daemon", reference: "example/app:latest", summary: "Tags: example/app:latest · 42MB"},
+            {kind: "package", name: "fedcba9876543210", display_name: "Untagged image fedcba987654", source: "podman", architecture: "x86_64", installed: "fedcba987654", candidate: null, update: "unknown", scope: {user: {uid: 1000}}, remote: "rootless Podman storage", reference: null, summary: "Dangling · 9MB"}
+        ]);
+        const list = findChild(browser, "packageResults");
+        tryVerify(() => list.itemAtIndex(1) !== null);
+        const tagged = list.itemAtIndex(0);
+        const pull = findChild(tagged, "rowContainerPull");
+        const remove = findChild(tagged, "rowPackageAction");
+        verify(pull.visible);
+        compare(pull.symbol, "updates");
+        compare(remove.symbol, "remove");
+        clickDelegate(pull);
+        verify(fake.confirmation.indexOf("upgrade") === 0);
+        fake.confirmation = "";
+        const dangling = list.itemAtIndex(1);
+        verify(!findChild(dangling, "rowContainerPull").visible);
+        compare(findChild(dangling, "rowPackageAction").symbol, "remove");
+        compare(fake.writes, 0);
+    }
     function test_header_source_checklist_and_installed_filter() {
         browser.openView("Installed");
         const filter = findChild(browser, "sourceFilter");
@@ -986,16 +1008,16 @@ TestCase {
         const npm = browser.sourceIds.indexOf("npm");
         verify(browser.sourceCheckAt(npm).checked);
         clickSourceCheck(npm);
-        compare(browser.sourceSelection, "apt,dnf,pacman,zypper,snap,homebrew,homebrew-cask,appimage,flatpak,cargo,pnpm,bun,pip,pipx,uv,composer,gem,fwupd,codex,claude,grok,opencode");
-        compare(filter.text, "22 sources");
-        compare(fake.lastSource, "apt,dnf,pacman,zypper,snap,homebrew,homebrew-cask,appimage,flatpak,cargo,pnpm,bun,pip,pipx,uv,composer,gem,fwupd,codex,claude,grok,opencode");
+        compare(browser.sourceSelection, "apt,dnf,pacman,zypper,snap,homebrew,homebrew-cask,appimage,flatpak,docker,podman,cargo,pnpm,bun,pip,pipx,uv,composer,gem,fwupd,codex,claude,grok,opencode");
+        compare(filter.text, "24 sources");
+        compare(fake.lastSource, "apt,dnf,pacman,zypper,snap,homebrew,homebrew-cask,appimage,flatpak,docker,podman,cargo,pnpm,bun,pip,pipx,uv,composer,gem,fwupd,codex,claude,grok,opencode");
         compare(fake.lastView, "Installed");
         // Re-checking the last unchecked source returns to all available.
         clickSourceCheck(npm);
         compare(browser.sourceSelection, "");
         compare(filter.text, "All sources");
         // Unchecking down to one source disables that final checkbox.
-        const ids = ["apt", "dnf", "pacman", "zypper", "snap", "homebrew", "homebrew-cask", "appimage", "flatpak", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "composer", "gem", "fwupd", "codex", "claude", "grok", "opencode"];
+        const ids = ["apt", "dnf", "pacman", "zypper", "snap", "homebrew", "homebrew-cask", "appimage", "flatpak", "docker", "podman", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "composer", "gem", "fwupd", "codex", "claude", "grok", "opencode"];
         for (let idx = 0; idx < ids.length; idx++) {
             if (ids[idx] === "apt")
                 continue;
