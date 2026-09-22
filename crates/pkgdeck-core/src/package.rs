@@ -88,6 +88,34 @@ pub enum Capability {
     Remove,
     Refresh,
     Upgrade,
+    /// Discover and execute manager-native maintenance plans.
+    Clean,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+#[serde(rename_all = "snake_case")]
+pub enum CleanupKind {
+    OrphanDependencies,
+    PackageCache,
+}
+
+/// One manager-native cleanup plan. `key` is a backend-defined fixed token,
+/// never command text supplied by a frontend.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub struct CleanupId {
+    pub backend: String,
+    pub key: String,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq)]
+pub struct CleanupItem {
+    pub id: CleanupId,
+    pub kind: CleanupKind,
+    pub title: String,
+    pub summary: String,
+    /// Exact native dry-run output, bounded by the process layer. Frontends
+    /// show it so users can inspect the plan before authorizing the write.
+    pub preview: String,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq)]
@@ -111,6 +139,7 @@ pub enum Operation {
     UpgradeAll {
         backend: String,
     },
+    Clean(CleanupId),
 }
 
 impl Operation {
@@ -118,6 +147,7 @@ impl Operation {
         match self {
             Self::Refresh { backend } | Self::UpgradeAll { backend } => backend,
             Self::Install(id) | Self::Remove(id) | Self::Upgrade(id) => &id.backend,
+            Self::Clean(id) => &id.backend,
         }
     }
     pub fn capability(&self) -> Capability {
@@ -126,6 +156,7 @@ impl Operation {
             Self::Install(_) => Capability::Install,
             Self::Remove(_) => Capability::Remove,
             Self::Upgrade(_) | Self::UpgradeAll { .. } => Capability::Upgrade,
+            Self::Clean(_) => Capability::Clean,
         }
     }
 }

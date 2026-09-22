@@ -185,6 +185,7 @@ impl Backend for Synthetic {
                 package.installed_version = None;
                 package.update = UpdateAvailability::Unknown;
             }
+            Operation::Clean(_) => return Err(self.unsupported(Capability::Clean)),
         }
         progress(Progress::Transfer {
             completed: 1,
@@ -202,6 +203,138 @@ fn engine(fault: Fault) -> Engine {
     let mut engine = Engine::default();
     engine.register(Synthetic::new("synthetic", fault)).unwrap();
     engine
+}
+
+struct Cleaner;
+impl Backend for Cleaner {
+    fn id(&self) -> &str {
+        "cleaner"
+    }
+    fn capabilities(&self) -> &[Capability] {
+        &[Capability::Clean]
+    }
+    fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
+        Ok(Availability::Available)
+    }
+    fn cleanup(&mut self, _: &Cancellation) -> Result<Vec<CleanupItem>, EngineError> {
+        Ok(vec![CleanupItem {
+            id: CleanupId {
+                backend: "cleaner".into(),
+                key: "orphans".into(),
+            },
+            kind: CleanupKind::OrphanDependencies,
+            title: "Synthetic orphans".into(),
+            summary: "One synthetic dependency".into(),
+            preview: "synthetic-runtime".into(),
+        }])
+    }
+    fn execute(
+        &mut self,
+        operation: &Operation,
+        _: &Cancellation,
+        _: &mut dyn FnMut(Progress),
+    ) -> Result<OperationOutcome, EngineError> {
+        match operation {
+            Operation::Clean(id) if id.backend == "cleaner" && id.key == "orphans" => {
+                Ok(OperationOutcome::default())
+            }
+            _ => Err(EngineError::NotFound),
+        }
+    }
+}
+
+struct BrokenCleaner {
+    name: &'static str,
+    result: Result<Vec<CleanupItem>, EngineError>,
+}
+impl Backend for BrokenCleaner {
+    fn id(&self) -> &str {
+        self.name
+    }
+    fn capabilities(&self) -> &[Capability] {
+        &[Capability::Clean]
+    }
+    fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
+        Ok(Availability::Available)
+    }
+    fn cleanup(&mut self, _: &Cancellation) -> Result<Vec<CleanupItem>, EngineError> {
+        self.result.clone()
+    }
+}
+
+fn cleanup_item(backend: &str, key: &str, title: &str) -> CleanupItem {
+    CleanupItem {
+        id: CleanupId {
+            backend: backend.into(),
+            key: key.into(),
+        },
+        kind: CleanupKind::PackageCache,
+        title: title.into(),
+        summary: "Synthetic cache".into(),
+        preview: "/tmp/synthetic-cache".into(),
+    }
+}
+
+#[test]
+fn cleanup_discovery_is_typed_and_unsupported_sources_are_explicit() {
+    let mut engine = engine(Fault::None);
+    engine.register(Cleaner).unwrap();
+    let cancel = Cancellation::default();
+    let report = engine.cleanup(&cancel);
+    assert_eq!(report.items.len(), 1);
+    assert_eq!(report.items[0].id.key, "orphans");
+    assert!(matches!(
+        report.failures[0].error,
+        EngineError::Unsupported {
+            capability: Capability::Clean,
+            ..
+        }
+    ));
+    assert!(engine
+        .execute(
+            &Operation::Clean(report.items[0].id.clone()),
+            &cancel,
+            &mut |_| {}
+        )
+        .is_ok());
+}
+
+#[test]
+fn cleanup_rejects_invalid_plans_and_preserves_backend_failures() {
+    for (name, result) in [
+        (
+            "foreign",
+            Ok(vec![cleanup_item("other", "cache", "Foreign cache")]),
+        ),
+        (
+            "duplicate",
+            Ok(vec![
+                cleanup_item("duplicate", "cache", "Cache"),
+                cleanup_item("duplicate", "cache", "Cache again"),
+            ]),
+        ),
+        ("incomplete", Ok(vec![cleanup_item("incomplete", "", "")])),
+        ("failed", Err(ExecutionError::TimedOut.into())),
+    ] {
+        let mut engine = Engine::default();
+        engine
+            .register(BrokenCleaner { name, result })
+            .expect("unique synthetic backend");
+        let report = engine.cleanup(&Cancellation::default());
+        assert!(report.items.is_empty());
+        assert_eq!(report.failures.len(), 1);
+        if name == "failed" {
+            assert_eq!(
+                report.failures[0].error,
+                EngineError::Execution(ExecutionError::TimedOut)
+            );
+        } else {
+            assert!(matches!(
+                report.failures[0].error,
+                EngineError::InvalidResponse { .. }
+            ));
+        }
+    }
 }
 
 #[test]

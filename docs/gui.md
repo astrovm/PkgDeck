@@ -1,6 +1,6 @@
 # Graphical interface
 
-Launch `pkgdeck`. The sidebar contains Search, Installed, Updates, Sources,
+Launch `pkgdeck`. The sidebar contains Search, Installed, Updates, Clean, Sources,
 Settings, and About. Settings offers system, dark, and light appearance, reduced
 motion, and authorization preferences.
 
@@ -29,6 +29,12 @@ tags, digests, size, age, immutable short ID, and storage scope. A tagged image
 can be pulled again or removed after confirmation; dangling images can only be
 removed. To pull a new registry reference, select only Docker or Podman and
 search for the exact tagged reference.
+
+## Clean
+
+Clean lists manager-native maintenance plans after a successful dry run. Inspect
+one task or choose **Clean all**; every write requires confirmation of the plan.
+Unsupported and failed sources remain visible.
 
 ## Updates
 
@@ -74,7 +80,7 @@ disable repositories. Refresh sources updates metadata for selected managers.
 
 | Shortcut | Action |
 | --- | --- |
-| Ctrl+1 / Ctrl+2 / Ctrl+3 / Ctrl+4 | Search / Installed / Updates / Sources |
+| Ctrl+1 / Ctrl+2 / Ctrl+3 / Ctrl+4 / Ctrl+5 | Search / Installed / Updates / Clean / Sources |
 | Ctrl+F | Focus the search or filter field |
 | Ctrl+R | Reload |
 | Ctrl+Shift+U | Update checked packages |
@@ -86,6 +92,5 @@ column headings also support Space or Return to sort.
 ## Availability
 
 The GUI runs natively on Linux and is packaged with the CLI by Homebrew on macOS.
-Available sources depend on the platform and installed managers. Experimental
-Flatpak and Snap builds cannot currently manage host packages. See
+Available sources depend on the platform and installed managers. The Flatpak build manages host Flatpak installations; classic Snap manages host packages. See
 [distribution](distribution.md) and [authorization](host-execution.md).

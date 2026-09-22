@@ -37,6 +37,7 @@ cargo run --locked -p pkgdeck
 - **Search:** compare the same app across sources and install a specific variant.
 - **Installed:** filter packages, inspect details, and find duplicate installations.
 - **Updates:** update individual packages or a selection, including firmware on Linux.
+- **Clean:** preview and confirm manager-native cleanup tasks.
 - **Sources:** choose managers and manage Flatpak repositories and firmware remotes.
 - **Container images:** inspect, pull, refresh, and remove Docker or rootless Podman images.
 

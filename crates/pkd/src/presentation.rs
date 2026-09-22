@@ -33,6 +33,9 @@ pub fn operation(op: &Operation) -> String {
         Operation::UpgradeAll { backend } => {
             return format!("Upgrade all packages from {}", clean(backend))
         }
+        Operation::Clean(id) => {
+            return format!("Clean {} with {}", clean(&id.key), clean(&id.backend))
+        }
         Operation::Install(id) => ("Install", id),
         Operation::Remove(id) => ("Remove", id),
         Operation::Upgrade(id) => ("Upgrade", id),
@@ -123,7 +126,43 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
         "PkgDeck"
     };
     let mut output = format!("{heading}\n\n");
-    if let Some(packages) = data["packages"].as_array() {
+    if let Some(items) = data["items"].as_array() {
+        if items.is_empty() {
+            output.push_str("Nothing to clean.");
+        } else {
+            let rows = items
+                .iter()
+                .map(|item| {
+                    vec![
+                        format!(
+                            "{}:{}",
+                            value(&item["id"]["backend"]),
+                            value(&item["id"]["key"])
+                        ),
+                        value(&item["title"]),
+                        value(&item["summary"]),
+                    ]
+                })
+                .collect::<Vec<_>>();
+            output.push_str(&table(&["KEY", "CLEANUP", "SUMMARY"], &rows, width));
+            output.push_str("\n\nReview a plan with --json. Run selected keys with `pkd clean <key>` or every plan with `pkd clean --all`.");
+        }
+        if let Some(failures) = data["failures"].as_array() {
+            for failure in failures {
+                let unsupported = failure["error"].get("Unsupported").is_some()
+                    || failure["error"].get("unsupported").is_some();
+                output.push_str(&format!(
+                    "\n{} {}",
+                    if unsupported {
+                        "[-] Unsupported:"
+                    } else {
+                        "[!] Failed:"
+                    },
+                    value(failure)
+                ));
+            }
+        }
+    } else if let Some(packages) = data["packages"].as_array() {
         let rows = packages
             .iter()
             .map(|p| {
@@ -321,6 +360,42 @@ mod tests {
         assert!(output.contains("[^] fixture"));
         assert!(output.contains("[^] Update available"));
         assert!(!output.contains('\u{1b}'));
+    }
+    #[test]
+    fn cleanup_plans_and_failures_are_concise_and_actionable() {
+        assert_eq!(
+            operation(&Operation::Clean(pkgdeck_core::package::CleanupId {
+                backend: "apt".into(),
+                key: "autoremove".into(),
+            })),
+            "Clean autoremove with apt"
+        );
+        assert_eq!(
+            operation(&Operation::UpgradeAll {
+                backend: "homebrew".into(),
+            }),
+            "Upgrade all packages from homebrew"
+        );
+        let plans = json!({
+            "items": [{
+                "id": {"backend": "apt", "key": "autoremove"},
+                "title": "Unused dependencies",
+                "summary": "One package"
+            }],
+            "failures": [
+                {"backend": "snap", "error": {"unsupported": {"capability": "clean"}}},
+                {"backend": "homebrew", "error": "synthetic failure"}
+            ]
+        });
+        let output = human(&plans, 100, false);
+        assert!(output.contains("apt:autoremove"));
+        assert!(output.contains("Unused dependencies"));
+        assert!(output.contains("Review a plan with --json"));
+        assert!(output.contains("Unsupported:"));
+        assert!(output.contains("Failed:"));
+
+        let empty = human(&json!({"items": [], "failures": []}), 80, false);
+        assert!(empty.contains("Nothing to clean"));
     }
     #[test]
     fn package_table_shows_the_installed_version_when_present() {

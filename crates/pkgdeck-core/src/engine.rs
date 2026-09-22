@@ -104,6 +104,9 @@ pub trait Backend: Send {
     ) -> Result<PackageDetails, EngineError> {
         Err(self.unsupported(Capability::Details))
     }
+    fn cleanup(&mut self, _cancel: &Cancellation) -> Result<Vec<CleanupItem>, EngineError> {
+        Err(self.unsupported(Capability::Clean))
+    }
     fn execute(
         &mut self,
         operation: &Operation,
@@ -118,6 +121,12 @@ pub trait Backend: Send {
             capability,
         }
     }
+}
+
+#[derive(serde::Serialize, Clone, Debug, Default, Eq, PartialEq)]
+pub struct CleanupReport {
+    pub items: Vec<CleanupItem>,
+    pub failures: Vec<BackendFailure>,
 }
 
 #[derive(serde::Serialize, Clone, Debug, Eq, PartialEq)]
@@ -264,6 +273,40 @@ impl Engine {
     }
     pub fn installed(&mut self, cancel: &Cancellation) -> PackageReport {
         self.query(None, cancel)
+    }
+    /// Discover cleanup plans independently per backend. Unsupported sources
+    /// are explicit failures so frontends never imply that they were checked.
+    pub fn cleanup(&mut self, cancel: &Cancellation) -> CleanupReport {
+        let mut report = CleanupReport::default();
+        let ids: Vec<_> = self.backends.keys().cloned().collect();
+        for id in ids {
+            let mut seen = BTreeSet::new();
+            let result = self
+                .ready(&id, Capability::Clean, cancel)
+                .and_then(|backend| backend.cleanup(cancel));
+            match result {
+                Ok(items)
+                    if items.iter().all(|item| {
+                        item.id.backend == id
+                            && !item.id.key.is_empty()
+                            && !item.title.trim().is_empty()
+                            && seen.insert(item.id.clone())
+                    }) =>
+                {
+                    report.items.extend(items)
+                }
+                Ok(_) => report.failures.push(BackendFailure {
+                    backend: id.clone(),
+                    error: EngineError::InvalidResponse {
+                        backend: id,
+                        reason: "foreign, duplicate, or incomplete cleanup item".into(),
+                    },
+                }),
+                Err(error) => report.failures.push(BackendFailure { backend: id, error }),
+            }
+        }
+        report.items.sort_by(|a, b| a.id.cmp(&b.id));
+        report
     }
     fn query(&mut self, query: Option<&str>, cancel: &Cancellation) -> PackageReport {
         let mut report = PackageReport::default();

@@ -67,12 +67,13 @@ enum Job {
     Details(PackageId),
     Write(Operation),
     UpgradeAll(Vec<Operation>),
+    CleanAll(Vec<Operation>),
 }
 impl Job {
     fn writes(&self) -> bool {
         matches!(
             self,
-            Self::Write(_) | Self::UpgradeAll(_) | Self::Repositories(Some(_))
+            Self::Write(_) | Self::UpgradeAll(_) | Self::CleanAll(_) | Self::Repositories(Some(_))
         )
     }
 }
@@ -83,6 +84,7 @@ enum Payload {
     Details(Box<PackageDetails>),
     Written(OperationOutcome),
     Batch(String),
+    Cleanup(CleanupReport),
 }
 enum Reply {
     Progress(String),
@@ -114,6 +116,8 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
         Job::Load(view, query) => {
             if view == "Sources" {
                 Ok(Payload::Sources(engine.discover(cancel)))
+            } else if view == "Clean" {
+                Ok(Payload::Cleanup(engine.cleanup(cancel)))
             } else if view == "Search" {
                 // Stream cumulative partials so fast backends render while
                 // slow ones still query; the terminal emission below carries
@@ -151,7 +155,7 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
         Job::Details(id) => engine
             .details(&id, cancel)
             .map(|d| Payload::Details(Box::new(d))),
-        Job::UpgradeAll(operations) => {
+        Job::UpgradeAll(operations) | Job::CleanAll(operations) => {
             let results = engine.execute_batch(&operations, cancel, &mut |event| {
                 if let Event::Progress {
                     operation,
@@ -165,7 +169,8 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
                 }
             });
             let completed = results.iter().filter(|r| r.is_ok()).count();
-            let mut status = format!("Completed {completed} of {} updates.", operations.len());
+            let noun = if operations.iter().all(|op| matches!(op, Operation::Clean(_))) { "cleanup tasks" } else { "updates" };
+            let mut status = format!("Completed {completed} of {} {noun}.", operations.len());
             for (operation, result) in operations.iter().zip(results) {
                 let outcome = match result {
                     Ok(outcome) if outcome.cancellation_deferred => {
@@ -232,6 +237,7 @@ pub struct Controller {
     upgradable: bool,
     updates_view: bool,
     packages: Vec<Package>,
+    cleanup: Vec<CleanupItem>,
     failures: Vec<BackendFailure>,
     detail_cache: BTreeMap<PackageId, QString>,
     sources: Vec<Source>,
@@ -258,6 +264,7 @@ impl Default for Controller {
             upgradable: false,
             updates_view: false,
             packages: vec![],
+            cleanup: vec![],
             failures: vec![],
             detail_cache: BTreeMap::new(),
             sources: vec![],
@@ -462,6 +469,7 @@ fn operation_label(operation: &Operation) -> String {
         Operation::Upgrade(id) => ("Update", id),
         Operation::Refresh { backend } => return format!("Refresh metadata for {backend}"),
         Operation::UpgradeAll { backend } => return format!("Update all packages from {backend}"),
+        Operation::Clean(id) => return format!("Clean {} with {}", id.key, id.backend),
     };
     format!(
         "{action} {}\nSource: {}\nArchitecture: {}\nScope: {}",
@@ -619,7 +627,7 @@ impl ffi::PackageController {
             .filter(|s| !s.is_empty())
             .map(str::to_owned)
             .collect();
-        if !["Search", "Installed", "Updates", "Sources"].contains(&view.as_str())
+        if !["Search", "Installed", "Updates", "Sources", "Clean"].contains(&view.as_str())
             || (view == "Search" && query.trim().is_empty())
         {
             return;
@@ -664,6 +672,7 @@ impl ffi::PackageController {
             self.as_mut().rust_mut().detail_cache.clear();
         }
         self.as_mut().rust_mut().packages.clear();
+        self.as_mut().rust_mut().cleanup.clear();
         self.as_mut().rust_mut().failures.clear();
         self.as_mut().rust_mut().sources.clear();
         self.as_mut().rust_mut().pending = None;
@@ -729,10 +738,17 @@ impl ffi::PackageController {
                 json!({"package": package_row(&package, &same, None), "description": package.summary}),
             ));
             self.start(Job::Details(package.id));
+        } else if let Some(item) = usize::try_from(index)
+            .ok()
+            .and_then(|i| self.rust().cleanup.get(i))
+            .cloned()
+        {
+            self.as_mut().set_details(encoded(json!({"cleanup": item})));
+            self.set_status("Cleanup preview loaded.".into());
         } else if let Some(failure) = usize::try_from(index)
             .ok()
             .and_then(|i| {
-                i.checked_sub(self.rust().packages.len())
+                i.checked_sub(self.rust().packages.len() + self.rust().cleanup.len())
                     .and_then(|j| self.rust().failures.get(j))
             })
             .cloned()
@@ -810,6 +826,27 @@ impl ffi::PackageController {
             self.rust_mut().pending = Some(Job::UpgradeAll(operations));
             return;
         }
+        if action == "clean-all" {
+            let operations: Vec<_> = self
+                .rust()
+                .cleanup
+                .iter()
+                .map(|item| Operation::Clean(item.id.clone()))
+                .collect();
+            if operations.is_empty() {
+                return;
+            }
+            let labels = self
+                .rust()
+                .cleanup
+                .iter()
+                .map(|item| format!("{} ({})\n{}", item.title, item.id.backend, item.preview))
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            self.as_mut().set_confirmation(format!("Run {} cleanup tasks?\n\n{labels}\n\nThe native managers selected these files and dependencies. Completed tasks are not rolled back if another fails. Continue?", operations.len()).as_str().into());
+            self.rust_mut().pending = Some(Job::CleanAll(operations));
+            return;
+        }
         let operation = usize::try_from(index).ok().and_then(|i| {
             if action == "refresh" {
                 self.rust()
@@ -822,6 +859,11 @@ impl ffi::PackageController {
                     .map(|s| Operation::Refresh {
                         backend: s.backend.clone(),
                     })
+            } else if action == "clean" {
+                self.rust()
+                    .cleanup
+                    .get(i)
+                    .map(|item| Operation::Clean(item.id.clone()))
             } else {
                 self.rust()
                     .packages
@@ -852,7 +894,16 @@ impl ffi::PackageController {
             }
         });
         if let Some(op) = &operation {
-            let label = confirmation_label(op, &self.rust().packages);
+            let label = if let Operation::Clean(id) = op {
+                self.rust()
+                    .cleanup
+                    .iter()
+                    .find(|item| item.id == *id)
+                    .map(|item| format!("{} ({})\n\n{}", item.title, id.backend, item.preview))
+                    .unwrap_or_else(|| operation_label(op))
+            } else {
+                confirmation_label(op, &self.rust().packages)
+            };
             self.as_mut().set_confirmation(
                 format!(
                     "{}\n\nNative dependency changes may follow. Continue?",
@@ -971,6 +1022,38 @@ impl ffi::PackageController {
                 self.as_mut().set_rows(encoded(rows));
                 self.set_status(status.as_str().into());
             }
+            Ok(Payload::Cleanup(report)) => {
+                let empty = report.items.is_empty();
+                let mut rows: Vec<_> = report
+                    .items
+                    .iter()
+                    .map(|item| {
+                        json!({
+                            "kind": "cleanup", "name": item.title, "display_name": item.title,
+                            "source": item.id.backend, "summary": item.summary,
+                            "cleanup_key": item.id.key, "cleanup_kind": item.kind,
+                            "preview": item.preview
+                        })
+                    })
+                    .collect();
+                rows.extend(report.failures.iter().map(|failure| {
+                    json!({
+                        "kind": "failure", "name": failure.backend, "source": failure.backend,
+                        "summary": failure.error.to_string(), "available": false
+                    })
+                }));
+                self.as_mut().rust_mut().cleanup = report.items;
+                self.as_mut().rust_mut().failures = report.failures;
+                self.as_mut().set_rows(encoded(rows));
+                self.set_status(
+                    if empty {
+                        "Nothing to clean."
+                    } else {
+                        "Review a cleanup task before running it."
+                    }
+                    .into(),
+                );
+            }
             Ok(Payload::Repositories(report)) => {
                 self.as_mut().rust_mut().view_cache.clear();
                 self.as_mut().rust_mut().detail_cache.clear();
@@ -1036,6 +1119,7 @@ impl ffi::PackageController {
                 self.as_mut().rust_mut().view_cache.clear();
                 self.as_mut().rust_mut().detail_cache.clear();
                 self.as_mut().rust_mut().packages.clear();
+                self.as_mut().rust_mut().cleanup.clear();
                 self.as_mut().rust_mut().failures.clear();
                 self.as_mut().rust_mut().sources.clear();
                 self.as_mut().set_rows("[]".into());
@@ -1131,6 +1215,69 @@ impl ffi::PackageController {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cleanup_rows_show_preview_and_require_confirmation() {
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        let item = CleanupItem {
+            id: CleanupId {
+                backend: "apt".into(),
+                key: "autoremove".into(),
+            },
+            kind: CleanupKind::OrphanDependencies,
+            title: "Unused dependencies".into(),
+            summary: "One package".into(),
+            preview: "Remv synthetic-runtime [1.0]".into(),
+        };
+        controller
+            .as_mut()
+            .apply(Ok(Payload::Cleanup(CleanupReport {
+                items: vec![item],
+                failures: vec![],
+            })));
+        assert!(controller.rows().to_string().contains("cleanup"));
+        controller.as_mut().select(0);
+        assert!(controller
+            .details()
+            .to_string()
+            .contains("synthetic-runtime"));
+        controller.as_mut().propose("clean".into(), 0);
+        assert!(controller
+            .confirmation()
+            .to_string()
+            .contains("Remv synthetic-runtime"));
+        assert!(matches!(
+            controller.rust().pending,
+            Some(Job::Write(Operation::Clean(_)))
+        ));
+        controller.as_mut().propose("clean-all".into(), 0);
+        assert!(controller
+            .confirmation()
+            .to_string()
+            .contains("Run 1 cleanup tasks"));
+        assert!(matches!(controller.rust().pending, Some(Job::CleanAll(_))));
+        controller.as_mut().confirm(false);
+
+        let failure = BackendFailure {
+            backend: "homebrew".into(),
+            error: EngineError::Unavailable {
+                backend: "homebrew".into(),
+                reason: "synthetic executable missing".into(),
+            },
+        };
+        controller
+            .as_mut()
+            .apply(Ok(Payload::Cleanup(CleanupReport {
+                items: vec![],
+                failures: vec![failure],
+            })));
+        assert!(controller.status().to_string().contains("Nothing to clean"));
+        assert!(controller.rows().to_string().contains("failure"));
+        controller.as_mut().select(0);
+        assert!(controller.details().to_string().contains("homebrew"));
+        controller.as_mut().propose("clean-all".into(), 0);
+        assert!(controller.confirmation().is_empty());
+    }
     #[test]
     fn qt_repository_confirmation_and_refresh_invalidate_cached_state() {
         let mut controller = ffi::create_controller();

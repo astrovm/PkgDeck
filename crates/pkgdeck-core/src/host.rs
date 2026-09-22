@@ -815,6 +815,8 @@ pub enum AptAction {
     UpgradeAll,
     Install(String),
     Remove(String),
+    Autoremove,
+    Autoclean,
 }
 
 impl AptAction {
@@ -834,6 +836,22 @@ impl AptAction {
             }
             Self::UpgradeAll => {
                 return Ok(["--assume-yes", "-o", "DPkg::Lock::Timeout=0", "upgrade"]
+                    .map(OsString::from)
+                    .to_vec());
+            }
+            Self::Autoremove => {
+                return Ok([
+                    "--assume-yes",
+                    "-o",
+                    "DPkg::Lock::Timeout=0",
+                    "--purge",
+                    "autoremove",
+                ]
+                .map(OsString::from)
+                .to_vec());
+            }
+            Self::Autoclean => {
+                return Ok(["--assume-yes", "-o", "DPkg::Lock::Timeout=0", "autoclean"]
                     .map(OsString::from)
                     .to_vec());
             }

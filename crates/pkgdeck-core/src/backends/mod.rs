@@ -25,6 +25,16 @@ const CAPABILITIES: &[Capability] = &[
     Capability::Refresh,
     Capability::Upgrade,
 ];
+const CLEAN_CAPABILITIES: &[Capability] = &[
+    Capability::Search,
+    Capability::Details,
+    Capability::Installed,
+    Capability::Install,
+    Capability::Remove,
+    Capability::Refresh,
+    Capability::Upgrade,
+    Capability::Clean,
+];
 
 /// Backend ids accepted by `--from` and the source checklist. Adding a
 /// backend means extending this list, the GUI `sourceIds`, and the CLI
@@ -1017,7 +1027,7 @@ impl<T: Transport> Backend for Apt<T> {
         "apt"
     }
     fn capabilities(&self) -> &[Capability] {
-        CAPABILITIES
+        CLEAN_CAPABILITIES
     }
     fn detect(&mut self, cancel: &Cancellation) -> Result<Availability, EngineError> {
         availability(self.transport.apt_query("detect", "", "", cancel))
@@ -1082,6 +1092,79 @@ impl<T: Transport> Backend for Apt<T> {
         }
         Ok(details)
     }
+    fn cleanup(&mut self, cancel: &Cancellation) -> Result<Vec<CleanupItem>, EngineError> {
+        fn preview(completion: Completion) -> Result<Option<String>, EngineError> {
+            if completion.code != Some(0) {
+                return Err(ExecutionError::Failed(completion).into());
+            }
+            let output =
+                String::from_utf8(completion.stdout).map_err(|error| invalid("apt", error))?;
+            let actionable: Vec<_> = output
+                .lines()
+                .filter(|line| {
+                    line.starts_with("Remv ")
+                        || line.starts_with("Purg ")
+                        || line.starts_with("Del ")
+                })
+                .map(str::trim)
+                .collect();
+            Ok((!actionable.is_empty()).then(|| actionable.join("\n")))
+        }
+        let mut items = Vec::new();
+        let orphan_args = [
+            "--simulate",
+            "-o",
+            "Debug::NoLocking=1",
+            "--purge",
+            "autoremove",
+        ]
+        .map(OsString::from);
+        if let Some(plan) =
+            preview(
+                self.transport
+                    .system_manager("apt-get", &orphan_args, cancel, false)?,
+            )?
+        {
+            let count = plan.lines().count();
+            items.push(CleanupItem {
+                id: CleanupId {
+                    backend: "apt".into(),
+                    key: "autoremove".into(),
+                },
+                kind: CleanupKind::OrphanDependencies,
+                title: "Unused dependencies".into(),
+                summary: format!(
+                    "APT can remove {count} unused package entr{} and leftover configuration",
+                    if count == 1 { "y" } else { "ies" }
+                ),
+                preview: plan,
+            });
+        }
+        let cache_args =
+            ["--simulate", "-o", "Debug::NoLocking=1", "autoclean"].map(OsString::from);
+        if let Some(plan) =
+            preview(
+                self.transport
+                    .system_manager("apt-get", &cache_args, cancel, false)?,
+            )?
+        {
+            let count = plan.lines().count();
+            items.push(CleanupItem {
+                id: CleanupId {
+                    backend: "apt".into(),
+                    key: "autoclean".into(),
+                },
+                kind: CleanupKind::PackageCache,
+                title: "Obsolete package downloads".into(),
+                summary: format!(
+                    "APT can remove {count} cached package file{}",
+                    if count == 1 { "" } else { "s" }
+                ),
+                preview: plan,
+            });
+        }
+        Ok(items)
+    }
     fn execute(
         &mut self,
         operation: &Operation,
@@ -1094,6 +1177,12 @@ impl<T: Transport> Backend for Apt<T> {
             Operation::Remove(id) => AptAction::Remove(self.target(id)?),
             Operation::Upgrade(id) => AptAction::Upgrade(self.target(id)?),
             Operation::UpgradeAll { backend } if backend == "apt" => AptAction::UpgradeAll,
+            Operation::Clean(id) if id.backend == "apt" && id.key == "autoremove" => {
+                AptAction::Autoremove
+            }
+            Operation::Clean(id) if id.backend == "apt" && id.key == "autoclean" => {
+                AptAction::Autoclean
+            }
             _ => return Err(invalid("apt", "foreign operation")),
         };
         progress(Progress::Message(
@@ -1262,7 +1351,7 @@ impl<T: Transport> Backend for Homebrew<T> {
         "homebrew"
     }
     fn capabilities(&self) -> &[Capability] {
-        CAPABILITIES
+        CLEAN_CAPABILITIES
     }
     fn detect(&mut self, cancel: &Cancellation) -> Result<Availability, EngineError> {
         let result = self.transport.brew(&["--prefix".into()], cancel, false);
@@ -1325,6 +1414,40 @@ impl<T: Transport> Backend for Homebrew<T> {
         .find(|d| d.package.id == *id)
         .ok_or(EngineError::NotFound)
     }
+    fn cleanup(&mut self, cancel: &Cancellation) -> Result<Vec<CleanupItem>, EngineError> {
+        fn plan(result: Completion) -> Result<Option<String>, EngineError> {
+            let output = String::from_utf8(bytes("homebrew", result)?)
+                .map_err(|error| invalid("homebrew", error))?;
+            let output = output.trim();
+            Ok((!output.is_empty()).then(|| output.to_owned()))
+        }
+        let mut items = Vec::new();
+        if let Some(preview) = plan(self.call(&["autoremove", "--dry-run"], cancel, false)?)? {
+            items.push(CleanupItem {
+                id: CleanupId {
+                    backend: "homebrew".into(),
+                    key: "autoremove".into(),
+                },
+                kind: CleanupKind::OrphanDependencies,
+                title: "Unused Homebrew dependencies".into(),
+                summary: "Formulae no installed package still requires".into(),
+                preview,
+            });
+        }
+        if let Some(preview) = plan(self.call(&["cleanup", "--dry-run"], cancel, false)?)? {
+            items.push(CleanupItem {
+                id: CleanupId {
+                    backend: "homebrew".into(),
+                    key: "cleanup".into(),
+                },
+                kind: CleanupKind::PackageCache,
+                title: "Old Homebrew downloads and versions".into(),
+                summary: "Stale files selected by brew cleanup".into(),
+                preview,
+            });
+        }
+        Ok(items)
+    }
     fn execute(
         &mut self,
         operation: &Operation,
@@ -1340,6 +1463,12 @@ impl<T: Transport> Backend for Homebrew<T> {
             Operation::Upgrade(id) => vec!["upgrade", "--formula", "--", self.target(id)?],
             Operation::UpgradeAll { backend } if backend == "homebrew" => {
                 vec!["upgrade", "--formula"]
+            }
+            Operation::Clean(id) if id.backend == "homebrew" && id.key == "autoremove" => {
+                vec!["autoremove"]
+            }
+            Operation::Clean(id) if id.backend == "homebrew" && id.key == "cleanup" => {
+                vec!["cleanup"]
             }
             _ => return Err(invalid("homebrew", "foreign operation")),
         };
@@ -1632,6 +1761,7 @@ impl ManagerKind {
             (Self::Snap, Operation::Remove(_)) => vec!["remove"],
             (Self::Snap, Operation::Upgrade(_)) => vec!["refresh"],
             (Self::Snap, Operation::UpgradeAll { .. }) => vec!["refresh"],
+            (_, Operation::Clean(_)) => vec![],
         }
     }
 }
@@ -1930,6 +2060,7 @@ impl<T: Transport> Backend for SystemManager<T> {
                 Some(self.target(id)?)
             }
             Operation::UpgradeAll { .. } => None,
+            Operation::Clean(_) => return Err(self.unsupported(Capability::Clean)),
         };
         let mut args: Vec<OsString> = self
             .kind
@@ -3383,6 +3514,7 @@ impl<T: Transport> Backend for DevTool<T> {
             Operation::UpgradeAll { .. } => {
                 return self.upgrade_all(cancel, progress);
             }
+            Operation::Clean(_) => return Err(self.unsupported(Capability::Clean)),
         };
         progress(Progress::Message(format!(
             "Running {id} as the invoking user; cancellation waits for completion."
