@@ -1042,11 +1042,14 @@ impl ffi::PackageController {
                         "summary": failure.error.to_string(), "available": false
                     })
                 }));
+                let incomplete = !report.failures.is_empty();
                 self.as_mut().rust_mut().cleanup = report.items;
                 self.as_mut().rust_mut().failures = report.failures;
                 self.as_mut().set_rows(encoded(rows));
                 self.set_status(
-                    if empty {
+                    if incomplete {
+                        "Some cleanup sources could not be checked."
+                    } else if empty {
                         "Nothing to clean."
                     } else {
                         "Review a cleanup task before running it."
@@ -1271,7 +1274,10 @@ mod tests {
                 items: vec![],
                 failures: vec![failure],
             })));
-        assert!(controller.status().to_string().contains("Nothing to clean"));
+        assert!(controller
+            .status()
+            .to_string()
+            .contains("could not be checked"));
         assert!(controller.rows().to_string().contains("failure"));
         controller.as_mut().select(0);
         assert!(controller.details().to_string().contains("homebrew"));

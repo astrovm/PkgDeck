@@ -100,8 +100,8 @@ confirmation; `--json` exposes typed items and per-source failures.
 
 APT exposes unused dependencies with leftover configuration and obsolete package downloads. Homebrew exposes
 unused formula dependencies and stale downloads/old versions. Other managers are
-reported as unsupported until they offer a stable dry-run contract PkgDeck can
-validate safely.
+omitted from discovery until they offer a stable dry-run contract PkgDeck can
+validate safely. Explicit unsupported cleanup requests still return an error.
 
 ## Output contract, version 1
 

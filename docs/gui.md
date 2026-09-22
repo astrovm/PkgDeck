@@ -34,7 +34,8 @@ search for the exact tagged reference.
 
 Clean lists manager-native maintenance plans after a successful dry run. Inspect
 one task or choose **Clean all**; every write requires confirmation of the plan.
-Unsupported and failed sources remain visible.
+Sources without cleanup support are omitted. Failed checks appear separately from
+cleanup tasks, with diagnostic details available from the notice.
 
 ## Updates
 

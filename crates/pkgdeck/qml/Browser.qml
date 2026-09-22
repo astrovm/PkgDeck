@@ -305,8 +305,11 @@ Controls.ApplicationWindow {
         }
         return grouped;
     }
+    readonly property var cleanupFailures: currentView === "Clean" ? items.filter(row => row.kind === "failure") : []
     property var viewItems: {
         let rows = root.currentView === "Search" ? items.filter((row) => !isFabricated(row)) : items.slice();
+        if (root.currentView === "Clean")
+            rows = rows.filter(row => row.kind === "cleanup");
         // The Installed filter narrows the loaded rows as you type; the
         // backend is queried once with an empty query (see reload).
         if (root.currentView === "Installed") {
@@ -1067,6 +1070,23 @@ Controls.ApplicationWindow {
                     textFormat: Text.PlainText
                 }
             }
+            RowLayout {
+                visible: root.cleanupFailures.length > 0
+                Layout.fillWidth: true
+                DeckIcon { name: "warning"; ink: root.muted; Layout.preferredWidth: 20; Layout.preferredHeight: 20 }
+                Controls.Label {
+                    objectName: "cleanupFailureNotice"
+                    text: "Could not check: " + root.cleanupFailures.map(row => root.sourceDisplayName(row.source)).join(", ")
+                    color: root.muted
+                    wrapMode: Text.WordWrap
+                    Layout.fillWidth: true
+                }
+                ActionButton {
+                    objectName: "cleanupFailureDetails"
+                    text: "Details"
+                    onClicked: cleanupErrorsDialog.open()
+                }
+            }
             Rectangle {
                 id: resultsBox
                 Layout.fillWidth: true
@@ -1448,7 +1468,7 @@ Controls.ApplicationWindow {
                                 wrapMode: Text.WordWrap
                                 color: root.muted
                                 visible: !backend.busy || !root.motionEnabled
-                                text: backend.busy ? "Working…" : root.currentView === "Search" ? (search.text.trim().length === 0 ? "Search apps and packages" : "No matching packages.\nTry a shorter search or another source.") : (root.currentView === "Updates" ? "You're up to date" : root.currentView === "Clean" ? "Nothing to clean" : (root.currentView === "Installed" && (root.installedFilter.length > 0 || root.multiSourceOnly) ? "No packages match these filters.\nClear the filter or include more sources." : "No results to show.\nCheck source availability or reload to try again."))
+                                text: backend.busy ? "Working…" : root.currentView === "Search" ? (search.text.trim().length === 0 ? "Search apps and packages" : "No matching packages.\nTry a shorter search or another source.") : (root.currentView === "Updates" ? "You're up to date" : root.currentView === "Clean" ? (root.cleanupFailures.length > 0 ? "Cleanup check incomplete" : "Nothing to clean") : (root.currentView === "Installed" && (root.installedFilter.length > 0 || root.multiSourceOnly) ? "No packages match these filters.\nClear the filter or include more sources." : "No results to show.\nCheck source availability or reload to try again."))
                             }
                         }
                     }
@@ -1781,6 +1801,20 @@ Controls.ApplicationWindow {
             Controls.TextField { id: repositoryName; objectName: "repositoryName"; placeholderText: "Name"; Accessible.name: "Repository name"; Layout.fillWidth: true }
             Controls.TextField { id: repositoryUrl; objectName: "repositoryUrl"; placeholderText: "https://…/repository.flatpakrepo"; Accessible.name: "Repository URL"; Layout.fillWidth: true }
             Controls.ComboBox { id: repositoryScope; objectName: "repositoryScope"; model: ["User", "System"]; Accessible.name: "Installation scope"; Layout.fillWidth: true }
+        }
+    }
+    Controls.Dialog {
+        id: cleanupErrorsDialog
+        objectName: "cleanupErrorsDialog"
+        anchors.centerIn: parent
+        width: Math.min(root.width - 32, 680)
+        modal: true
+        title: "Cleanup checks"
+        standardButtons: Controls.Dialog.Close
+        contentItem: Controls.Label {
+            text: root.cleanupFailures.map(row => root.sourceDisplayName(row.source) + "\n" + row.summary).join("\n\n")
+            wrapMode: Text.WrapAnywhere
+            color: root.muted
         }
     }
     Controls.Dialog {

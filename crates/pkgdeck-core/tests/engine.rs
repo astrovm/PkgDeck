@@ -276,20 +276,14 @@ fn cleanup_item(backend: &str, key: &str, title: &str) -> CleanupItem {
 }
 
 #[test]
-fn cleanup_discovery_is_typed_and_unsupported_sources_are_explicit() {
+fn cleanup_discovery_omits_unsupported_sources() {
     let mut engine = engine(Fault::None);
     engine.register(Cleaner).unwrap();
     let cancel = Cancellation::default();
     let report = engine.cleanup(&cancel);
     assert_eq!(report.items.len(), 1);
     assert_eq!(report.items[0].id.key, "orphans");
-    assert!(matches!(
-        report.failures[0].error,
-        EngineError::Unsupported {
-            capability: Capability::Clean,
-            ..
-        }
-    ));
+    assert!(report.failures.is_empty());
     assert!(engine
         .execute(
             &Operation::Clean(report.items[0].id.clone()),

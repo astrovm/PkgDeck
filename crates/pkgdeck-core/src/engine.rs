@@ -274,12 +274,19 @@ impl Engine {
     pub fn installed(&mut self, cancel: &Cancellation) -> PackageReport {
         self.query(None, cancel)
     }
-    /// Discover cleanup plans independently per backend. Unsupported sources
-    /// are explicit failures so frontends never imply that they were checked.
+    /// Discover cleanup plans independently per backend. Sources without a
+    /// cleanup capability are omitted; they have nothing to show on this view.
     pub fn cleanup(&mut self, cancel: &Cancellation) -> CleanupReport {
         let mut report = CleanupReport::default();
         let ids: Vec<_> = self.backends.keys().cloned().collect();
         for id in ids {
+            if !self
+                .backends
+                .get(&id)
+                .is_some_and(|backend| backend.capabilities().contains(&Capability::Clean))
+            {
+                continue;
+            }
             let mut seen = BTreeSet::new();
             let result = self
                 .ready(&id, Capability::Clean, cancel)

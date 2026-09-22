@@ -326,6 +326,26 @@ TestCase {
         mouseClick(all);
         verify(fake.confirmation.indexOf("clean-all") >= 0);
     }
+    function test_cleanup_errors_are_separate_from_tasks() {
+        browser.openView("Clean");
+        fake.rows = JSON.stringify([
+            {kind: "failure", name: "apt", source: "apt", summary: "Synthetic preview failure"},
+            {kind: "cleanup", name: "Old downloads", source: "homebrew", cleanup_key: "cleanup", cleanup_kind: "cache", preview: "synthetic-cache"}
+        ]);
+        wait(20);
+        compare(browser.viewItems.length, 1);
+        compare(browser.originalIndex(0), 1);
+        compare(browser.cleanupFailures.length, 1);
+        verify(findChild(browser, "cleanupFailureNotice").visible);
+        mouseClick(findChild(browser, "cleanupFailureDetails"));
+        const dialog = findChild(browser, "cleanupErrorsDialog");
+        tryCompare(dialog, "visible", true);
+        dialog.close();
+        fake.rows = JSON.stringify([{kind: "failure", name: "apt", source: "apt", summary: "Synthetic preview failure"}]);
+        wait(20);
+        compare(browser.viewItems.length, 0);
+        verify(!findChild(browser, "cleanAllButton").visible);
+    }
     function test_appearance_and_search_does_not_relabel_old_results() {
         browser.openView("Installed");
         populate();
