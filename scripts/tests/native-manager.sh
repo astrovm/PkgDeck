@@ -5,9 +5,9 @@ trap 'echo "native-manager FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
 backend=${1:?Expected dnf, pacman, or zypper}
 binary=${2:?Expected absolute pkd binary path}
 case "$backend" in
-    dnf) image=registry.fedoraproject.org/fedora:44; bootstrap='dnf -y install sudo'; query='rpm -q jq'; remove='dnf -y remove jq'; manager=dnf ;;
-    pacman) image=docker.io/library/archlinux:base; bootstrap='pacman -Sy --noconfirm sudo'; query='pacman -Q jq'; remove='pacman -Rns --noconfirm jq'; manager=pacman ;;
-    zypper) image=registry.opensuse.org/opensuse/tumbleweed:latest; bootstrap='zypper --non-interactive install sudo'; query='rpm -q jq'; remove='zypper --non-interactive remove jq'; manager=zypper ;;
+    dnf) image=registry.fedoraproject.org/fedora:44; bootstrap='dnf -y install sudo'; query='rpm -q jq'; manager=dnf ;;
+    pacman) image=docker.io/library/archlinux:base; bootstrap='pacman -Sy --noconfirm sudo'; query='pacman -Q jq'; manager=pacman ;;
+    zypper) image=registry.opensuse.org/opensuse/tumbleweed:latest; bootstrap='sed -i "s|http://|https://|g" /etc/zypp/repos.d/*.repo; zypper --non-interactive install sudo'; query='rpm -q jq'; manager=zypper ;;
     *) echo "Expected dnf, pacman, or zypper" >&2; exit 2 ;;
 esac
 
