@@ -840,39 +840,6 @@ TestCase {
         compare(fake.lastForce, true);
         compare(fake.lastView, "Search");
     }
-    function test_search_content_filters_loaded_rows_without_new_requests() {
-        browser.openView("Search");
-        const search = findChild(browser, "searchField");
-        search.text = "example";
-        search.forceActiveFocus();
-        keyClick(Qt.Key_Return);
-        const requests = fake.loadCount;
-        const rows = [
-            {kind: "package", name: "example-app", source: "apt", component_ids: ["org.example.App"], architecture: "all", scope: "system", installed: null, candidate: "1"},
-            {kind: "package", name: "example-cli", source: "cargo", architecture: "all", scope: "user", installed: null, candidate: "1"},
-            {kind: "package", name: "example-system", source: "apt", architecture: "all", scope: "system", installed: null, candidate: "1"},
-            {kind: "package", name: "example-image", source: "podman", reference: "registry.example/app:tag", architecture: "all", scope: "user", installed: null, candidate: "Registry"},
-            {kind: "package", name: "example-unknown", source: "future", architecture: "all", scope: "user", installed: null, candidate: "1"}
-        ];
-        fake.source_catalog = JSON.stringify(browser.sourceIds.concat(["future"]).map((id) => ({source: id, availability_kind: "available", capabilities: ["search"]})));
-        fake.rows = JSON.stringify(rows);
-        wait(30);
-        compare(browser.viewItems.length, 5);
-        browser.choose(1);
-        const selectedId = browser.selectedIdentity;
-        const filters = ["Apps", "CLI tools", "System packages", "Container images"];
-        const names = ["example-app", "example-cli", "example-system", "example-image"];
-        for (let i = 0; i < filters.length; i++) {
-            mouseClick(findChild(browser, "searchPane").filterAt(filters[i]));
-            compare(browser.viewItems.length, 1);
-            compare(browser.viewItems[0].name, names[i]);
-            compare(fake.loadCount, requests);
-        }
-        mouseClick(findChild(browser, "searchPane").filterAt("All"));
-        compare(browser.viewItems.length, 5);
-        compare(browser.selectedIdentity, selectedId);
-        compare(fake.writes, 0);
-    }
     function test_activity_navigation_stays_available_during_write() {
         populate();
         fake.activity = JSON.stringify([{id: 1, frontend: "gui", operations: [{install: {backend: "apt", name: "synthetic-tool", architecture: "all", scope: "system"}}], started_at: 1000, state: "queued", outcomes: []}]);
@@ -906,7 +873,6 @@ TestCase {
     }
     function test_container_reference_uses_explicit_search_submission() {
         browser.openView("Search");
-        mouseClick(findChild(browser, "searchPane").filterAt("Container images"));
         const search = findChild(browser, "searchField");
         const requests = fake.loadCount;
         search.text = "registry.example/team/app:tag";

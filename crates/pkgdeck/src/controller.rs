@@ -912,7 +912,6 @@ fn package_row(p: &Package, same_from: &[String], same_group: Option<&str>) -> V
     json!({"name": p.id.name, "display_name": p.display_name, "source": p.id.backend, "architecture": p.id.architecture,
         "remote": p.id.remote, "reference": p.id.reference, "scope": p.id.scope, "scope_label": scope_label(&p.id.scope), "summary": p.summary, "installed": p.installed_version,
         "candidate": p.candidate_version, "update": p.update, "kind": "package", "icon": p.icon,
-        "component_ids": p.component_ids,
         "same_app_from": same_from, "same_app_group": same_group})
 }
 fn update_detail_name(
