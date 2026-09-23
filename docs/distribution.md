@@ -61,9 +61,9 @@ supported; a successful Linux build does not establish macOS compatibility.
 4. Review both Homebrew results before merging. After users run `brew update`,
    `brew install astrovm/pkgdeck/pkgdeck` installs the stable version.
 
-No release archive, checksum, bottle, signing identity, or notarization result is
-assumed by the initial recipe. The `.app` uses Homebrew dependencies and is not a
-standalone downloadable macOS application.
+The formula builds from the tagged source archive; it does not provide a bottle.
+The `.app` uses Homebrew dependencies and is not a standalone downloadable
+macOS application.
 
 ## Linux packages
 
@@ -76,7 +76,7 @@ flatpak install https://flatpak.4st.li/io.github.astrovm.PkgDeck.flatpakref
 The `.flatpakref` adds the repository for future updates. GitHub release
 `.flatpak` files are standalone bundles.
 
-The existing scripts build native packages, AppImage, Flatpak, and Snap artifacts.
+The packaging scripts build AppImage, Flatpak, and Snap artifacts.
 Use the same verified build environment as CI:
 
 ```sh

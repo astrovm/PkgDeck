@@ -124,6 +124,8 @@ details; sources returns `sources`; clean discovery returns typed `items` and
 per-backend `failures`; writes return `operations`, each with its
 operation and `result` (`{"Ok":...}` or `{"Err":...}`). Selection and other top-level
 failures contain `error` and, when available, a human-readable `message`.
+If an APT full upgrade plans removals without `--allow-removals`, the error is
+`apt_removals_require_consent` and includes the typed `plan`.
 A failing source row means the underlying manager errored: the message carries
 the manager's own diagnostic where available, and the same command run directly
 in a terminal shows complete output. Failed sources block ambiguous selection
