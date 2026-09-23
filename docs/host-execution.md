@@ -65,8 +65,11 @@ see the [pkexec manual](https://polkit.pages.freedesktop.org/polkit/pkexec.1.htm
 
 APT owns its normal dpkg/frontend locks. Requests use `DPkg::Lock::Timeout=0` so
 contention is reported immediately. PkgDeck neither creates a competing lock
-scheme nor removes native lock files. Install and upgrade use `--no-remove`;
-APT handles dependencies and transactions. CLI confirmation is documented in the
+scheme nor removes native lock files. Installs and targeted upgrades use
+`--no-remove`. APT Update all simulates `dist-upgrade` as an unprivileged host
+read, displays installs and removals for approval, and re-simulates immediately
+before the privileged write. A changed or incomplete plan stops the write.
+CLI confirmation is documented in the
 [CLI contract](cli.md).
 
 Read commands have a deadline and bounded stdout/stderr capture (128 KiB per

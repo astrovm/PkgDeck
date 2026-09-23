@@ -142,6 +142,34 @@ pub enum Operation {
     Clean(CleanupId),
 }
 
+/// A read-only APT solver result. The preview is retained verbatim so a
+/// second simulation can reject any change before the privileged write.
+#[derive(serde::Serialize, Clone, Debug, Eq, PartialEq)]
+pub struct AptUpgradePlan {
+    pub preview: String,
+    pub upgrades: Vec<String>,
+    pub installs: Vec<String>,
+    pub removals: Vec<String>,
+}
+
+impl AptUpgradePlan {
+    pub fn summary(&self) -> String {
+        fn section(label: &str, names: &[String]) -> String {
+            if names.is_empty() {
+                format!("{label}: none")
+            } else {
+                format!("{label} ({}): {}", names.len(), names.join(", "))
+            }
+        }
+        [
+            section("Update", &self.upgrades),
+            section("Install", &self.installs),
+            section("Remove", &self.removals),
+        ]
+        .join("\n")
+    }
+}
+
 impl Operation {
     pub fn backend(&self) -> &str {
         match self {

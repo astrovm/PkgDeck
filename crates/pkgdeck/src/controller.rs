@@ -72,14 +72,15 @@ enum Job {
     Load(String, String),
     Details(PackageId),
     Write(Operation),
-    UpgradeAll(Vec<Operation>),
+    PlanUpgrade(Vec<Operation>, usize),
+    UpgradeAll(Vec<Operation>, Option<AptUpgradePlan>),
     CleanAll(Vec<Operation>),
 }
 impl Job {
     fn writes(&self) -> bool {
         matches!(
             self,
-            Self::Write(_) | Self::UpgradeAll(_) | Self::CleanAll(_) | Self::Repositories(Some(_))
+            Self::Write(_) | Self::UpgradeAll(..) | Self::CleanAll(_) | Self::Repositories(Some(_))
         )
     }
 }
@@ -91,6 +92,7 @@ enum Payload {
     Written(OperationOutcome),
     Batch(String),
     Cleanup(CleanupReport),
+    UpgradePreview(Vec<Operation>, usize, Option<AptUpgradePlan>),
 }
 enum Reply {
     Progress(String),
@@ -163,7 +165,18 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
         Job::Details(id) => engine
             .details(&id, cancel)
             .map(|d| Payload::Details(Box::new(d))),
-        Job::UpgradeAll(operations) | Job::CleanAll(operations) => {
+        Job::PlanUpgrade(operations, count) => {
+            if operations.iter().any(|operation| {
+                matches!(operation, Operation::UpgradeAll { backend } if backend == "apt")
+            }) {
+                engine
+                    .plan_apt_upgrade(cancel)
+                    .map(|plan| Payload::UpgradePreview(operations, count, Some(plan)))
+            } else {
+                Ok(Payload::UpgradePreview(operations, count, None))
+            }
+        }
+        Job::UpgradeAll(operations, _) | Job::CleanAll(operations) => {
             let results = engine.execute_batch(&operations, cancel, &mut |event| {
                 if let Event::Progress {
                     operation,
@@ -327,6 +340,10 @@ fn encoded(value: impl serde::Serialize) -> QString {
 fn engine_source(job: &Job, filter: &[String]) -> Vec<String> {
     match job {
         Job::Details(id) => vec![id.backend.clone()],
+        Job::PlanUpgrade(operations, _)
+            if operations.iter().any(|operation| {
+                matches!(operation, Operation::UpgradeAll { backend } if backend == "apt")
+            }) => vec!["apt".into()],
         _ => filter.to_owned(),
     }
 }
@@ -635,6 +652,9 @@ impl ffi::PackageController {
                     for item in cleanup {
                         engine.remember_cleanup_plan(item);
                     }
+                    if let Job::UpgradeAll(_, Some(plan)) = &job {
+                        engine.remember_apt_upgrade_plan(plan.clone());
+                    }
                     execute(&mut engine, job, &token, &mut send);
                     send(Reply::Engine(engine));
                 }
@@ -901,13 +921,14 @@ impl ffi::PackageController {
                         && package.update == UpdateAvailability::Available
                 })
                 .count();
-            let labels = operations
-                .iter()
-                .map(|operation| confirmation_label(operation, &self.rust().packages))
-                .collect::<Vec<_>>()
-                .join("\n\n");
-            self.as_mut().set_confirmation(format!("Update all {count} listed packages?\n\n{labels}\n\nUpdates use each source’s native updater. Native dependency changes may follow. Successful updates are not rolled back if another fails. Continue?").as_str().into());
-            self.rust_mut().pending = Some(Job::UpgradeAll(operations));
+            if operations.iter().any(|operation| {
+                matches!(operation, Operation::UpgradeAll { backend } if backend == "apt")
+            }) {
+                self.start(Job::PlanUpgrade(operations, count));
+            } else {
+                self.as_mut()
+                    .apply(Ok(Payload::UpgradePreview(operations, count, None)));
+            }
             return;
         }
         if action == "clean-all" {
@@ -1021,7 +1042,7 @@ impl ffi::PackageController {
             self.as_mut().set_status(status.as_str().into());
         }
         if !plan.operations.is_empty() {
-            self.rust_mut().pending = Some(Job::UpgradeAll(plan.operations));
+            self.rust_mut().pending = Some(Job::UpgradeAll(plan.operations, None));
         }
     }
     pub fn confirm(mut self: Pin<&mut Self>, approved: bool) {
@@ -1053,7 +1074,10 @@ impl ffi::PackageController {
     }
     fn apply(mut self: Pin<&mut Self>, result: Result<Payload, EngineError>) {
         if matches!(self.rust().queued, Some(Job::Load(..)))
-            && matches!(result, Ok(Payload::Cleanup(_)))
+            && matches!(
+                result,
+                Ok(Payload::Cleanup(_) | Payload::UpgradePreview(..))
+            )
         {
             return;
         }
@@ -1066,6 +1090,22 @@ impl ffi::PackageController {
                 if !superseded {
                     self.set_status(e.to_string().as_str().into());
                 }
+            }
+            Ok(Payload::UpgradePreview(operations, count, apt_plan)) => {
+                let labels = operations
+                    .iter()
+                    .map(|operation| confirmation_label(operation, &self.rust().packages))
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+                let apt = apt_plan.as_ref().map_or_else(String::new, |plan| {
+                    format!("\n\nAPT transaction:\n{}", plan.summary())
+                });
+                self.as_mut().set_confirmation(
+                    format!("Update all {count} listed packages?{apt}\n\n{labels}\n\nContinue?")
+                        .as_str()
+                        .into(),
+                );
+                self.rust_mut().pending = Some(Job::UpgradeAll(operations, apt_plan));
             }
             Ok(Payload::Packages(report)) => {
                 if matches!(self.rust().queued, Some(Job::Load(..))) {
@@ -1392,6 +1432,33 @@ impl ffi::PackageController {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn apt_removals_appear_first_in_update_confirmation() {
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        let plan = AptUpgradePlan {
+            preview: "synthetic plan".into(),
+            upgrades: vec!["synthetic".into()],
+            installs: vec!["dependency".into()],
+            removals: vec!["retired".into()],
+        };
+        controller.as_mut().apply(Ok(Payload::UpgradePreview(
+            vec![Operation::UpgradeAll {
+                backend: "apt".into(),
+            }],
+            1,
+            Some(plan.clone()),
+        )));
+        let confirmation = controller.confirmation().to_string();
+        assert!(confirmation.contains("Remove (1): retired"));
+        assert!(
+            confirmation.find("Remove (1): retired")
+                < confirmation.find("Update all packages from apt")
+        );
+        assert!(
+            matches!(&controller.rust().pending, Some(Job::UpgradeAll(_, Some(saved))) if *saved == plan)
+        );
+    }
     #[test]
     fn background_inventory_populates_both_sections_without_foreground_changes() {
         let mut controller = ffi::create_controller();
@@ -2648,7 +2715,7 @@ mod tests {
             .unwrap();
         for job in [
             Job::Write(Operation::Upgrade(firmware.id.clone())),
-            Job::UpgradeAll(vec![Operation::Upgrade(firmware.id.clone())]),
+            Job::UpgradeAll(vec![Operation::Upgrade(firmware.id.clone())], None),
         ] {
             let mut replies = vec![];
             execute(
@@ -2698,9 +2765,12 @@ mod tests {
                 Job::Load("Sources".into(), "".into()),
                 Job::Details(id.clone()),
                 Job::Write(Operation::Upgrade(id.clone())),
-                Job::UpgradeAll(vec![Operation::UpgradeAll {
-                    backend: id.backend.clone(),
-                }]),
+                Job::UpgradeAll(
+                    vec![Operation::UpgradeAll {
+                        backend: id.backend.clone(),
+                    }],
+                    None,
+                ),
             ] {
                 let mut replies = vec![];
                 execute(

@@ -132,6 +132,12 @@ pub trait Backend: Send {
             .find(|item| item.id == *id)
             .ok_or(EngineError::NotFound)
     }
+    fn apt_upgrade_plan(&mut self, _cancel: &Cancellation) -> Result<AptUpgradePlan, EngineError> {
+        Err(EngineError::Unsupported {
+            backend: self.id().into(),
+            capability: Capability::Upgrade,
+        })
+    }
     fn execute(
         &mut self,
         operation: &Operation,
@@ -230,8 +236,27 @@ pub struct Engine {
     /// are short-lived per query, so entries cannot go stale.
     detected: BTreeMap<String, Availability>,
     cleanup_plans: BTreeMap<CleanupId, CleanupItem>,
+    apt_upgrade_plan: Option<AptUpgradePlan>,
 }
 impl Engine {
+    /// Simulate the host APT solver before asking the user to approve a full update.
+    pub fn plan_apt_upgrade(
+        &mut self,
+        cancel: &Cancellation,
+    ) -> Result<AptUpgradePlan, EngineError> {
+        self.apt_upgrade_plan = None;
+        let plan = self
+            .ready("apt", Capability::Upgrade, cancel)?
+            .apt_upgrade_plan(cancel)?;
+        self.apt_upgrade_plan = Some(plan.clone());
+        Ok(plan)
+    }
+
+    /// Transfer an approved plan to a fresh worker engine. It is always
+    /// re-simulated there, before authorization or any APT write.
+    pub fn remember_apt_upgrade_plan(&mut self, plan: AptUpgradePlan) {
+        self.apt_upgrade_plan = Some(plan);
+    }
     pub fn register(&mut self, backend: impl Backend + 'static) -> Result<(), EngineError> {
         let id = backend.id().to_owned();
         if self.backends.contains_key(&id) {
@@ -568,9 +593,26 @@ impl Engine {
             Operation::Clean(id) => self.cleanup_plans.remove(id),
             _ => None,
         };
+        let expected_apt = if matches!(operation, Operation::UpgradeAll { backend } if backend == "apt")
+        {
+            self.apt_upgrade_plan.take()
+        } else {
+            None
+        };
         let result = self
             .ready(operation.backend(), operation.capability(), cancel)
             .and_then(|backend| {
+                if matches!(operation, Operation::UpgradeAll { backend } if backend == "apt") {
+                    let current = backend.apt_upgrade_plan(cancel)?;
+                    if expected_apt.as_ref() != Some(&current) {
+                        return Err(EngineError::InvalidResponse {
+                            backend: "apt".into(),
+                            reason:
+                                "APT upgrade plan changed or was not reviewed; preview it again."
+                                    .into(),
+                        });
+                    }
+                }
                 if let Operation::Clean(id) = operation {
                     // Backends may need an explicitly authorized preview for
                     // this exact task (APT autoclean, for example). A general
@@ -610,5 +652,81 @@ impl Engine {
             .iter()
             .map(|operation| self.execute(operation, cancel, events))
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod apt_upgrade_tests {
+    use super::*;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    struct AptFixture {
+        reads: usize,
+        drift: bool,
+        writes: Arc<AtomicUsize>,
+    }
+    impl Backend for AptFixture {
+        fn id(&self) -> &str {
+            "apt"
+        }
+        fn capabilities(&self) -> &[Capability] {
+            &[Capability::Upgrade]
+        }
+        fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
+            Ok(Availability::Available)
+        }
+        fn apt_upgrade_plan(&mut self, _: &Cancellation) -> Result<AptUpgradePlan, EngineError> {
+            self.reads += 1;
+            Ok(AptUpgradePlan {
+                preview: if self.drift && self.reads > 1 {
+                    "Inst changed"
+                } else {
+                    "Inst original"
+                }
+                .into(),
+                upgrades: vec!["synthetic".into()],
+                installs: vec![],
+                removals: vec![],
+            })
+        }
+        fn execute(
+            &mut self,
+            _: &Operation,
+            _: &Cancellation,
+            _: &mut dyn FnMut(Progress),
+        ) -> Result<OperationOutcome, EngineError> {
+            self.writes.fetch_add(1, Ordering::SeqCst);
+            Ok(OperationOutcome::default())
+        }
+    }
+    #[test]
+    fn apt_full_upgrade_requires_a_fresh_matching_preview() {
+        let cancel = Cancellation::default();
+        let op = Operation::UpgradeAll {
+            backend: "apt".into(),
+        };
+        for (preview, drift, succeeds) in [
+            (false, false, false),
+            (true, true, false),
+            (true, false, true),
+        ] {
+            let writes = Arc::new(AtomicUsize::new(0));
+            let mut engine = Engine::default();
+            engine
+                .register(AptFixture {
+                    reads: 0,
+                    drift,
+                    writes: writes.clone(),
+                })
+                .unwrap();
+            if preview {
+                engine.plan_apt_upgrade(&cancel).unwrap();
+            }
+            assert_eq!(engine.execute(&op, &cancel, &mut |_| {}).is_ok(), succeeds);
+            assert_eq!(writes.load(Ordering::SeqCst), usize::from(succeeds));
+        }
     }
 }
