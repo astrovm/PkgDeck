@@ -99,9 +99,6 @@ pub enum Commands {
         /// Run every discovered cleanup plan.
         #[arg(long)]
         all: bool,
-        /// Authenticate to preview protected APT cache files without removing them.
-        #[arg(long)]
-        authenticate: bool,
     },
 }
 #[derive(Subcommand)]
@@ -240,16 +237,8 @@ pub fn dispatch(
                 2,
             )
         }
-        Commands::Clean {
-            targets,
-            all,
-            authenticate,
-        } if targets.is_empty() && !all => {
-            let report = if *authenticate {
-                engine.cleanup_authenticated(cancel)
-            } else {
-                engine.cleanup(cancel)
-            };
+        Commands::Clean { targets, all } if targets.is_empty() && !all => {
+            let report = engine.cleanup(cancel);
             let code = if report
                 .failures
                 .iter()
@@ -337,16 +326,8 @@ pub fn dispatch(
                 }
                 Ok(operations)
             }
-            Commands::Clean {
-                targets,
-                all,
-                authenticate,
-            } => {
-                let report = if *authenticate {
-                    engine.cleanup_authenticated(cancel)
-                } else {
-                    engine.cleanup(cancel)
-                };
+            Commands::Clean { targets, all } => {
+                let report = engine.cleanup(cancel);
                 let hard_failures: Vec<_> = report
                     .failures
                     .into_iter()
@@ -914,6 +895,7 @@ mod tests {
     }
     #[test]
     fn commands_and_confirmation() {
+        assert!(Args::try_parse_from(["pkd", "clean", "--authenticate"]).is_err());
         let mut engine = engine();
         for args in [
             vec!["sources"],
@@ -926,7 +908,6 @@ mod tests {
             vec!["update"],
             vec!["remove", "fixture"],
             vec!["clean"],
-            vec!["clean", "--authenticate"],
             vec!["clean", "apt:orphans"],
         ] {
             assert_eq!(call(&mut engine, &args, true).1, 0, "{args:?}");

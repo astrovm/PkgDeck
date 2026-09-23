@@ -23,7 +23,6 @@ TestCase {
         property bool simulateLoading: false
         property bool busy: false
         property bool writing: false
-        property bool inspecting: false
         property bool upgradable: false
         property string lastView: ""
         property string lastQuery: ""
@@ -326,23 +325,10 @@ TestCase {
         verify(all.visible);
         mouseClick(all);
         verify(fake.confirmation.indexOf("clean-all") >= 0);
-        // The unauthenticated cache probe is skipped, so an APT task alone
-        // must still offer the authenticated "Check APT" preview.
         verify(!findChild(browser, "cleanupFailureNotice").visible);
-        verify(findChild(browser, "cleanupAuthenticate").visible);
         fake.rows = "[]";
         wait(20);
-        verify(findChild(browser, "cleanupAuthenticate").visible);
-    }
-    function test_authenticated_cleanup_does_not_reload_unprivileged() {
-        browser.openView("Clean");
-        fake.lastForce = false;
-        fake.inspecting = true;
-        fake.writing = true;
-        fake.writing = false;
-        fake.inspecting = false;
-        wait(30);
-        compare(fake.lastForce, false);
+        verify(!findChild(browser, "cleanAllButton").visible);
     }
     function test_cleanup_errors_are_separate_from_tasks() {
         browser.openView("Clean");
@@ -355,11 +341,6 @@ TestCase {
         compare(browser.originalIndex(0), 1);
         compare(browser.cleanupFailures.length, 1);
         verify(findChild(browser, "cleanupFailureNotice").visible);
-        mouseClick(findChild(browser, "cleanupAuthenticate"));
-        verify(fake.confirmation.indexOf("inspect-clean") >= 0);
-        const auth = findChild(browser, "confirmationDialog");
-        auth.reject();
-        tryCompare(auth, "visible", false);
         mouseClick(findChild(browser, "cleanupFailureDetails"));
         const dialog = findChild(browser, "cleanupErrorsDialog");
         tryCompare(dialog, "visible", true);

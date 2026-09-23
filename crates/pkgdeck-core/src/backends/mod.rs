@@ -1318,10 +1318,7 @@ impl<T: Transport> Backend for Apt<T> {
         }
     }
     fn cleanup_report(&mut self, cancel: &Cancellation) -> CleanupReport {
-        self.cleanup_apt_report(cancel, false)
-    }
-    fn cleanup_authenticated(&mut self, cancel: &Cancellation) -> CleanupReport {
-        self.cleanup_apt_report(cancel, true)
+        self.cleanup_apt_report(cancel)
     }
     fn cleanup_plan(
         &mut self,
@@ -1331,7 +1328,7 @@ impl<T: Transport> Backend for Apt<T> {
         if id.backend != "apt" {
             return Err(invalid("apt", "foreign cleanup task"));
         }
-        self.cleanup_apt_task(&id.key, cancel, id.key == "autoclean")?
+        self.cleanup_apt_task(&id.key, cancel)?
             .ok_or(EngineError::NotFound)
     }
     fn execute(
