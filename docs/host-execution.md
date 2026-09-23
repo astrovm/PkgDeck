@@ -50,7 +50,23 @@ updates retain their own authorization requirements. Homebrew and development to
 run as the invoking user. Frontends must stay unprivileged.
 
 Authorized commands use a fixed system PATH, excluding user tool directories.
-For example, the APT adapter invokes the fixed `/usr/bin/apt-get` path via either:
+For a confirmed batch, the engine validates every typed operation and its saved
+native preview before any write. When a root-owned `pkgdeck-host-runner` is
+installed at `/usr/libexec/pkgdeck-host-runner`, PkgDeck starts it once through
+the selected authorization method. The runner independently derives its allowed
+commands from the typed operations, accepts only ordered, one-time requests for
+those commands, and exits with the batch. It never accepts a shell script or an
+arbitrary executable path. User-scoped commands stay in the unprivileged frontend.
+
+The native system package can install the runner at that path. Classic Snap uses
+its root-owned `$SNAP/usr/libexec/pkgdeck-host-runner`. AppImage and Flatpak may
+use a separately installed host runner; their bundled copies are not trusted as
+host executables. If no trusted runner is available, PkgDeck reports that it is
+using the existing per-command authorization path. This fallback retains the
+current behavior and can require more than one prompt.
+
+For example, a single APT write without a trusted batch runner invokes the fixed
+`/usr/bin/apt-get` path via either:
 
 - `/usr/bin/pkexec --disable-internal-agent`, using an existing polkit agent/policy;
 - `/usr/bin/sudo -n --`, requiring an existing grant and never prompting.
@@ -77,7 +93,8 @@ stream by default). Excess output is drained and marked truncated. Cancellation
 or timeout terminates their process group and reaps the direct child. A descendant
 holding a pipe cannot indefinitely block completion.
 
-Cancellation before a write starts prevents authorization and execution. Once a
+Cancellation before authorization or a write starts prevents execution. A dismissed
+batch prompt leaves every operation untouched. Once a
 write starts, cancellation is **deferred** until the manager exits; the completion
 records that request. Read deadlines do not forcibly interrupt writes. A native
 manager can therefore keep a write pending until it finishes. Frontends must show

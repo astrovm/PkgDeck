@@ -102,7 +102,13 @@ one `Finished` event carrying its result during normal error-returning execution
 write has begun. Progress includes messages and transfer counts with optional
 totals; adapters should not invent percentages when a manager supplies no total.
 
-`execute_batch` preserves request order and returns one result per request. It
+`execute_batch` validates each operation and stored native plan before starting
+the confirmed batch. If any validation fails, every request receives a terminal
+error without a write. For native engines with a trusted host runner, it asks for
+authorization once before any user or system write and binds protected commands
+to that batch. Consecutive exact APT selections with the same verb share one
+native transaction while retaining one result per selection. `execute_batch`
+preserves request order and returns one result per request. It
 continues after failures and does not roll back successful native operations.
 Pending requests after cancellation receive cancellation results and terminal
 events. Cancellation during a native write is controlled by the host boundary:

@@ -55,6 +55,7 @@ jobs:
         if: matrix.arch == 'x86_64'
         run: |
           cargo build --locked -p pkgdeck-core --example apt-probe
+          cargo build --locked -p pkgdeck-core --bin pkgdeck-host-runner
           cargo build --locked -p pkd -p pkgdeck-tools
       - name: Run host authorization tests
         if: matrix.arch == 'x86_64'

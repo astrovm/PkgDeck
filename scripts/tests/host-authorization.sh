@@ -25,7 +25,8 @@ repo=/etc/apt/sources.list.d/pkgdeck-fixture.list
 rule=/etc/polkit-1/rules.d/00-pkgdeck-fixture.rules
 sudoers=/etc/sudoers.d/pkgdeck-fixture
 binaries=/opt/pkgdeck-bin
-for path in "$marker" "$repo" "$rule" "$sudoers" "$binaries" /opt/pkgdeck-fixture-repo /tmp/pkgdeck-package; do
+runner=/usr/libexec/pkgdeck-host-runner
+for path in "$marker" "$repo" "$rule" "$sudoers" "$binaries" "$runner" /opt/pkgdeck-fixture-repo /tmp/pkgdeck-package; do
     [[ ! -e $path ]] || { echo "Fixture path already exists: $path" >&2; exit 1; }
 done
 for user in pkgdeck-test pkgdeck-denied; do
@@ -35,7 +36,7 @@ done
     echo 'Fixture package already exists.' >&2
     exit 1
 }
-for path in target/debug/pkd target/debug/pkgdeck-tools target/debug/examples/apt-probe; do
+for path in target/debug/pkd target/debug/pkgdeck-tools target/debug/examples/apt-probe target/debug/pkgdeck-host-runner; do
     [[ -x $path ]] || { echo "Missing build artifact: $path" >&2; exit 1; }
 done
 
@@ -44,7 +45,7 @@ cleanup() {
     if dpkg-query -W -f='${db:Status-Status}' "$fixture" 2>/dev/null | grep -qx installed; then
         apt-get remove -y -qq "$fixture" >/dev/null 2>&1
     fi
-    rm -f -- "$rule" "$sudoers" "$repo" "$marker"
+    rm -f -- "$rule" "$sudoers" "$repo" "$marker" "$runner"
     userdel -r pkgdeck-denied &>/dev/null
     userdel -r pkgdeck-test &>/dev/null
     rm -rf -- "$binaries" /opt/pkgdeck-fixture-repo /tmp/pkgdeck-package
@@ -54,6 +55,7 @@ trap cleanup EXIT
 printf 'github-hosted-ubuntu-26.04\n' >"$marker"
 mkdir -p "$binaries/examples"
 cp target/debug/pkd target/debug/pkgdeck-tools "$binaries/"
+install -Dm755 target/debug/pkgdeck-host-runner "$runner"
 cp target/debug/examples/apt-probe "$binaries/examples/"
 scripts/build-apt.sh "$binaries"
 useradd -m pkgdeck-test
@@ -97,6 +99,22 @@ for auth in sudo polkit; do
     [[ $(dpkg-query -W '-f=${db:Status-Status} ${Version}' "$fixture") == 'installed 1.0' &&
         $(cat /usr/share/pkgdeck-fixture/version) == 1.0 ]]
     probe pkgdeck-test "$auth" remove
+    [[ ! -e /usr/share/pkgdeck-fixture/version ]]
+done
+printf 'pkgdeck-test ALL=(root) NOPASSWD: %s\n' "$runner" >"$sudoers"
+chmod 440 "$sudoers"
+cat >"$rule" <<'RULE'
+polkit.addRule(function(action, subject) {
+    if (action.id == "org.freedesktop.policykit.exec" && action.lookup("program") == "/usr/libexec/pkgdeck-host-runner") {
+        return subject.user == "pkgdeck-test" ? polkit.Result.YES : polkit.Result.NO;
+    }
+});
+RULE
+systemctl restart polkit
+for auth in sudo polkit; do
+    runuser -u pkgdeck-test -- "$binaries/pkd" --json --yes --auth "$auth" --from apt install "$fixture" | jq -e '.exit_code == 0'
+    [[ $(cat /usr/share/pkgdeck-fixture/version) == 1.0 ]]
+    runuser -u pkgdeck-test -- "$binaries/pkd" --json --yes --auth "$auth" --from apt remove "$fixture" | jq -e '.exit_code == 0'
     [[ ! -e /usr/share/pkgdeck-fixture/version ]]
 done
 echo PKGDECK_HOST_AUTHORIZATION_PASS
