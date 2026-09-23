@@ -32,12 +32,14 @@ TestCase {
         property string lastView: ""
         property string lastQuery: ""
         property string lastSource: ""
+        property int loadCount: 0
         property bool lastForce: false
         property int selection: -1
         property int writes: 0
         property int cancels: 0
         property string lastChecked: ""
         function load(view, query, source, sudo, force) {
+            loadCount++;
             lastView = view;
             lastQuery = query;
             lastSource = source;
@@ -107,6 +109,7 @@ TestCase {
         fake.cancels = 0;
         fake.lastChecked = "";
         fake.lastForce = false;
+        fake.loadCount = 0;
         browser = createTemporaryObject(window, test);
         verify(browser !== null);
         fake.source_catalog = JSON.stringify(browser.sourceIds.map((id) => ({source: id, summary: "Available", availability_kind: "available", capabilities: ["search", "installed", "upgrade", "clean"]})));
@@ -826,6 +829,52 @@ TestCase {
         compare(browser.viewItems[0].name, "fire");
         compare(fake.lastForce, true);
         compare(fake.lastView, "Search");
+    }
+    function test_search_content_filters_loaded_rows_without_new_requests() {
+        browser.openView("Search");
+        const search = findChild(browser, "searchField");
+        search.text = "example";
+        search.forceActiveFocus();
+        keyClick(Qt.Key_Return);
+        const requests = fake.loadCount;
+        const rows = [
+            {kind: "package", name: "example-app", source: "apt", component_ids: ["org.example.App"], architecture: "all", scope: "system", installed: null, candidate: "1"},
+            {kind: "package", name: "example-cli", source: "cargo", architecture: "all", scope: "user", installed: null, candidate: "1"},
+            {kind: "package", name: "example-system", source: "apt", architecture: "all", scope: "system", installed: null, candidate: "1"},
+            {kind: "package", name: "example-image", source: "podman", reference: "registry.example/app:tag", architecture: "all", scope: "user", installed: null, candidate: "Registry"},
+            {kind: "package", name: "example-unknown", source: "future", architecture: "all", scope: "user", installed: null, candidate: "1"}
+        ];
+        fake.source_catalog = JSON.stringify(browser.sourceIds.concat(["future"]).map((id) => ({source: id, availability_kind: "available", capabilities: ["search"]})));
+        fake.rows = JSON.stringify(rows);
+        wait(30);
+        compare(browser.viewItems.length, 5);
+        browser.choose(1);
+        const selectedId = browser.selectedIdentity;
+        const filters = ["Apps", "CLI tools", "System packages", "Container images"];
+        const names = ["example-app", "example-cli", "example-system", "example-image"];
+        for (let i = 0; i < filters.length; i++) {
+            mouseClick(findChild(browser, "searchPane").filterAt(filters[i]));
+            compare(browser.viewItems.length, 1);
+            compare(browser.viewItems[0].name, names[i]);
+            compare(fake.loadCount, requests);
+        }
+        mouseClick(findChild(browser, "searchPane").filterAt("All"));
+        compare(browser.viewItems.length, 5);
+        compare(browser.selectedIdentity, selectedId);
+        compare(fake.writes, 0);
+    }
+    function test_container_reference_uses_explicit_search_submission() {
+        browser.openView("Search");
+        mouseClick(findChild(browser, "searchPane").filterAt("Container images"));
+        const search = findChild(browser, "searchField");
+        const requests = fake.loadCount;
+        search.text = "registry.example/team/app:tag";
+        compare(fake.loadCount, requests);
+        search.forceActiveFocus();
+        keyClick(Qt.Key_Return);
+        compare(fake.lastQuery, "registry.example/team/app:tag");
+        compare(fake.lastView, "Search");
+        compare(fake.writes, 0);
     }
     function test_search_compares_sources_and_actions_without_opening_details() {
         const field = findChild(browser, "searchField");
