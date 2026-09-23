@@ -19,7 +19,7 @@ Browser {
         onMessageClicked: { browser.show(); browser.raise(); browser.requestActivate(); browser.openView("Updates"); }
     }
     Connections {
-        target: browser.backend
+        target: browser
         function onBackgroundStateChanged() {
             if (browser.backgroundState.notify && tray.visible && tray.supportsMessages)
                 tray.showMessage("PkgDeck updates", browser.backgroundState.available + " updates available", Platform.SystemTrayIcon.Information, 8000);
