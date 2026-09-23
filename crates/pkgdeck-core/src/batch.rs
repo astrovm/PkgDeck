@@ -430,12 +430,21 @@ impl Drop for ScopeGuard {
 }
 impl Drop for Session {
     fn drop(&mut self) {
+        trace("session drop: checking runner");
         // Also close a runner that sent a malformed Ready frame. A batch
         // error must never leave an elevated child waiting for more input.
         if self.child.try_wait().ok().flatten().is_none() {
+            trace("session drop: killing runner");
             let _ = self.child.kill();
         }
+        trace("session drop: waiting for runner");
         let _ = self.child.wait();
+        trace("session drop: runner reaped");
+    }
+}
+fn trace(message: &str) {
+    if std::env::var_os("PKGDECK_BATCH_TRACE").is_some() {
+        eprintln!("batch trace: {message}");
     }
 }
 fn root_owned(path: &Path) -> bool {
@@ -630,6 +639,7 @@ pub fn run_in_scope(
         if cancel.requested() {
             return Some(Err(ExecutionError::Cancelled));
         }
+        trace("dispatching approved command");
         let result = (|| {
             send(
                 &mut session.input,
@@ -638,8 +648,10 @@ pub fn run_in_scope(
                     command: next,
                 },
             )?;
+            trace("approved command sent");
             let response: Response = serde_json::from_slice(&line(&mut session.output)?)
                 .map_err(|e| ExecutionError::Io(e.to_string()))?;
+            trace("runner response received");
             match response {
                 Response::Completed { completion } => {
                     session.next[index] += 1;
