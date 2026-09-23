@@ -21,7 +21,9 @@ printf '%s  %s\n' "$updater_sha256" "$out/usr/lib/pkgdeck/appimageupdatetool.App
 chmod +x "$out/usr/lib/pkgdeck/appimageupdatetool.AppImage"
 scripts/build-apt.sh "${CARGO_TARGET_DIR:-target}/release"
 cp "${CARGO_TARGET_DIR:-target}/release/"{pkd,pkgdeck,pkgdeck-apt-query} "$out/usr/bin/"
-for module in QtQuick QtQml QtCore org; do cp -a "$QT_QML_DIR/$module" "$out/usr/qml/"; done
+for module in QtQuick QtQml QtCore QtNetwork org; do cp -a "$QT_QML_DIR/$module" "$out/usr/qml/"; done
+mkdir -p "$out/usr/qml/Qt/labs"
+cp -a "$QT_QML_DIR/Qt/labs/platform" "$out/usr/qml/Qt/labs/"
 shopt -s nullglob
 for pattern in platforms/libqoffscreen.so platforms/libqminimal.so platforms/libqxcb.so 'platforms/libqwayland*.so' 'imageformats/libqjpeg.so' 'imageformats/libqico.so' 'imageformats/libqsvg.so' 'imageformats/libqwebp.so' 'tls/*.so' 'iconengines/*.so' 'xcbglintegrations/*.so' 'wayland-graphics-integration-client/*.so' 'wayland-shell-integration/*.so' platforminputcontexts/libcomposeplatforminputcontextplugin.so platforminputcontexts/libibusplatforminputcontextplugin.so; do
     for source in "$QT_PLUGIN_DIR"/$pattern; do

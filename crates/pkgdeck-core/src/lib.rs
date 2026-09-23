@@ -9,6 +9,8 @@ pub mod host;
 pub mod inspection;
 pub mod process;
 
+pub mod activity;
+pub mod background;
 pub mod engine;
 pub mod package;
 
