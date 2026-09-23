@@ -457,7 +457,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            flatpak flatpak-builder dbus-daemon xvfb xdotool jq fonts-dejavu-core
+            flatpak flatpak-builder dbus-daemon elfutils xvfb xdotool jq fonts-dejavu-core
+          command -v eu-strip
           rustup show
       - name: Build GUI test helper
         run: cargo build --locked -p pkgdeck-tools
