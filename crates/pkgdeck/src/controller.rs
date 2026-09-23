@@ -3168,6 +3168,66 @@ mod tests {
             .to_string()
             .contains("\"kind\":\"audit\""));
     }
+    #[test]
+    fn inspection_requests_queue_behind_reads_and_never_interrupt_writes() {
+        let mut object = ffi::create_controller();
+        let mut controller = object.pin_mut();
+        controller.as_mut().inspect_command("   ".into());
+        assert!(controller.rust().worker.is_none());
+        assert!(controller.rust().queued.is_none());
+
+        let (_sender, receiver) = mpsc::channel();
+        controller.as_mut().rust_mut().worker = Some(Worker {
+            handle: thread::spawn(|| {}),
+            receiver,
+            cancel: Cancellation::default(),
+            job: Job::Load("Installed".into(), "".into()),
+        });
+        controller.as_mut().inspect_command(" git ".into());
+        assert!(
+            matches!(controller.rust().queued, Some(Job::Inspection(Some(ref command))) if command == "git")
+        );
+        assert_eq!(controller.inspection().to_string(), "{}");
+        controller.as_mut().audit_installed();
+        assert!(matches!(
+            controller.rust().queued,
+            Some(Job::Inspection(None))
+        ));
+
+        controller.as_mut().rust_mut().worker.as_mut().unwrap().job = Job::Write(
+            Operation::Refresh {
+                backend: "apt".into(),
+            },
+            None,
+        );
+        controller.as_mut().rust_mut().queued = None;
+        controller.as_mut().inspect_command("other".into());
+        controller.as_mut().audit_installed();
+        assert!(controller.rust().queued.is_none());
+    }
+    #[test]
+    fn inspection_invokable_reports_invalid_command_without_executing_it() {
+        let mut object = ffi::create_controller();
+        let mut controller = object.pin_mut();
+        controller.as_mut().inspect_command("../never-run".into());
+        assert!(matches!(
+            controller.rust().worker.as_ref().map(|worker| &worker.job),
+            Some(Job::Inspection(Some(_)))
+        ));
+        let deadline = Instant::now() + std::time::Duration::from_secs(30);
+        while controller.rust().worker.is_some() && Instant::now() < deadline {
+            controller.as_mut().poll();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            controller.rust().worker.is_none(),
+            "read-only inspection timed out"
+        );
+        let report: serde_json::Value =
+            serde_json::from_str(&controller.inspection().to_string()).unwrap();
+        assert_eq!(report["kind"], "error");
+        assert!(report["message"].as_str().unwrap().contains("command name"));
+    }
     fn cached_view(name: &str) -> CachedView {
         CachedView {
             loaded: Instant::now(),

@@ -705,6 +705,39 @@ mod tests {
             .all(|owner| owner.state != OwnerState::Known));
     }
     #[test]
+    fn inspection_cancellation_and_uninstalled_owner_records_stay_explicit() {
+        let temp = Temp::new();
+        let executable = temp.0.join("fixture");
+        fs::write(&executable, b"never executed").unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        let host = host(&temp.0.display().to_string());
+        let owners = Fixture(BTreeMap::from([(
+            executable,
+            vec![("apt".into(), "former-package:amd64".into())],
+        )]));
+        let mut unavailable = package("apt", "former-package", "former");
+        unavailable.installed_version = None;
+        let report = inspect_with(
+            &host,
+            "fixture",
+            &[unavailable.clone()],
+            &owners,
+            &Cancellation::default(),
+        )
+        .unwrap();
+        assert_eq!(report.candidates[0].owners[0].state, OwnerState::Unmatched);
+        assert!(audit(&[unavailable], vec![]).installed_copies.is_empty());
+        let cancel = Cancellation::default();
+        cancel.cancel();
+        assert!(matches!(
+            inspect_with(&host, "fixture", &[], &owners, &cancel),
+            Err(ExecutionError::Cancelled)
+        ));
+        for invalid in ["", ".", "..", "a/b", "line\nbreak", &"x".repeat(256)] {
+            assert!(inspect_with(&host, invalid, &[], &owners, &Cancellation::default()).is_err());
+        }
+    }
+    #[test]
     fn audit_locations_require_an_explicit_appimage_identity() {
         let mut managed = package("appimage", "pkgdeck-aaaa.AppImage", "appimage");
         managed.id.scope = Scope::Environment {
