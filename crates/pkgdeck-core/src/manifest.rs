@@ -404,7 +404,52 @@ pub fn inspect(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::{Backend, EngineError};
     use crate::package::UpdateAvailability;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    struct InventoryFixture {
+        installed: Vec<Package>,
+        offers: Vec<Package>,
+        search_calls: Arc<AtomicUsize>,
+        fail_search: bool,
+    }
+    impl Backend for InventoryFixture {
+        fn id(&self) -> &str {
+            "flatpak"
+        }
+        fn capabilities(&self) -> &[Capability] {
+            &[
+                Capability::Installed,
+                Capability::Search,
+                Capability::Install,
+            ]
+        }
+        fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
+            Ok(Availability::Available)
+        }
+        fn installed(&mut self, _: &Cancellation) -> Result<Vec<Package>, EngineError> {
+            Ok(self.installed.clone())
+        }
+        fn search(&mut self, name: &str, _: &Cancellation) -> Result<Vec<Package>, EngineError> {
+            self.search_calls.fetch_add(1, Ordering::SeqCst);
+            if self.fail_search {
+                return Err(EngineError::InvalidResponse {
+                    backend: "flatpak".into(),
+                    reason: "synthetic catalog failure".into(),
+                });
+            }
+            Ok(self
+                .offers
+                .iter()
+                .filter(|offer| offer.id.name == name)
+                .cloned()
+                .collect())
+        }
+    }
 
     fn package(name: &str, scope: Scope, remote: Option<&str>) -> Package {
         Package {
@@ -589,5 +634,111 @@ mod tests {
         assert!(export(&[secret_version], &[]).unwrap().packages[0]
             .observed_version
             .is_none());
+    }
+
+    #[test]
+    fn inspection_queries_only_missing_exact_sources_and_reports_failures() {
+        let installed_package = package("org.example.App", Scope::System, Some("flathub"));
+        let manifest = export(std::slice::from_ref(&installed_package), &[]).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut engine = Engine::default();
+        engine
+            .register(InventoryFixture {
+                installed: vec![installed_package.clone()],
+                offers: vec![],
+                search_calls: calls.clone(),
+                fail_search: false,
+            })
+            .unwrap();
+        let result = inspect(&mut engine, &manifest, &Cancellation::default()).unwrap();
+        assert_eq!(result.packages[0].status, PreviewStatus::AlreadyInstalled);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+        let mut offer = installed_package.clone();
+        offer.installed_version = None;
+        let mut engine = Engine::default();
+        engine
+            .register(InventoryFixture {
+                installed: vec![],
+                offers: vec![offer],
+                search_calls: calls.clone(),
+                fail_search: false,
+            })
+            .unwrap();
+        let result = inspect(&mut engine, &manifest, &Cancellation::default()).unwrap();
+        assert_eq!(result.packages[0].status, PreviewStatus::Installable);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        let mut engine = Engine::default();
+        engine
+            .register(InventoryFixture {
+                installed: vec![],
+                offers: vec![],
+                search_calls: calls.clone(),
+                fail_search: true,
+            })
+            .unwrap();
+        let result = inspect(&mut engine, &manifest, &Cancellation::default()).unwrap();
+        assert_eq!(result.packages[0].status, PreviewStatus::Unavailable);
+        assert!(result.packages[0].reason.contains("query failed"));
+        assert!(result.packages[0].proposed_changes.is_empty());
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn preview_distinguishes_missing_capability_from_unavailable_repository() {
+        let installed_package = package("org.example.App", Scope::System, Some("flathub"));
+        let manifest = export(std::slice::from_ref(&installed_package), &[]).unwrap();
+        let source = Source {
+            backend: "flatpak".into(),
+            capabilities: vec![Capability::Search],
+            availability: Ok(Availability::Available),
+        };
+        let result = preview(&manifest, &[], &[], std::slice::from_ref(&source), &[]).unwrap();
+        assert_eq!(result.packages[0].status, PreviewStatus::Unsupported);
+        assert!(result.packages[0].reason.contains("cannot install"));
+
+        let mut install_source = source.clone();
+        install_source.capabilities.push(Capability::Install);
+        let result = preview(&manifest, &[], &[], &[install_source.clone()], &[]).unwrap();
+        assert_eq!(result.packages[0].status, PreviewStatus::Unavailable);
+        assert!(result.packages[0].reason.contains("repository"));
+        assert_eq!(
+            result.packages[0].proposed_changes[0].kind,
+            ProposedChangeKind::RepositoryAddition
+        );
+
+        install_source.availability = Ok(Availability::Unavailable(
+            "synthetic missing manager".into(),
+        ));
+        let result = preview(&manifest, &[], &[], &[install_source], &[]).unwrap();
+        assert_eq!(result.packages[0].status, PreviewStatus::Unavailable);
+        assert!(result.packages[0].reason.contains("Source is unavailable"));
+    }
+
+    #[test]
+    fn oversized_files_and_cancelled_preview_stop_before_install_plan() {
+        let path = std::env::temp_dir().join(format!(
+            "pkgdeck-oversized-inventory-{}-{:?}.json",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::write(&path, vec![b' '; MAX_BYTES as usize + 1]).unwrap();
+        assert!(
+            matches!(read(&path), Err(ManifestError::Invalid(message)) if message.contains("too large"))
+        );
+        std::fs::remove_file(&path).unwrap();
+        assert!(matches!(read(&path), Err(ManifestError::Io(_))));
+
+        let package = package("org.example.App", Scope::System, None);
+        let manifest = export(std::slice::from_ref(&package), &[]).unwrap();
+        let cancel = Cancellation::default();
+        cancel.cancel();
+        assert!(
+            matches!(inspect(&mut Engine::default(), &manifest, &cancel), Err(ManifestError::Invalid(message)) if message.contains("cancelled"))
+        );
+        assert!(ManifestError::UnsupportedVersion(42)
+            .to_string()
+            .contains("42"));
     }
 }

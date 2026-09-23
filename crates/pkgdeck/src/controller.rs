@@ -3023,6 +3023,128 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn inventory_jobs_export_and_preview_exact_installed_identity() {
+        let package: Package = serde_json::from_value(json!({
+            "id":{"backend":"fixture", "name":"synthetic-editor", "architecture":"x86_64", "scope":"system"},
+            "display_name":"Synthetic Editor", "summary":"Fixture", "installed_version":"1", "candidate_version":null, "update":"current"
+        })).unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "pkgdeck-gui-inventory-{}-{:?}.json",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let mut engine = Engine::default();
+        engine
+            .register(Fixture {
+                package: package.clone(),
+                fail: false,
+            })
+            .unwrap();
+        let mut replies = Vec::new();
+        execute(
+            &mut engine,
+            Job::ManifestExport(path.clone(), vec![package.id.clone()]),
+            &Cancellation::default(),
+            &mut |reply| replies.push(reply),
+        );
+        assert!(matches!(
+            replies.pop(),
+            Some(Reply::Done(Ok(Payload::ManifestExport(1))))
+        ));
+        let saved = manifest::read(&path).unwrap();
+        assert_eq!(saved.packages[0].name, "synthetic-editor");
+        execute(
+            &mut engine,
+            Job::ManifestPreview(path.clone()),
+            &Cancellation::default(),
+            &mut |reply| replies.push(reply),
+        );
+        let Some(Reply::Done(Ok(Payload::ManifestPreview(preview)))) = replies.pop() else {
+            panic!("preview failed");
+        };
+        assert_eq!(
+            preview.packages[0].status,
+            manifest::PreviewStatus::AlreadyInstalled
+        );
+        execute(
+            &mut engine,
+            Job::ManifestExport(path.clone(), vec![]),
+            &Cancellation::default(),
+            &mut |reply| replies.push(reply),
+        );
+        assert!(matches!(replies.pop(), Some(Reply::Done(Err(_)))));
+        std::fs::remove_file(path).unwrap();
+    }
+    #[test]
+    fn inventory_picker_rejects_remote_paths_and_bad_selection() {
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller
+            .as_mut()
+            .export_inventory(QUrl::from("https://example.invalid/list.json"), "[]".into());
+        assert!(controller.status().to_string().contains("local inventory"));
+        controller
+            .as_mut()
+            .preview_inventory(QUrl::from("https://example.invalid/list.json"));
+        assert!(controller.status().to_string().contains("local inventory"));
+        let file = QUrl::from_local_file(&"/tmp/synthetic-list.json".into());
+        controller.as_mut().export_inventory(file, "broken".into());
+        assert!(controller
+            .status()
+            .to_string()
+            .contains("Invalid package selection"));
+        controller
+            .as_mut()
+            .apply(Ok(Payload::ManifestPreview(manifest::Preview {
+                schema_version: manifest::SCHEMA_VERSION,
+                packages: vec![],
+            })));
+        assert!(controller
+            .manifest_preview()
+            .to_string()
+            .contains("packages"));
+        controller.as_mut().apply(Ok(Payload::ManifestExport(2)));
+        assert!(controller
+            .status()
+            .to_string()
+            .contains("Exported 2 packages"));
+
+        // A foreground picker request can preempt a background read without
+        // touching the host while it waits for the worker to wind down.
+        let (sender, receiver) = mpsc::channel();
+        drop(sender);
+        let cancellation = Cancellation::default();
+        controller.as_mut().rust_mut().background = true;
+        controller.as_mut().rust_mut().worker = Some(Worker {
+            handle: thread::spawn(|| {}),
+            receiver,
+            cancel: cancellation.clone(),
+            job: Job::Load("Installed".into(), String::new()),
+        });
+        let local = QUrl::from_local_file(&"/tmp/synthetic-list.json".into());
+        controller.as_mut().preview_inventory(local.clone());
+        assert!(matches!(
+            controller.rust().queued,
+            Some(Job::ManifestPreview(_))
+        ));
+        assert!(cancellation.requested());
+        controller.as_mut().export_inventory(local, "[]".into());
+        assert!(matches!(
+            controller.rust().queued,
+            Some(Job::ManifestExport(_, _))
+        ));
+        controller
+            .as_mut()
+            .rust_mut()
+            .worker
+            .take()
+            .unwrap()
+            .handle
+            .join()
+            .unwrap();
+        controller.as_mut().rust_mut().queued = None;
+    }
     fn cached_view(name: &str) -> CachedView {
         CachedView {
             loaded: Instant::now(),

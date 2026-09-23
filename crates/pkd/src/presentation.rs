@@ -342,6 +342,27 @@ mod tests {
     use super::*;
     use serde_json::json;
     #[test]
+    fn portable_inventory_summary_shows_status_and_proposed_change() {
+        let exported = human(
+            &json!({"manifest_export":{"path":"synthetic.json", "packages":2}}),
+            100,
+            false,
+        );
+        assert!(exported.contains("Exported 2 packages to synthetic.json"));
+        let preview = human(
+            &json!({"manifest_preview":{"packages":[
+                {"package":{"name":"org.example.App", "backend":"flatpak"},
+                 "status":"ambiguous", "reason":"choose a repository",
+                 "proposed_changes":[{"kind":"repository_addition", "detail":"Review flathub"}]}
+            ]}}),
+            100,
+            false,
+        );
+        assert!(preview.contains("org.example.App"));
+        assert!(preview.contains("ambiguous"));
+        assert!(preview.contains("Review flathub"));
+    }
+    #[test]
     fn repository_and_firmware_labels_are_human_readable() {
         let output = human(
             &json!({"repositories":[

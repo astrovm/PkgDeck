@@ -920,7 +920,64 @@ mod tests {
             preview["manifest_preview"]["packages"][0]["status"],
             "installable"
         );
+        let (_, duplicate_code) = dispatch(
+            &mut engine(),
+            &export_args,
+            &Cancellation::default(),
+            &mut |_| panic!("inventory export must not request confirmation"),
+            &mut |_| {},
+        );
+        assert_eq!(duplicate_code, 1);
+        let missing_args = Args::try_parse_from([
+            "pkd",
+            "inventory",
+            "export",
+            path_text,
+            "missing-synthetic-package",
+        ])
+        .unwrap();
+        let (_, missing_code) = dispatch(
+            &mut engine(),
+            &missing_args,
+            &Cancellation::default(),
+            &mut |_| panic!("inventory export must not request confirmation"),
+            &mut |_| {},
+        );
+        assert_eq!(missing_code, 3);
+        let mut failed_target = Engine::default();
+        failed_target
+            .register(Fixture {
+                backend: "apt".into(),
+                installed: false,
+                fail: None,
+                read_failure: Some(EngineError::InvalidResponse {
+                    backend: "apt".into(),
+                    reason: "synthetic catalog failure".into(),
+                }),
+                verified: true,
+            })
+            .unwrap();
+        let (incomplete, incomplete_code) = dispatch(
+            &mut failed_target,
+            &preview_args,
+            &Cancellation::default(),
+            &mut |_| panic!("inventory preview must not request confirmation"),
+            &mut |_| {},
+        );
+        assert_eq!(incomplete_code, 8);
+        assert_eq!(
+            incomplete["manifest_preview"]["packages"][0]["status"],
+            "unavailable"
+        );
         std::fs::remove_file(path).unwrap();
+        let (_, absent_code) = dispatch(
+            &mut engine(),
+            &preview_args,
+            &Cancellation::default(),
+            &mut |_| panic!("inventory preview must not request confirmation"),
+            &mut |_| {},
+        );
+        assert_eq!(absent_code, 1);
     }
     struct Fixture {
         backend: String,
