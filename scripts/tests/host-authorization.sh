@@ -111,10 +111,40 @@ polkit.addRule(function(action, subject) {
 });
 RULE
 systemctl restart polkit
+batch_probe() {
+    local auth=$1 action=$2 output command_pid watchdog status
+    output=$(mktemp)
+    timeout --signal=TERM --kill-after=5s 75s \
+        runuser -u pkgdeck-test -- "$binaries/pkd" --json --yes --auth "$auth" --from apt "$action" "$fixture" >"$output" &
+    command_pid=$!
+    (
+        sleep 15
+        if kill -0 "$command_pid" 2>/dev/null; then
+            echo "Batch $auth $action is still running; process snapshot:" >&2
+            ps -eo pid,ppid,stat,wchan:24,args | grep -E 'pkd|pkexec|pkgdeck-host-runner|apt-get|dpkg|runuser|timeout' >&2 || :
+        fi
+    ) &
+    watchdog=$!
+    if wait "$command_pid"; then status=0; else status=$?; fi
+    kill "$watchdog" 2>/dev/null || :
+    wait "$watchdog" 2>/dev/null || :
+    if ((status != 0)); then
+        cat "$output" >&2
+        rm -f "$output"
+        echo "Batch $auth $action exited with $status" >&2
+        return "$status"
+    fi
+    if ! jq -e '.exit_code == 0' "$output"; then
+        cat "$output" >&2
+        rm -f "$output"
+        return 1
+    fi
+    rm -f "$output"
+}
 for auth in sudo polkit; do
-    runuser -u pkgdeck-test -- "$binaries/pkd" --json --yes --auth "$auth" --from apt install "$fixture" | jq -e '.exit_code == 0'
+    batch_probe "$auth" install
     [[ $(cat /usr/share/pkgdeck-fixture/version) == 1.0 ]]
-    runuser -u pkgdeck-test -- "$binaries/pkd" --json --yes --auth "$auth" --from apt remove "$fixture" | jq -e '.exit_code == 0'
+    batch_probe "$auth" remove
     [[ ! -e /usr/share/pkgdeck-fixture/version ]]
 done
 echo PKGDECK_HOST_AUTHORIZATION_PASS
