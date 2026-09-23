@@ -137,8 +137,6 @@ Controls.ApplicationWindow {
     function clearVisibleFilters() {
         installedFilter = "";
         multiSourceOnly = false;
-        if (currentView === "Search")
-            searchPane.contentFilter = "All";
         const filters = Object.assign({}, viewSourceFilters);
         const hadSourceFilter = filters[currentView] !== undefined;
         delete filters[currentView];
@@ -448,7 +446,7 @@ Controls.ApplicationWindow {
     }
     readonly property var cleanupFailures: currentView === "Clean" ? items.filter(row => row.kind === "failure") : []
     property var viewItems: {
-        let rows = root.currentView === "Search" ? items.filter((row) => row.kind !== "failure" && !isFabricated(row) && searchPane.accepts(row)) : items.filter((row) => row.kind !== "failure");
+        let rows = root.currentView === "Search" ? items.filter((row) => row.kind !== "failure" && !isFabricated(row)) : items.filter((row) => row.kind !== "failure");
         if (root.currentView === "Clean")
             rows = rows.filter(row => row.kind === "cleanup");
         rows = rows.filter((row) => root.effectiveSources().indexOf(row.source) >= 0);
@@ -1147,7 +1145,6 @@ Controls.ApplicationWindow {
             SearchPane {
                 id: searchPane
                 visible: root.currentView === "Search"
-                compact: root.compact
                 writing: backend.writing
                 surface: root.surface
                 ink: root.ink
@@ -1155,7 +1152,6 @@ Controls.ApplicationWindow {
                 line: root.line
                 accent: root.accent
                 onAccent: root.palette.highlightedText
-                selection: root.selection
                 textFont: root.font
                 onSubmitted: {
                     root.currentView = "Search";
@@ -1354,7 +1350,7 @@ Controls.ApplicationWindow {
                 id: resultsBox
                 Layout.fillWidth: true
                 Layout.fillHeight: true
-                Layout.minimumHeight: root.compact && root.currentView === "Search" ? 88 : 130
+                Layout.minimumHeight: 130
                 visible: root.currentView !== "Settings" && root.currentView !== "About"
                 color: root.surface
                 radius: 10
@@ -1757,8 +1753,7 @@ Controls.ApplicationWindow {
                                 anchors.horizontalCenter: parent.horizontalCenter
                                 visible: !backend.busy && root.readFailures.length === 0 &&
                                     (root.viewSourceFilters[root.currentView] !== undefined ||
-                                    (root.currentView === "Installed" && (root.installedFilter.length > 0 || root.multiSourceOnly)) ||
-                                    (root.currentView === "Search" && searchPane.contentFilter !== "All"))
+                                    (root.currentView === "Installed" && (root.installedFilter.length > 0 || root.multiSourceOnly)))
                                 text: "Clear filters"
                                 symbol: "cancel"
                                 onClicked: root.clearVisibleFilters()
