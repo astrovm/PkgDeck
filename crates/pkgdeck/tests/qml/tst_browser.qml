@@ -115,7 +115,7 @@ TestCase {
         id: window
         App.Browser {
             backend: fake
-            repositoryIconSource: Qt.resolvedUrl("../../assets/" + (dark ? "github-dark.png" : "github.png"))
+            repositoryIconSource: Qt.resolvedUrl("../../assets/" + (dark ? "github-dark.svg" : "github.svg"))
             logoIconSource: Qt.resolvedUrl("../../assets/logo.svg")
         }
     }
@@ -738,8 +738,11 @@ TestCase {
         verify(link.visible);
         compare(link.width, 26);
         compare(link.height, 26);
-        compare(icon.width, 14);
-        compare(icon.height, 14);
+        compare(icon.width, 16);
+        compare(icon.height, 16);
+        verify(icon.source.toString().endsWith("github.svg") || icon.source.toString().endsWith("github-dark.svg"));
+        compare(icon.sourceSize.width, Math.ceil(icon.width * browser.screen.devicePixelRatio));
+        compare(icon.sourceSize.height, Math.ceil(icon.height * browser.screen.devicePixelRatio));
     }
     function test_search_button_fits_at_normal_and_compact_widths() {
         browser.openView("Search");
