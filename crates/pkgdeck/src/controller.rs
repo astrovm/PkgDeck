@@ -2025,7 +2025,12 @@ mod tests {
         elf[..4].copy_from_slice(b"\x7fELF");
         elf[4..7].copy_from_slice(&[2, 1, 1]);
         elf[8..11].copy_from_slice(b"AI\x02");
-        elf[18..20].copy_from_slice(&62_u16.to_le_bytes());
+        let machine = if std::env::consts::ARCH == "aarch64" {
+            183_u16
+        } else {
+            62_u16
+        };
+        elf[18..20].copy_from_slice(&machine.to_le_bytes());
         elf[20..24].copy_from_slice(&1_u32.to_le_bytes());
         elf[52..54].copy_from_slice(&64_u16.to_le_bytes());
         std::fs::write(&source, elf).unwrap();
@@ -2034,15 +2039,20 @@ mod tests {
         controller
             .as_mut()
             .open_input(source.to_str().unwrap().into());
-        for _ in 0..200 {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while Instant::now() < deadline {
             controller.as_mut().poll();
             if !controller.confirmation().is_empty() {
                 break;
             }
-            std::thread::sleep(Duration::from_millis(5));
+            std::thread::sleep(Duration::from_millis(10));
         }
         let preview = controller.confirmation().to_string();
-        assert!(preview.contains("Sample ñ"), "{preview}");
+        assert!(
+            preview.contains("Sample ñ"),
+            "preview: {preview}; status: {}",
+            controller.status()
+        );
         assert!(preview.contains("Managed file:"), "{preview}");
         assert!(preview.contains("Desktop entry:"), "{preview}");
         assert!(matches!(
@@ -2052,6 +2062,87 @@ mod tests {
         controller.as_mut().confirm(false);
         assert!(source.exists());
         assert!(controller.confirmation().is_empty());
+        std::fs::remove_dir_all(base).unwrap();
+    }
+    #[test]
+    fn opening_flatpak_reference_uses_confirmation_and_rejects_unsupported_input() {
+        let base =
+            std::env::temp_dir().join(format!("pkgdeck-open-flatpakref-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let source = base.join("Synthetic ñ.flatpakref");
+        std::fs::write(
+            &source,
+            "[Flatpak Ref]\nName=org.example.Synthetic\nUrl=https://example.invalid/repo\n",
+        )
+        .unwrap();
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller
+            .as_mut()
+            .open_input(base.join("queued-unsupported.txt").to_str().unwrap().into());
+        controller
+            .as_mut()
+            .open_input(format!("file://{}", source.display()).into());
+        assert!(controller
+            .status()
+            .to_string()
+            .contains("Opening the file after the current operation"));
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while Instant::now() < deadline {
+            controller.as_mut().poll();
+            if !controller.confirmation().is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let preview = controller.confirmation().to_string();
+        assert!(preview.contains("org.example.Synthetic"), "{preview}");
+        assert!(
+            preview.contains("Repository to add if needed:"),
+            "{preview}"
+        );
+        assert!(matches!(
+            controller.rust().pending,
+            Some(Job::Write(Operation::Install(_), _))
+        ));
+        controller.as_mut().confirm(false);
+        assert!(source.exists());
+
+        controller
+            .as_mut()
+            .open_input(base.join("unsupported.txt").to_str().unwrap().into());
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while Instant::now() < deadline {
+            controller.as_mut().poll();
+            if !controller.busy() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(controller
+            .status()
+            .to_string()
+            .contains("Supported local formats"));
+        assert!(controller.confirmation().is_empty());
+        controller
+            .as_mut()
+            .open_input("flatpak+http://example.invalid/app.flatpakref".into());
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while Instant::now() < deadline {
+            controller.as_mut().poll();
+            if !controller.busy() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(controller.status().to_string().contains(".flatpakref"));
+        assert!(controller.confirmation().is_empty());
+        controller.as_mut().open_input(" ".into());
+        assert_eq!(
+            controller.status().to_string(),
+            "Choose an installation file."
+        );
         std::fs::remove_dir_all(base).unwrap();
     }
     #[test]

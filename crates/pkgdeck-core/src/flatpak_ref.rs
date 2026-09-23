@@ -38,7 +38,11 @@ fn https_url(value: &str, suffix: &str) -> bool {
             .next()
             .is_some_and(|path| path.ends_with(suffix))
 }
-fn reference_bytes(source: &str, cancel: &Cancellation) -> Result<Vec<u8>, EngineError> {
+fn reference_bytes(
+    source: &str,
+    cancel: &Cancellation,
+    host: &Host,
+) -> Result<Vec<u8>, EngineError> {
     if source.starts_with("https://") {
         if !https_url(source, ".flatpakref") {
             return Err(invalid("expected an HTTPS .flatpakref URL"));
@@ -61,7 +65,6 @@ fn reference_bytes(source: &str, cancel: &Cancellation) -> Result<Vec<u8>, Engin
             source,
         ]
         .map(OsString::from);
-        let host = Host::current();
         let executable = host
             .resolve("curl")?
             .ok_or_else(|| invalid("curl is unavailable"))?;
@@ -171,7 +174,7 @@ fn inspect_bytes(source: &str, bytes: &[u8]) -> Result<Package, EngineError> {
     })
 }
 pub fn inspect(source: &str, cancel: &Cancellation) -> Result<Package, EngineError> {
-    inspect_bytes(source, &reference_bytes(source, cancel)?)
+    inspect_bytes(source, &reference_bytes(source, cancel, &Host::current())?)
 }
 pub fn verified_source(
     id: &PackageId,
@@ -187,7 +190,7 @@ pub fn verified_source(
     let (expected, source) = reference
         .split_once(':')
         .ok_or_else(|| invalid("invalid Flatpak reference identity"))?;
-    let bytes = reference_bytes(source, cancel)?;
+    let bytes = reference_bytes(source, cancel, &Host::current())?;
     let current = inspect_bytes(source, &bytes)?;
     if current.id != *id
         || current
@@ -204,6 +207,77 @@ pub fn verified_source(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn remote_reference_reads_bounded_https_without_following_redirects() {
+        let base =
+            std::env::temp_dir().join(format!("pkgdeck-flatpakref-https-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let script = base.join("curl");
+        let calls = base.join("calls");
+        let reference =
+            b"[Flatpak Ref]\nName=org.example.Remote\nUrl=https://example.invalid/repo\n";
+        fs::write(base.join("reference"), reference).unwrap();
+        fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n/usr/bin/cat '{}'\n",
+                calls.display(),
+                base.join("reference").display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        let host = Host::new(
+            crate::host::Runtime::Native,
+            [(OsString::from("PATH"), base.as_os_str().to_os_string())]
+                .into_iter()
+                .collect(),
+        );
+        let cancel = Cancellation::default();
+        let url = "https://example.invalid/a.flatpakref";
+        let bytes = reference_bytes(url, &cancel, &host).unwrap();
+        assert_eq!(bytes, reference);
+        let package = inspect_bytes(url, &bytes).unwrap();
+        assert_eq!(package.id.name, "org.example.Remote");
+        assert_eq!(package.candidate_version.as_deref(), Some("master"));
+        let args = fs::read_to_string(&calls).unwrap();
+        assert!(args.contains("--max-redirs\n0\n"));
+        assert!(args.contains("--proto\n=https\n"));
+        assert!(args.ends_with("https://example.invalid/a.flatpakref\n"));
+        assert!(reference_bytes("https://example.invalid/a.txt", &cancel, &host).is_err());
+        assert!(reference_bytes("http://example.invalid/a.flatpakref", &cancel, &host).is_err());
+        assert!(reference_bytes("https://example.invalid", &cancel, &host).is_err());
+        fs::write(&script, "#!/bin/sh\nexit 22\n").unwrap();
+        assert!(reference_bytes(url, &cancel, &host).is_err());
+        fs::remove_file(&script).unwrap();
+        assert!(reference_bytes(url, &cancel, &host).is_err());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn local_reference_rejects_symlinks_and_large_files_without_parsing() {
+        let base =
+            std::env::temp_dir().join(format!("pkgdeck-flatpakref-limits-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let source = base.join("reference.flatpakref");
+        fs::write(
+            &source,
+            b"[Flatpak Ref]\nName=org.example.App\nUrl=https://example.invalid/repo\n",
+        )
+        .unwrap();
+        let alias = base.join("alias.flatpakref");
+        std::os::unix::fs::symlink(&source, &alias).unwrap();
+        let cancel = Cancellation::default();
+        assert!(inspect(alias.to_str().unwrap(), &cancel).is_err());
+        let oversized = fs::OpenOptions::new().write(true).open(&source).unwrap();
+        oversized.set_len(MAX_BYTES as u64 + 1).unwrap();
+        assert!(inspect(source.to_str().unwrap(), &cancel).is_err());
+        fs::remove_dir_all(base).unwrap();
+    }
     #[test]
     fn parses_valid_reference_and_rejects_bad_origins() {
         let base = std::env::temp_dir().join(format!("pkgdeck-flatpakref-{}", std::process::id()));
@@ -225,5 +299,27 @@ mod tests {
             ".flatpakref"
         ));
         fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn reference_metadata_rejects_invalid_identity_scope_and_repository() {
+        let source = "/tmp/example.flatpakref";
+        for body in [
+            "[Flatpak Ref]\nUrl=https://example.invalid/repo\n",
+            "[Flatpak Ref]\nName=org.example.App\n",
+            "[Flatpak Ref]\nName=-bad\nUrl=https://example.invalid/repo\n",
+            "[Flatpak Ref]\nName=org.example.App\nBranch=-bad\nUrl=https://example.invalid/repo\n",
+            "[Flatpak Ref]\nName=org.example.App\nUrl=http://example.invalid/repo\n",
+            "[Flatpak Ref]\nName=org.example.App\nUrl=https://example.invalid/repo\nRuntimeRepo=http://example.invalid/runtime.flatpakrepo\n",
+            "[Flatpak Ref]\nName=org.example.App\nUrl=https://example.invalid/repo\nIsRuntime=perhaps\n",
+            "[Flatpak Ref]\nName=org.example.App\nUrl=https://example.invalid/repo\nSuggestRemoteName=-bad\n",
+        ] {
+            assert!(inspect_bytes(source, body.as_bytes()).is_err(), "{body}");
+        }
+        assert!(inspect_bytes(source, &[0xff]).is_err());
+        let runtime = inspect_bytes(source, b"[Flatpak Ref]\nName=org.example.Runtime\nUrl=https://example.invalid/repo\nIsRuntime=true\nGPGKey=synthetic\nSuggestRemoteName=example\n").unwrap();
+        assert!(runtime.summary.contains("Runtime:"));
+        assert!(runtime.summary.contains("Signing key: included"));
+        assert!(runtime.summary.contains("Suggested remote: example"));
     }
 }

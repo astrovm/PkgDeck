@@ -175,6 +175,15 @@ mod tests {
         let alias = base.join("alias.deb");
         std::os::unix::fs::symlink(&archive, &alias).unwrap();
         assert!(inspect(&alias, &Cancellation::default()).is_err());
+        assert!(inspect(Path::new("relative.deb"), &Cancellation::default()).is_err());
+        let cancelled = Cancellation::default();
+        cancelled.cancel();
+        let header_only = base.join("header.deb");
+        fs::write(&header_only, b"!<arch>\n").unwrap();
+        assert_eq!(
+            digest(&header_only, &cancelled),
+            Err(EngineError::Cancelled)
+        );
         fs::remove_dir_all(base).unwrap();
     }
     #[test]

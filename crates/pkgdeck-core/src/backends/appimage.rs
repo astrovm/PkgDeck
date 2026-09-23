@@ -767,11 +767,28 @@ mod tests {
         let applications = base.join("data/applications");
         let mut backend = AppImage::new(root.clone(), applications.clone(), 1000);
         let cancel = Cancellation::default();
+        let cancelled_preview = Cancellation::default();
+        cancelled_preview.cancel();
+        assert_eq!(
+            backend.search(source.to_str().unwrap(), &cancelled_preview),
+            Err(EngineError::Cancelled)
+        );
         let import = backend
             .search(source.to_str().unwrap(), &cancel)
             .unwrap()
             .remove(0);
         assert!(backend.details(&import.id, &cancel).is_err());
+        let cancelled = Cancellation::default();
+        cancelled.cancel();
+        assert_eq!(
+            backend.execute(
+                &Operation::Install(import.id.clone()),
+                &cancelled,
+                &mut |_| {}
+            ),
+            Err(EngineError::Cancelled)
+        );
+        assert!(!root.exists());
         backend
             .execute(&Operation::Install(import.id), &cancel, &mut |_| {})
             .unwrap();
@@ -866,6 +883,16 @@ mod tests {
         assert_eq!(output, b"data");
     }
     #[test]
+    fn unavailable_bundled_updater_is_reported() {
+        let backend = AppImage::new(
+            PathBuf::from("/nonexistent/pkgdeck-owned"),
+            PathBuf::from("/nonexistent/pkgdeck-applications"),
+            rustix::process::getuid().as_raw(),
+        );
+        let error = backend.updater().unwrap_err().to_string();
+        assert!(error.contains("bundled AppImage updater is unavailable"));
+    }
+    #[test]
     fn bounded_elf_sections_report_update_metadata() {
         let base = std::env::temp_dir().join(format!(
             "pkgdeck-appimage-update-info-{}",
@@ -898,6 +925,22 @@ mod tests {
             .unwrap()[0]
             .summary
             .contains("Update metadata: available"));
+        let mut invalid_table = bytes.clone();
+        invalid_table[58..60].copy_from_slice(&32_u16.to_le_bytes());
+        fs::write(&source, invalid_table).unwrap();
+        assert!(AppImage::has_update_metadata(&source).is_err());
+        let mut invalid_names = bytes.clone();
+        invalid_names[64 + 64 + 32..64 + 64 + 40]
+            .copy_from_slice(&(1024_u64 * 1024 + 1).to_le_bytes());
+        fs::write(&source, invalid_names).unwrap();
+        assert!(AppImage::has_update_metadata(&source).is_err());
+        let mut invalid_data = bytes.clone();
+        invalid_data[64 + 128 + 32..64 + 128 + 40].copy_from_slice(&5000_u64.to_le_bytes());
+        fs::write(&source, invalid_data).unwrap();
+        assert!(AppImage::has_update_metadata(&source).is_err());
+        bytes[64 + 128..64 + 132].copy_from_slice(&0_u32.to_le_bytes());
+        fs::write(&source, bytes).unwrap();
+        assert!(!AppImage::has_update_metadata(&source).unwrap());
         fs::remove_dir_all(base).unwrap();
     }
 
@@ -1108,6 +1151,8 @@ mod tests {
         backend
             .execute(&Operation::Install(candidate.id), &cancel, &mut |_| {})
             .unwrap();
+        let duplicate = backend.search(source.to_str().unwrap(), &cancel).unwrap();
+        assert!(duplicate[0].summary.contains("Already imported"));
         let installed = backend.installed(&cancel).unwrap();
         assert_eq!(installed.len(), 1);
         assert_eq!(
@@ -1136,6 +1181,11 @@ mod tests {
             .search(source.to_str().unwrap(), &cancel)
             .unwrap()
             .remove(0);
+        let mut unreviewed = candidate.id.clone();
+        unreviewed.reference = None;
+        assert!(backend
+            .execute(&Operation::Install(unreviewed), &cancel, &mut |_| {})
+            .is_err());
         candidate.id.architecture = "aarch64".into();
         assert!(backend
             .execute(&Operation::Install(candidate.id), &cancel, &mut |_| {})
