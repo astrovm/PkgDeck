@@ -164,6 +164,8 @@ Controls.ApplicationWindow {
             return reportState.phase === "partial" ? "No results from the sources that completed." : "Could not check these sources.";
         if (reportState.phase === "unsupported")
             return "No enabled sources support this view.";
+        if (currentView === "Search" && queryDirty)
+            return "";
         if (currentView === "Search" && searchPane.text.trim().length === 0)
             return "";
         if (currentView === "Installed" && (installedFilter.length > 0 || multiSourceOnly))
@@ -1008,8 +1010,11 @@ Controls.ApplicationWindow {
                     Controls.Label { text: "by astro"; color: root.muted; font.pointSize: root.font.pointSize * 0.9 }
                     Controls.ToolButton {
                         objectName: "repositoryLink"
-                        implicitWidth: 28
-                        implicitHeight: 28
+                        implicitWidth: 26
+                        implicitHeight: 26
+                        Layout.maximumWidth: 26
+                        Layout.maximumHeight: 26
+                        padding: 0
                         Accessible.name: "Open PkgDeck on GitHub"
                         Controls.ToolTip.visible: hovered
                         Controls.ToolTip.text: Accessible.name
@@ -1019,13 +1024,18 @@ Controls.ApplicationWindow {
                             color: parent.hovered ? root.selection : "transparent"
                             border.color: parent.activeFocus ? root.accent : "transparent"
                         }
-                        contentItem: Image {
-                            objectName: "repositoryIcon"
-                            source: root.repositoryIconSource
-                            sourceSize.width: 18
-                            sourceSize.height: 18
-                            fillMode: Image.PreserveAspectFit
-                            Accessible.ignored: true
+                        contentItem: Item {
+                            Image {
+                                objectName: "repositoryIcon"
+                                anchors.centerIn: parent
+                                width: 14
+                                height: 14
+                                source: root.repositoryIconSource
+                                sourceSize.width: 14
+                                sourceSize.height: 14
+                                fillMode: Image.PreserveAspectFit
+                                Accessible.ignored: true
+                            }
                         }
                     }
                 }
