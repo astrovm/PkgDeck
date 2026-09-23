@@ -1722,6 +1722,13 @@ impl ffi::PackageController {
         {
             return;
         }
+        if let Err(error) = inspection::validate_command(&command) {
+            self.as_mut().set_inspection(encoded(json!({
+                "kind": "error", "message": error.to_string()
+            })));
+            self.set_status(error.to_string().as_str().into());
+            return;
+        }
         self.as_mut().set_inspection("{}".into());
         self.as_mut()
             .set_status("Inspecting command and installed ownership…".into());
@@ -4696,19 +4703,7 @@ mod tests {
         let mut object = ffi::create_controller();
         let mut controller = object.pin_mut();
         controller.as_mut().inspect_command("../never-run".into());
-        assert!(matches!(
-            controller.rust().worker.as_ref().map(|worker| &worker.job),
-            Some(Job::Inspection(Some(_)))
-        ));
-        let deadline = Instant::now() + std::time::Duration::from_secs(30);
-        while controller.rust().worker.is_some() && Instant::now() < deadline {
-            controller.as_mut().poll();
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        assert!(
-            controller.rust().worker.is_none(),
-            "read-only inspection timed out"
-        );
+        assert!(controller.rust().worker.is_none());
         let report: serde_json::Value =
             serde_json::from_str(&controller.inspection().to_string()).unwrap();
         assert_eq!(report["kind"], "error");

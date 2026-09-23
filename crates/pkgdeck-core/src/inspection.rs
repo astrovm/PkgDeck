@@ -75,6 +75,15 @@ fn valid_command(name: &str) -> bool {
         && name != ".."
         && !name.chars().any(char::is_control)
 }
+pub fn validate_command(name: &str) -> Result<(), ExecutionError> {
+    if valid_command(name) {
+        Ok(())
+    } else {
+        Err(ExecutionError::Invalid(
+            "expected a command name without a path".into(),
+        ))
+    }
+}
 fn host_path(host: &Host, inspected: &Path, mapped: &Path) -> PathBuf {
     if host.runtime == Runtime::Flatpak {
         mapped.strip_prefix("/run/host").map_or_else(
@@ -93,11 +102,7 @@ pub fn inspect_with(
     source: &impl OwnershipSource,
     cancel: &Cancellation,
 ) -> Result<ExecutableReport, ExecutionError> {
-    if !valid_command(command) {
-        return Err(ExecutionError::Invalid(
-            "expected a command name without a path".into(),
-        ));
-    }
+    validate_command(command)?;
     let path = host.var("PATH").unwrap_or_default();
     let mut report = ExecutableReport {
         command: command.into(),
