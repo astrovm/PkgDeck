@@ -2,7 +2,7 @@
 //! network state so scheduling can be tested without waiting or networking.
 use crate::{
     engine::PackageReport,
-    host::Runtime,
+    host::{Host, Runtime},
     package::{PackageId, UpdateAvailability},
 };
 use std::{
@@ -67,10 +67,19 @@ impl Schedule {
 }
 
 pub fn autostart_path() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
+    // In Flatpak, Host::current reads the host user's XDG paths through the
+    // bridge, instead of the sandbox's private configuration directory.
+    let host = Host::current();
+    autostart_path_from(host.var("XDG_CONFIG_HOME"), host.var("HOME"))
+}
+fn autostart_path_from(config: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
+    let base = config
         .filter(|p| Path::new(p).is_absolute())
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
+        .or_else(|| {
+            home.filter(|p| Path::new(p).is_absolute())
+                .map(|home| PathBuf::from(home).join(".config"))
+        })?;
     Some(base.join("autostart/io.github.astrovm.PkgDeck.desktop"))
 }
 pub fn set_autostart(path: &Path, enabled: bool) -> io::Result<()> {
@@ -238,5 +247,26 @@ mod tests {
         );
         assert!(autostart_exec(Runtime::Native, Path::new("relative/app"), None).is_err());
         assert!(autostart_exec(Runtime::Native, Path::new("/tmp/app\nstart"), None).is_err());
+    }
+
+    #[test]
+    fn autostart_path_uses_absolute_user_config_and_falls_back_to_home() {
+        let suffix = Path::new("autostart/io.github.astrovm.PkgDeck.desktop");
+        assert!(autostart_path().unwrap().ends_with(suffix));
+        assert_eq!(
+            autostart_path_from(
+                Some("/home/fixture/.config-alt".into()),
+                Some("/home/fixture".into())
+            ),
+            Some(Path::new("/home/fixture/.config-alt").join(suffix))
+        );
+        assert_eq!(
+            autostart_path_from(Some("relative/config".into()), Some("/home/fixture".into())),
+            Some(Path::new("/home/fixture/.config").join(suffix))
+        );
+        assert_eq!(
+            autostart_path_from(None, Some("relative/home".into())),
+            None
+        );
     }
 }
