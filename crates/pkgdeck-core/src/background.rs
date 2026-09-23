@@ -2,9 +2,12 @@
 //! network state so scheduling can be tested without waiting or networking.
 use crate::{
     engine::PackageReport,
+    host::Runtime,
     package::{PackageId, UpdateAvailability},
 };
 use std::{
+    collections::BTreeMap,
+    ffi::OsString,
     fs::{self, OpenOptions},
     io::{self, Write},
     path::{Path, PathBuf},
@@ -81,13 +84,62 @@ pub fn set_autostart(path: &Path, enabled: bool) -> io::Result<()> {
         path.parent()
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid autostart path"))?,
     )?;
+    let environment: BTreeMap<OsString, OsString> = std::env::vars_os().collect();
+    let runtime = Runtime::detect(&environment, Path::new("/.flatpak-info").exists());
+    let executable = if matches!(runtime, Runtime::Native | Runtime::AppImage) {
+        std::env::current_exe()?
+    } else {
+        PathBuf::new()
+    };
+    let appimage = environment.get(&OsString::from("APPIMAGE")).map(Path::new);
+    let exec = autostart_exec(runtime, &executable, appimage)?;
     let mut file = OpenOptions::new()
         .create(true)
         .write(true)
         .truncate(true)
         .open(path)?;
-    file.write_all(b"[Desktop Entry]\nType=Application\nName=PkgDeck\nExec=pkgdeck --background\nIcon=io.github.astrovm.PkgDeck\nX-GNOME-Autostart-enabled=true\n")?;
+    file.write_all(format!("[Desktop Entry]\nType=Application\nName=PkgDeck\nExec={exec}\nIcon=io.github.astrovm.PkgDeck\nX-GNOME-Autostart-enabled=true\n").as_bytes())?;
     file.sync_all()
+}
+
+fn autostart_exec(
+    runtime: Runtime,
+    executable: &Path,
+    appimage: Option<&Path>,
+) -> io::Result<String> {
+    match runtime {
+        Runtime::Flatpak => Ok("flatpak run io.github.astrovm.PkgDeck --background".into()),
+        Runtime::Snap => Ok("snap run pkgdeck --background".into()),
+        Runtime::Native | Runtime::AppImage => {
+            let path = if runtime == Runtime::AppImage {
+                appimage
+                    .filter(|path| path.is_absolute())
+                    .unwrap_or(executable)
+            } else {
+                executable
+            };
+            let value = path
+                .to_str()
+                .filter(|value| path.is_absolute() && !value.chars().any(char::is_control))
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "invalid autostart executable")
+                })?;
+            // Desktop Entry Exec has its own quoting and string escaping rules.
+            let mut quoted = String::from("\"");
+            for character in value.chars() {
+                match character {
+                    '%' => quoted.push_str("%%"),
+                    '\\' => quoted.push_str("\\\\\\\\"),
+                    '"' => quoted.push_str("\\\\\""),
+                    '$' => quoted.push_str("\\\\$"),
+                    '`' => quoted.push_str("\\\\`"),
+                    other => quoted.push(other),
+                }
+            }
+            quoted.push('"');
+            Ok(format!("{quoted} --background"))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -153,5 +205,38 @@ mod tests {
         set_autostart(&path, false).unwrap();
         assert!(!path.exists());
         fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn autostart_uses_a_launchable_package_command_and_escapes_paths() {
+        let native = autostart_exec(
+            Runtime::Native,
+            Path::new("/opt/Pkg Deck/app%$\"`\\bin"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            native,
+            "\"/opt/Pkg Deck/app%%\\\\$\\\\\"\\\\`\\\\\\\\bin\" --background"
+        );
+        assert_eq!(
+            autostart_exec(
+                Runtime::AppImage,
+                Path::new("/tmp/extracted/AppRun"),
+                Some(Path::new("/home/user/Pkg Deck.AppImage"))
+            )
+            .unwrap(),
+            "\"/home/user/Pkg Deck.AppImage\" --background"
+        );
+        assert_eq!(
+            autostart_exec(Runtime::Flatpak, Path::new(""), None).unwrap(),
+            "flatpak run io.github.astrovm.PkgDeck --background"
+        );
+        assert_eq!(
+            autostart_exec(Runtime::Snap, Path::new(""), None).unwrap(),
+            "snap run pkgdeck --background"
+        );
+        assert!(autostart_exec(Runtime::Native, Path::new("relative/app"), None).is_err());
+        assert!(autostart_exec(Runtime::Native, Path::new("/tmp/app\nstart"), None).is_err());
     }
 }

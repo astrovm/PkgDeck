@@ -1016,6 +1016,26 @@ impl ffi::PackageController {
             .collect();
         self.as_mut().set_background_state(encoded(json!({"last_check": checked, "available": result.count, "failures": failures, "notify": result.changed && result.count > 0})));
     }
+    fn finish_background_error(mut self: Pin<&mut Self>, error: &EngineError) {
+        let available = serde_json::from_str::<Value>(&self.background_state().to_string())
+            .ok()
+            .and_then(|state| state["available"].as_u64())
+            .unwrap_or(0);
+        let checked = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let failures: Vec<_> = match error {
+            EngineError::Incomplete(sources) => sources
+                .iter()
+                .map(
+                    |source| json!({"source": source.backend, "kind": failure_kind(&source.error)}),
+                )
+                .collect(),
+            _ => vec![json!({"source": "check", "kind": failure_kind(error)})],
+        };
+        self.as_mut().set_background_state(encoded(json!({"last_check": checked, "available": available, "failures": failures, "notify": false})));
+    }
     pub fn refresh_activity(mut self: Pin<&mut Self>) {
         if let Some(store) = self.rust().activity_store.clone() {
             let _ = store.recover_dead();
@@ -2169,6 +2189,9 @@ impl ffi::PackageController {
                             Reply::Done(Ok(Payload::BackgroundUpdates(report))) => {
                                 self.as_mut().finish_background_check(report)
                             }
+                            Reply::Done(Err(error)) => {
+                                self.as_mut().finish_background_error(&error)
+                            }
                             Reply::Done(Ok(payload)) => {
                                 if let Job::Load(view, query) = &worker.job {
                                     if let Payload::Sources(sources) = &payload {
@@ -2285,6 +2308,12 @@ impl ffi::PackageController {
             }
             if joined.is_err() && !self.rust().background {
                 self.as_mut().set_status("Backend worker failed.".into());
+            } else if joined.is_err() {
+                self.as_mut()
+                    .finish_background_error(&EngineError::InvalidResponse {
+                        backend: "check".into(),
+                        reason: "Backend worker failed".into(),
+                    });
             }
             self.as_mut().rust_mut().background = false;
             self.as_mut().rust_mut().discard_revalidation = false;
@@ -3147,6 +3176,59 @@ mod tests {
             Some(Reply::Done(Ok(Payload::BackgroundUpdates(report))))
                 if report.packages.len() == 1 && report.packages[0].id.name == "synthetic"
         ));
+    }
+
+    #[test]
+    fn background_worker_error_updates_failure_state_without_losing_known_count() {
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().set_background_state(encoded(json!({
+            "last_check": 1, "available": 3, "failures": [], "notify": true
+        })));
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(Reply::Done(Err(EngineError::Unavailable {
+                backend: "fixture".into(),
+                reason: "temporarily offline".into(),
+            })))
+            .unwrap();
+        drop(sender);
+        controller.as_mut().rust_mut().background = true;
+        controller.as_mut().rust_mut().worker = Some(Worker {
+            handle: thread::spawn(|| {}),
+            receiver,
+            cancel: Cancellation::default(),
+            job: Job::BackgroundUpdates(vec!["fixture".into()]),
+        });
+        controller.as_mut().poll();
+        let state: Value =
+            serde_json::from_str(&controller.background_state().to_string()).unwrap();
+        assert_eq!(state["available"], 3);
+        assert_eq!(state["notify"], false);
+        assert_eq!(state["failures"][0]["kind"], "unavailable");
+        assert!(state["last_check"].as_u64().unwrap() > 1);
+        assert!(!controller.busy());
+
+        controller
+            .as_mut()
+            .finish_background_error(&EngineError::Incomplete(vec![
+                BackendFailure {
+                    backend: "apt".into(),
+                    error: EngineError::Unavailable {
+                        backend: "apt".into(),
+                        reason: "offline".into(),
+                    },
+                },
+                BackendFailure {
+                    backend: "flatpak".into(),
+                    error: EngineError::Cancelled,
+                },
+            ]));
+        let state: Value =
+            serde_json::from_str(&controller.background_state().to_string()).unwrap();
+        assert_eq!(state["available"], 3);
+        assert_eq!(state["failures"][0]["source"], "apt");
+        assert_eq!(state["failures"][1]["kind"], "cancelled");
     }
 
     #[test]
