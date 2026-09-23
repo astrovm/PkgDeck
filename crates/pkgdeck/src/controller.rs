@@ -174,6 +174,35 @@ enum Reply {
     Done(Result<Payload, EngineError>),
     Engine(Box<Engine>),
 }
+fn inspect_open_input(input: &str, cancel: &Cancellation) -> Result<Payload, EngineError> {
+    if let Some(url) = input.strip_prefix("flatpak+") {
+        return pkgdeck_core::flatpak_ref::inspect(url, cancel)
+            .map(|package| Payload::OpenPackage(Box::new(package)));
+    }
+    let path = local_input_path(input).map_err(|reason| EngineError::InvalidResponse {
+        backend: "open".into(),
+        reason,
+    })?;
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    let package = match extension {
+        "AppImage" => {
+            use pkgdeck_core::engine::Backend;
+            AppImage::native()
+                .search(&path.to_string_lossy(), cancel)
+                .and_then(|mut packages| packages.pop().ok_or(EngineError::NotFound))
+        }
+        "deb" => pkgdeck_core::local_deb::inspect(&path, cancel),
+        "flatpakref" => pkgdeck_core::flatpak_ref::inspect(&path.to_string_lossy(), cancel),
+        _ => Err(EngineError::InvalidResponse {
+            backend: "open".into(),
+            reason: "Supported local formats are .AppImage, .deb, and .flatpakref.".into(),
+        }),
+    };
+    package.map(|package| Payload::OpenPackage(Box::new(package)))
+}
 fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn FnMut(Reply)) {
     fn filter_updates(report: &mut PackageReport) {
         report
@@ -193,29 +222,7 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
         }
     }
     let result = match job {
-        Job::OpenInput(input) => {
-            if let Some(url) = input.strip_prefix("flatpak+") {
-                let package = pkgdeck_core::flatpak_ref::inspect(url, cancel)
-                    .map(|package| Payload::OpenPackage(Box::new(package)));
-                send(Reply::Done(package));
-                return;
-            }
-            let path = local_input_path(&input)
-                .map_err(|reason| EngineError::InvalidResponse { backend: "open".into(), reason });
-            let path = match path { Ok(path) => path, Err(error) => { send(Reply::Done(Err(error))); return; } };
-            let extension = path.extension().and_then(|value| value.to_str()).unwrap_or_default();
-            let package = match extension {
-                "AppImage" => {
-                    use pkgdeck_core::engine::Backend;
-                    AppImage::native().search(&path.to_string_lossy(), cancel)
-                        .and_then(|mut packages| packages.pop().ok_or(EngineError::NotFound))
-                }
-                "deb" => pkgdeck_core::local_deb::inspect(&path, cancel),
-                "flatpakref" => pkgdeck_core::flatpak_ref::inspect(&path.to_string_lossy(), cancel),
-                _ => Err(EngineError::InvalidResponse { backend: "open".into(), reason: "Supported local formats are .AppImage, .deb, and .flatpakref.".into() }),
-            };
-            package.map(|package| Payload::OpenPackage(Box::new(package)))
-        }
+        Job::OpenInput(input) => inspect_open_input(&input, cancel),
         Job::Repositories(_) => Err(EngineError::NotFound),
         Job::Load(view, query) => {
             if view == "Sources" {
@@ -1047,6 +1054,10 @@ impl ffi::PackageController {
                         })
                 };
                 send(Reply::Done(result));
+                return;
+            }
+            if let Job::OpenInput(input) = &job {
+                send(Reply::Done(inspect_open_input(input, &token)));
                 return;
             }
             // Fast path: Details against a warm engine reuse detected state
@@ -2013,7 +2024,48 @@ mod tests {
         );
         assert!(local_input_path("file://remote/tmp/package.deb").is_err());
         assert!(local_input_path("file:///tmp/bad%00.deb").is_err());
+        assert!(local_input_path("file:///tmp/bad%2Z.deb").is_err());
+        assert!(local_input_path("file:///tmp/bad%FF.deb").is_err());
+        assert!(local_input_path("relative.deb").is_err());
         assert!(local_input_path("https://example.org/package.deb").is_err());
+        assert!(inspect_open_input("file:///tmp/bad%2Z.deb", &Cancellation::default()).is_err());
+    }
+    #[test]
+    fn opening_local_deb_reads_metadata_without_installing_it() {
+        let base = std::env::temp_dir().join(format!("pkgdeck-open-deb-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let control = base.join("staging/DEBIAN");
+        std::fs::create_dir_all(&control).unwrap();
+        std::fs::write(
+            control.join("control"),
+            "Package: pkgdeck-open-synthetic\nVersion: 1.2.3\nArchitecture: all\nMaintainer: PkgDeck tests <nobody@example.invalid>\nDescription: Synthetic local archive\n",
+        )
+        .unwrap();
+        let archive = base.join("Synthetic package.deb");
+        let status = std::process::Command::new("dpkg-deb")
+            .arg("--build")
+            .arg(base.join("staging"))
+            .arg(&archive)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let package = match inspect_open_input(archive.to_str().unwrap(), &Cancellation::default())
+            .unwrap()
+        {
+            Payload::OpenPackage(package) => package,
+            _ => panic!("local archive inspection must return a package"),
+        };
+        assert_eq!(package.id.backend, "apt");
+        assert_eq!(package.id.name, "pkgdeck-open-synthetic");
+        assert_eq!(package.candidate_version.as_deref(), Some("1.2.3"));
+        assert!(package
+            .id
+            .reference
+            .as_deref()
+            .unwrap()
+            .starts_with("local-deb:"));
+        assert!(archive.exists());
+        std::fs::remove_dir_all(base).unwrap();
     }
     #[test]
     fn opening_appimage_previews_without_importing_until_confirmation() {
