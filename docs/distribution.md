@@ -10,15 +10,17 @@ The repository doubles as a third-party Homebrew tap. Its formula lives in
 | macOS | `pkd`, `pkgdeck` | `PkgDeck.app` |
 | Linux | `pkd` | Not installed by Homebrew |
 
-Before the first tagged release, install the development recipe with:
+Install the current stable release with:
 
 ```sh
 brew tap astrovm/pkgdeck https://github.com/astrovm/PkgDeck
-brew install --HEAD astrovm/pkgdeck/pkgdeck
+brew install astrovm/pkgdeck/pkgdeck
 ```
 
 Use the explicit repository URL: this project is not named `homebrew-pkgdeck`.
-This is our tap, not a submission to Homebrew core. To update a HEAD installation:
+This is our tap, not a submission to Homebrew core. To build the current
+development branch instead, use `brew install --HEAD astrovm/pkgdeck/pkgdeck`.
+To update a HEAD installation:
 
 ```sh
 brew upgrade --fetch-HEAD astrovm/pkgdeck/pkgdeck
@@ -59,13 +61,22 @@ supported; a successful Linux build does not establish macOS compatibility.
 4. Review both Homebrew results before merging. After users run `brew update`,
    `brew install astrovm/pkgdeck/pkgdeck` installs the stable version.
 
-No release archive, checksum, bottle, signing identity, or notarization result is
-assumed by the initial recipe. The `.app` uses Homebrew dependencies and is not a
-standalone downloadable macOS application.
+The formula builds from the tagged source archive; it does not provide a bottle.
+The `.app` uses Homebrew dependencies and is not a standalone downloadable
+macOS application.
 
 ## Linux packages
 
-The existing scripts build native packages, AppImage, Flatpak, and Snap artifacts.
+Users can install the Flatpak from the signed [astrovm Flatpak repository](https://github.com/astrovm/flatpak) with:
+
+```sh
+flatpak install https://flatpak.4st.li/io.github.astrovm.PkgDeck.flatpakref
+```
+
+The `.flatpakref` adds the repository for future updates. GitHub release
+`.flatpak` files are standalone bundles.
+
+The packaging scripts build AppImage, Flatpak, and Snap artifacts.
 Use the same verified build environment as CI:
 
 ```sh

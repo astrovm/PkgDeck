@@ -8,24 +8,34 @@ frontends use the same Rust engine and your existing package managers.
 
 ## Install
 
-| Platform | Homebrew package | Other options |
-| --- | --- | --- |
-| macOS | GUI (`pkgdeck`) and CLI (`pkd`) | Build from source |
-| Linux | CLI (`pkd`) | Build the GUI from source; Linux packaging scripts below |
+On Linux, install the Flatpak from the [astrovm Flatpak repository](https://github.com/astrovm/flatpak) with [Install PkgDeck](https://flatpak.4st.li/io.github.astrovm.PkgDeck.flatpakref), or use the terminal:
 
-Until the first tagged release is published, install the development recipe with:
+```sh
+flatpak install https://flatpak.4st.li/io.github.astrovm.PkgDeck.flatpakref
+```
+
+Open PkgDeck from your application menu, or run `flatpak run io.github.astrovm.PkgDeck`. Updates arrive through your software manager or `flatpak update`.
+
+Other Linux packages are available from [GitHub Releases](https://github.com/astrovm/PkgDeck/releases/latest):
+
+| Package | How to run it |
+| --- | --- |
+| AppImage | Download `PkgDeck-x86_64.AppImage` or `PkgDeck-aarch64.AppImage`, run `chmod +x PkgDeck-<arch>.AppImage`, then `./PkgDeck-<arch>.AppImage`. |
+| Snap | Download the `.snap` for your architecture, then run `sudo snap install --dangerous --classic ./pkgdeck_*.snap`. The Snap is hosted on GitHub, not the Snap Store. |
+
+On macOS, install the GUI and CLI with Homebrew:
 
 ```sh
 brew tap astrovm/pkgdeck https://github.com/astrovm/PkgDeck
-brew install --HEAD astrovm/pkgdeck/pkgdeck
+brew install astrovm/pkgdeck/pkgdeck
 ```
 
-On macOS, run `pkgdeck` for the GUI or follow `brew info astrovm/pkgdeck/pkgdeck`
-to add it to Applications. On Linux, Homebrew installs only `pkd` and does not
-pull in Qt. APT metadata requires the optional companion reader built with your
-distribution's `libapt-pkg-dev`; see [distribution](docs/distribution.md).
+Run `pkgdeck` from a terminal, or see [distribution](docs/distribution.md#homebrew) for the Applications shortcut. On Linux, the Homebrew formula installs only `pkd`; use a Linux package above for the GUI.
+The CLI is `pkd` on Homebrew, `pkgdeck.pkd` in Snap,
+`flatpak run --command=pkd io.github.astrovm.PkgDeck` in Flatpak, and
+`./PkgDeck-x86_64.AppImage --cli` in AppImage (substitute your architecture).
 
-For a Linux source build, install the [development prerequisites](docs/development.md#sdk-and-prerequisites), then:
+To build on Linux from source, install the [development prerequisites](docs/development.md#sdk-and-prerequisites), then:
 
 ```sh
 source scripts/dev-env.sh
@@ -46,12 +56,15 @@ The CLI works without Qt:
 ```sh
 cargo run --locked -p pkd -- sources
 pkd search vlc --from flatpak
-pkd list --from homebrew
-pkd upgrade --from homebrew
+pkd list --from apt
+pkd upgrade --from flatpak
 ```
 
 `pkd update` refreshes metadata; `pkd upgrade` updates installed packages.
 Writes require confirmation. Native managers handle dependencies and authorization.
+For APT, Update all previews a full `dist-upgrade` transaction. The GUI shows
+planned installs and removals before confirmation. The CLI requires
+`--allow-removals` if APT plans to remove packages, even with `--yes`.
 
 ## Package sources
 
@@ -72,7 +85,7 @@ build manages host packages through its explicit host bridge.
 - [GUI guide](docs/gui.md)
 - [CLI commands, selection, and JSON output](docs/cli.md)
 - [Development and verification](docs/development.md)
-- [Distribution and Homebrew releases](docs/distribution.md)
+- [Distribution and releases](docs/distribution.md)
 - [Shared engine](docs/shared-engine.md)
 - [Host execution and authorization](docs/host-execution.md)
 

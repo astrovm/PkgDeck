@@ -57,8 +57,12 @@ system privileges. The default `--auth sudo` uses an existing `sudo -n` grant;
 `--auth polkit` uses an existing desktop agent/policy. The frontend does not read
 passwords, change authorization policy, or elevate Homebrew.
 
-APT uses `--no-remove` for installations/upgrades and `--only-upgrade` for targeted
-upgrades. Explicit removal retains APT's normal dependency behavior. Homebrew
+APT uses `--no-remove` for installations and targeted upgrades, with
+`--only-upgrade` for targeted upgrades. An all-package APT update simulates
+`dist-upgrade`, shows its planned updates, installs, and removals, and checks
+the plan again before the privileged write. If removals are planned, pass
+`--allow-removals` after reviewing them; `--yes` alone never approves removals.
+Explicit removal retains APT's normal dependency behavior. Homebrew
 retains its native dependency checks, locks, and tap trust policy. Removal uses
 `brew uninstall --force --formula` to remove every installed version of the selected
 formula, including older kegs retained after an upgrade; it does not pass
@@ -120,6 +124,8 @@ details; sources returns `sources`; clean discovery returns typed `items` and
 per-backend `failures`; writes return `operations`, each with its
 operation and `result` (`{"Ok":...}` or `{"Err":...}`). Selection and other top-level
 failures contain `error` and, when available, a human-readable `message`.
+If an APT full upgrade plans removals without `--allow-removals`, the error is
+`apt_removals_require_consent` and includes the typed `plan`.
 A failing source row means the underlying manager errored: the message carries
 the manager's own diagnostic where available, and the same command run directly
 in a terminal shows complete output. Failed sources block ambiguous selection

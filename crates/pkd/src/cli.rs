@@ -91,7 +91,12 @@ pub enum Commands {
     /// Refresh source metadata without upgrading packages.
     Update,
     /// Upgrade named packages, or all available updates if no names are supplied.
-    Upgrade { names: Vec<String> },
+    Upgrade {
+        names: Vec<String>,
+        /// Explicitly approve removals in an APT full upgrade.
+        #[arg(long)]
+        allow_removals: bool,
+    },
     /// Find safe manager-native cleanup plans, or run selected plan keys.
     Clean {
         /// Cleanup keys shown by `pkd clean` (for example apt:autoremove).
@@ -267,7 +272,7 @@ pub fn dispatch(
                     }),
                 })
                 .collect(),
-            Commands::Upgrade { names } if names.is_empty() => {
+            Commands::Upgrade { names, .. } if names.is_empty() => {
                 let report = engine.installed(cancel);
                 if !report.failures.is_empty() {
                     return Err(EngineError::Incomplete(report.failures));
@@ -305,7 +310,7 @@ pub fn dispatch(
             }
             Commands::Install { names }
             | Commands::Remove { names }
-            | Commands::Upgrade { names } => {
+            | Commands::Upgrade { names, .. } => {
                 let mut operations = Vec::new();
                 for name in names {
                     let id = select(
@@ -357,6 +362,32 @@ pub fn dispatch(
         Ok(ops) => ops,
         Err(e) => return failure(e),
     };
+    if let Some(operation) = operations.iter().find(
+        |operation| matches!(operation, Operation::UpgradeAll { backend } if backend == "apt"),
+    ) {
+        let plan = match engine.plan_apt_upgrade(cancel) {
+            Ok(plan) => plan,
+            Err(error) => return failure(error),
+        };
+        events(Event::Progress {
+            operation: operation.clone(),
+            progress: Progress::Message(format!("APT transaction:\n{}", plan.summary())),
+        });
+        if !plan.removals.is_empty()
+            && !matches!(
+                command,
+                Commands::Upgrade {
+                    allow_removals: true,
+                    ..
+                }
+            )
+        {
+            return (
+                json!({"error": "apt_removals_require_consent", "message": "APT would remove packages; review the plan and pass --allow-removals to approve them.", "plan": plan}),
+                2,
+            );
+        }
+    }
     for operation in &operations {
         if let Operation::Upgrade(id) = operation {
             if id.backend == "fwupd" {
@@ -856,6 +887,18 @@ mod tests {
                 preview: "synthetic-runtime".into(),
             }])
         }
+        fn apt_upgrade_plan(&mut self, _: &Cancellation) -> Result<AptUpgradePlan, EngineError> {
+            Ok(AptUpgradePlan {
+                preview: "Inst fixture [1.0] (2.0 synthetic)".into(),
+                upgrades: vec!["fixture".into()],
+                installs: vec![],
+                removals: if self.verified {
+                    vec![]
+                } else {
+                    vec!["old-fixture".into()]
+                },
+            })
+        }
         fn execute(
             &mut self,
             op: &Operation,
@@ -971,6 +1014,27 @@ mod tests {
             })
             .unwrap();
         assert_ne!(call(&mut failed_write, &["clean", "--all"], true).1, 0);
+    }
+    #[test]
+    fn apt_removals_require_separate_cli_consent() {
+        let mut engine = Engine::default();
+        engine
+            .register(Fixture {
+                backend: "apt".into(),
+                installed: true,
+                fail: None,
+                read_failure: None,
+                verified: false,
+            })
+            .unwrap();
+        let (blocked, code) = call(&mut engine, &["--yes", "upgrade"], true);
+        assert_eq!(code, 2);
+        assert_eq!(blocked["error"], "apt_removals_require_consent");
+        assert_eq!(blocked["plan"]["removals"], json!(["old-fixture"]));
+        assert_eq!(
+            call(&mut engine, &["--yes", "upgrade", "--allow-removals"], true).1,
+            0
+        );
     }
     #[test]
     fn source_ambiguity_partial_results_and_exit_codes() {

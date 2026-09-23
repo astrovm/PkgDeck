@@ -33,6 +33,7 @@ an additional candidate.
 | `installed` | Structured package results with installed versions |
 | `details` | Details for exactly the requested identity |
 | `cleanup` | Safe manager-native cleanup plans obtained through dry-run/list operations |
+| `apt_upgrade_plan` | Read-only APT full-upgrade simulation for review before a write |
 | `execute` | A typed install, remove, metadata refresh, package upgrade, or cleanup, with progress |
 
 Methods other than detection have explicit unsupported defaults. Before dispatch,
@@ -83,6 +84,11 @@ cold engines, where availability is re-validated first.
 `Operation::Refresh` targets one backend's metadata. `Operation::Upgrade` targets
 an explicit installed package identity. These are different capabilities and
 requests; the engine never substitutes one for the other.
+
+APT `UpgradeAll` requires a reviewed solver plan. The engine compares it with
+a fresh simulation before dispatching `dist-upgrade`; missing, changed, or
+incomplete plans stop the write. The GUI computes the preview on a worker so
+the window remains responsive.
 
 Each dispatch emits `Started`, zero or more backend progress events, and exactly
 one `Finished` event carrying its result during normal error-returning execution.

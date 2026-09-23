@@ -1201,7 +1201,81 @@ fn snap_desktop_ids(sysroot: &std::path::Path, name: &str) -> Vec<String> {
     ids.dedup();
     ids
 }
+fn parse_apt_upgrade_plan(output: &[u8]) -> Result<AptUpgradePlan, EngineError> {
+    let preview = std::str::from_utf8(output)
+        .map_err(|e| invalid("apt", e))?
+        .trim();
+    let summary = preview
+        .lines()
+        .find(|line| {
+            line.contains(" upgraded, ")
+                && line.contains(" newly installed, ")
+                && line.contains(" to remove")
+        })
+        .ok_or_else(|| invalid("apt", "simulation did not include a transaction summary"))?;
+    let counts: Vec<_> = summary
+        .split(',')
+        .take(3)
+        .map(|part| {
+            part.split_whitespace()
+                .next()
+                .and_then(|n| n.parse::<usize>().ok())
+        })
+        .collect();
+    let [Some(upgrades), Some(installs), Some(removals)] = counts.as_slice() else {
+        return Err(invalid("apt", "invalid simulation counts"));
+    };
+    let mut plan = AptUpgradePlan {
+        preview: preview.into(),
+        upgrades: Vec::new(),
+        installs: Vec::new(),
+        removals: Vec::new(),
+    };
+    for line in preview.lines() {
+        let mut fields = line.split_whitespace();
+        match fields.next() {
+            Some("Inst") => {
+                let name = fields
+                    .next()
+                    .ok_or_else(|| invalid("apt", "incomplete install action"))?;
+                let existing = fields.next().is_some_and(|field| field.starts_with('['));
+                if existing {
+                    plan.upgrades.push(name.into());
+                } else {
+                    plan.installs.push(name.into());
+                }
+            }
+            Some("Remv" | "Purg") => {
+                let name = fields
+                    .next()
+                    .ok_or_else(|| invalid("apt", "incomplete removal action"))?;
+                plan.removals.push(name.into());
+            }
+            _ => {}
+        }
+    }
+    if plan.upgrades.len() != *upgrades
+        || plan.installs.len() != *installs
+        || plan.removals.len() != *removals
+    {
+        return Err(invalid(
+            "apt",
+            "simulation actions did not match its summary",
+        ));
+    }
+    Ok(plan)
+}
+
 impl<T: Transport> Apt<T> {
+    fn simulated_upgrade(&self, cancel: &Cancellation) -> Result<AptUpgradePlan, EngineError> {
+        let args = ["--simulate", "-o", "Debug::NoLocking=1", "dist-upgrade"].map(OsString::from);
+        let output = bytes(
+            "apt",
+            self.transport
+                .system_manager("apt-get", &args, cancel, false)?,
+        )?;
+        parse_apt_upgrade_plan(&output)
+    }
     fn query(
         &self,
         mode: &str,
@@ -1330,6 +1404,9 @@ impl<T: Transport> Backend for Apt<T> {
         }
         self.cleanup_apt_task(&id.key, cancel)?
             .ok_or(EngineError::NotFound)
+    }
+    fn apt_upgrade_plan(&mut self, cancel: &Cancellation) -> Result<AptUpgradePlan, EngineError> {
+        self.simulated_upgrade(cancel)
     }
     fn execute(
         &mut self,
@@ -3910,6 +3987,24 @@ pub fn native_engine(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn apt_dist_upgrade_preview_classifies_actions() {
+        let plan = parse_apt_upgrade_plan(b"Reading package lists...\n1 upgraded, 1 newly installed, 2 to remove and 0 not upgraded.\nInst old [1.0] (2.0 Ubuntu:stable [amd64])\nInst dependency (1.0 Ubuntu:stable [amd64])\nRemv retired [1.0]\nPurg obsolete [1.0]\nConf old (2.0 Ubuntu:stable [amd64])\n").unwrap();
+        assert_eq!(plan.upgrades, ["old"]);
+        assert_eq!(plan.installs, ["dependency"]);
+        assert_eq!(plan.removals, ["retired", "obsolete"]);
+        assert!(plan.summary().contains("Remove (2): retired, obsolete"));
+        assert!(parse_apt_upgrade_plan(
+            b"1 upgraded, 0 newly installed, 0 to remove and 0 not upgraded.\nInst\n"
+        )
+        .is_err());
+        assert!(parse_apt_upgrade_plan(
+            b"0 upgraded, 0 newly installed, 1 to remove and 0 not upgraded.\n"
+        )
+        .is_err());
+        assert!(parse_apt_upgrade_plan(&[0xff]).is_err());
+    }
 
     #[test]
     fn apt_helper_supports_cargo_builds_and_relocated_bundles() {

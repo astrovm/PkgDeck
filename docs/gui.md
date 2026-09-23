@@ -57,6 +57,9 @@ versions. PkgDeck does not invent version numbers.
 Review the confirmation before applying changes. Firmware confirmations include
 power and restart requirements; PkgDeck does not reboot automatically. Failed
 sources are shown explicitly and block Update all until the result is complete.
+For APT, Update all previews the `dist-upgrade` transaction. Planned installs
+and removals appear at the top of the confirmation, and a changed plan stops
+the update before authorization.
 
 Cancel stops pending work. If a native transaction has already started, it finishes
 before cancellation takes effect. Successful changes are not rolled back after a

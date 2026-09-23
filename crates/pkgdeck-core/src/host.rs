@@ -1260,9 +1260,14 @@ impl AptAction {
                 .to_vec());
             }
             Self::UpgradeAll => {
-                return Ok(["--assume-yes", "-o", "DPkg::Lock::Timeout=0", "upgrade"]
-                    .map(OsString::from)
-                    .to_vec());
+                return Ok([
+                    "--assume-yes",
+                    "-o",
+                    "DPkg::Lock::Timeout=0",
+                    "dist-upgrade",
+                ]
+                .map(OsString::from)
+                .to_vec());
             }
             Self::Autoremove => {
                 return Ok([
