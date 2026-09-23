@@ -11,13 +11,11 @@ with variants from different managers together. Each row retains its own source,
 architecture, and installation scope. For Flatpak, choose the User or System row
 to target that installation.
 
-The row button installs, removes, or updates that exact package. Click the row for
-its Overview, Available sources, Installed copies, and Technical details. The
-sections show source and scope explicitly and link known installed copies by
-their exact identity. Publisher, license, homepage, and screenshots appear only
-when the selected source supplies reliable metadata. Details are optional
-and close with the × button. App names, icons, and screenshots depend on source
-metadata; packages without desktop metadata keep their native names.
+The row button installs, removes, or updates that exact package. Click the row
+for any additional description, screenshots, publisher, license, homepage, or
+dependencies supplied by that source. Details are optional and close with the
+× button. App names, icons, and screenshots depend on source metadata; packages
+without desktop metadata keep their native names.
 
 ## Open installation files
 
@@ -38,13 +36,6 @@ Flatpak may discover additional runtimes during installation.
 Installed supports filtering and a **Duplicate installs** view. AppStream identity
 and upstream homepage metadata associate related installations; grouping does not
 merge packages or change what an action targets.
-
-Use **Inspect & audit** in Installed to resolve a command through host `PATH`
-without running it, or review known duplicate copies and manager-reported
-residual configuration. Command results show other candidates, symlink targets,
-and native package database ownership; unknown or ambiguous ownership stays
-explicit. Audit paths come only from dpkg's residual-config records. There is no
-home-directory scan or deletion flow.
 
 Click column headings to sort; drag the name and version dividers to resize.
 Use the source picker to filter the current page. Enable managers separately in
