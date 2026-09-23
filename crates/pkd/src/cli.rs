@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use pkgdeck_core::{
+    activity::{History, Outcome, State},
     engine::*,
     host::Authorization,
     package::*,
@@ -407,7 +408,22 @@ pub fn dispatch(
     if !operations.is_empty() && !args.yes && !confirm(&operations) {
         return (json!({"error": "confirmation_declined"}), 7);
     }
+    let history = History::default_store();
+    let activity_id = history
+        .as_ref()
+        .and_then(|store| store.begin("cli", operations.clone(), State::Running).ok());
     let results = engine.execute_batch(&operations, cancel, events);
+    if let (Some(store), Some(id)) = (&history, activity_id) {
+        let outcomes = results
+            .iter()
+            .map(|result| match result {
+                Ok(_) => Outcome::Finished,
+                Err(EngineError::Cancelled) => Outcome::Cancelled,
+                Err(_) => Outcome::Failed,
+            })
+            .collect();
+        let _ = store.finish(id, outcomes);
+    }
     let failed = results.iter().filter(|r| r.is_err()).count();
     let code = if failed == 0 {
         0

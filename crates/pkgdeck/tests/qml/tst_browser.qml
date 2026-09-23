@@ -23,6 +23,8 @@ TestCase {
         property string confirmation_data: "{}"
         property string source_catalog: "[]"
         property string report_state: "{}"
+        property string activity: "[]"
+        property string background_state: "{}"
         property string lastRetry: ""
         property string version: "9.9.9-test"
         property bool simulateLoading: false
@@ -78,6 +80,10 @@ TestCase {
         function poll() {
         }
         function retrySource(view, query, source) { lastRetry = source; }
+        function refreshActivity() {}
+        function cancelQueued() {}
+        function checkUpdates(sources, enabled, offline, metered, force) {}
+        function setAutostart(enabled) { return true; }
     }
     Component {
         id: window
@@ -100,6 +106,8 @@ TestCase {
         fake.confirmation = "";
         fake.confirmation_data = "{}";
         fake.report_state = "{}";
+        fake.activity = "[]";
+        fake.background_state = "{}";
         fake.lastRetry = "";
         fake.simulateLoading = false;
         fake.busy = false;
@@ -117,6 +125,8 @@ TestCase {
         // Fresh checklist and column layout per test: QSettings persist
         // across tests in one run.
         browser.reduceMotion = false;
+        browser.backgroundMode = false;
+        browser.autostartEnabled = false;
         browser.sourceSelection = "";
         browser.viewSourceFilters = ({});
         browser.sortColumn = "";
@@ -303,7 +313,7 @@ TestCase {
         verify(findChild(browser, "resultsCancel").visible);
         fake.writing = true;
         browser.openView("Updates");
-        compare(browser.currentView, "Installed");
+        compare(browser.currentView, "Updates");
         browser.openView("Settings");
         compare(browser.currentView, "Settings");
         fake.writing = false;
@@ -862,6 +872,37 @@ TestCase {
         compare(browser.viewItems.length, 5);
         compare(browser.selectedIdentity, selectedId);
         compare(fake.writes, 0);
+    }
+    function test_activity_navigation_stays_available_during_write() {
+        populate();
+        fake.activity = JSON.stringify([{id: 1, frontend: "gui", operations: [{install: {backend: "apt", name: "synthetic-tool", architecture: "all", scope: "system"}}], started_at: 1000, state: "queued", outcomes: []}]);
+        fake.writing = true;
+        fake.busy = true;
+        browser.openView("Installed");
+        compare(browser.currentView, "Installed");
+        verify(findChild(findChild(browser, "packageResults").itemAtIndex(0), "rowPackageAction").enabled);
+        verify(findChild(browser, "activityIndicator").visible);
+        browser.openView("Activity");
+        compare(browser.currentView, "Activity");
+        const list = findChild(browser, "activityList");
+        tryCompare(list, "count", 1);
+        verify(findChild(browser, "cancelQueuedButton").enabled);
+        fake.writing = false;
+        fake.busy = false;
+    }
+    function test_background_mode_requires_a_usable_tray_to_hide() {
+        browser.openView("Settings");
+        browser.startHidden = true;
+        browser.backgroundMode = true;
+        browser.trayAvailable = false;
+        verify(browser.visible);
+        verify(!findChild(browser, "autostartSetting").enabled);
+        browser.trayAvailable = true;
+        verify(!browser.visible);
+        browser.backgroundMode = false;
+        verify(browser.visible);
+        browser.close();
+        verify(!browser.visible);
     }
     function test_container_reference_uses_explicit_search_submission() {
         browser.openView("Search");
