@@ -1051,6 +1051,26 @@ TestCase {
         compare(findChild(dangling, "rowPackageAction").symbol, "remove");
         compare(fake.writes, 0);
     }
+    function test_source_picker_stays_inside_window() {
+        browser.openView("Updates");
+        const popup = findChild(browser, "sourcePopup");
+        const title = findChild(browser, "sourcePopupTitle");
+        const apply = findChild(browser, "applySourceFilter");
+        for (const width of [1100, 420, 360]) {
+            browser.width = width;
+            popup.open();
+            tryCompare(popup, "visible", true);
+            waitForRendering(browser.contentItem);
+            verify(!title.visible);
+            for (const item of [popup.contentItem, apply]) {
+                const at = item.mapToItem(browser.contentItem, 0, 0);
+                verify(at.x >= 0);
+                verify(at.x + item.width <= browser.width);
+            }
+            popup.close();
+            tryCompare(popup, "visible", false);
+        }
+    }
     function test_header_source_checklist_and_installed_filter() {
         browser.openView("Installed");
         const filter = findChild(browser, "sourceFilter");

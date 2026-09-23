@@ -1007,6 +1007,7 @@ Controls.ApplicationWindow {
                         property var draftSources: []
                         property string searchText: ""
                         property bool showUnavailable: false
+                        x: sourceFilterButton.width - width
                         y: sourceFilterButton.height + 4
                         width: Math.min(340, root.width - 32)
                         height: Math.min(460, root.height - 100)
@@ -1021,7 +1022,9 @@ Controls.ApplicationWindow {
                         contentItem: ColumnLayout {
                             spacing: 8
                             Controls.Label {
-                                text: sourcePopup.mode === "settings" ? "Enabled managers" : "Filter " + root.currentView
+                                objectName: "sourcePopupTitle"
+                                visible: sourcePopup.mode === "settings"
+                                text: "Enabled managers"
                                 font.bold: true
                                 color: root.ink
                             }
