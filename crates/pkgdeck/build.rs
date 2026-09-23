@@ -8,6 +8,7 @@ fn main() {
             .qml_file("qml/SearchPane.qml")
             .qml_file("qml/UpdatesActions.qml")
             .qml_file("qml/PackageDetails.qml")
+            .qml_file("qml/InspectionDialog.qml")
             .qml_file("qml/DeckIcon.qml"),
     )
     .qrc("resources.qrc")

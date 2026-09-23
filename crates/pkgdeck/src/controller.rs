@@ -2,7 +2,13 @@
 use cxx_qt::CxxQtType;
 use cxx_qt_lib::QString;
 use pkgdeck_core::repositories::{self, Action as RepositoryAction};
-use pkgdeck_core::{engine::*, host::Authorization, package::*, process::Cancellation};
+use pkgdeck_core::{
+    engine::*,
+    host::{Authorization, Host},
+    inspection,
+    package::*,
+    process::Cancellation,
+};
 use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
@@ -27,6 +33,7 @@ pub mod ffi {
         #[qml_element]
         #[qproperty(QString, rows)]
         #[qproperty(QString, details)]
+        #[qproperty(QString, inspection)]
         #[qproperty(QString, status)]
         #[qproperty(QString, repositories)]
         #[qproperty(QString, source_catalog)]
@@ -49,6 +56,12 @@ pub mod ffi {
         );
         #[qinvokable]
         fn select(self: Pin<&mut PackageController>, index: i32);
+        #[qinvokable]
+        #[cxx_name = "inspectCommand"]
+        fn inspect_command(self: Pin<&mut PackageController>, command: QString);
+        #[qinvokable]
+        #[cxx_name = "auditInstalled"]
+        fn audit_installed(self: Pin<&mut PackageController>);
         #[qinvokable]
         #[cxx_name = "retrySource"]
         fn retry_source(
@@ -83,6 +96,7 @@ enum Job {
     Load(String, String),
     RetrySource(String, String, String),
     Details(PackageId),
+    Inspection(Option<String>),
     PlanOperation(Operation),
     Write(Operation, Option<Box<TransactionPlan>>),
     PlanUpgrade(Vec<Operation>, usize),
@@ -108,6 +122,7 @@ enum Payload {
     RetrySources(String, Vec<Source>),
     Sources(Vec<Source>),
     Details(Box<PackageDetails>),
+    Inspection(Value),
     Written(OperationOutcome),
     Batch(String),
     Cleanup(CleanupReport),
@@ -203,6 +218,16 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
         Job::Details(id) => engine
             .details(&id, cancel)
             .map(|d| Payload::Details(Box::new(d))),
+        Job::Inspection(command) => {
+            let inventory = engine.installed(cancel);
+            let host = Host::current();
+            match command {
+                Some(command) => inspection::inspect_native(&host, &command, &inventory.packages, cancel)
+                    .map(|report| Payload::Inspection(json!({"kind": "command", "report": report, "failures": inventory.failures})))
+                    .map_err(Into::into),
+                None => Ok(Payload::Inspection(json!({"kind": "audit", "report": inspection::audit(&inventory.packages, inspection::native_leftovers(&host)), "failures": inventory.failures}))),
+            }
+        }
         Job::PlanUpgrade(operations, count) => {
             if operations.iter().any(|operation| {
                 matches!(operation, Operation::UpgradeAll { backend } if backend == "apt")
@@ -289,6 +314,7 @@ impl Drop for Controller {
 pub struct Controller {
     rows: QString,
     details: QString,
+    inspection: QString,
     status: QString,
     confirmation: QString,
     confirmation_data: QString,
@@ -324,6 +350,7 @@ impl Default for Controller {
         Self {
             rows: "[]".into(),
             details: "{}".into(),
+            inspection: "{}".into(),
             status: "Choose a view or search for a package.".into(),
             confirmation: QString::default(),
             confirmation_data: "{}".into(),
@@ -394,6 +421,7 @@ fn engine_source(job: &Job, filter: &[String]) -> Vec<String> {
         // The picker needs to explain disabled and unavailable managers too.
         Job::Load(view, _) if view == "Sources" => vec![],
         Job::Details(id) => vec![id.backend.clone()],
+        Job::Inspection(_) => vec![],
         Job::PlanUpgrade(operations, _)
             if operations.iter().any(|operation| {
                 matches!(operation, Operation::UpgradeAll { backend } if backend == "apt")
@@ -786,6 +814,53 @@ fn package_row(p: &Package, same_from: &[String], same_group: Option<&str>) -> V
         "component_ids": p.component_ids,
         "same_app_from": same_from, "same_app_group": same_group})
 }
+fn related_rows(
+    selected: &Package,
+    current: &[Package],
+    cached: &ViewCache,
+) -> (Vec<Value>, Vec<Value>) {
+    let mut known: BTreeMap<PackageId, &Package> = BTreeMap::new();
+    for package in current.iter().chain(
+        cached
+            .entries
+            .iter()
+            .flat_map(|(_, view)| view.packages.iter()),
+    ) {
+        known.entry(package.id.clone()).or_insert(package);
+    }
+    known.entry(selected.id.clone()).or_insert(selected);
+    let homepages: Vec<_> = selected
+        .homepages
+        .iter()
+        .filter_map(|url| normalize_homepage(url))
+        .collect();
+    let matches = |package: &Package| {
+        package.id == selected.id
+            || selected
+                .component_ids
+                .iter()
+                .any(|id| package.component_ids.contains(id))
+            || package
+                .homepages
+                .iter()
+                .filter_map(|url| normalize_homepage(url))
+                .any(|url| homepages.contains(&url))
+    };
+    let mut sources = Vec::new();
+    let mut copies = Vec::new();
+    for package in known
+        .into_values()
+        .filter(|package| matches(package))
+        .take(64)
+    {
+        let row = package_row(package, &[], None);
+        if package.installed_version.is_some() {
+            copies.push(row.clone());
+        }
+        sources.push(row);
+    }
+    (sources, copies)
+}
 fn update_detail_name(
     packages: &mut [Package],
     rows: &str,
@@ -1157,6 +1232,46 @@ impl ffi::PackageController {
         };
         self.rust_mut().view_cache.insert(key, view);
     }
+    pub fn inspect_command(mut self: Pin<&mut Self>, command: QString) {
+        let command = command.to_string().trim().to_owned();
+        if command.is_empty()
+            || self
+                .rust()
+                .worker
+                .as_ref()
+                .is_some_and(|worker| worker.job.writes())
+        {
+            return;
+        }
+        self.as_mut().set_inspection("{}".into());
+        self.as_mut()
+            .set_status("Inspecting command and installed ownership…".into());
+        let job = Job::Inspection(Some(command));
+        if self.rust().worker.is_some() && !self.rust().background {
+            self.as_mut().rust_mut().queued = Some(job);
+        } else {
+            self.start(job);
+        }
+    }
+    pub fn audit_installed(mut self: Pin<&mut Self>) {
+        if self
+            .rust()
+            .worker
+            .as_ref()
+            .is_some_and(|worker| worker.job.writes())
+        {
+            return;
+        }
+        self.as_mut().set_inspection("{}".into());
+        self.as_mut()
+            .set_status("Auditing manager-reported installed copies and residual files…".into());
+        let job = Job::Inspection(None);
+        if self.rust().worker.is_some() && !self.rust().background {
+            self.as_mut().rust_mut().queued = Some(job);
+        } else {
+            self.start(job);
+        }
+    }
     pub fn select(mut self: Pin<&mut Self>, index: i32) {
         if let Some(package) = usize::try_from(index)
             .ok()
@@ -1190,8 +1305,11 @@ impl ffi::PackageController {
                 return;
             }
             let same = same_app_sources(&self.rust().packages, &package.id);
+            let (available_sources, installed_copies) =
+                related_rows(&package, &self.rust().packages, &self.rust().view_cache);
             self.as_mut().set_details(encoded(
-                json!({"package": package_row(&package, &same, None), "description": package.summary}),
+                json!({"package": package_row(&package, &same, None), "description": package.summary,
+                    "available_sources": available_sources, "installed_copies": installed_copies}),
             ));
             self.start(Job::Details(package.id));
         } else if let Some(item) = usize::try_from(index)
@@ -1658,8 +1776,13 @@ impl ffi::PackageController {
                     self.as_mut().rust_mut().prefetch = prefetch_views();
                 }
                 let info = crate::metadata::cached_info(&details.package);
+                let (available_sources, installed_copies) = related_rows(
+                    &details.package,
+                    &self.rust().packages,
+                    &self.rust().view_cache,
+                );
                 let data = encoded(
-                    json!({"package": package_row(&details.package, &same_app_sources(&self.rust().packages, &details.package.id), None), "description": info.as_ref().filter(|i| !i.description.is_empty()).map(|i| &i.description).unwrap_or(&details.description), "homepage": details.homepage.as_ref().or_else(|| info.as_ref().and_then(|i| i.homepage.as_ref())), "dependencies": details.dependencies, "screenshots": info.as_ref().map(|i| &i.screenshots)}),
+                    json!({"package": package_row(&details.package, &same_app_sources(&self.rust().packages, &details.package.id), None), "description": info.as_ref().filter(|i| !i.description.is_empty()).map(|i| &i.description).unwrap_or(&details.description), "homepage": details.homepage.as_ref().or_else(|| info.as_ref().and_then(|i| i.homepage.as_ref())), "publisher": info.as_ref().and_then(|i| i.publisher.as_ref()), "license": info.as_ref().and_then(|i| i.license.as_ref()), "dependencies": details.dependencies, "screenshots": info.as_ref().map(|i| &i.screenshots), "available_sources": available_sources, "installed_copies": installed_copies}),
                 );
                 // Bound memory use for large searches; reload and writes invalidate this snapshot.
                 if self.rust().detail_cache.len() >= 128 {
@@ -1675,6 +1798,11 @@ impl ffi::PackageController {
                     self.as_mut().set_details(data);
                     self.set_status("Package details loaded.".into());
                 }
+            }
+            Ok(Payload::Inspection(report)) => {
+                let kind = report["kind"].as_str().unwrap_or("inspection").to_owned();
+                self.as_mut().set_inspection(encoded(report));
+                self.set_status(format!("{kind} report loaded.").as_str().into());
             }
             Ok(Payload::Batch(status)) => {
                 // Clear the entire snapshot even on partial failure: any native write may
@@ -1808,6 +1936,11 @@ impl ffi::PackageController {
                         self.as_mut().apply(Ok(Payload::Details(details)))
                     }
                     Reply::Done(result) => {
+                        if let (Job::Inspection(_), Err(error)) = (&worker.job, &result) {
+                            self.as_mut().set_inspection(encoded(
+                                json!({"kind": "error", "message": error.to_string()}),
+                            ));
+                        }
                         // A reviewed native plan can change between review and write.
                         // Stop the write, compute the new plan, and ask again.
                         if let Some(next) =
@@ -1882,6 +2015,45 @@ impl ffi::PackageController {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn detail_sections_match_authoritative_metadata_and_keep_exact_copies() {
+        let mut apt: Package = serde_json::from_value(json!({
+            "id": {"backend":"apt", "name":"fixture", "architecture":"amd64", "scope":"system"},
+            "display_name":"Fixture", "summary":"Synthetic", "installed_version":"1", "candidate_version":"2", "update":"available",
+            "component_ids":["org.example.Fixture"]
+        })).unwrap();
+        let mut flatpak = apt.clone();
+        flatpak.id.backend = "flatpak".into();
+        flatpak.id.name = "org.example.Fixture".into();
+        flatpak.id.reference = Some("app/org.example.Fixture/x86_64/stable".into());
+        flatpak.id.architecture = "x86_64".into();
+        flatpak.installed_version = Some("stable".into());
+        let mut unrelated = apt.clone();
+        unrelated.id.backend = "snap".into();
+        unrelated.component_ids.clear();
+        let (sources, copies) = related_rows(
+            &apt,
+            &[apt.clone(), flatpak.clone(), unrelated],
+            &ViewCache { entries: vec![] },
+        );
+        assert_eq!(sources.len(), 2);
+        assert_eq!(copies.len(), 2);
+        assert_eq!(
+            copies[1]["reference"],
+            "app/org.example.Fixture/x86_64/stable"
+        );
+        apt.component_ids.clear();
+        assert_eq!(
+            related_rows(
+                &apt,
+                &[apt.clone(), flatpak],
+                &ViewCache { entries: vec![] }
+            )
+            .0
+            .len(),
+            1
+        );
+    }
     #[test]
     fn confirmation_preview_names_target_and_extra_native_changes() {
         let package: Package = serde_json::from_value(json!({
@@ -2939,6 +3111,62 @@ mod tests {
                 })
             }
         }
+    }
+    #[test]
+    fn inspection_jobs_share_read_only_inventory_and_report_exact_ids() {
+        let package: Package = serde_json::from_value(json!({
+            "id": {"backend":"apt", "name":"fixture", "architecture":"amd64", "scope":"system"},
+            "display_name":"Fixture", "summary":"Synthetic", "installed_version":"1", "candidate_version":null, "update":"current"
+        })).unwrap();
+        let mut engine = Engine::default();
+        engine
+            .register(Fixture {
+                package,
+                fail: false,
+            })
+            .unwrap();
+        let cancel = Cancellation::default();
+        let mut replies = Vec::new();
+        execute(&mut engine, Job::Inspection(None), &cancel, &mut |reply| {
+            replies.push(reply)
+        });
+        assert!(replies.iter().any(|reply| matches!(reply, Reply::Done(Ok(Payload::Inspection(value)))
+            if value["kind"] == "audit" && value["report"]["installed_copies"][0]["package"]["name"] == "fixture")));
+        replies.clear();
+        execute(
+            &mut engine,
+            Job::Inspection(Some("pkgdeck-fixture-missing".into())),
+            &cancel,
+            &mut |reply| replies.push(reply),
+        );
+        assert!(replies.iter().any(
+            |reply| matches!(reply, Reply::Done(Ok(Payload::Inspection(value)))
+            if value["kind"] == "command" && value["report"]["resolved"].is_null())
+        ));
+        replies.clear();
+        execute(
+            &mut engine,
+            Job::Inspection(Some("../bad".into())),
+            &cancel,
+            &mut |reply| replies.push(reply),
+        );
+        assert!(replies
+            .iter()
+            .any(|reply| matches!(reply, Reply::Done(Err(EngineError::Execution(_))))));
+    }
+    #[test]
+    fn inspection_payload_reaches_the_qt_property_without_changing_package_rows() {
+        let mut object = ffi::create_controller();
+        let mut controller = object.pin_mut();
+        let before = controller.rows().to_string();
+        controller.as_mut().apply(Ok(Payload::Inspection(
+            json!({"kind":"audit","report":{"groups":[]}}),
+        )));
+        assert_eq!(controller.rows().to_string(), before);
+        assert!(controller
+            .inspection()
+            .to_string()
+            .contains("\"kind\":\"audit\""));
     }
     fn cached_view(name: &str) -> CachedView {
         CachedView {

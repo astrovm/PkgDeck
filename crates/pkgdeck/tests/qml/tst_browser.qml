@@ -18,6 +18,8 @@ TestCase {
         function changeRepository(request) { lastRepositoryChange = request; }
         property string rows: "[]"
         property string details: "{}"
+        property string inspection: "{}"
+        property string inspectedCommand: ""
         property string status: "Ready"
         property string confirmation: ""
         property string confirmation_data: "{}"
@@ -78,6 +80,26 @@ TestCase {
         function poll() {
         }
         function retrySource(view, query, source) { lastRetry = source; }
+        function inspectCommand(command) {
+            inspectedCommand = command;
+            inspection = JSON.stringify({kind: "command", report: {
+                command: command, environment: "Synthetic host", resolved: "/fixture/" + command,
+                candidates: [{path: "/fixture/" + command, state: "executable", target: null,
+                    owners: [{manager: "apt", native_name: "fixture", state: "known", packages: []}]}],
+                ownership_note: "Synthetic ownership only."
+            }});
+        }
+        function auditInstalled() {
+            inspection = JSON.stringify({kind: "audit", report: {
+                groups: [{key: "synthetic-app", copies: [
+                    {package: {backend: "apt", name: "fixture", architecture: "all", scope: "system"}, installed_version: "1"},
+                    {package: {backend: "flatpak", name: "org.example.Fixture", architecture: "x86_64", scope: "system"}, installed_version: "1"}
+                ]}], installed_copies: [
+                    {package: {backend: "apt", name: "fixture", architecture: "all", scope: "system"}, installed_version: "1"},
+                    {package: {backend: "flatpak", name: "org.example.Fixture", architecture: "x86_64", scope: "system"}, installed_version: "1"}
+                ], leftovers: [], data_note: "Unknown data remains unknown."
+            }});
+        }
     }
     Component {
         id: window
@@ -96,6 +118,8 @@ TestCase {
         fake.lastRepositoryChange = "";
         fake.rows = "[]";
         fake.details = "{}";
+        fake.inspection = "{}";
+        fake.inspectedCommand = "";
         fake.status = "Ready";
         fake.confirmation = "";
         fake.confirmation_data = "{}";
@@ -167,6 +191,24 @@ TestCase {
             }
         ]);
         wait(30);
+    }
+    function test_read_only_inspection_and_audit_are_reachable_from_installed() {
+        populate();
+        browser.openView("Installed");
+        const open = findChild(browser, "openInspectionButton");
+        verify(open.visible);
+        mouseClick(open);
+        const dialog = findChild(browser, "inspectionDialog");
+        tryCompare(dialog, "visible", true);
+        const field = findChild(dialog, "inspectCommandField");
+        field.text = "fixture";
+        mouseClick(findChild(dialog, "runCommandInspection"));
+        compare(fake.inspectedCommand, "fixture");
+        compare(browser.inspectionReport.report.resolved, "/fixture/fixture");
+        mouseClick(findChild(dialog, "installedAuditTab"));
+        compare(browser.inspectionReport.report.groups.length, 1);
+        compare(browser.inspectionReport.report.leftovers.length, 0);
+        dialog.close();
     }
     function test_refresh_retains_inactive_results_until_fresh_data_arrives() {
         populate();

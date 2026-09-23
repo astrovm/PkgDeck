@@ -56,6 +56,7 @@ Controls.ApplicationWindow {
         }
     }
     property var detail: JSON.parse(backend.details || "{}")
+    readonly property var inspectionReport: JSON.parse(backend.inspection || "{}")
     readonly property bool detailMatchesSelection: selected !== null && detail.package !== undefined && rowIdentity(selected) === rowIdentity(detail.package)
     readonly property var screenshots: detailMatchesSelection ? (detail.screenshots || []) : []
     property var failedScreenshots: []
@@ -70,11 +71,7 @@ Controls.ApplicationWindow {
         if (detail && detail.cleanup)
             return [detail.cleanup.summary || "", detail.cleanup.preview || ""].filter(Boolean).join("\n\n");
         if (detailMatchesSelection) {
-            const pkg = detail.package || {};
-            return [detail.description || "", pkg.reference || pkg.name || "",
-                [pkg.scope_label, pkg.architecture].filter(Boolean).join(" · "),
-                detail.homepage || "",
-                (detail.dependencies || []).length ? "Dependencies: " + detail.dependencies.join(", ") : ""].filter(Boolean).join("\n\n");
+            return detail.description || "Description unavailable from this source.";
         }
         if (detail && detail.failure)
             return (detail.failure.error || "") + "\n" + (detail.hint || "");
@@ -98,6 +95,7 @@ Controls.ApplicationWindow {
     property bool closePending: false
     property bool queryDirty: false
     property var selectedIdentity: null
+    property string pendingInspectionIdentity: ""
     function rowIdentity(row) {
         return row ? JSON.stringify([row.source, row.name, row.architecture, row.remote || null, row.scope, row.reference || null]) : "";
     }
@@ -749,6 +747,34 @@ Controls.ApplicationWindow {
         selectedIdentity = rowIdentity(viewItems[index]);
         backend.select(originalIndex(index));
     }
+    function openExactInspectionPackage(packageId) {
+        const identity = rowIdentity({source: packageId.backend, name: packageId.name,
+            architecture: packageId.architecture, remote: packageId.remote,
+            scope: packageId.scope, reference: packageId.reference});
+        inspectionDialog.close();
+        installedFilter = "";
+        multiSourceOnly = false;
+        if (checkedSources().indexOf(packageId.backend) < 0)
+            sourceSelection += "," + packageId.backend;
+        const filters = Object.assign({}, viewSourceFilters);
+        delete filters.Installed;
+        viewSourceFilters = filters;
+        pendingInspectionIdentity = identity;
+        openView("Installed");
+        Qt.callLater(root.selectPendingInspection);
+    }
+    function selectPendingInspection() {
+        if (!pendingInspectionIdentity || retainingResults)
+            return false;
+        for (let i = 0; i < viewItems.length; i++) {
+            if (rowIdentity(viewItems[i]) === pendingInspectionIdentity) {
+                choose(i);
+                pendingInspectionIdentity = "";
+                return true;
+            }
+        }
+        return false;
+    }
     function restoreSelection() {
         if (!selectedIdentity || retainingResults)
             return;
@@ -762,7 +788,10 @@ Controls.ApplicationWindow {
         if (currentView !== "Search" || !items.some((row) => rowIdentity(row) === selectedIdentity))
             selectedIdentity = null;
     }
-    onViewItemsChanged: Qt.callLater(root.restoreSelection)
+    onViewItemsChanged: Qt.callLater(() => {
+        if (root.selectPendingInspection()) return;
+        root.restoreSelection();
+    })
     function propose(action) {
         if (!retainingResults) {
             backend.propose(action, originalIndex(results.currentIndex));
@@ -1223,6 +1252,17 @@ Controls.ApplicationWindow {
                         color: root.ink
                         verticalAlignment: Text.AlignVCenter
                         leftPadding: 28
+                    }
+                }
+                ActionButton {
+                    objectName: "openInspectionButton"
+                    text: root.compact ? "Inspect" : "Inspect & audit"
+                    symbol: "search"
+                    enabled: !backend.writing
+                    onClicked: {
+                        root.rememberDialogFocus();
+                        inspectionDialog.mode = "command";
+                        inspectionDialog.open();
                     }
                 }
             }
@@ -1771,11 +1811,12 @@ Controls.ApplicationWindow {
                 id: detailsPanel
                 visible: root.selected !== null && ["Search", "Installed", "Updates", "Clean", "Sources"].indexOf(root.currentView) >= 0
                 Layout.fillWidth: true
-                Layout.preferredHeight: root.visibleScreenshots.length > 0 ? Math.min(root.height * (root.compact ? 0.35 : 0.42), 320) : Math.min(root.height * 0.27, 180)
+                Layout.preferredHeight: root.detailMatchesSelection ? Math.min(root.height * (root.compact ? 0.35 : 0.48), 420) : Math.min(root.height * 0.27, 180)
                 selected: root.selected
                 selectionIdentity: root.rowIdentity(root.selected)
                 screenshots: root.visibleScreenshots
                 description: root.detailText()
+                detailsData: root.detailMatchesSelection ? root.detail : ({})
                 iconSource: root.iconUrl(root.selectedIcon)
                 compact: root.compact
                 motionEnabled: root.motionEnabled
@@ -1799,6 +1840,7 @@ Controls.ApplicationWindow {
                     screenshotDialog.open();
                 }
                 onScreenshotFailed: (url, identity) => root.hideFailedScreenshot(url, identity)
+                onPackageRequested: (packageId) => root.openExactInspectionPackage(packageId)
             }
             Flow {
                 objectName: "updatesActions"
@@ -1864,6 +1906,21 @@ Controls.ApplicationWindow {
                 }
             }
         }
+    }
+    InspectionDialog {
+        id: inspectionDialog
+        backend: root.backend
+        reportData: root.inspectionReport
+        ink: root.ink
+        muted: root.muted
+        surface: root.surface
+        line: root.line
+        parent: Controls.Overlay.overlay
+        anchors.centerIn: parent
+        width: Math.min(root.width - 32, 760)
+        height: Math.min(root.height - 40, 620)
+        onClosed: root.restoreDialogFocus()
+        onExactPackage: (packageId) => root.openExactInspectionPackage(packageId)
     }
     Controls.Dialog {
         id: repositoriesDialog
