@@ -424,6 +424,11 @@ TestCase {
         compare(browser.items.length, 0);
         browser.openView("Settings");
         const appearance = findChild(browser, "appearanceSetting");
+        verify(typeof appearance.contentItem.positionToRectangle === "function");
+        verify(typeof findChild(browser, "authorizationSetting").contentItem.positionToRectangle === "function");
+        mouseClick(appearance);
+        tryCompare(appearance.popup, "visible", true);
+        appearance.popup.close();
         appearance.currentIndex = 2;
         appearance.activated(2);
         compare(browser.dark, false);
