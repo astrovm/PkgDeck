@@ -736,7 +736,31 @@ TestCase {
         browser.width = 1100;
         wait(30);
         verify(link.visible);
-        verify(link.width >= 24);
+        compare(link.width, 26);
+        compare(link.height, 26);
+        compare(icon.width, 14);
+        compare(icon.height, 14);
+    }
+    function test_search_button_fits_at_normal_and_compact_widths() {
+        browser.openView("Search");
+        const search = findChild(browser, "searchField");
+        const button = findChild(browser, "searchButton");
+        const label = findChild(browser, "searchButtonLabel");
+        search.text = "Firefox";
+        compare(browser.queryDirty, true);
+        compare(browser.emptyStateMessage(), "");
+        for (const width of [1100, 380, 360]) {
+            browser.width = width;
+            waitForRendering(browser.contentItem);
+            verify(button.width >= button.contentItem.implicitWidth + button.leftPadding + button.rightPadding - 1);
+            compare(button.height, search.height);
+            const labelPosition = label.mapToItem(button, 0, 0);
+            verify(labelPosition.x > 0);
+            verify(labelPosition.x + label.width < button.width);
+        }
+        mouseClick(button);
+        compare(fake.lastQuery, "Firefox");
+        compare(browser.queryDirty, false);
     }
     function test_about_shows_backend_version() {
         browser.openView("About");
