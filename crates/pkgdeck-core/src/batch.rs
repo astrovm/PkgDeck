@@ -413,7 +413,7 @@ fn line(pipe: &mut impl Read) -> Result<Vec<u8>, ExecutionError> {
 pub struct ScopeGuard;
 struct Session {
     child: Child,
-    input: ChildStdin,
+    input: Option<ChildStdin>,
     output: ChildStdout,
     commands: Vec<Vec<ProtectedCommand>>,
     current: usize,
@@ -430,21 +430,16 @@ impl Drop for ScopeGuard {
 }
 impl Drop for Session {
     fn drop(&mut self) {
-        trace("session drop: checking runner");
+        // A pkexec runner is root-owned under the original child PID. The
+        // unprivileged frontend cannot signal it, so EOF must let it leave
+        // its request loop before we wait for the child.
+        self.input.take();
         // Also close a runner that sent a malformed Ready frame. A batch
         // error must never leave an elevated child waiting for more input.
         if self.child.try_wait().ok().flatten().is_none() {
-            trace("session drop: killing runner");
             let _ = self.child.kill();
         }
-        trace("session drop: waiting for runner");
         let _ = self.child.wait();
-        trace("session drop: runner reaped");
-    }
-}
-fn trace(message: &str) {
-    if std::env::var_os("PKGDECK_BATCH_TRACE").is_some() {
-        eprintln!("batch trace: {message}");
     }
 }
 fn root_owned(path: &Path) -> bool {
@@ -539,7 +534,7 @@ fn begin_session(
     }
     let mut session = Session {
         child,
-        input,
+        input: Some(input),
         output,
         next: vec![0; commands.len()],
         commands,
@@ -639,19 +634,16 @@ pub fn run_in_scope(
         if cancel.requested() {
             return Some(Err(ExecutionError::Cancelled));
         }
-        trace("dispatching approved command");
         let result = (|| {
             send(
-                &mut session.input,
+                session.input.as_mut().expect("active runner input"),
                 &Request::Run {
                     operation: index,
                     command: next,
                 },
             )?;
-            trace("approved command sent");
             let response: Response = serde_json::from_slice(&line(&mut session.output)?)
                 .map_err(|e| ExecutionError::Io(e.to_string()))?;
-            trace("runner response received");
             match response {
                 Response::Completed { completion } => {
                     session.next[index] += 1;

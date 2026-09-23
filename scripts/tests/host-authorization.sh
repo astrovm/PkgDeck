@@ -112,26 +112,14 @@ polkit.addRule(function(action, subject) {
 RULE
 systemctl restart polkit
 batch_probe() {
-    local auth=$1 action=$2 output command_pid watchdog status
+    local auth=$1 action=$2 output status
     output=$(mktemp)
-    timeout --signal=TERM --kill-after=5s 75s \
-        runuser -u pkgdeck-test -- env PKGDECK_BATCH_TRACE=1 "$binaries/pkd" --json --yes --auth "$auth" --from apt "$action" "$fixture" >"$output" &
-    command_pid=$!
-    (
-        sleep 15
-        if kill -0 "$command_pid" 2>/dev/null; then
-            echo "Batch $auth $action is still running; process snapshot:" >&2
-            ps -eo pid,ppid,stat,wchan:24,args | grep -E 'pkd|pkexec|pkgdeck-host-runner|apt-get|dpkg|runuser|timeout' >&2 || :
-            for pid in $(pgrep -f '^/opt/pkgdeck-bin/pkd --json --yes --auth' || :); do
-                echo "pkd $pid child PIDs: $(cat "/proc/$pid/task/$pid/children" 2>/dev/null || :)" >&2
-                echo "pkd $pid syscall: $(cat "/proc/$pid/task/$pid/syscall" 2>/dev/null || :)" >&2
-            done
-        fi
-    ) &
-    watchdog=$!
-    if wait "$command_pid"; then status=0; else status=$?; fi
-    kill "$watchdog" 2>/dev/null || :
-    wait "$watchdog" 2>/dev/null || :
+    if timeout --signal=TERM --kill-after=5s 75s \
+        runuser -u pkgdeck-test -- "$binaries/pkd" --json --yes --auth "$auth" --from apt "$action" "$fixture" >"$output"; then
+        status=0
+    else
+        status=$?
+    fi
     if ((status != 0)); then
         cat "$output" >&2
         rm -f "$output"
