@@ -8,6 +8,8 @@ pub const FOUNDATION_MESSAGE: &str =
 pub mod host;
 pub mod process;
 
+pub mod activity;
+pub mod background;
 pub mod engine;
 pub mod package;
 

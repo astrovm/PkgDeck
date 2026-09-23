@@ -50,10 +50,14 @@ RowLayout {
     }
     Controls.Button {
         id: searchButton
+        objectName: "searchButton"
         text: "Search"
         Accessible.name: text
         enabled: !pane.writing && search.text.trim().length > 0
-        implicitHeight: Math.max(38, pane.textFont.pointSize * 3)
+        implicitWidth: Math.max(104, buttonContents.implicitWidth + leftPadding + rightPadding)
+        Layout.minimumWidth: implicitWidth
+        implicitHeight: search.implicitHeight
+        horizontalPadding: 14
         onClicked: pane.submitted()
         background: Rectangle {
             radius: 7
@@ -62,9 +66,10 @@ RowLayout {
             border.width: parent.activeFocus ? 2 : 1
         }
         contentItem: RowLayout {
+            id: buttonContents
             spacing: 8
             DeckIcon { name: "search"; ink: searchButton.enabled ? pane.onAccent : pane.muted; Layout.preferredWidth: 18; Layout.preferredHeight: 18 }
-            Text { text: "Search"; color: searchButton.enabled ? pane.onAccent : pane.muted; font: pane.textFont }
+            Text { objectName: "searchButtonLabel"; text: "Search"; color: searchButton.enabled ? pane.onAccent : pane.muted; font: pane.textFont }
         }
     }
 }

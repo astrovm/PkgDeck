@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Controls as Controls
 import QtQuick.Layouts
 import QtCore
+import QtNetwork
 import org.kde.kirigami as Kirigami
 
 Controls.ApplicationWindow {
@@ -15,6 +16,18 @@ Controls.ApplicationWindow {
         backend.changeRepository(JSON.stringify(request));
     }
     property string currentView: "Search"
+    readonly property var activityRows: JSON.parse(backend.activity || "[]")
+    readonly property int queuedCount: activityRows.filter(row => row.state === "queued").length
+    readonly property var backgroundState: JSON.parse(backend.background_state || "{}")
+    property bool startHidden: Qt.application.arguments.indexOf("--background") >= 0
+    property bool forceQuit: false
+    property bool trayAvailable: false
+    property alias backgroundMode: preferences.backgroundMode
+    property alias autostartEnabled: preferences.autostart
+    function checkUpdates(force) {
+        const offline = NetworkInformation.reachability === NetworkInformation.Reachability.Disconnected || NetworkInformation.isBehindCaptivePortal;
+        backend.checkUpdates(root.checkedSources().join(","), preferences.backgroundMode, offline, NetworkInformation.isMetered, force === true);
+    }
     property string resultView: "Search"
     property var liveItems: JSON.parse(backend.rows || "[]")
     property var retainedItems: []
@@ -145,12 +158,16 @@ Controls.ApplicationWindow {
             reload();
     }
     function emptyStateMessage() {
+        if (backend.writing && currentView === "Search" && items.length === 0)
+            return "Search queued until the current operation finishes.";
         if (backend.busy || reportState.phase === "loading")
             return retainingResults ? "Checking for current results…" : "Checking sources…";
         if (readFailures.length > 0)
             return reportState.phase === "partial" ? "No results from the sources that completed." : "Could not check these sources.";
         if (reportState.phase === "unsupported")
             return "No enabled sources support this view.";
+        if (currentView === "Search" && queryDirty)
+            return "";
         if (currentView === "Search" && searchPane.text.trim().length === 0)
             return "";
         if (currentView === "Installed" && (installedFilter.length > 0 || multiSourceOnly))
@@ -597,10 +614,14 @@ Controls.ApplicationWindow {
             border.color: combo.activeFocus ? root.accent : root.line
             border.width: combo.activeFocus ? 2 : 1
         }
-        contentItem: Text {
+        contentItem: Controls.TextField {
             text: combo.displayText
             color: combo.enabled ? root.ink : root.muted
-            elide: Text.ElideRight
+            enabled: false
+            readOnly: true
+            selectByMouse: false
+            background: null
+            clip: true
             verticalAlignment: Text.AlignVCenter
             leftPadding: 14
             rightPadding: 8
@@ -680,14 +701,14 @@ Controls.ApplicationWindow {
         return path ? (path.indexOf("https://") === 0 ? path : "file://" + encodeURI(path)) : "";
     }
 
-    property url repositoryIconSource: root.dark ? "qrc:/pkgdeck/github-dark.png" : "qrc:/pkgdeck/github.png"
+    property url repositoryIconSource: root.dark ? "qrc:/pkgdeck/github-dark.svg" : "qrc:/pkgdeck/github.svg"
     property url logoIconSource: "qrc:/pkgdeck/logo.svg"
     readonly property url repositoryUrl: "https://github.com/astrovm/PkgDeck"
     width: 1100
     height: 760
     minimumWidth: 360
     minimumHeight: 400
-    visible: true
+    visible: !startHidden || !preferences.backgroundMode || !trayAvailable
     title: "PkgDeck — " + currentView + (backend.busy ? " — Working" : "")
     function argument(name, fallback) {
         const index = Qt.application.arguments.indexOf(name);
@@ -705,8 +726,6 @@ Controls.ApplicationWindow {
         return found;
     }
     function openView(view) {
-        if (backend.writing && ["Search", "Installed", "Updates", "Clean", "Sources"].indexOf(view) >= 0)
-            return;
         queryDirty = false;
         selectedIdentity = null;
         uncheckedPackages = [];
@@ -720,18 +739,21 @@ Controls.ApplicationWindow {
         results.currentIndex = -1;
         if (view === "Search")
             searchPane.focusSearch(false);
+        else if (view === "Activity")
+            backend.refreshActivity();
         else if (["Search", "Installed", "Updates", "Clean", "Sources"].indexOf(view) >= 0)
             reload();
     }
     // Reload the current view. Without force, a cached snapshot serves
     // instantly with no worker; force always queries native managers.
-    function reload(force) {
+    function reload(force, preserveSelection) {
         retainedItems = currentView === resultView ? items.slice() : [];
         retainingResults = retainedItems.length > 0;
         revealedRows = new Set(retainedItems.map(rowIdentity));
         resultView = currentView;
         results.currentIndex = -1;
-        selectedIdentity = null;
+        if (!preserveSelection)
+            selectedIdentity = null;
         uncheckedPackages = [];
         // Installed filtering is client-side over the loaded rows (see
         // viewItems), so the backend always returns the full installed set
@@ -782,8 +804,15 @@ Controls.ApplicationWindow {
         property int versionWidth: 150
         property string sortColumn: ""
         property bool sortAscending: true
+        property bool backgroundMode: false
+        property bool autostart: false
     }
     onClosing: function (close) {
+        if (!forceQuit && preferences.backgroundMode && trayAvailable) {
+            close.accepted = false;
+            root.hide();
+            return;
+        }
         if (backend.busy) {
             close.accepted = false;
             closePending = true;
@@ -839,6 +868,17 @@ Controls.ApplicationWindow {
         }
     }
     Timer {
+        interval: 30000
+        running: preferences.backgroundMode
+        onTriggered: root.checkUpdates(false)
+    }
+    Timer {
+        interval: 300000
+        repeat: true
+        running: preferences.backgroundMode
+        onTriggered: root.checkUpdates(false)
+    }
+    Timer {
         id: completionHold
         interval: 1000
         onTriggered: root.completedRows = []
@@ -863,7 +903,7 @@ Controls.ApplicationWindow {
         interval: 0
         onTriggered: {
             if (!backend.busy && !root.closePending)
-                root.reload(true);
+                root.reload(true, true);
         }
     }
     Component.onCompleted: {
@@ -921,13 +961,12 @@ Controls.ApplicationWindow {
                 }
                 Item { Layout.preferredHeight: 24 }
                 Repeater {
-                    model: ["Search", "Installed", "Updates", "Clean", "Sources", "Settings", "About"]
+                    model: ["Search", "Installed", "Updates", "Clean", "Sources", "Activity", "Settings", "About"]
                     delegate: ActionButton {
                         required property string modelData
                         Layout.fillWidth: true
                         text: modelData
-                        symbol: ({"Search":"search", "Installed":"installed", "Updates":"updates", "Clean":"remove", "Sources":"sources", "Settings":"settings", "About":"help"})[modelData]
-                        enabled: !backend.writing
+                        symbol: ({"Search":"search", "Installed":"installed", "Updates":"updates", "Clean":"remove", "Sources":"sources", "Activity":"updates", "Settings":"settings", "About":"help"})[modelData]
                         navigation: true
                         primary: root.currentView === modelData
                         onClicked: root.openView(modelData)
@@ -942,8 +981,11 @@ Controls.ApplicationWindow {
                     Controls.Label { text: "by astro"; color: root.muted; font.pointSize: root.font.pointSize * 0.9 }
                     Controls.ToolButton {
                         objectName: "repositoryLink"
-                        implicitWidth: 28
-                        implicitHeight: 28
+                        implicitWidth: 26
+                        implicitHeight: 26
+                        Layout.maximumWidth: 26
+                        Layout.maximumHeight: 26
+                        padding: 0
                         Accessible.name: "Open PkgDeck on GitHub"
                         Controls.ToolTip.visible: hovered
                         Controls.ToolTip.text: Accessible.name
@@ -953,13 +995,18 @@ Controls.ApplicationWindow {
                             color: parent.hovered ? root.selection : "transparent"
                             border.color: parent.activeFocus ? root.accent : "transparent"
                         }
-                        contentItem: Image {
-                            objectName: "repositoryIcon"
-                            source: root.repositoryIconSource
-                            sourceSize.width: 18
-                            sourceSize.height: 18
-                            fillMode: Image.PreserveAspectFit
-                            Accessible.ignored: true
+                        contentItem: Item {
+                            Image {
+                                objectName: "repositoryIcon"
+                                anchors.centerIn: parent
+                                width: 16
+                                height: 16
+                                source: root.repositoryIconSource
+                                sourceSize.width: Math.ceil(width * (root.screen ? root.screen.devicePixelRatio : 1))
+                                sourceSize.height: Math.ceil(height * (root.screen ? root.screen.devicePixelRatio : 1))
+                                fillMode: Image.PreserveAspectFit
+                                Accessible.ignored: true
+                            }
                         }
                     }
                 }
@@ -975,9 +1022,8 @@ Controls.ApplicationWindow {
                 Layout.fillWidth: true
                 ThemedComboBox {
                     visible: root.compact
-                    model: ["Search", "Installed", "Updates", "Clean", "Sources", "Settings", "About"]
+                    model: ["Search", "Installed", "Updates", "Clean", "Sources", "Activity", "Settings", "About"]
                     currentIndex: model.indexOf(root.currentView)
-                    enabled: !backend.writing
                     onActivated: root.openView(currentText)
                     Accessible.name: "Navigation"
                     Layout.fillWidth: true
@@ -992,12 +1038,19 @@ Controls.ApplicationWindow {
                     Layout.fillWidth: true
                 }
                 ActionButton {
+                    objectName: "activityIndicator"
+                    visible: backend.writing || root.queuedCount > 0
+                    text: root.queuedCount > 0 ? "Activity · " + root.queuedCount : "Working"
+                    symbol: "updates"
+                    Accessible.name: text
+                    onClicked: root.openView("Activity")
+                }
+                ActionButton {
                     objectName: "sourceFilter"
                     id: sourceFilterButton
                     visible: ["Search", "Installed", "Updates", "Clean", "Sources", "Settings"].indexOf(root.currentView) >= 0
                     text: root.currentView === "Settings" ? "Manage sources" : root.sourceSummary()
                     symbol: "sources"
-                    enabled: !backend.writing
                     onClicked: { root.rememberDialogFocus(); sourcePopup.mode = root.currentView === "Settings" ? "settings" : "filter"; sourcePopup.open(); }
                     Accessible.name: root.currentView === "Settings" ? "Manage package managers" : "Filter this page by package source"
                     Layout.preferredWidth: 210
@@ -1145,7 +1198,7 @@ Controls.ApplicationWindow {
             SearchPane {
                 id: searchPane
                 visible: root.currentView === "Search"
-                writing: backend.writing
+                writing: false
                 surface: root.surface
                 ink: root.ink
                 muted: root.muted
@@ -1176,7 +1229,7 @@ Controls.ApplicationWindow {
                     text: root.installedFilter
                     placeholderText: "Filter installed packages"
                     Accessible.name: "Filter installed packages"
-                    enabled: !backend.writing
+                    enabled: true
                     selectByMouse: true
                     implicitHeight: Math.max(44, root.font.pointSize * 3.4)
                     color: root.ink
@@ -1205,7 +1258,7 @@ Controls.ApplicationWindow {
                     objectName: "multiSourceCheck"
                     text: "Duplicate installs"
                     checked: root.multiSourceOnly
-                    enabled: !backend.writing
+                    enabled: true
                     onToggled: root.multiSourceOnly = checked
                     Accessible.name: "Show only packages installed from multiple sources"
                     Layout.alignment: Qt.AlignVCenter
@@ -1242,6 +1295,40 @@ Controls.ApplicationWindow {
                     checked: !root.reduceMotion
                     onToggled: root.reduceMotion = !checked
                     Accessible.name: "Enable interface animations"
+                }
+                Controls.CheckBox {
+                    objectName: "backgroundModeSetting"
+                    text: "Background checks"
+                    checked: preferences.backgroundMode
+                    onClicked: {
+                        if (!checked && preferences.autostart && !backend.setAutostart(false)) {
+                            checked = true;
+                            return;
+                        }
+                        preferences.backgroundMode = checked;
+                        if (!checked)
+                            preferences.autostart = false;
+                    }
+                    Accessible.name: text
+                }
+                Controls.CheckBox {
+                    objectName: "autostartSetting"
+                    text: "Start in background at login"
+                    checked: preferences.autostart
+                    enabled: preferences.backgroundMode && root.trayAvailable
+                    onClicked: {
+                        if (backend.setAutostart(checked))
+                            preferences.autostart = checked;
+                        else
+                            checked = preferences.autostart;
+                    }
+                    Accessible.name: text
+                }
+                Controls.Label {
+                    text: root.backgroundState.last_check ? "Last check: " + new Date(root.backgroundState.last_check * 1000).toLocaleString() + (root.backgroundState.failures && root.backgroundState.failures.length ? " · " + root.backgroundState.failures.length + " sources failed" : "") : ""
+                    visible: text.length > 0
+                    color: root.muted
+                    Layout.fillWidth: true
                 }
                 Controls.Label {
                     text: "Authentication"
@@ -1346,12 +1433,24 @@ Controls.ApplicationWindow {
                     onClicked: { root.rememberDialogFocus(); sourceFailuresDialog.open(); }
                 }
             }
+            ActivityPane {
+                visible: root.currentView === "Activity"
+                entries: root.activityRows
+                backgroundState: root.backgroundState
+                surface: root.surface
+                ink: root.ink
+                muted: root.muted
+                line: root.line
+                accent: root.accent
+                textFont: root.font
+                onCancelQueued: backend.cancelQueued()
+            }
             Rectangle {
                 id: resultsBox
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 Layout.minimumHeight: 130
-                visible: root.currentView !== "Settings" && root.currentView !== "About"
+                visible: root.currentView !== "Settings" && root.currentView !== "About" && root.currentView !== "Activity"
                 color: root.surface
                 radius: 10
                 border.color: results.activeFocus ? root.accent : root.line
@@ -1554,7 +1653,7 @@ Controls.ApplicationWindow {
                             leftPadding: 16
                             rightPadding: 16
                             highlighted: results.currentIndex === index
-                            enabled: !backend.writing
+                            enabled: true
                             Accessible.name: (modelData.kind === "package" ? (modelData.update === "available" ? "Update available. " : (root.isInstalled(modelData) ? "Installed. " : "Not installed. ")) : "") + modelData.name + ", " + modelData.source + ", " + (modelData.summary || "")
                             onClicked: { results.forceActiveFocus(); root.choose(index); }
                             Rectangle {
@@ -1603,7 +1702,7 @@ Controls.ApplicationWindow {
                                     id: packageCheck
                                     visible: root.currentView === "Updates" && modelData.kind === "package"
                                     checked: root.packageChecked(modelData)
-                                    enabled: !backend.writing
+                                    enabled: true
                                     onToggled: root.togglePackage(modelData)
                                     Accessible.name: "Select " + (modelData.name || "")
                                     Layout.preferredWidth: 28
@@ -1702,7 +1801,7 @@ Controls.ApplicationWindow {
                                 ActionButton {
                                     objectName: "rowContainerPull"
                                     visible: modelData.kind === "package" && root.containerSource(modelData.source) && root.isInstalled(modelData) && !!modelData.reference
-                                    enabled: !backend.busy && !root.retainingResults
+                                    enabled: (!backend.busy || backend.writing) && !root.retainingResults
                                     text: root.compact ? "" : "Pull"
                                     symbol: "updates"
                                     glyphColor: root.accent
@@ -1715,7 +1814,7 @@ Controls.ApplicationWindow {
                                 ActionButton {
                                     objectName: "rowPackageAction"
                                     visible: (modelData.kind === "package" && (!root.updateOnly(modelData.source) || modelData.update === "available")) || modelData.kind === "cleanup"
-                                    enabled: !backend.busy && !root.retainingResults
+                                    enabled: (!backend.busy || backend.writing) && !root.retainingResults
                                     text: root.compact ? "" : (modelData.kind === "cleanup" ? "Clean" : (root.currentView === "Updates" || root.updateOnly(modelData.source) ? "Update" : (root.isInstalled(modelData) ? "Remove" : "Install")))
                                     symbol: modelData.kind === "cleanup" ? "remove" : (root.currentView === "Updates" || root.updateOnly(modelData.source)) ? "updates" : (root.isInstalled(modelData) ? "remove" : "install")
                                     glyphColor: (root.currentView === "Updates" || root.updateOnly(modelData.source)) ? root.accent : root.isInstalled(modelData) ? (root.dark ? "#f18b91" : "#b42332") : (root.dark ? "#77d6a0" : "#187442")
@@ -1806,15 +1905,15 @@ Controls.ApplicationWindow {
                     text: "Clean all"
                     symbol: "remove"
                     primary: true
-                    enabled: !backend.busy
+                    enabled: !backend.busy || backend.writing
                     onClicked: backend.propose("clean-all", -1)
                 }
                 UpdatesActions {
                     active: root.currentView === "Updates"
                     width: Math.min(parent.width, preferredWidth)
                     compact: root.compact
-                    busy: backend.busy
-                    writing: backend.writing
+                    busy: backend.busy && !backend.writing
+                    writing: false
                     upgradable: backend.upgradable
                     selectedCount: root.selectedCount()
                     uncheckedCount: root.uncheckedPackages.length
@@ -1845,7 +1944,7 @@ Controls.ApplicationWindow {
                     text: "Refresh sources"
                     symbol: "refresh"
                     primary: true
-                    enabled: !backend.busy && root.selected !== null && root.selected.kind === "source" && root.selected.available
+                    enabled: (!backend.busy || backend.writing) && root.selected !== null && root.selected.kind === "source" && root.selected.available
                     onClicked: root.propose("refresh")
                 }
                 ActionButton {
@@ -1854,7 +1953,7 @@ Controls.ApplicationWindow {
                     symbol: "refresh"
                     Accessible.name: "Reload"
                     tooltipText: root.compact ? "Reload" : ""
-                    enabled: !backend.writing
+                    enabled: !backend.busy || backend.writing
                     onClicked: root.reload(true)
                 }
             }
@@ -2203,12 +2302,10 @@ Controls.ApplicationWindow {
     }
     Shortcut {
         sequence: "Ctrl+L"
-        enabled: !backend.writing
         onActivated: results.forceActiveFocus()
     }
     Shortcut {
         sequence: "Ctrl+F"
-        enabled: !backend.writing
         onActivated: {
             if (root.currentView === "Installed") {
                 installedFilterField.forceActiveFocus();
@@ -2247,32 +2344,31 @@ Controls.ApplicationWindow {
     }
     Shortcut {
         sequence: "Ctrl+R"
-        enabled: !backend.writing
         onActivated: root.reload(true)
     }
     Shortcut {
         sequence: "Ctrl+I"
-        enabled: !backend.busy
+        enabled: !backend.busy || backend.writing
         onActivated: root.propose("install")
     }
     Shortcut {
         sequence: "Ctrl+D"
-        enabled: !backend.busy
+        enabled: !backend.busy || backend.writing
         onActivated: root.propose("remove")
     }
     Shortcut {
         sequence: "Ctrl+U"
-        enabled: !backend.busy
+        enabled: !backend.busy || backend.writing
         onActivated: root.propose("upgrade")
     }
     Shortcut {
         sequence: "Ctrl+Shift+U"
-        enabled: root.currentView === "Updates" && !backend.busy && root.selectedCount() > 0 && (root.uncheckedPackages.length > 0 || backend.upgradable)
+        enabled: root.currentView === "Updates" && (!backend.busy || backend.writing) && root.selectedCount() > 0 && (root.uncheckedPackages.length > 0 || backend.upgradable)
         onActivated: root.upgradeUpdates()
     }
     Shortcut {
         sequence: "Ctrl+M"
-        enabled: !backend.busy
+        enabled: !backend.busy || backend.writing
         onActivated: root.propose("refresh")
     }
     Shortcut {

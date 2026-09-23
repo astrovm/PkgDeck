@@ -23,6 +23,8 @@ TestCase {
         property string confirmation_data: "{}"
         property string source_catalog: "[]"
         property string report_state: "{}"
+        property string activity: "[]"
+        property string background_state: "{}"
         property string lastRetry: ""
         property string version: "9.9.9-test"
         property bool simulateLoading: false
@@ -78,12 +80,16 @@ TestCase {
         function poll() {
         }
         function retrySource(view, query, source) { lastRetry = source; }
+        function refreshActivity() {}
+        function cancelQueued() {}
+        function checkUpdates(sources, enabled, offline, metered, force) {}
+        function setAutostart(enabled) { return true; }
     }
     Component {
         id: window
         App.Browser {
             backend: fake
-            repositoryIconSource: Qt.resolvedUrl("../../assets/" + (dark ? "github-dark.png" : "github.png"))
+            repositoryIconSource: Qt.resolvedUrl("../../assets/" + (dark ? "github-dark.svg" : "github.svg"))
             logoIconSource: Qt.resolvedUrl("../../assets/logo.svg")
         }
     }
@@ -100,6 +106,8 @@ TestCase {
         fake.confirmation = "";
         fake.confirmation_data = "{}";
         fake.report_state = "{}";
+        fake.activity = "[]";
+        fake.background_state = "{}";
         fake.lastRetry = "";
         fake.simulateLoading = false;
         fake.busy = false;
@@ -117,6 +125,8 @@ TestCase {
         // Fresh checklist and column layout per test: QSettings persist
         // across tests in one run.
         browser.reduceMotion = false;
+        browser.backgroundMode = false;
+        browser.autostartEnabled = false;
         browser.sourceSelection = "";
         browser.viewSourceFilters = ({});
         browser.sortColumn = "";
@@ -303,7 +313,7 @@ TestCase {
         verify(findChild(browser, "resultsCancel").visible);
         fake.writing = true;
         browser.openView("Updates");
-        compare(browser.currentView, "Installed");
+        compare(browser.currentView, "Updates");
         browser.openView("Settings");
         compare(browser.currentView, "Settings");
         fake.writing = false;
@@ -372,6 +382,11 @@ TestCase {
         compare(browser.items.length, 0);
         browser.openView("Settings");
         const appearance = findChild(browser, "appearanceSetting");
+        verify(typeof appearance.contentItem.positionToRectangle === "function");
+        verify(typeof findChild(browser, "authorizationSetting").contentItem.positionToRectangle === "function");
+        mouseClick(appearance);
+        tryCompare(appearance.popup, "visible", true);
+        appearance.popup.close();
         appearance.currentIndex = 2;
         appearance.activated(2);
         compare(browser.dark, false);
@@ -657,7 +672,34 @@ TestCase {
         browser.width = 1100;
         wait(30);
         verify(link.visible);
-        verify(link.width >= 24);
+        compare(link.width, 26);
+        compare(link.height, 26);
+        compare(icon.width, 16);
+        compare(icon.height, 16);
+        verify(icon.source.toString().endsWith("github.svg") || icon.source.toString().endsWith("github-dark.svg"));
+        compare(icon.sourceSize.width, Math.ceil(icon.width * browser.screen.devicePixelRatio));
+        compare(icon.sourceSize.height, Math.ceil(icon.height * browser.screen.devicePixelRatio));
+    }
+    function test_search_button_fits_at_normal_and_compact_widths() {
+        browser.openView("Search");
+        const search = findChild(browser, "searchField");
+        const button = findChild(browser, "searchButton");
+        const label = findChild(browser, "searchButtonLabel");
+        search.text = "Firefox";
+        compare(browser.queryDirty, true);
+        compare(browser.emptyStateMessage(), "");
+        for (const width of [1100, 380, 360]) {
+            browser.width = width;
+            waitForRendering(browser.contentItem);
+            verify(button.width >= button.contentItem.implicitWidth + button.leftPadding + button.rightPadding - 1);
+            compare(button.height, search.height);
+            const labelPosition = label.mapToItem(button, 0, 0);
+            verify(labelPosition.x > 0);
+            verify(labelPosition.x + label.width < button.width);
+        }
+        mouseClick(button);
+        compare(fake.lastQuery, "Firefox");
+        compare(browser.queryDirty, false);
     }
     function test_about_shows_backend_version() {
         browser.openView("About");
@@ -829,6 +871,37 @@ TestCase {
         compare(browser.viewItems[0].name, "fire");
         compare(fake.lastForce, true);
         compare(fake.lastView, "Search");
+    }
+    function test_activity_navigation_stays_available_during_write() {
+        populate();
+        fake.activity = JSON.stringify([{id: 1, frontend: "gui", operations: [{install: {backend: "apt", name: "synthetic-tool", architecture: "all", scope: "system"}}], started_at: 1000, state: "queued", outcomes: []}]);
+        fake.writing = true;
+        fake.busy = true;
+        browser.openView("Installed");
+        compare(browser.currentView, "Installed");
+        verify(findChild(findChild(browser, "packageResults").itemAtIndex(0), "rowPackageAction").enabled);
+        verify(findChild(browser, "activityIndicator").visible);
+        browser.openView("Activity");
+        compare(browser.currentView, "Activity");
+        const list = findChild(browser, "activityList");
+        tryCompare(list, "count", 1);
+        verify(findChild(browser, "cancelQueuedButton").enabled);
+        fake.writing = false;
+        fake.busy = false;
+    }
+    function test_background_mode_requires_a_usable_tray_to_hide() {
+        browser.openView("Settings");
+        browser.startHidden = true;
+        browser.backgroundMode = true;
+        browser.trayAvailable = false;
+        verify(browser.visible);
+        verify(!findChild(browser, "autostartSetting").enabled);
+        browser.trayAvailable = true;
+        verify(!browser.visible);
+        browser.backgroundMode = false;
+        verify(browser.visible);
+        browser.close();
+        verify(!browser.visible);
     }
     function test_container_reference_uses_explicit_search_submission() {
         browser.openView("Search");
