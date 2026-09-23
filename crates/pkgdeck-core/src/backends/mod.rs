@@ -913,6 +913,57 @@ impl<T: Transport> Backend for Flatpak<T> {
         cancel: &Cancellation,
         progress: &mut dyn FnMut(Progress),
     ) -> Result<OperationOutcome, EngineError> {
+        if let Operation::Install(id) = operation {
+            if let Some(bytes) = crate::flatpak_ref::verified_source(id, cancel)? {
+                let (system, scope) = match id.scope {
+                    Scope::System => (true, "--system"),
+                    Scope::User { .. } => (false, "--user"),
+                    _ => return Err(invalid("flatpak", "invalid Flatpak scope")),
+                };
+                progress(Progress::Message(format!(
+                    "Installing Flatpak reference for {}.",
+                    id.name
+                )));
+                let temporary = std::env::temp_dir().join(format!(
+                    "pkgdeck-flatpakref-{}-{}.flatpakref",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_nanos()
+                ));
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&temporary)
+                    .map_err(|e| invalid("flatpak", e))?;
+                use std::io::Write;
+                if let Err(error) = file.write_all(&bytes) {
+                    let _ = std::fs::remove_file(&temporary);
+                    return Err(invalid("flatpak", error));
+                }
+                drop(file);
+                let source = temporary.to_string_lossy().into_owned();
+                let result = self.call(
+                    &[
+                        scope,
+                        "install",
+                        "--noninteractive",
+                        "--assumeyes",
+                        "--from",
+                        &source,
+                    ],
+                    cancel,
+                    true,
+                    system,
+                );
+                let _ = std::fs::remove_file(&temporary);
+                let result = result?;
+                return Ok(OperationOutcome {
+                    cancellation_deferred: result.cancellation_deferred,
+                });
+            }
+        }
         if let Operation::Clean(id) = operation {
             if !self.transport.supports_flatpak_cleanup() {
                 return Err(self.unsupported(Capability::Clean));
@@ -1329,7 +1380,12 @@ impl<T: Transport> Apt<T> {
             Operation::Remove(id) => ("remove", id),
             _ => return Ok(None),
         };
-        let target = self.target(id)?;
+        let target = if matches!(operation, Operation::Install(_)) {
+            crate::local_deb::verified_path(id, cancel)?
+                .map_or_else(|| self.target(id), |path| Ok(path.display().to_string()))?
+        } else {
+            self.target(id)?
+        };
         let args = [
             OsString::from("--simulate"),
             OsString::from("-o"),
@@ -1498,9 +1554,16 @@ impl<T: Transport> Backend for Apt<T> {
         cancel: &Cancellation,
         progress: &mut dyn FnMut(Progress),
     ) -> Result<OperationOutcome, EngineError> {
+        let staged = match operation {
+            Operation::Install(id) => crate::local_deb::stage(id, cancel)?,
+            _ => None,
+        };
         let action = match operation {
             Operation::Refresh { backend } if backend == "apt" => AptAction::Refresh,
-            Operation::Install(id) => AptAction::Install(self.target(id)?),
+            Operation::Install(id) => match staged.as_ref() {
+                Some(archive) => AptAction::InstallLocal(archive.path().to_owned()),
+                None => AptAction::Install(self.target(id)?),
+            },
             Operation::Remove(id) => AptAction::Remove(self.target(id)?),
             Operation::Upgrade(id) => AptAction::Upgrade(self.target(id)?),
             Operation::UpgradeAll { backend } if backend == "apt" => AptAction::UpgradeAll,

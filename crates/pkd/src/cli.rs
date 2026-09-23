@@ -1,7 +1,9 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use pkgdeck_core::{
+    activity::{History, Outcome, State},
     engine::*,
-    host::Authorization,
+    host::{Authorization, Host},
+    inspection::{audit, inspect_native, native_leftovers},
     manifest::{self, PreviewStatus},
     package::*,
     process::{Cancellation, ExecutionError},
@@ -78,6 +80,10 @@ pub enum Commands {
     Search { query: String },
     /// Show details for one exact package identifier.
     Info { name: String },
+    /// Resolve a command in PATH and show manager-reported ownership without running it.
+    Inspect { command: String },
+    /// Show installed copies and manager-reported residual configuration.
+    Audit,
     /// List installed packages.
     List,
     /// Export installed software or preview a portable inventory.
@@ -314,6 +320,31 @@ pub fn dispatch(
                 Err(e) => failure(e),
             }
         }
+        Commands::Inspect { command } => {
+            let mut inventory = engine.installed(cancel);
+            inventory
+                .packages
+                .retain(|p| args.scope.is_none_or(|scope| scope.native() == p.id.scope));
+            let code = if inventory.failures.is_empty() { 0 } else { 8 };
+            return match inspect_native(&Host::current(), command, &inventory.packages, cancel) {
+                Ok(report) => (
+                    json!({"inspection": report, "failures": inventory.failures}),
+                    code,
+                ),
+                Err(error) => failure(error.into()),
+            };
+        }
+        Commands::Audit => {
+            let mut inventory = engine.installed(cancel);
+            inventory
+                .packages
+                .retain(|p| args.scope.is_none_or(|scope| scope.native() == p.id.scope));
+            let code = if inventory.failures.is_empty() { 0 } else { 8 };
+            return (
+                json!({"audit": audit(&inventory.packages, native_leftovers(&Host::current())), "failures": inventory.failures}),
+                code,
+            );
+        }
         Commands::Doctor => {
             return (
                 json!({"error": "doctor is a text-only diagnostic; omit --json"}),
@@ -485,7 +516,22 @@ pub fn dispatch(
     if !operations.is_empty() && !args.yes && !confirm(&operations) {
         return (json!({"error": "confirmation_declined"}), 7);
     }
+    let history = History::default_store();
+    let activity_id = history
+        .as_ref()
+        .and_then(|store| store.begin("cli", operations.clone(), State::Running).ok());
     let results = engine.execute_batch(&operations, cancel, events);
+    if let (Some(store), Some(id)) = (&history, activity_id) {
+        let outcomes = results
+            .iter()
+            .map(|result| match result {
+                Ok(_) => Outcome::Finished,
+                Err(EngineError::Cancelled) => Outcome::Cancelled,
+                Err(_) => Outcome::Failed,
+            })
+            .collect();
+        let _ = store.finish(id, outcomes);
+    }
     let failed = results.iter().filter(|r| r.is_err()).count();
     let code = if failed == 0 {
         0
@@ -1197,6 +1243,27 @@ mod tests {
             })
             .unwrap();
         assert_ne!(call(&mut failed_write, &["clean", "--all"], true).1, 0);
+    }
+    #[test]
+    fn inspection_commands_are_read_only_and_preserve_report_shapes() {
+        let mut engine = engine();
+        let (inspected, code) = call(&mut engine, &["inspect", "pkgdeck-fixture-missing"], false);
+        assert_eq!(code, 0);
+        assert_eq!(
+            inspected["inspection"]["command"],
+            "pkgdeck-fixture-missing"
+        );
+        assert!(inspected["inspection"]["resolved"].is_null());
+        let (invalid, code) = call(&mut engine, &["inspect", "../outside"], false);
+        assert_eq!(code, 1);
+        assert!(invalid["error"].is_object());
+        let (audited, code) = call(&mut engine, &["audit"], false);
+        assert_eq!(code, 0);
+        assert!(audited["audit"]["installed_copies"].is_array());
+        assert_eq!(
+            audited["audit"]["installed_copies"][0]["package"]["backend"],
+            "apt"
+        );
     }
     #[test]
     fn apt_removals_require_separate_cli_consent() {

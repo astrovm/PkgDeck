@@ -6,9 +6,14 @@ pub const FOUNDATION_MESSAGE: &str =
     "Package management is not available yet. This build contains the application foundation.";
 
 pub mod host;
+pub mod inspection;
 pub mod process;
 
+pub mod activity;
+pub mod background;
 pub mod engine;
+pub mod flatpak_ref;
+pub mod local_deb;
 pub mod manifest;
 pub mod package;
 

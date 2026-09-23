@@ -1,15 +1,18 @@
 use crate::{
     engine::*,
+    host::Host,
     package::*,
     process::{self, Cancellation, ExecutionError, Limits},
 };
 use sha2::{Digest, Sha256};
 use std::{
     fs,
-    io::{Read, Seek, SeekFrom},
-    os::unix::fs::MetadataExt,
+    io::{Read, Seek, SeekFrom, Write},
+    os::unix::fs::{MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
 };
+
+const MAX_IMPORT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 const CAPABILITIES: &[Capability] = &[
     Capability::Search,
@@ -32,12 +35,15 @@ pub struct AppImage {
 
 impl AppImage {
     pub fn native() -> Self {
-        let data = std::env::var_os("XDG_DATA_HOME")
+        let host = Host::current();
+        let data = host
+            .var("XDG_DATA_HOME")
             .map(PathBuf::from)
             .or_else(|| {
-                std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share"))
+                host.var("HOME")
+                    .map(|home| PathBuf::from(home).join(".local/share"))
             })
-            .unwrap_or_else(|| PathBuf::from("/tmp"));
+            .unwrap_or_else(|| PathBuf::from("/nonexistent/pkgdeck-host-data-unavailable"));
         Self {
             root: data.join("pkgdeck/appimages"),
             applications: data.join("applications"),
@@ -70,22 +76,191 @@ impl AppImage {
         }
     }
     fn type2(path: &Path) -> Result<String, EngineError> {
+        let metadata = fs::symlink_metadata(path).map_err(|e| Self::invalid(e.to_string()))?;
+        if !metadata.file_type().is_file() || metadata.len() > MAX_IMPORT_BYTES {
+            return Err(Self::invalid(
+                "expected a regular AppImage no larger than 2 GiB",
+            ));
+        }
         let mut file = fs::File::open(path).map_err(|e| Self::invalid(e.to_string()))?;
-        let mut header = [0; 20];
+        let mut header = [0; 64];
         file.read_exact(&mut header)
             .map_err(|e| Self::invalid(e.to_string()))?;
         if &header[..4] != b"\x7fELF" || &header[8..11] != b"AI\x02" {
             return Err(Self::invalid("expected a Type 2 AppImage ELF file"));
         }
+        if header[4] != 2
+            || header[5] != 1
+            || header[6] != 1
+            || u32::from_le_bytes(header[20..24].try_into().unwrap()) != 1
+            || u16::from_le_bytes(header[52..54].try_into().unwrap()) != 64
+        {
+            return Err(Self::invalid("malformed or unsupported ELF header"));
+        }
         let arch = match u16::from_le_bytes([header[18], header[19]]) {
             62 => "x86_64",
             183 => "aarch64",
-            _ => "unknown",
+            _ => return Err(Self::invalid("unsupported AppImage architecture")),
         };
-        // Type 2 magic is at offset 8; this seek makes short/truncated files fail above.
-        file.seek(SeekFrom::Start(0))
-            .map_err(|e| Self::invalid(e.to_string()))?;
         Ok(arch.into())
+    }
+    fn digest(path: &Path) -> Result<String, EngineError> {
+        let mut file = fs::File::open(path).map_err(|e| Self::invalid(e.to_string()))?;
+        let mut hash = Sha256::new();
+        let mut buffer = [0_u8; 64 * 1024];
+        let mut total = 0_u64;
+        loop {
+            let count = file
+                .read(&mut buffer)
+                .map_err(|e| Self::invalid(e.to_string()))?;
+            if count == 0 {
+                break;
+            }
+            total += count as u64;
+            if total > MAX_IMPORT_BYTES {
+                return Err(Self::invalid("AppImage exceeds 2 GiB"));
+            }
+            hash.update(&buffer[..count]);
+        }
+        Ok(format!("{:x}", hash.finalize()))
+    }
+    fn copy_bounded(
+        input: &mut impl Read,
+        output: &mut impl Write,
+        cancel: &Cancellation,
+    ) -> Result<(), EngineError> {
+        let mut copied = 0_u64;
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            if cancel.requested() {
+                return Err(EngineError::Cancelled);
+            }
+            let count = input
+                .read(&mut buffer)
+                .map_err(|e| Self::invalid(e.to_string()))?;
+            if count == 0 {
+                break;
+            }
+            copied += count as u64;
+            if copied > MAX_IMPORT_BYTES {
+                return Err(Self::invalid("AppImage exceeds 2 GiB"));
+            }
+            output
+                .write_all(&buffer[..count])
+                .map_err(|e| Self::invalid(e.to_string()))?;
+        }
+        Ok(())
+    }
+    fn has_update_metadata(path: &Path) -> Result<bool, EngineError> {
+        let mut file = fs::File::open(path).map_err(|e| Self::invalid(e.to_string()))?;
+        let len = file
+            .metadata()
+            .map_err(|e| Self::invalid(e.to_string()))?
+            .len();
+        let mut header = [0_u8; 64];
+        file.read_exact(&mut header)
+            .map_err(|e| Self::invalid(e.to_string()))?;
+        let offset = u64::from_le_bytes(header[40..48].try_into().unwrap());
+        let entry_size = u16::from_le_bytes(header[58..60].try_into().unwrap()) as u64;
+        let count = u16::from_le_bytes(header[60..62].try_into().unwrap()) as u64;
+        let names_index = u16::from_le_bytes(header[62..64].try_into().unwrap()) as u64;
+        if offset == 0 && count == 0 {
+            return Ok(false);
+        }
+        if entry_size != 64
+            || count == 0
+            || count > 4096
+            || names_index >= count
+            || offset
+                .checked_add(entry_size * count)
+                .is_none_or(|end| end > len)
+        {
+            return Err(Self::invalid("invalid ELF section table"));
+        }
+        file.seek(SeekFrom::Start(offset))
+            .map_err(|e| Self::invalid(e.to_string()))?;
+        let mut entries = vec![0_u8; (entry_size * count) as usize];
+        file.read_exact(&mut entries)
+            .map_err(|e| Self::invalid(e.to_string()))?;
+        let names = &entries[(names_index * 64) as usize..((names_index + 1) * 64) as usize];
+        let names_offset = u64::from_le_bytes(names[24..32].try_into().unwrap());
+        let names_size = u64::from_le_bytes(names[32..40].try_into().unwrap());
+        if names_size > 1024 * 1024
+            || names_offset
+                .checked_add(names_size)
+                .is_none_or(|end| end > len)
+        {
+            return Err(Self::invalid("invalid ELF section names"));
+        }
+        file.seek(SeekFrom::Start(names_offset))
+            .map_err(|e| Self::invalid(e.to_string()))?;
+        let mut strings = vec![0_u8; names_size as usize];
+        file.read_exact(&mut strings)
+            .map_err(|e| Self::invalid(e.to_string()))?;
+        for entry in entries.as_chunks::<64>().0 {
+            let index = u32::from_le_bytes(entry[..4].try_into().unwrap()) as usize;
+            if strings
+                .get(index..)
+                .is_some_and(|suffix| suffix.starts_with(b".upd_info\0"))
+            {
+                let data_offset = u64::from_le_bytes(entry[24..32].try_into().unwrap());
+                let data_size = u64::from_le_bytes(entry[32..40].try_into().unwrap());
+                if data_size == 0
+                    || data_size > 4096
+                    || data_offset
+                        .checked_add(data_size)
+                        .is_none_or(|end| end > len)
+                {
+                    return Err(Self::invalid("invalid AppImage update metadata"));
+                }
+                file.seek(SeekFrom::Start(data_offset))
+                    .map_err(|e| Self::invalid(e.to_string()))?;
+                let mut data = vec![0_u8; data_size as usize];
+                file.read_exact(&mut data)
+                    .map_err(|e| Self::invalid(e.to_string()))?;
+                return Ok(data.iter().any(|byte| !matches!(byte, 0 | b' ' | b'\n')));
+            }
+        }
+        Ok(false)
+    }
+    fn desktop_entry(destination: &Path, display_name: &str) -> String {
+        let escaped = destination
+            .display()
+            .to_string()
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('%', "%%");
+        let name = display_name.replace(['\n', '\r'], " ");
+        format!("[Desktop Entry]\nType=Application\nName={name}\nExec=\"{escaped}\" %U\nTryExec={escaped}\nTerminal=false\nCategories=Utility;\n")
+    }
+    fn existing_import(
+        destination: &Path,
+        entry: &Path,
+        digest: &str,
+    ) -> Result<bool, EngineError> {
+        if destination.symlink_metadata().is_err() && entry.symlink_metadata().is_err() {
+            return Ok(false);
+        }
+        let identical = destination
+            .symlink_metadata()
+            .is_ok_and(|meta| meta.file_type().is_file())
+            && entry
+                .symlink_metadata()
+                .is_ok_and(|meta| meta.file_type().is_file())
+            && Self::digest(destination).ok().as_deref() == Some(digest)
+            && fs::read_to_string(entry).ok().is_some_and(|desktop| {
+                Self::desktop_entry(destination, "Imported AppImage")
+                    .lines()
+                    .find(|line| line.starts_with("Exec="))
+                    .is_some_and(|line| desktop.lines().any(|existing| existing == line))
+            });
+        if identical {
+            Ok(true)
+        } else {
+            Err(Self::invalid(
+                "AppImage destination conflicts with an existing installation",
+            ))
+        }
     }
     fn managed_name(name: &str) -> bool {
         name.len() == 81
@@ -116,7 +291,7 @@ impl AppImage {
             summary: format!("PkgDeck-managed local Type 2 AppImage ({digest})"),
             installed_version: Some(digest.into()),
             candidate_version: Some(digest.into()),
-            update: if self.updater().is_ok() {
+            update: if Self::has_update_metadata(&path)? && self.updater().is_ok() {
                 UpdateAvailability::Available
             } else {
                 UpdateAvailability::Current
@@ -231,7 +406,9 @@ impl AppImage {
                         summary: "Externally managed local Type 2 AppImage".into(),
                         installed_version: Some(version.clone()),
                         candidate_version: Some(version),
-                        update: if self.updater().is_ok() {
+                        update: if Self::has_update_metadata(&canonical).ok()?
+                            && self.updater().is_ok()
+                        {
                             UpdateAvailability::Available
                         } else {
                             UpdateAvailability::Current
@@ -259,7 +436,10 @@ impl AppImage {
             .map(|(package, _)| package)
             .collect())
     }
-    fn import(&self, id: &PackageId) -> Result<(), EngineError> {
+    fn import(&self, id: &PackageId, cancel: &Cancellation) -> Result<(), EngineError> {
+        if cancel.requested() {
+            return Err(EngineError::Cancelled);
+        }
         if id.backend != "appimage"
             || id.scope
                 != (Scope::Environment {
@@ -276,19 +456,84 @@ impl AppImage {
         if architecture != id.architecture {
             return Err(Self::invalid("AppImage architecture changed during import"));
         }
-        let bytes = fs::read(&source).map_err(|e| Self::invalid(e.to_string()))?;
-        let digest = format!("{:x}", Sha256::digest(&bytes));
+        let digest = Self::digest(&source)?;
+        if cancel.requested() {
+            return Err(EngineError::Cancelled);
+        }
+        if id.reference.as_deref() != Some(digest.as_str()) {
+            return Err(Self::invalid("AppImage changed or was not previewed"));
+        }
         let name = format!("pkgdeck-{digest}.AppImage");
         fs::create_dir_all(&self.root).map_err(|e| Self::invalid(e.to_string()))?;
         let destination = self.root.join(&name);
-        if !destination.exists() {
-            fs::copy(&source, &destination).map_err(|e| Self::invalid(e.to_string()))?;
-        }
         fs::create_dir_all(&self.applications).map_err(|e| Self::invalid(e.to_string()))?;
         let entry = self
             .applications
             .join(format!("pkgdeck-{}.desktop", &name[8..72]));
-        fs::write(entry, format!("[Desktop Entry]\nType=Application\nName=Imported AppImage\nExec=\"{}\" %U\nTerminal=false\n", destination.display())).map_err(|e| Self::invalid(e.to_string()))
+        if Self::existing_import(&destination, &entry, &digest)? {
+            return Ok(());
+        }
+        let temporary = self.root.join(format!(
+            ".pkgdeck-import-{}-{}-{digest}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let result = (|| {
+            let mut input = fs::File::open(&source).map_err(|e| Self::invalid(e.to_string()))?;
+            let mut output = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)
+                .map_err(|e| Self::invalid(e.to_string()))?;
+            Self::copy_bounded(&mut input, &mut output, cancel)?;
+            output.flush().map_err(|e| Self::invalid(e.to_string()))?;
+            output
+                .sync_all()
+                .map_err(|e| Self::invalid(e.to_string()))?;
+            drop(output);
+            if Self::digest(&temporary)? != digest {
+                return Err(Self::invalid("AppImage changed during import"));
+            }
+            if cancel.requested() {
+                return Err(EngineError::Cancelled);
+            }
+            fs::set_permissions(&temporary, fs::Permissions::from_mode(0o755))
+                .map_err(|e| Self::invalid(e.to_string()))?;
+            fs::hard_link(&temporary, &destination).map_err(|e| Self::invalid(e.to_string()))?;
+            let display_name = source
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("Imported AppImage");
+            let desktop = Self::desktop_entry(&destination, display_name);
+            let file = match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&entry)
+            {
+                Ok(file) => file,
+                Err(error) => {
+                    let _ = fs::remove_file(&destination);
+                    return Err(Self::invalid(format!("desktop entry failed: {error}")));
+                }
+            };
+            match (|| {
+                let mut file = file;
+                file.write_all(desktop.as_bytes())?;
+                file.sync_all()
+            })() {
+                Ok(()) => Ok(()),
+                Err(error) => {
+                    let _ = fs::remove_file(&entry);
+                    let _ = fs::remove_file(&destination);
+                    Err(Self::invalid(format!("desktop entry failed: {error}")))
+                }
+            }
+        })();
+        let _ = fs::remove_file(&temporary);
+        result
     }
     fn updater(&self) -> Result<PathBuf, EngineError> {
         #[cfg(test)]
@@ -355,10 +600,22 @@ impl Backend for AppImage {
             Ok(Availability::Available)
         }
     }
-    fn search(&mut self, query: &str, _: &Cancellation) -> Result<Vec<Package>, EngineError> {
+    fn search(&mut self, query: &str, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
         let source = PathBuf::from(query);
-        if source.is_absolute() && source.is_file() {
+        if source.is_absolute() && source.symlink_metadata().is_ok() {
             let architecture = Self::type2(&source)?;
+            let has_updates = Self::has_update_metadata(&source)?;
+            let digest = Self::digest(&source)?;
+            if cancel.requested() {
+                return Err(EngineError::Cancelled);
+            }
+            let destination = self.root.join(format!("pkgdeck-{digest}.AppImage"));
+            let desktop = self.applications.join(format!("pkgdeck-{digest}.desktop"));
+            let already_imported = Self::existing_import(&destination, &desktop, &digest)?;
+            let display_name = source
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or("Imported AppImage");
             return Ok(vec![Package {
                 id: PackageId {
                     backend: "appimage".into(),
@@ -368,14 +625,14 @@ impl Backend for AppImage {
                         path: self.root.clone(),
                     },
                     remote: None,
-                    reference: None,
+                    reference: Some(digest),
                 },
                 display_name: source
                     .file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or("AppImage")
                     .into(),
-                summary: "Import local Type 2 AppImage into PkgDeck-managed storage".into(),
+                summary: format!("Original: {} (kept)\nManaged file: {} (executable, mode 0755)\nDesktop entry: {}\nDesktop name: {}\nDesktop command: {} %U\nUpdate metadata: {}\n{}", source.display(), destination.display(), desktop.display(), display_name, destination.display(), if has_updates { "available" } else { "unavailable" }, if already_imported { "Already imported; no files will be overwritten." } else { "A managed copy and desktop entry will be created." }),
                 installed_version: None,
                 candidate_version: None,
                 update: UpdateAvailability::Unknown,
@@ -416,7 +673,7 @@ impl Backend for AppImage {
                 progress(Progress::Message(
                     "Importing AppImage without executing it.".into(),
                 ));
-                self.import(id)?;
+                self.import(id, cancel)?;
             }
             Operation::Remove(id)
                 if id.backend == "appimage"
@@ -470,10 +727,15 @@ mod tests {
     use super::*;
 
     fn type2(path: &Path) {
-        let mut header = [0_u8; 20];
+        let mut header = [0_u8; 64];
         header[..4].copy_from_slice(b"\x7fELF");
+        header[4] = 2;
+        header[5] = 1;
+        header[6] = 1;
         header[8..11].copy_from_slice(b"AI\x02");
         header[18..20].copy_from_slice(&62_u16.to_le_bytes());
+        header[20..24].copy_from_slice(&1_u32.to_le_bytes());
+        header[52..54].copy_from_slice(&64_u16.to_le_bytes());
         fs::write(path, header).unwrap();
     }
 
@@ -505,11 +767,28 @@ mod tests {
         let applications = base.join("data/applications");
         let mut backend = AppImage::new(root.clone(), applications.clone(), 1000);
         let cancel = Cancellation::default();
+        let cancelled_preview = Cancellation::default();
+        cancelled_preview.cancel();
+        assert_eq!(
+            backend.search(source.to_str().unwrap(), &cancelled_preview),
+            Err(EngineError::Cancelled)
+        );
         let import = backend
             .search(source.to_str().unwrap(), &cancel)
             .unwrap()
             .remove(0);
         assert!(backend.details(&import.id, &cancel).is_err());
+        let cancelled = Cancellation::default();
+        cancelled.cancel();
+        assert_eq!(
+            backend.execute(
+                &Operation::Install(import.id.clone()),
+                &cancelled,
+                &mut |_| {}
+            ),
+            Err(EngineError::Cancelled)
+        );
+        assert!(!root.exists());
         backend
             .execute(&Operation::Install(import.id), &cancel, &mut |_| {})
             .unwrap();
@@ -549,6 +828,119 @@ mod tests {
         assert!(backend
             .search(source.to_str().unwrap(), &Cancellation::default())
             .is_err());
+        fs::remove_dir_all(base).unwrap();
+    }
+    #[test]
+    fn import_rejects_symlinks_and_existing_destination_conflicts() {
+        let base =
+            std::env::temp_dir().join(format!("pkgdeck-appimage-conflict-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let source = base.join("Sample App.AppImage");
+        type2(&source);
+        let alias = base.join("alias.AppImage");
+        std::os::unix::fs::symlink(&source, &alias).unwrap();
+        let root = base.join("owned");
+        let mut backend = AppImage::new(root.clone(), base.join("applications"), 1000);
+        let cancel = Cancellation::default();
+        assert!(backend.search(alias.to_str().unwrap(), &cancel).is_err());
+        let candidate = backend
+            .search(source.to_str().unwrap(), &cancel)
+            .unwrap()
+            .remove(0);
+        let digest = candidate.id.reference.clone().unwrap();
+        fs::create_dir_all(&root).unwrap();
+        let target = root.join(format!("pkgdeck-{digest}.AppImage"));
+        fs::write(&target, b"foreign file").unwrap();
+        assert!(backend
+            .execute(&Operation::Install(candidate.id), &cancel, &mut |_| {})
+            .is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"foreign file");
+        assert!(source.exists());
+        fs::remove_dir_all(base).unwrap();
+    }
+    #[test]
+    fn interrupted_copy_stops_before_publishing_more_bytes() {
+        struct CancelAfterRead(Cancellation, bool);
+        impl Read for CancelAfterRead {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                if self.1 {
+                    return Ok(0);
+                }
+                self.1 = true;
+                buffer[..4].copy_from_slice(b"data");
+                self.0.cancel();
+                Ok(4)
+            }
+        }
+        let cancel = Cancellation::default();
+        let mut source = CancelAfterRead(cancel.clone(), false);
+        let mut output = Vec::new();
+        assert_eq!(
+            AppImage::copy_bounded(&mut source, &mut output, &cancel),
+            Err(EngineError::Cancelled)
+        );
+        assert_eq!(output, b"data");
+    }
+    #[test]
+    fn unavailable_bundled_updater_is_reported() {
+        let backend = AppImage::new(
+            PathBuf::from("/nonexistent/pkgdeck-owned"),
+            PathBuf::from("/nonexistent/pkgdeck-applications"),
+            rustix::process::getuid().as_raw(),
+        );
+        let error = backend.updater().unwrap_err().to_string();
+        assert!(error.contains("bundled AppImage updater is unavailable"));
+    }
+    #[test]
+    fn bounded_elf_sections_report_update_metadata() {
+        let base = std::env::temp_dir().join(format!(
+            "pkgdeck-appimage-update-info-{}",
+            std::process::id()
+        ));
+        let _ = fs::create_dir_all(&base);
+        let source = base.join("with-update.AppImage");
+        type2(&source);
+        let mut bytes = fs::read(&source).unwrap();
+        bytes[40..48].copy_from_slice(&64_u64.to_le_bytes());
+        bytes[58..60].copy_from_slice(&64_u16.to_le_bytes());
+        bytes[60..62].copy_from_slice(&3_u16.to_le_bytes());
+        bytes[62..64].copy_from_slice(&1_u16.to_le_bytes());
+        bytes.resize(64 + 3 * 64, 0);
+        let names = b"\0.shstrtab\0.upd_info\0";
+        let names_offset = bytes.len() as u64;
+        bytes[64 + 64 + 24..64 + 64 + 32].copy_from_slice(&names_offset.to_le_bytes());
+        bytes[64 + 64 + 32..64 + 64 + 40].copy_from_slice(&(names.len() as u64).to_le_bytes());
+        let update_offset = names_offset + names.len() as u64;
+        bytes[64 + 128..64 + 132].copy_from_slice(&11_u32.to_le_bytes());
+        bytes[64 + 128 + 24..64 + 128 + 32].copy_from_slice(&update_offset.to_le_bytes());
+        bytes[64 + 128 + 32..64 + 128 + 40].copy_from_slice(&4_u64.to_le_bytes());
+        bytes.extend_from_slice(names);
+        bytes.extend_from_slice(b"zsyn");
+        fs::write(&source, &bytes).unwrap();
+        assert!(AppImage::has_update_metadata(&source).unwrap());
+        let mut backend = AppImage::new(base.join("owned"), base.join("apps"), 1000);
+        assert!(backend
+            .search(source.to_str().unwrap(), &Cancellation::default())
+            .unwrap()[0]
+            .summary
+            .contains("Update metadata: available"));
+        let mut invalid_table = bytes.clone();
+        invalid_table[58..60].copy_from_slice(&32_u16.to_le_bytes());
+        fs::write(&source, invalid_table).unwrap();
+        assert!(AppImage::has_update_metadata(&source).is_err());
+        let mut invalid_names = bytes.clone();
+        invalid_names[64 + 64 + 32..64 + 64 + 40]
+            .copy_from_slice(&(1024_u64 * 1024 + 1).to_le_bytes());
+        fs::write(&source, invalid_names).unwrap();
+        assert!(AppImage::has_update_metadata(&source).is_err());
+        let mut invalid_data = bytes.clone();
+        invalid_data[64 + 128 + 32..64 + 128 + 40].copy_from_slice(&5000_u64.to_le_bytes());
+        fs::write(&source, invalid_data).unwrap();
+        assert!(AppImage::has_update_metadata(&source).is_err());
+        bytes[64 + 128..64 + 132].copy_from_slice(&0_u32.to_le_bytes());
+        fs::write(&source, bytes).unwrap();
+        assert!(!AppImage::has_update_metadata(&source).unwrap());
         fs::remove_dir_all(base).unwrap();
     }
 
@@ -759,6 +1151,8 @@ mod tests {
         backend
             .execute(&Operation::Install(candidate.id), &cancel, &mut |_| {})
             .unwrap();
+        let duplicate = backend.search(source.to_str().unwrap(), &cancel).unwrap();
+        assert!(duplicate[0].summary.contains("Already imported"));
         let installed = backend.installed(&cancel).unwrap();
         assert_eq!(installed.len(), 1);
         assert_eq!(
@@ -787,6 +1181,11 @@ mod tests {
             .search(source.to_str().unwrap(), &cancel)
             .unwrap()
             .remove(0);
+        let mut unreviewed = candidate.id.clone();
+        unreviewed.reference = None;
+        assert!(backend
+            .execute(&Operation::Install(unreviewed), &cancel, &mut |_| {})
+            .is_err());
         candidate.id.architecture = "aarch64".into();
         assert!(backend
             .execute(&Operation::Install(candidate.id), &cancel, &mut |_| {})
@@ -821,12 +1220,7 @@ mod tests {
         fs::write(&source, bytes).unwrap();
         let mut backend = AppImage::new(base.join("owned"), base.join("applications"), 1000);
         let cancel = Cancellation::default();
-        assert_eq!(
-            backend.search(source.to_str().unwrap(), &cancel).unwrap()[0]
-                .id
-                .architecture,
-            "unknown"
-        );
+        assert!(backend.search(source.to_str().unwrap(), &cancel).is_err());
         assert!(backend
             .search("relative.AppImage", &cancel)
             .unwrap()

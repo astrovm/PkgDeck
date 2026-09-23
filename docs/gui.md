@@ -12,9 +12,28 @@ architecture, and installation scope. For Flatpak, choose the User or System row
 to target that installation.
 
 The row button installs, removes, or updates that exact package. Click the row for
-its description, native identifier, and available screenshots. Details are optional
+its Overview, Available sources, Installed copies, and Technical details. The
+sections show source and scope explicitly and link known installed copies by
+their exact identity. Publisher, license, homepage, and screenshots appear only
+when the selected source supplies reliable metadata. Details are optional
 and close with the × button. App names, icons, and screenshots depend on source
 metadata; packages without desktop metadata keep their native names.
+
+## Open installation files
+
+Choose **Open…**, drop one file onto the window, or pass a path or URL to
+`pkgdeck`. Supported inputs are local `.AppImage`, `.deb`, and `.flatpakref`
+files, plus `flatpak+https://…flatpakref` links. A second launch forwards its
+input to an already open PkgDeck window. Opening shows a confirmation preview;
+it never installs or launches a file by itself.
+
+AppImages are inspected as Type 2 ELF files without execution. The preview
+shows the managed destination, executable copy, desktop entry, and whether
+embedded update metadata is present. Import keeps the original file. Local
+Debian packages show APT's simulated package changes before system
+authorization. Flatpak references show the exact app, user scope, repository,
+signing key presence, and any runtime repository named in the reference.
+Flatpak may discover additional runtimes during installation.
 
 Installed supports filtering and a **Duplicate installs** view. AppStream identity
 and upstream homepage metadata associate related installations; grouping does not
@@ -25,6 +44,13 @@ a portable JSON inventory. In Settings, **Preview inventory** checks one of thes
 files against this machine. It shows installed, installable, unavailable,
 unsupported, and ambiguous entries, with repository or source choices where
 needed. Preview makes no package or repository changes.
+
+Use **Inspect & audit** in Installed to resolve a command through host `PATH`
+without running it, or review known duplicate copies and manager-reported
+residual configuration. Command results show other candidates, symlink targets,
+and native package database ownership; unknown or ambiguous ownership stays
+explicit. Audit paths come only from dpkg's residual-config records. There is no
+home-directory scan or deletion flow.
 
 Click column headings to sort; drag the name and version dividers to resize.
 Use the source picker to filter the current page. Enable managers separately in

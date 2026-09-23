@@ -1,23 +1,71 @@
 //! Thin Qt facade: native work runs on a worker; Qt properties change only on the GUI thread.
 use cxx_qt::CxxQtType;
 use cxx_qt_lib::{QString, QUrl};
+use pkgdeck_core::activity::{History, Outcome, State};
+use pkgdeck_core::backends::AppImage;
+use pkgdeck_core::background::{self, Schedule};
 use pkgdeck_core::repositories::{self, Action as RepositoryAction};
 use pkgdeck_core::{
     engine::*,
-    host::Authorization,
-    manifest,
+    host::{Authorization, Host},
+    inspection, manifest,
     package::*,
     process::{Cancellation, ExecutionError},
 };
 use serde_json::{json, Value};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     path::PathBuf,
     pin::Pin,
     sync::mpsc,
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+
+fn local_input_path(input: &str) -> Result<PathBuf, String> {
+    let input = input.trim();
+    let path = if let Some(encoded) = input.strip_prefix("file://") {
+        let encoded = encoded
+            .strip_prefix("localhost/")
+            .map_or(encoded, |rest| rest);
+        let encoded = if input.starts_with("file://localhost/") {
+            format!("/{encoded}")
+        } else {
+            encoded.to_owned()
+        };
+        if !encoded.starts_with('/') {
+            return Err("Only local file URLs are supported.".into());
+        }
+        let mut bytes = Vec::with_capacity(encoded.len());
+        let mut chars = encoded.as_bytes().iter().copied();
+        while let Some(byte) = chars.next() {
+            if byte == b'%' {
+                let high = chars.next().and_then(|value| (value as char).to_digit(16));
+                let low = chars.next().and_then(|value| (value as char).to_digit(16));
+                let (Some(high), Some(low)) = (high, low) else {
+                    return Err("Invalid file URL encoding.".into());
+                };
+                let decoded = ((high << 4) | low) as u8;
+                if decoded == 0 {
+                    return Err("File URLs cannot contain NUL bytes.".into());
+                }
+                bytes.push(decoded);
+            } else {
+                bytes.push(byte);
+            }
+        }
+        String::from_utf8(bytes).map_err(|_| "File URL is not UTF-8.".to_owned())?
+    } else if input.contains("://") {
+        return Err("Unsupported link. Open a local package file or a flatpak+https link.".into());
+    } else {
+        input.to_owned()
+    };
+    let path = PathBuf::from(path);
+    if !path.is_absolute() {
+        return Err("Choose an absolute local file path.".into());
+    }
+    Ok(path)
+}
 
 // CXX-Qt generates the FFI boundary; application code below uses safe Rust.
 #[cxx_qt::bridge]
@@ -36,11 +84,14 @@ pub mod ffi {
         #[qml_element]
         #[qproperty(QString, rows)]
         #[qproperty(QString, details)]
+        #[qproperty(QString, inspection)]
         #[qproperty(QString, status)]
         #[qproperty(QString, repositories)]
         #[qproperty(QString, source_catalog)]
         #[qproperty(QString, report_state)]
         #[qproperty(QString, manifest_preview)]
+        #[qproperty(QString, activity)]
+        #[qproperty(QString, background_state)]
         #[qproperty(QString, confirmation)]
         #[qproperty(QString, confirmation_data)]
         #[qproperty(QString, version)]
@@ -60,6 +111,12 @@ pub mod ffi {
         #[qinvokable]
         fn select(self: Pin<&mut PackageController>, index: i32);
         #[qinvokable]
+        #[cxx_name = "inspectCommand"]
+        fn inspect_command(self: Pin<&mut PackageController>, command: QString);
+        #[qinvokable]
+        #[cxx_name = "auditInstalled"]
+        fn audit_installed(self: Pin<&mut PackageController>);
+        #[qinvokable]
         #[cxx_name = "retrySource"]
         fn retry_source(
             self: Pin<&mut PackageController>,
@@ -69,6 +126,9 @@ pub mod ffi {
         );
         #[qinvokable]
         fn propose(self: Pin<&mut PackageController>, action: QString, index: i32);
+        #[qinvokable]
+        #[cxx_name = "openInput"]
+        fn open_input(self: Pin<&mut PackageController>, input: QString);
         #[qinvokable]
         #[cxx_name = "loadRepositories"]
         fn load_repositories(self: Pin<&mut PackageController>);
@@ -90,16 +150,39 @@ pub mod ffi {
         #[qinvokable]
         #[cxx_name = "previewInventory"]
         fn preview_inventory(self: Pin<&mut PackageController>, url: QUrl);
+        #[qinvokable]
+        #[cxx_name = "refreshActivity"]
+        fn refresh_activity(self: Pin<&mut PackageController>);
+        #[qinvokable]
+        #[cxx_name = "cancelQueued"]
+        fn cancel_queued(self: Pin<&mut PackageController>);
+        #[qinvokable]
+        #[cxx_name = "checkUpdates"]
+        fn check_updates(
+            self: Pin<&mut PackageController>,
+            sources: QString,
+            enabled: bool,
+            offline: bool,
+            metered: bool,
+            force: bool,
+        );
+        #[qinvokable]
+        #[cxx_name = "setAutostart"]
+        fn set_autostart(self: Pin<&mut PackageController>, enabled: bool) -> bool;
     }
 }
 
 #[derive(Clone)]
 enum Job {
+    OpenInput(String),
     Repositories(Option<RepositoryAction>),
     Load(String, String),
+    BackgroundUpdates(Vec<String>),
     RetrySource(String, String, String),
     Details(PackageId),
+    Inspection(Option<String>),
     PlanOperation(Operation),
+    PlanCleanAll(Vec<Operation>),
     Write(Operation, Option<Box<TransactionPlan>>),
     PlanUpgrade(Vec<Operation>, usize),
     UpgradeAll(Vec<Operation>, Option<AptUpgradePlan>),
@@ -117,22 +200,38 @@ impl Job {
                 | Self::Repositories(Some(_))
         )
     }
+    fn operations(&self) -> Vec<Operation> {
+        match self {
+            Self::Write(operation, _) => vec![operation.clone()],
+            Self::UpgradeAll(operations, _) | Self::CleanAll(operations) => operations.clone(),
+            _ => vec![],
+        }
+    }
+}
+struct Confirmed {
+    job: Job,
+    activity_id: Option<u64>,
+    cleanup_preview: Vec<CleanupItem>,
 }
 enum Payload {
+    OpenPackage(Box<Package>),
     Repositories(repositories::Report),
     Packages(PackageReport),
+    BackgroundUpdates(PackageReport),
     RetryPackages(String, PackageReport),
     RetryCleanup(String, CleanupReport),
     RetrySources(String, Vec<Source>),
     Sources(Vec<Source>),
     Details(Box<PackageDetails>),
+    Inspection(Value),
     Written(OperationOutcome),
-    Batch(String),
+    Batch(String, Vec<Outcome>),
     Cleanup(CleanupReport),
     UpgradePreview(Vec<Operation>, usize, Option<AptUpgradePlan>),
     OperationPreview(Operation, Option<Box<TransactionPlan>>),
     ManifestExport(usize),
     ManifestPreview(manifest::Preview),
+    CleanPreview(Vec<Operation>, Vec<CleanupItem>),
 }
 enum Reply {
     Progress(String),
@@ -141,6 +240,35 @@ enum Reply {
     DetailsPreview(Box<PackageDetails>),
     Done(Result<Payload, EngineError>),
     Engine(Box<Engine>),
+}
+fn inspect_open_input(input: &str, cancel: &Cancellation) -> Result<Payload, EngineError> {
+    if let Some(url) = input.strip_prefix("flatpak+") {
+        return pkgdeck_core::flatpak_ref::inspect(url, cancel)
+            .map(|package| Payload::OpenPackage(Box::new(package)));
+    }
+    let path = local_input_path(input).map_err(|reason| EngineError::InvalidResponse {
+        backend: "open".into(),
+        reason,
+    })?;
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    let package = match extension {
+        "AppImage" => {
+            use pkgdeck_core::engine::Backend;
+            AppImage::native()
+                .search(&path.to_string_lossy(), cancel)
+                .and_then(|mut packages| packages.pop().ok_or(EngineError::NotFound))
+        }
+        "deb" => pkgdeck_core::local_deb::inspect(&path, cancel),
+        "flatpakref" => pkgdeck_core::flatpak_ref::inspect(&path.to_string_lossy(), cancel),
+        _ => Err(EngineError::InvalidResponse {
+            backend: "open".into(),
+            reason: "Supported local formats are .AppImage, .deb, and .flatpakref.".into(),
+        }),
+    };
+    package.map(|package| Payload::OpenPackage(Box::new(package)))
 }
 fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn FnMut(Reply)) {
     fn filter_updates(report: &mut PackageReport) {
@@ -161,6 +289,7 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
         }
     }
     let result = match job {
+        Job::OpenInput(input) => inspect_open_input(&input, cancel),
         Job::Repositories(_) => Err(EngineError::NotFound),
         Job::ManifestExport(path, selected) => {
             let installed = engine.installed(cancel);
@@ -181,6 +310,11 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
             .and_then(|document| manifest::inspect(engine, &document, cancel))
             .map(Payload::ManifestPreview)
             .map_err(|error| EngineError::Execution(ExecutionError::Invalid(error.to_string()))),
+        Job::BackgroundUpdates(_) => {
+            let mut report = engine.installed(cancel);
+            filter_updates(&mut report);
+            Ok(Payload::BackgroundUpdates(report))
+        }
         Job::Load(view, query) => {
             if view == "Sources" {
                 Ok(Payload::Sources(engine.discover(cancel)))
@@ -242,6 +376,16 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
         Job::Details(id) => engine
             .details(&id, cancel)
             .map(|d| Payload::Details(Box::new(d))),
+        Job::Inspection(command) => {
+            let inventory = engine.installed(cancel);
+            let host = Host::current();
+            match command {
+                Some(command) => inspection::inspect_native(&host, &command, &inventory.packages, cancel)
+                    .map(|report| Payload::Inspection(json!({"kind": "command", "report": report, "failures": inventory.failures})))
+                    .map_err(Into::into),
+                None => Ok(Payload::Inspection(json!({"kind": "audit", "report": inspection::audit(&inventory.packages, inspection::native_leftovers(&host)), "failures": inventory.failures}))),
+            }
+        }
         Job::PlanUpgrade(operations, count) => {
             if operations.iter().any(|operation| {
                 matches!(operation, Operation::UpgradeAll { backend } if backend == "apt")
@@ -255,6 +399,10 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
         }
         Job::PlanOperation(operation) => engine.plan_operation(&operation, cancel)
             .map(|plan| Payload::OperationPreview(operation, plan.map(Box::new))),
+        Job::PlanCleanAll(operations) => {
+            let report = engine.cleanup(cancel);
+            Ok(Payload::CleanPreview(operations, report.items))
+        }
         Job::UpgradeAll(operations, _) | Job::CleanAll(operations) => {
             let results = engine.execute_batch(&operations, cancel, &mut |event| {
                 if let Event::Progress {
@@ -271,7 +419,13 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
             let completed = results.iter().filter(|r| r.is_ok()).count();
             let noun = if operations.iter().all(|op| matches!(op, Operation::Clean(_))) { "cleanup tasks" } else { "updates" };
             let mut status = format!("Completed {completed} of {} {noun}.", operations.len());
+            let mut outcomes = Vec::new();
             for (operation, result) in operations.iter().zip(results) {
+                outcomes.push(match &result {
+                    Ok(_) => Outcome::Finished,
+                    Err(EngineError::Cancelled) => Outcome::Cancelled,
+                    Err(_) => Outcome::Failed,
+                });
                 let outcome = match result {
                     Ok(outcome) if outcome.cancellation_deferred => {
                         "Completed after cancellation; changes were not rolled back.".into()
@@ -284,7 +438,7 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
             if operations.iter().any(|op| matches!(op, Operation::Upgrade(id) if id.backend == "fwupd")) {
                 status.push_str("\nFirmware: follow the device restart or shutdown requirements shown before updating.");
             }
-            Ok(Payload::Batch(status))
+            Ok(Payload::Batch(status, outcomes))
         }
         Job::Write(op, _) => engine
             .execute(&op, cancel, &mut |event| {
@@ -304,7 +458,7 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
                         "Firmware completed after cancellation. Follow the device restart or shutdown requirements.".into()
                     } else {
                         "Firmware completed. Follow the device restart or shutdown requirements.".into()
-                    })
+                    }, vec![Outcome::Finished])
                 } else { Payload::Written(outcome) }
             }),
     };
@@ -328,6 +482,7 @@ impl Drop for Controller {
 pub struct Controller {
     rows: QString,
     details: QString,
+    inspection: QString,
     status: QString,
     confirmation: QString,
     confirmation_data: QString,
@@ -335,6 +490,8 @@ pub struct Controller {
     source_catalog: QString,
     report_state: QString,
     manifest_preview: QString,
+    activity: QString,
+    background_state: QString,
     version: QString,
     busy: bool,
     writing: bool,
@@ -349,6 +506,15 @@ pub struct Controller {
     sources: Vec<Source>,
     pending: Option<Job>,
     queued: Option<Job>,
+    confirmed_queue: VecDeque<Confirmed>,
+    active_activity_id: Option<u64>,
+    revalidating: Option<Confirmed>,
+    discard_revalidation: bool,
+    validated_confirmed: Option<Confirmed>,
+    deferred_load: Option<Job>,
+    activity_store: Option<History>,
+    autostart_path: Option<PathBuf>,
+    background_schedule: Schedule,
     selected: Option<PackageId>,
     engine: Option<Engine>,
     view_cache: ViewCache,
@@ -364,6 +530,7 @@ impl Default for Controller {
         Self {
             rows: "[]".into(),
             details: "{}".into(),
+            inspection: "{}".into(),
             status: "Choose a view or search for a package.".into(),
             confirmation: QString::default(),
             confirmation_data: "{}".into(),
@@ -371,6 +538,8 @@ impl Default for Controller {
             source_catalog: "[]".into(),
             report_state: r#"{"phase":"idle"}"#.into(),
             manifest_preview: "{}".into(),
+            activity: "[]".into(),
+            background_state: "{}".into(),
             version: pkgdeck_core::VERSION.into(),
             busy: false,
             writing: false,
@@ -385,6 +554,23 @@ impl Default for Controller {
             sources: vec![],
             pending: None,
             queued: None,
+            confirmed_queue: VecDeque::new(),
+            active_activity_id: None,
+            revalidating: None,
+            discard_revalidation: false,
+            validated_confirmed: None,
+            deferred_load: None,
+            activity_store: if cfg!(test) {
+                None
+            } else {
+                History::default_store()
+            },
+            autostart_path: if cfg!(test) {
+                None
+            } else {
+                background::autostart_path()
+            },
+            background_schedule: Schedule::default(),
             selected: None,
             engine: None,
             view_cache: ViewCache { entries: vec![] },
@@ -430,18 +616,64 @@ fn encoded(value: impl serde::Serialize) -> QString {
 /// empty filter means every available backend.
 fn engine_source(job: &Job, filter: &[String]) -> Vec<String> {
     match job {
+        Job::OpenInput(_) => vec![],
         Job::RetrySource(_, _, source) => vec![source.clone()],
         Job::PlanOperation(operation) => vec![operation.backend().into()],
+        Job::Write(operation, _) => vec![operation.backend().into()],
+        Job::BackgroundUpdates(sources) => sources.clone(),
+        Job::UpgradeAll(operations, _) | Job::CleanAll(operations) => operations.iter().map(|op| op.backend().to_owned()).collect(),
+        Job::PlanCleanAll(operations) => operations.iter().map(|op| op.backend().to_owned()).collect(),
         // The picker needs to explain disabled and unavailable managers too.
         Job::Load(view, _) if view == "Sources" => vec![],
         Job::Details(id) => vec![id.backend.clone()],
         Job::ManifestPreview(_) => vec![],
+        Job::Inspection(_) => vec![],
         Job::PlanUpgrade(operations, _)
             if operations.iter().any(|operation| {
                 matches!(operation, Operation::UpgradeAll { backend } if backend == "apt")
             }) => vec!["apt".into()],
         _ => filter.to_owned(),
     }
+}
+fn same_target(a: &Operation, b: &Operation) -> bool {
+    match (a, b) {
+        (
+            Operation::Install(x) | Operation::Remove(x) | Operation::Upgrade(x),
+            Operation::Install(y) | Operation::Remove(y) | Operation::Upgrade(y),
+        ) => x == y,
+        (Operation::Clean(x), Operation::Clean(y)) => x == y,
+        (Operation::UpgradeAll { backend }, other) | (other, Operation::UpgradeAll { backend }) => {
+            backend == other.backend()
+        }
+        _ => false,
+    }
+}
+fn queue_conflict(
+    candidate: &Job,
+    active: Option<&Job>,
+    queued: &VecDeque<Confirmed>,
+    revalidating: Option<&Confirmed>,
+    validated: Option<&Confirmed>,
+) -> Option<&'static str> {
+    let operations = candidate.operations();
+    for existing in active
+        .into_iter()
+        .chain(queued.iter().map(|entry| &entry.job))
+        .chain(revalidating.map(|entry| &entry.job))
+        .chain(validated.map(|entry| &entry.job))
+    {
+        for operation in &operations {
+            for other in existing.operations() {
+                if operation == &other {
+                    return Some("This operation is already running or queued.");
+                }
+                if same_target(operation, &other) {
+                    return Some("A conflicting operation is already running or queued.");
+                }
+            }
+        }
+    }
+    None
 }
 fn repreview_changed_plan(
     job: &Job,
@@ -717,6 +949,14 @@ fn confirmation_preview(
         if package.id.backend == "fwupd" {
             lines.push(package.summary.clone());
         }
+        if (package.id.backend == "appimage"
+            || package.id.reference.as_deref().is_some_and(|value| {
+                value.starts_with("local-deb:") || value.starts_with("flatpakref:")
+            }))
+            && matches!(operation, Operation::Install(_))
+        {
+            lines.push(package.summary.clone());
+        }
     }
     if let Operation::Clean(id) = operation {
         if let Some(item) = cleanup.iter().find(|item| item.id == *id) {
@@ -828,6 +1068,53 @@ fn package_row(p: &Package, same_from: &[String], same_group: Option<&str>) -> V
         "component_ids": p.component_ids,
         "same_app_from": same_from, "same_app_group": same_group})
 }
+fn related_rows(
+    selected: &Package,
+    current: &[Package],
+    cached: &ViewCache,
+) -> (Vec<Value>, Vec<Value>) {
+    let mut known: BTreeMap<PackageId, &Package> = BTreeMap::new();
+    for package in current.iter().chain(
+        cached
+            .entries
+            .iter()
+            .flat_map(|(_, view)| view.packages.iter()),
+    ) {
+        known.entry(package.id.clone()).or_insert(package);
+    }
+    known.entry(selected.id.clone()).or_insert(selected);
+    let homepages: Vec<_> = selected
+        .homepages
+        .iter()
+        .filter_map(|url| normalize_homepage(url))
+        .collect();
+    let matches = |package: &Package| {
+        package.id == selected.id
+            || selected
+                .component_ids
+                .iter()
+                .any(|id| package.component_ids.contains(id))
+            || package
+                .homepages
+                .iter()
+                .filter_map(|url| normalize_homepage(url))
+                .any(|url| homepages.contains(&url))
+    };
+    let mut sources = Vec::new();
+    let mut copies = Vec::new();
+    for package in known
+        .into_values()
+        .filter(|package| matches(package))
+        .take(64)
+    {
+        let row = package_row(package, &[], None);
+        if package.installed_version.is_some() {
+            copies.push(row.clone());
+        }
+        sources.push(row);
+    }
+    (sources, copies)
+}
 fn update_detail_name(
     packages: &mut [Package],
     rows: &str,
@@ -850,6 +1137,238 @@ fn update_detail_name(
 }
 
 impl ffi::PackageController {
+    pub fn open_input(mut self: Pin<&mut Self>, input: QString) {
+        if input.to_string().trim().is_empty() {
+            self.as_mut()
+                .set_status("Choose an installation file.".into());
+            return;
+        }
+        if self.rust().worker.is_some() && !self.rust().background {
+            self.as_mut().rust_mut().queued = Some(Job::OpenInput(input.to_string()));
+            self.as_mut()
+                .set_status("Opening the file after the current operation.".into());
+            return;
+        }
+        self.start(Job::OpenInput(input.to_string()));
+    }
+    pub fn set_autostart(mut self: Pin<&mut Self>, enabled: bool) -> bool {
+        let result = self
+            .rust()
+            .autostart_path
+            .clone()
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "No user configuration directory",
+                )
+            })
+            .and_then(|path| background::set_autostart(&path, enabled));
+        match result {
+            Ok(()) => true,
+            Err(error) => {
+                self.as_mut().set_status(
+                    format!("Autostart could not be changed: {error}")
+                        .as_str()
+                        .into(),
+                );
+                false
+            }
+        }
+    }
+    pub fn check_updates(
+        mut self: Pin<&mut Self>,
+        sources: QString,
+        enabled: bool,
+        offline: bool,
+        metered: bool,
+        force: bool,
+    ) {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let busy = self.rust().worker.is_some()
+            || !self.rust().confirmed_queue.is_empty()
+            || self.rust().pending.is_some();
+        if !self
+            .as_mut()
+            .rust_mut()
+            .background_schedule
+            .ready(now, enabled, offline, metered, busy, force)
+        {
+            return;
+        }
+        let sources: Vec<String> = sources
+            .to_string()
+            .split(',')
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned)
+            .collect();
+        if sources
+            .iter()
+            .any(|id| !pkgdeck_core::backends::BACKEND_IDS.contains(&id.as_str()))
+        {
+            return;
+        }
+        self.as_mut().rust_mut().background = true;
+        self.start(Job::BackgroundUpdates(sources));
+    }
+    fn finish_background_check(mut self: Pin<&mut Self>, report: PackageReport) {
+        let result = self
+            .as_mut()
+            .rust_mut()
+            .background_schedule
+            .complete(&report);
+        let checked = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let failures: Vec<_> = report
+            .failures
+            .iter()
+            .map(|failure| json!({"source": failure.backend, "kind": failure_kind(&failure.error)}))
+            .collect();
+        self.as_mut().set_background_state(encoded(json!({"last_check": checked, "available": result.count, "failures": failures, "notify": result.changed && result.count > 0})));
+    }
+    fn finish_background_error(mut self: Pin<&mut Self>, error: &EngineError) {
+        let available = serde_json::from_str::<Value>(&self.background_state().to_string())
+            .ok()
+            .and_then(|state| state["available"].as_u64())
+            .unwrap_or(0);
+        let checked = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let failures: Vec<_> = match error {
+            EngineError::Incomplete(sources) => sources
+                .iter()
+                .map(
+                    |source| json!({"source": source.backend, "kind": failure_kind(&source.error)}),
+                )
+                .collect(),
+            _ => vec![json!({"source": "check", "kind": failure_kind(error)})],
+        };
+        self.as_mut().set_background_state(encoded(json!({"last_check": checked, "available": available, "failures": failures, "notify": false})));
+    }
+    pub fn refresh_activity(mut self: Pin<&mut Self>) {
+        if let Some(store) = self.rust().activity_store.clone() {
+            let _ = store.recover_dead();
+            if let Ok(entries) = store.entries() {
+                self.as_mut().set_activity(encoded(entries));
+            }
+        }
+    }
+    fn start_confirmed(mut self: Pin<&mut Self>, entry: Confirmed) {
+        if let (Some(store), Some(id)) = (self.rust().activity_store.clone(), entry.activity_id) {
+            let _ = store.state(id, State::Running);
+        }
+        self.as_mut().rust_mut().active_activity_id = entry.activity_id;
+        self.as_mut().refresh_activity();
+        self.start(entry.job);
+    }
+    fn accept_confirmed(mut self: Pin<&mut Self>, job: Job) {
+        let active = self.rust().worker.as_ref().map(|worker| &worker.job);
+        if let Some(message) = queue_conflict(
+            &job,
+            active,
+            &self.rust().confirmed_queue,
+            self.rust().revalidating.as_ref(),
+            self.rust().validated_confirmed.as_ref(),
+        ) {
+            self.set_status(message.into());
+            return;
+        }
+        let operations = job.operations();
+        let activity_id = self
+            .rust()
+            .activity_store
+            .clone()
+            .and_then(|store| store.begin("gui", operations, State::Queued).ok());
+        let cleanup_preview = if let Job::CleanAll(operations) = &job {
+            self.rust()
+                .cleanup
+                .iter()
+                .filter(|item| operations.contains(&Operation::Clean(item.id.clone())))
+                .cloned()
+                .collect()
+        } else {
+            vec![]
+        };
+        let entry = Confirmed {
+            job,
+            activity_id,
+            cleanup_preview,
+        };
+        if self.rust().worker.is_some() || !self.rust().confirmed_queue.is_empty() {
+            self.as_mut().rust_mut().confirmed_queue.push_back(entry);
+            self.as_mut().refresh_activity();
+            self.as_mut().set_status("Operation queued.".into());
+            self.as_mut().set_busy(true);
+            if let Some(worker) = &self.rust().worker {
+                if !worker.job.writes() {
+                    worker.cancel.cancel();
+                }
+            }
+        } else {
+            self.start_confirmed(entry);
+        }
+    }
+    fn validate_confirmed(mut self: Pin<&mut Self>, entry: Confirmed) {
+        let plan = match &entry.job {
+            Job::Write(operation, _) => Job::PlanOperation(operation.clone()),
+            Job::UpgradeAll(operations, _) => {
+                Job::PlanUpgrade(operations.clone(), operations.len())
+            }
+            Job::CleanAll(operations) => Job::PlanCleanAll(operations.clone()),
+            _ => {
+                self.start_confirmed(entry);
+                return;
+            }
+        };
+        self.as_mut().rust_mut().revalidating = Some(entry);
+        self.start(plan);
+    }
+    fn fail_revalidation(mut self: Pin<&mut Self>, entry: Confirmed) {
+        if let (Some(store), Some(id)) = (self.rust().activity_store.clone(), entry.activity_id) {
+            let outcomes = entry
+                .job
+                .operations()
+                .iter()
+                .map(|_| Outcome::Failed)
+                .collect();
+            let _ = store.finish(id, outcomes);
+        }
+        self.as_mut().refresh_activity();
+    }
+    pub fn cancel_queued(mut self: Pin<&mut Self>) {
+        let mut cancelled = Vec::new();
+        while let Some(entry) = self.as_mut().rust_mut().confirmed_queue.pop_front() {
+            cancelled.push(entry);
+        }
+        if let Some(entry) = self.as_mut().rust_mut().revalidating.take() {
+            cancelled.push(entry);
+            self.as_mut().rust_mut().discard_revalidation = true;
+            if let Some(worker) = &self.rust().worker {
+                worker.cancel.cancel();
+            }
+        }
+        if let Some(entry) = self.as_mut().rust_mut().validated_confirmed.take() {
+            cancelled.push(entry);
+        }
+        for entry in cancelled {
+            if let (Some(store), Some(id)) = (self.rust().activity_store.clone(), entry.activity_id)
+            {
+                let outcomes = entry
+                    .job
+                    .operations()
+                    .iter()
+                    .map(|_| Outcome::Cancelled)
+                    .collect();
+                let _ = store.finish(id, outcomes);
+            }
+        }
+        self.as_mut().refresh_activity();
+    }
     fn successful_sources(&self) -> Vec<String> {
         let state: Value =
             serde_json::from_str(&self.report_state().to_string()).unwrap_or_default();
@@ -922,6 +1441,11 @@ impl ffi::PackageController {
             }
             return;
         }
+        if matches!(job, Job::OpenInput(_)) {
+            self.as_mut().rust_mut().pending = None;
+            self.as_mut().set_confirmation(QString::default());
+            self.as_mut().set_confirmation_data("{}".into());
+        }
         let source_filter = self.rust().source_filter.clone();
         let authorization = if self.rust().sudo {
             Authorization::SudoNonInteractive
@@ -936,12 +1460,8 @@ impl ffi::PackageController {
         // Details can reuse a warm engine; mutation jobs always rediscover.
         let cached = self.as_mut().rust_mut().engine.take();
         let cleanup = self.rust().cleanup.clone();
-        if job.writes() {
-            self.as_mut().rust_mut().view_cache.clear();
-            self.as_mut().rust_mut().prefetched.clear();
-            self.as_mut().rust_mut().prefetch = prefetch_views();
-            self.as_mut().rust_mut().detail_cache.clear();
-        }
+        // Keep read snapshots while a native write owns the worker. The UI
+        // can browse them, clearly marked stale, until the queue drains.
         let handle = thread::spawn(move || {
             let sources_view = matches!(&job, Job::Load(view, _) | Job::RetrySource(view, ..) if view == "Sources");
             let mut send = |mut reply| {
@@ -985,6 +1505,10 @@ impl ffi::PackageController {
                         })
                 };
                 send(Reply::Done(result));
+                return;
+            }
+            if let Job::OpenInput(input) = &job {
+                send(Reply::Done(inspect_open_input(input, &token)));
                 return;
             }
             // Fast path: Details against a warm engine reuse detected state
@@ -1046,9 +1570,7 @@ impl ffi::PackageController {
         sudo: bool,
         force: bool,
     ) {
-        if self.rust().worker.as_ref().is_some_and(|w| w.job.writes()) {
-            return;
-        }
+        let writing = self.rust().worker.as_ref().is_some_and(|w| w.job.writes());
         let view = view.to_string();
         let query = query.to_string();
         // Comma-joined checked source ids; empty means every available source.
@@ -1070,6 +1592,31 @@ impl ffi::PackageController {
             return;
         }
         let key = cache_key(&view, &query, &sources, sudo);
+        if writing {
+            self.as_mut().rust_mut().source_filter = sources;
+            self.as_mut().rust_mut().sudo = sudo;
+            if let Some(cached) = self.rust().view_cache.get(&key).cloned() {
+                self.as_mut().rust_mut().packages = cached.packages;
+                self.as_mut().rust_mut().cleanup = cached.cleanup;
+                self.as_mut().rust_mut().failures = cached.failures;
+                self.as_mut().rust_mut().sources = cached.sources;
+                self.as_mut().rust_mut().updates_view = cached.updates_view;
+                self.as_mut().set_upgradable(cached.upgradable);
+                self.as_mut().set_rows(cached.rows);
+                self.as_mut().set_details("{}".into());
+                self.as_mut().set_report_state(cached.report_state);
+                self.as_mut().set_phase("stale");
+            } else {
+                self.as_mut().rust_mut().packages.clear();
+                self.as_mut().rust_mut().cleanup.clear();
+                self.as_mut().rust_mut().sources.clear();
+                self.as_mut().set_rows("[]".into());
+                self.as_mut().set_details("{}".into());
+                self.as_mut().set_phase("loading");
+            }
+            self.as_mut().rust_mut().deferred_load = Some(Job::Load(view, query));
+            return;
+        }
         let changed = self.rust().source_filter != sources || self.rust().sudo != sudo;
         if force || changed {
             self.as_mut().rust_mut().prefetched.clear();
@@ -1199,6 +1746,46 @@ impl ffi::PackageController {
         };
         self.rust_mut().view_cache.insert(key, view);
     }
+    pub fn inspect_command(mut self: Pin<&mut Self>, command: QString) {
+        let command = command.to_string().trim().to_owned();
+        if command.is_empty()
+            || self
+                .rust()
+                .worker
+                .as_ref()
+                .is_some_and(|worker| worker.job.writes())
+        {
+            return;
+        }
+        self.as_mut().set_inspection("{}".into());
+        self.as_mut()
+            .set_status("Inspecting command and installed ownership…".into());
+        let job = Job::Inspection(Some(command));
+        if self.rust().worker.is_some() && !self.rust().background {
+            self.as_mut().rust_mut().queued = Some(job);
+        } else {
+            self.start(job);
+        }
+    }
+    pub fn audit_installed(mut self: Pin<&mut Self>) {
+        if self
+            .rust()
+            .worker
+            .as_ref()
+            .is_some_and(|worker| worker.job.writes())
+        {
+            return;
+        }
+        self.as_mut().set_inspection("{}".into());
+        self.as_mut()
+            .set_status("Auditing manager-reported installed copies and residual files…".into());
+        let job = Job::Inspection(None);
+        if self.rust().worker.is_some() && !self.rust().background {
+            self.as_mut().rust_mut().queued = Some(job);
+        } else {
+            self.start(job);
+        }
+    }
     pub fn select(mut self: Pin<&mut Self>, index: i32) {
         if let Some(package) = usize::try_from(index)
             .ok()
@@ -1229,11 +1816,16 @@ impl ffi::PackageController {
                     self.as_mut().rust_mut().queued = Some(Job::Details(package.id));
                     return;
                 }
+                let same = same_app_sources(&self.rust().packages, &package.id);
+                self.as_mut().set_details(encoded(json!({"package": package_row(&package, &same, None), "description": package.summary})));
                 return;
             }
             let same = same_app_sources(&self.rust().packages, &package.id);
+            let (available_sources, installed_copies) =
+                related_rows(&package, &self.rust().packages, &self.rust().view_cache);
             self.as_mut().set_details(encoded(
-                json!({"package": package_row(&package, &same, None), "description": package.summary}),
+                json!({"package": package_row(&package, &same, None), "description": package.summary,
+                    "available_sources": available_sources, "installed_copies": installed_copies}),
             ));
             self.start(Job::Details(package.id));
         } else if let Some(item) = usize::try_from(index)
@@ -1301,9 +1893,6 @@ impl ffi::PackageController {
         self.start(Job::ManifestPreview(path));
     }
     pub fn change_repository(mut self: Pin<&mut Self>, action: QString) {
-        if self.rust().worker.is_some() && !self.rust().background {
-            return;
-        }
         let action = match repositories::parse_action(&action.to_string()) {
             Ok(action) => action,
             Err(error) => {
@@ -1333,9 +1922,11 @@ impl ffi::PackageController {
         self.rust_mut().pending = Some(Job::Repositories(Some(action)));
     }
     pub fn propose(mut self: Pin<&mut Self>, action: QString, index: i32) {
-        if self.rust().worker.is_some() && !self.rust().background {
-            return;
-        }
+        let writing = self
+            .rust()
+            .worker
+            .as_ref()
+            .is_some_and(|worker| worker.job.writes());
         let action = action.to_string();
         if action == "upgrade-all" {
             if !self.upgradable {
@@ -1351,7 +1942,7 @@ impl ffi::PackageController {
                         && package.update == UpdateAvailability::Available
                 })
                 .count();
-            if operations.iter().any(|operation| {
+            if !writing && operations.iter().any(|operation| {
                 matches!(operation, Operation::UpgradeAll { backend } if backend == "apt")
             }) {
                 self.start(Job::PlanUpgrade(operations, count));
@@ -1432,6 +2023,7 @@ impl ffi::PackageController {
         match operation {
             Some(op)
                 if op.backend() == "apt"
+                    && !writing
                     && matches!(
                         op,
                         Operation::Install(_) | Operation::Remove(_) | Operation::Upgrade(_)
@@ -1452,9 +2044,6 @@ impl ffi::PackageController {
     /// or vanished while streaming) are skipped, never guessed. An empty
     /// resolution clears any pending confirmation and says so in status.
     pub fn propose_checked(mut self: Pin<&mut Self>, identities: QString) {
-        if self.rust().worker.is_some() && !self.rust().background {
-            return;
-        }
         let plan = plan_checked_upgrade(&self.rust().packages, &identities.to_string());
         if plan.operations.is_empty() {
             self.as_mut().rust_mut().pending = None;
@@ -1475,21 +2064,19 @@ impl ffi::PackageController {
         }
     }
     pub fn confirm(mut self: Pin<&mut Self>, approved: bool) {
-        if self.rust().worker.is_some() && !self.rust().background {
-            return;
-        }
         let pending = self.as_mut().rust_mut().pending.take();
-        self.as_mut().rust_mut().queued = None;
         self.as_mut().set_confirmation(QString::default());
         self.as_mut().set_confirmation_data("{}".into());
         if approved {
             if let Some(op) = pending {
-                self.start(op);
+                self.accept_confirmed(op);
             }
         }
     }
     pub fn cancel(mut self: Pin<&mut Self>) {
         self.as_mut().rust_mut().prefetch.clear();
+        self.as_mut().cancel_queued();
+        self.as_mut().rust_mut().deferred_load = None;
         if self.rust().worker.is_some() {
             // An explicit cancellation also drops any queued selection: the
             // user asked everything to stop, not to continue afterwards.
@@ -1510,7 +2097,11 @@ impl ffi::PackageController {
             return;
         }
         match result {
+            Ok(Payload::BackgroundUpdates(report)) => self.as_mut().finish_background_check(report),
             Err(e) => {
+                if let Some(entry) = self.as_mut().rust_mut().revalidating.take() {
+                    self.as_mut().fail_revalidation(entry);
+                }
                 // A superseded Details job ends cancelled once its replacement
                 // is queued; that abort carries no news worth flashing.
                 let superseded =
@@ -1519,7 +2110,30 @@ impl ffi::PackageController {
                     self.set_status(e.to_string().as_str().into());
                 }
             }
+            Ok(Payload::OpenPackage(package)) => {
+                let operation = Operation::Install(package.id.clone());
+                let apt = package.id.backend == "apt";
+                self.as_mut()
+                    .rust_mut()
+                    .packages
+                    .retain(|row| row.id != package.id);
+                self.as_mut().rust_mut().packages.push(*package);
+                if apt {
+                    self.as_mut().start(Job::PlanOperation(operation));
+                } else {
+                    self.as_mut()
+                        .apply(Ok(Payload::OperationPreview(operation, None)));
+                }
+            }
             Ok(Payload::UpgradePreview(operations, count, apt_plan)) => {
+                if let Some(entry) = self.as_mut().rust_mut().revalidating.take() {
+                    if matches!(&entry.job, Job::UpgradeAll(previous, plan) if previous == &operations && plan == &apt_plan)
+                    {
+                        self.as_mut().rust_mut().validated_confirmed = Some(entry);
+                        return;
+                    }
+                    self.as_mut().fail_revalidation(entry);
+                }
                 let labels = operations
                     .iter()
                     .map(|operation| confirmation_label(operation, &self.rust().packages))
@@ -1537,6 +2151,14 @@ impl ffi::PackageController {
                 self.rust_mut().pending = Some(Job::UpgradeAll(operations, apt_plan));
             }
             Ok(Payload::OperationPreview(operation, plan)) => {
+                if let Some(entry) = self.as_mut().rust_mut().revalidating.take() {
+                    if matches!(&entry.job, Job::Write(previous, reviewed) if previous == &operation && reviewed == &plan)
+                    {
+                        self.as_mut().rust_mut().validated_confirmed = Some(entry);
+                        return;
+                    }
+                    self.as_mut().fail_revalidation(entry);
+                }
                 let data = confirmation_preview(
                     &operation,
                     &self.rust().packages,
@@ -1554,6 +2176,41 @@ impl ffi::PackageController {
             Ok(Payload::ManifestPreview(preview)) => {
                 self.as_mut().set_manifest_preview(encoded(preview));
                 self.set_status("Inventory preview ready.".into());
+            }
+            Ok(Payload::CleanPreview(operations, fresh)) => {
+                if let Some(entry) = self.as_mut().rust_mut().revalidating.take() {
+                    let selected: Vec<_> = fresh
+                        .iter()
+                        .filter(|item| operations.contains(&Operation::Clean(item.id.clone())))
+                        .cloned()
+                        .collect();
+                    if selected == entry.cleanup_preview {
+                        self.as_mut().rust_mut().cleanup = fresh;
+                        self.as_mut().rust_mut().validated_confirmed = Some(entry);
+                        return;
+                    }
+                    self.as_mut().fail_revalidation(entry);
+                    self.as_mut().rust_mut().cleanup = fresh;
+                    if selected.is_empty() {
+                        self.as_mut()
+                            .set_status("Queued cleanup is no longer available.".into());
+                        return;
+                    }
+                    let operations: Vec<_> = selected
+                        .iter()
+                        .map(|item| Operation::Clean(item.id.clone()))
+                        .collect();
+                    let body = selected
+                        .iter()
+                        .map(|item| {
+                            format!("{} ({})\n{}", item.title, item.id.backend, item.preview)
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n\n");
+                    self.as_mut().set_confirmation_data(encoded(json!({"action": format!("Clean {} tasks", operations.len()), "body": body})));
+                    self.as_mut().set_confirmation(body.as_str().into());
+                    self.as_mut().rust_mut().pending = Some(Job::CleanAll(operations));
+                }
             }
             Ok(Payload::RetryPackages(source, retry)) => {
                 self.as_mut().rust_mut().view_cache.clear();
@@ -1741,8 +2398,13 @@ impl ffi::PackageController {
                     self.as_mut().rust_mut().prefetch = prefetch_views();
                 }
                 let info = crate::metadata::cached_info(&details.package);
+                let (available_sources, installed_copies) = related_rows(
+                    &details.package,
+                    &self.rust().packages,
+                    &self.rust().view_cache,
+                );
                 let data = encoded(
-                    json!({"package": package_row(&details.package, &same_app_sources(&self.rust().packages, &details.package.id), None), "description": info.as_ref().filter(|i| !i.description.is_empty()).map(|i| &i.description).unwrap_or(&details.description), "homepage": details.homepage.as_ref().or_else(|| info.as_ref().and_then(|i| i.homepage.as_ref())), "dependencies": details.dependencies, "screenshots": info.as_ref().map(|i| &i.screenshots)}),
+                    json!({"package": package_row(&details.package, &same_app_sources(&self.rust().packages, &details.package.id), None), "description": info.as_ref().filter(|i| !i.description.is_empty()).map(|i| &i.description).unwrap_or(&details.description), "homepage": details.homepage.as_ref().or_else(|| info.as_ref().and_then(|i| i.homepage.as_ref())), "publisher": info.as_ref().and_then(|i| i.publisher.as_ref()), "license": info.as_ref().and_then(|i| i.license.as_ref()), "dependencies": details.dependencies, "screenshots": info.as_ref().map(|i| &i.screenshots), "available_sources": available_sources, "installed_copies": installed_copies}),
                 );
                 // Bound memory use for large searches; reload and writes invalidate this snapshot.
                 if self.rust().detail_cache.len() >= 128 {
@@ -1759,9 +2421,13 @@ impl ffi::PackageController {
                     self.set_status("Package details loaded.".into());
                 }
             }
-            Ok(Payload::Batch(status)) => {
-                // Clear the entire snapshot even on partial failure: any native write may
-                // have changed dependencies belonging to another listed package.
+            Ok(Payload::Inspection(report)) => {
+                let kind = report["kind"].as_str().unwrap_or("inspection").to_owned();
+                self.as_mut().set_inspection(encoded(report));
+                self.set_status(format!("{kind} report loaded.").as_str().into());
+            }
+            Ok(Payload::Batch(status, _)) => {
+                // Native writes may change dependencies in other rows.
                 self.as_mut()
                     .apply(Ok(Payload::Written(OperationOutcome::default())));
                 self.set_status(status.as_str().into());
@@ -1769,24 +2435,15 @@ impl ffi::PackageController {
             Ok(Payload::Written(outcome)) => {
                 crate::metadata::invalidate();
                 self.as_mut().set_upgradable(false);
-                // Any native write may change dependencies belonging to
-                // another listed package: drop every cached view with them.
-                self.as_mut().rust_mut().view_cache.clear();
                 self.as_mut().rust_mut().prefetched.clear();
                 self.as_mut().rust_mut().prefetch = prefetch_views();
                 self.as_mut().rust_mut().detail_cache.clear();
-                self.as_mut().rust_mut().packages.clear();
-                self.as_mut().rust_mut().cleanup.clear();
-                self.as_mut().rust_mut().failures.clear();
-                self.as_mut().rust_mut().sources.clear();
-                self.as_mut().set_rows("[]".into());
-                self.as_mut().set_phase("idle");
-                self.as_mut().set_details("{}".into());
+                self.as_mut().set_phase("stale");
                 self.set_status(
                     if outcome.cancellation_deferred {
                         "Completed after cancellation; native changes were not rolled back."
                     } else {
-                        "Completed. Reload to see current package state."
+                        "Completed. Refreshing package state."
                     }
                     .into(),
                 );
@@ -1860,23 +2517,32 @@ impl ffi::PackageController {
                 }
                 if self.rust().background {
                     if !worker.cancel.requested() {
-                        if let (Job::Load(view, query), Reply::Done(Ok(payload))) =
-                            (&worker.job, reply)
-                        {
-                            if let Payload::Sources(sources) = &payload {
-                                let rows: Vec<_> = sources.iter().map(source_row).collect();
-                                self.as_mut().set_source_catalog(encoded(rows));
+                        match reply {
+                            Reply::Done(Ok(Payload::BackgroundUpdates(report))) => {
+                                self.as_mut().finish_background_check(report)
                             }
-                            let key = cache_key(
-                                view,
-                                query,
-                                &self.rust().source_filter,
-                                self.rust().sudo,
-                            );
-                            self.as_mut()
-                                .rust_mut()
-                                .prefetched
-                                .insert(key, (Instant::now(), payload));
+                            Reply::Done(Err(error)) => {
+                                self.as_mut().finish_background_error(&error)
+                            }
+                            Reply::Done(Ok(payload)) => {
+                                if let Job::Load(view, query) = &worker.job {
+                                    if let Payload::Sources(sources) = &payload {
+                                        let rows: Vec<_> = sources.iter().map(source_row).collect();
+                                        self.as_mut().set_source_catalog(encoded(rows));
+                                    }
+                                    let key = cache_key(
+                                        view,
+                                        query,
+                                        &self.rust().source_filter,
+                                        self.rust().sudo,
+                                    );
+                                    self.as_mut()
+                                        .rust_mut()
+                                        .prefetched
+                                        .insert(key, (Instant::now(), payload));
+                                }
+                            }
+                            _ => {}
                         }
                     }
                     continue;
@@ -1891,6 +2557,50 @@ impl ffi::PackageController {
                         self.as_mut().apply(Ok(Payload::Details(details)))
                     }
                     Reply::Done(result) => {
+                        if self.rust().discard_revalidation
+                            && matches!(
+                                worker.job,
+                                Job::PlanOperation(..)
+                                    | Job::PlanUpgrade(..)
+                                    | Job::PlanCleanAll(..)
+                            )
+                        {
+                            continue;
+                        }
+                        if worker.job.writes() {
+                            if let Some(id) = self.as_mut().rust_mut().active_activity_id.take() {
+                                if let Some(store) = self.rust().activity_store.clone() {
+                                    let outcomes = match &result {
+                                        Ok(Payload::Batch(_, outcomes)) => outcomes.clone(),
+                                        Ok(_) => worker
+                                            .job
+                                            .operations()
+                                            .iter()
+                                            .map(|_| Outcome::Finished)
+                                            .collect(),
+                                        Err(EngineError::Cancelled) => worker
+                                            .job
+                                            .operations()
+                                            .iter()
+                                            .map(|_| Outcome::Cancelled)
+                                            .collect(),
+                                        Err(_) => worker
+                                            .job
+                                            .operations()
+                                            .iter()
+                                            .map(|_| Outcome::Failed)
+                                            .collect(),
+                                    };
+                                    let _ = store.finish(id, outcomes);
+                                }
+                                self.as_mut().refresh_activity();
+                            }
+                        }
+                        if let (Job::Inspection(_), Err(error)) = (&worker.job, &result) {
+                            self.as_mut().set_inspection(encoded(
+                                json!({"kind": "error", "message": error.to_string()}),
+                            ));
+                        }
                         // A reviewed native plan can change between review and write.
                         // Stop the write, compute the new plan, and ask again.
                         if let Some(next) =
@@ -1935,14 +2645,29 @@ impl ffi::PackageController {
             }
             if joined.is_err() && !self.rust().background {
                 self.as_mut().set_status("Backend worker failed.".into());
+            } else if joined.is_err() {
+                self.as_mut()
+                    .finish_background_error(&EngineError::InvalidResponse {
+                        backend: "check".into(),
+                        reason: "Backend worker failed".into(),
+                    });
             }
             self.as_mut().rust_mut().background = false;
+            self.as_mut().rust_mut().discard_revalidation = false;
             let queued = self.as_mut().rust_mut().queued.take();
             self.as_mut().set_writing(false);
             self.as_mut().set_busy(false);
-            // A selection or view change that arrived while the worker was
-            // busy starts now that the previous job has fully terminated.
-            if let Some(job) = queued {
+            if let Some(entry) = self.as_mut().rust_mut().validated_confirmed.take() {
+                self.as_mut().rust_mut().queued = queued;
+                self.start_confirmed(entry);
+            } else if let Some(entry) = self.as_mut().rust_mut().confirmed_queue.pop_front() {
+                self.as_mut().rust_mut().queued = queued;
+                self.validate_confirmed(entry);
+            } else if matches!(&queued, Some(Job::PlanOperation(..) | Job::PlanUpgrade(..))) {
+                self.start(queued.expect("review job"));
+            } else if let Some(job) = self.as_mut().rust_mut().deferred_load.take() {
+                self.start(job);
+            } else if let Some(job) = queued {
                 self.start(job);
             }
         } else if !self.rust().background {
@@ -1965,6 +2690,230 @@ impl ffi::PackageController {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn file_urls_preserve_spaces_and_unicode_and_reject_remote_hosts() {
+        assert_eq!(
+            local_input_path("file:///tmp/Sample%20%C3%B1.AppImage").unwrap(),
+            PathBuf::from("/tmp/Sample ñ.AppImage")
+        );
+        assert_eq!(
+            local_input_path("file://localhost/tmp/Sample%20App.deb").unwrap(),
+            PathBuf::from("/tmp/Sample App.deb")
+        );
+        assert!(local_input_path("file://remote/tmp/package.deb").is_err());
+        assert!(local_input_path("file:///tmp/bad%00.deb").is_err());
+        assert!(local_input_path("file:///tmp/bad%2Z.deb").is_err());
+        assert!(local_input_path("file:///tmp/bad%FF.deb").is_err());
+        assert!(local_input_path("relative.deb").is_err());
+        assert!(local_input_path("https://example.org/package.deb").is_err());
+        assert!(inspect_open_input("file:///tmp/bad%2Z.deb", &Cancellation::default()).is_err());
+    }
+    #[test]
+    fn opening_local_deb_reads_metadata_without_installing_it() {
+        let base = std::env::temp_dir().join(format!("pkgdeck-open-deb-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let control = base.join("staging/DEBIAN");
+        std::fs::create_dir_all(&control).unwrap();
+        std::fs::write(
+            control.join("control"),
+            "Package: pkgdeck-open-synthetic\nVersion: 1.2.3\nArchitecture: all\nMaintainer: PkgDeck tests <nobody@example.invalid>\nDescription: Synthetic local archive\n",
+        )
+        .unwrap();
+        let archive = base.join("Synthetic package.deb");
+        let status = std::process::Command::new("dpkg-deb")
+            .arg("--build")
+            .arg(base.join("staging"))
+            .arg(&archive)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let package = match inspect_open_input(archive.to_str().unwrap(), &Cancellation::default())
+            .unwrap()
+        {
+            Payload::OpenPackage(package) => package,
+            _ => panic!("local archive inspection must return a package"),
+        };
+        assert_eq!(package.id.backend, "apt");
+        assert_eq!(package.id.name, "pkgdeck-open-synthetic");
+        assert_eq!(package.candidate_version.as_deref(), Some("1.2.3"));
+        assert!(package
+            .id
+            .reference
+            .as_deref()
+            .unwrap()
+            .starts_with("local-deb:"));
+        assert!(archive.exists());
+        std::fs::remove_dir_all(base).unwrap();
+    }
+    #[test]
+    fn opening_appimage_previews_without_importing_until_confirmation() {
+        let base =
+            std::env::temp_dir().join(format!("pkgdeck-open-appimage-{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let source = base.join("Sample ñ.AppImage");
+        let mut elf = [0_u8; 64];
+        elf[..4].copy_from_slice(b"\x7fELF");
+        elf[4..7].copy_from_slice(&[2, 1, 1]);
+        elf[8..11].copy_from_slice(b"AI\x02");
+        let machine = if std::env::consts::ARCH == "aarch64" {
+            183_u16
+        } else {
+            62_u16
+        };
+        elf[18..20].copy_from_slice(&machine.to_le_bytes());
+        elf[20..24].copy_from_slice(&1_u32.to_le_bytes());
+        elf[52..54].copy_from_slice(&64_u16.to_le_bytes());
+        std::fs::write(&source, elf).unwrap();
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller
+            .as_mut()
+            .open_input(source.to_str().unwrap().into());
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while Instant::now() < deadline {
+            controller.as_mut().poll();
+            if !controller.confirmation().is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let preview = controller.confirmation().to_string();
+        assert!(
+            preview.contains("Sample ñ"),
+            "preview: {preview}; status: {}",
+            controller.status()
+        );
+        assert!(preview.contains("Managed file:"), "{preview}");
+        assert!(preview.contains("Desktop entry:"), "{preview}");
+        assert!(matches!(
+            controller.rust().pending,
+            Some(Job::Write(Operation::Install(_), _))
+        ));
+        controller.as_mut().confirm(false);
+        assert!(source.exists());
+        assert!(controller.confirmation().is_empty());
+        std::fs::remove_dir_all(base).unwrap();
+    }
+    #[test]
+    fn opening_flatpak_reference_uses_confirmation_and_rejects_unsupported_input() {
+        let base =
+            std::env::temp_dir().join(format!("pkgdeck-open-flatpakref-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let source = base.join("Synthetic ñ.flatpakref");
+        std::fs::write(
+            &source,
+            "[Flatpak Ref]\nName=org.example.Synthetic\nUrl=https://example.invalid/repo\n",
+        )
+        .unwrap();
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller
+            .as_mut()
+            .open_input(base.join("queued-unsupported.txt").to_str().unwrap().into());
+        controller
+            .as_mut()
+            .open_input(format!("file://{}", source.display()).into());
+        assert!(controller
+            .status()
+            .to_string()
+            .contains("Opening the file after the current operation"));
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while Instant::now() < deadline {
+            controller.as_mut().poll();
+            if !controller.confirmation().is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let preview = controller.confirmation().to_string();
+        assert!(preview.contains("org.example.Synthetic"), "{preview}");
+        assert!(
+            preview.contains("Repository to add if needed:"),
+            "{preview}"
+        );
+        assert!(matches!(
+            controller.rust().pending,
+            Some(Job::Write(Operation::Install(_), _))
+        ));
+        controller.as_mut().confirm(false);
+        assert!(source.exists());
+
+        controller
+            .as_mut()
+            .open_input(base.join("unsupported.txt").to_str().unwrap().into());
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while Instant::now() < deadline {
+            controller.as_mut().poll();
+            if !controller.busy() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(controller
+            .status()
+            .to_string()
+            .contains("Supported local formats"));
+        assert!(controller.confirmation().is_empty());
+        controller
+            .as_mut()
+            .open_input("flatpak+http://example.invalid/app.flatpakref".into());
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while Instant::now() < deadline {
+            controller.as_mut().poll();
+            if !controller.busy() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(controller.status().to_string().contains(".flatpakref"));
+        assert!(controller.confirmation().is_empty());
+        controller.as_mut().open_input(" ".into());
+        assert_eq!(
+            controller.status().to_string(),
+            "Choose an installation file."
+        );
+        std::fs::remove_dir_all(base).unwrap();
+    }
+    #[test]
+    fn detail_sections_match_authoritative_metadata_and_keep_exact_copies() {
+        let mut apt: Package = serde_json::from_value(json!({
+            "id": {"backend":"apt", "name":"fixture", "architecture":"amd64", "scope":"system"},
+            "display_name":"Fixture", "summary":"Synthetic", "installed_version":"1", "candidate_version":"2", "update":"available",
+            "component_ids":["org.example.Fixture"]
+        })).unwrap();
+        let mut flatpak = apt.clone();
+        flatpak.id.backend = "flatpak".into();
+        flatpak.id.name = "org.example.Fixture".into();
+        flatpak.id.reference = Some("app/org.example.Fixture/x86_64/stable".into());
+        flatpak.id.architecture = "x86_64".into();
+        flatpak.installed_version = Some("stable".into());
+        let mut unrelated = apt.clone();
+        unrelated.id.backend = "snap".into();
+        unrelated.component_ids.clear();
+        let (sources, copies) = related_rows(
+            &apt,
+            &[apt.clone(), flatpak.clone(), unrelated],
+            &ViewCache { entries: vec![] },
+        );
+        assert_eq!(sources.len(), 2);
+        assert_eq!(copies.len(), 2);
+        assert_eq!(
+            copies[1]["reference"],
+            "app/org.example.Fixture/x86_64/stable"
+        );
+        apt.component_ids.clear();
+        assert_eq!(
+            related_rows(
+                &apt,
+                &[apt.clone(), flatpak],
+                &ViewCache { entries: vec![] }
+            )
+            .0
+            .len(),
+            1
+        );
+    }
     #[test]
     fn confirmation_preview_names_target_and_extra_native_changes() {
         let package: Package = serde_json::from_value(json!({
@@ -2393,10 +3342,711 @@ mod tests {
         // UI must already report busy so confirmed work is never read as
         // idle before it starts.
         assert!(matches!(
-            &controller.rust().queued,
+            controller.rust().confirmed_queue.front().map(|entry| &entry.job),
             Some(Job::Write(Operation::Refresh { backend }, _)) if backend == "fixture"
         ));
         assert!(*controller.busy());
+    }
+
+    #[test]
+    fn confirmed_queue_keeps_order_and_rejects_duplicate_or_conflicting_targets() {
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        let (_sender, receiver) = mpsc::channel();
+        let first = PackageId {
+            backend: "fixture".into(),
+            name: "first".into(),
+            architecture: "all".into(),
+            scope: Scope::System,
+            remote: None,
+            reference: None,
+        };
+        let second = PackageId {
+            name: "second".into(),
+            ..first.clone()
+        };
+        let third = PackageId {
+            name: "third".into(),
+            ..first.clone()
+        };
+        controller.as_mut().rust_mut().worker = Some(Worker {
+            handle: thread::spawn(|| {}),
+            receiver,
+            cancel: Cancellation::default(),
+            job: Job::Write(Operation::Install(first.clone()), None),
+        });
+        controller
+            .as_mut()
+            .accept_confirmed(Job::Write(Operation::Install(first.clone()), None));
+        controller
+            .as_mut()
+            .accept_confirmed(Job::Write(Operation::Remove(first), None));
+        assert!(controller.rust().confirmed_queue.is_empty());
+        controller
+            .as_mut()
+            .accept_confirmed(Job::Write(Operation::Install(second.clone()), None));
+        controller
+            .as_mut()
+            .accept_confirmed(Job::Write(Operation::Install(third.clone()), None));
+        assert_eq!(controller.rust().confirmed_queue.len(), 2);
+        assert!(
+            matches!(&controller.rust().confirmed_queue[0].job, Job::Write(Operation::Install(id), _) if id == &second)
+        );
+        assert!(
+            matches!(&controller.rust().confirmed_queue[1].job, Job::Write(Operation::Install(id), _) if id == &third)
+        );
+        controller.as_mut().cancel_queued();
+        assert!(controller.rust().confirmed_queue.is_empty());
+        let validating = Confirmed {
+            job: Job::Write(Operation::Install(second.clone()), None),
+            activity_id: None,
+            cleanup_preview: vec![],
+        };
+        assert_eq!(
+            queue_conflict(
+                &Job::Write(Operation::Remove(second), None),
+                None,
+                &VecDeque::new(),
+                Some(&validating),
+                None,
+            ),
+            Some("A conflicting operation is already running or queued.")
+        );
+        let clean = CleanupId {
+            backend: "fixture".into(),
+            key: "cache".into(),
+        };
+        let active = Job::CleanAll(vec![Operation::Clean(clean.clone())]);
+        assert_eq!(
+            queue_conflict(
+                &Job::Write(Operation::Clean(clean), None),
+                Some(&active),
+                &VecDeque::new(),
+                None,
+                None
+            ),
+            Some("This operation is already running or queued.")
+        );
+        let active = Job::UpgradeAll(
+            vec![Operation::UpgradeAll {
+                backend: "fixture".into(),
+            }],
+            None,
+        );
+        assert_eq!(
+            queue_conflict(
+                &Job::Write(Operation::Upgrade(third), None),
+                Some(&active),
+                &VecDeque::new(),
+                None,
+                None
+            ),
+            Some("A conflicting operation is already running or queued.")
+        );
+    }
+
+    #[test]
+    fn cancelling_queued_revalidation_discards_a_late_preview() {
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        let operation = Operation::Refresh {
+            backend: "fixture".into(),
+        };
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(Reply::Done(Ok(Payload::OperationPreview(
+                operation.clone(),
+                None,
+            ))))
+            .unwrap();
+        controller.as_mut().rust_mut().revalidating = Some(Confirmed {
+            job: Job::Write(operation.clone(), None),
+            activity_id: None,
+            cleanup_preview: vec![],
+        });
+        let cancel = Cancellation::default();
+        controller.as_mut().rust_mut().worker = Some(Worker {
+            handle: thread::spawn(|| {}),
+            receiver,
+            cancel: cancel.clone(),
+            job: Job::PlanOperation(operation),
+        });
+        controller.as_mut().cancel_queued();
+        assert!(cancel.requested());
+        controller.as_mut().poll();
+        assert!(controller.rust().pending.is_none());
+        assert!(controller.confirmation().is_empty());
+    }
+
+    #[test]
+    fn background_check_policy_and_results_leave_the_current_view_intact() {
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().set_rows("current view".into());
+        controller
+            .as_mut()
+            .check_updates("apt".into(), false, false, false, false);
+        controller
+            .as_mut()
+            .check_updates("apt".into(), true, true, false, false);
+        controller
+            .as_mut()
+            .check_updates("apt".into(), true, false, true, false);
+        assert!(controller.rust().worker.is_none());
+        controller
+            .as_mut()
+            .check_updates("unknown".into(), true, false, false, false);
+        assert!(controller.rust().worker.is_none());
+
+        let package: Package = serde_json::from_value(json!({
+            "id": {"backend":"apt", "name":"synthetic", "architecture":"amd64", "scope":"system"},
+            "display_name":"Synthetic", "summary":"Fixture", "installed_version":"1",
+            "candidate_version":"2", "update":"available"
+        }))
+        .unwrap();
+        let report = PackageReport {
+            packages: vec![package],
+            failures: vec![],
+            successful_sources: vec!["apt".into()],
+        };
+        controller.as_mut().finish_background_check(report.clone());
+        let state: Value =
+            serde_json::from_str(&controller.background_state().to_string()).unwrap();
+        assert_eq!(state["available"], 1);
+        assert_eq!(state["notify"], false);
+        assert_eq!(controller.rows().to_string(), "current view");
+
+        let mut changed = report;
+        changed.packages[0].candidate_version = Some("3".into());
+        controller.as_mut().finish_background_check(changed);
+        let state: Value =
+            serde_json::from_str(&controller.background_state().to_string()).unwrap();
+        assert_eq!(state["notify"], true);
+
+        controller.as_mut().finish_background_check(PackageReport {
+            packages: vec![],
+            failures: vec![BackendFailure {
+                backend: "fixture".into(),
+                error: EngineError::Cancelled,
+            }],
+            successful_sources: vec![],
+        });
+        let state: Value =
+            serde_json::from_str(&controller.background_state().to_string()).unwrap();
+        assert_eq!(state["notify"], false);
+        assert_eq!(state["failures"][0]["source"], "fixture");
+    }
+
+    #[test]
+    fn writes_serve_cached_navigation_and_defer_new_reads_without_cancelling() {
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().rust_mut().view_cache.insert(
+            cache_key("Installed", "", &[], false),
+            cached_view("retained package"),
+        );
+        let (_sender, receiver) = mpsc::channel();
+        let cancel = Cancellation::default();
+        controller.as_mut().rust_mut().worker = Some(Worker {
+            handle: thread::spawn(|| {}),
+            receiver,
+            cancel: cancel.clone(),
+            job: Job::Write(
+                Operation::Refresh {
+                    backend: "fixture".into(),
+                },
+                None,
+            ),
+        });
+        controller
+            .as_mut()
+            .load("Installed".into(), "".into(), "".into(), false, false);
+        assert!(controller.rows().to_string().contains("retained package"));
+        assert!(!cancel.requested());
+        assert!(
+            matches!(&controller.rust().deferred_load, Some(Job::Load(view, _)) if view == "Installed")
+        );
+        controller
+            .as_mut()
+            .load("Search".into(), "new query".into(), "".into(), false, false);
+        assert_eq!(controller.rows().to_string(), "[]");
+        assert!(
+            matches!(&controller.rust().deferred_load, Some(Job::Load(view, query)) if view == "Search" && query == "new query")
+        );
+        assert!(!cancel.requested());
+    }
+
+    #[test]
+    fn queued_previews_only_reuse_an_unchanged_confirmation() {
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        let operation = Operation::Refresh {
+            backend: "fixture".into(),
+        };
+        let queued = || Confirmed {
+            job: Job::Write(operation.clone(), None),
+            activity_id: None,
+            cleanup_preview: vec![],
+        };
+        controller.as_mut().rust_mut().revalidating = Some(queued());
+        controller
+            .as_mut()
+            .apply(Ok(Payload::OperationPreview(operation.clone(), None)));
+        assert!(controller.rust().validated_confirmed.is_some());
+        assert!(controller.confirmation().is_empty());
+        controller.as_mut().rust_mut().validated_confirmed = None;
+        controller.as_mut().rust_mut().revalidating = Some(queued());
+        controller.as_mut().apply(Ok(Payload::OperationPreview(
+            Operation::Refresh {
+                backend: "changed".into(),
+            },
+            None,
+        )));
+        assert!(controller.rust().validated_confirmed.is_none());
+        assert!(controller.confirmation().to_string().contains("changed"));
+    }
+
+    #[test]
+    fn queued_cleanup_requires_new_consent_when_its_native_preview_changes() {
+        let item = CleanupItem {
+            id: CleanupId {
+                backend: "fixture".into(),
+                key: "cache".into(),
+            },
+            kind: CleanupKind::OrphanDependencies,
+            title: "Synthetic cleanup".into(),
+            summary: "Fixture".into(),
+            preview: "Remove one cached file".into(),
+        };
+        let operations = vec![Operation::Clean(item.id.clone())];
+        let queued = || Confirmed {
+            job: Job::CleanAll(operations.clone()),
+            activity_id: None,
+            cleanup_preview: vec![item.clone()],
+        };
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().rust_mut().revalidating = Some(queued());
+        controller.as_mut().apply(Ok(Payload::CleanPreview(
+            operations.clone(),
+            vec![item.clone()],
+        )));
+        assert!(controller.rust().validated_confirmed.is_some());
+        assert!(controller.confirmation().is_empty());
+
+        controller.as_mut().rust_mut().validated_confirmed = None;
+        controller.as_mut().rust_mut().revalidating = Some(queued());
+        let mut changed = item.clone();
+        changed.preview = "Remove two cached files".into();
+        controller
+            .as_mut()
+            .apply(Ok(Payload::CleanPreview(operations.clone(), vec![changed])));
+        assert!(controller.rust().validated_confirmed.is_none());
+        assert!(controller
+            .confirmation()
+            .to_string()
+            .contains("Remove two cached files"));
+        assert!(matches!(controller.rust().pending, Some(Job::CleanAll(_))));
+
+        controller.as_mut().rust_mut().pending = None;
+        controller.as_mut().set_confirmation(QString::default());
+        controller.as_mut().rust_mut().revalidating = Some(queued());
+        controller
+            .as_mut()
+            .apply(Ok(Payload::CleanPreview(operations, vec![])));
+        assert!(controller.rust().pending.is_none());
+        assert!(controller
+            .status()
+            .to_string()
+            .contains("no longer available"));
+    }
+
+    #[test]
+    fn queued_writes_wait_for_a_read_worker_then_revalidate_each_job_kind() {
+        let clean = Operation::Clean(CleanupId {
+            backend: "fixture".into(),
+            key: "cache".into(),
+        });
+        let jobs = [
+            Job::Write(
+                Operation::Refresh {
+                    backend: "fixture".into(),
+                },
+                None,
+            ),
+            Job::UpgradeAll(
+                vec![Operation::UpgradeAll {
+                    backend: "fixture".into(),
+                }],
+                None,
+            ),
+            Job::CleanAll(vec![clean]),
+        ];
+        for (index, job) in jobs.into_iter().enumerate() {
+            let mut controller = ffi::create_controller();
+            let mut controller = controller.pin_mut();
+            let (_sender, receiver) = mpsc::channel();
+            let cancel = Cancellation::default();
+            controller.as_mut().rust_mut().background = true;
+            controller.as_mut().rust_mut().worker = Some(Worker {
+                handle: thread::spawn(|| {}),
+                receiver,
+                cancel: cancel.clone(),
+                job: Job::Load("Sources".into(), "".into()),
+            });
+            controller.as_mut().validate_confirmed(Confirmed {
+                job,
+                activity_id: None,
+                cleanup_preview: vec![],
+            });
+            assert!(controller.rust().revalidating.is_some());
+            assert!(cancel.requested());
+            assert!(matches!(
+                (index, &controller.rust().queued),
+                (0, Some(Job::PlanOperation(_)))
+                    | (1, Some(Job::PlanUpgrade(_, _)))
+                    | (2, Some(Job::PlanCleanAll(_)))
+            ));
+        }
+    }
+
+    #[test]
+    fn background_update_job_reads_only_available_updates() {
+        let package: Package = serde_json::from_value(json!({
+            "id": {"backend":"fixture", "name":"synthetic", "architecture":"all", "scope":"system"},
+            "display_name":"Synthetic", "summary":"Fixture", "installed_version":"1",
+            "candidate_version":"2", "update":"available"
+        }))
+        .unwrap();
+        let mut engine = Engine::default();
+        engine
+            .register(Fixture {
+                package,
+                fail: false,
+            })
+            .unwrap();
+        let mut replies = vec![];
+        execute(
+            &mut engine,
+            Job::BackgroundUpdates(vec!["fixture".into()]),
+            &Cancellation::default(),
+            &mut |reply| replies.push(reply),
+        );
+        assert!(matches!(
+            replies.pop(),
+            Some(Reply::Done(Ok(Payload::BackgroundUpdates(report))))
+                if report.packages.len() == 1 && report.packages[0].id.name == "synthetic"
+        ));
+    }
+
+    #[test]
+    fn background_worker_error_updates_failure_state_without_losing_known_count() {
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().set_background_state(encoded(json!({
+            "last_check": 1, "available": 3, "failures": [], "notify": true
+        })));
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(Reply::Done(Err(EngineError::Unavailable {
+                backend: "fixture".into(),
+                reason: "temporarily offline".into(),
+            })))
+            .unwrap();
+        drop(sender);
+        controller.as_mut().rust_mut().background = true;
+        controller.as_mut().rust_mut().worker = Some(Worker {
+            handle: thread::spawn(|| {}),
+            receiver,
+            cancel: Cancellation::default(),
+            job: Job::BackgroundUpdates(vec!["fixture".into()]),
+        });
+        controller.as_mut().poll();
+        let state: Value =
+            serde_json::from_str(&controller.background_state().to_string()).unwrap();
+        assert_eq!(state["available"], 3);
+        assert_eq!(state["notify"], false);
+        assert_eq!(state["failures"][0]["kind"], "unavailable");
+        assert!(state["last_check"].as_u64().unwrap() > 1);
+        assert!(!controller.busy());
+
+        controller
+            .as_mut()
+            .finish_background_error(&EngineError::Incomplete(vec![
+                BackendFailure {
+                    backend: "apt".into(),
+                    error: EngineError::Unavailable {
+                        backend: "apt".into(),
+                        reason: "offline".into(),
+                    },
+                },
+                BackendFailure {
+                    backend: "flatpak".into(),
+                    error: EngineError::Cancelled,
+                },
+            ]));
+        let state: Value =
+            serde_json::from_str(&controller.background_state().to_string()).unwrap();
+        assert_eq!(state["available"], 3);
+        assert_eq!(state["failures"][0]["source"], "apt");
+        assert_eq!(state["failures"][1]["kind"], "cancelled");
+    }
+
+    #[test]
+    fn autostart_only_persists_after_a_successful_file_change() {
+        let path = std::env::temp_dir().join(format!(
+            "pkgdeck-controller-autostart-{}",
+            std::process::id()
+        ));
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().rust_mut().autostart_path = Some(path.join("autostart/app.desktop"));
+        assert!(controller.as_mut().set_autostart(true));
+        assert!(std::fs::read_to_string(path.join("autostart/app.desktop"))
+            .unwrap()
+            .contains("--background"));
+        assert!(controller.as_mut().set_autostart(false));
+        assert!(!path.join("autostart/app.desktop").exists());
+        std::fs::write(path.join("blocked"), "synthetic").unwrap();
+        controller.as_mut().rust_mut().autostart_path = Some(path.join("blocked/app.desktop"));
+        assert!(!controller.as_mut().set_autostart(true));
+        assert!(controller
+            .status()
+            .to_string()
+            .contains("Autostart could not"));
+        controller.as_mut().rust_mut().autostart_path = None;
+        assert!(!controller.as_mut().set_autostart(true));
+        assert!(controller
+            .status()
+            .to_string()
+            .contains("No user configuration directory"));
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn queued_activity_and_mixed_batch_results_use_exact_targets() {
+        let path = std::env::temp_dir().join(format!(
+            "pkgdeck-controller-activity-{}",
+            std::process::id()
+        ));
+        let store = History::new(path.join("activity.json"));
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().rust_mut().activity_store = Some(store.clone());
+        let first = Operation::Upgrade(PackageId {
+            backend: "fixture".into(),
+            name: "first".into(),
+            architecture: "all".into(),
+            scope: Scope::System,
+            remote: None,
+            reference: None,
+        });
+        let second = Operation::Upgrade(PackageId {
+            backend: "fixture".into(),
+            name: "second".into(),
+            architecture: "all".into(),
+            scope: Scope::User { uid: 1234 },
+            remote: None,
+            reference: None,
+        });
+        let operations = vec![first, second];
+        let (_sender, receiver) = mpsc::channel();
+        controller.as_mut().rust_mut().worker = Some(Worker {
+            handle: thread::spawn(|| {}),
+            receiver,
+            cancel: Cancellation::default(),
+            job: Job::Load("Sources".into(), "".into()),
+        });
+        controller
+            .as_mut()
+            .accept_confirmed(Job::UpgradeAll(operations.clone(), None));
+        let entries = store.entries().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].operations, operations);
+        assert_eq!(entries[0].state, State::Queued);
+        assert!(controller.activity().to_string().contains("queued"));
+        controller.as_mut().cancel_queued();
+        assert_eq!(store.entries().unwrap()[0].state, State::Cancelled);
+        controller.as_mut().rust_mut().worker = None;
+
+        let id = store
+            .begin("gui", operations.clone(), State::Running)
+            .unwrap();
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(Reply::Done(Ok(Payload::Batch(
+                "One completed, one failed".into(),
+                vec![Outcome::Finished, Outcome::Failed],
+            ))))
+            .unwrap();
+        controller.as_mut().rust_mut().active_activity_id = Some(id);
+        controller.as_mut().rust_mut().worker = Some(Worker {
+            handle: thread::spawn(|| {}),
+            receiver,
+            cancel: Cancellation::default(),
+            job: Job::UpgradeAll(operations.clone(), None),
+        });
+        controller.as_mut().poll();
+        let entry = store
+            .entries()
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.id == id)
+            .unwrap();
+        assert_eq!(entry.state, State::Failed);
+        assert_eq!(entry.outcomes, [Outcome::Finished, Outcome::Failed]);
+        assert_eq!(entry.operations, operations);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn failed_queued_revalidation_records_failure_without_starting_a_write() {
+        let path = std::env::temp_dir().join(format!(
+            "pkgdeck-revalidation-activity-{}",
+            std::process::id()
+        ));
+        let store = History::new(path.join("activity.json"));
+        let operation = Operation::Refresh {
+            backend: "fixture".into(),
+        };
+        let id = store
+            .begin("gui", vec![operation.clone()], State::Queued)
+            .unwrap();
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().rust_mut().activity_store = Some(store.clone());
+        controller.as_mut().rust_mut().revalidating = Some(Confirmed {
+            job: Job::Write(operation, None),
+            activity_id: Some(id),
+            cleanup_preview: vec![],
+        });
+        controller.as_mut().apply(Err(EngineError::NotFound));
+        assert!(controller.rust().revalidating.is_none());
+        assert!(controller.rust().worker.is_none());
+        let entry = store.entries().unwrap().pop().unwrap();
+        assert_eq!(entry.state, State::Failed);
+        assert_eq!(entry.outcomes, [Outcome::Failed]);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn unavailable_confirmed_target_has_a_terminal_activity_result() {
+        let path = std::env::temp_dir().join(format!(
+            "pkgdeck-unavailable-activity-{}",
+            std::process::id()
+        ));
+        let store = History::new(path.join("activity.json"));
+        let operation = Operation::Refresh {
+            backend: "missing-fixture".into(),
+        };
+        let id = store
+            .begin("gui", vec![operation.clone()], State::Queued)
+            .unwrap();
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().rust_mut().activity_store = Some(store.clone());
+        controller.as_mut().start_confirmed(Confirmed {
+            job: Job::Write(operation, None),
+            activity_id: Some(id),
+            cleanup_preview: vec![],
+        });
+        assert_eq!(store.entries().unwrap()[0].state, State::Running);
+        for _ in 0..500 {
+            if controller
+                .rust()
+                .worker
+                .as_ref()
+                .is_some_and(|worker| worker.handle.is_finished())
+            {
+                break;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        controller.as_mut().poll();
+        let entry = store
+            .entries()
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.id == id)
+            .unwrap();
+        assert_eq!(entry.state, State::Failed);
+        assert_eq!(entry.outcomes, [Outcome::Failed]);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn changed_native_plan_is_reviewed_before_a_deferred_page_load() {
+        let operation = Operation::Refresh {
+            backend: "missing-fixture".into(),
+        };
+        let plan = TransactionPlan {
+            operation: operation.clone(),
+            native_preview: "synthetic".into(),
+            changes: vec![],
+            download_bytes: None,
+            disk_bytes: None,
+            restart_required: None,
+        };
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(Reply::Done(Err(EngineError::InvalidResponse {
+                backend: "missing-fixture".into(),
+                reason: "Transaction plan changed".into(),
+            })))
+            .unwrap();
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().rust_mut().worker = Some(Worker {
+            handle: thread::spawn(|| {}),
+            receiver,
+            cancel: Cancellation::default(),
+            job: Job::Write(operation.clone(), Some(Box::new(plan))),
+        });
+        controller.as_mut().rust_mut().deferred_load =
+            Some(Job::Load("Search".into(), "query".into()));
+        controller.as_mut().poll();
+        assert!(
+            matches!(controller.rust().worker.as_ref().map(|worker| &worker.job), Some(Job::PlanOperation(op)) if op == &operation)
+        );
+        assert!(
+            matches!(&controller.rust().deferred_load, Some(Job::Load(view, query)) if view == "Search" && query == "query")
+        );
+    }
+
+    #[test]
+    fn selection_during_a_write_uses_retained_package_details() {
+        let package: Package = serde_json::from_value(json!({
+            "id": {"backend":"fixture", "name":"selected", "architecture":"all", "scope":"system"},
+            "display_name":"Selected", "summary":"Synthetic details", "installed_version":"1",
+            "candidate_version":"2", "update":"available"
+        }))
+        .unwrap();
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().rust_mut().packages = vec![package];
+        let (_sender, receiver) = mpsc::channel();
+        let cancel = Cancellation::default();
+        controller.as_mut().rust_mut().worker = Some(Worker {
+            handle: thread::spawn(|| {}),
+            receiver,
+            cancel: cancel.clone(),
+            job: Job::Write(
+                Operation::Refresh {
+                    backend: "fixture".into(),
+                },
+                None,
+            ),
+        });
+        controller.as_mut().select(0);
+        assert_eq!(
+            controller.rust().selected.as_ref().unwrap().name,
+            "selected"
+        );
+        assert!(controller
+            .details()
+            .to_string()
+            .contains("Synthetic details"));
+        assert!(!cancel.requested());
     }
 
     #[test]
@@ -2732,9 +4382,10 @@ mod tests {
         assert!(controller.status().to_string().contains("No selected"));
         controller.as_mut().apply(Ok(Payload::Batch(
             "Firmware completed. Restart required.".into(),
+            vec![Outcome::Finished],
         )));
         assert!(controller.status().to_string().contains("Restart required"));
-        assert!(controller.rust().packages.is_empty());
+        assert!(!controller.rust().packages.is_empty());
         assert!(!*controller.upgradable());
     }
     #[test]
@@ -3144,6 +4795,122 @@ mod tests {
             .join()
             .unwrap();
         controller.as_mut().rust_mut().queued = None;
+    }
+    #[test]
+    fn inspection_jobs_share_read_only_inventory_and_report_exact_ids() {
+        let package: Package = serde_json::from_value(json!({
+            "id": {"backend":"apt", "name":"fixture", "architecture":"amd64", "scope":"system"},
+            "display_name":"Fixture", "summary":"Synthetic", "installed_version":"1", "candidate_version":null, "update":"current"
+        })).unwrap();
+        let mut engine = Engine::default();
+        engine
+            .register(Fixture {
+                package,
+                fail: false,
+            })
+            .unwrap();
+        let cancel = Cancellation::default();
+        let mut replies = Vec::new();
+        execute(&mut engine, Job::Inspection(None), &cancel, &mut |reply| {
+            replies.push(reply)
+        });
+        assert!(replies.iter().any(|reply| matches!(reply, Reply::Done(Ok(Payload::Inspection(value)))
+            if value["kind"] == "audit" && value["report"]["installed_copies"][0]["package"]["name"] == "fixture")));
+        replies.clear();
+        execute(
+            &mut engine,
+            Job::Inspection(Some("pkgdeck-fixture-missing".into())),
+            &cancel,
+            &mut |reply| replies.push(reply),
+        );
+        assert!(replies.iter().any(
+            |reply| matches!(reply, Reply::Done(Ok(Payload::Inspection(value)))
+            if value["kind"] == "command" && value["report"]["resolved"].is_null())
+        ));
+        replies.clear();
+        execute(
+            &mut engine,
+            Job::Inspection(Some("../bad".into())),
+            &cancel,
+            &mut |reply| replies.push(reply),
+        );
+        assert!(replies
+            .iter()
+            .any(|reply| matches!(reply, Reply::Done(Err(EngineError::Execution(_))))));
+    }
+    #[test]
+    fn inspection_payload_reaches_the_qt_property_without_changing_package_rows() {
+        let mut object = ffi::create_controller();
+        let mut controller = object.pin_mut();
+        let before = controller.rows().to_string();
+        controller.as_mut().apply(Ok(Payload::Inspection(
+            json!({"kind":"audit","report":{"groups":[]}}),
+        )));
+        assert_eq!(controller.rows().to_string(), before);
+        assert!(controller
+            .inspection()
+            .to_string()
+            .contains("\"kind\":\"audit\""));
+    }
+    #[test]
+    fn inspection_requests_queue_behind_reads_and_never_interrupt_writes() {
+        let mut object = ffi::create_controller();
+        let mut controller = object.pin_mut();
+        controller.as_mut().inspect_command("   ".into());
+        assert!(controller.rust().worker.is_none());
+        assert!(controller.rust().queued.is_none());
+
+        let (_sender, receiver) = mpsc::channel();
+        controller.as_mut().rust_mut().worker = Some(Worker {
+            handle: thread::spawn(|| {}),
+            receiver,
+            cancel: Cancellation::default(),
+            job: Job::Load("Installed".into(), "".into()),
+        });
+        controller.as_mut().inspect_command(" git ".into());
+        assert!(
+            matches!(controller.rust().queued, Some(Job::Inspection(Some(ref command))) if command == "git")
+        );
+        assert_eq!(controller.inspection().to_string(), "{}");
+        controller.as_mut().audit_installed();
+        assert!(matches!(
+            controller.rust().queued,
+            Some(Job::Inspection(None))
+        ));
+
+        controller.as_mut().rust_mut().worker.as_mut().unwrap().job = Job::Write(
+            Operation::Refresh {
+                backend: "apt".into(),
+            },
+            None,
+        );
+        controller.as_mut().rust_mut().queued = None;
+        controller.as_mut().inspect_command("other".into());
+        controller.as_mut().audit_installed();
+        assert!(controller.rust().queued.is_none());
+    }
+    #[test]
+    fn inspection_invokable_reports_invalid_command_without_executing_it() {
+        let mut object = ffi::create_controller();
+        let mut controller = object.pin_mut();
+        controller.as_mut().inspect_command("../never-run".into());
+        assert!(matches!(
+            controller.rust().worker.as_ref().map(|worker| &worker.job),
+            Some(Job::Inspection(Some(_)))
+        ));
+        let deadline = Instant::now() + std::time::Duration::from_secs(30);
+        while controller.rust().worker.is_some() && Instant::now() < deadline {
+            controller.as_mut().poll();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            controller.rust().worker.is_none(),
+            "read-only inspection timed out"
+        );
+        let report: serde_json::Value =
+            serde_json::from_str(&controller.inspection().to_string()).unwrap();
+        assert_eq!(report["kind"], "error");
+        assert!(report["message"].as_str().unwrap().contains("command name"));
     }
     fn cached_view(name: &str) -> CachedView {
         CachedView {
@@ -3699,7 +5466,7 @@ mod tests {
                 &Cancellation::default(),
                 &mut |reply| replies.push(reply),
             );
-            let Reply::Done(Ok(Payload::Batch(status))) = replies.pop().unwrap() else {
+            let Reply::Done(Ok(Payload::Batch(status, _))) = replies.pop().unwrap() else {
                 panic!("firmware completion status missing")
             };
             assert!(status.contains("restart or shutdown"));
@@ -3761,7 +5528,7 @@ mod tests {
                     Reply::Done(Ok(Payload::Sources(sources))) => {
                         assert_eq!(sources[0].backend, "fixture")
                     }
-                    Reply::Done(Ok(Payload::Batch(status))) => {
+                    Reply::Done(Ok(Payload::Batch(status, _))) => {
                         assert!(status.contains(if fail {
                             "Completed 0 of 1"
                         } else {

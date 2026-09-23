@@ -1,30 +1,37 @@
-use cxx_qt::casting::Upcast;
-use cxx_qt_lib::{QCoreApplication, QGuiApplication, QQmlApplicationEngine};
 use pkgdeck as _;
 
+#[allow(unsafe_code)]
+unsafe extern "C" {
+    fn pkgdeck_run_gui(
+        argc: i32,
+        argv: *mut *mut std::ffi::c_char,
+        version: *const std::ffi::c_char,
+    ) -> i32;
+}
+
+#[allow(unsafe_code)]
 fn main() {
     if std::env::args().any(|arg| arg == "--version") {
         println!("pkgdeck {}", pkgdeck_core::VERSION);
         return;
     }
-    let mut app = QGuiApplication::new();
-    {
-        let mut core = Upcast::<QCoreApplication>::upcast_pin(app.as_mut().unwrap());
-        core.as_mut().set_application_name(&"PkgDeck".into());
-        core.as_mut()
-            .set_application_version(&pkgdeck_core::VERSION.into());
-        core.as_mut().set_organization_name(&"astrovm".into());
-        core.set_organization_domain(&"github.com/astrovm".into());
-    }
-    QGuiApplication::set_desktop_file_name(&pkgdeck_core::APP_ID.into());
-    let mut engine = QQmlApplicationEngine::new();
-    pkgdeck::network::ffi::configure_network(engine.as_mut().unwrap());
-    let _failure = engine.as_mut().unwrap().on_object_creation_failed(|_, _| {
-        std::process::exit(1);
-    });
-    engine
-        .as_mut()
-        .unwrap()
-        .load(&"qrc:/qt/qml/io/github/astrovm/PkgDeck/qml/Main.qml".into());
-    app.as_mut().unwrap().exec();
+    let mut args: Vec<Vec<u8>> = std::env::args_os()
+        .map(|arg| {
+            use std::os::unix::ffi::OsStrExt;
+            std::ffi::CString::new(arg.as_os_str().as_bytes())
+                .expect("argument contains NUL")
+                .into_bytes_with_nul()
+        })
+        .collect();
+    let mut argv: Vec<*mut std::ffi::c_char> = args
+        .iter_mut()
+        .map(|arg| arg.as_mut_ptr().cast())
+        .chain(std::iter::once(std::ptr::null_mut()))
+        .collect();
+    let version = std::ffi::CString::new(pkgdeck_core::VERSION).unwrap();
+    // QApplication may reorder or edit argv; the mutable byte buffers stay
+    // alive until the Qt event loop exits.
+    let exit_code =
+        unsafe { pkgdeck_run_gui(args.len() as i32, argv.as_mut_ptr(), version.as_ptr()) };
+    std::process::exit(exit_code);
 }

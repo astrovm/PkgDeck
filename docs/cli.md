@@ -14,6 +14,8 @@ redirected input/output. Use `pkgdeck` to launch the GUI.
 pkd sources
 pkd search neovim --from apt
 pkd info neovim --from homebrew
+pkd inspect git
+pkd audit --json
 pkd list --json
 pkd install neovim --from apt --yes
 pkd update --from apt --yes
@@ -64,6 +66,24 @@ install them. Applying an inventory is not supported.
 For a named Flatpak present in both installations, choose `--scope user` or
 `--scope system`, for example `pkd --from flatpak --scope system install org.example.App`.
 Without a scope, ambiguous targets require an explicit choice.
+
+## Read-only inspection
+
+`pkd inspect COMMAND` reads the invoking host's sanitized `PATH` in order. It
+shows the first executable path, other candidates, symlink targets, and
+ownership reported by native package databases. It never runs `COMMAND`.
+Missing ownership is shown as unknown; a manager record without a matching
+installed inventory identity is shown as unmatched. Use `--json` for exact
+`PackageId` links, including backend, architecture, scope, remote, and ref.
+
+`pkd audit` reports exact installed copies and groups copies only when shared
+AppStream IDs or upstream homepages identify the same application. Versions
+are never compared across managers. The residual-data section lists only
+existing paths explicitly recorded as residual configuration by dpkg; paths
+claimed by more than one package are omitted. PkgDeck does not scan arbitrary
+home directories or guess leftover data from package names. Unknown data
+remains unknown. `--from` and `--scope` restrict the installed inventory used
+for the report.
 
 ## Confirmation and authorization
 
