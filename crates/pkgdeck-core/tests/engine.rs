@@ -1,5 +1,6 @@
 use pkgdeck_core::{
     engine::*,
+    host::{Authorization, Host, Runtime},
     package::*,
     process::{Cancellation, ExecutionError},
 };
@@ -878,4 +879,317 @@ fn cleanup_revalidates_confirmed_preview_before_writing() {
         engine.execute(&operation, &cancel, &mut |_| {}),
         Err(EngineError::InvalidResponse { .. })
     ));
+}
+
+#[test]
+fn confirmed_batch_rejects_stale_cleanup_before_any_step_runs() {
+    let mut engine = engine(Fault::None);
+    engine.register(Cleaner).unwrap();
+    let cancel = Cancellation::default();
+    let mut reviewed = engine.cleanup(&cancel).items.remove(0);
+    let cleanup = Operation::Clean(reviewed.id.clone());
+    reviewed.preview = "stale synthetic preview".into();
+    engine.remember_cleanup_plan(reviewed);
+    engine.enable_batch_authorization(
+        Host::new(Runtime::Native, Default::default()),
+        Authorization::Polkit,
+    );
+    let operations = [
+        Operation::Refresh {
+            backend: "synthetic".into(),
+        },
+        cleanup,
+    ];
+    let mut events = Vec::new();
+    let outcomes = engine.execute_batch(&operations, &cancel, &mut |event| events.push(event));
+    assert!(outcomes
+        .iter()
+        .all(|result| matches!(result, Err(EngineError::InvalidResponse { .. }))));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, Event::Started(_)))
+            .count(),
+        2
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, Event::Finished { .. }))
+            .count(),
+        2
+    );
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, Event::Progress { .. })));
+}
+
+#[test]
+fn batch_rejects_upgrade_without_backend_apt_preview() {
+    let cancel = Cancellation::default();
+    let mut engine = Engine::default();
+    engine.register(Synthetic::new("apt", Fault::None)).unwrap();
+    assert!(matches!(
+        engine.plan_apt_upgrade(&cancel),
+        Err(EngineError::Unsupported { .. })
+    ));
+    engine.remember_apt_upgrade_plan(AptUpgradePlan {
+        preview: "synthetic reviewed transaction".into(),
+        upgrades: vec!["synthetic".into()],
+        installs: vec![],
+        removals: vec![],
+    });
+    engine.enable_batch_authorization(
+        Host::new(Runtime::Native, Default::default()),
+        Authorization::Polkit,
+    );
+    let results = engine.execute_batch(
+        &[Operation::UpgradeAll {
+            backend: "apt".into(),
+        }],
+        &cancel,
+        &mut |_| {},
+    );
+    assert!(matches!(&results[0], Err(EngineError::Unsupported { .. })));
+}
+
+struct ChangingPreview {
+    calls: usize,
+    wrong_target: bool,
+}
+impl Backend for ChangingPreview {
+    fn id(&self) -> &str {
+        "plan"
+    }
+    fn capabilities(&self) -> &[Capability] {
+        &[Capability::Install]
+    }
+    fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
+        Ok(Availability::Available)
+    }
+    fn operation_plan(
+        &mut self,
+        operation: &Operation,
+        _: &Cancellation,
+    ) -> Result<Option<TransactionPlan>, EngineError> {
+        self.calls += 1;
+        let operation = if self.wrong_target {
+            Operation::Install(PackageId {
+                name: "different".into(),
+                ..id("plan")
+            })
+        } else {
+            operation.clone()
+        };
+        Ok(Some(TransactionPlan {
+            operation,
+            native_preview: format!("synthetic plan {}", self.calls),
+            changes: vec![],
+            download_bytes: None,
+            disk_bytes: None,
+            restart_required: None,
+        }))
+    }
+}
+
+#[test]
+fn batch_rejects_a_changed_or_misdirected_native_preview() {
+    let cancel = Cancellation::default();
+    let operation = Operation::Install(id("plan"));
+    let mut wrong = Engine::default();
+    wrong
+        .register(ChangingPreview {
+            calls: 0,
+            wrong_target: true,
+        })
+        .unwrap();
+    assert!(matches!(
+        wrong.plan_operation(&operation, &cancel),
+        Err(EngineError::InvalidResponse { .. })
+    ));
+
+    let mut changed = Engine::default();
+    changed
+        .register(ChangingPreview {
+            calls: 0,
+            wrong_target: false,
+        })
+        .unwrap();
+    let reviewed = changed
+        .plan_operation(&operation, &cancel)
+        .unwrap()
+        .unwrap();
+    changed.remember_operation_plan(reviewed);
+    changed.enable_batch_authorization(
+        Host::new(Runtime::Native, Default::default()),
+        Authorization::Polkit,
+    );
+    let results = changed.execute_batch(&[operation], &cancel, &mut |_| {});
+    assert!(
+        matches!(&results[0], Err(EngineError::InvalidResponse { reason, .. }) if reason.contains("Transaction plan changed"))
+    );
+}
+
+#[derive(Clone, Copy)]
+enum GroupResult {
+    Missing,
+    Failed,
+    Succeeded,
+}
+struct AptGroupScenario(GroupResult);
+struct MissingAptGroup;
+impl Backend for MissingAptGroup {
+    fn id(&self) -> &str {
+        "apt"
+    }
+    fn capabilities(&self) -> &[Capability] {
+        &[Capability::Install]
+    }
+    fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
+        Ok(Availability::Available)
+    }
+}
+impl Backend for AptGroupScenario {
+    fn id(&self) -> &str {
+        "apt"
+    }
+    fn capabilities(&self) -> &[Capability] {
+        &[Capability::Install]
+    }
+    fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
+        Ok(Availability::Available)
+    }
+    fn execute_group(
+        &mut self,
+        operations: &[Operation],
+        _: &Cancellation,
+        progress: &mut dyn FnMut(Progress),
+    ) -> Option<Result<Vec<OperationOutcome>, EngineError>> {
+        assert_eq!(operations.len(), 2);
+        match self.0 {
+            GroupResult::Missing => unreachable!("missing handler uses the default method"),
+            GroupResult::Failed => Some(Err(ExecutionError::LockBusy.into())),
+            GroupResult::Succeeded => {
+                progress(Progress::Message("synthetic grouped install".into()));
+                Some(Ok(vec![OperationOutcome::default(); operations.len()]))
+            }
+        }
+    }
+}
+
+#[test]
+fn exact_apt_group_reports_missing_failed_and_successful_native_transactions() {
+    let selected = ["first", "second"].map(|name| {
+        Operation::Install(PackageId {
+            backend: "apt".into(),
+            name: name.into(),
+            architecture: "amd64".into(),
+            scope: Scope::System,
+            remote: None,
+            reference: None,
+        })
+    });
+    for scenario in [
+        GroupResult::Missing,
+        GroupResult::Failed,
+        GroupResult::Succeeded,
+    ] {
+        let mut engine = Engine::default();
+        if matches!(scenario, GroupResult::Missing) {
+            engine.register(MissingAptGroup).unwrap();
+        } else {
+            engine.register(AptGroupScenario(scenario)).unwrap();
+        }
+        engine
+            .register(Synthetic::new("synthetic", Fault::None))
+            .unwrap();
+        engine.enable_batch_authorization(
+            Host::new(Runtime::Native, Default::default()),
+            Authorization::Polkit,
+        );
+        let operations = [
+            selected[0].clone(),
+            selected[1].clone(),
+            Operation::Refresh {
+                backend: "synthetic".into(),
+            },
+        ];
+        let mut events = Vec::new();
+        let outcomes = engine.execute_batch(&operations, &Cancellation::default(), &mut |event| {
+            events.push(event)
+        });
+        assert_eq!(outcomes.len(), 3);
+        assert_eq!(
+            outcomes[0].is_ok(),
+            matches!(scenario, GroupResult::Succeeded)
+        );
+        assert_eq!(
+            outcomes[1].is_ok(),
+            matches!(scenario, GroupResult::Succeeded)
+        );
+        assert!(outcomes[2].is_ok());
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, Event::Finished { .. }))
+                .count(),
+            3
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, Event::Progress { operation, .. } if operation == &selected[0]))
+                .count(),
+            if matches!(scenario, GroupResult::Succeeded) {
+                3
+            } else {
+                2
+            }
+        );
+    }
+}
+
+#[test]
+fn cancelling_at_the_authorization_boundary_stops_every_batch_write() {
+    let mut engine = Engine::default();
+    engine.register(MissingAptGroup).unwrap();
+    engine
+        .register(Synthetic::new("synthetic", Fault::None))
+        .unwrap();
+    engine.enable_batch_authorization(
+        Host::new(Runtime::Native, Default::default()),
+        Authorization::Polkit,
+    );
+    let operations = [
+        Operation::Install(PackageId {
+            backend: "apt".into(),
+            name: "fixture-tool".into(),
+            architecture: "amd64".into(),
+            scope: Scope::System,
+            remote: None,
+            reference: None,
+        }),
+        Operation::Refresh {
+            backend: "synthetic".into(),
+        },
+    ];
+    let cancel = Cancellation::default();
+    let mut events = Vec::new();
+    let results = engine.execute_batch(&operations, &cancel, &mut |event| {
+        if matches!(&event, Event::Progress { progress: Progress::Message(message), .. } if message.starts_with("Authorizing system changes")) {
+            cancel.cancel();
+        }
+        events.push(event);
+    });
+    assert_eq!(results, vec![Err(EngineError::Cancelled); 2]);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, Event::Finished { .. }))
+            .count(),
+        2
+    );
+    assert!(
+        matches!(events.first(), Some(Event::Started(operation)) if operation == &operations[0])
+    );
 }
