@@ -1,4 +1,4 @@
-//! Development-only probe. Run in a disposable VM; never installed with PkgDeck.
+//! CI-only probe. Run on a disposable GitHub-hosted runner; never installed with PkgDeck.
 use pkgdeck_core::{
     host::{AptAction, Authorization, Host},
     process::Cancellation,
@@ -6,7 +6,9 @@ use pkgdeck_core::{
 fn main() {
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args.len() != 3 {
-        eprintln!("usage: apt-probe sudo|polkit install|remove PACKAGE (disposable VM only)");
+        eprintln!(
+            "usage: apt-probe sudo|polkit install|remove PACKAGE (disposable CI runner only)"
+        );
         std::process::exit(2);
     }
     let authorization = match args[0].as_str() {

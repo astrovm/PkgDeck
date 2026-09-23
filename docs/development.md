@@ -7,7 +7,7 @@ GUI tests away from your desktop. Local work and GitHub CI use the same verifier
 scripts/verify.sh fast --engine podman   # Format, script behavior, Qt-free lint/tests/build
 scripts/verify.sh full --only tests --engine podman  # Workspace tests
 scripts/verify.sh full --engine podman  # Lint, tests, >=95% coverage, release builds
-scripts/verify.sh vm    # Real package/authorization tests in a disposable VM
+scripts/verify.sh containers --engine podman  # APT and Homebrew package lifecycles
 ```
 
 Run these from any directory. Each verification run writes stage logs under
@@ -15,8 +15,7 @@ Run these from any directory. Each verification run writes stage logs under
 points to the latest run. Output streams live to the terminal. A failed stage
 stops subsequent stages and preserves its exit status. Stages time out after
 20 minutes and terminate their process group; `PKGDECK_STAGE_TIMEOUT` overrides
-that limit (GNU timeout syntax). The VM launcher has its own cleanup and deadline.
-VM details also remain in `build/host-vm/`. No verification mode publishes releases.
+that limit (GNU timeout syntax). No verification mode publishes releases.
 
 ## Running tests
 
@@ -82,14 +81,15 @@ The workflow is named `CI`. Checks use `Category / Scope (architecture)`:
 
 | Check | Responsibility |
 | --- | --- |
-| `Test / Terminal (x86_64, aarch64)` | Fast checks and Qt-free CLI builds, one job per architecture |
+| `Test / Terminal (x86_64, aarch64)` | Fast checks and Qt-free CLI builds; x86_64 also checks native host authorization and APT locks |
 | `Lint / Workspace (x86_64, aarch64)` | Workspace Clippy, one job per architecture |
 | `Coverage / Workspace (x86_64)` | Workspace tests with the 95% coverage gate |
 | `Test / Workspace (aarch64)` | Native workspace tests without instrumentation |
 | `Test / Podman (x86_64, aarch64)` | Container workspace tests and CLI APT/Homebrew lifecycles, one job per architecture |
-| `Test / VM (x86_64)` | VM lifecycles and authorization checks |
 | `Test / Backend / <backend> (x86_64)` | Real native/development-manager lifecycle tests |
-| `Package / Linux (x86_64, aarch64)` | Release build, package formats, and packaged GUI lifecycles, one job per architecture |
+| `Package / AppImage + Snap (x86_64, aarch64)` | Release build, bundles, and packaged GUI lifecycles |
+| `Package / Flatpak (x86_64, aarch64)` | Flatpak build, installed GUI, and host bridge lifecycle |
+| `Package / Homebrew (Linux, macOS)` | Formula build and installed commands |
 
 Job IDs and log stages use lowercase kebab-case (`test-workspace`,
 `lint-terminal`, `build-release`, `check-coverage`). Step names start with an
@@ -158,32 +158,18 @@ across changing OS repositories. Resolved OS packages are recorded at
 `/opt/pkgdeck-os-packages.txt` in each prepared image. Delete a particular PkgDeck
 image tag to rebuild it; the scripts never prune unrelated images or caches.
 
-## Prepared QEMU guests
+## Hosted runner authorization checks
 
-```sh
-scripts/verify.sh vm  # First run prepares dependencies, then tests a fresh overlay
-scripts/verify.sh vm  # Reuses the prepared base; creates another fresh test overlay
-```
+CI builds the CLI and probes, then runs `scripts/tests/host-authorization.sh` as
+root on a fresh GitHub-hosted Ubuntu 26.04 x86_64 runner. The script rejects local
+and self-hosted environments before changing APT, sudoers, or polkit. It creates a
+synthetic package and users, checks native host detection, permission denials,
+APT lock contention, and installation/removal through sudo and polkit, then removes
+its fixtures. The runner is discarded after the job.
 
-The preparation stage installs system dependencies and the checksum-verified
-Homebrew tool once. It does not install test packages or create the privileged test
-user. Its cache key includes the pinned Ubuntu cloud image checksum and
-`scripts/vm/prepare.sh`; changing lifecycle assertions does not invalidate setup.
-Prepared images have a SHA-256 sidecar checked before reuse. A failed preparation
-never becomes a valid cache entry. A cache lock serializes runs using the same base.
-
-Set `PKGDECK_VM_CACHE` to choose the cache directory (default `build/host-vm`). Keep
-it at a stable absolute path because qcow2 backing paths are absolute. Logs stream
-live and remain in `build/host-vm/logs/<run>-prepare|lifecycle/`. Each boot has a
-15-minute deadline; the shared verifier also bounds the overall VM stage. Failed
-runs retain logs and remove disposable overlays. SIGTERM and Ctrl-C unwind QEMU
-cleanup. `CARGO_TARGET_DIR` selects binaries outside the default host target path;
-they are mounted separately and read-only.
-
-QEMU retains the real sudo/polkit, APT lock, and full-system checks. Podman covers
-faster backend lifecycles; it does not claim desktop authorization, installed
-Flatpak/Snap bridges, FUSE, or a real display session. The current QEMU fixture is
-x86_64 only. No preparation or test script is intended to run directly on the host.
+APT and Homebrew package lifecycles run in rootless Podman on both architectures.
+These jobs do not claim interactive desktop authorization, installed Flatpak/Snap
+bridges, FUSE, or a real display session.
 
 ## Native tooling
 

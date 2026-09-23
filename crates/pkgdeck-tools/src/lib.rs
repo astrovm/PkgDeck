@@ -464,10 +464,10 @@ pub fn qml() {
 
 pub fn apt_lock_probe() {
     assert_eq!(
-        fs::read_to_string("/etc/pkgdeck-disposable-vm")
+        fs::read_to_string("/etc/pkgdeck-disposable-ci-runner")
             .unwrap()
             .trim(),
-        "host-execution-test"
+        "github-hosted-ubuntu-26.04"
     );
     assert_eq!(unsafe { libc::geteuid() }, 0);
     let lock = fs::OpenOptions::new()
@@ -487,7 +487,7 @@ pub fn apt_lock_probe() {
             "-u",
             "pkgdeck-test",
             "--",
-            "/mnt/pkgdeck-bin/examples/apt-probe",
+            "/opt/pkgdeck-bin/examples/apt-probe",
             "sudo",
             "install",
             "pkgdeck-fixture",

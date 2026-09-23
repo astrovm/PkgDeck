@@ -1,12 +1,8 @@
 #!/usr/bin/env bash
-# Dependencies only; allowed exclusively in disposable guests.
+# Dependencies only; allowed exclusively in disposable containers.
 set -euo pipefail
-if [[ ${1:-} == --container ]]; then
-    [[ $EUID == 0 && -f /etc/pkgdeck-disposable-container && (-f /run/.containerenv || ${container:-} == podman) ]]
-else
-    [[ $EUID == 0 && -f /etc/pkgdeck-disposable-vm ]]
-    systemctl stop apt-daily.timer apt-daily-upgrade.timer apt-daily.service apt-daily-upgrade.service
-fi
+[[ ${1:-} == --container && $EUID == 0 && -f /etc/pkgdeck-disposable-container &&
+    (-f /run/.containerenv || ${container:-} == podman) ]]
 apt-get update -qq
 apt-get install -y --no-install-recommends pkexec polkitd sudo libapt-pkg-dev build-essential git curl jq file procps ca-certificates
 useradd -m linuxbrew

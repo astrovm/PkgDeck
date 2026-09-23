@@ -79,21 +79,6 @@ grep -q 'CARGO_HOME=/cache/cargo' containers/development.Containerfile
 expect_code 0 env PATH="$work/bin:$PATH" PODMAN_ARGS="$work/args" PKGDECK_CONTAINER_CACHE="$work/cache" scripts/container.sh development --exec cargo test --locked example
 grep -Fxq example "$work/args"
 expect_code 2 env PATH="$work/bin:$PATH" PKGDECK_CONTAINER_CACHE="$work/cache" scripts/container.sh development --exec
-source scripts/vm/cache.sh
-printf synthetic-base >"$work/base"
-qemu-img() { printf synthetic-prepared >"${@: -2:1}"; }
-boot() {
-    echo prepare >>"$work/calls"
-    [[ ! -e $work/fail ]]
-}
-: >"$work/fail"
-expect_code 1 prepare_cached "$work/base" "$work/prepared" "$work/sha"
-[[ ! -e $work/prepared && ! -e $work/prepared.part && ! -e $work/sha ]]
-rm "$work/fail" "$work/calls"
-prepare_cached "$work/base" "$work/prepared" "$work/sha"
-prepare_cached "$work/base" "$work/prepared" "$work/sha"
-[[ $(wc -l <"$work/calls") == 1 ]]
-printf corrupted >"$work/prepared"
-prepare_cached "$work/base" "$work/prepared" "$work/sha"
-[[ $(wc -l <"$work/calls") == 2 && ! -e $work/prepared.part ]]
-echo 'PASS verifier arguments, failure, timeout; VM cache publication, reuse and corruption'
+expect_code 1 scripts/tests/host-authorization.sh
+grep -q 'disposable PkgDeck GitHub-hosted runner' "$work/output"
+echo 'PASS verifier arguments, failure, timeout, and hosted-runner guard'

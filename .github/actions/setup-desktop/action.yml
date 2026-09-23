@@ -27,10 +27,10 @@ runs:
           libxtst6 libwayland-cursor0 libwayland-egl1 xvfb xdotool fonts-dejavu-core
         )
         if [[ "$PACKAGING" == true ]]; then
-          packages+=(flatpak flatpak-builder dbus-daemon snapd squashfs-tools zsync desktop-file-utils podman)
+          packages+=(snapd squashfs-tools desktop-file-utils podman)
         fi
         sudo apt-get update
-        sudo apt-get install -y "${packages[@]}"
+        sudo apt-get install -y --no-install-recommends "${packages[@]}"
         rustup show
     - name: Install coverage tool
       if: inputs.coverage == 'true'

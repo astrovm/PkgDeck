@@ -3,7 +3,7 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 mode=${1:-fast}
 if (($#)); then shift; fi
-usage='Usage: scripts/verify.sh [fast|full|vm|containers] [--engine native|podman] [--only lint,coverage,release,tests]'
+usage='Usage: scripts/verify.sh [fast|full|containers] [--engine native|podman] [--only lint,coverage,release,tests]'
 if [[ "$mode" == --help ]]; then echo "$usage"; exit 0; fi
 engine=native
 only=all
@@ -14,7 +14,7 @@ while (($#)); do
         *) echo "$usage" >&2; exit 2;;
     esac
 done
-if [[ ! "$mode" =~ ^(fast|full|vm|containers)$ ]] || [[ ! "$engine" =~ ^(native|podman)$ ]] || [[ "$mode" == vm && "$engine" == podman ]]; then
+if [[ ! "$mode" =~ ^(fast|full|containers)$ ]] || [[ ! "$engine" =~ ^(native|podman)$ ]]; then
     echo "$usage" >&2
     exit 2
 fi
@@ -64,12 +64,6 @@ if [[ "$mode" == containers ]]; then
 fi
 if [[ "$engine" == podman ]]; then
     stage "verify-podman-$mode" scripts/container.sh development "$mode" --only "$only"
-    exit 0
-fi
-if [[ "$mode" == vm ]]; then
-    stage build-probe cargo build --locked -p pkgdeck-core --example apt-probe
-    stage build-cli cargo build --locked -p pkd -p pkgdeck-tools
-    stage test-vm-lifecycle scripts/test-host-vm.sh
     exit 0
 fi
 # Stage-selected full runs (parallel CI jobs) skip the shared prefix: the
