@@ -10,6 +10,12 @@ Rectangle {
     property var screenshots: []
     property string description: ""
     property var detailsData: ({})
+    readonly property string metadataText: detailMatchesSelection ? [
+        detailsData.publisher ? "Publisher: " + detailsData.publisher : "",
+        detailsData.license ? "License: " + detailsData.license : "",
+        detailsData.homepage ? "Homepage: " + detailsData.homepage : "",
+        (detailsData.dependencies || []).length ? "Dependencies: " + detailsData.dependencies.join(", ") : ""
+    ].filter(Boolean).join("\n") : ""
     property string iconSource: ""
     property bool compact: false
     property bool motionEnabled: false
@@ -22,10 +28,10 @@ Rectangle {
     property color accent
     property font textFont
     property alias detailsContentItem: detailsContent
+    readonly property real idealHeight: Math.max(88, 32 + 40 + detailsContent.spacing + detailBody.implicitHeight)
     signal closeRequested()
     signal screenshotRequested(string url, string caption)
     signal screenshotFailed(string url, string identity)
-    signal packageRequested(var packageId)
 
     color: surface
     radius: 10
@@ -95,6 +101,7 @@ Rectangle {
             contentWidth: availableWidth
             clip: true
             ColumnLayout {
+                id: detailBody
                 width: detailScroll.availableWidth
                 spacing: 10
                 ListView {
@@ -154,6 +161,7 @@ Rectangle {
                 }
                 TextEdit {
                     objectName: "packageDetails"
+                    visible: panel.description.length > 0
                     Layout.fillWidth: true
                     readOnly: true
                     selectByMouse: true
@@ -165,100 +173,17 @@ Rectangle {
                     text: panel.description
                     Accessible.name: "Package details"
                 }
-                Controls.Label {
-                    visible: panel.detailMatchesSelection
-                    text: "Overview"
-                    color: panel.ink
-                    font.bold: true
-                }
-                Controls.Label {
-                    visible: panel.detailMatchesSelection
-                    Layout.fillWidth: true
-                    text: panel.selected ? (panel.selected.source + " · " + panel.selected.scope_label
-                        + " · " + (panel.selected.installed ? "Installed " + panel.selected.installed
-                        : "Available " + (panel.selected.candidate || "version unknown"))) : ""
-                    color: panel.muted
-                    wrapMode: Text.Wrap
-                }
-                Controls.Label {
-                    visible: panel.detailMatchesSelection
-                    text: "Available sources"
-                    color: panel.ink
-                    font.bold: true
-                }
-                Repeater {
-                    model: panel.detailMatchesSelection ? (panel.detailsData.available_sources || []) : []
-                    delegate: Controls.Label {
-                        required property var modelData
-                        width: detailScroll.availableWidth
-                        text: modelData.source + " · " + modelData.name + " · " + modelData.scope_label
-                            + " · " + (modelData.candidate || modelData.installed || "version unknown")
-                        color: panel.muted
-                        wrapMode: Text.WrapAnywhere
-                    }
-                }
-                Controls.Label {
-                    visible: panel.detailMatchesSelection
-                    Layout.fillWidth: true
-                    text: "Variants known from loaded results; search to check more sources."
-                    color: panel.muted
-                    wrapMode: Text.Wrap
-                }
-                Controls.Label {
-                    visible: panel.detailMatchesSelection
-                    text: "Installed copies"
-                    color: panel.ink
-                    font.bold: true
-                }
-                Controls.Label {
-                    visible: panel.detailMatchesSelection && !(panel.detailsData.installed_copies || []).length
-                    text: "No installed copy in loaded results. Open Installed to check all sources."
-                    color: panel.muted
-                    wrapMode: Text.Wrap
-                }
-                Repeater {
-                    model: panel.detailMatchesSelection ? (panel.detailsData.installed_copies || []) : []
-                    delegate: Controls.Button {
-                        required property var modelData
-                        width: detailScroll.availableWidth
-                        text: modelData.source + " · " + modelData.name + " · " + modelData.scope_label
-                        Accessible.name: "Open exact installed copy " + text
-                        onClicked: panel.packageRequested({backend: modelData.source, name: modelData.name,
-                            architecture: modelData.architecture, scope: modelData.scope,
-                            remote: modelData.remote, reference: modelData.reference})
-                    }
-                }
-                Controls.Label {
-                    visible: panel.detailMatchesSelection && (panel.detailsData.installed_copies || []).length > 0
-                    Layout.fillWidth: true
-                    text: "Open Installed for a full inventory and audit."
-                    color: panel.muted
-                    wrapMode: Text.Wrap
-                }
-                Controls.Label {
-                    visible: panel.detailMatchesSelection
-                    text: "Technical details"
-                    color: panel.ink
-                    font.bold: true
-                }
                 TextEdit {
-                    visible: panel.detailMatchesSelection
+                    objectName: "packageMetadata"
+                    visible: panel.metadataText.length > 0
                     Layout.fillWidth: true
                     readOnly: true
                     selectByMouse: true
                     wrapMode: TextEdit.Wrap
                     textFormat: TextEdit.PlainText
                     color: panel.muted
-                    text: panel.selected ? [
-                        "Identity: " + (panel.selected.reference || panel.selected.name),
-                        "Architecture: " + panel.selected.architecture,
-                        "Scope: " + panel.selected.scope_label,
-                        panel.detailsData.publisher ? "Publisher: " + panel.detailsData.publisher : "",
-                        panel.detailsData.license ? "License: " + panel.detailsData.license : "",
-                        panel.detailsData.homepage ? "Homepage: " + panel.detailsData.homepage : "",
-                        (panel.detailsData.dependencies || []).length ? "Dependencies: " + panel.detailsData.dependencies.join(", ") : ""
-                    ].filter(Boolean).join("\n") : ""
-                    Accessible.name: "Technical package details"
+                    text: panel.metadataText
+                    Accessible.name: "Additional package metadata"
                 }
             }
         }
