@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls as Controls
 import QtQuick.Layouts
+import QtQuick.Dialogs
 import QtCore
 import org.kde.kirigami as Kirigami
 
@@ -20,6 +21,19 @@ Controls.ApplicationWindow {
     property var retainedItems: []
     property bool retainingResults: false
     property var items: currentView === resultView ? (retainingResults ? retainedItems : liveItems) : []
+    property var inventorySelection: []
+    readonly property var inventoryPreview: JSON.parse(backend.manifest_preview || "{}")
+    function visibleInventoryIds() {
+        return viewItems.filter(row => row.kind === "package").map(row => ({
+            backend: row.source, name: row.name, architecture: row.architecture,
+            scope: row.scope, remote: row.remote || null, reference: row.reference || null
+        }));
+    }
+    function exportVisibleInventory() {
+        inventorySelection = visibleInventoryIds();
+        rememberDialogFocus();
+        exportInventoryFile.open();
+    }
     property bool reduceMotion: preferences.reduceMotion
     readonly property bool motionEnabled: !reduceMotion && Kirigami.Units.shortDuration > 0
     readonly property int feedbackDuration: motionEnabled ? Math.round(Kirigami.Units.shortDuration * 0.8) : 0
@@ -1225,6 +1239,14 @@ Controls.ApplicationWindow {
                         leftPadding: 28
                     }
                 }
+                ActionButton {
+                    objectName: "exportInventoryButton"
+                    text: root.compact ? "Export" : "Export shown"
+                    symbol: "installed"
+                    enabled: !backend.busy && root.viewItems.some(row => row.kind === "package") && root.readFailures.length === 0
+                    onClicked: root.exportVisibleInventory()
+                    Accessible.name: "Export shown installed packages"
+                }
             }
             ColumnLayout {
                 visible: root.currentView === "Settings"
@@ -1266,6 +1288,14 @@ Controls.ApplicationWindow {
                     Layout.fillWidth: true
                     wrapMode: Text.WordWrap
                     text: "Polkit opens your system authentication dialog. Sudo uses an existing authorization. Homebrew and development tools run without elevation."
+                }
+                Controls.Label { text: "Inventory" }
+                ActionButton {
+                    objectName: "previewInventoryButton"
+                    text: "Preview inventory"
+                    symbol: "installed"
+                    enabled: !backend.busy
+                    onClicked: { root.rememberDialogFocus(); previewInventoryFile.open(); }
                 }
                 // Absorbs leftover height so the settings stack stays top-anchored.
                 Item { Layout.fillHeight: true }
@@ -1861,6 +1891,93 @@ Controls.ApplicationWindow {
                     tooltipText: root.compact ? "Reload" : ""
                     enabled: !backend.writing
                     onClicked: root.reload(true)
+                }
+            }
+        }
+    }
+    FileDialog {
+        id: exportInventoryFile
+        title: "Export inventory"
+        fileMode: FileDialog.SaveFile
+        nameFilters: ["PkgDeck inventory (*.json)"]
+        onAccepted: {
+            backend.exportInventory(selectedFile, JSON.stringify(root.inventorySelection));
+            root.restoreDialogFocus();
+        }
+        onRejected: root.restoreDialogFocus()
+    }
+    FileDialog {
+        id: previewInventoryFile
+        title: "Preview inventory"
+        fileMode: FileDialog.OpenFile
+        nameFilters: ["PkgDeck inventory (*.json)", "JSON files (*.json)"]
+        onAccepted: {
+            backend.previewInventory(selectedFile);
+            inventoryPreviewDialog.open();
+        }
+        onRejected: root.restoreDialogFocus()
+    }
+    Controls.Dialog {
+        id: inventoryPreviewDialog
+        objectName: "inventoryPreviewDialog"
+        parent: Controls.Overlay.overlay
+        anchors.centerIn: parent
+        width: Math.min(root.width - 32, 660)
+        height: Math.min(root.height - 32, 540)
+        modal: true
+        title: "Inventory preview"
+        standardButtons: Controls.Dialog.Close
+        onClosed: root.restoreDialogFocus()
+        background: Rectangle { color: root.surface; radius: 10; border.color: root.line }
+        contentItem: Controls.ScrollView {
+            clip: true
+            contentWidth: availableWidth
+            ColumnLayout {
+                width: parent.width
+                spacing: 8
+                Controls.BusyIndicator {
+                    running: backend.busy && !root.inventoryPreview.packages
+                    visible: running
+                    Layout.alignment: Qt.AlignHCenter
+                }
+                Controls.Label {
+                    visible: !backend.busy && !root.inventoryPreview.packages
+                    text: backend.status
+                    textFormat: Text.PlainText
+                    wrapMode: Text.WordWrap
+                    color: root.muted
+                    Layout.fillWidth: true
+                }
+                Repeater {
+                    model: root.inventoryPreview.packages || []
+                    delegate: ColumnLayout {
+                        required property var modelData
+                        Layout.fillWidth: true
+                        Controls.Label {
+                            text: modelData.package.name + " · " + modelData.package.backend
+                            color: root.ink
+                            font.bold: true
+                            Layout.fillWidth: true
+                        }
+                        Controls.Label {
+                            text: modelData.status.replaceAll("_", " ") + (modelData.reason ? " · " + modelData.reason : "")
+                            textFormat: Text.PlainText
+                            wrapMode: Text.WordWrap
+                            color: root.muted
+                            Layout.fillWidth: true
+                        }
+                        Repeater {
+                            model: modelData.proposed_changes || []
+                            delegate: Controls.Label {
+                                required property var modelData
+                                text: modelData.detail
+                                textFormat: Text.PlainText
+                                wrapMode: Text.WordWrap
+                                color: root.muted
+                                Layout.fillWidth: true
+                            }
+                        }
+                    }
                 }
             }
         }

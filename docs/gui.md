@@ -20,6 +20,12 @@ Installed supports filtering and a **Duplicate installs** view. AppStream identi
 and upstream homepage metadata associate related installations; grouping does not
 merge packages or change what an action targets.
 
+**Export shown** saves the installed packages currently visible after filters to
+a portable JSON inventory. In Settings, **Preview inventory** checks one of these
+files against this machine. It shows installed, installable, unavailable,
+unsupported, and ambiguous entries, with repository or source choices where
+needed. Preview makes no package or repository changes.
+
 Click column headings to sort; drag the name and version dividers to resize.
 Use the source picker to filter the current page. Enable managers separately in
 Settings; that choice persists between sessions. The picker shows unavailable

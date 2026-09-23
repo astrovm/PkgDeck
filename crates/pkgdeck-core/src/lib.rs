@@ -9,6 +9,7 @@ pub mod host;
 pub mod process;
 
 pub mod engine;
+pub mod manifest;
 pub mod package;
 
 pub mod backends;

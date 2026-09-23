@@ -23,6 +23,10 @@ TestCase {
         property string confirmation_data: "{}"
         property string source_catalog: "[]"
         property string report_state: "{}"
+        property string manifest_preview: "{}"
+        property string lastInventorySelection: ""
+        function exportInventory(url, identities) { lastInventorySelection = identities; }
+        function previewInventory(url) {}
         property string lastRetry: ""
         property string version: "9.9.9-test"
         property bool simulateLoading: false
@@ -101,6 +105,8 @@ TestCase {
         fake.confirmation_data = "{}";
         fake.report_state = "{}";
         fake.lastRetry = "";
+        fake.manifest_preview = "{}";
+        fake.lastInventorySelection = "";
         fake.simulateLoading = false;
         fake.busy = false;
         fake.writing = false;
@@ -522,6 +528,22 @@ TestCase {
         installed.update = "available";
         browser.openView("Updates");
         compare(browser.versionText(installed), "1.2.3 → 2.0.0");
+    }
+    function test_export_visible_inventory_preserves_exact_filtered_identity() {
+        browser.openView("Installed");
+        fake.rows = JSON.stringify([
+            {kind: "package", name: "editor", source: "apt", architecture: "amd64", scope: "system", installed: "1", summary: "Editor"},
+            {kind: "package", name: "editor", source: "flatpak", architecture: "x86_64", scope: {user: {uid: 1000}}, remote: "flathub", reference: "app/editor/x86_64/stable", installed: "2", summary: "Editor"}
+        ]);
+        compare(browser.visibleInventoryIds().length, 2);
+        browser.viewSourceFilters = ({Installed: ["flatpak"]});
+        const selected = browser.visibleInventoryIds();
+        compare(selected.length, 1);
+        compare(selected[0].backend, "flatpak");
+        compare(selected[0].remote, "flathub");
+        compare(selected[0].reference, "app/editor/x86_64/stable");
+        compare(selected[0].scope.user.uid, 1000);
+        verify(findChild(browser, "exportInventoryButton").enabled);
     }
     function test_versionless_runtime_actions_and_rebuild_labels() {
         browser.openView("Updates");

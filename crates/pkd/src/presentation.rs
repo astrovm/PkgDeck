@@ -208,6 +208,36 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
                 output.push_str(&format!("\n[!] Source failed: {}", value(failure)));
             }
         }
+    } else if let Some(export) = data.get("manifest_export") {
+        output.push_str(&format!(
+            "Exported {} packages to {}",
+            value(&export["packages"]),
+            value(&export["path"])
+        ));
+    } else if let Some(preview) = data.get("manifest_preview") {
+        let rows = preview["packages"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|entry| {
+                vec![
+                    value(&entry["package"]["name"]),
+                    value(&entry["package"]["backend"]),
+                    value(&entry["status"]),
+                    value(&entry["reason"]),
+                ]
+            })
+            .collect::<Vec<_>>();
+        output.push_str(&table(
+            &["PACKAGE", "SOURCE", "STATUS", "DETAIL"],
+            &rows,
+            width,
+        ));
+        for entry in preview["packages"].as_array().into_iter().flatten() {
+            for proposed in entry["proposed_changes"].as_array().into_iter().flatten() {
+                output.push_str(&format!("\n  {}", value(&proposed["detail"])));
+            }
+        }
     } else if data.get("package").is_some() {
         let p = &data["package"];
         output.push_str(&format!(
