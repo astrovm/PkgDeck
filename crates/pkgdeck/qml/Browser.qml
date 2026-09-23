@@ -1898,12 +1898,6 @@ Controls.ApplicationWindow {
                     enabled: !backend.busy && (root.uncheckedPackages.length > 0 || backend.upgradable)
                     onClicked: root.upgradeUpdates()
                 }
-                Controls.Label {
-                    visible: root.currentView === "Updates"
-                    text: root.selectedCount() + " updates · " + root.effectiveSources().length + " selected sources"
-                    color: root.muted
-                    Layout.alignment: Qt.AlignVCenter
-                }
                 ActionButton {
                     objectName: "selectNoneButton"
                     visible: root.currentView === "Updates" && root.selectedCount() > 0
