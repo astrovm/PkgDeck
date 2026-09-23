@@ -7,9 +7,15 @@ pub const FOUNDATION_MESSAGE: &str =
 
 pub mod batch;
 pub mod host;
+pub mod inspection;
 pub mod process;
 
+pub mod activity;
+pub mod background;
 pub mod engine;
+pub mod flatpak_ref;
+pub mod local_deb;
+pub mod manifest;
 pub mod package;
 
 pub mod backends;

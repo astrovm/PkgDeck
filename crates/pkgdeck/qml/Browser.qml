@@ -1,11 +1,31 @@
 import QtQuick
 import QtQuick.Controls as Controls
 import QtQuick.Layouts
+import QtQuick.Dialogs
 import QtCore
+import QtNetwork
 import org.kde.kirigami as Kirigami
 
 Controls.ApplicationWindow {
     id: root
+    function openExternalInput(input) { backend.openInput(input); }
+    FileDialog {
+        id: installationPicker
+        title: "Open installation file"
+        nameFilters: ["Installation files (*.AppImage *.deb *.flatpakref)"]
+        onAccepted: backend.openInput(selectedFile.toString())
+    }
+    DropArea {
+        anchors.fill: parent
+        z: 1000
+        onEntered: (drag) => { if (!drag.hasUrls || drag.urls.length !== 1) drag.accepted = false; }
+        onDropped: (drop) => {
+            if (drop.urls.length === 1) {
+                backend.openInput(drop.urls[0].toString());
+                drop.acceptProposedAction();
+            } else drop.accepted = false;
+        }
+    }
     SystemPalette { id: systemPalette }
     SystemPalette { id: disabledPalette; colorGroup: SystemPalette.Disabled }
     required property var backend
@@ -15,11 +35,36 @@ Controls.ApplicationWindow {
         backend.changeRepository(JSON.stringify(request));
     }
     property string currentView: "Search"
+    readonly property var activityRows: JSON.parse(backend.activity || "[]")
+    readonly property int queuedCount: activityRows.filter(row => row.state === "queued").length
+    readonly property var backgroundState: JSON.parse(backend.background_state || "{}")
+    property bool startHidden: Qt.application.arguments.indexOf("--background") >= 0
+    property bool forceQuit: false
+    property bool trayAvailable: false
+    property alias backgroundMode: preferences.backgroundMode
+    property alias autostartEnabled: preferences.autostart
+    function checkUpdates(force) {
+        const offline = NetworkInformation.reachability === NetworkInformation.Reachability.Disconnected || NetworkInformation.isBehindCaptivePortal;
+        backend.checkUpdates(root.checkedSources().join(","), preferences.backgroundMode, offline, NetworkInformation.isMetered, force === true);
+    }
     property string resultView: "Search"
     property var liveItems: JSON.parse(backend.rows || "[]")
     property var retainedItems: []
     property bool retainingResults: false
     property var items: currentView === resultView ? (retainingResults ? retainedItems : liveItems) : []
+    property var inventorySelection: []
+    readonly property var inventoryPreview: JSON.parse(backend.manifest_preview || "{}")
+    function visibleInventoryIds() {
+        return viewItems.filter(row => row.kind === "package").map(row => ({
+            backend: row.source, name: row.name, architecture: row.architecture,
+            scope: row.scope, remote: row.remote || null, reference: row.reference || null
+        }));
+    }
+    function exportVisibleInventory() {
+        inventorySelection = visibleInventoryIds();
+        rememberDialogFocus();
+        exportInventoryFile.open();
+    }
     property bool reduceMotion: preferences.reduceMotion
     readonly property bool motionEnabled: !reduceMotion && Kirigami.Units.shortDuration > 0
     readonly property int feedbackDuration: motionEnabled ? Math.round(Kirigami.Units.shortDuration * 0.8) : 0
@@ -56,6 +101,7 @@ Controls.ApplicationWindow {
         }
     }
     property var detail: JSON.parse(backend.details || "{}")
+    readonly property var inspectionReport: JSON.parse(backend.inspection || "{}")
     readonly property bool detailMatchesSelection: selected !== null && detail.package !== undefined && rowIdentity(selected) === rowIdentity(detail.package)
     readonly property var screenshots: detailMatchesSelection ? (detail.screenshots || []) : []
     property var failedScreenshots: []
@@ -70,11 +116,7 @@ Controls.ApplicationWindow {
         if (detail && detail.cleanup)
             return [detail.cleanup.summary || "", detail.cleanup.preview || ""].filter(Boolean).join("\n\n");
         if (detailMatchesSelection) {
-            const pkg = detail.package || {};
-            return [detail.description || "", pkg.reference || pkg.name || "",
-                [pkg.scope_label, pkg.architecture].filter(Boolean).join(" · "),
-                detail.homepage || "",
-                (detail.dependencies || []).length ? "Dependencies: " + detail.dependencies.join(", ") : ""].filter(Boolean).join("\n\n");
+            return detail.description || "Description unavailable from this source.";
         }
         if (detail && detail.failure)
             return (detail.failure.error || "") + "\n" + (detail.hint || "");
@@ -98,6 +140,7 @@ Controls.ApplicationWindow {
     property bool closePending: false
     property bool queryDirty: false
     property var selectedIdentity: null
+    property string pendingInspectionIdentity: ""
     function rowIdentity(row) {
         return row ? JSON.stringify([row.source, row.name, row.architecture, row.remote || null, row.scope, row.reference || null]) : "";
     }
@@ -130,13 +173,15 @@ Controls.ApplicationWindow {
     function retryFailedSource(id) {
         if (currentView === "Search" && queryDirty)
             return;
-        const query = currentView === "Installed" ? "" : search.text;
+        const query = currentView === "Installed" ? "" : searchPane.text;
         backend.retrySource(currentView, query, id);
         sourceFailuresDialog.close();
     }
     function clearVisibleFilters() {
         installedFilter = "";
         multiSourceOnly = false;
+        if (currentView === "Search")
+            searchPane.contentFilter = "All";
         const filters = Object.assign({}, viewSourceFilters);
         const hadSourceFilter = filters[currentView] !== undefined;
         delete filters[currentView];
@@ -145,13 +190,15 @@ Controls.ApplicationWindow {
             reload();
     }
     function emptyStateMessage() {
+        if (backend.writing && currentView === "Search" && items.length === 0)
+            return "Search queued until the current operation finishes.";
         if (backend.busy || reportState.phase === "loading")
             return retainingResults ? "Checking for current results…" : "Checking sources…";
         if (readFailures.length > 0)
             return reportState.phase === "partial" ? "No results from the sources that completed." : "Could not check these sources.";
         if (reportState.phase === "unsupported")
             return "No enabled sources support this view.";
-        if (currentView === "Search" && search.text.trim().length === 0)
+        if (currentView === "Search" && searchPane.text.trim().length === 0)
             return "";
         if (currentView === "Installed" && (installedFilter.length > 0 || multiSourceOnly))
             return "No packages match these filters.";
@@ -446,7 +493,7 @@ Controls.ApplicationWindow {
     }
     readonly property var cleanupFailures: currentView === "Clean" ? items.filter(row => row.kind === "failure") : []
     property var viewItems: {
-        let rows = root.currentView === "Search" ? items.filter((row) => row.kind !== "failure" && !isFabricated(row)) : items.filter((row) => row.kind !== "failure");
+        let rows = root.currentView === "Search" ? items.filter((row) => row.kind !== "failure" && !isFabricated(row) && searchPane.accepts(row)) : items.filter((row) => row.kind !== "failure");
         if (root.currentView === "Clean")
             rows = rows.filter(row => row.kind === "cleanup");
         rows = rows.filter((row) => root.effectiveSources().indexOf(row.source) >= 0);
@@ -473,7 +520,7 @@ Controls.ApplicationWindow {
                 return (x < y ? -dir : (x > y ? dir : 0)) || relevanceTiebreak(a, b) * dir;
             });
         } else if (root.currentView === "Search") {
-            const query = search.text.trim().toLowerCase();
+            const query = searchPane.text.trim().toLowerCase();
             if (query !== "")
                 rows.sort((a, b) => ((isFabricated(a) ? 1 : 0) - (isFabricated(b) ? 1 : 0)) || (relevanceScore(a, query) - relevanceScore(b, query)) || relevanceTiebreak(a, b));
         }
@@ -687,7 +734,7 @@ Controls.ApplicationWindow {
     height: 760
     minimumWidth: 360
     minimumHeight: 400
-    visible: true
+    visible: !startHidden || !preferences.backgroundMode || !trayAvailable
     title: "PkgDeck — " + currentView + (backend.busy ? " — Working" : "")
     function argument(name, fallback) {
         const index = Qt.application.arguments.indexOf(name);
@@ -705,8 +752,6 @@ Controls.ApplicationWindow {
         return found;
     }
     function openView(view) {
-        if (backend.writing && ["Search", "Installed", "Updates", "Clean", "Sources"].indexOf(view) >= 0)
-            return;
         queryDirty = false;
         selectedIdentity = null;
         uncheckedPackages = [];
@@ -719,24 +764,27 @@ Controls.ApplicationWindow {
         currentView = view;
         results.currentIndex = -1;
         if (view === "Search")
-            search.forceActiveFocus();
+            searchPane.focusSearch(false);
+        else if (view === "Activity")
+            backend.refreshActivity();
         else if (["Search", "Installed", "Updates", "Clean", "Sources"].indexOf(view) >= 0)
             reload();
     }
     // Reload the current view. Without force, a cached snapshot serves
     // instantly with no worker; force always queries native managers.
-    function reload(force) {
+    function reload(force, preserveSelection) {
         retainedItems = currentView === resultView ? items.slice() : [];
         retainingResults = retainedItems.length > 0;
         revealedRows = new Set(retainedItems.map(rowIdentity));
         resultView = currentView;
         results.currentIndex = -1;
-        selectedIdentity = null;
+        if (!preserveSelection)
+            selectedIdentity = null;
         uncheckedPackages = [];
         // Installed filtering is client-side over the loaded rows (see
         // viewItems), so the backend always returns the full installed set
         // and typing never triggers a native query.
-        backend.load(currentView, currentView === "Installed" ? "" : search.text, checkedCsv(), useSudo, force === true);
+        backend.load(currentView, currentView === "Installed" ? "" : searchPane.text, checkedCsv(), useSudo, force === true);
         if (!backend.busy)
             retainingResults = false;
     }
@@ -746,6 +794,34 @@ Controls.ApplicationWindow {
         results.currentIndex = index;
         selectedIdentity = rowIdentity(viewItems[index]);
         backend.select(originalIndex(index));
+    }
+    function openExactInspectionPackage(packageId) {
+        const identity = rowIdentity({source: packageId.backend, name: packageId.name,
+            architecture: packageId.architecture, remote: packageId.remote,
+            scope: packageId.scope, reference: packageId.reference});
+        inspectionDialog.close();
+        installedFilter = "";
+        multiSourceOnly = false;
+        if (checkedSources().indexOf(packageId.backend) < 0)
+            sourceSelection += "," + packageId.backend;
+        const filters = Object.assign({}, viewSourceFilters);
+        delete filters.Installed;
+        viewSourceFilters = filters;
+        pendingInspectionIdentity = identity;
+        openView("Installed");
+        Qt.callLater(root.selectPendingInspection);
+    }
+    function selectPendingInspection() {
+        if (!pendingInspectionIdentity || retainingResults)
+            return false;
+        for (let i = 0; i < viewItems.length; i++) {
+            if (rowIdentity(viewItems[i]) === pendingInspectionIdentity) {
+                choose(i);
+                pendingInspectionIdentity = "";
+                return true;
+            }
+        }
+        return false;
     }
     function restoreSelection() {
         if (!selectedIdentity || retainingResults)
@@ -757,9 +833,13 @@ Controls.ApplicationWindow {
             }
         }
         results.currentIndex = -1;
-        selectedIdentity = null;
+        if (currentView !== "Search" || !items.some((row) => rowIdentity(row) === selectedIdentity))
+            selectedIdentity = null;
     }
-    onViewItemsChanged: Qt.callLater(root.restoreSelection)
+    onViewItemsChanged: Qt.callLater(() => {
+        if (root.selectPendingInspection()) return;
+        root.restoreSelection();
+    })
     function propose(action) {
         if (!retainingResults) {
             backend.propose(action, originalIndex(results.currentIndex));
@@ -781,8 +861,15 @@ Controls.ApplicationWindow {
         property int versionWidth: 150
         property string sortColumn: ""
         property bool sortAscending: true
+        property bool backgroundMode: false
+        property bool autostart: false
     }
     onClosing: function (close) {
+        if (!forceQuit && preferences.backgroundMode && trayAvailable) {
+            close.accepted = false;
+            root.hide();
+            return;
+        }
         if (backend.busy) {
             close.accepted = false;
             closePending = true;
@@ -838,13 +925,24 @@ Controls.ApplicationWindow {
         }
     }
     Timer {
+        interval: 30000
+        running: preferences.backgroundMode
+        onTriggered: root.checkUpdates(false)
+    }
+    Timer {
+        interval: 300000
+        repeat: true
+        running: preferences.backgroundMode
+        onTriggered: root.checkUpdates(false)
+    }
+    Timer {
         id: completionHold
         interval: 1000
         onTriggered: root.completedRows = []
     }
     NumberAnimation {
         id: detailsReveal
-        target: detailsContent
+        target: detailsPanel.detailsContentItem
         property: "opacity"
         from: 0.55
         to: 1
@@ -862,7 +960,7 @@ Controls.ApplicationWindow {
         interval: 0
         onTriggered: {
             if (!backend.busy && !root.closePending)
-                root.reload(true);
+                root.reload(true, true);
         }
     }
     Component.onCompleted: {
@@ -886,6 +984,9 @@ Controls.ApplicationWindow {
             sortColumn = preferences.sortColumn;
         sortAscending = preferences.sortAscending;
         reload();
+        const opening = Qt.application.arguments.slice(1).filter((argument) => argument.startsWith("file://") || argument.startsWith("flatpak+https://") || argument.startsWith("/"));
+        if (opening.length === 1)
+            Qt.callLater(() => backend.openInput(opening[0]));
     }
 
     RowLayout {
@@ -920,13 +1021,12 @@ Controls.ApplicationWindow {
                 }
                 Item { Layout.preferredHeight: 24 }
                 Repeater {
-                    model: ["Search", "Installed", "Updates", "Clean", "Sources", "Settings", "About"]
+                    model: ["Search", "Installed", "Updates", "Clean", "Sources", "Activity", "Settings", "About"]
                     delegate: ActionButton {
                         required property string modelData
                         Layout.fillWidth: true
                         text: modelData
-                        symbol: ({"Search":"search", "Installed":"installed", "Updates":"updates", "Clean":"remove", "Sources":"sources", "Settings":"settings", "About":"help"})[modelData]
-                        enabled: !backend.writing
+                        symbol: ({"Search":"search", "Installed":"installed", "Updates":"updates", "Clean":"remove", "Sources":"sources", "Activity":"updates", "Settings":"settings", "About":"help"})[modelData]
                         navigation: true
                         primary: root.currentView === modelData
                         onClicked: root.openView(modelData)
@@ -974,9 +1074,8 @@ Controls.ApplicationWindow {
                 Layout.fillWidth: true
                 ThemedComboBox {
                     visible: root.compact
-                    model: ["Search", "Installed", "Updates", "Clean", "Sources", "Settings", "About"]
+                    model: ["Search", "Installed", "Updates", "Clean", "Sources", "Activity", "Settings", "About"]
                     currentIndex: model.indexOf(root.currentView)
-                    enabled: !backend.writing
                     onActivated: root.openView(currentText)
                     Accessible.name: "Navigation"
                     Layout.fillWidth: true
@@ -991,12 +1090,26 @@ Controls.ApplicationWindow {
                     Layout.fillWidth: true
                 }
                 ActionButton {
+                    text: "Open…"
+                    symbol: "installed"
+                    enabled: !backend.writing
+                    onClicked: installationPicker.open()
+                    Accessible.name: "Open installation file"
+                }
+                ActionButton {
+                    objectName: "activityIndicator"
+                    visible: backend.writing || root.queuedCount > 0
+                    text: root.queuedCount > 0 ? "Activity · " + root.queuedCount : "Working"
+                    symbol: "updates"
+                    Accessible.name: text
+                    onClicked: root.openView("Activity")
+                }
+                ActionButton {
                     objectName: "sourceFilter"
                     id: sourceFilterButton
                     visible: ["Search", "Installed", "Updates", "Clean", "Sources", "Settings"].indexOf(root.currentView) >= 0
                     text: root.currentView === "Settings" ? "Manage sources" : root.sourceSummary()
                     symbol: "sources"
-                    enabled: !backend.writing
                     onClicked: { root.rememberDialogFocus(); sourcePopup.mode = root.currentView === "Settings" ? "settings" : "filter"; sourcePopup.open(); }
                     Accessible.name: root.currentView === "Settings" ? "Manage package managers" : "Filter this page by package source"
                     Layout.preferredWidth: 210
@@ -1141,49 +1254,31 @@ Controls.ApplicationWindow {
                     }
                 }
             }
-            RowLayout {
-                Layout.fillWidth: true
+            SearchPane {
+                id: searchPane
                 visible: root.currentView === "Search"
-                Controls.TextField {
-                    id: search
-                    objectName: "searchField"
-                    Layout.fillWidth: true
-                    placeholderText: "Search apps and packages"
-                    Accessible.name: "Search packages"
-                    enabled: !backend.writing
-                    selectByMouse: true
-                    implicitHeight: Math.max(44, root.font.pointSize * 3.4)
-                    color: root.ink
-                    placeholderTextColor: root.muted
-                    leftPadding: 14
-                    background: Rectangle {
-                        color: root.surface
-                        radius: 8
-                        border.color: search.activeFocus ? root.accent : root.line
-                        border.width: search.activeFocus ? 2 : 1
-                    }
-                    onAccepted: {
-                        root.currentView = "Search";
-                        root.queryDirty = false;
-                        // A fresh search resets to best-match order: a stale
-                        // column sort would otherwise silently win over it.
-                        root.sortColumn = "";
-                        root.reload(true);
-                    }
-                    Keys.onDownPressed: {
-                        results.forceActiveFocus();
-                        if (root.viewItems.length > 0)
-                            root.choose(0);
-                    }
-                    onTextChanged: root.queryDirty = true
+                compact: root.compact
+                writing: false
+                surface: root.surface
+                ink: root.ink
+                muted: root.muted
+                line: root.line
+                accent: root.accent
+                onAccent: root.palette.highlightedText
+                selection: root.selection
+                textFont: root.font
+                onSubmitted: {
+                    root.currentView = "Search";
+                    root.queryDirty = false;
+                    root.sortColumn = "";
+                    root.reload(true);
                 }
-                ActionButton {
-                    text: "Search"
-                    symbol: "search"
-                    primary: true
-                    enabled: !backend.writing && search.text.trim().length > 0
-                    onClicked: { root.currentView = "Search"; root.queryDirty = false; root.sortColumn = ""; root.reload(true); }
+                onDownRequested: {
+                    results.forceActiveFocus();
+                    if (root.viewItems.length > 0)
+                        root.choose(0);
                 }
+                onQueryEdited: root.queryDirty = true
             }
             RowLayout {
                 Layout.fillWidth: true
@@ -1195,7 +1290,7 @@ Controls.ApplicationWindow {
                     text: root.installedFilter
                     placeholderText: "Filter installed packages"
                     Accessible.name: "Filter installed packages"
-                    enabled: !backend.writing
+                    enabled: true
                     selectByMouse: true
                     implicitHeight: Math.max(44, root.font.pointSize * 3.4)
                     color: root.ink
@@ -1224,7 +1319,7 @@ Controls.ApplicationWindow {
                     objectName: "multiSourceCheck"
                     text: "Duplicate installs"
                     checked: root.multiSourceOnly
-                    enabled: !backend.writing
+                    enabled: true
                     onToggled: root.multiSourceOnly = checked
                     Accessible.name: "Show only packages installed from multiple sources"
                     Layout.alignment: Qt.AlignVCenter
@@ -1238,6 +1333,25 @@ Controls.ApplicationWindow {
                         color: root.ink
                         verticalAlignment: Text.AlignVCenter
                         leftPadding: 28
+                    }
+                }
+                ActionButton {
+                    objectName: "exportInventoryButton"
+                    text: root.compact ? "Export" : "Export shown"
+                    symbol: "installed"
+                    enabled: !backend.busy && root.viewItems.some(row => row.kind === "package") && root.readFailures.length === 0
+                    onClicked: root.exportVisibleInventory()
+                    Accessible.name: "Export shown installed packages"
+                }
+                ActionButton {
+                    objectName: "openInspectionButton"
+                    text: root.compact ? "Inspect" : "Inspect & audit"
+                    symbol: "search"
+                    enabled: !backend.writing
+                    onClicked: {
+                        root.rememberDialogFocus();
+                        inspectionDialog.mode = "command";
+                        inspectionDialog.open();
                     }
                 }
             }
@@ -1262,6 +1376,40 @@ Controls.ApplicationWindow {
                     onToggled: root.reduceMotion = !checked
                     Accessible.name: "Enable interface animations"
                 }
+                Controls.CheckBox {
+                    objectName: "backgroundModeSetting"
+                    text: "Background checks"
+                    checked: preferences.backgroundMode
+                    onClicked: {
+                        if (!checked && preferences.autostart && !backend.setAutostart(false)) {
+                            checked = true;
+                            return;
+                        }
+                        preferences.backgroundMode = checked;
+                        if (!checked)
+                            preferences.autostart = false;
+                    }
+                    Accessible.name: text
+                }
+                Controls.CheckBox {
+                    objectName: "autostartSetting"
+                    text: "Start in background at login"
+                    checked: preferences.autostart
+                    enabled: preferences.backgroundMode && root.trayAvailable
+                    onClicked: {
+                        if (backend.setAutostart(checked))
+                            preferences.autostart = checked;
+                        else
+                            checked = preferences.autostart;
+                    }
+                    Accessible.name: text
+                }
+                Controls.Label {
+                    text: root.backgroundState.last_check ? "Last check: " + new Date(root.backgroundState.last_check * 1000).toLocaleString() + (root.backgroundState.failures && root.backgroundState.failures.length ? " · " + root.backgroundState.failures.length + " sources failed" : "") : ""
+                    visible: text.length > 0
+                    color: root.muted
+                    Layout.fillWidth: true
+                }
                 Controls.Label {
                     text: "Authentication"
                 }
@@ -1281,6 +1429,14 @@ Controls.ApplicationWindow {
                     Layout.fillWidth: true
                     wrapMode: Text.WordWrap
                     text: "Polkit opens your system authentication dialog. Sudo uses an existing authorization. Homebrew and development tools run without elevation."
+                }
+                Controls.Label { text: "Inventory" }
+                ActionButton {
+                    objectName: "previewInventoryButton"
+                    text: "Preview inventory"
+                    symbol: "installed"
+                    enabled: !backend.busy
+                    onClicked: { root.rememberDialogFocus(); previewInventoryFile.open(); }
                 }
                 // Absorbs leftover height so the settings stack stays top-anchored.
                 Item { Layout.fillHeight: true }
@@ -1365,12 +1521,24 @@ Controls.ApplicationWindow {
                     onClicked: { root.rememberDialogFocus(); sourceFailuresDialog.open(); }
                 }
             }
+            ActivityPane {
+                visible: root.currentView === "Activity"
+                entries: root.activityRows
+                backgroundState: root.backgroundState
+                surface: root.surface
+                ink: root.ink
+                muted: root.muted
+                line: root.line
+                accent: root.accent
+                textFont: root.font
+                onCancelQueued: backend.cancelQueued()
+            }
             Rectangle {
                 id: resultsBox
                 Layout.fillWidth: true
                 Layout.fillHeight: true
-                Layout.minimumHeight: 130
-                visible: root.currentView !== "Settings" && root.currentView !== "About"
+                Layout.minimumHeight: root.compact && root.currentView === "Search" ? 88 : 130
+                visible: root.currentView !== "Settings" && root.currentView !== "About" && root.currentView !== "Activity"
                 color: root.surface
                 radius: 10
                 border.color: results.activeFocus ? root.accent : root.line
@@ -1573,7 +1741,7 @@ Controls.ApplicationWindow {
                             leftPadding: 16
                             rightPadding: 16
                             highlighted: results.currentIndex === index
-                            enabled: !backend.writing
+                            enabled: true
                             Accessible.name: (modelData.kind === "package" ? (modelData.update === "available" ? "Update available. " : (root.isInstalled(modelData) ? "Installed. " : "Not installed. ")) : "") + modelData.name + ", " + modelData.source + ", " + (modelData.summary || "")
                             onClicked: { results.forceActiveFocus(); root.choose(index); }
                             Rectangle {
@@ -1622,7 +1790,7 @@ Controls.ApplicationWindow {
                                     id: packageCheck
                                     visible: root.currentView === "Updates" && modelData.kind === "package"
                                     checked: root.packageChecked(modelData)
-                                    enabled: !backend.writing
+                                    enabled: true
                                     onToggled: root.togglePackage(modelData)
                                     Accessible.name: "Select " + (modelData.name || "")
                                     Layout.preferredWidth: 28
@@ -1721,7 +1889,7 @@ Controls.ApplicationWindow {
                                 ActionButton {
                                     objectName: "rowContainerPull"
                                     visible: modelData.kind === "package" && root.containerSource(modelData.source) && root.isInstalled(modelData) && !!modelData.reference
-                                    enabled: !backend.busy && !root.retainingResults
+                                    enabled: (!backend.busy || backend.writing) && !root.retainingResults
                                     text: root.compact ? "" : "Pull"
                                     symbol: "updates"
                                     glyphColor: root.accent
@@ -1734,7 +1902,7 @@ Controls.ApplicationWindow {
                                 ActionButton {
                                     objectName: "rowPackageAction"
                                     visible: (modelData.kind === "package" && (!root.updateOnly(modelData.source) || modelData.update === "available")) || modelData.kind === "cleanup"
-                                    enabled: !backend.busy && !root.retainingResults
+                                    enabled: (!backend.busy || backend.writing) && !root.retainingResults
                                     text: root.compact ? "" : (modelData.kind === "cleanup" ? "Clean" : (root.currentView === "Updates" || root.updateOnly(modelData.source) ? "Update" : (root.isInstalled(modelData) ? "Remove" : "Install")))
                                     symbol: modelData.kind === "cleanup" ? "remove" : (root.currentView === "Updates" || root.updateOnly(modelData.source)) ? "updates" : (root.isInstalled(modelData) ? "remove" : "install")
                                     glyphColor: (root.currentView === "Updates" || root.updateOnly(modelData.source)) ? root.accent : root.isInstalled(modelData) ? (root.dark ? "#f18b91" : "#b42332") : (root.dark ? "#77d6a0" : "#187442")
@@ -1772,7 +1940,8 @@ Controls.ApplicationWindow {
                                 anchors.horizontalCenter: parent.horizontalCenter
                                 visible: !backend.busy && root.readFailures.length === 0 &&
                                     (root.viewSourceFilters[root.currentView] !== undefined ||
-                                    (root.currentView === "Installed" && (root.installedFilter.length > 0 || root.multiSourceOnly)))
+                                    (root.currentView === "Installed" && (root.installedFilter.length > 0 || root.multiSourceOnly)) ||
+                                    (root.currentView === "Search" && searchPane.contentFilter !== "All"))
                                 text: "Clear filters"
                                 symbol: "cancel"
                                 onClicked: root.clearVisibleFilters()
@@ -1781,159 +1950,40 @@ Controls.ApplicationWindow {
                     }
                 }
             }
-            Rectangle {
+            PackageDetails {
                 id: detailsPanel
-                objectName: "detailsPanel"
                 visible: root.selected !== null && ["Search", "Installed", "Updates", "Clean", "Sources"].indexOf(root.currentView) >= 0
                 Layout.fillWidth: true
-                Layout.preferredHeight: root.visibleScreenshots.length > 0 ? Math.min(root.height * (root.compact ? 0.35 : 0.42), 320) : Math.min(root.height * 0.27, 180)
-                color: root.surface
-                radius: 10
-                border.color: root.line
-                ColumnLayout {
-                    id: detailsContent
-                    objectName: "detailsContent"
-                    anchors.fill: parent
-                    anchors.margins: 16
-                    spacing: 6
-                    RowLayout {
-                        Layout.fillWidth: true
-                        Item {
-                            visible: detailIcon.status !== Image.Ready
-                            Layout.preferredWidth: 40
-                            Layout.preferredHeight: 40
-                            DeckIcon {
-                                name: root.selected ? (root.selected.kind === "source" ? root.selected.source : (root.selected.kind === "failure" ? "warning" : "package")) : "package"
-                                ink: root.accent
-                                anchors.centerIn: parent
-                                width: 24
-                                height: 24
-                            }
-                        }
-                        Image {
-                            id: detailIcon
-                            visible: status === Image.Ready
-                            asynchronous: true
-                            source: root.iconUrl(root.selectedIcon)
-                            sourceSize.width: 40
-                            sourceSize.height: 40
-                            fillMode: Image.PreserveAspectFit
-                            Layout.preferredWidth: 40
-                            Layout.preferredHeight: 40
-                            Accessible.ignored: true
-                        }
-                        Controls.Label {
-                        text: root.selected ? (root.selected.display_name || root.selected.name) : ""
-                        textFormat: Text.PlainText
-                        color: root.ink
-                        font.pointSize: root.font.pointSize * (root.compact ? 1.3 : 1.6)
-                        font.bold: true
-                        elide: Text.ElideRight
-                        Layout.fillWidth: true
-                        }
-                        ActionButton {
-                            objectName: "closeDetailsButton"
-                            text: ""
-                            symbol: "cancel"
-                            Accessible.name: "Close details"
-                            tooltipText: Accessible.name
-                            Layout.preferredWidth: 38
-                            horizontalPadding: 8
-                            onClicked: {
-                                results.currentIndex = -1;
-                                root.selectedIdentity = null;
-                                results.forceActiveFocus();
-                            }
-                        }
-                    }
-                    Controls.ScrollView {
-                        id: detailScroll
-                        Layout.fillWidth: true
-                        Layout.fillHeight: true
-                        contentWidth: availableWidth
-                        clip: true
-                        ColumnLayout {
-                            width: detailScroll.availableWidth
-                            spacing: 10
-                            ListView {
-                                id: screenshotGallery
-                                objectName: "screenshotGallery"
-                                visible: root.visibleScreenshots.length > 0
-                                Layout.fillWidth: true
-                                Layout.preferredHeight: root.compact ? 72 : 130
-                                orientation: ListView.Horizontal
-                                spacing: 10
-                                clip: true
-                                model: root.visibleScreenshots
-                                cacheBuffer: 0
-                                reuseItems: true
-                                delegate: Controls.AbstractButton {
-                                    required property var modelData
-                                    width: root.compact ? 128 : 230
-                                    height: screenshotGallery.height
-                                    enabled: preview.status === Image.Ready
-                                    Accessible.name: modelData.caption || "View app screenshot"
-                                    Controls.ToolTip.visible: hovered
-                                    Controls.ToolTip.text: Accessible.name
-                                    onClicked: {
-                                        root.rememberDialogFocus();
-                                        root.screenshotUrl = modelData.url;
-                                        root.screenshotCaption = modelData.caption || "";
-                                        screenshotDialog.open();
-                                    }
-                                    background: Rectangle { color: root.canvas; radius: 6; border.color: parent.activeFocus ? root.accent : root.line }
-                                    contentItem: Item {
-                                        Image {
-                                            id: preview
-                                            onStatusChanged: {
-                                                if (status === Image.Error) {
-                                                    const failedUrl = modelData.url;
-                                                    const identity = root.rowIdentity(root.selected);
-                                                    Qt.callLater(root.hideFailedScreenshot, failedUrl, identity);
-                                                }
-                                            }
-                                            anchors.fill: parent
-                                            source: root.detailMatchesSelection ? modelData.url : ""
-                                            asynchronous: true
-                                            cache: true
-                                            sourceSize.width: 960
-                                            sourceSize.height: 540
-                                            fillMode: Image.PreserveAspectFit
-                                        }
-                                        Controls.BusyIndicator {
-                                            anchors.centerIn: parent
-                                            width: 28; height: 28
-                                            visible: preview.status === Image.Loading && root.motionEnabled
-                                            running: visible
-                                        }
-                                        Controls.Label {
-                                            anchors.centerIn: parent
-                                            width: parent.width - 12
-                                            horizontalAlignment: Text.AlignHCenter
-                                            color: root.muted
-                                            wrapMode: Text.WordWrap
-                                            text: "Loading…"
-                                            visible: preview.status === Image.Loading && !root.motionEnabled
-                                        }
-                                    }
-                                }
-                            }
-                            TextEdit {
-                                objectName: "packageDetails"
-                                Layout.fillWidth: true
-                                readOnly: true
-                                selectByMouse: true
-                                color: root.muted
-                                padding: 0
-                                font.pointSize: root.font.pointSize
-                                wrapMode: TextEdit.Wrap
-                                textFormat: TextEdit.PlainText
-                                text: root.detailText()
-                                Accessible.name: "Package details"
-                            }
-                        }
-                    }
+                Layout.preferredHeight: root.detailMatchesSelection ? Math.min(root.height * (root.compact ? 0.35 : 0.48), 420) : Math.min(root.height * 0.27, 180)
+                selected: root.selected
+                selectionIdentity: root.rowIdentity(root.selected)
+                screenshots: root.visibleScreenshots
+                description: root.detailText()
+                detailsData: root.detailMatchesSelection ? root.detail : ({})
+                iconSource: root.iconUrl(root.selectedIcon)
+                compact: root.compact
+                motionEnabled: root.motionEnabled
+                detailMatchesSelection: root.detailMatchesSelection
+                textFont: root.font
+                canvas: root.canvas
+                surface: root.surface
+                ink: root.ink
+                muted: root.muted
+                line: root.line
+                accent: root.accent
+                onCloseRequested: {
+                    results.currentIndex = -1;
+                    root.selectedIdentity = null;
+                    results.forceActiveFocus();
                 }
+                onScreenshotRequested: (url, caption) => {
+                    root.rememberDialogFocus();
+                    root.screenshotUrl = url;
+                    root.screenshotCaption = caption;
+                    screenshotDialog.open();
+                }
+                onScreenshotFailed: (url, identity) => root.hideFailedScreenshot(url, identity)
+                onPackageRequested: (packageId) => root.openExactInspectionPackage(packageId)
             }
             Flow {
                 objectName: "updatesActions"
@@ -1946,43 +1996,30 @@ Controls.ApplicationWindow {
                     text: "Clean all"
                     symbol: "remove"
                     primary: true
-                    enabled: !backend.busy
+                    enabled: !backend.busy || backend.writing
                     onClicked: backend.propose("clean-all", -1)
                 }
-                ActionButton {
-                    objectName: "upgradeAllButton"
-                    visible: root.currentView === "Updates" && (root.uncheckedPackages.length === 0 || root.selectedCount() > 0)
-                    text: root.uncheckedPackages.length === 0 ? "Update all" : (root.compact ? "Update" : "Update selected")
-                    Accessible.name: root.uncheckedPackages.length === 0 ? "Update all" : "Update selected"
-                    symbol: "updates"
-                    primary: true
-                    enabled: !backend.busy && (root.uncheckedPackages.length > 0 || backend.upgradable)
-                    onClicked: root.upgradeUpdates()
-                }
-                ActionButton {
-                    objectName: "selectNoneButton"
-                    visible: root.currentView === "Updates" && root.selectedCount() > 0
-                    text: "Select none"
-                    symbol: "cancel"
-                    enabled: !backend.writing
-                    onClicked: root.selectNonePackages()
-                }
-                ActionButton {
-                    objectName: "selectAllButton"
-                    visible: root.currentView === "Updates" && root.uncheckedPackages.length > 0
-                    text: "Select all"
-                    symbol: "installed"
-                    enabled: !backend.writing
-                    onClicked: root.uncheckedPackages = []
-                }
-                Controls.Label {
-                    objectName: "upgradeAllHint"
-                    visible: root.currentView === "Updates" && !backend.upgradable && !backend.busy && root.items.some((row) => row.kind === "failure")
-                    text: "Update all is unavailable while a source has failed."
-                    color: root.muted
-                    font.pointSize: root.font.pointSize * 0.9
-                    wrapMode: Text.WordWrap
-                    Layout.fillWidth: true
+                UpdatesActions {
+                    active: root.currentView === "Updates"
+                    width: Math.min(parent.width, preferredWidth)
+                    compact: root.compact
+                    busy: backend.busy && !backend.writing
+                    writing: false
+                    upgradable: backend.upgradable
+                    selectedCount: root.selectedCount()
+                    uncheckedCount: root.uncheckedPackages.length
+                    failed: root.items.some((row) => row.kind === "failure")
+                    textFont: root.font
+                    surface: root.surface
+                    ink: root.ink
+                    muted: root.muted
+                    line: root.line
+                    accent: root.accent
+                    onAccent: root.palette.highlightedText
+                    selection: root.selection
+                    onUpgradeRequested: root.upgradeUpdates()
+                    onSelectNoneRequested: root.selectNonePackages()
+                    onSelectAllRequested: root.uncheckedPackages = []
                 }
                 ActionButton {
                     objectName: "repositoriesButton"
@@ -1998,7 +2035,7 @@ Controls.ApplicationWindow {
                     text: "Refresh sources"
                     symbol: "refresh"
                     primary: true
-                    enabled: !backend.busy && root.selected !== null && root.selected.kind === "source" && root.selected.available
+                    enabled: (!backend.busy || backend.writing) && root.selected !== null && root.selected.kind === "source" && root.selected.available
                     onClicked: root.propose("refresh")
                 }
                 ActionButton {
@@ -2007,11 +2044,113 @@ Controls.ApplicationWindow {
                     symbol: "refresh"
                     Accessible.name: "Reload"
                     tooltipText: root.compact ? "Reload" : ""
-                    enabled: !backend.writing
+                    enabled: !backend.busy || backend.writing
                     onClicked: root.reload(true)
                 }
             }
         }
+    }
+    FileDialog {
+        id: exportInventoryFile
+        title: "Export inventory"
+        fileMode: FileDialog.SaveFile
+        nameFilters: ["PkgDeck inventory (*.json)"]
+        onAccepted: {
+            backend.exportInventory(selectedFile, JSON.stringify(root.inventorySelection));
+            root.restoreDialogFocus();
+        }
+        onRejected: root.restoreDialogFocus()
+    }
+    FileDialog {
+        id: previewInventoryFile
+        title: "Preview inventory"
+        fileMode: FileDialog.OpenFile
+        nameFilters: ["PkgDeck inventory (*.json)", "JSON files (*.json)"]
+        onAccepted: {
+            backend.previewInventory(selectedFile);
+            inventoryPreviewDialog.open();
+        }
+        onRejected: root.restoreDialogFocus()
+    }
+    Controls.Dialog {
+        id: inventoryPreviewDialog
+        objectName: "inventoryPreviewDialog"
+        parent: Controls.Overlay.overlay
+        anchors.centerIn: parent
+        width: Math.min(root.width - 32, 660)
+        height: Math.min(root.height - 32, 540)
+        modal: true
+        title: "Inventory preview"
+        standardButtons: Controls.Dialog.Close
+        onClosed: root.restoreDialogFocus()
+        background: Rectangle { color: root.surface; radius: 10; border.color: root.line }
+        contentItem: Controls.ScrollView {
+            clip: true
+            contentWidth: availableWidth
+            ColumnLayout {
+                width: parent.width
+                spacing: 8
+                Controls.BusyIndicator {
+                    running: backend.busy && !root.inventoryPreview.packages
+                    visible: running
+                    Layout.alignment: Qt.AlignHCenter
+                }
+                Controls.Label {
+                    visible: !backend.busy && !root.inventoryPreview.packages
+                    text: backend.status
+                    textFormat: Text.PlainText
+                    wrapMode: Text.WordWrap
+                    color: root.muted
+                    Layout.fillWidth: true
+                }
+                Repeater {
+                    model: root.inventoryPreview.packages || []
+                    delegate: ColumnLayout {
+                        required property var modelData
+                        Layout.fillWidth: true
+                        Controls.Label {
+                            text: modelData.package.name + " · " + modelData.package.backend
+                            color: root.ink
+                            font.bold: true
+                            Layout.fillWidth: true
+                        }
+                        Controls.Label {
+                            text: modelData.status.replaceAll("_", " ") + (modelData.reason ? " · " + modelData.reason : "")
+                            textFormat: Text.PlainText
+                            wrapMode: Text.WordWrap
+                            color: root.muted
+                            Layout.fillWidth: true
+                        }
+                        Repeater {
+                            model: modelData.proposed_changes || []
+                            delegate: Controls.Label {
+                                required property var modelData
+                                text: modelData.detail
+                                textFormat: Text.PlainText
+                                wrapMode: Text.WordWrap
+                                color: root.muted
+                                Layout.fillWidth: true
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    InspectionDialog {
+        id: inspectionDialog
+        backend: root.backend
+        reportData: root.inspectionReport
+        ink: root.ink
+        muted: root.muted
+        surface: root.surface
+        line: root.line
+        parent: Controls.Overlay.overlay
+        anchors.centerIn: parent
+        width: Math.min(root.width - 32, 760)
+        height: Math.min(root.height - 40, 620)
+        onClosed: root.restoreDialogFocus()
+        onExactPackage: (packageId) => root.openExactInspectionPackage(packageId)
     }
     Controls.Dialog {
         id: repositoriesDialog
@@ -2356,12 +2495,10 @@ Controls.ApplicationWindow {
     }
     Shortcut {
         sequence: "Ctrl+L"
-        enabled: !backend.writing
         onActivated: results.forceActiveFocus()
     }
     Shortcut {
         sequence: "Ctrl+F"
-        enabled: !backend.writing
         onActivated: {
             if (root.currentView === "Installed") {
                 installedFilterField.forceActiveFocus();
@@ -2374,8 +2511,7 @@ Controls.ApplicationWindow {
             } else {
                 if (root.currentView !== "Search")
                     root.openView("Search");
-                search.forceActiveFocus();
-                search.selectAll();
+                searchPane.focusSearch(true);
             }
         }
     }
@@ -2401,32 +2537,31 @@ Controls.ApplicationWindow {
     }
     Shortcut {
         sequence: "Ctrl+R"
-        enabled: !backend.writing
         onActivated: root.reload(true)
     }
     Shortcut {
         sequence: "Ctrl+I"
-        enabled: !backend.busy
+        enabled: !backend.busy || backend.writing
         onActivated: root.propose("install")
     }
     Shortcut {
         sequence: "Ctrl+D"
-        enabled: !backend.busy
+        enabled: !backend.busy || backend.writing
         onActivated: root.propose("remove")
     }
     Shortcut {
         sequence: "Ctrl+U"
-        enabled: !backend.busy
+        enabled: !backend.busy || backend.writing
         onActivated: root.propose("upgrade")
     }
     Shortcut {
         sequence: "Ctrl+Shift+U"
-        enabled: root.currentView === "Updates" && !backend.busy && root.selectedCount() > 0 && (root.uncheckedPackages.length > 0 || backend.upgradable)
+        enabled: root.currentView === "Updates" && (!backend.busy || backend.writing) && root.selectedCount() > 0 && (root.uncheckedPackages.length > 0 || backend.upgradable)
         onActivated: root.upgradeUpdates()
     }
     Shortcut {
         sequence: "Ctrl+M"
-        enabled: !backend.busy
+        enabled: !backend.busy || backend.writing
         onActivated: root.propose("refresh")
     }
     Shortcut {

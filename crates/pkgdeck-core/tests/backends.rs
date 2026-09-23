@@ -21,6 +21,7 @@ struct Fixture {
     apt_simulation: Option<String>,
     simulations: Arc<Mutex<Vec<SystemCall>>>,
     installed: Arc<Mutex<Option<String>>>,
+    local_install: Arc<Mutex<Option<std::path::PathBuf>>>,
     candidate: Arc<Mutex<String>>,
     failure: Arc<Mutex<Option<ExecutionError>>>,
 }
@@ -107,9 +108,21 @@ impl Transport for Fixture {
         cancel: &Cancellation,
     ) -> Result<Completion, ExecutionError> {
         self.check(cancel)?;
+        if let AptAction::InstallLocal(path) = &action {
+            use std::os::unix::fs::PermissionsExt;
+            assert!(path.is_file(), "staged archive must exist for the write");
+            assert_eq!(
+                std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            *self.local_install.lock().unwrap() = Some(path.clone());
+        }
         match action {
             AptAction::Refresh => *self.candidate.lock().unwrap() = "2.0".into(),
-            AptAction::Install(_) | AptAction::Upgrade(_) | AptAction::UpgradeAll => {
+            AptAction::Install(_)
+            | AptAction::InstallLocal(_)
+            | AptAction::Upgrade(_)
+            | AptAction::UpgradeAll => {
                 *self.installed.lock().unwrap() = Some(self.candidate.lock().unwrap().clone())
             }
             AptAction::Remove(_) => *self.installed.lock().unwrap() = None,
@@ -749,6 +762,62 @@ fn flatpak_operations_keep_scope_and_noninteractive_arguments() {
     assert!(calls.iter().any(|(args, write, system)| *write
         && *system
         && args.first().is_some_and(|scope| scope == "--system")));
+}
+
+#[test]
+fn flatpak_reference_install_revalidates_and_cleans_temporary_file() {
+    let base =
+        std::env::temp_dir().join(format!("pkgdeck-flatpakref-install-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    let source = base.join("Synthetic reference.flatpakref");
+    std::fs::write(
+        &source,
+        "[Flatpak Ref]\nName=org.example.Synthetic\nUrl=https://example.invalid/repo\n",
+    )
+    .unwrap();
+    let cancel = Cancellation::default();
+    let package = pkgdeck_core::flatpak_ref::inspect(source.to_str().unwrap(), &cancel).unwrap();
+    let fixture = FlatpakFixture::default();
+    let mut backend = Flatpak::new(fixture.clone());
+    let mut progress = Vec::new();
+    backend
+        .execute(
+            &Operation::Install(package.id.clone()),
+            &cancel,
+            &mut |item| progress.push(item),
+        )
+        .unwrap();
+    assert!(progress.iter().any(|item| matches!(item, Progress::Message(message) if message.contains("Installing Flatpak reference"))));
+    let calls = fixture.calls.lock().unwrap();
+    let (args, write, system) = calls
+        .iter()
+        .find(|(args, _, _)| args.contains(&"--from".into()))
+        .unwrap();
+    assert!(*write && !*system);
+    assert_eq!(args[0], "--user");
+    let temporary = std::path::Path::new(args.last().unwrap());
+    assert!(!temporary.exists());
+    drop(calls);
+    std::fs::write(
+        &source,
+        "[Flatpak Ref]\nName=org.example.Other\nUrl=https://example.invalid/repo\n",
+    )
+    .unwrap();
+    assert!(backend
+        .execute(&Operation::Install(package.id), &cancel, &mut |_| {})
+        .is_err());
+    assert_eq!(
+        fixture
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(args, _, _)| args.contains(&"--from".into()))
+            .count(),
+        1
+    );
+    std::fs::remove_dir_all(base).unwrap();
 }
 
 #[test]
@@ -3459,6 +3528,49 @@ fn apt_single_operation_preview_uses_read_only_simulation_and_exact_target() {
     assert!(apt
         .operation_plan(&Operation::Remove(foreign), &Cancellation::default())
         .is_err());
+}
+
+#[test]
+fn apt_local_archive_uses_exact_path_and_revalidates_before_install() {
+    let base = std::env::temp_dir().join(format!("pkgdeck-apt-local-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let control = base.join("staging/DEBIAN");
+    std::fs::create_dir_all(&control).unwrap();
+    std::fs::write(control.join("control"), "Package: pkgdeck-synthetic\nVersion: 1.0\nArchitecture: all\nMaintainer: PkgDeck tests <nobody@example.invalid>\nDescription: Synthetic fixture\n").unwrap();
+    let archive = base.join("Synthetic ñ package.deb");
+    assert!(std::process::Command::new("dpkg-deb")
+        .arg("--build")
+        .arg(base.join("staging"))
+        .arg(&archive)
+        .status()
+        .unwrap()
+        .success());
+    let cancel = Cancellation::default();
+    let id = pkgdeck_core::local_deb::inspect(&archive, &cancel)
+        .unwrap()
+        .id;
+    let fixture = Fixture {
+        apt_simulation: Some("0 upgraded, 1 newly installed, 0 to remove and 0 not upgraded.\nInst pkgdeck-synthetic (1.0 Synthetic:stable [all])\n".into()),
+        ..Fixture::new()
+    };
+    let mut apt = Apt::new(fixture.clone());
+    let operation = Operation::Install(id);
+    let plan = apt.operation_plan(&operation, &cancel).unwrap().unwrap();
+    assert_eq!(plan.changes[0].name, "pkgdeck-synthetic");
+    let calls = fixture.simulations.lock().unwrap();
+    assert_eq!(calls[0].1.last().unwrap(), archive.as_os_str());
+    drop(calls);
+    apt.execute(&operation, &cancel, &mut |_| {}).unwrap();
+    assert_eq!(fixture.installed.lock().unwrap().as_deref(), Some("1.0"));
+    let staged = fixture.local_install.lock().unwrap().clone().unwrap();
+    assert_ne!(staged, archive);
+    assert!(
+        !staged.exists(),
+        "staged archive must be removed after APT returns"
+    );
+    std::fs::write(&archive, b"changed since preview").unwrap();
+    assert!(apt.execute(&operation, &cancel, &mut |_| {}).is_err());
+    std::fs::remove_dir_all(base).unwrap();
 }
 
 #[test]

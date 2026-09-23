@@ -208,6 +208,112 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
                 output.push_str(&format!("\n[!] Source failed: {}", value(failure)));
             }
         }
+    } else if let Some(export) = data.get("manifest_export") {
+        output.push_str(&format!(
+            "Exported {} packages to {}",
+            value(&export["packages"]),
+            value(&export["path"])
+        ));
+    } else if let Some(preview) = data.get("manifest_preview") {
+        let rows = preview["packages"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|entry| {
+                vec![
+                    value(&entry["package"]["name"]),
+                    value(&entry["package"]["backend"]),
+                    value(&entry["status"]),
+                    value(&entry["reason"]),
+                ]
+            })
+            .collect::<Vec<_>>();
+        output.push_str(&table(
+            &["PACKAGE", "SOURCE", "STATUS", "DETAIL"],
+            &rows,
+            width,
+        ));
+        for entry in preview["packages"].as_array().into_iter().flatten() {
+            for proposed in entry["proposed_changes"].as_array().into_iter().flatten() {
+                output.push_str(&format!("\n  {}", value(&proposed["detail"])));
+            }
+        }
+    } else if let Some(report) = data.get("inspection") {
+        output.push_str(&format!(
+            "Command: {}\nEnvironment: {}\nPATH: {}\nResolved: {}\n",
+            value(&report["command"]),
+            value(&report["environment"]),
+            value(&report["path"]),
+            value(&report["resolved"])
+        ));
+        if let Some(candidates) = report["candidates"].as_array() {
+            for candidate in candidates {
+                output.push_str(&format!(
+                    "\n{} [{}]",
+                    value(&candidate["path"]),
+                    value(&candidate["state"])
+                ));
+                if !candidate["target"].is_null() {
+                    output.push_str(&format!(" → {}", value(&candidate["target"])));
+                }
+                if let Some(owners) = candidate["owners"].as_array() {
+                    for owner in owners {
+                        output.push_str(&format!(
+                            "\n  Owner of {}: {} {} ({})",
+                            value(&owner["path"]),
+                            value(&owner["manager"]),
+                            value(&owner["native_name"]),
+                            value(&owner["state"])
+                        ));
+                        if let Some(packages) = owner["packages"].as_array() {
+                            for package in packages {
+                                output.push_str(&format!(
+                                    "\n    Exact copy: {} · {} · {}",
+                                    value(&package["backend"]),
+                                    value(&package["name"]),
+                                    value(&package["scope"])
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        output.push_str(&format!("\n\n{}", value(&report["ownership_note"])));
+    } else if let Some(report) = data.get("audit") {
+        if let Some(groups) = report["groups"].as_array() {
+            output.push_str(&format!("{} known duplicate groups\n", groups.len()));
+            for group in groups {
+                output.push_str(&format!("\n{}\n", value(&group["key"])));
+                if let Some(copies) = group["copies"].as_array() {
+                    for copy in copies {
+                        output.push_str(&format!(
+                            "  {} · {} · {} · {}\n",
+                            value(&copy["package"]["backend"]),
+                            value(&copy["package"]["name"]),
+                            value(&copy["package"]["scope"]),
+                            value(&copy["installed_version"])
+                        ));
+                    }
+                }
+            }
+        }
+        if let Some(leftovers) = report["leftovers"].as_array() {
+            output.push_str(&format!(
+                "\n{} manager-reported residual files\n",
+                leftovers.len()
+            ));
+            for row in leftovers {
+                output.push_str(&format!(
+                    "  {} · {} · {} · {} bytes\n",
+                    value(&row["manager"]),
+                    value(&row["native_name"]),
+                    value(&row["path"]),
+                    value(&row["size_bytes"])
+                ));
+            }
+        }
+        output.push_str(&format!("\n{}", value(&report["data_note"])));
     } else if data.get("package").is_some() {
         let p = &data["package"];
         output.push_str(&format!(
@@ -304,6 +410,13 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
             value(data.get("message").unwrap_or(&data["error"]))
         ));
     }
+    if data.get("inspection").is_some() || data.get("audit").is_some() {
+        if let Some(failures) = data["failures"].as_array() {
+            for failure in failures {
+                output.push_str(&format!("\n[!] Source failed: {}", value(failure)));
+            }
+        }
+    }
     output.trim_end().to_string()
 }
 
@@ -311,6 +424,27 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn portable_inventory_summary_shows_status_and_proposed_change() {
+        let exported = human(
+            &json!({"manifest_export":{"path":"synthetic.json", "packages":2}}),
+            100,
+            false,
+        );
+        assert!(exported.contains("Exported 2 packages to synthetic.json"));
+        let preview = human(
+            &json!({"manifest_preview":{"packages":[
+                {"package":{"name":"org.example.App", "backend":"flatpak"},
+                 "status":"ambiguous", "reason":"choose a repository",
+                 "proposed_changes":[{"kind":"repository_addition", "detail":"Review flathub"}]}
+            ]}}),
+            100,
+            false,
+        );
+        assert!(preview.contains("org.example.App"));
+        assert!(preview.contains("ambiguous"));
+        assert!(preview.contains("Review flathub"));
+    }
     #[test]
     fn repository_and_firmware_labels_are_human_readable() {
         let output = human(
@@ -360,6 +494,25 @@ mod tests {
         assert!(output.contains("[^] fixture"));
         assert!(output.contains("[^] Update available"));
         assert!(!output.contains('\u{1b}'));
+    }
+    #[test]
+    fn inspection_and_audit_render_exact_read_only_evidence() {
+        let command = json!({"inspection":{"command":"tool","environment":"Native host","path":"/first:/second",
+            "resolved":"/first/tool","ownership_note":"Unknown remains unknown.","candidates":[
+                {"path":"/first/tool","target":"/target/tool","state":"executable","owners":[
+                    {"manager":"apt","native_name":"fixture:amd64","state":"known","packages":[
+                        {"backend":"apt","name":"fixture","scope":"system"}]}]}]}});
+        let output = human(&command, 100, false);
+        assert!(output.contains("Resolved: /first/tool"));
+        assert!(output.contains("/target/tool"));
+        assert!(output.contains("Exact copy: apt · fixture · system"));
+        let audited = json!({"audit":{"groups":[{"key":"fixture","copies":[{"package":{"backend":"apt","name":"fixture","scope":"system"},"installed_version":"1"}]}],
+            "leftovers":[{"manager":"apt","native_name":"old-fixture","path":"/etc/old.conf","size_bytes":4}],
+            "data_note":"Unknown data remains unknown."}});
+        let output = human(&audited, 100, false);
+        assert!(output.contains("1 known duplicate groups"));
+        assert!(output.contains("/etc/old.conf"));
+        assert!(output.contains("Unknown data remains unknown."));
     }
     #[test]
     fn cleanup_plans_and_failures_are_concise_and_actionable() {

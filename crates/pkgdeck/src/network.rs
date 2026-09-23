@@ -8,11 +8,13 @@ pub mod ffi {
         include!("cxx-qt-lib/qstring.h");
         include!("pkgdeck/native/network.h");
         include!("pkgdeck/native/providers.h");
+        include!("pkgdeck/native/opening.h");
         #[namespace = ""]
         type QQmlApplicationEngine = cxx_qt_lib::QQmlApplicationEngine;
         #[namespace = ""]
         type QString = cxx_qt_lib::QString;
         fn configure_network(engine: Pin<&mut QQmlApplicationEngine>);
+        fn register_open_handler(engine: Pin<&mut QQmlApplicationEngine>, input: &QString) -> bool;
         fn fetch_metadata(url: &QString, cancel: &LookupCancellation) -> QString;
     }
     extern "Rust" {

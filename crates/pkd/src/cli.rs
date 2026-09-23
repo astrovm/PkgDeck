@@ -1,12 +1,16 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use pkgdeck_core::{
+    activity::{History, Outcome, State},
     engine::*,
-    host::Authorization,
+    host::{Authorization, Host},
+    inspection::{audit, inspect_native, native_leftovers},
+    manifest::{self, PreviewStatus},
     package::*,
     process::{Cancellation, ExecutionError},
 };
 use serde_json::{json, Value};
 use std::io::{self, IsTerminal, Write};
+use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(version = pkgdeck_core::VERSION, about = "PkgDeck package manager")]
@@ -76,8 +80,17 @@ pub enum Commands {
     Search { query: String },
     /// Show details for one exact package identifier.
     Info { name: String },
+    /// Resolve a command in PATH and show manager-reported ownership without running it.
+    Inspect { command: String },
+    /// Show installed copies and manager-reported residual configuration.
+    Audit,
     /// List installed packages.
     List,
+    /// Export installed software or preview a portable inventory.
+    Inventory {
+        #[command(subcommand)]
+        command: InventoryCommand,
+    },
     /// Install packages by exact identifier.
     Install {
         #[arg(required = true)]
@@ -105,6 +118,13 @@ pub enum Commands {
         #[arg(long)]
         all: bool,
     },
+}
+#[derive(Subcommand)]
+pub enum InventoryCommand {
+    /// Export selected installed package names, or all when none are given.
+    Export { path: PathBuf, names: Vec<String> },
+    /// Preview an inventory against this machine without making changes.
+    Preview { path: PathBuf },
 }
 #[derive(Subcommand)]
 pub enum RepoCommand {
@@ -186,7 +206,13 @@ pub fn dispatch(
     if args.scope.is_some()
         && matches!(
             command,
-            Commands::Update | Commands::Sources | Commands::Doctor | Commands::Clean { .. }
+            Commands::Update
+                | Commands::Sources
+                | Commands::Doctor
+                | Commands::Clean { .. }
+                | Commands::Inventory {
+                    command: InventoryCommand::Preview { .. }
+                }
         )
     {
         return (
@@ -228,6 +254,64 @@ pub fn dispatch(
             let code = if report.failures.is_empty() { 0 } else { 8 };
             return (json!(report), code);
         }
+        Commands::Inventory { command } => {
+            return match command {
+                InventoryCommand::Export { path, names } => {
+                    let mut report = engine.installed(cancel);
+                    if !report.failures.is_empty() {
+                        return failure(EngineError::Incomplete(report.failures));
+                    }
+                    report.packages.retain(|package| {
+                        args.scope
+                            .is_none_or(|scope| scope.native() == package.id.scope)
+                            && args
+                                .arch
+                                .as_ref()
+                                .is_none_or(|arch| arch == &package.id.architecture)
+                    });
+                    let selected: Result<Vec<_>, _> = names
+                        .iter()
+                        .map(|name| {
+                            report.select(&Selector {
+                                name: name.clone(),
+                                backend: match args.from.as_slice() {
+                                    [one] => Some(one.clone()),
+                                    _ => None,
+                                },
+                                architecture: args.arch.clone(),
+                                scope: args.scope.map(InstallScope::native),
+                            })
+                        })
+                        .collect();
+                    let selected = match selected {
+                        Ok(selected) => selected,
+                        Err(error) => return failure(error),
+                    };
+                    match manifest::export(&report.packages, &selected).and_then(|document| {
+                        manifest::write_new(path, &document)?;
+                        Ok(document.packages.len())
+                    }) {
+                        Ok(count) => (json!({"manifest_export":{"path":path,"packages":count}}), 0),
+                        Err(error) => (json!({"error":error.to_string()}), 1),
+                    }
+                }
+                InventoryCommand::Preview { path } => match manifest::read(path)
+                    .and_then(|document| manifest::inspect(engine, &document, cancel))
+                {
+                    Ok(preview) => {
+                        let incomplete = preview.packages.iter().any(|entry| {
+                            matches!(entry.status, PreviewStatus::Unavailable)
+                                && entry.reason.contains("query failed")
+                        });
+                        (
+                            json!({"manifest_preview":preview}),
+                            if incomplete { 8 } else { 0 },
+                        )
+                    }
+                    Err(error) => (json!({"error":error.to_string()}), 1),
+                },
+            };
+        }
         Commands::Info { name } => {
             return match select(engine, args, name, false, cancel)
                 .and_then(|id| engine.details(&id, cancel))
@@ -235,6 +319,31 @@ pub fn dispatch(
                 Ok(details) => (json!(details), 0),
                 Err(e) => failure(e),
             }
+        }
+        Commands::Inspect { command } => {
+            let mut inventory = engine.installed(cancel);
+            inventory
+                .packages
+                .retain(|p| args.scope.is_none_or(|scope| scope.native() == p.id.scope));
+            let code = if inventory.failures.is_empty() { 0 } else { 8 };
+            return match inspect_native(&Host::current(), command, &inventory.packages, cancel) {
+                Ok(report) => (
+                    json!({"inspection": report, "failures": inventory.failures}),
+                    code,
+                ),
+                Err(error) => failure(error.into()),
+            };
+        }
+        Commands::Audit => {
+            let mut inventory = engine.installed(cancel);
+            inventory
+                .packages
+                .retain(|p| args.scope.is_none_or(|scope| scope.native() == p.id.scope));
+            let code = if inventory.failures.is_empty() { 0 } else { 8 };
+            return (
+                json!({"audit": audit(&inventory.packages, native_leftovers(&Host::current())), "failures": inventory.failures}),
+                code,
+            );
         }
         Commands::Doctor => {
             return (
@@ -407,7 +516,22 @@ pub fn dispatch(
     if !operations.is_empty() && !args.yes && !confirm(&operations) {
         return (json!({"error": "confirmation_declined"}), 7);
     }
+    let history = History::default_store();
+    let activity_id = history
+        .as_ref()
+        .and_then(|store| store.begin("cli", operations.clone(), State::Running).ok());
     let results = engine.execute_batch(&operations, cancel, events);
+    if let (Some(store), Some(id)) = (&history, activity_id) {
+        let outcomes = results
+            .iter()
+            .map(|result| match result {
+                Ok(_) => Outcome::Finished,
+                Err(EngineError::Cancelled) => Outcome::Cancelled,
+                Err(_) => Outcome::Failed,
+            })
+            .collect();
+        let _ = store.finish(id, outcomes);
+    }
     let failed = results.iter().filter(|r| r.is_err()).count();
     let code = if failed == 0 {
         0
@@ -796,6 +920,111 @@ mod tests {
         );
         assert_eq!(call(&mut engine, &["--scope", "user", "update"], true).1, 2);
     }
+    #[test]
+    fn inventory_cli_exports_and_previews_exact_packages_without_writes() {
+        let path = std::env::temp_dir().join(format!(
+            "pkgdeck inventory test {} {:?}.json",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let path_text = path.to_str().unwrap();
+        let mut installed = engine();
+        let export_args =
+            Args::try_parse_from(["pkd", "inventory", "export", path_text, "fixture"]).unwrap();
+        let (exported, code) = dispatch(
+            &mut installed,
+            &export_args,
+            &Cancellation::default(),
+            &mut |_| panic!("inventory export must not request package confirmation"),
+            &mut |_| {},
+        );
+        assert_eq!(code, 0, "{exported}");
+        assert_eq!(exported["manifest_export"]["packages"], 1);
+        assert_eq!(manifest::read(&path).unwrap().packages[0].name, "fixture");
+
+        let mut target = Engine::default();
+        target
+            .register(Fixture {
+                backend: "apt".into(),
+                installed: false,
+                fail: None,
+                read_failure: None,
+                verified: true,
+            })
+            .unwrap();
+        let preview_args =
+            Args::try_parse_from(["pkd", "inventory", "preview", path_text]).unwrap();
+        let (preview, code) = dispatch(
+            &mut target,
+            &preview_args,
+            &Cancellation::default(),
+            &mut |_| panic!("inventory preview must not request package confirmation"),
+            &mut |_| {},
+        );
+        assert_eq!(code, 0, "{preview}");
+        assert_eq!(
+            preview["manifest_preview"]["packages"][0]["status"],
+            "installable"
+        );
+        let (_, duplicate_code) = dispatch(
+            &mut engine(),
+            &export_args,
+            &Cancellation::default(),
+            &mut |_| panic!("inventory export must not request confirmation"),
+            &mut |_| {},
+        );
+        assert_eq!(duplicate_code, 1);
+        let missing_args = Args::try_parse_from([
+            "pkd",
+            "inventory",
+            "export",
+            path_text,
+            "missing-synthetic-package",
+        ])
+        .unwrap();
+        let (_, missing_code) = dispatch(
+            &mut engine(),
+            &missing_args,
+            &Cancellation::default(),
+            &mut |_| panic!("inventory export must not request confirmation"),
+            &mut |_| {},
+        );
+        assert_eq!(missing_code, 3);
+        let mut failed_target = Engine::default();
+        failed_target
+            .register(Fixture {
+                backend: "apt".into(),
+                installed: false,
+                fail: None,
+                read_failure: Some(EngineError::InvalidResponse {
+                    backend: "apt".into(),
+                    reason: "synthetic catalog failure".into(),
+                }),
+                verified: true,
+            })
+            .unwrap();
+        let (incomplete, incomplete_code) = dispatch(
+            &mut failed_target,
+            &preview_args,
+            &Cancellation::default(),
+            &mut |_| panic!("inventory preview must not request confirmation"),
+            &mut |_| {},
+        );
+        assert_eq!(incomplete_code, 8);
+        assert_eq!(
+            incomplete["manifest_preview"]["packages"][0]["status"],
+            "unavailable"
+        );
+        std::fs::remove_file(path).unwrap();
+        let (_, absent_code) = dispatch(
+            &mut engine(),
+            &preview_args,
+            &Cancellation::default(),
+            &mut |_| panic!("inventory preview must not request confirmation"),
+            &mut |_| {},
+        );
+        assert_eq!(absent_code, 1);
+    }
     struct Fixture {
         backend: String,
         installed: bool,
@@ -1014,6 +1243,27 @@ mod tests {
             })
             .unwrap();
         assert_ne!(call(&mut failed_write, &["clean", "--all"], true).1, 0);
+    }
+    #[test]
+    fn inspection_commands_are_read_only_and_preserve_report_shapes() {
+        let mut engine = engine();
+        let (inspected, code) = call(&mut engine, &["inspect", "pkgdeck-fixture-missing"], false);
+        assert_eq!(code, 0);
+        assert_eq!(
+            inspected["inspection"]["command"],
+            "pkgdeck-fixture-missing"
+        );
+        assert!(inspected["inspection"]["resolved"].is_null());
+        let (invalid, code) = call(&mut engine, &["inspect", "../outside"], false);
+        assert_eq!(code, 1);
+        assert!(invalid["error"].is_object());
+        let (audited, code) = call(&mut engine, &["audit"], false);
+        assert_eq!(code, 0);
+        assert!(audited["audit"]["installed_copies"].is_array());
+        assert_eq!(
+            audited["audit"]["installed_copies"][0]["package"]["backend"],
+            "apt"
+        );
     }
     #[test]
     fn apt_removals_require_separate_cli_consent() {

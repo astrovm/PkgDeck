@@ -11,5 +11,6 @@ architectures: [ARCHITECTURE]
 apps:
   pkgdeck:
     command: AppRun
+    plugs: [home, removable-media, network]
   pkd:
     command: usr/bin/pkd

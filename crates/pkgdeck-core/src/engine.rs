@@ -375,6 +375,33 @@ impl Engine {
     pub fn search(&mut self, query: &str, cancel: &Cancellation) -> PackageReport {
         self.query(Some(query), cancel)
     }
+    /// Query one exact backend for an imported manifest entry. This avoids
+    /// sending each imported name to every remote manager.
+    pub fn search_backend(
+        &mut self,
+        id: &str,
+        query: &str,
+        cancel: &Cancellation,
+    ) -> PackageReport {
+        match self
+            .ready(id, Capability::Search, cancel)
+            .and_then(|backend| backend.search(query, cancel))
+        {
+            Ok(packages) => PackageReport {
+                packages,
+                failures: vec![],
+                successful_sources: vec![id.into()],
+            },
+            Err(error) => PackageReport {
+                packages: vec![],
+                failures: vec![BackendFailure {
+                    backend: id.into(),
+                    error,
+                }],
+                successful_sources: vec![],
+            },
+        }
+    }
     pub fn installed(&mut self, cancel: &Cancellation) -> PackageReport {
         self.query(None, cancel)
     }

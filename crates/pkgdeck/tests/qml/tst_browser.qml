@@ -18,11 +18,19 @@ TestCase {
         function changeRepository(request) { lastRepositoryChange = request; }
         property string rows: "[]"
         property string details: "{}"
+        property string inspection: "{}"
+        property string inspectedCommand: ""
         property string status: "Ready"
         property string confirmation: ""
         property string confirmation_data: "{}"
         property string source_catalog: "[]"
         property string report_state: "{}"
+        property string manifest_preview: "{}"
+        property string lastInventorySelection: ""
+        function exportInventory(url, identities) { lastInventorySelection = identities; }
+        function previewInventory(url) {}
+        property string activity: "[]"
+        property string background_state: "{}"
         property string lastRetry: ""
         property string version: "9.9.9-test"
         property bool simulateLoading: false
@@ -32,12 +40,14 @@ TestCase {
         property string lastView: ""
         property string lastQuery: ""
         property string lastSource: ""
+        property int loadCount: 0
         property bool lastForce: false
         property int selection: -1
         property int writes: 0
         property int cancels: 0
         property string lastChecked: ""
         function load(view, query, source, sudo, force) {
+            loadCount++;
             lastView = view;
             lastQuery = query;
             lastSource = source;
@@ -76,6 +86,30 @@ TestCase {
         function poll() {
         }
         function retrySource(view, query, source) { lastRetry = source; }
+        function inspectCommand(command) {
+            inspectedCommand = command;
+            inspection = JSON.stringify({kind: "command", report: {
+                command: command, environment: "Synthetic host", resolved: "/fixture/" + command,
+                candidates: [{path: "/fixture/" + command, state: "executable", target: null,
+                    owners: [{manager: "apt", native_name: "fixture", state: "known", packages: []}]}],
+                ownership_note: "Synthetic ownership only."
+            }});
+        }
+        function auditInstalled() {
+            inspection = JSON.stringify({kind: "audit", report: {
+                groups: [{key: "synthetic-app", copies: [
+                    {package: {backend: "apt", name: "fixture", architecture: "all", scope: "system"}, installed_version: "1"},
+                    {package: {backend: "flatpak", name: "org.example.Fixture", architecture: "x86_64", scope: "system"}, installed_version: "1"}
+                ]}], installed_copies: [
+                    {package: {backend: "apt", name: "fixture", architecture: "all", scope: "system"}, installed_version: "1"},
+                    {package: {backend: "flatpak", name: "org.example.Fixture", architecture: "x86_64", scope: "system"}, installed_version: "1"}
+                ], leftovers: [], data_note: "Unknown data remains unknown."
+            }});
+        }
+        function refreshActivity() {}
+        function cancelQueued() {}
+        function checkUpdates(sources, enabled, offline, metered, force) {}
+        function setAutostart(enabled) { return true; }
     }
     Component {
         id: window
@@ -94,11 +128,17 @@ TestCase {
         fake.lastRepositoryChange = "";
         fake.rows = "[]";
         fake.details = "{}";
+        fake.inspection = "{}";
+        fake.inspectedCommand = "";
         fake.status = "Ready";
         fake.confirmation = "";
         fake.confirmation_data = "{}";
         fake.report_state = "{}";
+        fake.activity = "[]";
+        fake.background_state = "{}";
         fake.lastRetry = "";
+        fake.manifest_preview = "{}";
+        fake.lastInventorySelection = "";
         fake.simulateLoading = false;
         fake.busy = false;
         fake.writing = false;
@@ -107,6 +147,7 @@ TestCase {
         fake.cancels = 0;
         fake.lastChecked = "";
         fake.lastForce = false;
+        fake.loadCount = 0;
         browser = createTemporaryObject(window, test);
         verify(browser !== null);
         fake.source_catalog = JSON.stringify(browser.sourceIds.map((id) => ({source: id, summary: "Available", availability_kind: "available", capabilities: ["search", "installed", "upgrade", "clean"]})));
@@ -114,6 +155,8 @@ TestCase {
         // Fresh checklist and column layout per test: QSettings persist
         // across tests in one run.
         browser.reduceMotion = false;
+        browser.backgroundMode = false;
+        browser.autostartEnabled = false;
         browser.sourceSelection = "";
         browser.viewSourceFilters = ({});
         browser.sortColumn = "";
@@ -164,6 +207,24 @@ TestCase {
             }
         ]);
         wait(30);
+    }
+    function test_read_only_inspection_and_audit_are_reachable_from_installed() {
+        populate();
+        browser.openView("Installed");
+        const open = findChild(browser, "openInspectionButton");
+        verify(open.visible);
+        mouseClick(open);
+        const dialog = findChild(browser, "inspectionDialog");
+        tryCompare(dialog, "visible", true);
+        const field = findChild(dialog, "inspectCommandField");
+        field.text = "fixture";
+        mouseClick(findChild(dialog, "runCommandInspection"));
+        compare(fake.inspectedCommand, "fixture");
+        compare(browser.inspectionReport.report.resolved, "/fixture/fixture");
+        mouseClick(findChild(dialog, "installedAuditTab"));
+        compare(browser.inspectionReport.report.groups.length, 1);
+        compare(browser.inspectionReport.report.leftovers.length, 0);
+        dialog.close();
     }
     function test_refresh_retains_inactive_results_until_fresh_data_arrives() {
         populate();
@@ -300,7 +361,7 @@ TestCase {
         verify(findChild(browser, "resultsCancel").visible);
         fake.writing = true;
         browser.openView("Updates");
-        compare(browser.currentView, "Installed");
+        compare(browser.currentView, "Updates");
         browser.openView("Settings");
         compare(browser.currentView, "Settings");
         fake.writing = false;
@@ -519,6 +580,22 @@ TestCase {
         installed.update = "available";
         browser.openView("Updates");
         compare(browser.versionText(installed), "1.2.3 → 2.0.0");
+    }
+    function test_export_visible_inventory_preserves_exact_filtered_identity() {
+        browser.openView("Installed");
+        fake.rows = JSON.stringify([
+            {kind: "package", name: "editor", source: "apt", architecture: "amd64", scope: "system", installed: "1", summary: "Editor"},
+            {kind: "package", name: "editor", source: "flatpak", architecture: "x86_64", scope: {user: {uid: 1000}}, remote: "flathub", reference: "app/editor/x86_64/stable", installed: "2", summary: "Editor"}
+        ]);
+        compare(browser.visibleInventoryIds().length, 2);
+        browser.viewSourceFilters = ({Installed: ["flatpak"]});
+        const selected = browser.visibleInventoryIds();
+        compare(selected.length, 1);
+        compare(selected[0].backend, "flatpak");
+        compare(selected[0].remote, "flathub");
+        compare(selected[0].reference, "app/editor/x86_64/stable");
+        compare(selected[0].scope.user.uid, 1000);
+        verify(findChild(browser, "exportInventoryButton").enabled);
     }
     function test_versionless_runtime_actions_and_rebuild_labels() {
         browser.openView("Updates");
@@ -826,6 +903,83 @@ TestCase {
         compare(browser.viewItems[0].name, "fire");
         compare(fake.lastForce, true);
         compare(fake.lastView, "Search");
+    }
+    function test_search_content_filters_loaded_rows_without_new_requests() {
+        browser.openView("Search");
+        const search = findChild(browser, "searchField");
+        search.text = "example";
+        search.forceActiveFocus();
+        keyClick(Qt.Key_Return);
+        const requests = fake.loadCount;
+        const rows = [
+            {kind: "package", name: "example-app", source: "apt", component_ids: ["org.example.App"], architecture: "all", scope: "system", installed: null, candidate: "1"},
+            {kind: "package", name: "example-cli", source: "cargo", architecture: "all", scope: "user", installed: null, candidate: "1"},
+            {kind: "package", name: "example-system", source: "apt", architecture: "all", scope: "system", installed: null, candidate: "1"},
+            {kind: "package", name: "example-image", source: "podman", reference: "registry.example/app:tag", architecture: "all", scope: "user", installed: null, candidate: "Registry"},
+            {kind: "package", name: "example-unknown", source: "future", architecture: "all", scope: "user", installed: null, candidate: "1"}
+        ];
+        fake.source_catalog = JSON.stringify(browser.sourceIds.concat(["future"]).map((id) => ({source: id, availability_kind: "available", capabilities: ["search"]})));
+        fake.rows = JSON.stringify(rows);
+        wait(30);
+        compare(browser.viewItems.length, 5);
+        browser.choose(1);
+        const selectedId = browser.selectedIdentity;
+        const filters = ["Apps", "CLI tools", "System packages", "Container images"];
+        const names = ["example-app", "example-cli", "example-system", "example-image"];
+        for (let i = 0; i < filters.length; i++) {
+            mouseClick(findChild(browser, "searchPane").filterAt(filters[i]));
+            compare(browser.viewItems.length, 1);
+            compare(browser.viewItems[0].name, names[i]);
+            compare(fake.loadCount, requests);
+        }
+        mouseClick(findChild(browser, "searchPane").filterAt("All"));
+        compare(browser.viewItems.length, 5);
+        compare(browser.selectedIdentity, selectedId);
+        compare(fake.writes, 0);
+    }
+    function test_activity_navigation_stays_available_during_write() {
+        populate();
+        fake.activity = JSON.stringify([{id: 1, frontend: "gui", operations: [{install: {backend: "apt", name: "synthetic-tool", architecture: "all", scope: "system"}}], started_at: 1000, state: "queued", outcomes: []}]);
+        fake.writing = true;
+        fake.busy = true;
+        browser.openView("Installed");
+        compare(browser.currentView, "Installed");
+        verify(findChild(findChild(browser, "packageResults").itemAtIndex(0), "rowPackageAction").enabled);
+        verify(findChild(browser, "activityIndicator").visible);
+        browser.openView("Activity");
+        compare(browser.currentView, "Activity");
+        const list = findChild(browser, "activityList");
+        tryCompare(list, "count", 1);
+        verify(findChild(browser, "cancelQueuedButton").enabled);
+        fake.writing = false;
+        fake.busy = false;
+    }
+    function test_background_mode_requires_a_usable_tray_to_hide() {
+        browser.openView("Settings");
+        browser.startHidden = true;
+        browser.backgroundMode = true;
+        browser.trayAvailable = false;
+        verify(browser.visible);
+        verify(!findChild(browser, "autostartSetting").enabled);
+        browser.trayAvailable = true;
+        verify(!browser.visible);
+        browser.backgroundMode = false;
+        verify(browser.visible);
+        browser.close();
+        verify(!browser.visible);
+    }
+    function test_container_reference_uses_explicit_search_submission() {
+        browser.openView("Search");
+        mouseClick(findChild(browser, "searchPane").filterAt("Container images"));
+        const search = findChild(browser, "searchField");
+        const requests = fake.loadCount;
+        search.text = "registry.example/team/app:tag";
+        compare(fake.loadCount, requests);
+        search.forceActiveFocus();
+        keyClick(Qt.Key_Return);
+        compare(fake.lastQuery, "registry.example/team/app:tag");
+        compare(fake.lastView, "Search");
+        compare(fake.writes, 0);
     }
     function test_search_compares_sources_and_actions_without_opening_details() {
         const field = findChild(browser, "searchField");

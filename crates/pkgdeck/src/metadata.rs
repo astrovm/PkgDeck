@@ -27,6 +27,8 @@ pub struct AppInfo {
     pub name: String,
     pub description: String,
     pub homepage: Option<String>,
+    pub publisher: Option<String>,
+    pub license: Option<String>,
     pub screenshots: Vec<Screenshot>,
 }
 impl AppInfo {
@@ -42,6 +44,12 @@ impl AppInfo {
         }
         if self.homepage.is_none() {
             self.homepage.clone_from(&other.homepage);
+        }
+        if self.publisher.is_none() {
+            self.publisher.clone_from(&other.publisher);
+        }
+        if self.license.is_none() {
+            self.license.clone_from(&other.license);
         }
         if self.screenshots.is_empty() {
             self.screenshots.clone_from(&other.screenshots);
@@ -266,6 +274,18 @@ fn provider_info(package: &Package, text: &str) -> Option<AppInfo> {
         homepage: homepage.as_str().and_then(web_url),
         screenshots: shots,
         icon: None,
+        publisher: match package.id.backend.as_str() {
+            "flatpak" => value["developer_name"].as_str().map(str::to_owned),
+            "snap" => value["snap"]["publisher"]["display-name"]
+                .as_str()
+                .map(str::to_owned),
+            _ => None,
+        },
+        license: match package.id.backend.as_str() {
+            "flatpak" => value["project_license"].as_str().map(str::to_owned),
+            "snap" => value["snap"]["license"].as_str().map(str::to_owned),
+            _ => None,
+        },
     };
     if info.description.is_empty() {
         info.description = summary.as_str().unwrap_or("").into();
@@ -488,6 +508,12 @@ impl Catalog {
                         .find(|n| n.has_tag_name("url") && n.attribute("type") == Some("homepage"))
                         .and_then(|n| n.text())
                         .and_then(web_url),
+                    publisher: child(component, "developer_name")
+                        .map(plain)
+                        .filter(|name| !name.is_empty()),
+                    license: child(component, "project_license")
+                        .map(plain)
+                        .filter(|name| !name.is_empty()),
                     icon: component
                         .children()
                         .filter(|node| node.has_tag_name("icon"))
@@ -559,6 +585,9 @@ impl Catalog {
                     .map(|d| plain(d.root_element()))
                     .unwrap_or_default(),
                     homepage: value["Url"]["homepage"].as_str().and_then(web_url),
+                    publisher: Some(localized(&value["DeveloperName"]))
+                        .filter(|name| !name.is_empty()),
+                    license: value["ProjectLicense"].as_str().map(str::to_owned),
                     icon: value["Icon"]["stock"]
                         .as_str()
                         .and_then(|name| self.resolve_icon(name, "stock"))
@@ -795,6 +824,7 @@ mod tests {
       <pkgname>player-bin</pkgname><name xml:lang="es">Reproductor</name><name>Example Player</name>
       <description><p>A <em>friendly</em> player.</p><p xml:lang="es">Traducción</p><p>Second paragraph.</p></description>
       <url type="homepage">https://example.invalid/player</url>
+      <developer_name>Example Studio</developer_name><project_license>MIT</project_license>
       <screenshots>
         <screenshot><caption>Library</caption><image type="thumbnail">https://example.invalid/thumb.png</image><image type="source">https://example.invalid/player.png</image></screenshot>
         <screenshot><image>https://example.invalid/player.png</image></screenshot>
@@ -878,6 +908,8 @@ mod tests {
         assert_eq!(info.name, "Updated name");
         assert!(!info.description.is_empty());
         assert!(info.homepage.is_some());
+        assert_eq!(info.publisher.as_deref(), Some("Example Studio"));
+        assert_eq!(info.license.as_deref(), Some("MIT"));
         assert_eq!(info.screenshots.len(), 1);
         let shots: String = (0..12)
             .map(|n| {
@@ -910,6 +942,8 @@ Launchable: {desktop-id: [editor-app.desktop]}
 Package: editor
 Name: {C: Example Editor, es: Editor de ejemplo}
 Description: {en: '<p>Edit <em>text</em>.</p>'}
+DeveloperName: {C: Example Editors}
+ProjectLicense: GPL-3.0-only
 Url: {homepage: 'https://example.invalid/editor'}
 Screenshots:
   - source-image: {url: 'https://example.invalid/editor.png'}
@@ -932,6 +966,8 @@ Description: '&invalid;'
             "Example Editor"
         );
         assert_eq!(info.description, "Edit text.");
+        assert_eq!(info.publisher.as_deref(), Some("Example Editors"));
+        assert_eq!(info.license.as_deref(), Some("GPL-3.0-only"));
         assert_eq!(
             info.homepage.as_deref(),
             Some("https://example.invalid/editor")
@@ -1099,10 +1135,12 @@ Description: '&invalid;'
             provider_url(&flatpak).as_deref(),
             Some("https://flathub.org/api/v2/appstream/org.example.Player")
         );
-        let json = r#"{"id":"org.example.Player","name":"Remote Player","summary":"Fallback","description":"<p>Play <em>media</em>.</p>","urls":{"homepage":"https://example.invalid"},"screenshots":[{"caption":"Library","sizes":[{"width":320,"src":"https://example.invalid/small.webp"},{"width":1280,"src":"https://example.invalid/large.webp"}]},{"sizes":[{"src":"file:///tmp/private"}]}]}"#;
+        let json = r#"{"id":"org.example.Player","name":"Remote Player","summary":"Fallback","description":"<p>Play <em>media</em>.</p>","developer_name":"Example Studio","project_license":"MIT","urls":{"homepage":"https://example.invalid"},"screenshots":[{"caption":"Library","sizes":[{"width":320,"src":"https://example.invalid/small.webp"},{"width":1280,"src":"https://example.invalid/large.webp"}]},{"sizes":[{"src":"file:///tmp/private"}]}]}"#;
         let info = provider_info(&flatpak, json).unwrap();
         assert_eq!(info.name, "Remote Player");
         assert_eq!(info.description, "Play media.");
+        assert_eq!(info.publisher.as_deref(), Some("Example Studio"));
+        assert_eq!(info.license.as_deref(), Some("MIT"));
         assert_eq!(
             info.screenshots[0].url,
             "https://example.invalid/large.webp"
@@ -1115,9 +1153,11 @@ Description: '&invalid;'
             provider_url(&snap).as_deref(),
             Some("https://api.snapcraft.io/v2/snaps/info/player")
         );
-        let info = provider_info(&snap, r#"{"snap":{"name":"player","title":"Snap Player","summary":"Summary","store-url":"https://example.invalid/store","media":[{"type":"icon","url":"https://example.invalid/icon"},{"type":"screenshot","url":"https://example.invalid/snap.png"}]}}"#).unwrap();
+        let info = provider_info(&snap, r#"{"snap":{"name":"player","title":"Snap Player","summary":"Summary","store-url":"https://example.invalid/store","publisher":{"display-name":"Example Publisher"},"license":"Apache-2.0","media":[{"type":"icon","url":"https://example.invalid/icon"},{"type":"screenshot","url":"https://example.invalid/snap.png"}]}}"#).unwrap();
         assert_eq!(info.name, "Snap Player");
         assert_eq!(info.description, "Summary");
+        assert_eq!(info.publisher.as_deref(), Some("Example Publisher"));
+        assert_eq!(info.license.as_deref(), Some("Apache-2.0"));
         assert_eq!(info.screenshots.len(), 1);
         assert!(
             provider_info(&package("snap", "other"), r#"{"snap":{"name":"player"}}"#).is_none()
