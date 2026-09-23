@@ -9,6 +9,13 @@ Rectangle {
     property string selectionIdentity: ""
     property var screenshots: []
     property string description: ""
+    property var detailsData: ({})
+    readonly property string metadataText: detailMatchesSelection ? [
+        detailsData.publisher ? "Publisher: " + detailsData.publisher : "",
+        detailsData.license ? "License: " + detailsData.license : "",
+        detailsData.homepage ? "Homepage: " + detailsData.homepage : "",
+        (detailsData.dependencies || []).length ? "Dependencies: " + detailsData.dependencies.join(", ") : ""
+    ].filter(Boolean).join("\n") : ""
     property string iconSource: ""
     property bool compact: false
     property bool motionEnabled: false
@@ -21,6 +28,7 @@ Rectangle {
     property color accent
     property font textFont
     property alias detailsContentItem: detailsContent
+    readonly property real idealHeight: Math.max(88, 32 + 40 + detailsContent.spacing + detailBody.implicitHeight)
     signal closeRequested()
     signal screenshotRequested(string url, string caption)
     signal screenshotFailed(string url, string identity)
@@ -93,6 +101,7 @@ Rectangle {
             contentWidth: availableWidth
             clip: true
             ColumnLayout {
+                id: detailBody
                 width: detailScroll.availableWidth
                 spacing: 10
                 ListView {
@@ -152,6 +161,7 @@ Rectangle {
                 }
                 TextEdit {
                     objectName: "packageDetails"
+                    visible: panel.description.length > 0
                     Layout.fillWidth: true
                     readOnly: true
                     selectByMouse: true
@@ -162,6 +172,18 @@ Rectangle {
                     textFormat: TextEdit.PlainText
                     text: panel.description
                     Accessible.name: "Package details"
+                }
+                TextEdit {
+                    objectName: "packageMetadata"
+                    visible: panel.metadataText.length > 0
+                    Layout.fillWidth: true
+                    readOnly: true
+                    selectByMouse: true
+                    wrapMode: TextEdit.Wrap
+                    textFormat: TextEdit.PlainText
+                    color: panel.muted
+                    text: panel.metadataText
+                    Accessible.name: "Additional package metadata"
                 }
             }
         }

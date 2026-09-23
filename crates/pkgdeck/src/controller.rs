@@ -2076,7 +2076,7 @@ impl ffi::PackageController {
                 }
                 let info = crate::metadata::cached_info(&details.package);
                 let data = encoded(
-                    json!({"package": package_row(&details.package, &same_app_sources(&self.rust().packages, &details.package.id), None), "description": info.as_ref().filter(|i| !i.description.is_empty()).map(|i| &i.description).unwrap_or(&details.description), "homepage": details.homepage.as_ref().or_else(|| info.as_ref().and_then(|i| i.homepage.as_ref())), "dependencies": details.dependencies, "screenshots": info.as_ref().map(|i| &i.screenshots)}),
+                    json!({"package": package_row(&details.package, &same_app_sources(&self.rust().packages, &details.package.id), None), "description": info.as_ref().filter(|i| !i.description.is_empty()).map(|i| &i.description).unwrap_or(&details.description), "homepage": details.homepage.as_ref().or_else(|| info.as_ref().and_then(|i| i.homepage.as_ref())), "publisher": info.as_ref().and_then(|i| i.publisher.as_ref()), "license": info.as_ref().and_then(|i| i.license.as_ref()), "dependencies": details.dependencies, "screenshots": info.as_ref().map(|i| &i.screenshots)}),
                 );
                 // Bound memory use for large searches; reload and writes invalidate this snapshot.
                 if self.rust().detail_cache.len() >= 128 {

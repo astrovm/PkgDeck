@@ -11,10 +11,11 @@ with variants from different managers together. Each row retains its own source,
 architecture, and installation scope. For Flatpak, choose the User or System row
 to target that installation.
 
-The row button installs, removes, or updates that exact package. Click the row for
-its description, native identifier, and available screenshots. Details are optional
-and close with the × button. App names, icons, and screenshots depend on source
-metadata; packages without desktop metadata keep their native names.
+The row button installs, removes, or updates that exact package. Click the row
+for any additional description, screenshots, publisher, license, homepage, or
+dependencies supplied by that source. Details are optional and close with the
+× button. App names, icons, and screenshots depend on source metadata; packages
+without desktop metadata keep their native names.
 
 Installed supports filtering and a **Duplicate installs** view. AppStream identity
 and upstream homepage metadata associate related installations; grouping does not

@@ -83,11 +83,8 @@ Controls.ApplicationWindow {
         if (detail && detail.cleanup)
             return [detail.cleanup.summary || "", detail.cleanup.preview || ""].filter(Boolean).join("\n\n");
         if (detailMatchesSelection) {
-            const pkg = detail.package || {};
-            return [detail.description || "", pkg.reference || pkg.name || "",
-                [pkg.scope_label, pkg.architecture].filter(Boolean).join(" · "),
-                detail.homepage || "",
-                (detail.dependencies || []).length ? "Dependencies: " + detail.dependencies.join(", ") : ""].filter(Boolean).join("\n\n");
+            const description = (detail.description || "").trim();
+            return description === (selected.summary || "").trim() ? "" : description;
         }
         if (detail && detail.failure)
             return (detail.failure.error || "") + "\n" + (detail.hint || "");
@@ -782,7 +779,7 @@ Controls.ApplicationWindow {
         if (currentView !== "Search" || !items.some((row) => rowIdentity(row) === selectedIdentity))
             selectedIdentity = null;
     }
-    onViewItemsChanged: Qt.callLater(root.restoreSelection)
+    onViewItemsChanged: Qt.callLater(() => root.restoreSelection())
     function propose(action) {
         if (!retainingResults) {
             backend.propose(action, originalIndex(results.currentIndex));
@@ -1864,12 +1861,15 @@ Controls.ApplicationWindow {
             PackageDetails {
                 id: detailsPanel
                 visible: root.selected !== null && ["Search", "Installed", "Updates", "Clean", "Sources"].indexOf(root.currentView) >= 0
+                    && (root.selected.kind !== "package" || (root.detailMatchesSelection
+                        && (root.detailText().length > 0 || root.visibleScreenshots.length > 0 || detailsPanel.metadataText.length > 0)))
                 Layout.fillWidth: true
-                Layout.preferredHeight: root.visibleScreenshots.length > 0 ? Math.min(root.height * (root.compact ? 0.35 : 0.42), 320) : Math.min(root.height * 0.27, 180)
+                Layout.preferredHeight: Math.min(root.height * (root.compact ? 0.35 : 0.48), detailsPanel.idealHeight)
                 selected: root.selected
                 selectionIdentity: root.rowIdentity(root.selected)
                 screenshots: root.visibleScreenshots
                 description: root.detailText()
+                detailsData: root.detailMatchesSelection ? root.detail : ({})
                 iconSource: root.iconUrl(root.selectedIcon)
                 compact: root.compact
                 motionEnabled: root.motionEnabled
