@@ -483,6 +483,8 @@ jobs:
         uses: ./.github/actions/setup-desktop
         with:
           packaging: 'true'
+      - name: Build GUI test helper
+        run: cargo build --locked -p pkgdeck-tools
       - name: Build and test Flatpak
         run: |
           sudo flatpak remote-add --system --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
