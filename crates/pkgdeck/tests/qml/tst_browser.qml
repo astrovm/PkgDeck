@@ -18,11 +18,15 @@ TestCase {
         function changeRepository(request) { lastRepositoryChange = request; }
         property string rows: "[]"
         property string details: "{}"
+        property string inspection: "{}"
+        property string inspectedCommand: ""
         property string status: "Ready"
         property string confirmation: ""
         property string confirmation_data: "{}"
         property string source_catalog: "[]"
         property string report_state: "{}"
+        property string activity: "[]"
+        property string background_state: "{}"
         property string lastRetry: ""
         property string version: "9.9.9-test"
         property bool simulateLoading: false
@@ -78,6 +82,30 @@ TestCase {
         function poll() {
         }
         function retrySource(view, query, source) { lastRetry = source; }
+        function inspectCommand(command) {
+            inspectedCommand = command;
+            inspection = JSON.stringify({kind: "command", report: {
+                command: command, environment: "Synthetic host", resolved: "/fixture/" + command,
+                candidates: [{path: "/fixture/" + command, state: "executable", target: null,
+                    owners: [{manager: "apt", native_name: "fixture", state: "known", packages: []}]}],
+                ownership_note: "Synthetic ownership only."
+            }});
+        }
+        function auditInstalled() {
+            inspection = JSON.stringify({kind: "audit", report: {
+                groups: [{key: "synthetic-app", copies: [
+                    {package: {backend: "apt", name: "fixture", architecture: "all", scope: "system"}, installed_version: "1"},
+                    {package: {backend: "flatpak", name: "org.example.Fixture", architecture: "x86_64", scope: "system"}, installed_version: "1"}
+                ]}], installed_copies: [
+                    {package: {backend: "apt", name: "fixture", architecture: "all", scope: "system"}, installed_version: "1"},
+                    {package: {backend: "flatpak", name: "org.example.Fixture", architecture: "x86_64", scope: "system"}, installed_version: "1"}
+                ], leftovers: [], data_note: "Unknown data remains unknown."
+            }});
+        }
+        function refreshActivity() {}
+        function cancelQueued() {}
+        function checkUpdates(sources, enabled, offline, metered, force) {}
+        function setAutostart(enabled) { return true; }
     }
     Component {
         id: window
@@ -96,10 +124,14 @@ TestCase {
         fake.lastRepositoryChange = "";
         fake.rows = "[]";
         fake.details = "{}";
+        fake.inspection = "{}";
+        fake.inspectedCommand = "";
         fake.status = "Ready";
         fake.confirmation = "";
         fake.confirmation_data = "{}";
         fake.report_state = "{}";
+        fake.activity = "[]";
+        fake.background_state = "{}";
         fake.lastRetry = "";
         fake.simulateLoading = false;
         fake.busy = false;
@@ -117,6 +149,8 @@ TestCase {
         // Fresh checklist and column layout per test: QSettings persist
         // across tests in one run.
         browser.reduceMotion = false;
+        browser.backgroundMode = false;
+        browser.autostartEnabled = false;
         browser.sourceSelection = "";
         browser.viewSourceFilters = ({});
         browser.sortColumn = "";
@@ -167,6 +201,24 @@ TestCase {
             }
         ]);
         wait(30);
+    }
+    function test_read_only_inspection_and_audit_are_reachable_from_installed() {
+        populate();
+        browser.openView("Installed");
+        const open = findChild(browser, "openInspectionButton");
+        verify(open.visible);
+        mouseClick(open);
+        const dialog = findChild(browser, "inspectionDialog");
+        tryCompare(dialog, "visible", true);
+        const field = findChild(dialog, "inspectCommandField");
+        field.text = "fixture";
+        mouseClick(findChild(dialog, "runCommandInspection"));
+        compare(fake.inspectedCommand, "fixture");
+        compare(browser.inspectionReport.report.resolved, "/fixture/fixture");
+        mouseClick(findChild(dialog, "installedAuditTab"));
+        compare(browser.inspectionReport.report.groups.length, 1);
+        compare(browser.inspectionReport.report.leftovers.length, 0);
+        dialog.close();
     }
     function test_refresh_retains_inactive_results_until_fresh_data_arrives() {
         populate();
@@ -303,7 +355,7 @@ TestCase {
         verify(findChild(browser, "resultsCancel").visible);
         fake.writing = true;
         browser.openView("Updates");
-        compare(browser.currentView, "Installed");
+        compare(browser.currentView, "Updates");
         browser.openView("Settings");
         compare(browser.currentView, "Settings");
         fake.writing = false;
@@ -862,6 +914,37 @@ TestCase {
         compare(browser.viewItems.length, 5);
         compare(browser.selectedIdentity, selectedId);
         compare(fake.writes, 0);
+    }
+    function test_activity_navigation_stays_available_during_write() {
+        populate();
+        fake.activity = JSON.stringify([{id: 1, frontend: "gui", operations: [{install: {backend: "apt", name: "synthetic-tool", architecture: "all", scope: "system"}}], started_at: 1000, state: "queued", outcomes: []}]);
+        fake.writing = true;
+        fake.busy = true;
+        browser.openView("Installed");
+        compare(browser.currentView, "Installed");
+        verify(findChild(findChild(browser, "packageResults").itemAtIndex(0), "rowPackageAction").enabled);
+        verify(findChild(browser, "activityIndicator").visible);
+        browser.openView("Activity");
+        compare(browser.currentView, "Activity");
+        const list = findChild(browser, "activityList");
+        tryCompare(list, "count", 1);
+        verify(findChild(browser, "cancelQueuedButton").enabled);
+        fake.writing = false;
+        fake.busy = false;
+    }
+    function test_background_mode_requires_a_usable_tray_to_hide() {
+        browser.openView("Settings");
+        browser.startHidden = true;
+        browser.backgroundMode = true;
+        browser.trayAvailable = false;
+        verify(browser.visible);
+        verify(!findChild(browser, "autostartSetting").enabled);
+        browser.trayAvailable = true;
+        verify(!browser.visible);
+        browser.backgroundMode = false;
+        verify(browser.visible);
+        browser.close();
+        verify(!browser.visible);
     }
     function test_container_reference_uses_explicit_search_submission() {
         browser.openView("Search");

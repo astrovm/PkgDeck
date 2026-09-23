@@ -8,13 +8,17 @@ fn main() {
             .qml_file("qml/SearchPane.qml")
             .qml_file("qml/UpdatesActions.qml")
             .qml_file("qml/PackageDetails.qml")
+            .qml_file("qml/InspectionDialog.qml")
+            .qml_file("qml/ActivityPane.qml")
             .qml_file("qml/DeckIcon.qml"),
     )
     .qrc("resources.qrc")
     .file("src/controller.rs")
     .file("src/network.rs")
     .qt_module("Network")
+    .qt_module("Widgets")
     .cpp_files([
+        "native/main.cpp",
         "native/network.cpp",
         "native/providers.cpp",
         "native/controller.cpp",
