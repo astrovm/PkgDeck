@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Controls as Controls
 import QtTest
 import "../../qml" as App
 
@@ -661,7 +662,11 @@ TestCase {
         const about = findChild(browser, "aboutText");
         verify(about !== null);
         verify(about.text.indexOf("9.9.9-test") >= 0);
-        verify(about.text.indexOf("Ctrl+2: Installed") >= 0);
+        const shortcuts = findChild(browser, "aboutShortcuts");
+        verify(shortcuts !== null);
+        compare(shortcuts.count, 15);
+        compare(shortcuts.itemAt(0).children[1].text, "Ctrl+1");
+        compare(shortcuts.itemAt(11).children[1].text, "Ctrl+Shift+U");
         const at = about.mapToItem(browser.contentItem, 0, 0);
         verify(at.y < browser.height / 3);
         // A tall window must not vertically center the text (regression:
@@ -1001,6 +1006,61 @@ TestCase {
         compare(request.url, "https://example.invalid/new.flatpakrepo");
         compare(request.scope, "system");
     }
+    function test_repository_form_validates_before_submitting() {
+        const dialog = findChild(browser, "addRepositoryDialog");
+        dialog.open();
+        tryCompare(dialog, "visible", true);
+        const ok = dialog.standardButton(Controls.Dialog.Ok);
+        verify(ok !== null);
+        const name = findChild(browser, "repositoryName");
+        const url = findChild(browser, "repositoryUrl");
+        verify(!ok.enabled);
+        name.text = "-invalid";
+        url.text = "http://example.invalid/repo.flatpakrepo";
+        verify(findChild(browser, "repositoryNameError").visible);
+        verify(findChild(browser, "repositoryUrlError").visible);
+        clickDelegate(ok);
+        verify(dialog.visible);
+        compare(fake.lastRepositoryChange, "");
+
+        name.text = "sample_repo";
+        url.text = "https://example.invalid/repo.flatpakrepo";
+        tryVerify(() => ok.enabled);
+        verify(!findChild(browser, "repositoryNameError").visible);
+        verify(!findChild(browser, "repositoryUrlError").visible);
+        clickDelegate(ok);
+        tryCompare(dialog, "visible", false);
+        const request = JSON.parse(fake.lastRepositoryChange);
+        compare(request.action, "add");
+        compare(request.name, "sample_repo");
+        compare(request.url, "https://example.invalid/repo.flatpakrepo");
+    }
+    function test_narrow_repositories_show_identity_before_actions() {
+        browser.width = 360;
+        browser.height = 500;
+        browser.openView("Sources");
+        const title = "A synthetic repository with a long name";
+        const url = "https://example.invalid/long/path/to/a/synthetic-repository.flatpakrepo";
+        fake.repositories = JSON.stringify({repositories: [{backend: "flatpak", name: "synthetic-repo", title: title, url: url, scope: "user", enabled: true, priority: 1}], errors: []});
+        const dialog = findChild(browser, "repositoriesDialog");
+        dialog.open();
+        tryCompare(dialog, "visible", true);
+        const list = findChild(browser, "repositoryList");
+        tryVerify(() => list.itemAtIndex(0) !== null);
+        waitForRendering(browser.contentItem);
+        const row = list.itemAtIndex(0);
+        const titleLabel = findChild(row, "repositoryTitle");
+        const urlLabel = findChild(row, "repositoryUrlLabel");
+        const remove = findChild(row, "removeRepositoryButton");
+        compare(titleLabel.text, title);
+        compare(urlLabel.text, url);
+        verify(row.height > 76);
+        verify(urlLabel.height > urlLabel.font.pointSize);
+        const urlBottom = urlLabel.mapToItem(row, 0, urlLabel.height).y;
+        const actionTop = remove.mapToItem(row, 0, 0).y;
+        verify(urlBottom <= actionTop);
+        dialog.close();
+    }
     function test_firmware_row_updates_instead_of_removing() {
         browser.openView("Installed");
         fake.rows = JSON.stringify([{kind: "package", name: "synthetic-device", display_name: "Synthetic BIOS", source: "fwupd", architecture: "device", installed: "1", candidate: "2", update: "available", scope: "system", summary: "Firmware · AC power required"}]);
@@ -1070,6 +1130,51 @@ TestCase {
             popup.close();
             tryCompare(popup, "visible", false);
         }
+    }
+    function test_source_picker_focus_and_settings_controls() {
+        browser.openView("Updates");
+        const filter = findChild(browser, "sourceFilter");
+        clickDelegate(filter);
+        const popup = findChild(browser, "sourcePopup");
+        tryCompare(popup, "visible", true);
+        tryVerify(() => findChild(browser, "sourcePickerSearch").activeFocus);
+        verify(findChild(browser, "unavailableSourceToggle").visible);
+        popup.close();
+        tryCompare(popup, "visible", false);
+
+        browser.openView("Settings");
+        clickDelegate(filter);
+        tryCompare(popup, "visible", true);
+        tryVerify(() => findChild(browser, "sourcePickerSearch").activeFocus);
+        verify(!findChild(browser, "unavailableSourceToggle").visible);
+        popup.close();
+    }
+    function test_compact_updates_keep_names_and_actions_readable() {
+        browser.width = 360;
+        browser.openView("Updates");
+        fake.upgradable = true;
+        const rows = [
+            {kind: "package", name: "synthetic-editor", display_name: "Synthetic Editor", source: "apt", architecture: "all", installed: "1.0", candidate: "2.0", update: "available", scope: "system", summary: "Edit synthetic documents"},
+            {kind: "package", name: "synthetic-player", display_name: "Synthetic Player", source: "flatpak", architecture: "x86_64", installed: "3.1", candidate: "3.2", update: "available", scope: "user", summary: "Play synthetic music"}
+        ];
+        fake.rows = JSON.stringify(rows);
+        const list = findChild(browser, "packageResults");
+        tryVerify(() => list.itemAtIndex(0) !== null);
+        waitForRendering(browser.contentItem);
+        const row = list.itemAtIndex(0);
+        verify(findChild(row, "packageName").width >= 140);
+        verify(findChild(row, "compactVersion").visible);
+        verify(!findChild(row, "wideVersion").visible);
+        const update = findChild(browser, "upgradeAllButton");
+        const selectNone = findChild(browser, "selectNoneButton");
+        const reload = findChild(browser, "reloadButton");
+        compare(reload.text, "");
+        const updateY = update.mapToItem(browser.contentItem, 0, 0).y;
+        compare(selectNone.mapToItem(browser.contentItem, 0, 0).y, updateY);
+        compare(reload.mapToItem(browser.contentItem, 0, 0).y, updateY);
+        browser.togglePackage(rows[0]);
+        compare(update.text, "Update");
+        compare(reload.mapToItem(browser.contentItem, 0, 0).y, update.mapToItem(browser.contentItem, 0, 0).y);
     }
     function test_header_source_checklist_and_installed_filter() {
         browser.openView("Installed");

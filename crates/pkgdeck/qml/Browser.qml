@@ -152,7 +152,7 @@ Controls.ApplicationWindow {
         if (reportState.phase === "unsupported")
             return "No enabled sources support this view.";
         if (currentView === "Search" && search.text.trim().length === 0)
-            return "Search apps and packages";
+            return "";
         if (currentView === "Installed" && (installedFilter.length > 0 || multiSourceOnly))
             return "No packages match these filters.";
         if (viewSourceFilters[currentView] && items.length > 0)
@@ -1017,6 +1017,7 @@ Controls.ApplicationWindow {
                             searchText = "";
                             pickerSearch.text = "";
                             draftSources = mode === "settings" ? root.checkedSources() : root.effectiveSources().filter((id) => root.sourceInfo(id).availability_kind === "available" && root.sourceSupportsView(id));
+                            Qt.callLater(() => { if (sourcePopup.visible) pickerSearch.forceActiveFocus(); });
                         }
                         onClosed: root.restoreDialogFocus()
                         contentItem: ColumnLayout {
@@ -1108,7 +1109,9 @@ Controls.ApplicationWindow {
                                 Controls.ScrollBar.vertical: Controls.ScrollBar { }
                             }
                             ActionButton {
+                                objectName: "unavailableSourceToggle"
                                 Layout.fillWidth: true
+                                visible: sourcePopup.mode === "filter"
                                 text: sourcePopup.showUnavailable ? "Hide unavailable" : "Show unavailable"
                                 symbol: "help"
                                 onClicked: sourcePopup.showUnavailable = !sourcePopup.showUnavailable
@@ -1242,11 +1245,6 @@ Controls.ApplicationWindow {
                 visible: root.currentView === "Settings"
                 Layout.fillWidth: true
                 Layout.fillHeight: true
-                Controls.Label { text: "Package managers" }
-                Controls.Label {
-                    text: root.checkedSources().length + " enabled · choose Manage sources above"
-                    color: root.muted
-                }
                 Controls.Label { text: "Appearance" }
                 ThemedComboBox {
                     objectName: "appearanceSetting"
@@ -1295,13 +1293,58 @@ Controls.ApplicationWindow {
                 Layout.fillHeight: true
                 contentWidth: availableWidth
                 clip: true
-                Controls.Label {
-                    objectName: "aboutText"
+                ColumnLayout {
                     width: aboutScroll.availableWidth
-                    verticalAlignment: Text.AlignTop
-                    wrapMode: Text.WordWrap
-                    text: "PkgDeck " + backend.version + "\nA unified package interface for Linux.\n\nKeyboard shortcuts\nCtrl+1: Search • Ctrl+2: Installed • Ctrl+3: Updates • Ctrl+4: Clean • Ctrl+5: Sources\nCtrl+F: search, installed filter, or source picker • Ctrl+L: focus results • Up/Down: select • Ctrl+I: install • Ctrl+D: remove • Ctrl+U: update • Ctrl+M: refresh source • Ctrl+R: reload\nEscape: cancel current work\n\nRefresh sources checks package metadata. Updating apps and cleaning change installed files. Changes require confirmation."
-                    textFormat: Text.PlainText
+                    spacing: 10
+                    Controls.Label {
+                        objectName: "aboutText"
+                        text: "PkgDeck " + backend.version
+                        color: root.ink
+                        font.bold: true
+                        font.pointSize: root.font.pointSize * 1.3
+                        Layout.fillWidth: true
+                    }
+                    Controls.Label {
+                        text: "Keyboard shortcuts"
+                        color: root.ink
+                        font.bold: true
+                        Layout.topMargin: 10
+                    }
+                    Repeater {
+                        objectName: "aboutShortcuts"
+                        model: [
+                            {action: "Search", keys: "Ctrl+1"},
+                            {action: "Installed", keys: "Ctrl+2"},
+                            {action: "Updates", keys: "Ctrl+3"},
+                            {action: "Clean", keys: "Ctrl+4"},
+                            {action: "Sources", keys: "Ctrl+5"},
+                            {action: "Search or filter", keys: "Ctrl+F"},
+                            {action: "Focus results", keys: "Ctrl+L"},
+                            {action: "Select result", keys: "↑ / ↓"},
+                            {action: "Install", keys: "Ctrl+I"},
+                            {action: "Remove", keys: "Ctrl+D"},
+                            {action: "Update", keys: "Ctrl+U"},
+                            {action: "Update selected", keys: "Ctrl+Shift+U"},
+                            {action: "Refresh source", keys: "Ctrl+M"},
+                            {action: "Reload", keys: "Ctrl+R"},
+                            {action: "Cancel work", keys: "Esc"}
+                        ]
+                        delegate: RowLayout {
+                            required property var modelData
+                            Layout.fillWidth: true
+                            spacing: 12
+                            Controls.Label {
+                                text: modelData.action
+                                color: root.muted
+                                Layout.preferredWidth: root.compact ? 150 : 220
+                            }
+                            Controls.Label {
+                                text: modelData.keys
+                                color: root.ink
+                                Layout.fillWidth: true
+                            }
+                        }
+                    }
                 }
             }
             RowLayout {
@@ -1525,7 +1568,7 @@ Controls.ApplicationWindow {
                                 easing.type: Easing.OutCubic
                             }
                             width: ListView.view.width
-                            height: (root.compact ? Math.max(78, root.font.pointSize * 7) : Math.max(56, root.font.pointSize * 5)) + (modelData.groupStart ? 38 : 0)
+                            height: (root.compact ? Math.max(94, root.font.pointSize * 8.5) : Math.max(56, root.font.pointSize * 5)) + (modelData.groupStart ? 38 : 0)
                             topPadding: modelData.groupStart ? 38 : 0
                             leftPadding: 16
                             rightPadding: 16
@@ -1595,6 +1638,7 @@ Controls.ApplicationWindow {
                                     Layout.preferredWidth: root.compact ? -1 : root.nameWidth
                                     Layout.fillWidth: root.compact
                                     Controls.Label {
+                                        objectName: "packageName"
                                         text: modelData.display_name || modelData.name
                                         color: root.ink
                                         font.bold: true
@@ -1636,6 +1680,17 @@ Controls.ApplicationWindow {
                                         }
                                     }
                                     Controls.Label {
+                                        objectName: "compactVersion"
+                                        visible: root.compact
+                                        text: root.versionText(modelData)
+                                        font.family: "monospace"
+                                        font.pointSize: root.font.pointSize * 0.9
+                                        color: modelData.kind === "failure" ? "#e87979" : (modelData.update === "available" ? root.accent : root.muted)
+                                        textFormat: Text.PlainText
+                                        elide: Text.ElideRight
+                                        Layout.fillWidth: true
+                                    }
+                                    Controls.Label {
                                         visible: root.compact
                                         text: modelData.kind === "source" ? (modelData.capabilities || []).join(", ") : (modelData.summary || "")
                                         color: root.muted
@@ -1645,7 +1700,9 @@ Controls.ApplicationWindow {
                                     }
                                 }
                                 Controls.Label {
-                                    Layout.preferredWidth: root.compact ? 100 : root.versionWidth
+                                    objectName: "wideVersion"
+                                    visible: !root.compact
+                                    Layout.preferredWidth: root.versionWidth
                                     text: root.versionText(modelData)
                                     font.family: "monospace"
                                     color: modelData.kind === "failure" ? "#e87979" : (modelData.update === "available" ? root.accent : root.muted)
@@ -1707,7 +1764,7 @@ Controls.ApplicationWindow {
                                 horizontalAlignment: Text.AlignHCenter
                                 wrapMode: Text.WordWrap
                                 color: root.muted
-                                visible: !backend.busy || !root.motionEnabled
+                                visible: text.length > 0 && (!backend.busy || !root.motionEnabled)
                                 text: root.emptyStateMessage()
                             }
                             ActionButton {
@@ -1895,7 +1952,8 @@ Controls.ApplicationWindow {
                 ActionButton {
                     objectName: "upgradeAllButton"
                     visible: root.currentView === "Updates" && (root.uncheckedPackages.length === 0 || root.selectedCount() > 0)
-                    text: root.uncheckedPackages.length === 0 ? "Update all" : "Update selected"
+                    text: root.uncheckedPackages.length === 0 ? "Update all" : (root.compact ? "Update" : "Update selected")
+                    Accessible.name: root.uncheckedPackages.length === 0 ? "Update all" : "Update selected"
                     symbol: "updates"
                     primary: true
                     enabled: !backend.busy && (root.uncheckedPackages.length > 0 || backend.upgradable)
@@ -1944,8 +2002,11 @@ Controls.ApplicationWindow {
                     onClicked: root.propose("refresh")
                 }
                 ActionButton {
-                    text: "Reload"
+                    objectName: "reloadButton"
+                    text: root.compact ? "" : "Reload"
                     symbol: "refresh"
+                    Accessible.name: "Reload"
+                    tooltipText: root.compact ? "Reload" : ""
                     enabled: !backend.writing
                     onClicked: root.reload(true)
                 }
@@ -1993,51 +2054,91 @@ Controls.ApplicationWindow {
                 delegate: Rectangle {
                     required property var modelData
                     width: ListView.view.width
-                    height: 76
+                    height: repositoryCard.implicitHeight + 16
                     color: root.surface
                     radius: 6
-                    RowLayout {
-                        anchors.fill: parent; anchors.margins: 8; spacing: 10
-                        Controls.CheckBox {
-                            objectName: "repositoryEnabled"
-                            checked: modelData.enabled
-                            enabled: !backend.busy && modelData.backend !== "apt"
-                            Accessible.name: "Enable " + (modelData.title || modelData.name)
-                            onClicked: {
-                                root.repositoryChange(modelData, "set_enabled", {enabled: checked});
-                                checked = Qt.binding(() => modelData.enabled);
+                    ColumnLayout {
+                        id: repositoryCard
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.top: parent.top
+                        anchors.margins: 8
+                        spacing: 6
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 10
+                            Controls.CheckBox {
+                                objectName: "repositoryEnabled"
+                                checked: modelData.enabled
+                                enabled: !backend.busy && modelData.backend !== "apt"
+                                Accessible.name: "Enable " + (modelData.title || modelData.name)
+                                onClicked: {
+                                    root.repositoryChange(modelData, "set_enabled", {enabled: checked});
+                                    checked = Qt.binding(() => modelData.enabled);
+                                }
+                            }
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                spacing: 2
+                                Controls.Label {
+                                    objectName: "repositoryTitle"
+                                    text: modelData.title || modelData.name
+                                    textFormat: Text.PlainText
+                                    color: root.ink
+                                    wrapMode: Text.WordWrap
+                                    Layout.fillWidth: true
+                                }
+                                Controls.Label {
+                                    text: modelData.backend.toUpperCase() + " · " + (modelData.scope === "system" ? "System" : "User")
+                                    color: root.muted
+                                    font.pointSize: root.font.pointSize * 0.9
+                                }
                             }
                         }
-                        ColumnLayout {
-                            Layout.fillWidth: true; spacing: 3
-                            Controls.Label { text: modelData.title || modelData.name; textFormat: Text.PlainText; color: root.ink; elide: Text.ElideRight; Layout.fillWidth: true }
-                            Controls.Label { text: modelData.backend.toUpperCase() + " · " + (modelData.scope === "system" ? "System" : "User") + (modelData.url ? " · " + modelData.url : ""); textFormat: Text.PlainText; color: root.muted; elide: Text.ElideRight; Layout.fillWidth: true; font.pointSize: root.font.pointSize * 0.9 }
+                        Controls.Label {
+                            objectName: "repositoryUrlLabel"
+                            visible: !!modelData.url
+                            text: modelData.url || ""
+                            textFormat: Text.PlainText
+                            color: root.muted
+                            font.pointSize: root.font.pointSize * 0.9
+                            wrapMode: Text.WrapAnywhere
+                            Layout.fillWidth: true
                         }
-                        Controls.Label { visible: modelData.priority !== null; text: "Priority " + modelData.priority; color: root.muted; font.pointSize: root.font.pointSize * 0.9 }
-                        ActionButton {
-                            text: ""; symbol: "up"; visible: modelData.backend === "flatpak"
-                            Accessible.name: "Increase repository priority"; enabled: !backend.busy && modelData.priority < 9999
-                            tooltipText: Accessible.name
-                            onClicked: root.repositoryChange(modelData, "set_priority", {priority: modelData.priority + 1})
-                        }
-                        ActionButton {
-                            text: ""; symbol: "down"; visible: modelData.backend === "flatpak"
-                            Accessible.name: "Decrease repository priority"; enabled: !backend.busy && modelData.priority > 0
-                            tooltipText: Accessible.name
-                            onClicked: root.repositoryChange(modelData, "set_priority", {priority: modelData.priority - 1})
-                        }
-                        ActionButton {
-                            text: ""; symbol: "settings"; visible: modelData.backend === "apt"
-                            Accessible.name: "Edit software sources"; enabled: !backend.busy
-                            tooltipText: Accessible.name
-                            onClicked: root.repositoryChange({backend: "apt", name: "sources", scope: "system"}, "open_editor")
-                        }
-                        ActionButton {
-                            objectName: "removeRepositoryButton"
-                            text: ""; symbol: "remove"; visible: modelData.backend === "flatpak"
-                            Accessible.name: "Remove " + modelData.name; enabled: !backend.busy
-                            tooltipText: Accessible.name
-                            onClicked: root.repositoryChange(modelData, "remove")
+                        RowLayout {
+                            Layout.fillWidth: true
+                            Controls.Label {
+                                visible: modelData.priority !== null && modelData.priority !== undefined
+                                text: "Priority " + modelData.priority
+                                color: root.muted
+                                font.pointSize: root.font.pointSize * 0.9
+                            }
+                            Item { Layout.fillWidth: true }
+                            ActionButton {
+                                text: ""; symbol: "up"; visible: modelData.backend === "flatpak"
+                                Accessible.name: "Increase repository priority"; enabled: !backend.busy && modelData.priority < 9999
+                                tooltipText: Accessible.name
+                                onClicked: root.repositoryChange(modelData, "set_priority", {priority: modelData.priority + 1})
+                            }
+                            ActionButton {
+                                text: ""; symbol: "down"; visible: modelData.backend === "flatpak"
+                                Accessible.name: "Decrease repository priority"; enabled: !backend.busy && modelData.priority > 0
+                                tooltipText: Accessible.name
+                                onClicked: root.repositoryChange(modelData, "set_priority", {priority: modelData.priority - 1})
+                            }
+                            ActionButton {
+                                text: ""; symbol: "settings"; visible: modelData.backend === "apt"
+                                Accessible.name: "Edit software sources"; enabled: !backend.busy
+                                tooltipText: Accessible.name
+                                onClicked: root.repositoryChange({backend: "apt", name: "sources", scope: "system"}, "open_editor")
+                            }
+                            ActionButton {
+                                objectName: "removeRepositoryButton"
+                                text: ""; symbol: "remove"; visible: modelData.backend === "flatpak"
+                                Accessible.name: "Remove " + modelData.name; enabled: !backend.busy
+                                tooltipText: Accessible.name
+                                onClicked: root.repositoryChange(modelData, "remove")
+                            }
                         }
                     }
                 }
@@ -2049,18 +2150,41 @@ Controls.ApplicationWindow {
     Controls.Dialog {
         id: addRepositoryDialog
         objectName: "addRepositoryDialog"
+        readonly property bool validName: /^[A-Za-z0-9._][A-Za-z0-9._-]*$/.test(repositoryName.text.trim())
+        readonly property bool validUrl: /^https:\/\/\S+\.flatpakrepo$/.test(repositoryUrl.text.trim())
         parent: Controls.Overlay.overlay
         anchors.centerIn: parent
         width: Math.min(root.width - 48, 560)
         title: "Add Flatpak repository"
         modal: true
         standardButtons: Controls.Dialog.Ok | Controls.Dialog.Cancel
-        onOpened: { repositoryName.text = ""; repositoryUrl.text = ""; repositoryName.forceActiveFocus(); }
+        onOpened: {
+            repositoryName.text = "";
+            repositoryUrl.text = "";
+            standardButton(Controls.Dialog.Ok).enabled = Qt.binding(() => addRepositoryDialog.validName && addRepositoryDialog.validUrl);
+            repositoryName.forceActiveFocus();
+        }
         onClosed: root.restoreDialogFocus()
         onAccepted: root.repositoryChange({backend: "flatpak", name: repositoryName.text.trim(), scope: repositoryScope.currentIndex === 0 ? "user" : "system"}, "add", {url: repositoryUrl.text.trim()})
         contentItem: ColumnLayout {
             Controls.TextField { id: repositoryName; objectName: "repositoryName"; placeholderText: "Name"; Accessible.name: "Repository name"; Layout.fillWidth: true }
+            Controls.Label {
+                objectName: "repositoryNameError"
+                text: "Use letters, numbers, . _ - (no leading -)."
+                visible: repositoryName.text.length > 0 && !addRepositoryDialog.validName
+                color: root.dark ? "#f18b91" : "#b42332"
+                wrapMode: Text.WordWrap
+                Layout.fillWidth: true
+            }
             Controls.TextField { id: repositoryUrl; objectName: "repositoryUrl"; placeholderText: "https://…/repository.flatpakrepo"; Accessible.name: "Repository URL"; Layout.fillWidth: true }
+            Controls.Label {
+                objectName: "repositoryUrlError"
+                text: "Enter an HTTPS .flatpakrepo URL."
+                visible: repositoryUrl.text.length > 0 && !addRepositoryDialog.validUrl
+                color: root.dark ? "#f18b91" : "#b42332"
+                wrapMode: Text.WordWrap
+                Layout.fillWidth: true
+            }
             Controls.ComboBox { id: repositoryScope; objectName: "repositoryScope"; model: ["User", "System"]; Accessible.name: "Installation scope"; Layout.fillWidth: true }
         }
     }
