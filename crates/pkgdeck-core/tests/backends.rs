@@ -17,6 +17,7 @@ type SystemCall = (String, Vec<OsString>);
 struct Fixture {
     record_writes: bool,
     writes: Arc<Mutex<Vec<SystemCall>>>,
+    grouped_apt_writes: Arc<Mutex<Vec<Vec<AptAction>>>>,
     apt_simulation: Option<String>,
     simulations: Arc<Mutex<Vec<SystemCall>>>,
     installed: Arc<Mutex<Option<String>>>,
@@ -114,6 +115,18 @@ impl Transport for Fixture {
             AptAction::Remove(_) => *self.installed.lock().unwrap() = None,
             AptAction::Autoremove | AptAction::Autoclean => {}
         }
+        Ok(output(""))
+    }
+    fn apt_write_group(
+        &self,
+        actions: &[AptAction],
+        cancel: &Cancellation,
+    ) -> Result<Completion, ExecutionError> {
+        self.check(cancel)?;
+        self.grouped_apt_writes
+            .lock()
+            .unwrap()
+            .push(actions.to_vec());
         Ok(output(""))
     }
     fn brew(
@@ -357,6 +370,82 @@ fn lifecycle(mut backend: impl Backend) {
 #[test]
 fn apt_lifecycle() {
     lifecycle(Apt::new(Fixture::new()));
+}
+
+#[test]
+fn apt_groups_exact_targets_in_one_native_write_and_rejects_mixed_actions() {
+    let fixture = Fixture::new();
+    let mut apt = Apt::new(fixture.clone());
+    let cancel = Cancellation::default();
+    let first = fixture.package().package.id;
+    let mut second = first.clone();
+    second.name = "second-fixture".into();
+    let installs = [
+        Operation::Install(first.clone()),
+        Operation::Install(second.clone()),
+    ];
+    let mut progress = Vec::new();
+    assert!(apt
+        .execute_group(&installs[..1], &cancel, &mut |_| {})
+        .is_none());
+    let outcomes = apt
+        .execute_group(&installs, &cancel, &mut |event| progress.push(event))
+        .unwrap()
+        .unwrap();
+    assert_eq!(outcomes.len(), 2);
+    assert!(outcomes
+        .iter()
+        .all(|outcome| !outcome.cancellation_deferred));
+    assert!(
+        matches!(progress.as_slice(), [Progress::Message(message)] if message.contains("2 exact APT targets"))
+    );
+    let writes = fixture.grouped_apt_writes.lock().unwrap();
+    assert_eq!(writes.len(), 1);
+    assert!(
+        matches!(&writes[0][0], AptAction::Install(target) if target == "synthetic-fixture:all")
+    );
+    assert!(matches!(&writes[0][1], AptAction::Install(target) if target == "second-fixture:all"));
+    drop(writes);
+
+    let mixed = [
+        Operation::Install(first.clone()),
+        Operation::Remove(second.clone()),
+    ];
+    assert!(apt
+        .execute_group(&mixed, &cancel, &mut |_| {})
+        .unwrap()
+        .is_err());
+    let foreign = [
+        Operation::Install(first.clone()),
+        Operation::Refresh {
+            backend: "apt".into(),
+        },
+    ];
+    assert!(apt
+        .execute_group(&foreign, &cancel, &mut |_| {})
+        .unwrap()
+        .is_err());
+    let mut invalid = second;
+    invalid.name = "--invalid-target".into();
+    assert!(apt
+        .execute_group(
+            &[
+                Operation::Install(first.clone()),
+                Operation::Install(invalid)
+            ],
+            &cancel,
+            &mut |_| {}
+        )
+        .unwrap()
+        .is_err());
+    assert_eq!(fixture.grouped_apt_writes.lock().unwrap().len(), 1);
+
+    *fixture.failure.lock().unwrap() = Some(ExecutionError::LockBusy);
+    assert!(matches!(
+        apt.execute_group(&installs, &cancel, &mut |_| {}).unwrap(),
+        Err(EngineError::Execution(ExecutionError::LockBusy))
+    ));
+    assert_eq!(fixture.grouped_apt_writes.lock().unwrap().len(), 1);
 }
 #[test]
 fn homebrew_lifecycle() {

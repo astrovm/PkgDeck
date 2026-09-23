@@ -1507,4 +1507,75 @@ done"#;
         ));
         drop(scope);
     }
+
+    #[test]
+    fn nested_batch_is_rejected_before_starting_another_runner() {
+        use std::collections::BTreeMap;
+        let operations = [Operation::Refresh {
+            backend: "apt".into(),
+        }];
+        let commands = batch_commands(&operations).unwrap();
+        let mut child = Command::new("/bin/sh");
+        child.arg("-c").arg("IFS= read -r start; printf '%s\\n' '{\"type\":\"ready\",\"protocol\":1}'; IFS= read -r request");
+        let cancel = Cancellation::default();
+        let scope = begin_session(child, &operations, commands, &cancel)
+            .unwrap()
+            .unwrap();
+        let host = Host::new(Runtime::Native, BTreeMap::new());
+        assert!(matches!(
+            begin(&host, Authorization::Polkit, &operations, &cancel),
+            Err(ExecutionError::Invalid(_))
+        ));
+        drop(scope);
+    }
+
+    #[test]
+    fn runner_fails_closed_when_ready_channel_closes_or_authorization_fails() {
+        let operations = [Operation::Refresh {
+            backend: "apt".into(),
+        }];
+        let commands = batch_commands(&operations).unwrap();
+        for script in [
+            "IFS= read -r start; exec 1>&-; sleep 1",
+            "IFS= read -r start; exit 1",
+        ] {
+            let mut child = Command::new("/bin/sh");
+            child.arg("-c").arg(script);
+            assert!(matches!(
+                begin_session(
+                    child,
+                    &operations,
+                    commands.clone(),
+                    &Cancellation::default()
+                ),
+                Err(ExecutionError::AuthorizationDenied)
+            ));
+        }
+    }
+
+    #[test]
+    fn runner_stops_before_dispatch_when_ready_cannot_be_written() {
+        struct BrokenOutput;
+        impl Write for BrokenOutput {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let start = Request::Start {
+            protocol: PROTOCOL,
+            operations: vec![Operation::Refresh {
+                backend: "apt".into(),
+            }],
+        };
+        let mut called = false;
+        let result = serve_protocol(&mut Cursor::new(input(&[start])), &mut BrokenOutput, |_| {
+            called = true;
+            Ok(completion())
+        });
+        assert!(matches!(result, Err(ExecutionError::Io(_))));
+        assert!(!called);
+    }
 }

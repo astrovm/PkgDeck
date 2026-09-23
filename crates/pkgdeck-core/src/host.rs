@@ -918,6 +918,64 @@ mod flatpak_bridge_tests {
     }
 
     #[test]
+    fn system_writes_use_fixed_host_paths_and_fail_closed_when_unavailable() {
+        let mut host = Host::new(
+            Runtime::Flatpak,
+            [("PATH".into(), "/home/fixture/untrusted-bin".into())].into(),
+        );
+        host.bridge = "/bin/echo".into();
+        let cancel = Cancellation::default();
+        let flatpak = host
+            .flatpak(
+                &["--system".into(), "update".into()],
+                &cancel,
+                true,
+                true,
+                Authorization::SudoNonInteractive,
+            )
+            .unwrap();
+        let output = String::from_utf8(flatpak.stdout).unwrap();
+        assert!(output.contains("/usr/bin/sudo -n -- /usr/bin/flatpak --system update"));
+        assert!(!output.contains("/home/fixture/untrusted-bin/flatpak"));
+
+        let manager = host
+            .system_manager(
+                "dnf",
+                &["install".into(), "synthetic-package".into()],
+                &cancel,
+                true,
+                Authorization::Polkit,
+            )
+            .unwrap();
+        let output = String::from_utf8(manager.stdout).unwrap();
+        assert!(output.contains("/usr/bin/dnf install synthetic-package"));
+        assert!(!output.contains("/home/fixture/untrusted-bin/dnf"));
+
+        host.bridge = "/bin/false".into();
+        assert!(matches!(
+            host.flatpak(&[], &cancel, true, true, Authorization::Polkit),
+            Err(ExecutionError::Disabled(reason)) if reason == "system Flatpak not found"
+        ));
+        assert!(matches!(
+            host.system_manager("dnf", &[], &cancel, true, Authorization::Polkit),
+            Err(ExecutionError::Disabled(reason)) if reason == "dnf not found"
+        ));
+    }
+
+    #[test]
+    fn source_editor_checks_host_executable_before_launch() {
+        let mut host = Host::new(Runtime::Flatpak, BTreeMap::new());
+        host.bridge = "/bin/true".into();
+        host.open_source_editor().unwrap();
+
+        host.bridge = "/bin/false".into();
+        assert!(matches!(
+            host.open_source_editor(),
+            Err(ExecutionError::Disabled(reason)) if reason.contains("software-properties")
+        ));
+    }
+
+    #[test]
     fn bridge_commands_pin_the_host_program_and_forward_only_sanitized_values() {
         let host = Host::new(
             Runtime::Flatpak,
