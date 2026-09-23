@@ -1554,10 +1554,14 @@ impl<T: Transport> Backend for Apt<T> {
         cancel: &Cancellation,
         progress: &mut dyn FnMut(Progress),
     ) -> Result<OperationOutcome, EngineError> {
+        let staged = match operation {
+            Operation::Install(id) => crate::local_deb::stage(id, cancel)?,
+            _ => None,
+        };
         let action = match operation {
             Operation::Refresh { backend } if backend == "apt" => AptAction::Refresh,
-            Operation::Install(id) => match crate::local_deb::verified_path(id, cancel)? {
-                Some(path) => AptAction::InstallLocal(path),
+            Operation::Install(id) => match staged.as_ref() {
+                Some(archive) => AptAction::InstallLocal(archive.path().to_owned()),
                 None => AptAction::Install(self.target(id)?),
             },
             Operation::Remove(id) => AptAction::Remove(self.target(id)?),

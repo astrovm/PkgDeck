@@ -11,7 +11,7 @@ fn packaged_desktop_entry_passes_supported_inputs_to_the_gui() {
             .find_map(|line| line.strip_prefix(key))
             .unwrap()
     };
-    assert_eq!(value("Exec="), "pkgdeck %U");
+    assert_eq!(value("Exec="), "pkgdeck %u");
     let mimes: Vec<_> = value("MimeType=")
         .split(';')
         .filter(|value| !value.is_empty())

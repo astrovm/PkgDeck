@@ -20,6 +20,7 @@ struct Fixture {
     apt_simulation: Option<String>,
     simulations: Arc<Mutex<Vec<SystemCall>>>,
     installed: Arc<Mutex<Option<String>>>,
+    local_install: Arc<Mutex<Option<std::path::PathBuf>>>,
     candidate: Arc<Mutex<String>>,
     failure: Arc<Mutex<Option<ExecutionError>>>,
 }
@@ -106,6 +107,15 @@ impl Transport for Fixture {
         cancel: &Cancellation,
     ) -> Result<Completion, ExecutionError> {
         self.check(cancel)?;
+        if let AptAction::InstallLocal(path) = &action {
+            use std::os::unix::fs::PermissionsExt;
+            assert!(path.is_file(), "staged archive must exist for the write");
+            assert_eq!(
+                std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            *self.local_install.lock().unwrap() = Some(path.clone());
+        }
         match action {
             AptAction::Refresh => *self.candidate.lock().unwrap() = "2.0".into(),
             AptAction::Install(_)
@@ -3463,6 +3473,12 @@ fn apt_local_archive_uses_exact_path_and_revalidates_before_install() {
     drop(calls);
     apt.execute(&operation, &cancel, &mut |_| {}).unwrap();
     assert_eq!(fixture.installed.lock().unwrap().as_deref(), Some("1.0"));
+    let staged = fixture.local_install.lock().unwrap().clone().unwrap();
+    assert_ne!(staged, archive);
+    assert!(
+        !staged.exists(),
+        "staged archive must be removed after APT returns"
+    );
     std::fs::write(&archive, b"changed since preview").unwrap();
     assert!(apt.execute(&operation, &cancel, &mut |_| {}).is_err());
     std::fs::remove_dir_all(base).unwrap();

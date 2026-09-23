@@ -2,7 +2,7 @@
 Type=Application
 Name=PkgDeck
 Comment=Unified package manager interface
-Exec=pkgdeck %U
+Exec=pkgdeck %u
 Icon=io.github.astrovm.PkgDeck
 Terminal=false
 Categories=System;PackageManager;

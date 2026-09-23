@@ -9,9 +9,10 @@ use sha2::{Digest, Sha256};
 use std::{
     ffi::OsString,
     fs,
-    io::Read,
+    io::{Read, Write},
+    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 const MAX_BYTES: u64 = 1024 * 1024 * 1024;
@@ -159,6 +160,80 @@ pub fn verified_path(
         return Err(invalid("Debian package identity changed since preview"));
     }
     Ok(Some(path))
+}
+
+/// Hold a private copy of the reviewed bytes for the entire APT transaction.
+/// A changed source cannot be substituted between revalidation and apt-get.
+pub struct StagedArchive {
+    path: PathBuf,
+}
+impl StagedArchive {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+impl Drop for StagedArchive {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+pub fn stage(id: &PackageId, cancel: &Cancellation) -> Result<Option<StagedArchive>, EngineError> {
+    let Some(source) = verified_path(id, cancel)? else {
+        return Ok(None);
+    };
+    let expected = id
+        .reference
+        .as_deref()
+        .and_then(|value| value.strip_prefix("local-deb:"))
+        .and_then(|value| value.split_once(':'))
+        .map(|(hash, _)| hash)
+        .ok_or_else(|| invalid("invalid local archive reference"))?;
+    let path = std::env::temp_dir().join(format!(
+        "pkgdeck-deb-{}-{}.deb",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    let mut input = fs::File::open(&source).map_err(invalid)?;
+    let mut output = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .map_err(invalid)?;
+    let staged = StagedArchive { path };
+    let result = (|| {
+        let mut hash = Sha256::new();
+        let mut total = 0_u64;
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            if cancel.requested() {
+                return Err(EngineError::Cancelled);
+            }
+            let count = input.read(&mut buffer).map_err(invalid)?;
+            if count == 0 {
+                break;
+            }
+            total += count as u64;
+            if total > MAX_BYTES {
+                return Err(invalid("Debian archive exceeds 1 GiB"));
+            }
+            hash.update(&buffer[..count]);
+            output.write_all(&buffer[..count]).map_err(invalid)?;
+        }
+        output.sync_all().map_err(invalid)?;
+        if cancel.requested() {
+            return Err(EngineError::Cancelled);
+        }
+        if format!("{:x}", hash.finalize()) != expected {
+            return Err(invalid("Debian archive changed during staging"));
+        }
+        Ok(())
+    })();
+    result?;
+    Ok(Some(staged))
 }
 
 #[cfg(test)]
