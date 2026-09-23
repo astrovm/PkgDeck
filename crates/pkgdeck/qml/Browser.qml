@@ -1,11 +1,30 @@
 import QtQuick
 import QtQuick.Controls as Controls
 import QtQuick.Layouts
+import QtQuick.Dialogs
 import QtCore
 import org.kde.kirigami as Kirigami
 
 Controls.ApplicationWindow {
     id: root
+    function openExternalInput(input) { backend.openInput(input); }
+    FileDialog {
+        id: installationPicker
+        title: "Open installation file"
+        nameFilters: ["Installation files (*.AppImage *.deb *.flatpakref)"]
+        onAccepted: backend.openInput(selectedFile.toString())
+    }
+    DropArea {
+        anchors.fill: parent
+        z: 1000
+        onEntered: (drag) => { if (!drag.hasUrls || drag.urls.length !== 1) drag.accepted = false; }
+        onDropped: (drop) => {
+            if (drop.urls.length === 1) {
+                backend.openInput(drop.urls[0].toString());
+                drop.acceptProposedAction();
+            } else drop.accepted = false;
+        }
+    }
     SystemPalette { id: systemPalette }
     SystemPalette { id: disabledPalette; colorGroup: SystemPalette.Disabled }
     required property var backend
@@ -889,6 +908,9 @@ Controls.ApplicationWindow {
             sortColumn = preferences.sortColumn;
         sortAscending = preferences.sortAscending;
         reload();
+        const opening = Qt.application.arguments.slice(1).filter((argument) => argument.startsWith("file://") || argument.startsWith("flatpak+https://") || argument.startsWith("/"));
+        if (opening.length === 1)
+            Qt.callLater(() => backend.openInput(opening[0]));
     }
 
     RowLayout {
@@ -992,6 +1014,13 @@ Controls.ApplicationWindow {
                     font.pointSize: root.font.pointSize * 1.6
                     font.bold: true
                     Layout.fillWidth: true
+                }
+                ActionButton {
+                    text: "Open…"
+                    symbol: "installed"
+                    enabled: !backend.writing
+                    onClicked: installationPicker.open()
+                    Accessible.name: "Open installation file"
                 }
                 ActionButton {
                     objectName: "sourceFilter"

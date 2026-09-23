@@ -19,6 +19,22 @@ fn main() {
     QGuiApplication::set_desktop_file_name(&pkgdeck_core::APP_ID.into());
     let mut engine = QQmlApplicationEngine::new();
     pkgdeck::network::ffi::configure_network(engine.as_mut().unwrap());
+    let opening = std::env::args()
+        .skip(1)
+        .find(|arg| {
+            arg.starts_with('/')
+                || arg.starts_with("file://")
+                || arg.starts_with("flatpak+https://")
+        })
+        .unwrap_or_default();
+    if !std::env::args().any(|arg| arg == "--smoke-test")
+        && pkgdeck::network::ffi::register_open_handler(
+            engine.as_mut().unwrap(),
+            &opening.as_str().into(),
+        )
+    {
+        return;
+    }
     let _failure = engine.as_mut().unwrap().on_object_creation_failed(|_, _| {
         std::process::exit(1);
     });

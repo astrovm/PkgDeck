@@ -3,6 +3,40 @@ use pkgdeck as _;
 use std::process::Command;
 
 #[test]
+fn packaged_desktop_entry_passes_supported_inputs_to_the_gui() {
+    let desktop = include_str!("../../../assets/io.github.astrovm.PkgDeck.desktop");
+    let value = |key: &str| {
+        desktop
+            .lines()
+            .find_map(|line| line.strip_prefix(key))
+            .unwrap()
+    };
+    assert_eq!(value("Exec="), "pkgdeck %U");
+    let mimes: Vec<_> = value("MimeType=")
+        .split(';')
+        .filter(|value| !value.is_empty())
+        .collect();
+    for supported in [
+        "application/vnd.debian.binary-package",
+        "application/vnd.flatpak.ref",
+        "application/vnd.appimage",
+        "x-scheme-handler/flatpak+https",
+    ] {
+        assert!(
+            mimes.contains(&supported),
+            "missing association for {supported}"
+        );
+    }
+    assert!(
+        include_str!("../../../packaging/flatpak/io.github.astrovm.PkgDeck.yml")
+            .contains("assets/io.github.astrovm.PkgDeck.desktop /app/share/applications")
+    );
+    assert!(include_str!("../../../scripts/bundle.sh").contains("desktop:applications"));
+    assert!(include_str!("../../../packaging/appimage/AppRun")
+        .contains("exec \"$appdir/usr/bin/pkgdeck\" \"$@\""));
+}
+
+#[test]
 fn version_does_not_require_a_display() {
     let output = Command::new(env!("CARGO_BIN_EXE_pkgdeck"))
         .arg("--version")

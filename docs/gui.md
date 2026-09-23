@@ -16,6 +16,22 @@ its description, native identifier, and available screenshots. Details are optio
 and close with the × button. App names, icons, and screenshots depend on source
 metadata; packages without desktop metadata keep their native names.
 
+## Open installation files
+
+Choose **Open…**, drop one file onto the window, or pass a path or URL to
+`pkgdeck`. Supported inputs are local `.AppImage`, `.deb`, and `.flatpakref`
+files, plus `flatpak+https://…flatpakref` links. A second launch forwards its
+input to an already open PkgDeck window. Opening shows a confirmation preview;
+it never installs or launches a file by itself.
+
+AppImages are inspected as Type 2 ELF files without execution. The preview
+shows the managed destination, executable copy, desktop entry, and whether
+embedded update metadata is present. Import keeps the original file. Local
+Debian packages show APT's simulated package changes before system
+authorization. Flatpak references show the exact app, user scope, repository,
+signing key presence, and any runtime repository named in the reference.
+Flatpak may discover additional runtimes during installation.
+
 Installed supports filtering and a **Duplicate installs** view. AppStream identity
 and upstream homepage metadata associate related installations; grouping does not
 merge packages or change what an action targets.

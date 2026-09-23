@@ -1,16 +1,63 @@
 //! Thin Qt facade: native work runs on a worker; Qt properties change only on the GUI thread.
 use cxx_qt::CxxQtType;
 use cxx_qt_lib::QString;
+use pkgdeck_core::backends::AppImage;
 use pkgdeck_core::repositories::{self, Action as RepositoryAction};
 use pkgdeck_core::{engine::*, host::Authorization, package::*, process::Cancellation};
 use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
+    path::PathBuf,
     pin::Pin,
     sync::mpsc,
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+
+fn local_input_path(input: &str) -> Result<PathBuf, String> {
+    let input = input.trim();
+    let path = if let Some(encoded) = input.strip_prefix("file://") {
+        let encoded = encoded
+            .strip_prefix("localhost/")
+            .map_or(encoded, |rest| rest);
+        let encoded = if input.starts_with("file://localhost/") {
+            format!("/{encoded}")
+        } else {
+            encoded.to_owned()
+        };
+        if !encoded.starts_with('/') {
+            return Err("Only local file URLs are supported.".into());
+        }
+        let mut bytes = Vec::with_capacity(encoded.len());
+        let mut chars = encoded.as_bytes().iter().copied();
+        while let Some(byte) = chars.next() {
+            if byte == b'%' {
+                let high = chars.next().and_then(|value| (value as char).to_digit(16));
+                let low = chars.next().and_then(|value| (value as char).to_digit(16));
+                let (Some(high), Some(low)) = (high, low) else {
+                    return Err("Invalid file URL encoding.".into());
+                };
+                let decoded = ((high << 4) | low) as u8;
+                if decoded == 0 {
+                    return Err("File URLs cannot contain NUL bytes.".into());
+                }
+                bytes.push(decoded);
+            } else {
+                bytes.push(byte);
+            }
+        }
+        String::from_utf8(bytes).map_err(|_| "File URL is not UTF-8.".to_owned())?
+    } else if input.contains("://") {
+        return Err("Unsupported link. Open a local package file or a flatpak+https link.".into());
+    } else {
+        input.to_owned()
+    };
+    let path = PathBuf::from(path);
+    if !path.is_absolute() {
+        return Err("Choose an absolute local file path.".into());
+    }
+    Ok(path)
+}
 
 // CXX-Qt generates the FFI boundary; application code below uses safe Rust.
 #[cxx_qt::bridge]
@@ -60,6 +107,9 @@ pub mod ffi {
         #[qinvokable]
         fn propose(self: Pin<&mut PackageController>, action: QString, index: i32);
         #[qinvokable]
+        #[cxx_name = "openInput"]
+        fn open_input(self: Pin<&mut PackageController>, input: QString);
+        #[qinvokable]
         #[cxx_name = "loadRepositories"]
         fn load_repositories(self: Pin<&mut PackageController>);
         #[qinvokable]
@@ -79,6 +129,7 @@ pub mod ffi {
 
 #[derive(Clone)]
 enum Job {
+    OpenInput(String),
     Repositories(Option<RepositoryAction>),
     Load(String, String),
     RetrySource(String, String, String),
@@ -101,6 +152,7 @@ impl Job {
     }
 }
 enum Payload {
+    OpenPackage(Box<Package>),
     Repositories(repositories::Report),
     Packages(PackageReport),
     RetryPackages(String, PackageReport),
@@ -141,6 +193,29 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
         }
     }
     let result = match job {
+        Job::OpenInput(input) => {
+            if let Some(url) = input.strip_prefix("flatpak+") {
+                let package = pkgdeck_core::flatpak_ref::inspect(url, cancel)
+                    .map(|package| Payload::OpenPackage(Box::new(package)));
+                send(Reply::Done(package));
+                return;
+            }
+            let path = local_input_path(&input)
+                .map_err(|reason| EngineError::InvalidResponse { backend: "open".into(), reason });
+            let path = match path { Ok(path) => path, Err(error) => { send(Reply::Done(Err(error))); return; } };
+            let extension = path.extension().and_then(|value| value.to_str()).unwrap_or_default();
+            let package = match extension {
+                "AppImage" => {
+                    use pkgdeck_core::engine::Backend;
+                    AppImage::native().search(&path.to_string_lossy(), cancel)
+                        .and_then(|mut packages| packages.pop().ok_or(EngineError::NotFound))
+                }
+                "deb" => pkgdeck_core::local_deb::inspect(&path, cancel),
+                "flatpakref" => pkgdeck_core::flatpak_ref::inspect(&path.to_string_lossy(), cancel),
+                _ => Err(EngineError::InvalidResponse { backend: "open".into(), reason: "Supported local formats are .AppImage, .deb, and .flatpakref.".into() }),
+            };
+            package.map(|package| Payload::OpenPackage(Box::new(package)))
+        }
         Job::Repositories(_) => Err(EngineError::NotFound),
         Job::Load(view, query) => {
             if view == "Sources" {
@@ -389,8 +464,10 @@ fn encoded(value: impl serde::Serialize) -> QString {
 /// empty filter means every available backend.
 fn engine_source(job: &Job, filter: &[String]) -> Vec<String> {
     match job {
+        Job::OpenInput(_) => vec![],
         Job::RetrySource(_, _, source) => vec![source.clone()],
         Job::PlanOperation(operation) => vec![operation.backend().into()],
+        Job::Write(operation, _) => vec![operation.backend().into()],
         // The picker needs to explain disabled and unavailable managers too.
         Job::Load(view, _) if view == "Sources" => vec![],
         Job::Details(id) => vec![id.backend.clone()],
@@ -675,6 +752,14 @@ fn confirmation_preview(
         if package.id.backend == "fwupd" {
             lines.push(package.summary.clone());
         }
+        if (package.id.backend == "appimage"
+            || package.id.reference.as_deref().is_some_and(|value| {
+                value.starts_with("local-deb:") || value.starts_with("flatpakref:")
+            }))
+            && matches!(operation, Operation::Install(_))
+        {
+            lines.push(package.summary.clone());
+        }
     }
     if let Operation::Clean(id) = operation {
         if let Some(item) = cleanup.iter().find(|item| item.id == *id) {
@@ -808,6 +893,20 @@ fn update_detail_name(
 }
 
 impl ffi::PackageController {
+    pub fn open_input(mut self: Pin<&mut Self>, input: QString) {
+        if input.to_string().trim().is_empty() {
+            self.as_mut()
+                .set_status("Choose an installation file.".into());
+            return;
+        }
+        if self.rust().worker.is_some() && !self.rust().background {
+            self.as_mut().rust_mut().queued = Some(Job::OpenInput(input.to_string()));
+            self.as_mut()
+                .set_status("Opening the file after the current operation.".into());
+            return;
+        }
+        self.start(Job::OpenInput(input.to_string()));
+    }
     fn successful_sources(&self) -> Vec<String> {
         let state: Value =
             serde_json::from_str(&self.report_state().to_string()).unwrap_or_default();
@@ -879,6 +978,11 @@ impl ffi::PackageController {
                 self.as_mut().set_busy(true);
             }
             return;
+        }
+        if matches!(job, Job::OpenInput(_)) {
+            self.as_mut().rust_mut().pending = None;
+            self.as_mut().set_confirmation(QString::default());
+            self.as_mut().set_confirmation_data("{}".into());
         }
         let source_filter = self.rust().source_filter.clone();
         let authorization = if self.rust().sudo {
@@ -1443,6 +1547,21 @@ impl ffi::PackageController {
                     self.set_status(e.to_string().as_str().into());
                 }
             }
+            Ok(Payload::OpenPackage(package)) => {
+                let operation = Operation::Install(package.id.clone());
+                let apt = package.id.backend == "apt";
+                self.as_mut()
+                    .rust_mut()
+                    .packages
+                    .retain(|row| row.id != package.id);
+                self.as_mut().rust_mut().packages.push(*package);
+                if apt {
+                    self.as_mut().start(Job::PlanOperation(operation));
+                } else {
+                    self.as_mut()
+                        .apply(Ok(Payload::OperationPreview(operation, None)));
+                }
+            }
             Ok(Payload::UpgradePreview(operations, count, apt_plan)) => {
                 let labels = operations
                     .iter()
@@ -1882,6 +2001,59 @@ impl ffi::PackageController {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn file_urls_preserve_spaces_and_unicode_and_reject_remote_hosts() {
+        assert_eq!(
+            local_input_path("file:///tmp/Sample%20%C3%B1.AppImage").unwrap(),
+            PathBuf::from("/tmp/Sample ñ.AppImage")
+        );
+        assert_eq!(
+            local_input_path("file://localhost/tmp/Sample%20App.deb").unwrap(),
+            PathBuf::from("/tmp/Sample App.deb")
+        );
+        assert!(local_input_path("file://remote/tmp/package.deb").is_err());
+        assert!(local_input_path("file:///tmp/bad%00.deb").is_err());
+        assert!(local_input_path("https://example.org/package.deb").is_err());
+    }
+    #[test]
+    fn opening_appimage_previews_without_importing_until_confirmation() {
+        let base =
+            std::env::temp_dir().join(format!("pkgdeck-open-appimage-{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let source = base.join("Sample ñ.AppImage");
+        let mut elf = [0_u8; 64];
+        elf[..4].copy_from_slice(b"\x7fELF");
+        elf[4..7].copy_from_slice(&[2, 1, 1]);
+        elf[8..11].copy_from_slice(b"AI\x02");
+        elf[18..20].copy_from_slice(&62_u16.to_le_bytes());
+        elf[20..24].copy_from_slice(&1_u32.to_le_bytes());
+        elf[52..54].copy_from_slice(&64_u16.to_le_bytes());
+        std::fs::write(&source, elf).unwrap();
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller
+            .as_mut()
+            .open_input(source.to_str().unwrap().into());
+        for _ in 0..200 {
+            controller.as_mut().poll();
+            if !controller.confirmation().is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let preview = controller.confirmation().to_string();
+        assert!(preview.contains("Sample ñ"), "{preview}");
+        assert!(preview.contains("Managed file:"), "{preview}");
+        assert!(preview.contains("Desktop entry:"), "{preview}");
+        assert!(matches!(
+            controller.rust().pending,
+            Some(Job::Write(Operation::Install(_), _))
+        ));
+        controller.as_mut().confirm(false);
+        assert!(source.exists());
+        assert!(controller.confirmation().is_empty());
+        std::fs::remove_dir_all(base).unwrap();
+    }
     #[test]
     fn confirmation_preview_names_target_and_extra_native_changes() {
         let package: Package = serde_json::from_value(json!({

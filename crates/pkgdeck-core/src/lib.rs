@@ -9,6 +9,8 @@ pub mod host;
 pub mod process;
 
 pub mod engine;
+pub mod flatpak_ref;
+pub mod local_deb;
 pub mod package;
 
 pub mod backends;

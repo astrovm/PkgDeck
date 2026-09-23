@@ -108,7 +108,10 @@ impl Transport for Fixture {
         self.check(cancel)?;
         match action {
             AptAction::Refresh => *self.candidate.lock().unwrap() = "2.0".into(),
-            AptAction::Install(_) | AptAction::Upgrade(_) | AptAction::UpgradeAll => {
+            AptAction::Install(_)
+            | AptAction::InstallLocal(_)
+            | AptAction::Upgrade(_)
+            | AptAction::UpgradeAll => {
                 *self.installed.lock().unwrap() = Some(self.candidate.lock().unwrap().clone())
             }
             AptAction::Remove(_) => *self.installed.lock().unwrap() = None,
