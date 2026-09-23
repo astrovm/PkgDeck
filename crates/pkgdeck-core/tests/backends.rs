@@ -17,6 +17,8 @@ type SystemCall = (String, Vec<OsString>);
 struct Fixture {
     record_writes: bool,
     writes: Arc<Mutex<Vec<SystemCall>>>,
+    apt_simulation: Option<String>,
+    simulations: Arc<Mutex<Vec<SystemCall>>>,
     installed: Arc<Mutex<Option<String>>>,
     candidate: Arc<Mutex<String>>,
     failure: Arc<Mutex<Option<ExecutionError>>>,
@@ -190,6 +192,19 @@ impl Transport for Fixture {
             return Ok(output("..."));
         }
         if executable == "apt-get" {
+            if let Some(simulation) = self
+                .apt_simulation
+                .as_ref()
+                .filter(|_| args.contains(&"--simulate".into()))
+            {
+                self.simulations.lock().unwrap().push((
+                    executable.into(),
+                    args.iter()
+                        .map(|arg| OsString::from(arg.as_ref()))
+                        .collect(),
+                ));
+                return Ok(output(simulation));
+            }
             if args.contains(&"autoremove".into()) {
                 return Ok(output("Remv synthetic-orphan [1.0]\n"));
             }
@@ -3211,6 +3226,7 @@ fn flatpak_updates_match_commits_by_scope_origin_kind_and_branch() {
     let report = PackageReport {
         packages,
         failures: vec![],
+        successful_sources: vec![],
     };
     assert_eq!(
         report
@@ -3290,6 +3306,70 @@ fn flatpak_search_preserves_branch_without_guessing_kind_or_fetching_updates() {
     assert!(!system);
     assert_eq!(args.last().map(String::as_str), id.reference.as_deref());
     assert!(!args.iter().any(|arg| arg == "--app" || arg == "--runtime"));
+}
+
+#[test]
+fn apt_single_operation_preview_uses_read_only_simulation_and_exact_target() {
+    let fixture = Fixture {
+        apt_simulation: Some("0 upgraded, 1 newly installed, 1 to remove and 0 not upgraded.\nInst synthetic-fixture (2.0 Ubuntu:stable [amd64])\nRemv retired [1.0]\n".into()),
+        ..Fixture::new()
+    };
+    let mut apt = Apt::new(fixture.clone());
+    let id = PackageId {
+        backend: "apt".into(),
+        name: "synthetic-fixture".into(),
+        architecture: "amd64".into(),
+        scope: Scope::System,
+        remote: None,
+        reference: None,
+    };
+    let operation = Operation::Install(id.clone());
+    let plan = apt
+        .operation_plan(&operation, &Cancellation::default())
+        .unwrap()
+        .unwrap();
+    assert_eq!(plan.operation, operation);
+    assert_eq!(plan.changes.len(), 2);
+    assert_eq!(plan.changes[0].action, PlannedAction::Install);
+    assert_eq!(plan.changes[0].candidate_version.as_deref(), Some("2.0"));
+    assert_eq!(plan.changes[1].action, PlannedAction::Remove);
+    assert_eq!(plan.changes[1].installed_version.as_deref(), Some("1.0"));
+    let calls = fixture.simulations.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].0, "apt-get");
+    assert_eq!(
+        calls[0].1,
+        [
+            "--simulate",
+            "-o",
+            "Debug::NoLocking=1",
+            "install",
+            "synthetic-fixture:amd64"
+        ]
+    );
+    drop(calls);
+    assert!(fixture.writes.lock().unwrap().is_empty());
+    let upgrade_all = apt.apt_upgrade_plan(&Cancellation::default()).unwrap();
+    assert_eq!(upgrade_all.installs, ["synthetic-fixture"]);
+    assert_eq!(upgrade_all.removals, ["retired"]);
+    assert_eq!(
+        fixture.simulations.lock().unwrap()[1].1.last().unwrap(),
+        "dist-upgrade"
+    );
+    assert!(apt
+        .operation_plan(
+            &Operation::Refresh {
+                backend: "apt".into()
+            },
+            &Cancellation::default()
+        )
+        .unwrap()
+        .is_none());
+    let mut foreign = id;
+    foreign.backend = "snap".into();
+    assert!(apt
+        .operation_plan(&Operation::Remove(foreign), &Cancellation::default())
+        .is_err());
 }
 
 #[test]

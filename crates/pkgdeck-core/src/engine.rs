@@ -138,6 +138,15 @@ pub trait Backend: Send {
             capability: Capability::Upgrade,
         })
     }
+    /// Optional native plan. `None` means the manager cannot provide a
+    /// reliable preview for this operation.
+    fn operation_plan(
+        &mut self,
+        _operation: &Operation,
+        _cancel: &Cancellation,
+    ) -> Result<Option<TransactionPlan>, EngineError> {
+        Ok(None)
+    }
     fn execute(
         &mut self,
         operation: &Operation,
@@ -171,6 +180,9 @@ pub struct Source {
 pub struct PackageReport {
     pub packages: Vec<Package>,
     pub failures: Vec<BackendFailure>,
+    /// Backends whose query completed successfully, including empty results.
+    #[serde(default)]
+    pub successful_sources: Vec<String>,
 }
 impl PackageReport {
     /// Never selects across an unqueried/failed source or collapses same-name packages.
@@ -237,6 +249,7 @@ pub struct Engine {
     detected: BTreeMap<String, Availability>,
     cleanup_plans: BTreeMap<CleanupId, CleanupItem>,
     apt_upgrade_plan: Option<AptUpgradePlan>,
+    operation_plan: Option<TransactionPlan>,
 }
 impl Engine {
     /// Simulate the host APT solver before asking the user to approve a full update.
@@ -256,6 +269,30 @@ impl Engine {
     /// re-simulated there, before authorization or any APT write.
     pub fn remember_apt_upgrade_plan(&mut self, plan: AptUpgradePlan) {
         self.apt_upgrade_plan = Some(plan);
+    }
+    pub fn plan_operation(
+        &mut self,
+        operation: &Operation,
+        cancel: &Cancellation,
+    ) -> Result<Option<TransactionPlan>, EngineError> {
+        self.operation_plan = None;
+        let plan = self
+            .ready(operation.backend(), operation.capability(), cancel)?
+            .operation_plan(operation, cancel)?;
+        if plan
+            .as_ref()
+            .is_some_and(|plan| &plan.operation != operation)
+        {
+            return Err(EngineError::InvalidResponse {
+                backend: operation.backend().into(),
+                reason: "native preview targeted a different operation".into(),
+            });
+        }
+        self.operation_plan = plan.clone();
+        Ok(plan)
+    }
+    pub fn remember_operation_plan(&mut self, plan: TransactionPlan) {
+        self.operation_plan = Some(plan);
     }
     pub fn register(&mut self, backend: impl Backend + 'static) -> Result<(), EngineError> {
         let id = backend.id().to_owned();
@@ -395,7 +432,10 @@ impl Engine {
                 }
             };
             match result {
-                Ok(packages) => report.packages.extend(packages),
+                Ok(packages) => {
+                    report.packages.extend(packages);
+                    report.successful_sources.push(id);
+                }
                 Err(error) => report.failures.push(BackendFailure { backend: id, error }),
             }
         }
@@ -459,13 +499,17 @@ impl Engine {
             let mut stash = Vec::new();
             for (id, backend, result) in rx {
                 match result {
-                    Ok(packages) => accumulated.packages.extend(packages),
+                    Ok(packages) => {
+                        accumulated.packages.extend(packages);
+                        accumulated.successful_sources.push(id.clone());
+                    }
                     Err(error) => accumulated.failures.push(BackendFailure {
                         backend: id.clone(),
                         error,
                     }),
                 }
                 accumulated.packages.sort_by(|a, b| a.id.cmp(&b.id));
+                accumulated.successful_sources.sort();
                 stash.push((id, backend));
                 emit(accumulated.clone());
             }
@@ -599,6 +643,10 @@ impl Engine {
         } else {
             None
         };
+        let expected_plan = self
+            .operation_plan
+            .take()
+            .filter(|plan| &plan.operation == operation);
         let result = self
             .ready(operation.backend(), operation.capability(), cancel)
             .and_then(|backend| {
@@ -623,6 +671,15 @@ impl Engine {
                             backend: id.backend.clone(),
                             reason: "Cleanup plan changed or expired; reload and review it again."
                                 .into(),
+                        });
+                    }
+                }
+                if let Some(expected) = &expected_plan {
+                    let current = backend.operation_plan(operation, cancel)?;
+                    if current.as_ref() != Some(expected) {
+                        return Err(EngineError::InvalidResponse {
+                            backend: operation.backend().into(),
+                            reason: "Transaction plan changed; review the action again.".into(),
                         });
                     }
                 }
@@ -727,6 +784,102 @@ mod apt_upgrade_tests {
             }
             assert_eq!(engine.execute(&op, &cancel, &mut |_| {}).is_ok(), succeeds);
             assert_eq!(writes.load(Ordering::SeqCst), usize::from(succeeds));
+        }
+    }
+}
+
+#[cfg(test)]
+mod operation_plan_tests {
+    use super::*;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    struct PlannedFixture {
+        reads: usize,
+        drift: bool,
+        writes: Arc<AtomicUsize>,
+    }
+    impl Backend for PlannedFixture {
+        fn id(&self) -> &str {
+            "fixture"
+        }
+        fn capabilities(&self) -> &[Capability] {
+            &[Capability::Install]
+        }
+        fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
+            Ok(Availability::Available)
+        }
+        fn operation_plan(
+            &mut self,
+            operation: &Operation,
+            _: &Cancellation,
+        ) -> Result<Option<TransactionPlan>, EngineError> {
+            self.reads += 1;
+            Ok(Some(TransactionPlan {
+                operation: operation.clone(),
+                native_preview: if self.drift && self.reads > 1 {
+                    "extra removal"
+                } else {
+                    "install only"
+                }
+                .into(),
+                changes: if self.drift && self.reads > 1 {
+                    vec![PlannedChange {
+                        action: PlannedAction::Remove,
+                        name: "extra-library".into(),
+                        installed_version: Some("1".into()),
+                        candidate_version: None,
+                    }]
+                } else {
+                    vec![]
+                },
+                download_bytes: None,
+                disk_bytes: None,
+                restart_required: None,
+            }))
+        }
+        fn execute(
+            &mut self,
+            _: &Operation,
+            _: &Cancellation,
+            _: &mut dyn FnMut(Progress),
+        ) -> Result<OperationOutcome, EngineError> {
+            self.writes.fetch_add(1, Ordering::SeqCst);
+            Ok(OperationOutcome::default())
+        }
+    }
+    #[test]
+    fn changed_single_operation_plan_blocks_write() {
+        let cancel = Cancellation::default();
+        let operation = Operation::Install(PackageId {
+            backend: "fixture".into(),
+            name: "anonymous".into(),
+            architecture: "all".into(),
+            scope: Scope::System,
+            remote: None,
+            reference: None,
+        });
+        for drift in [false, true] {
+            let writes = Arc::new(AtomicUsize::new(0));
+            let mut engine = Engine::default();
+            engine
+                .register(PlannedFixture {
+                    reads: 0,
+                    drift,
+                    writes: writes.clone(),
+                })
+                .unwrap();
+            assert!(engine
+                .plan_operation(&operation, &cancel)
+                .unwrap()
+                .is_some());
+            assert_eq!(
+                engine.execute(&operation, &cancel, &mut |_| {}).is_ok(),
+                !drift
+            );
+            assert_eq!(writes.load(Ordering::SeqCst), usize::from(!drift));
         }
     }
 }

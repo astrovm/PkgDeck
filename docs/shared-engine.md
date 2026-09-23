@@ -51,8 +51,8 @@ also rejects details for a different identity, including a changed scope.
 
 ## Partial results and selection
 
-Search and installed listing return a `PackageReport` with successful packages
-and per-backend failures. One failed source does not discard another source's
+Search and installed listing return a `PackageReport` with successful packages,
+the successful source ids, and per-backend failures. One failed source does not discard another source's
 results. Backend traversal and package ordering are deterministic.
 
 A name cannot safely resolve while a relevant source's query failed. Selection
@@ -89,6 +89,12 @@ APT `UpgradeAll` requires a reviewed solver plan. The engine compares it with
 a fresh simulation before dispatching `dist-upgrade`; missing, changed, or
 incomplete plans stop the write. The GUI computes the preview on a worker so
 the window remains responsive.
+
+Adapters may also provide a structured `operation_plan` for one exact operation.
+The default is unavailable. APT simulates individual install, remove, and update
+operations and reports native package changes; sizes and restart needs remain
+unknown when APT does not supply them. The engine checks the plan again before
+the write. If it changed, the GUI prepares a new confirmation.
 
 Each dispatch emits `Started`, zero or more backend progress events, and exactly
 one `Finished` event carrying its result during normal error-returning execution.

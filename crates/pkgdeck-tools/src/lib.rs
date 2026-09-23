@@ -252,6 +252,7 @@ impl Desktop {
         self.idle();
     }
     pub fn search(&mut self, name: &str) {
+        self.key("ctrl+1");
         self.key("ctrl+f");
         self.xdo(&["type", "--clearmodifiers", "--delay", "0", name]);
         self.key("Return");
@@ -273,7 +274,12 @@ impl Desktop {
                 _ => panic!("unknown operation"),
             });
         }
-        self.key("alt+y");
+        self.key(match op {
+            "install" => "alt+i",
+            "remove" | "update" => "alt+r",
+            "upgrade" => "alt+u",
+            _ => unreachable!(),
+        });
     }
     pub fn close(mut self) {
         self.xdo(&["key", "--clearmodifiers", "ctrl+q"]);
@@ -323,7 +329,25 @@ pub fn gui_lifecycle(args: &[String]) {
         ("remove", Value::Null),
     ] {
         gui.write(op, "fixture");
-        assert_eq!(state(&dir.0)["installed"], installed, "{}", gui.logs());
+        assert!(
+            dir.0.join("state.json").exists(),
+            "operation {op}: {}",
+            gui.logs()
+        );
+        assert_eq!(
+            state(&dir.0)["installed"],
+            installed,
+            "operation {op}: {}",
+            gui.logs()
+        );
+        if op == "update" {
+            assert_eq!(
+                state(&dir.0)["candidate"],
+                "2.0",
+                "operation {op}: {}",
+                gui.logs()
+            );
+        }
     }
     gui.key("ctrl+2");
     gui.key("ctrl+3");
@@ -351,16 +375,16 @@ pub fn gui_lifecycle(args: &[String]) {
         gui.launch(&call);
         gui.key("ctrl+3");
         gui.key("ctrl+shift+u");
-        gui.key("alt+n");
+        gui.key("alt+c");
         assert_eq!(state(&dir.0), initial, "{}", gui.logs());
         assert!(!dir.0.join("attempts").exists());
         gui.key("ctrl+shift+u");
         if mode == "slow" {
-            gui.xdo(&["key", "--clearmodifiers", "alt+y"]);
+            gui.xdo(&["key", "--clearmodifiers", "alt+u"]);
             until(|| dir.0.join("started").exists(), 10);
             gui.key("Escape");
         } else {
-            gui.key("alt+y");
+            gui.key("alt+u");
         }
         let mut expected = initial;
         if matches!(mode, "success" | "slow") {

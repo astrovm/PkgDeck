@@ -6,6 +6,8 @@ import org.kde.kirigami as Kirigami
 
 Controls.ApplicationWindow {
     id: root
+    SystemPalette { id: systemPalette }
+    SystemPalette { id: disabledPalette; colorGroup: SystemPalette.Disabled }
     required property var backend
     readonly property var repositoryReport: JSON.parse(backend.repositories || "{}")
     function repositoryChange(row, action, extra) {
@@ -76,10 +78,23 @@ Controls.ApplicationWindow {
         }
         if (detail && detail.failure)
             return (detail.failure.error || "") + "\n" + (detail.hint || "");
-        return (detail && detail.availability) || "";
+        return detail && detail.source ? ((detail.availability || "") + "\nLast successful check: " + lastSuccessfulCheck(detail.source)) : "";
     }
     property string screenshotUrl: ""
     property string screenshotCaption: ""
+    property var focusStack: []
+    function rememberDialogFocus() { focusStack = focusStack.concat([root.activeFocusItem]); }
+    function restoreDialogFocus() {
+        const returnFocusItem = focusStack.length ? focusStack[focusStack.length - 1] : null;
+        focusStack = focusStack.slice(0, -1);
+        try {
+            if (returnFocusItem && returnFocusItem.visible && returnFocusItem.enabled) {
+                returnFocusItem.forceActiveFocus();
+                return;
+            }
+        } catch (e) { /* A reused result delegate may have been destroyed. */ }
+        results.forceActiveFocus();
+    }
     property bool closePending: false
     property bool queryDirty: false
     property var selectedIdentity: null
@@ -87,10 +102,69 @@ Controls.ApplicationWindow {
         return row ? JSON.stringify([row.source, row.name, row.architecture, row.remote || null, row.scope, row.reference || null]) : "";
     }
     property var selected: !retainingResults && results.currentIndex >= 0 && results.currentIndex < viewItems.length ? viewItems[results.currentIndex] : null
-    // Explicitly checked source ids, comma-joined; empty means every
-    // available source. Unchecking hides a source from all queries, which
-    // is how backends you never use stay silent.
+    // Persistent manager enablement. Empty means every known manager;
+    // page filters below never change this preference.
     property string sourceSelection: ""
+    property var viewSourceFilters: ({})
+    readonly property var sourceCatalog: JSON.parse(backend.source_catalog || "[]")
+    onSourceCatalogChanged: {
+        if (sourcePopup.visible && sourcePopup.mode === "filter" && sourcePopup.draftSources.length === 0)
+            sourcePopup.draftSources = root.effectiveSources().filter((id) => root.sourceInfo(id).availability_kind === "available" && root.sourceSupportsView(id));
+    }
+    readonly property var reportState: JSON.parse(backend.report_state || "{}")
+    readonly property var readFailures: (reportState.failures && reportState.failures.length ? reportState.failures : items.filter((row) => row.kind === "failure" && row.failure_kind !== "unsupported").map((row) => ({source: row.source, kind: row.failure_kind || "failed"}))).filter((failure) => effectiveSources().indexOf(failure.source) >= 0)
+    property string expandedFailure: ""
+    function failureSummary(id) {
+        const row = items.find((item) => item.kind === "failure" && item.source === id);
+        const reportFailure = (reportState.failures || []).find((failure) => failure.source === id);
+        return (row && row.summary) || (reportFailure && reportFailure.detail) || (currentView === "Sources" ? sourceInfo(id).summary : "") || "Source check did not complete.";
+    }
+    function lastSuccessfulCheck(id) {
+        const seconds = (reportState.last_success || {})[id];
+        return seconds ? new Date(seconds * 1000).toLocaleString() : "Not checked successfully this session";
+    }
+    function copyableDiagnostics() {
+        return "View: " + currentView + "\nState: " + (reportState.phase || "unknown") + "\n" +
+            readFailures.map((failure) => failure.source + ": " + failure.kind).join("\n");
+    }
+    function retryFailedSource(id) {
+        if (currentView === "Search" && queryDirty)
+            return;
+        const query = currentView === "Installed" ? "" : search.text;
+        backend.retrySource(currentView, query, id);
+        sourceFailuresDialog.close();
+    }
+    function clearVisibleFilters() {
+        installedFilter = "";
+        multiSourceOnly = false;
+        const filters = Object.assign({}, viewSourceFilters);
+        const hadSourceFilter = filters[currentView] !== undefined;
+        delete filters[currentView];
+        viewSourceFilters = filters;
+        if (hadSourceFilter)
+            reload();
+    }
+    function emptyStateMessage() {
+        if (backend.busy || reportState.phase === "loading")
+            return retainingResults ? "Checking for current results…" : "Checking sources…";
+        if (readFailures.length > 0)
+            return reportState.phase === "partial" ? "No results from the sources that completed." : "Could not check these sources.";
+        if (reportState.phase === "unsupported")
+            return "No enabled sources support this view.";
+        if (currentView === "Search" && search.text.trim().length === 0)
+            return "Search apps and packages";
+        if (currentView === "Installed" && (installedFilter.length > 0 || multiSourceOnly))
+            return "No packages match these filters.";
+        if (viewSourceFilters[currentView] && items.length > 0)
+            return "No results from selected sources.";
+        if (reportState.phase === "cached" || reportState.phase === "stale")
+            return "No results in the last check.";
+        if (currentView === "Updates")
+            return reportState.phase === "complete" ? "You're up to date" : "No updates to show.";
+        if (currentView === "Clean")
+            return "Nothing to clean";
+        return currentView === "Search" ? "No matching packages." : "No results to show.";
+    }
     property string installedFilter: ""
     // Session-only filter showing just the apps installed from more than
     // one source. Session-only like the text filter: view state, not a
@@ -100,7 +174,8 @@ Controls.ApplicationWindow {
     function updateOnly(source) {
         return ["fwupd", "codex", "claude", "grok", "opencode"].indexOf(source) >= 0;
     }
-    readonly property var sourceIds: ["apt", "dnf", "pacman", "zypper", "snap", "homebrew", "homebrew-cask", "appimage", "flatpak", "docker", "podman", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "composer", "gem", "fwupd", "codex", "claude", "grok", "opencode"]
+    readonly property var knownSourceIds: ["apt", "dnf", "pacman", "zypper", "snap", "homebrew", "homebrew-cask", "appimage", "flatpak", "docker", "podman", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "composer", "gem", "fwupd", "codex", "claude", "grok", "opencode"]
+    readonly property var sourceIds: knownSourceIds.concat(sourceCatalog.map((row) => row.source).filter((id) => knownSourceIds.indexOf(id) < 0))
     readonly property var sourceNames: ["APT", "DNF", "Pacman", "Zypper", "Snap", "Homebrew", "Homebrew Casks", "AppImage", "Flatpak", "Docker images", "Podman images", "Cargo", "npm", "pnpm", "Bun", "pip", "pipx", "uv", "Composer", "RubyGems", "Firmware", "Codex (standalone)", "Claude Code (standalone)", "Grok (standalone)", "OpenCode (standalone)"]
     function containerSource(source) {
         return source === "docker" || source === "podman";
@@ -111,20 +186,62 @@ Controls.ApplicationWindow {
         const checked = sourceSelection.split(",").filter((id) => sourceIds.indexOf(id) >= 0);
         return checked.length > 0 ? checked : sourceIds.slice();
     }
+    function effectiveSources(view) {
+        const enabled = checkedSources();
+        const selected = viewSourceFilters[view || currentView];
+        return selected ? enabled.filter((id) => selected.indexOf(id) >= 0) : enabled;
+    }
     function checkedCsv() {
-        const checked = checkedSources();
+        const checked = effectiveSources();
         return checked.length >= sourceIds.length ? "" : checked.join(",");
     }
     function sourceSummary() {
-        const checked = checkedSources();
-        if (checked.length >= sourceIds.length)
-            return "All sources";
+        const checked = effectiveSources();
         if (checked.length === 1)
-            return sourceNames[sourceIds.indexOf(checked[0])];
+            return sourceDisplayName(checked[0]);
+        if (!viewSourceFilters[currentView])
+            return checkedSources().length >= sourceIds.length ? "Available sources" : checked.length + " enabled sources";
         return checked.length + " sources";
     }
-    function toggleSource(id) {
-        let checked = checkedSources();
+    function sourceInfo(id) {
+        return sourceCatalog.find((row) => row.source === id) || {source: id, summary: sourceCatalog.length ? "Unsupported on this platform" : "Checking availability…", availability_kind: sourceCatalog.length ? "platform" : "checking", capabilities: []};
+    }
+    function sourceCategory(id) {
+        if (["apt", "dnf", "pacman", "zypper", "fwupd"].indexOf(id) >= 0)
+            return "System";
+        if (["snap", "homebrew", "homebrew-cask", "appimage", "flatpak"].indexOf(id) >= 0)
+            return "Applications";
+        if (containerSource(id))
+            return "Containers";
+        return "Developer tools";
+    }
+    function sourceSupportsView(id) {
+        const capability = ({"Search":"search", "Installed":"installed", "Updates":"upgrade", "Clean":"clean"})[currentView];
+        return !capability || sourceInfo(id).capabilities.indexOf(capability) >= 0;
+    }
+    function pickerItems() {
+        const query = sourcePopup.searchText.trim().toLowerCase();
+        const categories = ["System", "Applications", "Developer tools", "Containers"];
+        const discovered = sourceCatalog.map((row) => row.source).filter((id) => sourceIds.indexOf(id) >= 0);
+        const ids = discovered.slice();
+        if (sourcePopup.showUnavailable || sourcePopup.mode === "settings") {
+            for (const id of sourceIds) {
+                if (ids.indexOf(id) < 0)
+                    ids.push(id);
+            }
+        }
+        const matches = ids.filter((id) => !query || (sourceDisplayName(id) + " " + id).toLowerCase().indexOf(query) >= 0);
+        const available = matches.filter((id) => sourceInfo(id).availability_kind === "available" && (sourcePopup.mode === "settings" || sourceSupportsView(id)));
+        const unavailable = matches.filter((id) => available.indexOf(id) < 0);
+        const ordered = [];
+        for (const group of categories)
+            ordered.push(...available.filter((id) => sourceCategory(id) === group));
+        if (sourcePopup.showUnavailable || sourcePopup.mode === "settings")
+            ordered.push(...unavailable);
+        return ordered;
+    }
+    function toggleDraftSource(id) {
+        let checked = sourcePopup.draftSources.slice();
         const at = checked.indexOf(id);
         if (at >= 0) {
             if (checked.length <= 1)
@@ -132,19 +249,41 @@ Controls.ApplicationWindow {
             checked.splice(at, 1);
         } else {
             checked.push(id);
-            checked.sort((a, b) => sourceIds.indexOf(a) - sourceIds.indexOf(b));
         }
-        sourceSelection = checked.length >= sourceIds.length ? "" : checked.join(",");
-        preferences.sourceList = sourceSelection;
-        preferences.source = "";
-        if (["Search", "Installed", "Updates", "Clean", "Sources"].indexOf(root.currentView) >= 0)
-            root.reload();
+        sourcePopup.draftSources = checked;
+    }
+    function applySourceDraft() {
+        const selected = sourcePopup.draftSources;
+        if (sourcePopup.mode === "settings") {
+            sourceSelection = selected.length >= sourceIds.length ? "" : sourceIds.filter((id) => selected.indexOf(id) >= 0).join(",");
+            preferences.sourceList = sourceSelection;
+            preferences.source = "";
+            viewSourceFilters = ({});
+        } else {
+            const filters = Object.assign({}, viewSourceFilters);
+            const enabled = checkedSources();
+            const filtered = enabled.filter((id) => selected.indexOf(id) >= 0);
+            if (filtered.length >= enabled.length)
+                delete filters[currentView];
+            else
+                filters[currentView] = filtered;
+            viewSourceFilters = filters;
+        }
+        sourcePopup.close();
+        if (["Search", "Installed", "Updates", "Clean", "Sources"].indexOf(currentView) >= 0)
+            reload();
     }
     // Delegate lookup by position in sourceIds. Popup content reparents to
     // the Overlay, so findChild cannot reach the checkboxes; the Repeater
     // hands out the live delegate for real clicks in tests.
     function sourceCheckAt(index) {
-        return checklistRepeater.itemAt(index);
+        const id = sourceIds[index];
+        for (let i = 0; i < checklistRepeater.count; i++) {
+            const item = checklistRepeater.itemAt(i);
+            if (item && item.sourceId === id)
+                return item.checkBox;
+        }
+        return null;
     }
     // Deselected package identities for the Updates multi-select. Every
     // row is checked by default; deselections (not selections) are stored
@@ -307,9 +446,10 @@ Controls.ApplicationWindow {
     }
     readonly property var cleanupFailures: currentView === "Clean" ? items.filter(row => row.kind === "failure") : []
     property var viewItems: {
-        let rows = root.currentView === "Search" ? items.filter((row) => !isFabricated(row)) : items.slice();
+        let rows = root.currentView === "Search" ? items.filter((row) => row.kind !== "failure" && !isFabricated(row)) : items.filter((row) => row.kind !== "failure");
         if (root.currentView === "Clean")
             rows = rows.filter(row => row.kind === "cleanup");
+        rows = rows.filter((row) => root.effectiveSources().indexOf(row.source) >= 0);
         // The Installed filter narrows the loaded rows as you type; the
         // backend is queried once with an empty query (see reload).
         if (root.currentView === "Installed") {
@@ -355,25 +495,24 @@ Controls.ApplicationWindow {
         return -1;
     }
     readonly property bool compact: width < 760
-    readonly property bool dark: preferences.appearance === 1 || (preferences.appearance === 0 && Qt.styleHints.colorScheme === Qt.Dark)
-    readonly property color canvas: dark ? "#000000" : "#f3f5f8"
-    readonly property color surface: dark ? "#101014" : "#ffffff"
-    readonly property color ink: dark ? "#ecf1f8" : "#1c2b3e"
-    readonly property color muted: dark ? "#a2b1c4" : "#57677e"
-    readonly property color line: dark ? "#2a2e37" : "#dce3ec"
-    readonly property color accent: dark ? "#80b6ff" : "#245fc6"
-    readonly property color selection: dark ? "#1a2740" : "#e8f0ff"
+    readonly property bool systemAppearance: preferences.appearance === 0
+    readonly property bool dark: preferences.appearance === 1 || (systemAppearance && Qt.styleHints.colorScheme === Qt.Dark)
+    readonly property color canvas: systemAppearance ? systemPalette.window : (dark ? "#000000" : "#f3f5f8")
+    readonly property color surface: systemAppearance ? systemPalette.base : (dark ? "#101014" : "#ffffff")
+    readonly property color ink: systemAppearance ? systemPalette.text : (dark ? "#ecf1f8" : "#1c2b3e")
+    readonly property color muted: systemAppearance ? systemPalette.placeholderText : (dark ? "#a2b1c4" : "#57677e")
+    readonly property color line: systemAppearance ? systemPalette.mid : (dark ? "#2a2e37" : "#dce3ec")
+    readonly property color accent: systemAppearance ? systemPalette.highlight : (dark ? "#80b6ff" : "#245fc6")
+    readonly property color selection: systemAppearance ? Qt.rgba(systemPalette.highlight.r, systemPalette.highlight.g, systemPalette.highlight.b, 0.24) : (dark ? "#1a2740" : "#e8f0ff")
     color: canvas
-    font.family: "sans-serif"
-    font.pixelSize: 14
     palette.window: canvas
     palette.base: surface
     palette.text: ink
-    palette.windowText: ink
-    palette.buttonText: ink
-    palette.button: surface
+    palette.windowText: systemAppearance ? systemPalette.windowText : ink
+    palette.buttonText: systemAppearance ? systemPalette.buttonText : ink
+    palette.button: systemAppearance ? systemPalette.button : surface
     palette.highlight: accent
-    palette.highlightedText: dark ? "#111820" : "#ffffff"
+    palette.highlightedText: systemAppearance ? systemPalette.highlightedText : (dark ? "#111820" : "#ffffff")
 
     component ActionButton: Controls.Button {
         id: control
@@ -381,19 +520,22 @@ Controls.ApplicationWindow {
         property bool primary: false
         property bool navigation: false
         property string symbol: "package"
+        property string tooltipText: ""
         Accessible.name: text
-        implicitHeight: 38
+        Controls.ToolTip.visible: hovered && tooltipText.length > 0
+        Controls.ToolTip.text: tooltipText
+        implicitHeight: Math.max(38, root.font.pointSize * 3)
         horizontalPadding: 16
         verticalPadding: 4
-        opacity: enabled ? 1 : 0.45
+        opacity: enabled || root.systemAppearance ? 1 : 0.45
         scale: down ? 0.98 : 1
         Behavior on opacity { NumberAnimation { duration: root.feedbackDuration } }
         Behavior on scale { NumberAnimation { duration: root.feedbackDuration; easing.type: Easing.OutCubic } }
         background: Rectangle {
             radius: 7
             Behavior on color { ColorAnimation { duration: root.feedbackDuration } }
-            color: control.primary && control.enabled ? root.accent : (control.hovered ? root.selection : root.surface)
-            border.color: control.activeFocus ? root.accent : (control.navigation ? "transparent" : root.line)
+            color: !control.enabled && root.systemAppearance ? disabledPalette.button : control.primary && control.enabled ? root.accent : (control.hovered ? root.selection : root.surface)
+            border.color: control.activeFocus ? root.accent : !control.enabled && root.systemAppearance ? disabledPalette.mid : (control.navigation ? "transparent" : root.line)
             border.width: control.activeFocus ? 2 : 1
         }
         contentItem: Item {
@@ -408,7 +550,7 @@ Controls.ApplicationWindow {
                 spacing: 8
                 DeckIcon {
                     name: control.symbol
-                    ink: control.primary && control.enabled ? (root.dark ? "#111820" : "#ffffff") : control.glyphColor
+                    ink: !control.enabled && root.systemAppearance ? disabledPalette.buttonText : control.primary && control.enabled ? root.palette.highlightedText : control.glyphColor
                     Layout.preferredWidth: 18
                     Layout.preferredHeight: 18
                     Layout.alignment: Qt.AlignVCenter
@@ -417,7 +559,7 @@ Controls.ApplicationWindow {
                     text: control.text
                     visible: text.length > 0
                     font: control.font
-                    color: control.primary && control.enabled ? (root.dark ? "#111820" : "#ffffff") : root.ink
+                    color: !control.enabled && root.systemAppearance ? disabledPalette.buttonText : control.primary && control.enabled ? root.palette.highlightedText : root.ink
                     Layout.fillWidth: control.navigation
                     Layout.alignment: Qt.AlignVCenter
                     verticalAlignment: Text.AlignVCenter
@@ -505,7 +647,7 @@ Controls.ApplicationWindow {
     // Display names for backend ids used by related-install indicators without
     // changing the rows' exact identities.
     function sourceDisplayName(id) {
-        const at = sourceIds.indexOf(id);
+        const at = knownSourceIds.indexOf(id);
         return at >= 0 ? sourceNames[at] : id;
     }
     function sameAppNames(row) {
@@ -605,19 +747,27 @@ Controls.ApplicationWindow {
         selectedIdentity = rowIdentity(viewItems[index]);
         backend.select(originalIndex(index));
     }
+    function restoreSelection() {
+        if (!selectedIdentity || retainingResults)
+            return;
+        for (let i = 0; i < viewItems.length; i++) {
+            if (rowIdentity(viewItems[i]) === selectedIdentity) {
+                results.currentIndex = i;
+                return;
+            }
+        }
+        results.currentIndex = -1;
+        selectedIdentity = null;
+    }
+    onViewItemsChanged: Qt.callLater(root.restoreSelection)
     function propose(action) {
-        if (!retainingResults)
+        if (!retainingResults) {
             backend.propose(action, originalIndex(results.currentIndex));
+        }
     }
     function focusResultsAfterLoad() {
-        // Background completions land at any time: never yank focus out of
-        // a search field holding text, or mid-typing keystrokes (and the
-        // Return that submits the search) are lost to the results list. An
-        // empty, untouched field still yields so fresh rows stay
-        // keyboard-navigable right after a load.
-        if (!queryDirty && (!search.activeFocus || search.text.length === 0) && !installedFilterField.activeFocus && !sourcePopup.opened && !confirmation.opened
-                && ["Search", "Installed", "Updates", "Clean", "Sources"].indexOf(currentView) >= 0)
-            results.forceActiveFocus();
+        // A streaming reply never moves focus away from a user's control.
+        // Down or Ctrl+L moves into the result list explicitly.
     }
     Settings {
         id: preferences
@@ -674,24 +824,16 @@ Controls.ApplicationWindow {
                 if (!backend.writing)
                     root.markChangedRows();
             }
-            // Streaming partials re-sort rows around the selection: follow
-            // the selected identity instead of the row index.
-            results.currentIndex = -1;
-            if (root.selectedIdentity) {
-                for (let i = 0; i < root.viewItems.length; i++) {
-                    if (root.rowIdentity(root.viewItems[i]) === root.selectedIdentity) {
-                        results.currentIndex = i;
-                        break;
-                    }
-                }
-            }
-            if (root.viewItems.length > 0)
-                root.focusResultsAfterLoad();
+            // Sorting and streaming may reorder rows. Re-select by identity
+            // without firing another backend selection or moving focus.
+            Qt.callLater(root.restoreSelection);
         }
         function onConfirmationChanged() {
-            if (backend.confirmation.length)
+            if (backend.confirmation.length) {
+                if (!confirmation.opened)
+                    root.rememberDialogFocus();
                 confirmation.open();
-            else
+            } else
                 confirmation.close();
         }
     }
@@ -771,7 +913,7 @@ Controls.ApplicationWindow {
                     }
                     Controls.Label {
                         text: "PkgDeck"
-                        font.pixelSize: 25
+                        font.pointSize: root.font.pointSize * 1.8
                         font.bold: true
                         color: root.ink
                     }
@@ -794,14 +936,16 @@ Controls.ApplicationWindow {
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 4
-                    Controls.Label { text: "Made with"; color: root.muted; font.pixelSize: 11 }
+                    Controls.Label { text: "Made with"; color: root.muted; font.pointSize: root.font.pointSize * 0.9 }
                     DeckIcon { name: "heart"; ink: "#e34b5f"; Layout.preferredWidth: 14; Layout.preferredHeight: 14 }
-                    Controls.Label { text: "by astro"; color: root.muted; font.pixelSize: 11 }
+                    Controls.Label { text: "by astro"; color: root.muted; font.pointSize: root.font.pointSize * 0.9 }
                     Controls.ToolButton {
                         objectName: "repositoryLink"
                         implicitWidth: 28
                         implicitHeight: 28
                         Accessible.name: "Open PkgDeck on GitHub"
+                        Controls.ToolTip.visible: hovered
+                        Controls.ToolTip.text: Accessible.name
                         onClicked: Qt.openUrlExternally(root.repositoryUrl)
                         background: Rectangle {
                             radius: 5
@@ -842,69 +986,146 @@ Controls.ApplicationWindow {
                     text: root.currentView
                     color: root.ink
                     level: 1
-                    font.pointSize: 21
+                    font.pointSize: root.font.pointSize * 1.6
                     font.bold: true
                     Layout.fillWidth: true
                 }
                 ActionButton {
                     objectName: "sourceFilter"
                     id: sourceFilterButton
-                    visible: ["Search", "Installed", "Updates", "Clean", "Sources"].indexOf(root.currentView) >= 0
-                    text: root.sourceSummary()
+                    visible: ["Search", "Installed", "Updates", "Clean", "Sources", "Settings"].indexOf(root.currentView) >= 0
+                    text: root.currentView === "Settings" ? "Manage sources" : root.sourceSummary()
                     symbol: "sources"
                     enabled: !backend.writing
-                    onClicked: sourcePopup.open()
-                    Accessible.name: "Package source filter"
+                    onClicked: { root.rememberDialogFocus(); sourcePopup.mode = root.currentView === "Settings" ? "settings" : "filter"; sourcePopup.open(); }
+                    Accessible.name: root.currentView === "Settings" ? "Manage package managers" : "Filter this page by package source"
                     Layout.preferredWidth: 210
                     Controls.Popup {
                         id: sourcePopup
                         objectName: "sourcePopup"
+                        property string mode: "filter"
+                        property var draftSources: []
+                        property string searchText: ""
+                        property bool showUnavailable: false
                         y: sourceFilterButton.height + 4
-                        width: 250
-                        height: 340
-                        padding: 4
+                        width: Math.min(340, root.width - 32)
+                        height: Math.min(460, root.height - 100)
+                        padding: 10
                         closePolicy: Controls.Popup.CloseOnEscape | Controls.Popup.CloseOnPressOutside
-                        contentItem: Flickable {
-                            anchors.fill: parent
-                            clip: true
-                            contentWidth: width
-                            contentHeight: checklist.height
-                            Column {
-                                id: checklist
-                                width: parent.width
-                                Repeater {
-                                    id: checklistRepeater
-                                    model: root.sourceIds
-                                    delegate: Controls.CheckDelegate {
-                                        id: checkRow
-                                        required property var modelData
-                                        required property int index
-                                        objectName: "sourceCheck-" + modelData
-                                        width: checklist.width
-                                        text: root.sourceNames[index]
-                                        checked: root.checkedSources().indexOf(modelData) >= 0
-                                        enabled: !checked || root.checkedSources().length > 1
-                                        onToggled: root.toggleSource(modelData)
-                                        indicator: TickBox {
-                                            anchors.verticalCenter: parent.verticalCenter
-                                            anchors.left: parent.left
-                                            anchors.leftMargin: 8
-                                            ticked: checkRow.checked
-                                        }
-                                        background: Rectangle {
-                                            color: checkRow.hovered ? root.selection : "transparent"
-                                        }
-                                        contentItem: Text {
-                                            text: root.sourceNames[index]
-                                            color: checkRow.enabled ? root.ink : root.muted
-                                            elide: Text.ElideRight
-                                            verticalAlignment: Text.AlignVCenter
-                                            leftPadding: 34
+                        onOpened: {
+                            searchText = "";
+                            pickerSearch.text = "";
+                            draftSources = mode === "settings" ? root.checkedSources() : root.effectiveSources().filter((id) => root.sourceInfo(id).availability_kind === "available" && root.sourceSupportsView(id));
+                        }
+                        onClosed: root.restoreDialogFocus()
+                        contentItem: ColumnLayout {
+                            spacing: 8
+                            Controls.Label {
+                                text: sourcePopup.mode === "settings" ? "Enabled managers" : "Filter " + root.currentView
+                                font.bold: true
+                                color: root.ink
+                            }
+                            Controls.Label {
+                                visible: root.sourceCatalog.length === 0 && sourcePopup.mode === "filter"
+                                text: "Checking sources…"
+                                color: root.muted
+                            }
+                            Controls.TextField {
+                                id: pickerSearch
+                                objectName: "sourcePickerSearch"
+                                Layout.fillWidth: true
+                                placeholderText: "Find a source"
+                                Accessible.name: "Find a source"
+                                onTextChanged: sourcePopup.searchText = text
+                            }
+                            Flickable {
+                                id: sourceList
+                                Layout.fillWidth: true
+                                Layout.fillHeight: true
+                                clip: true
+                                contentWidth: width
+                                contentHeight: checklist.height
+                                Column {
+                                    id: checklist
+                                    width: sourceList.width
+                                    Repeater {
+                                        id: checklistRepeater
+                                        model: root.pickerItems()
+                                        delegate: Column {
+                                            required property string modelData
+                                            required property int index
+                                            readonly property string sourceId: modelData
+                                            property alias checkBox: checkRow
+                                            width: checklist.width
+                                            readonly property bool usable: root.sourceInfo(sourceId).availability_kind === "available" && (sourcePopup.mode === "settings" || root.sourceSupportsView(sourceId))
+                                            readonly property string section: usable ? root.sourceCategory(sourceId) : "Unavailable"
+                                            Controls.Label {
+                                                width: parent.width
+                                                topPadding: 8
+                                                text: parent.section
+                                                font.bold: true
+                                                color: root.muted
+                                                visible: index === 0 || root.pickerItems()[index - 1] === undefined ||
+                                                    (parent.usable ? root.sourceCategory(root.pickerItems()[index - 1]) : "Unavailable") !== parent.section
+                                            }
+                                            Controls.CheckDelegate {
+                                                id: checkRow
+                                                objectName: "sourceCheck-" + modelData
+                                                width: parent.width
+                                                text: root.sourceDisplayName(modelData)
+                                                checked: sourcePopup.draftSources.indexOf(modelData) >= 0
+                                                enabled: (sourcePopup.mode === "settings" || (parent.usable && root.checkedSources().indexOf(modelData) >= 0)) && (!checked || sourcePopup.draftSources.length > 1)
+                                                onToggled: root.toggleDraftSource(modelData)
+                                                indicator: TickBox {
+                                                    anchors.verticalCenter: parent.verticalCenter
+                                                    anchors.left: parent.left
+                                                    anchors.leftMargin: 8
+                                                    ticked: checkRow.checked
+                                                }
+                                                background: Rectangle { color: checkRow.hovered ? root.selection : "transparent" }
+                                                contentItem: Text {
+                                                    text: checkRow.text
+                                                    color: checkRow.enabled ? root.ink : root.muted
+                                                    elide: Text.ElideRight
+                                                    verticalAlignment: Text.AlignVCenter
+                                                    leftPadding: 34
+                                                }
+                                            }
+                                            Controls.Label {
+                                                width: parent.width - 34
+                                                x: 34
+                                                text: sourcePopup.mode !== "settings" && !root.sourceSupportsView(modelData) ? "Not supported in this view" : (root.sourceInfo(modelData).summary || "Unavailable")
+                                                color: root.muted
+                                                elide: Text.ElideRight
+                                                visible: !parent.usable
+                                            }
                                         }
                                     }
                                 }
+                                Controls.ScrollBar.vertical: Controls.ScrollBar { }
                             }
-                            Controls.ScrollBar.vertical: Controls.ScrollBar { }
+                            ActionButton {
+                                Layout.fillWidth: true
+                                text: sourcePopup.showUnavailable ? "Hide unavailable" : "Show unavailable"
+                                symbol: "help"
+                                onClicked: sourcePopup.showUnavailable = !sourcePopup.showUnavailable
+                            }
+                            RowLayout {
+                                Layout.fillWidth: true
+                                Item { Layout.fillWidth: true }
+                                ActionButton {
+                                    text: "Reset"
+                                    symbol: "refresh"
+                                    onClicked: sourcePopup.draftSources = sourcePopup.mode === "settings" ? root.sourceIds.slice() : root.checkedSources().filter((id) => root.sourceInfo(id).availability_kind === "available" && root.sourceSupportsView(id))
+                                }
+                                ActionButton {
+                                    objectName: "applySourceFilter"
+                                    text: "Apply"
+                                    primary: true
+                                    enabled: sourcePopup.draftSources.length > 0
+                                    onClicked: root.applySourceDraft()
+                                }
+                            }
                         }
                         background: Rectangle {
                             color: root.surface
@@ -925,7 +1146,7 @@ Controls.ApplicationWindow {
                     Accessible.name: "Search packages"
                     enabled: !backend.writing
                     selectByMouse: true
-                    implicitHeight: 44
+                    implicitHeight: Math.max(44, root.font.pointSize * 3.4)
                     color: root.ink
                     placeholderTextColor: root.muted
                     leftPadding: 14
@@ -970,7 +1191,7 @@ Controls.ApplicationWindow {
                     Accessible.name: "Filter installed packages"
                     enabled: !backend.writing
                     selectByMouse: true
-                    implicitHeight: 44
+                    implicitHeight: Math.max(44, root.font.pointSize * 3.4)
                     color: root.ink
                     placeholderTextColor: root.muted
                     leftPadding: 14
@@ -1018,6 +1239,11 @@ Controls.ApplicationWindow {
                 visible: root.currentView === "Settings"
                 Layout.fillWidth: true
                 Layout.fillHeight: true
+                Controls.Label { text: "Package managers" }
+                Controls.Label {
+                    text: root.checkedSources().length + " enabled · choose Manage sources above"
+                    color: root.muted
+                }
                 Controls.Label { text: "Appearance" }
                 ThemedComboBox {
                     objectName: "appearanceSetting"
@@ -1071,28 +1297,26 @@ Controls.ApplicationWindow {
                     width: aboutScroll.availableWidth
                     verticalAlignment: Text.AlignTop
                     wrapMode: Text.WordWrap
-                    text: "PkgDeck " + backend.version + "\nA unified package interface for Linux.\n\nKeyboard shortcuts\nCtrl+1: Search • Ctrl+2: Installed • Ctrl+3: Updates • Ctrl+4: Clean • Ctrl+5: Sources\nCtrl+F: search • Ctrl+L: focus results • Up/Down: select • Ctrl+I: install • Ctrl+D: remove • Ctrl+U: update • Ctrl+M: refresh source • Ctrl+R: reload\nEscape: cancel current work\n\nRefresh sources checks package metadata. Updating apps and cleaning change installed files. Changes require confirmation."
+                    text: "PkgDeck " + backend.version + "\nA unified package interface for Linux.\n\nKeyboard shortcuts\nCtrl+1: Search • Ctrl+2: Installed • Ctrl+3: Updates • Ctrl+4: Clean • Ctrl+5: Sources\nCtrl+F: search, installed filter, or source picker • Ctrl+L: focus results • Up/Down: select • Ctrl+I: install • Ctrl+D: remove • Ctrl+U: update • Ctrl+M: refresh source • Ctrl+R: reload\nEscape: cancel current work\n\nRefresh sources checks package metadata. Updating apps and cleaning change installed files. Changes require confirmation."
                     textFormat: Text.PlainText
                 }
             }
             RowLayout {
-                visible: root.currentView === "Clean" && root.cleanupFailures.length > 0
+                visible: root.readFailures.length > 0 && ["Search", "Installed", "Updates", "Clean", "Sources"].indexOf(root.currentView) >= 0
                 Layout.fillWidth: true
-                DeckIcon { name: "warning"; ink: root.muted; Layout.preferredWidth: 20; Layout.preferredHeight: 20; visible: root.cleanupFailures.length > 0 }
+                DeckIcon { name: "warning"; ink: root.accent; Layout.preferredWidth: 20; Layout.preferredHeight: 20 }
                 Controls.Label {
-                    objectName: "cleanupFailureNotice"
-                    visible: root.cleanupFailures.length > 0
-                    text: "Could not check: " + root.cleanupFailures.map(row => root.sourceDisplayName(row.source)).join(", ")
+                    objectName: "sourceFailureNotice"
+                    text: root.readFailures.length + (root.readFailures.length === 1 ? " source needs attention" : " sources need attention")
                     color: root.muted
                     wrapMode: Text.WordWrap
                     Layout.fillWidth: true
                 }
                 ActionButton {
-                    objectName: "cleanupFailureDetails"
-                    visible: root.cleanupFailures.length > 0
-                    text: "Details"
+                    objectName: "sourceFailureDetails"
+                    text: "Review"
                     symbol: "help"
-                    onClicked: cleanupErrorsDialog.open()
+                    onClicked: { root.rememberDialogFocus(); sourceFailuresDialog.open(); }
                 }
             }
             Rectangle {
@@ -1114,7 +1338,7 @@ Controls.ApplicationWindow {
                         Controls.Label {
                             text: backend.writing && backend.status.length ? backend.status : root.viewItems.length + (root.currentView === "Sources" ? (root.viewItems.length === 1 ? " source" : " sources") : root.currentView === "Clean" ? (root.viewItems.length === 1 ? " cleanup task" : " cleanup tasks") : (root.viewItems.length === 1 ? " package" : " packages")) + (root.currentView === "Updates" ? " · " + root.selectedCount() + " selected" : "")
                             color: root.muted
-                            font.pixelSize: 12
+                            font.pointSize: root.font.pointSize * 0.9
                             elide: Text.ElideRight
                             Layout.fillWidth: true
                         }
@@ -1129,7 +1353,7 @@ Controls.ApplicationWindow {
                             text: "Working…"
                             visible: backend.busy && !root.motionEnabled
                             color: root.muted
-                            font.pixelSize: 12
+                            font.pointSize: root.font.pointSize * 0.9
                         }
                         ActionButton {
                             objectName: "resultsCancel"
@@ -1154,7 +1378,7 @@ Controls.ApplicationWindow {
                             objectName: "columnHeader0"
                             text: (root.currentView === "Sources" ? "SOURCE" : "NAME / SOURCE") + root.sortArrow("name")
                             color: root.muted
-                            font.pixelSize: 11
+                            font.pointSize: root.font.pointSize * 0.9
                             font.underline: sortNameArea.activeFocus
                             elide: Text.ElideRight
                             Layout.preferredWidth: root.nameWidth
@@ -1186,7 +1410,7 @@ Controls.ApplicationWindow {
                             objectName: "columnHeader1"
                             text: (root.currentView === "Sources" ? "STATUS" : root.currentView === "Clean" ? "TYPE" : "VERSION") + root.sortArrow(root.currentView === "Sources" ? "status" : "version")
                             color: root.muted
-                            font.pixelSize: 11
+                            font.pointSize: root.font.pointSize * 0.9
                             font.underline: sortVersionArea.activeFocus
                             elide: Text.ElideRight
                             Layout.preferredWidth: root.versionWidth
@@ -1218,7 +1442,7 @@ Controls.ApplicationWindow {
                             objectName: "columnHeader2"
                             text: (root.currentView === "Sources" ? "CAPABILITIES" : "SUMMARY") + root.sortArrow(root.currentView === "Sources" ? "capabilities" : "summary")
                             color: root.muted
-                            font.pixelSize: 11
+                            font.pointSize: root.font.pointSize * 0.9
                             font.underline: sortSummaryArea.activeFocus
                             elide: Text.ElideRight
                             Layout.fillWidth: true
@@ -1247,7 +1471,10 @@ Controls.ApplicationWindow {
                         opacity: root.retainingResults ? 0.65 : 1
                         Behavior on opacity { NumberAnimation { duration: root.feedbackDuration } }
                         currentIndex: -1
-                        onCountChanged: currentIndex = -1
+                        onCountChanged: {
+                            if (!root.selectedIdentity)
+                                currentIndex = -1;
+                        }
                         keyNavigationEnabled: false
                         activeFocusOnTab: true
                         Controls.ScrollBar.vertical: Controls.ScrollBar {}
@@ -1295,7 +1522,7 @@ Controls.ApplicationWindow {
                                 easing.type: Easing.OutCubic
                             }
                             width: ListView.view.width
-                            height: (root.compact ? 78 : 56) + (modelData.groupStart ? 38 : 0)
+                            height: (root.compact ? Math.max(78, root.font.pointSize * 7) : Math.max(56, root.font.pointSize * 5)) + (modelData.groupStart ? 38 : 0)
                             topPadding: modelData.groupStart ? 38 : 0
                             leftPadding: 16
                             rightPadding: 16
@@ -1327,7 +1554,7 @@ Controls.ApplicationWindow {
                                     Controls.Label {
                                         text: (modelData.groupCount || 0) + " packages · " + (modelData.groupSources || []).join(" + ")
                                         color: root.accent
-                                        font.pixelSize: 11
+                                        font.pointSize: root.font.pointSize * 0.9
                                     }
                                 }
                             }
@@ -1400,7 +1627,7 @@ Controls.ApplicationWindow {
                                         objectName: "packageSourceLine"
                                         text: modelData.source.toUpperCase() + (modelData.remote ? " · " + modelData.remote : "") + ((modelData.source === "flatpak" || root.containerSource(modelData.source)) ? " · " + (modelData.scope === "system" ? "System" : "User") : "")
                                         color: root.muted
-                                        font.pixelSize: 11
+                                        font.pointSize: root.font.pointSize * 0.9
                                         elide: Text.ElideRight
                                         Layout.fillWidth: true
                                         }
@@ -1421,7 +1648,7 @@ Controls.ApplicationWindow {
                                     color: modelData.kind === "failure" ? "#e87979" : (modelData.update === "available" ? root.accent : root.muted)
                                     textFormat: Text.PlainText
                                     elide: Text.ElideRight
-                                    font.pixelSize: 12
+                                    font.pointSize: root.font.pointSize * 0.9
                                 }
                                 Controls.Label {
                                     visible: !root.compact
@@ -1435,11 +1662,12 @@ Controls.ApplicationWindow {
                                     objectName: "rowContainerPull"
                                     visible: modelData.kind === "package" && root.containerSource(modelData.source) && root.isInstalled(modelData) && !!modelData.reference
                                     enabled: !backend.busy && !root.retainingResults
-                                    text: ""
+                                    text: root.compact ? "" : "Pull"
                                     symbol: "updates"
                                     glyphColor: root.accent
                                     Accessible.name: "Pull " + (modelData.display_name || modelData.name) + " from " + modelData.source
-                                    Layout.preferredWidth: 38
+                                    tooltipText: Accessible.name
+                                    Layout.preferredWidth: root.compact ? 38 : 80
                                     horizontalPadding: 8
                                     onClicked: backend.propose("upgrade", root.originalIndex(index))
                                 }
@@ -1447,11 +1675,12 @@ Controls.ApplicationWindow {
                                     objectName: "rowPackageAction"
                                     visible: (modelData.kind === "package" && (!root.updateOnly(modelData.source) || modelData.update === "available")) || modelData.kind === "cleanup"
                                     enabled: !backend.busy && !root.retainingResults
-                                    text: ""
+                                    text: root.compact ? "" : (modelData.kind === "cleanup" ? "Clean" : (root.currentView === "Updates" || root.updateOnly(modelData.source) ? "Update" : (root.isInstalled(modelData) ? "Remove" : "Install")))
                                     symbol: modelData.kind === "cleanup" ? "remove" : (root.currentView === "Updates" || root.updateOnly(modelData.source)) ? "updates" : (root.isInstalled(modelData) ? "remove" : "install")
                                     glyphColor: (root.currentView === "Updates" || root.updateOnly(modelData.source)) ? root.accent : root.isInstalled(modelData) ? (root.dark ? "#f18b91" : "#b42332") : (root.dark ? "#77d6a0" : "#187442")
                                     Accessible.name: (modelData.kind === "cleanup" ? "Run cleanup " : ((root.currentView === "Updates" || root.updateOnly(modelData.source)) ? "Update " : (root.isInstalled(modelData) ? "Remove " : "Install "))) + (modelData.display_name || modelData.name) + " from " + modelData.source
-                                    Layout.preferredWidth: 38
+                                    tooltipText: Accessible.name
+                                    Layout.preferredWidth: root.compact ? 38 : 88
                                     horizontalPadding: 8
                                     onClicked: backend.propose(modelData.kind === "cleanup" ? "clean" : ((root.currentView === "Updates" || root.updateOnly(modelData.source)) ? "upgrade" : (root.isInstalled(modelData) ? "remove" : "install")), root.originalIndex(index))
                                 }
@@ -1476,7 +1705,17 @@ Controls.ApplicationWindow {
                                 wrapMode: Text.WordWrap
                                 color: root.muted
                                 visible: !backend.busy || !root.motionEnabled
-                                text: backend.busy ? "Working…" : root.currentView === "Search" ? (search.text.trim().length === 0 ? "Search apps and packages" : "No matching packages.\nTry a shorter search or another source.") : (root.currentView === "Updates" ? "You're up to date" : root.currentView === "Clean" ? (root.cleanupFailures.length > 0 ? "Cleanup check incomplete" : "Nothing to clean") : (root.currentView === "Installed" && (root.installedFilter.length > 0 || root.multiSourceOnly) ? "No packages match these filters.\nClear the filter or include more sources." : "No results to show.\nCheck source availability or reload to try again."))
+                                text: root.emptyStateMessage()
+                            }
+                            ActionButton {
+                                objectName: "clearResultFilters"
+                                anchors.horizontalCenter: parent.horizontalCenter
+                                visible: !backend.busy && root.readFailures.length === 0 &&
+                                    (root.viewSourceFilters[root.currentView] !== undefined ||
+                                    (root.currentView === "Installed" && (root.installedFilter.length > 0 || root.multiSourceOnly)))
+                                text: "Clear filters"
+                                symbol: "cancel"
+                                onClicked: root.clearVisibleFilters()
                             }
                         }
                     }
@@ -1527,7 +1766,7 @@ Controls.ApplicationWindow {
                         text: root.selected ? (root.selected.display_name || root.selected.name) : ""
                         textFormat: Text.PlainText
                         color: root.ink
-                        font.pixelSize: root.compact ? 18 : 22
+                        font.pointSize: root.font.pointSize * (root.compact ? 1.3 : 1.6)
                         font.bold: true
                         elide: Text.ElideRight
                         Layout.fillWidth: true
@@ -1537,11 +1776,13 @@ Controls.ApplicationWindow {
                             text: ""
                             symbol: "cancel"
                             Accessible.name: "Close details"
+                            tooltipText: Accessible.name
                             Layout.preferredWidth: 38
                             horizontalPadding: 8
                             onClicked: {
                                 results.currentIndex = -1;
                                 root.selectedIdentity = null;
+                                results.forceActiveFocus();
                             }
                         }
                     }
@@ -1572,7 +1813,10 @@ Controls.ApplicationWindow {
                                     height: screenshotGallery.height
                                     enabled: preview.status === Image.Ready
                                     Accessible.name: modelData.caption || "View app screenshot"
+                                    Controls.ToolTip.visible: hovered
+                                    Controls.ToolTip.text: Accessible.name
                                     onClicked: {
+                                        root.rememberDialogFocus();
                                         root.screenshotUrl = modelData.url;
                                         root.screenshotCaption = modelData.caption || "";
                                         screenshotDialog.open();
@@ -1621,7 +1865,7 @@ Controls.ApplicationWindow {
                                 selectByMouse: true
                                 color: root.muted
                                 padding: 0
-                                font.pixelSize: 14
+                                font.pointSize: root.font.pointSize
                                 wrapMode: TextEdit.Wrap
                                 textFormat: TextEdit.PlainText
                                 text: root.detailText()
@@ -1654,6 +1898,12 @@ Controls.ApplicationWindow {
                     enabled: !backend.busy && (root.uncheckedPackages.length > 0 || backend.upgradable)
                     onClicked: root.upgradeUpdates()
                 }
+                Controls.Label {
+                    visible: root.currentView === "Updates"
+                    text: root.selectedCount() + " updates · " + root.effectiveSources().length + " selected sources"
+                    color: root.muted
+                    Layout.alignment: Qt.AlignVCenter
+                }
                 ActionButton {
                     objectName: "selectNoneButton"
                     visible: root.currentView === "Updates" && root.selectedCount() > 0
@@ -1675,7 +1925,7 @@ Controls.ApplicationWindow {
                     visible: root.currentView === "Updates" && !backend.upgradable && !backend.busy && root.items.some((row) => row.kind === "failure")
                     text: "Update all is unavailable while a source has failed."
                     color: root.muted
-                    font.pixelSize: 12
+                    font.pointSize: root.font.pointSize * 0.9
                     wrapMode: Text.WordWrap
                     Layout.fillWidth: true
                 }
@@ -1685,7 +1935,7 @@ Controls.ApplicationWindow {
                     text: "Repositories"
                     symbol: "sources"
                     enabled: !backend.busy
-                    onClicked: repositoriesDialog.open()
+                    onClicked: { root.rememberDialogFocus(); repositoriesDialog.open(); }
                 }
                 ActionButton {
                     objectName: "refreshButton"
@@ -1716,6 +1966,7 @@ Controls.ApplicationWindow {
         modal: true
         standardButtons: Controls.Dialog.Close
         onOpened: backend.loadRepositories()
+        onClosed: root.restoreDialogFocus()
         contentItem: ColumnLayout {
             spacing: 12
             Flow {
@@ -1724,14 +1975,14 @@ Controls.ApplicationWindow {
                 ActionButton {
                     text: "Add Flatpak repository"; symbol: "install"
                     enabled: !backend.busy
-                    onClicked: addRepositoryDialog.open()
+                    onClicked: { root.rememberDialogFocus(); addRepositoryDialog.open(); }
                 }
                 ActionButton {
                     text: "Software Sources"; symbol: "settings"
                     enabled: !backend.busy
                     onClicked: root.repositoryChange({backend: "apt", name: "sources", scope: "system"}, "open_editor")
                 }
-                ActionButton { text: ""; symbol: "refresh"; Accessible.name: "Reload repositories"; enabled: !backend.busy; onClicked: backend.loadRepositories() }
+                ActionButton { text: ""; symbol: "refresh"; Accessible.name: "Reload repositories"; tooltipText: Accessible.name; enabled: !backend.busy; onClicked: backend.loadRepositories() }
             }
             Controls.BusyIndicator { visible: backend.busy; running: visible; Layout.alignment: Qt.AlignHCenter }
             ListView {
@@ -1763,28 +2014,32 @@ Controls.ApplicationWindow {
                         ColumnLayout {
                             Layout.fillWidth: true; spacing: 3
                             Controls.Label { text: modelData.title || modelData.name; textFormat: Text.PlainText; color: root.ink; elide: Text.ElideRight; Layout.fillWidth: true }
-                            Controls.Label { text: modelData.backend.toUpperCase() + " · " + (modelData.scope === "system" ? "System" : "User") + (modelData.url ? " · " + modelData.url : ""); textFormat: Text.PlainText; color: root.muted; elide: Text.ElideRight; Layout.fillWidth: true; font.pixelSize: 11 }
+                            Controls.Label { text: modelData.backend.toUpperCase() + " · " + (modelData.scope === "system" ? "System" : "User") + (modelData.url ? " · " + modelData.url : ""); textFormat: Text.PlainText; color: root.muted; elide: Text.ElideRight; Layout.fillWidth: true; font.pointSize: root.font.pointSize * 0.9 }
                         }
-                        Controls.Label { visible: modelData.priority !== null; text: "Priority " + modelData.priority; color: root.muted; font.pixelSize: 11 }
+                        Controls.Label { visible: modelData.priority !== null; text: "Priority " + modelData.priority; color: root.muted; font.pointSize: root.font.pointSize * 0.9 }
                         ActionButton {
                             text: ""; symbol: "up"; visible: modelData.backend === "flatpak"
                             Accessible.name: "Increase repository priority"; enabled: !backend.busy && modelData.priority < 9999
+                            tooltipText: Accessible.name
                             onClicked: root.repositoryChange(modelData, "set_priority", {priority: modelData.priority + 1})
                         }
                         ActionButton {
                             text: ""; symbol: "down"; visible: modelData.backend === "flatpak"
                             Accessible.name: "Decrease repository priority"; enabled: !backend.busy && modelData.priority > 0
+                            tooltipText: Accessible.name
                             onClicked: root.repositoryChange(modelData, "set_priority", {priority: modelData.priority - 1})
                         }
                         ActionButton {
                             text: ""; symbol: "settings"; visible: modelData.backend === "apt"
                             Accessible.name: "Edit software sources"; enabled: !backend.busy
+                            tooltipText: Accessible.name
                             onClicked: root.repositoryChange({backend: "apt", name: "sources", scope: "system"}, "open_editor")
                         }
                         ActionButton {
                             objectName: "removeRepositoryButton"
                             text: ""; symbol: "remove"; visible: modelData.backend === "flatpak"
                             Accessible.name: "Remove " + modelData.name; enabled: !backend.busy
+                            tooltipText: Accessible.name
                             onClicked: root.repositoryChange(modelData, "remove")
                         }
                     }
@@ -1804,6 +2059,7 @@ Controls.ApplicationWindow {
         modal: true
         standardButtons: Controls.Dialog.Ok | Controls.Dialog.Cancel
         onOpened: { repositoryName.text = ""; repositoryUrl.text = ""; repositoryName.forceActiveFocus(); }
+        onClosed: root.restoreDialogFocus()
         onAccepted: root.repositoryChange({backend: "flatpak", name: repositoryName.text.trim(), scope: repositoryScope.currentIndex === 0 ? "user" : "system"}, "add", {url: repositoryUrl.text.trim()})
         contentItem: ColumnLayout {
             Controls.TextField { id: repositoryName; objectName: "repositoryName"; placeholderText: "Name"; Accessible.name: "Repository name"; Layout.fillWidth: true }
@@ -1812,17 +2068,83 @@ Controls.ApplicationWindow {
         }
     }
     Controls.Dialog {
-        id: cleanupErrorsDialog
-        objectName: "cleanupErrorsDialog"
+        id: sourceFailuresDialog
+        objectName: "sourceFailuresDialog"
         anchors.centerIn: parent
-        width: Math.min(root.width - 32, 680)
+        width: Math.min(root.width - 32, 620)
+        height: Math.min(root.height - 32, 440)
         modal: true
-        title: "Cleanup checks"
+        title: "Source checks"
         standardButtons: Controls.Dialog.Close
-        contentItem: Controls.Label {
-            text: root.cleanupFailures.map(row => root.sourceDisplayName(row.source) + "\n" + row.summary).join("\n\n")
-            wrapMode: Text.Wrap
-            color: root.muted
+        onOpened: root.expandedFailure = ""
+        onClosed: root.restoreDialogFocus()
+        contentItem: ColumnLayout {
+            spacing: 10
+            Controls.ScrollView {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                contentWidth: availableWidth
+                clip: true
+                Column {
+                    width: parent.width
+                    spacing: 10
+                    Repeater {
+                        model: root.readFailures
+                        delegate: Column {
+                            required property var modelData
+                            width: parent.width
+                            spacing: 4
+                            RowLayout {
+                                width: parent.width
+                                Controls.Label {
+                                    text: root.sourceDisplayName(modelData.source)
+                                    color: root.ink
+                                    font.bold: true
+                                    Layout.fillWidth: true
+                                }
+                                ActionButton {
+                                    text: "Retry"
+                                    symbol: "refresh"
+                                    enabled: !backend.busy && modelData.kind !== "unsupported" && !(root.currentView === "Search" && root.queryDirty)
+                                    onClicked: root.retryFailedSource(modelData.source)
+                                }
+                                ActionButton {
+                                    text: "Details"
+                                    symbol: "help"
+                                    onClicked: root.expandedFailure = root.expandedFailure === modelData.source ? "" : modelData.source
+                                }
+                            }
+                            Controls.Label {
+                                width: parent.width
+                                text: modelData.kind === "unsupported" ? "This source does not support this view." :
+                                    modelData.kind === "authorization" ? "Authorization is required." :
+                                    modelData.kind === "locked" ? "The package manager is busy." :
+                                    modelData.kind === "cancelled" ? "The check was cancelled." : "The source could not be checked."
+                                color: root.muted
+                            }
+                            Controls.Label {
+                                width: parent.width
+                                text: root.failureSummary(modelData.source) + "\nLast successful check: " + root.lastSuccessfulCheck(modelData.source)
+                                textFormat: Text.PlainText
+                                wrapMode: Text.WordWrap
+                                color: root.muted
+                                visible: root.expandedFailure === modelData.source
+                            }
+                        }
+                    }
+                }
+            }
+            ActionButton {
+                text: "Copy diagnostics"
+                symbol: "help"
+                onClicked: { diagnosticsText.selectAll(); diagnosticsText.copy(); diagnosticsText.deselect(); }
+            }
+            TextEdit {
+                id: diagnosticsText
+                visible: false
+                readOnly: true
+                text: root.copyableDiagnostics()
+            }
         }
     }
     Controls.Dialog {
@@ -1834,7 +2156,7 @@ Controls.ApplicationWindow {
         modal: true
         title: root.screenshotCaption || "Screenshot"
         standardButtons: Controls.Dialog.Close
-        onClosed: root.screenshotUrl = ""
+        onClosed: { root.screenshotUrl = ""; root.restoreDialogFocus(); }
         background: Rectangle { color: root.surface; radius: 10; border.color: root.line }
         contentItem: Item {
             Image {
@@ -1879,13 +2201,15 @@ Controls.ApplicationWindow {
         exit: Transition {
             NumberAnimation { property: "opacity"; to: 0; duration: root.feedbackDuration; easing.type: Easing.OutCubic }
         }
-        standardButtons: Controls.Dialog.Yes | Controls.Dialog.No
+        readonly property var preview: JSON.parse(backend.confirmation_data || "{}")
+        standardButtons: Controls.Dialog.Ok | Controls.Dialog.Cancel
+        onClosed: root.restoreDialogFocus()
         onOpened: {
             // Let the buttons own their mnemonics. Separate Shortcuts collide
             // with the automatic button mnemonics in KDE styles.
-            standardButton(Controls.Dialog.Yes).text = "&Yes";
-            standardButton(Controls.Dialog.No).text = "&No";
-            standardButton(Controls.Dialog.No).forceActiveFocus();
+            standardButton(Controls.Dialog.Ok).text = "&" + (preview.action || "Apply").replace(/&/g, "&&");
+            standardButton(Controls.Dialog.Cancel).text = "&Cancel";
+            standardButton(Controls.Dialog.Cancel).forceActiveFocus();
         }
         onAccepted: backend.confirm(true)
         onRejected: backend.confirm(false)
@@ -1896,8 +2220,8 @@ Controls.ApplicationWindow {
             TextEdit {
                 width: confirmationScroll.availableWidth
                 color: root.ink
-                font.pixelSize: 14
-                text: backend.confirmation
+                font.pointSize: root.font.pointSize
+                text: confirmation.preview.body || backend.confirmation
                 readOnly: true
                 selectByMouse: true
                 wrapMode: TextEdit.Wrap
@@ -1918,8 +2242,20 @@ Controls.ApplicationWindow {
         sequence: "Ctrl+F"
         enabled: !backend.writing
         onActivated: {
-            root.openView("Search");
-            search.selectAll();
+            if (root.currentView === "Installed") {
+                installedFilterField.forceActiveFocus();
+                installedFilterField.selectAll();
+            } else if (["Updates", "Clean", "Sources"].indexOf(root.currentView) >= 0) {
+                root.rememberDialogFocus();
+                sourcePopup.mode = "filter";
+                sourcePopup.open();
+                Qt.callLater(() => pickerSearch.forceActiveFocus());
+            } else {
+                if (root.currentView !== "Search")
+                    root.openView("Search");
+                search.forceActiveFocus();
+                search.selectAll();
+            }
         }
     }
     Shortcut {
