@@ -52,10 +52,7 @@ impl<T: Transport> Flatpak<T> {
                     },
                     kind: CleanupKind::OrphanDependencies,
                     title: format!("Unused Flatpak runtimes ({scope})"),
-                    summary: format!(
-                        "{} unused runtimes and extensions; applications and their data are kept",
-                        entries.len()
-                    ),
+                    summary: format!("{} unused runtimes and extensions", entries.len()),
                     preview,
                 })
             })
@@ -143,7 +140,7 @@ impl<T: Transport> DevTool<T> {
                     .trim()
                     .parse()
                     .map_err(|error| invalid("uv", error))?;
-                (size > 0, format!("{size} bytes in the uv cache. Removes cached downloads and builds; installed tools and environments are kept."))
+                (size > 0, format!("{size} bytes cached"))
             }
             DevKind::Pip => {
                 let counts: Vec<_> = output
@@ -164,12 +161,15 @@ impl<T: Transport> DevTool<T> {
         };
         Ok(if present {
             vec![CleanupItem {
-            id: CleanupId { backend: self.kind.id().into(), key: key.into() },
-            kind: CleanupKind::PackageCache,
-            title: title.into(),
-            summary: "Removes cached downloads; installed packages are kept. Future installs may download again.".into(),
-            preview,
-        }]
+                id: CleanupId {
+                    backend: self.kind.id().into(),
+                    key: key.into(),
+                },
+                kind: CleanupKind::PackageCache,
+                title: title.into(),
+                summary: "Clear cached downloads".into(),
+                preview,
+            }]
         } else {
             vec![]
         })
@@ -201,22 +201,10 @@ impl<T: Transport> DevTool<T> {
 }
 
 impl<T: Transport> Apt<T> {
-    pub(super) fn cleanup_apt_report(
-        &self,
-        cancel: &Cancellation,
-        authenticated: bool,
-    ) -> CleanupReport {
+    pub(super) fn cleanup_apt_report(&self, cancel: &Cancellation) -> CleanupReport {
         let mut report = CleanupReport::default();
         for key in ["autoremove", "autoclean"] {
-            // Unauthenticated `autoclean` always fails for unprivileged users
-            // (`/var/cache/apt/archives/partial` is `_apt:root`), which would
-            // bury the actionable `autoremove` plan under a permission error.
-            // Skip the cache probe until the explicit authenticated "Check APT"
-            // preview; it runs the same `--simulate` through the auth boundary.
-            if key == "autoclean" && !authenticated {
-                continue;
-            }
-            match self.cleanup_apt_task(key, cancel, authenticated && key == "autoclean") {
+            match self.cleanup_apt_task(key, cancel) {
                 Ok(Some(item)) => report.items.push(item),
                 Ok(None) => {}
                 Err(error) => report.failures.push(BackendFailure {
@@ -232,36 +220,27 @@ impl<T: Transport> Apt<T> {
         &self,
         key: &str,
         cancel: &Cancellation,
-        authenticated: bool,
     ) -> Result<Option<CleanupItem>, EngineError> {
-        let (args, title, kind): (&[&str], _, _) = match key {
-            "autoremove" => (
-                &[
-                    "--simulate",
-                    "-o",
-                    "Debug::NoLocking=1",
-                    "--purge",
-                    "autoremove",
-                ],
-                "Unused dependencies",
-                CleanupKind::OrphanDependencies,
-            ),
-            "autoclean" => (
-                &["--simulate", "-o", "Debug::NoLocking=1", "autoclean"],
-                "Obsolete package downloads",
-                CleanupKind::PackageCache,
-            ),
-            _ => return Err(invalid("apt", "unknown cleanup task")),
-        };
-        // Authentication is only used by an explicit preview request or an already
-        // confirmed cleanup. Both paths retain --simulate: no discovery mutates APT.
+        if key == "autoclean" {
+            return self.cleanup_apt_cache(cancel);
+        }
+        if key != "autoremove" {
+            return Err(invalid("apt", "unknown cleanup task"));
+        }
+        let args = [
+            "--simulate",
+            "-o",
+            "Debug::NoLocking=1",
+            "--purge",
+            "autoremove",
+        ];
         let output = String::from_utf8(bytes(
             "apt",
             self.transport.system_manager(
                 "apt-get",
                 &args.iter().map(OsString::from).collect::<Vec<_>>(),
                 cancel,
-                authenticated,
+                false,
             )?,
         )?)
         .map_err(|error| invalid("apt", error))?;
@@ -280,17 +259,80 @@ impl<T: Transport> Apt<T> {
                 backend: "apt".into(),
                 key: key.into(),
             },
-            kind,
-            title: title.into(),
-            summary: if key == "autoremove" {
-                format!(
-                    "APT can remove {} unused package entries and leftover configuration",
-                    actionable.len()
-                )
-            } else {
-                format!("APT can remove {} cached package files", actionable.len())
-            },
+            kind: CleanupKind::OrphanDependencies,
+            title: "Unused dependencies".into(),
+            summary: format!("{} removable entries", actionable.len()),
             preview: actionable.join("\n"),
+        }))
+    }
+
+    fn cleanup_apt_cache(&self, cancel: &Cancellation) -> Result<Option<CleanupItem>, EngineError> {
+        // `apt-get --simulate autoclean` reads the root-only archives/partial
+        // directory. Count visible downloads instead; APT selects obsolete
+        // files only when the user authorizes the actual cleanup.
+        let config = String::from_utf8(bytes(
+            "apt",
+            self.transport.system_manager(
+                "apt-config",
+                &[
+                    "shell",
+                    "ROOT",
+                    "Dir",
+                    "CACHE",
+                    "Dir::Cache",
+                    "ARCHIVES",
+                    "Dir::Cache::archives",
+                ]
+                .map(OsString::from),
+                cancel,
+                false,
+            )?,
+        )?)
+        .map_err(|error| invalid("apt", error))?;
+        let value = |key: &str| {
+            config
+                .lines()
+                .find_map(|line| {
+                    line.strip_prefix(&format!("{key}='"))
+                        .and_then(|value| value.strip_suffix('\''))
+                })
+                .filter(|value| !value.is_empty() && !value.contains('\''))
+                .ok_or_else(|| invalid("apt", format!("missing {key} cache path")))
+        };
+        let archives = PathBuf::from(value("ROOT")?)
+            .join(value("CACHE")?)
+            .join(value("ARCHIVES")?);
+        let entries = bytes(
+            "apt",
+            self.transport.system_manager(
+                "find",
+                &[
+                    archives.into_os_string(),
+                    "-maxdepth".into(),
+                    "1".into(),
+                    "-type".into(),
+                    "f".into(),
+                    "-name".into(),
+                    "*.deb".into(),
+                    "-printf".into(),
+                    ".".into(),
+                ],
+                cancel,
+                false,
+            )?,
+        )?;
+        if entries.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(CleanupItem {
+            id: CleanupId {
+                backend: "apt".into(),
+                key: "autoclean".into(),
+            },
+            kind: CleanupKind::PackageCache,
+            title: "APT download cache".into(),
+            summary: format!("{} cached downloads", entries.len()),
+            preview: "APT selects obsolete downloads during cleanup.".into(),
         }))
     }
 }

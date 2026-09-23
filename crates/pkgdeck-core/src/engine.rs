@@ -122,10 +122,6 @@ pub trait Backend: Send {
             },
         }
     }
-    /// Explicitly authorized read-only discovery; never used by background loads.
-    fn cleanup_authenticated(&mut self, cancel: &Cancellation) -> CleanupReport {
-        self.cleanup_report(cancel)
-    }
     fn cleanup_plan(
         &mut self,
         id: &CleanupId,
@@ -307,12 +303,6 @@ impl Engine {
     /// Discover cleanup plans independently per backend. Sources without a
     /// cleanup capability are omitted; they have nothing to show on this view.
     pub fn cleanup(&mut self, cancel: &Cancellation) -> CleanupReport {
-        self.cleanup_inner(cancel, false)
-    }
-    pub fn cleanup_authenticated(&mut self, cancel: &Cancellation) -> CleanupReport {
-        self.cleanup_inner(cancel, true)
-    }
-    fn cleanup_inner(&mut self, cancel: &Cancellation, authenticated: bool) -> CleanupReport {
         self.cleanup_plans.clear();
         let mut report = CleanupReport::default();
         let ids: Vec<_> = self.backends.keys().cloned().collect();
@@ -325,13 +315,9 @@ impl Engine {
                 continue;
             }
             let mut seen = BTreeSet::new();
-            let result = self.ready(&id, Capability::Clean, cancel).map(|backend| {
-                if authenticated {
-                    backend.cleanup_authenticated(cancel)
-                } else {
-                    backend.cleanup_report(cancel)
-                }
-            });
+            let result = self
+                .ready(&id, Capability::Clean, cancel)
+                .map(|backend| backend.cleanup_report(cancel));
             match result {
                 Ok(partial)
                     if partial.failures.iter().all(|failure| failure.backend == id)

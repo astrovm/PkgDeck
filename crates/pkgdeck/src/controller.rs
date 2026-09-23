@@ -33,7 +33,6 @@ pub mod ffi {
         #[qproperty(QString, version)]
         #[qproperty(bool, busy)]
         #[qproperty(bool, writing)]
-        #[qproperty(bool, inspecting)]
         #[qproperty(bool, upgradable)]
         type PackageController = super::Controller;
         #[qinvokable]
@@ -75,18 +74,12 @@ enum Job {
     Write(Operation),
     UpgradeAll(Vec<Operation>),
     CleanAll(Vec<Operation>),
-    InspectCleanup,
 }
 impl Job {
-    // Authenticated inspection also takes the non-preemptible foreground lock.
     fn writes(&self) -> bool {
         matches!(
             self,
-            Self::Write(_)
-                | Self::UpgradeAll(_)
-                | Self::CleanAll(_)
-                | Self::Repositories(Some(_))
-                | Self::InspectCleanup
+            Self::Write(_) | Self::UpgradeAll(_) | Self::CleanAll(_) | Self::Repositories(Some(_))
         )
     }
 }
@@ -127,7 +120,6 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
     }
     let result = match job {
         Job::Repositories(_) => Err(EngineError::NotFound),
-        Job::InspectCleanup => Ok(Payload::Cleanup(engine.cleanup_authenticated(cancel))),
         Job::Load(view, query) => {
             if view == "Sources" {
                 Ok(Payload::Sources(engine.discover(cancel)))
@@ -250,7 +242,6 @@ pub struct Controller {
     version: QString,
     busy: bool,
     writing: bool,
-    inspecting: bool,
     upgradable: bool,
     updates_view: bool,
     packages: Vec<Package>,
@@ -281,7 +272,6 @@ impl Default for Controller {
             version: pkgdeck_core::VERSION.into(),
             busy: false,
             writing: false,
-            inspecting: false,
             upgradable: false,
             updates_view: false,
             packages: vec![],
@@ -652,8 +642,6 @@ impl ffi::PackageController {
             }
         });
         let writing = worker_job.writes();
-        self.as_mut()
-            .set_inspecting(matches!(worker_job, Job::InspectCleanup));
         self.as_mut().rust_mut().worker = Some(Worker {
             handle,
             receiver,
@@ -899,11 +887,6 @@ impl ffi::PackageController {
             return;
         }
         let action = action.to_string();
-        if action == "inspect-clean" {
-            self.as_mut().set_confirmation("Authenticate to inspect protected APT cleanup candidates? This only previews changes; nothing will be removed.".into());
-            self.rust_mut().pending = Some(Job::InspectCleanup);
-            return;
-        }
         if action == "upgrade-all" {
             if !self.upgradable {
                 return;
@@ -944,7 +927,7 @@ impl ffi::PackageController {
                 .map(|item| format!("{} ({})\n{}", item.title, item.id.backend, item.preview))
                 .collect::<Vec<_>>()
                 .join("\n\n");
-            self.as_mut().set_confirmation(format!("Run {} cleanup tasks?\n\n{labels}\n\nThe native managers selected these files and dependencies. Completed tasks are not rolled back if another fails. Continue?", operations.len()).as_str().into());
+            self.as_mut().set_confirmation(format!("Run {} cleanup tasks?\n\n{labels}\n\nTasks run in order. Completed tasks cannot be undone.", operations.len()).as_str().into());
             self.rust_mut().pending = Some(Job::CleanAll(operations));
             return;
         }
@@ -1000,19 +983,19 @@ impl ffi::PackageController {
                     .cleanup
                     .iter()
                     .find(|item| item.id == *id)
-                    .map(|item| format!("{} ({})\n\n{}", item.title, id.backend, item.preview))
+                    .map(|item| format!("Clean {}?\n\n{}", item.title, item.preview))
                     .unwrap_or_else(|| operation_label(op))
             } else {
                 confirmation_label(op, &self.rust().packages)
             };
-            self.as_mut().set_confirmation(
-                format!(
-                    "{}\n\nNative dependency changes may follow. Continue?",
-                    label
-                )
-                .as_str()
-                .into(),
-            );
+            self.as_mut()
+                .set_confirmation(if matches!(op, Operation::Clean(_)) {
+                    label.as_str().into()
+                } else {
+                    format!("{label}\n\nNative dependency changes may follow. Continue?")
+                        .as_str()
+                        .into()
+                });
         } else {
             self.as_mut().set_confirmation(QString::default());
         }
@@ -1359,12 +1342,6 @@ impl ffi::PackageController {
                                     self.rust().sudo,
                                 ))
                             }
-                            Job::InspectCleanup => Some(cache_key(
-                                "Clean",
-                                "",
-                                &self.rust().source_filter,
-                                self.rust().sudo,
-                            )),
                             _ => None,
                         };
                         let stashable = matches!(
@@ -1389,7 +1366,6 @@ impl ffi::PackageController {
             self.as_mut().rust_mut().background = false;
             let queued = self.as_mut().rust_mut().queued.take();
             self.as_mut().set_writing(false);
-            self.as_mut().set_inspecting(false);
             self.as_mut().set_busy(false);
             // A selection or view change that arrived while the worker was
             // busy starts now that the previous job has fully terminated.
@@ -1602,26 +1578,6 @@ mod tests {
             Some(Job::Load(view, query)) if view == "Search" && query == "fixture"
         ));
         assert!(*controller.busy());
-    }
-
-    #[test]
-    fn protected_cleanup_inspection_requires_explicit_confirmation() {
-        let mut controller = ffi::create_controller();
-        let mut controller = controller.pin_mut();
-        controller.as_mut().propose("inspect-clean".into(), -1);
-        assert!(matches!(
-            controller.rust().pending,
-            Some(Job::InspectCleanup)
-        ));
-        assert!(controller
-            .confirmation()
-            .to_string()
-            .contains("nothing will be removed"));
-        assert!(controller.rust().worker.is_none());
-        controller.as_mut().confirm(false);
-        assert!(controller.rust().pending.is_none());
-        assert!(controller.rust().worker.is_none());
-        assert!(Job::InspectCleanup.writes()); // Locks navigation during authentication only.
     }
 
     #[test]

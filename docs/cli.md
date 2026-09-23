@@ -103,10 +103,9 @@ npm, pip, and uv caches. Volumes are never included. pip requires an explicit
 virtual environment, as with its other operations. pnpm pruning and Podman build
 cache cleanup and Flatpak unused-runtime removal are not offered because an accurate native preview is unavailable.
 
-Use `pkd clean --authenticate` to inspect protected APT cache files. This only
-runs a privileged simulation; removing files requires a separate cleanup command
-and confirmation. Each confirmed preview is revalidated before execution; changed
-plans require another review. Sources without a supported preview are omitted.
+`pkd clean` lists tasks without authentication. APT determines which cached downloads
+are obsolete when cleaning; the list only counts cached files. Confirmed plans are
+revalidated before execution. Sources without cleanup support are omitted.
 
 ## Output contract, version 1
 

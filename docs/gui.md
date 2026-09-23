@@ -32,12 +32,11 @@ search for the exact tagged reference.
 
 ## Clean
 
-Clean lists manager-native maintenance plans after a successful dry run. Inspect
-one task or choose **Clean all**; every write requires confirmation of the plan.
-Sources without cleanup support are omitted. Failed checks appear separately from
-cleanup tasks, with diagnostic details available from the notice. **Check APT**
-authenticates for a read-only preview of protected cache files. It does not remove
-anything.
+Clean lists available maintenance tasks. Inspect one task or choose **Clean all**;
+writes require confirmation. Sources without cleanup support are omitted. Failed
+checks appear separately. APT checks unused dependencies without authentication
+and counts cached downloads without entering its protected directory. APT chooses
+obsolete downloads when cleanup runs, then asks for system authentication.
 
 Views show cached results immediately for up to 60 seconds and refresh expired
 results while keeping them visible. Installed and Updates share one inventory.

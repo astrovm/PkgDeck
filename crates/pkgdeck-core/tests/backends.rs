@@ -180,6 +180,15 @@ impl Transport for Fixture {
             return Ok(output(""));
         }
         let args: Vec<_> = args.iter().map(|arg| arg.to_string_lossy()).collect();
+        if executable == "apt-config" {
+            return Ok(output(
+                "ROOT='/'\nCACHE='var/cache/apt'\nARCHIVES='archives/'\n",
+            ));
+        }
+        if executable == "find" {
+            assert_eq!(args[0], "/var/cache/apt/archives/");
+            return Ok(output("..."));
+        }
         if executable == "apt-get" {
             if args.contains(&"autoremove".into()) {
                 return Ok(output("Remv synthetic-orphan [1.0]\n"));
@@ -344,27 +353,25 @@ fn apt_cleanup_uses_dry_run_plans_and_fixed_operations() {
     let fixture = Fixture::new();
     let mut apt = Apt::new(fixture);
     let cancel = Cancellation::default();
-    // Unauthenticated discovery offers the orphan plan while the cache probe
-    // waits for the explicit authenticated preview.
     let items = apt.cleanup(&cancel).unwrap();
-    assert_eq!(items.len(), 1);
+    assert_eq!(items.len(), 2);
     assert_eq!(items[0].id.backend, "apt");
     assert_eq!(items[0].id.key, "autoremove");
-    let report = apt.cleanup_authenticated(&cancel);
-    assert_eq!(report.items.len(), 2);
-    assert!(report.failures.is_empty());
-    for item in report.items {
+    assert_eq!(items[1].id.key, "autoclean");
+    assert_eq!(items[1].summary, "3 cached downloads");
+    assert!(!items[1].preview.contains("synthetic-cache"));
+    for item in items {
         apt.execute(&Operation::Clean(item.id), &cancel, &mut |_| {})
             .unwrap();
     }
 }
 
 #[test]
-fn authenticated_apt_cache_plan_survives_engine_revalidation() {
+fn apt_cache_plan_survives_engine_revalidation_without_preview_authentication() {
     let cancel = Cancellation::default();
     let mut engine = Engine::default();
     engine.register(Apt::new(Fixture::new())).unwrap();
-    let report = engine.cleanup_authenticated(&cancel);
+    let report = engine.cleanup(&cancel);
     assert!(report.failures.is_empty());
     let cache = report
         .items
@@ -3355,6 +3362,7 @@ struct CleanupFixture {
     preview: String,
     truncated: bool,
     apt_cache_denied: bool,
+    apt_cache_empty: bool,
     calls: Arc<Mutex<Vec<DevCall>>>,
 }
 impl Transport for CleanupFixture {
@@ -3386,15 +3394,19 @@ impl Transport for CleanupFixture {
         authenticated: bool,
     ) -> Result<Completion, ExecutionError> {
         self.dev_tool(exe, args, cancel, authenticated)?;
-        let cache = args.iter().any(|arg| arg == "autoclean");
-        if cache && self.apt_cache_denied && !authenticated {
+        if exe == "apt-config" {
+            return Ok(output(
+                "ROOT='/'\nCACHE='var/cache/apt'\nARCHIVES='archives/'\n",
+            ));
+        }
+        if exe == "find" && self.apt_cache_denied {
             return Err(ExecutionError::Io("Permission denied".into()));
         }
-        Ok(output(if cache {
-            "Del obsolete-package 1.0 [1 kB]\n"
-        } else {
-            "Remv unused-package [1.0]\n"
-        }))
+        if exe == "find" {
+            return Ok(output(if self.apt_cache_empty { "" } else { "..." }));
+        }
+        assert_eq!(exe, "apt-get");
+        Ok(output("Remv unused-package [1.0]\n"))
     }
     fn flatpak_unused(&self, _: &Cancellation) -> Result<Completion, ExecutionError> {
         let mut result = output(&self.preview);
@@ -3638,25 +3650,24 @@ fn cache_cleanup_does_not_offer_empty_or_invalid_inventories() {
 }
 
 #[test]
-fn apt_cleanup_preserves_orphans_and_authenticates_only_explicit_cache_preview() {
+fn apt_cleanup_loads_cache_without_authentication_and_preserves_orphans_on_failure() {
     let fixture = CleanupFixture {
         apt_cache_denied: true,
         ..Default::default()
     };
     let mut backend = Apt::new(fixture.clone());
-    // Unauthenticated discovery skips the cache probe (it needs the auth
-    // boundary) instead of reporting a permission failure.
     let report = backend.cleanup_report(&Cancellation::default());
     assert_eq!(report.items.len(), 1);
     assert_eq!(report.items[0].id.key, "autoremove");
-    assert!(report.failures.is_empty());
+    assert_eq!(report.failures.len(), 1);
     assert!(fixture
         .calls
         .lock()
         .unwrap()
         .iter()
         .all(|(_, _, authenticated)| !authenticated));
-    let report = backend.cleanup_authenticated(&Cancellation::default());
+    let mut backend = Apt::new(CleanupFixture::default());
+    let report = backend.cleanup_report(&Cancellation::default());
     assert_eq!(report.items.len(), 2);
     assert!(report.failures.is_empty());
     let plan = backend
@@ -3670,10 +3681,8 @@ fn apt_cleanup_preserves_orphans_and_authenticates_only_explicit_cache_preview()
         .unwrap();
     assert_eq!(plan.id.key, "autoclean");
     for (_, args, authenticated) in fixture.calls.lock().unwrap().iter() {
-        assert!(args.contains(&"--simulate".into()));
-        if *authenticated {
-            assert!(args.contains(&"autoclean".into()));
-        }
+        assert!(!authenticated);
+        assert!(!args.contains(&"autoclean".into()));
     }
     assert!(backend
         .cleanup_plan(
@@ -3684,6 +3693,13 @@ fn apt_cleanup_preserves_orphans_and_authenticates_only_explicit_cache_preview()
             &Cancellation::default()
         )
         .is_err());
+    let mut backend = Apt::new(CleanupFixture {
+        apt_cache_empty: true,
+        ..Default::default()
+    });
+    let report = backend.cleanup_report(&Cancellation::default());
+    assert_eq!(report.items.len(), 1);
+    assert_eq!(report.items[0].id.key, "autoremove");
 }
 
 #[test]

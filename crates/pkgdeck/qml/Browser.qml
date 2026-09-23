@@ -665,7 +665,7 @@ Controls.ApplicationWindow {
                 root.beforeWrite = snapshot;
                 root.completedRows = [];
             }
-            if (!backend.writing && !backend.inspecting && ["Search", "Installed", "Updates", "Clean", "Sources"].indexOf(root.currentView) >= 0)
+            if (!backend.writing && ["Search", "Installed", "Updates", "Clean", "Sources"].indexOf(root.currentView) >= 0)
                 postWriteReload.restart();
         }
         function onRowsChanged() {
@@ -1076,7 +1076,7 @@ Controls.ApplicationWindow {
                 }
             }
             RowLayout {
-                visible: root.currentView === "Clean" && (root.cleanupFailures.length > 0 || root.checkedSources().indexOf("apt") >= 0)
+                visible: root.currentView === "Clean" && root.cleanupFailures.length > 0
                 Layout.fillWidth: true
                 DeckIcon { name: "warning"; ink: root.muted; Layout.preferredWidth: 20; Layout.preferredHeight: 20; visible: root.cleanupFailures.length > 0 }
                 Controls.Label {
@@ -1086,14 +1086,6 @@ Controls.ApplicationWindow {
                     color: root.muted
                     wrapMode: Text.WordWrap
                     Layout.fillWidth: true
-                }
-                ActionButton {
-                    objectName: "cleanupAuthenticate"
-                    visible: root.currentView === "Clean" && root.checkedSources().indexOf("apt") >= 0
-                    text: "Check APT"
-                    symbol: "refresh"
-                    enabled: !backend.busy
-                    onClicked: backend.propose("inspect-clean", -1)
                 }
                 ActionButton {
                     objectName: "cleanupFailureDetails"
