@@ -1426,12 +1426,10 @@ impl ffi::PackageController {
         }
     }
     fn apply(mut self: Pin<&mut Self>, result: Result<Payload, EngineError>) {
-        if matches!(self.rust().queued, Some(Job::Load(..)))
-            && matches!(
-                result,
-                Ok(Payload::Cleanup(_) | Payload::UpgradePreview(..))
-            )
-        {
+        // A newer view or query owns the next visible report. A cancelled
+        // worker can still race one final partial into the channel, so none
+        // of its successful payloads may replace the new query's empty state.
+        if matches!(self.rust().queued, Some(Job::Load(..))) && result.is_ok() {
             return;
         }
         match result {
@@ -2393,6 +2391,21 @@ mod tests {
             Some(Job::Load(view, query)) if view == "Search" && query == "fixture"
         ));
         assert!(*controller.busy());
+    }
+
+    #[test]
+    fn superseded_search_drops_late_successful_payloads() {
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().set_rows("new-query-pending".into());
+        controller.as_mut().rust_mut().queued =
+            Some(Job::Load("Search".into(), "new-query".into()));
+        controller
+            .as_mut()
+            .apply(Ok(Payload::Packages(PackageReport::default())));
+        assert_eq!(controller.rows().to_string(), "new-query-pending");
+        controller.as_mut().apply(Ok(Payload::Sources(vec![])));
+        assert_eq!(controller.rows().to_string(), "new-query-pending");
     }
 
     #[test]

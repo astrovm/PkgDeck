@@ -5,6 +5,9 @@ fn main() {
         QmlModule::new("io.github.astrovm.PkgDeck")
             .qml_file("qml/Main.qml")
             .qml_file("qml/Browser.qml")
+            .qml_file("qml/SearchPane.qml")
+            .qml_file("qml/UpdatesActions.qml")
+            .qml_file("qml/PackageDetails.qml")
             .qml_file("qml/DeckIcon.qml"),
     )
     .qrc("resources.qrc")

@@ -130,7 +130,7 @@ Controls.ApplicationWindow {
     function retryFailedSource(id) {
         if (currentView === "Search" && queryDirty)
             return;
-        const query = currentView === "Installed" ? "" : search.text;
+        const query = currentView === "Installed" ? "" : searchPane.text;
         backend.retrySource(currentView, query, id);
         sourceFailuresDialog.close();
     }
@@ -151,7 +151,7 @@ Controls.ApplicationWindow {
             return reportState.phase === "partial" ? "No results from the sources that completed." : "Could not check these sources.";
         if (reportState.phase === "unsupported")
             return "No enabled sources support this view.";
-        if (currentView === "Search" && search.text.trim().length === 0)
+        if (currentView === "Search" && searchPane.text.trim().length === 0)
             return "";
         if (currentView === "Installed" && (installedFilter.length > 0 || multiSourceOnly))
             return "No packages match these filters.";
@@ -473,7 +473,7 @@ Controls.ApplicationWindow {
                 return (x < y ? -dir : (x > y ? dir : 0)) || relevanceTiebreak(a, b) * dir;
             });
         } else if (root.currentView === "Search") {
-            const query = search.text.trim().toLowerCase();
+            const query = searchPane.text.trim().toLowerCase();
             if (query !== "")
                 rows.sort((a, b) => ((isFabricated(a) ? 1 : 0) - (isFabricated(b) ? 1 : 0)) || (relevanceScore(a, query) - relevanceScore(b, query)) || relevanceTiebreak(a, b));
         }
@@ -719,7 +719,7 @@ Controls.ApplicationWindow {
         currentView = view;
         results.currentIndex = -1;
         if (view === "Search")
-            search.forceActiveFocus();
+            searchPane.focusSearch(false);
         else if (["Search", "Installed", "Updates", "Clean", "Sources"].indexOf(view) >= 0)
             reload();
     }
@@ -736,7 +736,7 @@ Controls.ApplicationWindow {
         // Installed filtering is client-side over the loaded rows (see
         // viewItems), so the backend always returns the full installed set
         // and typing never triggers a native query.
-        backend.load(currentView, currentView === "Installed" ? "" : search.text, checkedCsv(), useSudo, force === true);
+        backend.load(currentView, currentView === "Installed" ? "" : searchPane.text, checkedCsv(), useSudo, force === true);
         if (!backend.busy)
             retainingResults = false;
     }
@@ -757,7 +757,8 @@ Controls.ApplicationWindow {
             }
         }
         results.currentIndex = -1;
-        selectedIdentity = null;
+        if (currentView !== "Search" || !items.some((row) => rowIdentity(row) === selectedIdentity))
+            selectedIdentity = null;
     }
     onViewItemsChanged: Qt.callLater(root.restoreSelection)
     function propose(action) {
@@ -844,7 +845,7 @@ Controls.ApplicationWindow {
     }
     NumberAnimation {
         id: detailsReveal
-        target: detailsContent
+        target: detailsPanel.detailsContentItem
         property: "opacity"
         from: 0.55
         to: 1
@@ -1141,49 +1142,29 @@ Controls.ApplicationWindow {
                     }
                 }
             }
-            RowLayout {
-                Layout.fillWidth: true
+            SearchPane {
+                id: searchPane
                 visible: root.currentView === "Search"
-                Controls.TextField {
-                    id: search
-                    objectName: "searchField"
-                    Layout.fillWidth: true
-                    placeholderText: "Search apps and packages"
-                    Accessible.name: "Search packages"
-                    enabled: !backend.writing
-                    selectByMouse: true
-                    implicitHeight: Math.max(44, root.font.pointSize * 3.4)
-                    color: root.ink
-                    placeholderTextColor: root.muted
-                    leftPadding: 14
-                    background: Rectangle {
-                        color: root.surface
-                        radius: 8
-                        border.color: search.activeFocus ? root.accent : root.line
-                        border.width: search.activeFocus ? 2 : 1
-                    }
-                    onAccepted: {
-                        root.currentView = "Search";
-                        root.queryDirty = false;
-                        // A fresh search resets to best-match order: a stale
-                        // column sort would otherwise silently win over it.
-                        root.sortColumn = "";
-                        root.reload(true);
-                    }
-                    Keys.onDownPressed: {
-                        results.forceActiveFocus();
-                        if (root.viewItems.length > 0)
-                            root.choose(0);
-                    }
-                    onTextChanged: root.queryDirty = true
+                writing: backend.writing
+                surface: root.surface
+                ink: root.ink
+                muted: root.muted
+                line: root.line
+                accent: root.accent
+                onAccent: root.palette.highlightedText
+                textFont: root.font
+                onSubmitted: {
+                    root.currentView = "Search";
+                    root.queryDirty = false;
+                    root.sortColumn = "";
+                    root.reload(true);
                 }
-                ActionButton {
-                    text: "Search"
-                    symbol: "search"
-                    primary: true
-                    enabled: !backend.writing && search.text.trim().length > 0
-                    onClicked: { root.currentView = "Search"; root.queryDirty = false; root.sortColumn = ""; root.reload(true); }
+                onDownRequested: {
+                    results.forceActiveFocus();
+                    if (root.viewItems.length > 0)
+                        root.choose(0);
                 }
+                onQueryEdited: root.queryDirty = true
             }
             RowLayout {
                 Layout.fillWidth: true
@@ -1781,159 +1762,38 @@ Controls.ApplicationWindow {
                     }
                 }
             }
-            Rectangle {
+            PackageDetails {
                 id: detailsPanel
-                objectName: "detailsPanel"
                 visible: root.selected !== null && ["Search", "Installed", "Updates", "Clean", "Sources"].indexOf(root.currentView) >= 0
                 Layout.fillWidth: true
                 Layout.preferredHeight: root.visibleScreenshots.length > 0 ? Math.min(root.height * (root.compact ? 0.35 : 0.42), 320) : Math.min(root.height * 0.27, 180)
-                color: root.surface
-                radius: 10
-                border.color: root.line
-                ColumnLayout {
-                    id: detailsContent
-                    objectName: "detailsContent"
-                    anchors.fill: parent
-                    anchors.margins: 16
-                    spacing: 6
-                    RowLayout {
-                        Layout.fillWidth: true
-                        Item {
-                            visible: detailIcon.status !== Image.Ready
-                            Layout.preferredWidth: 40
-                            Layout.preferredHeight: 40
-                            DeckIcon {
-                                name: root.selected ? (root.selected.kind === "source" ? root.selected.source : (root.selected.kind === "failure" ? "warning" : "package")) : "package"
-                                ink: root.accent
-                                anchors.centerIn: parent
-                                width: 24
-                                height: 24
-                            }
-                        }
-                        Image {
-                            id: detailIcon
-                            visible: status === Image.Ready
-                            asynchronous: true
-                            source: root.iconUrl(root.selectedIcon)
-                            sourceSize.width: 40
-                            sourceSize.height: 40
-                            fillMode: Image.PreserveAspectFit
-                            Layout.preferredWidth: 40
-                            Layout.preferredHeight: 40
-                            Accessible.ignored: true
-                        }
-                        Controls.Label {
-                        text: root.selected ? (root.selected.display_name || root.selected.name) : ""
-                        textFormat: Text.PlainText
-                        color: root.ink
-                        font.pointSize: root.font.pointSize * (root.compact ? 1.3 : 1.6)
-                        font.bold: true
-                        elide: Text.ElideRight
-                        Layout.fillWidth: true
-                        }
-                        ActionButton {
-                            objectName: "closeDetailsButton"
-                            text: ""
-                            symbol: "cancel"
-                            Accessible.name: "Close details"
-                            tooltipText: Accessible.name
-                            Layout.preferredWidth: 38
-                            horizontalPadding: 8
-                            onClicked: {
-                                results.currentIndex = -1;
-                                root.selectedIdentity = null;
-                                results.forceActiveFocus();
-                            }
-                        }
-                    }
-                    Controls.ScrollView {
-                        id: detailScroll
-                        Layout.fillWidth: true
-                        Layout.fillHeight: true
-                        contentWidth: availableWidth
-                        clip: true
-                        ColumnLayout {
-                            width: detailScroll.availableWidth
-                            spacing: 10
-                            ListView {
-                                id: screenshotGallery
-                                objectName: "screenshotGallery"
-                                visible: root.visibleScreenshots.length > 0
-                                Layout.fillWidth: true
-                                Layout.preferredHeight: root.compact ? 72 : 130
-                                orientation: ListView.Horizontal
-                                spacing: 10
-                                clip: true
-                                model: root.visibleScreenshots
-                                cacheBuffer: 0
-                                reuseItems: true
-                                delegate: Controls.AbstractButton {
-                                    required property var modelData
-                                    width: root.compact ? 128 : 230
-                                    height: screenshotGallery.height
-                                    enabled: preview.status === Image.Ready
-                                    Accessible.name: modelData.caption || "View app screenshot"
-                                    Controls.ToolTip.visible: hovered
-                                    Controls.ToolTip.text: Accessible.name
-                                    onClicked: {
-                                        root.rememberDialogFocus();
-                                        root.screenshotUrl = modelData.url;
-                                        root.screenshotCaption = modelData.caption || "";
-                                        screenshotDialog.open();
-                                    }
-                                    background: Rectangle { color: root.canvas; radius: 6; border.color: parent.activeFocus ? root.accent : root.line }
-                                    contentItem: Item {
-                                        Image {
-                                            id: preview
-                                            onStatusChanged: {
-                                                if (status === Image.Error) {
-                                                    const failedUrl = modelData.url;
-                                                    const identity = root.rowIdentity(root.selected);
-                                                    Qt.callLater(root.hideFailedScreenshot, failedUrl, identity);
-                                                }
-                                            }
-                                            anchors.fill: parent
-                                            source: root.detailMatchesSelection ? modelData.url : ""
-                                            asynchronous: true
-                                            cache: true
-                                            sourceSize.width: 960
-                                            sourceSize.height: 540
-                                            fillMode: Image.PreserveAspectFit
-                                        }
-                                        Controls.BusyIndicator {
-                                            anchors.centerIn: parent
-                                            width: 28; height: 28
-                                            visible: preview.status === Image.Loading && root.motionEnabled
-                                            running: visible
-                                        }
-                                        Controls.Label {
-                                            anchors.centerIn: parent
-                                            width: parent.width - 12
-                                            horizontalAlignment: Text.AlignHCenter
-                                            color: root.muted
-                                            wrapMode: Text.WordWrap
-                                            text: "Loading…"
-                                            visible: preview.status === Image.Loading && !root.motionEnabled
-                                        }
-                                    }
-                                }
-                            }
-                            TextEdit {
-                                objectName: "packageDetails"
-                                Layout.fillWidth: true
-                                readOnly: true
-                                selectByMouse: true
-                                color: root.muted
-                                padding: 0
-                                font.pointSize: root.font.pointSize
-                                wrapMode: TextEdit.Wrap
-                                textFormat: TextEdit.PlainText
-                                text: root.detailText()
-                                Accessible.name: "Package details"
-                            }
-                        }
-                    }
+                selected: root.selected
+                selectionIdentity: root.rowIdentity(root.selected)
+                screenshots: root.visibleScreenshots
+                description: root.detailText()
+                iconSource: root.iconUrl(root.selectedIcon)
+                compact: root.compact
+                motionEnabled: root.motionEnabled
+                detailMatchesSelection: root.detailMatchesSelection
+                textFont: root.font
+                canvas: root.canvas
+                surface: root.surface
+                ink: root.ink
+                muted: root.muted
+                line: root.line
+                accent: root.accent
+                onCloseRequested: {
+                    results.currentIndex = -1;
+                    root.selectedIdentity = null;
+                    results.forceActiveFocus();
                 }
+                onScreenshotRequested: (url, caption) => {
+                    root.rememberDialogFocus();
+                    root.screenshotUrl = url;
+                    root.screenshotCaption = caption;
+                    screenshotDialog.open();
+                }
+                onScreenshotFailed: (url, identity) => root.hideFailedScreenshot(url, identity)
             }
             Flow {
                 objectName: "updatesActions"
@@ -1949,40 +1809,27 @@ Controls.ApplicationWindow {
                     enabled: !backend.busy
                     onClicked: backend.propose("clean-all", -1)
                 }
-                ActionButton {
-                    objectName: "upgradeAllButton"
-                    visible: root.currentView === "Updates" && (root.uncheckedPackages.length === 0 || root.selectedCount() > 0)
-                    text: root.uncheckedPackages.length === 0 ? "Update all" : (root.compact ? "Update" : "Update selected")
-                    Accessible.name: root.uncheckedPackages.length === 0 ? "Update all" : "Update selected"
-                    symbol: "updates"
-                    primary: true
-                    enabled: !backend.busy && (root.uncheckedPackages.length > 0 || backend.upgradable)
-                    onClicked: root.upgradeUpdates()
-                }
-                ActionButton {
-                    objectName: "selectNoneButton"
-                    visible: root.currentView === "Updates" && root.selectedCount() > 0
-                    text: "Select none"
-                    symbol: "cancel"
-                    enabled: !backend.writing
-                    onClicked: root.selectNonePackages()
-                }
-                ActionButton {
-                    objectName: "selectAllButton"
-                    visible: root.currentView === "Updates" && root.uncheckedPackages.length > 0
-                    text: "Select all"
-                    symbol: "installed"
-                    enabled: !backend.writing
-                    onClicked: root.uncheckedPackages = []
-                }
-                Controls.Label {
-                    objectName: "upgradeAllHint"
-                    visible: root.currentView === "Updates" && !backend.upgradable && !backend.busy && root.items.some((row) => row.kind === "failure")
-                    text: "Update all is unavailable while a source has failed."
-                    color: root.muted
-                    font.pointSize: root.font.pointSize * 0.9
-                    wrapMode: Text.WordWrap
-                    Layout.fillWidth: true
+                UpdatesActions {
+                    active: root.currentView === "Updates"
+                    width: Math.min(parent.width, preferredWidth)
+                    compact: root.compact
+                    busy: backend.busy
+                    writing: backend.writing
+                    upgradable: backend.upgradable
+                    selectedCount: root.selectedCount()
+                    uncheckedCount: root.uncheckedPackages.length
+                    failed: root.items.some((row) => row.kind === "failure")
+                    textFont: root.font
+                    surface: root.surface
+                    ink: root.ink
+                    muted: root.muted
+                    line: root.line
+                    accent: root.accent
+                    onAccent: root.palette.highlightedText
+                    selection: root.selection
+                    onUpgradeRequested: root.upgradeUpdates()
+                    onSelectNoneRequested: root.selectNonePackages()
+                    onSelectAllRequested: root.uncheckedPackages = []
                 }
                 ActionButton {
                     objectName: "repositoriesButton"
@@ -2374,8 +2221,7 @@ Controls.ApplicationWindow {
             } else {
                 if (root.currentView !== "Search")
                     root.openView("Search");
-                search.forceActiveFocus();
-                search.selectAll();
+                searchPane.focusSearch(true);
             }
         }
     }

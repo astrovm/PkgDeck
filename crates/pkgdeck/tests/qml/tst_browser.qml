@@ -32,12 +32,14 @@ TestCase {
         property string lastView: ""
         property string lastQuery: ""
         property string lastSource: ""
+        property int loadCount: 0
         property bool lastForce: false
         property int selection: -1
         property int writes: 0
         property int cancels: 0
         property string lastChecked: ""
         function load(view, query, source, sudo, force) {
+            loadCount++;
             lastView = view;
             lastQuery = query;
             lastSource = source;
@@ -107,6 +109,7 @@ TestCase {
         fake.cancels = 0;
         fake.lastChecked = "";
         fake.lastForce = false;
+        fake.loadCount = 0;
         browser = createTemporaryObject(window, test);
         verify(browser !== null);
         fake.source_catalog = JSON.stringify(browser.sourceIds.map((id) => ({source: id, summary: "Available", availability_kind: "available", capabilities: ["search", "installed", "upgrade", "clean"]})));
@@ -826,6 +829,18 @@ TestCase {
         compare(browser.viewItems[0].name, "fire");
         compare(fake.lastForce, true);
         compare(fake.lastView, "Search");
+    }
+    function test_container_reference_uses_explicit_search_submission() {
+        browser.openView("Search");
+        const search = findChild(browser, "searchField");
+        const requests = fake.loadCount;
+        search.text = "registry.example/team/app:tag";
+        compare(fake.loadCount, requests);
+        search.forceActiveFocus();
+        keyClick(Qt.Key_Return);
+        compare(fake.lastQuery, "registry.example/team/app:tag");
+        compare(fake.lastView, "Search");
+        compare(fake.writes, 0);
     }
     function test_search_compares_sources_and_actions_without_opening_details() {
         const field = findChild(browser, "searchField");
