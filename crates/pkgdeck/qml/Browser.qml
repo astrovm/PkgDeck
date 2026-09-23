@@ -718,7 +718,7 @@ Controls.ApplicationWindow {
         return path ? (path.indexOf("https://") === 0 ? path : "file://" + encodeURI(path)) : "";
     }
 
-    property url repositoryIconSource: root.dark ? "qrc:/pkgdeck/github-dark.png" : "qrc:/pkgdeck/github.png"
+    property url repositoryIconSource: root.dark ? "qrc:/pkgdeck/github-dark.svg" : "qrc:/pkgdeck/github.svg"
     property url logoIconSource: "qrc:/pkgdeck/logo.svg"
     readonly property url repositoryUrl: "https://github.com/astrovm/PkgDeck"
     width: 1100
@@ -1050,11 +1050,11 @@ Controls.ApplicationWindow {
                             Image {
                                 objectName: "repositoryIcon"
                                 anchors.centerIn: parent
-                                width: 14
-                                height: 14
+                                width: 16
+                                height: 16
                                 source: root.repositoryIconSource
-                                sourceSize.width: 14
-                                sourceSize.height: 14
+                                sourceSize.width: Math.ceil(width * (root.screen ? root.screen.devicePixelRatio : 1))
+                                sourceSize.height: Math.ceil(height * (root.screen ? root.screen.devicePixelRatio : 1))
                                 fillMode: Image.PreserveAspectFit
                                 Accessible.ignored: true
                             }
