@@ -612,10 +612,14 @@ Controls.ApplicationWindow {
             border.color: combo.activeFocus ? root.accent : root.line
             border.width: combo.activeFocus ? 2 : 1
         }
-        contentItem: Text {
+        contentItem: Controls.TextField {
             text: combo.displayText
             color: combo.enabled ? root.ink : root.muted
-            elide: Text.ElideRight
+            enabled: false
+            readOnly: true
+            selectByMouse: false
+            background: null
+            clip: true
             verticalAlignment: Text.AlignVCenter
             leftPadding: 14
             rightPadding: 8
