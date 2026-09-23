@@ -152,6 +152,34 @@ pub struct AptUpgradePlan {
     pub removals: Vec<String>,
 }
 
+/// A manager-authored, read-only transaction plan for one exact operation.
+/// Missing sizes or restart information remain unknown rather than guessed.
+#[derive(serde::Serialize, Clone, Debug, Eq, PartialEq)]
+pub struct TransactionPlan {
+    pub operation: Operation,
+    pub native_preview: String,
+    pub changes: Vec<PlannedChange>,
+    pub download_bytes: Option<u64>,
+    pub disk_bytes: Option<i64>,
+    pub restart_required: Option<bool>,
+}
+
+#[derive(serde::Serialize, Clone, Copy, Debug, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum PlannedAction {
+    Install,
+    Remove,
+    Upgrade,
+}
+
+#[derive(serde::Serialize, Clone, Debug, Eq, PartialEq)]
+pub struct PlannedChange {
+    pub action: PlannedAction,
+    pub name: String,
+    pub installed_version: Option<String>,
+    pub candidate_version: Option<String>,
+}
+
 impl AptUpgradePlan {
     pub fn summary(&self) -> String {
         fn section(label: &str, names: &[String]) -> String {

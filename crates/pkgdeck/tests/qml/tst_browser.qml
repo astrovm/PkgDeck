@@ -19,6 +19,10 @@ TestCase {
         property string details: "{}"
         property string status: "Ready"
         property string confirmation: ""
+        property string confirmation_data: "{}"
+        property string source_catalog: "[]"
+        property string report_state: "{}"
+        property string lastRetry: ""
         property string version: "9.9.9-test"
         property bool simulateLoading: false
         property bool busy: false
@@ -52,6 +56,7 @@ TestCase {
         }
         function propose(action, index) {
             selection = index;
+            confirmation_data = JSON.stringify({action: ({install:"Install", remove:"Remove", upgrade:"Update", "upgrade-all":"Update", clean:"Clean", "clean-all":"Clean", refresh:"Refresh"})[action] || "Apply"});
             confirmation = action + " synthetic-tool from apt, all, system";
         }
         function proposeChecked(identities) {
@@ -61,6 +66,7 @@ TestCase {
             if (approved)
                 writes++;
             confirmation = "";
+            confirmation_data = "{}";
         }
         function cancel() {
             cancels++;
@@ -68,6 +74,7 @@ TestCase {
         }
         function poll() {
         }
+        function retrySource(view, query, source) { lastRetry = source; }
     }
     Component {
         id: window
@@ -88,6 +95,9 @@ TestCase {
         fake.details = "{}";
         fake.status = "Ready";
         fake.confirmation = "";
+        fake.confirmation_data = "{}";
+        fake.report_state = "{}";
+        fake.lastRetry = "";
         fake.simulateLoading = false;
         fake.busy = false;
         fake.writing = false;
@@ -98,11 +108,13 @@ TestCase {
         fake.lastForce = false;
         browser = createTemporaryObject(window, test);
         verify(browser !== null);
+        fake.source_catalog = JSON.stringify(browser.sourceIds.map((id) => ({source: id, summary: "Available", availability_kind: "available", capabilities: ["search", "installed", "upgrade", "clean"]})));
         browser.requestActivate();
         // Fresh checklist and column layout per test: QSettings persist
         // across tests in one run.
         browser.reduceMotion = false;
         browser.sourceSelection = "";
+        browser.viewSourceFilters = ({});
         browser.sortColumn = "";
         browser.sortAscending = true;
         browser.nameWidth = 202;
@@ -112,20 +124,15 @@ TestCase {
     function cleanup() {
         browser.close();
     }
-    // Popup content reparents to the Overlay, which QTest item clicks
-    // reject after the first one ("window not shown"): click by window
-    // coordinates mapped through the delegate instead.
+    // Popup content reparents to the Overlay; check draft state directly
+    // when exercising several source choices in one test.
     function clickDelegate(delegate) {
         const at = delegate.mapToItem(browser.contentItem, delegate.width / 2, delegate.height / 2);
         mouseClick(browser, at.x, at.y);
     }
     function clickSourceCheck(index) {
-        const popup = findChild(browser, "sourcePopup");
-        const delegate = browser.sourceCheckAt(index);
-        const view = popup.contentItem;
-        view.contentY = Math.max(0, Math.min(delegate.y - 8, view.contentHeight - view.height));
-        waitForRendering(browser.contentItem);
-        clickDelegate(delegate);
+        verify(browser.sourceCheckAt(index) !== null);
+        browser.toggleDraftSource(browser.sourceIds[index]);
     }
     function populate() {
         fake.rows = JSON.stringify([
@@ -206,7 +213,7 @@ TestCase {
         browser.propose("install");
         const dialog = findChild(browser, "confirmationDialog");
         tryCompare(dialog, "opened", true);
-        keyClick(Qt.Key_Y, Qt.AltModifier);
+        keyClick(Qt.Key_I, Qt.AltModifier);
         compare(fake.writes, 1);
         tryCompare(dialog, "visible", false);
     }
@@ -241,19 +248,22 @@ TestCase {
         list.forceActiveFocus();
         keyClick(Qt.Key_Down);
         compare(fake.selection, 0);
-        verify(findChild(list.itemAtIndex(0), "rowPackageAction").enabled);
+        const firstAction = findChild(list.itemAtIndex(0), "rowPackageAction");
+        verify(firstAction.enabled);
+        compare(firstAction.text, "Install");
+        verify(firstAction.tooltipText.indexOf("apt") >= 0);
         waitForRendering(browser.contentItem);
         mouseClick(findChild(list.itemAtIndex(0), "rowPackageAction"));
         const dialog = findChild(browser, "confirmationDialog");
         tryCompare(dialog, "opened", true);
         compare(fake.writes, 0);
-        keyClick(Qt.Key_N, Qt.AltModifier);
+        keyClick(Qt.Key_C, Qt.AltModifier);
         tryCompare(dialog, "visible", false);
         compare(fake.writes, 0);
         waitForRendering(browser.contentItem);
         mouseClick(findChild(list.itemAtIndex(0), "rowPackageAction"));
         tryCompare(dialog, "opened", true);
-        keyClick(Qt.Key_Y, Qt.AltModifier);
+        keyClick(Qt.Key_I, Qt.AltModifier);
         compare(fake.writes, 1);
         tryCompare(dialog, "visible", false);
         list.forceActiveFocus();
@@ -325,7 +335,7 @@ TestCase {
         verify(all.visible);
         mouseClick(all);
         verify(fake.confirmation.indexOf("clean-all") >= 0);
-        verify(!findChild(browser, "cleanupFailureNotice").visible);
+        verify(!findChild(browser, "sourceFailureNotice").visible);
         fake.rows = "[]";
         wait(20);
         verify(!findChild(browser, "cleanAllButton").visible);
@@ -340,9 +350,9 @@ TestCase {
         compare(browser.viewItems.length, 1);
         compare(browser.originalIndex(0), 1);
         compare(browser.cleanupFailures.length, 1);
-        verify(findChild(browser, "cleanupFailureNotice").visible);
-        mouseClick(findChild(browser, "cleanupFailureDetails"));
-        const dialog = findChild(browser, "cleanupErrorsDialog");
+        verify(findChild(browser, "sourceFailureNotice").visible);
+        mouseClick(findChild(browser, "sourceFailureDetails"));
+        const dialog = findChild(browser, "sourceFailuresDialog");
         tryCompare(dialog, "visible", true);
         dialog.close();
         fake.rows = JSON.stringify([{kind: "failure", name: "apt", source: "apt", summary: "Synthetic preview failure"}]);
@@ -366,6 +376,9 @@ TestCase {
         compare(browser.dark, true);
         appearance.currentIndex = 0;
         appearance.activated(0);
+        verify(browser.systemAppearance);
+        compare(browser.canvas.toString(), browser.palette.window.toString());
+        verify(browser.font.pointSize > 0);
     }
     Component {
         id: vectorIcon
@@ -463,7 +476,7 @@ TestCase {
             {kind: "failure", name: "npm", source: "npm", summary: "boom", available: false}
         ]);
         waitForRendering(browser.contentItem);
-        compare(browser.viewItems.length, 4);
+        compare(browser.viewItems.length, 3);
         compare(browser.viewItems[1].groupStart, true);
         compare(browser.viewItems[1].groupTitle, "duo");
         compare(browser.viewItems[1].groupCount, 2);
@@ -479,21 +492,21 @@ TestCase {
         compare(check.text, "Duplicate installs");
         mouseClick(check);
         compare(browser.multiSourceOnly, true);
-        // The grouped app stays; failed sources stay visible as diagnostics.
-        compare(browser.viewItems.length, 3);
+        // The grouped app stays; failed sources are shown in the notice.
+        compare(browser.viewItems.length, 2);
         compare(browser.viewItems[0].name, "duo-libs");
         compare(browser.viewItems[1].name, "duo");
-        compare(browser.viewItems[2].kind, "failure");
-        // Combines with the text filter (failed rows stay in both).
+        verify(findChild(browser, "sourceFailureNotice").visible);
+        // Combines with the text filter.
         const field = findChild(browser, "installedFilterField");
         field.text = "duo";
-        compare(browser.viewItems.length, 3);
+        compare(browser.viewItems.length, 2);
         compare(browser.viewItems[0].name, "duo-libs");
         compare(browser.viewItems[1].name, "duo");
         field.text = "";
         mouseClick(check);
         compare(browser.multiSourceOnly, false);
-        compare(browser.viewItems.length, 4);
+        compare(browser.viewItems.length, 3);
     }
     function test_installed_view_omits_redundant_state_label() {
         browser.openView("Installed");
@@ -522,7 +535,7 @@ TestCase {
         verify(fake.confirmation.indexOf("upgrade ") === 0);
         const dialog = findChild(browser, "confirmationDialog");
         tryCompare(dialog, "opened", true);
-        keyClick(Qt.Key_N, Qt.AltModifier);
+        keyClick(Qt.Key_C, Qt.AltModifier);
         tryCompare(dialog, "visible", false);
         compare(browser.versionText(runtime), "—");
         runtime.installed = "1.0";
@@ -702,7 +715,7 @@ TestCase {
         populate();
         const search = findChild(browser, "searchField");
         const list = findChild(browser, "packageResults");
-        verify(list.activeFocus);
+        verify(search.activeFocus);
         search.forceActiveFocus();
         search.text = "synthetic";
         fake.rows = JSON.stringify(JSON.parse(fake.rows).reverse());
@@ -726,6 +739,25 @@ TestCase {
         compare(fake.selection, 1);
         keyClick(Qt.Key_End);
         compare(fake.selection, 0);
+    }
+    function test_ctrl_f_uses_current_view_and_restores_focus() {
+        browser.openView("Installed");
+        const installed = findChild(browser, "installedFilterField");
+        installed.text = "anonymous";
+        keyClick(Qt.Key_F, Qt.ControlModifier);
+        verify(installed.activeFocus);
+        browser.openView("Updates");
+        const list = findChild(browser, "packageResults");
+        list.forceActiveFocus();
+        keyClick(Qt.Key_F, Qt.ControlModifier);
+        const popup = findChild(browser, "sourcePopup");
+        tryCompare(popup, "visible", true);
+        tryVerify(() => findChild(browser, "sourcePickerSearch").activeFocus);
+        popup.close();
+        tryVerify(() => list.activeFocus);
+        browser.openView("Search");
+        keyClick(Qt.Key_F, Qt.ControlModifier);
+        verify(findChild(browser, "searchField").activeFocus);
     }
     function test_installed_filter_keeps_focus_during_streaming() {
         browser.openView("Installed");
@@ -767,21 +799,20 @@ TestCase {
             {kind: "failure", name: "bun", source: "bun", summary: "boom", available: false}
         ]);
         waitForRendering(browser.contentItem);
-        compare(browser.viewItems.length, 5);
+        compare(browser.viewItems.length, 4);
         compare(browser.viewItems[0].name, "fire");
         compare(browser.viewItems[0].source, "apt");
         compare(browser.viewItems[1].name, "firefox");
         compare(browser.viewItems[2].name, "x-fire-helper");
         compare(browser.viewItems[3].name, "zzz");
-        // Failed sources stay visible; guessed offers are excluded entirely.
-        compare(browser.viewItems[4].kind, "failure");
+        // Failed sources are separate; guessed offers are excluded entirely.
+        verify(findChild(browser, "sourceFailureNotice").visible);
         browser.choose(0);
         compare(fake.selection, 2);
         browser.cycleSort("name");
-        compare(browser.viewItems[0].name, "bun");
-        compare(browser.viewItems[1].name, "fire");
-        compare(browser.viewItems[1].source, "apt");
-        compare(browser.viewItems[4].name, "zzz");
+        compare(browser.viewItems[0].name, "fire");
+        compare(browser.viewItems[0].source, "apt");
+        compare(browser.viewItems[3].name, "zzz");
         // Submitting a fresh search resets to best-match order and forces
         // a native query instead of serving the cached snapshot.
         search.forceActiveFocus();
@@ -816,7 +847,7 @@ TestCase {
             verify(browser.selected === null);
             const dialog = findChild(browser, "confirmationDialog");
             tryCompare(dialog, "opened", true);
-            keyClick(Qt.Key_N, Qt.AltModifier);
+            keyClick(Qt.Key_C, Qt.AltModifier);
             tryCompare(dialog, "visible", false);
         }
         compare(fake.writes, 0);
@@ -858,7 +889,7 @@ TestCase {
         compare(fake.selection, 1);
         const dialog = findChild(browser, "confirmationDialog");
         tryCompare(dialog, "opened", true);
-        keyClick(Qt.Key_N, Qt.AltModifier);
+        keyClick(Qt.Key_C, Qt.AltModifier);
         tryCompare(dialog, "visible", false);
         compare(fake.writes, 0);
     }
@@ -1020,11 +1051,31 @@ TestCase {
         compare(findChild(dangling, "rowPackageAction").symbol, "remove");
         compare(fake.writes, 0);
     }
+    function test_source_picker_stays_inside_window() {
+        browser.openView("Updates");
+        const popup = findChild(browser, "sourcePopup");
+        const title = findChild(browser, "sourcePopupTitle");
+        const apply = findChild(browser, "applySourceFilter");
+        for (const width of [1100, 420, 360]) {
+            browser.width = width;
+            popup.open();
+            tryCompare(popup, "visible", true);
+            waitForRendering(browser.contentItem);
+            verify(!title.visible);
+            for (const item of [popup.contentItem, apply]) {
+                const at = item.mapToItem(browser.contentItem, 0, 0);
+                verify(at.x >= 0);
+                verify(at.x + item.width <= browser.width);
+            }
+            popup.close();
+            tryCompare(popup, "visible", false);
+        }
+    }
     function test_header_source_checklist_and_installed_filter() {
         browser.openView("Installed");
         const filter = findChild(browser, "sourceFilter");
         verify(filter !== null);
-        compare(filter.text, "All sources");
+        compare(filter.text, "Available sources");
         const popup = findChild(browser, "sourcePopup");
         verify(popup !== null);
         popup.open();
@@ -1032,27 +1083,23 @@ TestCase {
         const npm = browser.sourceIds.indexOf("npm");
         verify(browser.sourceCheckAt(npm).checked);
         clickSourceCheck(npm);
-        compare(browser.sourceSelection, "apt,dnf,pacman,zypper,snap,homebrew,homebrew-cask,appimage,flatpak,docker,podman,cargo,pnpm,bun,pip,pipx,uv,composer,gem,fwupd,codex,claude,grok,opencode");
-        compare(filter.text, "24 sources");
-        compare(fake.lastSource, "apt,dnf,pacman,zypper,snap,homebrew,homebrew-cask,appimage,flatpak,docker,podman,cargo,pnpm,bun,pip,pipx,uv,composer,gem,fwupd,codex,claude,grok,opencode");
-        compare(fake.lastView, "Installed");
-        // Re-checking the last unchecked source returns to all available.
-        clickSourceCheck(npm);
+        verify(popup.draftSources.indexOf("npm") < 0);
         compare(browser.sourceSelection, "");
-        compare(filter.text, "All sources");
-        // Unchecking down to one source disables that final checkbox.
-        const ids = ["apt", "dnf", "pacman", "zypper", "snap", "homebrew", "homebrew-cask", "appimage", "flatpak", "docker", "podman", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "composer", "gem", "fwupd", "codex", "claude", "grok", "opencode"];
-        for (let idx = 0; idx < ids.length; idx++) {
-            if (ids[idx] === "apt")
-                continue;
-            clickSourceCheck(browser.sourceIds.indexOf(ids[idx]));
-        }
-        compare(browser.sourceSelection, "apt");
-        compare(filter.text, "APT");
-        const last = browser.sourceCheckAt(browser.sourceIds.indexOf("apt"));
-        verify(last !== null);
-        verify(!last.enabled);
-        popup.close();
+        compare(fake.lastSource, "");
+        browser.applySourceDraft();
+        compare(filter.text, "24 sources");
+        verify(fake.lastSource.split(",").indexOf("npm") < 0);
+        compare(fake.lastView, "Installed");
+        popup.open();
+        tryCompare(popup, "visible", true);
+        mouseClick(findChild(browser, "sourcePickerSearch"));
+        findChild(browser, "sourcePickerSearch").text = "npm";
+        verify(browser.sourceCheckAt(npm) !== null);
+        findChild(browser, "sourcePickerSearch").text = "";
+        browser.applySourceDraft();
+        browser.viewSourceFilters = ({});
+        compare(browser.sourceSelection, "");
+        compare(filter.text, "Available sources");
         const field = findChild(browser, "installedFilterField");
         verify(field !== null);
         browser.openView("Installed");
@@ -1074,15 +1121,15 @@ TestCase {
     }
     function test_failure_rows_show_diagnostics() {
         fake.rows = JSON.stringify([{kind: "failure", name: "npm", source: "npm", summary: "Source failed"}]);
-        browser.choose(0);
-        fake.details = JSON.stringify({
-            failure: {backend: "npm", error: "invalid response from npm: npm ls failed: boom"},
-            hint: "Check the npm source in the Sources view."
-        });
         wait(30);
-        const details = findChild(browser, "packageDetails");
-        verify(details.text.indexOf("npm ls failed: boom") >= 0);
-        verify(details.text.indexOf("Sources view") >= 0);
+        compare(browser.viewItems.length, 0);
+        verify(findChild(browser, "sourceFailureNotice").visible);
+        mouseClick(findChild(browser, "sourceFailureDetails"));
+        const dialog = findChild(browser, "sourceFailuresDialog");
+        tryCompare(dialog, "visible", true);
+        compare(browser.copyableDiagnostics(), "View: Search\nState: unknown\nnpm: failed");
+        browser.retryFailedSource("npm");
+        compare(fake.lastRetry, "npm");
     }
     function test_sidebar_shows_app_logo() {
         const logo = findChild(browser, "appLogo");
@@ -1133,12 +1180,74 @@ TestCase {
         verify(popup !== null);
         popup.open();
         tryCompare(popup, "visible", true);
-        verify(popup.contentItem.contentHeight > 0);
+        verify(browser.pickerItems().length > 0);
         const npmCheck = browser.sourceCheckAt(browser.sourceIds.indexOf("npm"));
         verify(npmCheck !== null);
         verify(npmCheck.checked);
         popup.close();
         tryCompare(popup, "visible", false);
+    }
+    function test_read_states_keep_success_wording_scoped() {
+        browser.openView("Updates");
+        fake.rows = "[]";
+        fake.report_state = JSON.stringify({phase: "loading", failures: []});
+        compare(browser.emptyStateMessage(), "Checking sources…");
+        fake.report_state = JSON.stringify({phase: "complete", failures: []});
+        compare(browser.emptyStateMessage(), "You're up to date");
+        fake.report_state = JSON.stringify({phase: "partial", failures: [{source: "npm", kind: "locked", detail: "Synthetic package lock"}]});
+        verify(browser.emptyStateMessage().indexOf("completed") >= 0);
+        verify(browser.emptyStateMessage() !== "You're up to date");
+        compare(browser.copyableDiagnostics(), "View: Updates\nState: partial\nnpm: locked");
+        fake.report_state = JSON.stringify({phase: "failed", failures: [{source: "apt", kind: "authorization"}]});
+        compare(browser.emptyStateMessage(), "Could not check these sources.");
+        fake.report_state = JSON.stringify({phase: "cached", failures: []});
+        compare(browser.emptyStateMessage(), "No results in the last check.");
+        fake.report_state = JSON.stringify({phase: "complete", failures: []});
+        fake.rows = JSON.stringify([{kind: "package", name: "anonymous", source: "homebrew", installed: "1", candidate: "2", update: "available"}]);
+        browser.viewSourceFilters = ({Updates: ["apt"]});
+        compare(browser.viewItems.length, 0);
+        compare(browser.emptyStateMessage(), "No results from selected sources.");
+        compare(browser.sourceSummary(), "APT");
+    }
+    function test_manager_settings_are_separate_from_page_filter() {
+        browser.openView("Settings");
+        const popup = findChild(browser, "sourcePopup");
+        popup.mode = "settings";
+        popup.open();
+        tryCompare(popup, "visible", true);
+        browser.toggleDraftSource("npm");
+        browser.applySourceDraft();
+        verify(browser.sourceSelection.split(",").indexOf("npm") < 0);
+        compare(browser.viewSourceFilters["Installed"], undefined);
+        browser.openView("Installed");
+        verify(fake.lastSource.split(",").indexOf("npm") < 0);
+        popup.mode = "filter";
+        popup.open();
+        tryCompare(popup, "visible", true);
+        browser.toggleDraftSource("apt");
+        browser.applySourceDraft();
+        verify(browser.sourceSelection.split(",").indexOf("npm") < 0);
+        verify(browser.viewSourceFilters["Installed"] !== undefined);
+    }
+    function test_source_picker_uses_discovered_capabilities() {
+        fake.source_catalog = JSON.stringify([
+            {source: "apt", summary: "Available", availability_kind: "available", capabilities: ["search", "installed", "upgrade"]},
+            {source: "npm", summary: "Manager missing", availability_kind: "unavailable", capabilities: ["search", "installed"]}
+        ]);
+        browser.openView("Updates");
+        const popup = findChild(browser, "sourcePopup");
+        popup.mode = "filter";
+        popup.open();
+        tryCompare(popup, "visible", true);
+        compare(browser.pickerItems().join(","), "apt");
+        popup.showUnavailable = true;
+        verify(browser.pickerItems().indexOf("npm") >= 0);
+        verify(!browser.sourceCheckAt(browser.sourceIds.indexOf("npm")).enabled);
+        popup.close();
+        popup.mode = "settings";
+        popup.open();
+        tryCompare(popup, "visible", true);
+        verify(browser.pickerItems().indexOf("npm") >= 0);
     }
     function test_close_requests_cancellation() {
         fake.busy = true;

@@ -21,8 +21,9 @@ and upstream homepage metadata associate related installations; grouping does no
 merge packages or change what an action targets.
 
 Click column headings to sort; drag the name and version dividers to resize.
-Source filters and column preferences persist between sessions. **Reload** reads
-fresh package state.
+Use the source picker to filter the current page. Enable managers separately in
+Settings; that choice persists between sessions. The picker shows unavailable
+managers and why they cannot be used. **Reload** reads fresh package state.
 
 Docker daemon images and rootless Podman images are separate sources. Rows show
 tags, digests, size, age, immutable short ID, and storage scope. A tagged image
@@ -38,8 +39,9 @@ checks appear separately. APT checks unused dependencies without authentication
 and counts cached downloads without entering its protected directory. APT chooses
 obsolete downloads when cleanup runs, then asks for system authentication.
 
-Views show cached results immediately for up to 60 seconds and refresh expired
-results while keeping them visible. Installed and Updates share one inventory.
+Views identify cached results and show them immediately for up to 60 seconds.
+Expired results stay visible while a new check runs. Failed source checks appear
+in a separate notice with details and a retry for that source. Installed and Updates share one inventory.
 Sources, Installed, Updates, and Clean preload sequentially in the background;
 foreground requests take priority. Package and repository changes invalidate the
 cache. Cleanup always checks the confirmed plan again before execution.
@@ -54,7 +56,10 @@ Version arrows show installed → candidate versions when the source supplies bo
 Some Flatpak runtimes expose branches or commit identifiers instead of release
 versions. PkgDeck does not invent version numbers.
 
-Review the confirmation before applying changes. Firmware confirmations include
+Review the target, source, scope, and available native plan before applying
+changes. The confirmation button names the action; Cancel has focus by default.
+APT provides a dry run for individual package changes and rechecks it before
+writing. Other managers may not provide a transaction preview. Firmware confirmations include
 power and restart requirements; PkgDeck does not reboot automatically. Failed
 sources are shown explicitly and block Update all until the result is complete.
 For APT, Update all previews the `dist-upgrade` transaction. Planned installs
@@ -84,15 +89,16 @@ separately for User and System installations. Firmware remotes can be toggled.
 APT's editor button opens the native Software Sources tool. Repository changes
 use the manager's normal signature verification and authorization.
 
-The source filter controls which managers PkgDeck queries; it does not enable or
-disable repositories. Refresh sources updates metadata for selected managers.
+The source picker filters one page; Settings controls which managers PkgDeck
+queries. Neither setting enables or disables repositories. Refresh sources
+updates metadata for selected managers.
 
 ## Keyboard shortcuts
 
 | Shortcut | Action |
 | --- | --- |
 | Ctrl+1 / Ctrl+2 / Ctrl+3 / Ctrl+4 / Ctrl+5 | Search / Installed / Updates / Clean / Sources |
-| Ctrl+F | Focus the search or filter field |
+| Ctrl+F | Search field in Search, package filter in Installed, source picker in Updates/Clean/Sources; other pages open Search |
 | Ctrl+R | Reload |
 | Ctrl+Shift+U | Update checked packages |
 | Ctrl+Q | Close; finish an active native transaction first |

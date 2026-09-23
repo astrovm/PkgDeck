@@ -9,7 +9,7 @@ use std::{
     pin::Pin,
     sync::mpsc,
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 // CXX-Qt generates the FFI boundary; application code below uses safe Rust.
@@ -29,7 +29,10 @@ pub mod ffi {
         #[qproperty(QString, details)]
         #[qproperty(QString, status)]
         #[qproperty(QString, repositories)]
+        #[qproperty(QString, source_catalog)]
+        #[qproperty(QString, report_state)]
         #[qproperty(QString, confirmation)]
+        #[qproperty(QString, confirmation_data)]
         #[qproperty(QString, version)]
         #[qproperty(bool, busy)]
         #[qproperty(bool, writing)]
@@ -46,6 +49,14 @@ pub mod ffi {
         );
         #[qinvokable]
         fn select(self: Pin<&mut PackageController>, index: i32);
+        #[qinvokable]
+        #[cxx_name = "retrySource"]
+        fn retry_source(
+            self: Pin<&mut PackageController>,
+            view: QString,
+            query: QString,
+            source: QString,
+        );
         #[qinvokable]
         fn propose(self: Pin<&mut PackageController>, action: QString, index: i32);
         #[qinvokable]
@@ -70,8 +81,10 @@ pub mod ffi {
 enum Job {
     Repositories(Option<RepositoryAction>),
     Load(String, String),
+    RetrySource(String, String, String),
     Details(PackageId),
-    Write(Operation),
+    PlanOperation(Operation),
+    Write(Operation, Option<Box<TransactionPlan>>),
     PlanUpgrade(Vec<Operation>, usize),
     UpgradeAll(Vec<Operation>, Option<AptUpgradePlan>),
     CleanAll(Vec<Operation>),
@@ -80,19 +93,26 @@ impl Job {
     fn writes(&self) -> bool {
         matches!(
             self,
-            Self::Write(_) | Self::UpgradeAll(..) | Self::CleanAll(_) | Self::Repositories(Some(_))
+            Self::Write(..)
+                | Self::UpgradeAll(..)
+                | Self::CleanAll(_)
+                | Self::Repositories(Some(_))
         )
     }
 }
 enum Payload {
     Repositories(repositories::Report),
     Packages(PackageReport),
+    RetryPackages(String, PackageReport),
+    RetryCleanup(String, CleanupReport),
+    RetrySources(String, Vec<Source>),
     Sources(Vec<Source>),
     Details(Box<PackageDetails>),
     Written(OperationOutcome),
     Batch(String),
     Cleanup(CleanupReport),
     UpgradePreview(Vec<Operation>, usize, Option<AptUpgradePlan>),
+    OperationPreview(Operation, Option<Box<TransactionPlan>>),
 }
 enum Reply {
     Progress(String),
@@ -100,7 +120,7 @@ enum Reply {
     Inventory(PackageReport),
     DetailsPreview(Box<PackageDetails>),
     Done(Result<Payload, EngineError>),
-    Engine(Engine),
+    Engine(Box<Engine>),
 }
 fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn FnMut(Reply)) {
     fn filter_updates(report: &mut PackageReport) {
@@ -162,6 +182,24 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
                 Ok(Payload::Packages(report))
             }
         }
+        Job::RetrySource(view, query, source) => {
+            if view == "Sources" {
+                Ok(Payload::RetrySources(source, engine.discover(cancel)))
+            } else if view == "Clean" {
+                Ok(Payload::RetryCleanup(source, engine.cleanup(cancel)))
+            } else {
+                let mut report = if view == "Search" { engine.search(&query, cancel) }
+                    else { engine.installed(cancel) };
+                if view == "Updates" {
+                    filter_updates(&mut report);
+                } else if view == "Installed" {
+                    filter_installed(&mut report, &query);
+                } else {
+                    report.packages.retain(|p| !unverified_search_offer(p));
+                }
+                Ok(Payload::RetryPackages(source, report))
+            }
+        }
         Job::Details(id) => engine
             .details(&id, cancel)
             .map(|d| Payload::Details(Box::new(d))),
@@ -176,6 +214,8 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
                 Ok(Payload::UpgradePreview(operations, count, None))
             }
         }
+        Job::PlanOperation(operation) => engine.plan_operation(&operation, cancel)
+            .map(|plan| Payload::OperationPreview(operation, plan.map(Box::new))),
         Job::UpgradeAll(operations, _) | Job::CleanAll(operations) => {
             let results = engine.execute_batch(&operations, cancel, &mut |event| {
                 if let Event::Progress {
@@ -207,7 +247,7 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
             }
             Ok(Payload::Batch(status))
         }
-        Job::Write(op) => engine
+        Job::Write(op, _) => engine
             .execute(&op, cancel, &mut |event| {
                 if let Event::Progress { progress, .. } = event {
                     send(Reply::Progress(match progress {
@@ -251,7 +291,10 @@ pub struct Controller {
     details: QString,
     status: QString,
     confirmation: QString,
+    confirmation_data: QString,
     repositories: QString,
+    source_catalog: QString,
+    report_state: QString,
     version: QString,
     busy: bool,
     writing: bool,
@@ -260,6 +303,8 @@ pub struct Controller {
     packages: Vec<Package>,
     cleanup: Vec<CleanupItem>,
     failures: Vec<BackendFailure>,
+    last_success: BTreeMap<String, u64>,
+    retrying_source: Option<String>,
     detail_cache: BTreeMap<PackageId, QString>,
     sources: Vec<Source>,
     pending: Option<Job>,
@@ -281,7 +326,10 @@ impl Default for Controller {
             details: "{}".into(),
             status: "Choose a view or search for a package.".into(),
             confirmation: QString::default(),
+            confirmation_data: "{}".into(),
             repositories: "{}".into(),
+            source_catalog: "[]".into(),
+            report_state: r#"{"phase":"idle"}"#.into(),
             version: pkgdeck_core::VERSION.into(),
             busy: false,
             writing: false,
@@ -290,6 +338,8 @@ impl Default for Controller {
             packages: vec![],
             cleanup: vec![],
             failures: vec![],
+            last_success: BTreeMap::new(),
+            retrying_source: None,
             detail_cache: BTreeMap::new(),
             sources: vec![],
             pending: None,
@@ -339,12 +389,40 @@ fn encoded(value: impl serde::Serialize) -> QString {
 /// empty filter means every available backend.
 fn engine_source(job: &Job, filter: &[String]) -> Vec<String> {
     match job {
+        Job::RetrySource(_, _, source) => vec![source.clone()],
+        Job::PlanOperation(operation) => vec![operation.backend().into()],
+        // The picker needs to explain disabled and unavailable managers too.
+        Job::Load(view, _) if view == "Sources" => vec![],
         Job::Details(id) => vec![id.backend.clone()],
         Job::PlanUpgrade(operations, _)
             if operations.iter().any(|operation| {
                 matches!(operation, Operation::UpgradeAll { backend } if backend == "apt")
             }) => vec!["apt".into()],
         _ => filter.to_owned(),
+    }
+}
+fn repreview_changed_plan(
+    job: &Job,
+    result: &Result<Payload, EngineError>,
+    packages: &[Package],
+) -> Option<Job> {
+    if !matches!(result, Err(EngineError::InvalidResponse { reason, .. }) if reason.contains("plan changed"))
+    {
+        return None;
+    }
+    match job {
+        Job::Write(operation, Some(_)) => Some(Job::PlanOperation(operation.clone())),
+        Job::UpgradeAll(operations, Some(_)) => {
+            let count = packages
+                .iter()
+                .filter(|package| {
+                    package.installed_version.is_some()
+                        && package.update == UpdateAvailability::Available
+                })
+                .count();
+            Some(Job::PlanUpgrade(operations.clone(), count))
+        }
+        _ => None,
     }
 }
 /// A finished details reply is fresh only while its identity is still the
@@ -365,6 +443,38 @@ fn source_status(source: &Source) -> String {
         Ok(Availability::Unavailable(reason)) => format!("Unavailable: {reason}"),
         Err(error) => error.to_string(),
     }
+}
+fn source_row(source: &Source) -> Value {
+    let state = match &source.availability {
+        Ok(Availability::Available) => "available",
+        Ok(Availability::Unavailable(reason))
+            if reason.contains("restricted") || reason.contains("disabled by") =>
+        {
+            "restricted"
+        }
+        Ok(Availability::Unavailable(_)) => "unavailable",
+        Err(error) => failure_kind(error),
+    };
+    json!({"kind": "source", "name": source.backend, "source": source.backend,
+        "summary": source_status(source), "available": state == "available",
+        "availability_kind": state, "check_failed": source.availability.is_err(), "capabilities": source.capabilities})
+}
+fn failure_kind(error: &EngineError) -> &'static str {
+    match error {
+        EngineError::Unsupported { .. } => "unsupported",
+        EngineError::Unavailable { .. } => "unavailable",
+        EngineError::Cancelled
+        | EngineError::Execution(pkgdeck_core::process::ExecutionError::Cancelled) => "cancelled",
+        EngineError::Execution(
+            pkgdeck_core::process::ExecutionError::AuthorizationCancelled
+            | pkgdeck_core::process::ExecutionError::AuthorizationDenied,
+        ) => "authorization",
+        EngineError::Execution(pkgdeck_core::process::ExecutionError::LockBusy) => "locked",
+        _ => "failed",
+    }
+}
+fn read_failed(failure: &BackendFailure) -> bool {
+    !matches!(failure.error, EngineError::Unsupported { .. })
 }
 /// Details for a failed source row. Served from the stored report without a
 /// backend roundtrip: the query already failed, re-querying cannot help.
@@ -467,6 +577,7 @@ struct CachedView {
     sources: Vec<Source>,
     rows: QString,
     status: QString,
+    report_state: QString,
     upgradable: bool,
     updates_view: bool,
 }
@@ -520,6 +631,154 @@ fn operation_label(operation: &Operation) -> String {
         scope_label(&id.scope)
     )
 }
+fn action_name(operation: &Operation) -> &'static str {
+    match operation {
+        Operation::Install(_) => "Install",
+        Operation::Remove(_) => "Remove",
+        Operation::Upgrade(_) | Operation::UpgradeAll { .. } => "Update",
+        Operation::Refresh { .. } => "Refresh",
+        Operation::Clean(_) => "Clean",
+    }
+}
+fn confirmation_preview(
+    operation: &Operation,
+    packages: &[Package],
+    cleanup: &[CleanupItem],
+    plan: Option<&TransactionPlan>,
+) -> Value {
+    let mut lines = vec![operation_label(operation)];
+    let mut title = action_name(operation).to_owned();
+    if let Some(package) = packages.iter().find(|package| match operation {
+        Operation::Install(id) | Operation::Remove(id) | Operation::Upgrade(id) => {
+            package.id == *id
+        }
+        _ => false,
+    }) {
+        title = format!(
+            "{} {}",
+            title,
+            if package.display_name.is_empty() {
+                &package.id.name
+            } else {
+                &package.display_name
+            }
+        );
+        if !package.display_name.is_empty() && package.display_name != package.id.name {
+            lines.insert(0, package.display_name.clone());
+        }
+        if let Some(version) = &package.installed_version {
+            lines.push(format!("Installed: {version}"));
+        }
+        if let Some(version) = &package.candidate_version {
+            lines.push(format!("Available: {version}"));
+        }
+        if package.id.backend == "fwupd" {
+            lines.push(package.summary.clone());
+        }
+    }
+    if let Operation::Clean(id) = operation {
+        if let Some(item) = cleanup.iter().find(|item| item.id == *id) {
+            title = format!("Clean {}", item.title);
+            lines.push(item.preview.clone());
+        }
+    }
+    if let Operation::Refresh { backend } = operation {
+        title = format!("Refresh {backend}");
+    }
+    if let Some(plan) = plan {
+        let requested_name = match operation {
+            Operation::Install(id) | Operation::Remove(id) | Operation::Upgrade(id) => {
+                Some(id.name.as_str())
+            }
+            _ => None,
+        };
+        let requested_action = match operation {
+            Operation::Install(_) => Some(PlannedAction::Install),
+            Operation::Remove(_) => Some(PlannedAction::Remove),
+            Operation::Upgrade(_) => Some(PlannedAction::Upgrade),
+            _ => None,
+        };
+        let describe = |change: &PlannedChange| {
+            let action = match change.action {
+                PlannedAction::Install => "Install",
+                PlannedAction::Remove => "Remove",
+                PlannedAction::Upgrade => "Update",
+            };
+            let version = match (&change.installed_version, &change.candidate_version) {
+                (Some(old), Some(new)) => format!(" ({old} → {new})"),
+                (Some(old), None) => format!(" ({old})"),
+                (None, Some(new)) => format!(" ({new})"),
+                (None, None) => String::new(),
+            };
+            format!("{action} {}{version}", change.name)
+        };
+        let requested = plan
+            .changes
+            .iter()
+            .filter(|change| {
+                Some(change.name.as_str()) == requested_name
+                    && Some(change.action) == requested_action
+            })
+            .map(describe)
+            .collect::<Vec<_>>();
+        if !requested.is_empty() {
+            lines.push(format!("Requested change: {}", requested.join(", ")));
+        }
+        let changes = plan
+            .changes
+            .iter()
+            .filter(|change| {
+                Some(change.name.as_str()) != requested_name
+                    || Some(change.action) != requested_action
+            })
+            .map(describe)
+            .collect::<Vec<_>>();
+        lines.push(if changes.is_empty() {
+            "Native plan: no additional packages".into()
+        } else {
+            format!("Native plan — additional changes:\n{}", changes.join("\n"))
+        });
+        lines.push(format!(
+            "Download: {} · Disk impact: {} · Restart: {}",
+            plan.download_bytes
+                .map_or_else(|| "unknown".into(), |n| format!("{n} bytes")),
+            plan.disk_bytes
+                .map_or_else(|| "unknown".into(), |n| format!("{n:+} bytes")),
+            plan.restart_required.map_or("unknown", |needed| if needed {
+                "required"
+            } else {
+                "not indicated"
+            })
+        ));
+    } else if matches!(
+        operation,
+        Operation::Install(_) | Operation::Remove(_) | Operation::Upgrade(_)
+    ) {
+        lines.push("Transaction preview unavailable; additional changes are unknown.".into());
+    }
+    if matches!(
+        operation,
+        Operation::Install(_) | Operation::Remove(_) | Operation::Upgrade(_)
+    ) {
+        lines.push("Data retention: manager-specific; details unavailable".into());
+    } else if matches!(operation, Operation::Clean(_)) {
+        lines.push("Data removal: see native cleanup preview".into());
+    }
+    if matches!(
+        operation,
+        Operation::Install(_)
+            | Operation::Remove(_)
+            | Operation::Upgrade(_)
+            | Operation::UpgradeAll { .. }
+            | Operation::Refresh { .. }
+    ) {
+        lines.push("System authorization may be requested.".into());
+    }
+    if title.chars().count() > 36 {
+        title = format!("{}…", title.chars().take(35).collect::<String>());
+    }
+    json!({"action": title, "body": lines.join("\n\n")})
+}
 fn package_row(p: &Package, same_from: &[String], same_group: Option<&str>) -> Value {
     json!({"name": p.id.name, "display_name": p.display_name, "source": p.id.backend, "architecture": p.id.architecture,
         "remote": p.id.remote, "reference": p.id.reference, "scope": p.id.scope, "scope_label": scope_label(&p.id.scope), "summary": p.summary, "installed": p.installed_version,
@@ -548,6 +807,65 @@ fn update_detail_name(
 }
 
 impl ffi::PackageController {
+    fn successful_sources(&self) -> Vec<String> {
+        let state: Value =
+            serde_json::from_str(&self.report_state().to_string()).unwrap_or_default();
+        serde_json::from_value(state["successful_sources"].clone()).unwrap_or_default()
+    }
+    fn set_phase(mut self: Pin<&mut Self>, phase: &str) {
+        let mut state: Value =
+            serde_json::from_str(&self.report_state().to_string()).unwrap_or_else(|_| json!({}));
+        state["phase"] = json!(phase);
+        self.as_mut().set_report_state(encoded(state));
+    }
+    fn set_package_report_state(mut self: Pin<&mut Self>, report: &PackageReport, loading: bool) {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let retried = self.rust().retrying_source.clone();
+        for source in report
+            .successful_sources
+            .iter()
+            .filter(|source| retried.as_ref().is_none_or(|id| id == *source))
+        {
+            self.as_mut()
+                .rust_mut()
+                .last_success
+                .insert(source.clone(), now);
+        }
+        let failures: Vec<_> = report
+            .failures
+            .iter()
+            .filter(|failure| read_failed(failure))
+            .map(|failure| {
+                json!({
+                    "source": failure.backend, "kind": failure_kind(&failure.error),
+                    "detail": failure.error.to_string()
+                })
+            })
+            .collect();
+        let phase = if loading {
+            "loading"
+        } else if failures.is_empty()
+            && report.successful_sources.is_empty()
+            && !report.failures.is_empty()
+        {
+            "unsupported"
+        } else if failures.is_empty() {
+            "complete"
+        } else if report.successful_sources.is_empty() {
+            "failed"
+        } else {
+            "partial"
+        };
+        let last_success = self.rust().last_success.clone();
+        self.as_mut().set_report_state(encoded(json!({
+            "phase": phase, "failures": failures,
+            "successful_sources": report.successful_sources,
+            "last_success": last_success
+        })));
+    }
     fn start(mut self: Pin<&mut Self>, job: Job) {
         if let Some(worker) = &self.rust().worker {
             if self.rust().background {
@@ -582,12 +900,14 @@ impl ffi::PackageController {
             self.as_mut().rust_mut().detail_cache.clear();
         }
         let handle = thread::spawn(move || {
-            let sources_view = matches!(&job, Job::Load(view, _) if view == "Sources");
+            let sources_view = matches!(&job, Job::Load(view, _) | Job::RetrySource(view, ..) if view == "Sources");
             let mut send = |mut reply| {
                 match &mut reply {
                     Reply::Partial(report)
                     | Reply::Inventory(report)
-                    | Reply::Done(Ok(Payload::Packages(report))) => {
+                    | Reply::Done(Ok(
+                        Payload::Packages(report) | Payload::RetryPackages(_, report),
+                    )) => {
                         for package in &mut report.packages {
                             crate::metadata::enrich(package);
                         }
@@ -631,13 +951,13 @@ impl ffi::PackageController {
                 match engine.details_reuse(id, &token) {
                     Ok(details) => {
                         send(Reply::Done(Ok(Payload::Details(Box::new(details)))));
-                        send(Reply::Engine(engine));
+                        send(Reply::Engine(Box::new(engine)));
                         return;
                     }
                     Err(EngineError::UnknownBackend(_)) => {}
                     Err(error) => {
                         send(Reply::Done(Err(error)));
-                        send(Reply::Engine(engine));
+                        send(Reply::Engine(Box::new(engine)));
                         return;
                     }
                 }
@@ -655,8 +975,11 @@ impl ffi::PackageController {
                     if let Job::UpgradeAll(_, Some(plan)) = &job {
                         engine.remember_apt_upgrade_plan(plan.clone());
                     }
+                    if let Job::Write(_, Some(plan)) = &job {
+                        engine.remember_operation_plan((**plan).clone());
+                    }
                     execute(&mut engine, job, &token, &mut send);
-                    send(Reply::Engine(engine));
+                    send(Reply::Engine(Box::new(engine)));
                 }
                 Err(error) => send(Reply::Done(Err(error))),
             }
@@ -720,7 +1043,11 @@ impl ffi::PackageController {
                     self.as_mut().rust_mut().failures.clear();
                     self.as_mut().apply(Ok(payload));
                     let upgradable = view == "Updates"
-                        && self.rust().failures.is_empty()
+                        && self
+                            .rust()
+                            .failures
+                            .iter()
+                            .all(|failure| !read_failed(failure))
                         && !upgrade_plan(&self.rust().packages).is_empty();
                     self.as_mut().set_upgradable(upgradable);
                     self.as_mut().stash_current(key.clone());
@@ -742,6 +1069,13 @@ impl ffi::PackageController {
                 self.as_mut().set_rows(cached.rows);
                 self.as_mut().set_details("{}".into());
                 self.as_mut().set_status(cached.status);
+                self.as_mut().set_report_state(cached.report_state);
+                self.as_mut()
+                    .set_phase(if cached.loaded.elapsed() >= VIEW_TTL {
+                        "stale"
+                    } else {
+                        "cached"
+                    });
                 self.as_mut().set_busy(false);
                 if let Some(worker) = &self.rust().worker {
                     worker.cancel.cancel();
@@ -777,6 +1111,7 @@ impl ffi::PackageController {
         self.as_mut().set_confirmation(QString::default());
         self.as_mut().set_rows("[]".into());
         self.as_mut().set_details("{}".into());
+        self.as_mut().set_phase("loading");
         // Reads are preemptible: cancel the in-flight load or details
         // query and run this one next. Native writes keep the lock. Report
         // busy at once: the fresh rows are not on screen yet, and a silent
@@ -789,6 +1124,21 @@ impl ffi::PackageController {
         }
         self.start(Job::Load(view, query));
     }
+    pub fn retry_source(mut self: Pin<&mut Self>, view: QString, query: QString, source: QString) {
+        if self.rust().worker.is_some() && !self.rust().background || self.rust().pending.is_some()
+        {
+            return;
+        }
+        let (view, query, source) = (view.to_string(), query.to_string(), source.to_string());
+        if !["Search", "Installed", "Updates", "Clean", "Sources"].contains(&view.as_str())
+            || !pkgdeck_core::backends::BACKEND_IDS.contains(&source.as_str())
+            || !self.rust().source_filter.is_empty() && !self.rust().source_filter.contains(&source)
+        {
+            return;
+        }
+        self.as_mut().set_phase("loading");
+        self.start(Job::RetrySource(view, query, source));
+    }
     /// Snapshot the current table under `key`. Called after a terminal view
     /// report lands; the caller guarantees no newer load superseded it.
     fn stash_current(self: Pin<&mut Self>, key: String) {
@@ -800,6 +1150,7 @@ impl ffi::PackageController {
             sources: self.rust().sources.clone(),
             rows: self.rust().rows.clone(),
             status: self.rust().status.clone(),
+            report_state: self.rust().report_state.clone(),
             upgradable: self.rust().upgradable,
             updates_view: self.rust().updates_view,
         };
@@ -895,6 +1246,8 @@ impl ffi::PackageController {
             self.start(Job::Repositories(Some(action)));
             return;
         }
+        self.as_mut()
+            .set_confirmation_data(encoded(json!({"action":"Apply", "body": action.label()})));
         self.as_mut().set_confirmation(
             format!("{}\n\nApply this repository change?", action.label())
                 .as_str()
@@ -948,6 +1301,7 @@ impl ffi::PackageController {
                 .map(|item| format!("{} ({})\n{}", item.title, item.id.backend, item.preview))
                 .collect::<Vec<_>>()
                 .join("\n\n");
+            self.as_mut().set_confirmation_data(encoded(json!({"action":format!("Clean {} tasks", operations.len()), "body": format!("{labels}\n\nTasks run in order. Completed tasks cannot be undone.")})));
             self.as_mut().set_confirmation(format!("Run {} cleanup tasks?\n\n{labels}\n\nTasks run in order. Completed tasks cannot be undone.", operations.len()).as_str().into());
             self.rust_mut().pending = Some(Job::CleanAll(operations));
             return;
@@ -998,29 +1352,23 @@ impl ffi::PackageController {
                     })
             }
         });
-        if let Some(op) = &operation {
-            let label = if let Operation::Clean(id) = op {
-                self.rust()
-                    .cleanup
-                    .iter()
-                    .find(|item| item.id == *id)
-                    .map(|item| format!("Clean {}?\n\n{}", item.title, item.preview))
-                    .unwrap_or_else(|| operation_label(op))
-            } else {
-                confirmation_label(op, &self.rust().packages)
-            };
-            self.as_mut()
-                .set_confirmation(if matches!(op, Operation::Clean(_)) {
-                    label.as_str().into()
-                } else {
-                    format!("{label}\n\nNative dependency changes may follow. Continue?")
-                        .as_str()
-                        .into()
-                });
-        } else {
-            self.as_mut().set_confirmation(QString::default());
+        match operation {
+            Some(op)
+                if op.backend() == "apt"
+                    && matches!(
+                        op,
+                        Operation::Install(_) | Operation::Remove(_) | Operation::Upgrade(_)
+                    ) =>
+            {
+                self.start(Job::PlanOperation(op));
+            }
+            Some(op) => self.as_mut().apply(Ok(Payload::OperationPreview(op, None))),
+            None => {
+                self.as_mut().set_confirmation(QString::default());
+                self.as_mut().set_confirmation_data("{}".into());
+                self.rust_mut().pending = None;
+            }
         }
-        self.rust_mut().pending = operation.map(Job::Write);
     }
     /// Queue an upgrade of the checked Updates rows. Identities are
     /// re-resolved against the current package list: stale rows (moved on
@@ -1034,7 +1382,11 @@ impl ffi::PackageController {
         if plan.operations.is_empty() {
             self.as_mut().rust_mut().pending = None;
             self.as_mut().set_confirmation(QString::default());
+            self.as_mut().set_confirmation_data("{}".into());
         } else {
+            self.as_mut().set_confirmation_data(encoded(
+                json!({"action":format!("Update {} packages", plan.operations.len()), "body": plan.confirmation}),
+            ));
             self.as_mut()
                 .set_confirmation(plan.confirmation.as_str().into());
         }
@@ -1052,6 +1404,7 @@ impl ffi::PackageController {
         let pending = self.as_mut().rust_mut().pending.take();
         self.as_mut().rust_mut().queued = None;
         self.as_mut().set_confirmation(QString::default());
+        self.as_mut().set_confirmation_data("{}".into());
         if approved {
             if let Some(op) = pending {
                 self.start(op);
@@ -1100,12 +1453,69 @@ impl ffi::PackageController {
                 let apt = apt_plan.as_ref().map_or_else(String::new, |plan| {
                     format!("\n\nAPT transaction:\n{}", plan.summary())
                 });
+                self.as_mut().set_confirmation_data(encoded(json!({"action":format!("Update {count} packages"), "body": format!("{count} listed packages{apt}\n\n{labels}")})));
                 self.as_mut().set_confirmation(
                     format!("Update all {count} listed packages?{apt}\n\n{labels}\n\nContinue?")
                         .as_str()
                         .into(),
                 );
                 self.rust_mut().pending = Some(Job::UpgradeAll(operations, apt_plan));
+            }
+            Ok(Payload::OperationPreview(operation, plan)) => {
+                let data = confirmation_preview(
+                    &operation,
+                    &self.rust().packages,
+                    &self.rust().cleanup,
+                    plan.as_deref(),
+                );
+                let body = data["body"].as_str().unwrap_or_default().to_owned();
+                self.as_mut().set_confirmation_data(encoded(data));
+                self.as_mut().set_confirmation(body.as_str().into());
+                self.rust_mut().pending = Some(Job::Write(operation, plan));
+            }
+            Ok(Payload::RetryPackages(source, retry)) => {
+                self.as_mut().rust_mut().view_cache.clear();
+                self.as_mut().rust_mut().prefetched.clear();
+                let mut packages = self.rust().packages.clone();
+                packages.retain(|package| package.id.backend != source);
+                packages.extend(retry.packages);
+                packages.sort_by(|a, b| a.id.cmp(&b.id));
+                let mut failures = self.rust().failures.clone();
+                failures.retain(|failure| failure.backend != source);
+                failures.extend(retry.failures);
+                let mut successful_sources = self.successful_sources();
+                successful_sources.retain(|id| id != &source);
+                successful_sources.extend(retry.successful_sources);
+                successful_sources.sort();
+                self.as_mut().rust_mut().retrying_source = Some(source.clone());
+                self.as_mut().apply(Ok(Payload::Packages(PackageReport {
+                    packages,
+                    failures,
+                    successful_sources,
+                })));
+                self.as_mut().rust_mut().retrying_source = None;
+            }
+            Ok(Payload::RetryCleanup(source, retry)) => {
+                self.as_mut().rust_mut().view_cache.clear();
+                self.as_mut().rust_mut().prefetched.clear();
+                let mut items = self.rust().cleanup.clone();
+                items.retain(|item| item.id.backend != source);
+                items.extend(retry.items);
+                items.sort_by(|a, b| a.id.cmp(&b.id));
+                let mut failures = self.rust().failures.clone();
+                failures.retain(|failure| failure.backend != source);
+                failures.extend(retry.failures);
+                self.as_mut()
+                    .apply(Ok(Payload::Cleanup(CleanupReport { items, failures })));
+            }
+            Ok(Payload::RetrySources(source, retry)) => {
+                self.as_mut().rust_mut().view_cache.clear();
+                self.as_mut().rust_mut().prefetched.clear();
+                let mut sources = self.rust().sources.clone();
+                sources.retain(|row| row.backend != source);
+                sources.extend(retry);
+                sources.sort_by(|a, b| a.backend.cmp(&b.backend));
+                self.as_mut().apply(Ok(Payload::Sources(sources)));
             }
             Ok(Payload::Packages(report)) => {
                 if matches!(self.rust().queued, Some(Job::Load(..))) {
@@ -1117,10 +1527,12 @@ impl ffi::PackageController {
                 // status, and failures below update on every partial.
                 if self.rust().worker.is_none() {
                     let upgradable = self.rust().updates_view
-                        && report.failures.is_empty()
+                        && report.failures.iter().all(|failure| !read_failed(failure))
                         && !upgrade_plan(&report.packages).is_empty();
                     self.as_mut().set_upgradable(upgradable);
                 }
+                let loading = self.rust().worker.is_some();
+                self.as_mut().set_package_report_state(&report, loading);
                 let same = same_app_sources_all(&report.packages);
                 let groups = same_app_group_keys_all(&report.packages);
                 let mut rows: Vec<_> = report
@@ -1131,16 +1543,20 @@ impl ffi::PackageController {
                     .collect();
                 rows.extend(report.failures.iter().map(|failure| {
                     json!({"kind": "failure", "name": failure.backend, "source": failure.backend,
-                        "summary": failure.error.to_string(), "available": false})
+                        "summary": failure.error.to_string(), "failure_kind": failure_kind(&failure.error), "available": false})
                 }));
-                let status = if report.failures.is_empty() {
-                    format!("{} packages", rows.len())
+                let failed: Vec<_> = report
+                    .failures
+                    .iter()
+                    .filter(|failure| read_failed(failure))
+                    .collect();
+                let status = if failed.is_empty() {
+                    format!("{} packages", report.packages.len())
                 } else {
                     format!(
                         "{} packages\n{}",
-                        rows.len(),
-                        report
-                            .failures
+                        report.packages.len(),
+                        failed
                             .iter()
                             .map(|f| format!("{}: {}", f.backend, f.error))
                             .collect::<Vec<_>>()
@@ -1173,6 +1589,9 @@ impl ffi::PackageController {
                     })
                 }));
                 let incomplete = !report.failures.is_empty();
+                let failures: Vec<_> = report.failures.iter().map(|failure| json!({"source": failure.backend, "kind": failure_kind(&failure.error), "detail": failure.error.to_string()})).collect();
+                let last_success = self.rust().last_success.clone();
+                self.as_mut().set_report_state(encoded(json!({"phase": if incomplete { if empty { "failed" } else { "partial" } } else { "complete" }, "failures": failures, "last_success": last_success})));
                 self.as_mut().rust_mut().cleanup = report.items;
                 self.as_mut().rust_mut().failures = report.failures;
                 self.as_mut().set_rows(encoded(rows));
@@ -1200,7 +1619,24 @@ impl ffi::PackageController {
                 if matches!(self.rust().queued, Some(Job::Load(..))) {
                     return;
                 }
-                let rows: Vec<_> = sources.iter().map(|s| json!({"kind": "source", "name": s.backend, "source": s.backend, "summary": source_status(s), "available": s.availability == Ok(Availability::Available), "capabilities": s.capabilities})).collect();
+                let rows: Vec<_> = sources.iter().map(source_row).collect();
+                let failures: Vec<_> = rows
+                    .iter()
+                    .filter(|row| row["check_failed"] == true)
+                    .map(|row| json!({"source": row["source"], "kind": row["availability_kind"]}))
+                    .collect();
+                let last_success = self.rust().last_success.clone();
+                let phase = if failures.is_empty() {
+                    "complete"
+                } else if failures.len() == rows.len() {
+                    "failed"
+                } else {
+                    "partial"
+                };
+                self.as_mut().set_report_state(encoded(
+                    json!({"phase": phase, "failures": failures, "last_success": last_success}),
+                ));
+                self.as_mut().set_source_catalog(encoded(&rows));
                 self.as_mut().rust_mut().sources = sources;
                 self.as_mut().set_rows(encoded(rows));
                 self.set_status("Source availability checked. Select a source for details.".into());
@@ -1262,6 +1698,7 @@ impl ffi::PackageController {
                 self.as_mut().rust_mut().failures.clear();
                 self.as_mut().rust_mut().sources.clear();
                 self.as_mut().set_rows("[]".into());
+                self.as_mut().set_phase("idle");
                 self.as_mut().set_details("{}".into());
                 self.set_status(
                     if outcome.cancellation_deferred {
@@ -1344,6 +1781,10 @@ impl ffi::PackageController {
                         if let (Job::Load(view, query), Reply::Done(Ok(payload))) =
                             (&worker.job, reply)
                         {
+                            if let Payload::Sources(sources) = &payload {
+                                let rows: Vec<_> = sources.iter().map(source_row).collect();
+                                self.as_mut().set_source_catalog(encoded(rows));
+                            }
                             let key = cache_key(
                                 view,
                                 query,
@@ -1361,18 +1802,25 @@ impl ffi::PackageController {
                 match reply {
                     // The join above guarantees the thread finished sending.
                     Reply::Engine(engine) => {
-                        self.as_mut().rust_mut().engine = Some(engine);
+                        self.as_mut().rust_mut().engine = Some(*engine);
                     }
                     Reply::Partial(report) => self.as_mut().apply(Ok(Payload::Packages(report))),
                     Reply::DetailsPreview(details) => {
                         self.as_mut().apply(Ok(Payload::Details(details)))
                     }
                     Reply::Done(result) => {
+                        // A reviewed native plan can change between review and write.
+                        // Stop the write, compute the new plan, and ask again.
+                        if let Some(next) =
+                            repreview_changed_plan(&worker.job, &result, &self.rust().packages)
+                        {
+                            self.as_mut().rust_mut().queued = Some(next);
+                        }
                         // Snapshot terminal view reports for instant
                         // switching back, unless a newer load already
                         // superseded this one (its guard in apply skips it).
                         let key = match &worker.job {
-                            Job::Load(view, query)
+                            Job::Load(view, query) | Job::RetrySource(view, query, _)
                                 if !matches!(self.rust().queued, Some(Job::Load(..))) =>
                             {
                                 Some(cache_key(
@@ -1389,6 +1837,9 @@ impl ffi::PackageController {
                             Ok(Payload::Packages(_))
                                 | Ok(Payload::Sources(_))
                                 | Ok(Payload::Cleanup(_))
+                                | Ok(Payload::RetryPackages(..))
+                                | Ok(Payload::RetryCleanup(..))
+                                | Ok(Payload::RetrySources(..))
                         );
                         self.as_mut().apply(result);
                         if stashable {
@@ -1432,6 +1883,300 @@ impl ffi::PackageController {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn confirmation_preview_names_target_and_extra_native_changes() {
+        let package: Package = serde_json::from_value(json!({
+            "id": {"backend":"apt", "name":"anonymous", "architecture":"amd64", "scope":"system"},
+            "display_name":"Anonymous App", "summary":"Synthetic", "installed_version":"1", "candidate_version":"2", "update":"available"
+        })).unwrap();
+        let operation = Operation::Upgrade(package.id.clone());
+        let mut plan = TransactionPlan {
+            operation: operation.clone(),
+            native_preview: "synthetic".into(),
+            changes: vec![
+                PlannedChange {
+                    action: PlannedAction::Upgrade,
+                    name: "anonymous".into(),
+                    installed_version: Some("1".into()),
+                    candidate_version: Some("2".into()),
+                },
+                PlannedChange {
+                    action: PlannedAction::Remove,
+                    name: "old-library".into(),
+                    installed_version: Some("1".into()),
+                    candidate_version: None,
+                },
+            ],
+            download_bytes: None,
+            disk_bytes: None,
+            restart_required: None,
+        };
+        let preview =
+            confirmation_preview(&operation, std::slice::from_ref(&package), &[], Some(&plan));
+        assert_eq!(preview["action"], "Update Anonymous App");
+        let body = preview["body"].as_str().unwrap();
+        assert!(body.contains("Source: apt"));
+        assert!(body.contains("Scope: System"));
+        assert!(body.contains("Remove old-library (1)"));
+        assert!(!body.contains("Install anonymous"));
+        assert!(body.contains("Data retention: manager-specific"));
+        plan.changes.push(PlannedChange {
+            action: PlannedAction::Remove,
+            name: "anonymous".into(),
+            installed_version: Some("1".into()),
+            candidate_version: None,
+        });
+        plan.download_bytes = Some(2048);
+        plan.disk_bytes = Some(-512);
+        plan.restart_required = Some(true);
+        let preview =
+            confirmation_preview(&operation, std::slice::from_ref(&package), &[], Some(&plan));
+        let body = preview["body"].as_str().unwrap();
+        assert!(body.contains("Requested change: Update anonymous (1 → 2)"));
+        assert!(body.contains("Remove anonymous (1)"));
+        assert!(body.contains("Download: 2048 bytes · Disk impact: -512 bytes · Restart: required"));
+        let unavailable = confirmation_preview(&operation, &[package], &[], None);
+        assert!(unavailable["body"]
+            .as_str()
+            .unwrap()
+            .contains("Transaction preview unavailable"));
+        let long = serde_json::from_value::<Package>(json!({
+            "id": {"backend":"apt", "name":"anonymous", "architecture":"amd64", "scope":"system"},
+            "display_name":"An extremely long synthetic application name for narrow windows", "summary":"Synthetic", "installed_version":"1", "candidate_version":"2", "update":"available"
+        })).unwrap();
+        let preview = confirmation_preview(&operation, std::slice::from_ref(&long), &[], None);
+        assert!(preview["action"].as_str().unwrap().chars().count() <= 36);
+        assert!(preview["body"]
+            .as_str()
+            .unwrap()
+            .contains(&long.display_name));
+    }
+    #[test]
+    fn retry_merges_only_target_and_preserves_other_check_times() {
+        let package = |backend: &str| -> Package {
+            serde_json::from_value(json!({
+                "id": {"backend":backend, "name":"anonymous", "architecture":"all", "scope":"system"},
+                "display_name":"Anonymous", "summary":"Synthetic", "installed_version":"1", "candidate_version":"1", "update":"current"
+            })).unwrap()
+        };
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().rust_mut().packages = vec![package("apt")];
+        controller
+            .as_mut()
+            .rust_mut()
+            .last_success
+            .insert("apt".into(), 123);
+        controller.as_mut().set_report_state(encoded(json!({"phase":"partial", "successful_sources":["apt"], "failures":[{"source":"npm", "kind":"failed"}], "last_success":{"apt":123}})));
+        controller.as_mut().apply(Ok(Payload::RetryPackages(
+            "npm".into(),
+            PackageReport {
+                packages: vec![package("npm")],
+                failures: vec![],
+                successful_sources: vec!["npm".into()],
+            },
+        )));
+        assert_eq!(controller.rust().packages.len(), 2);
+        assert_eq!(controller.rust().last_success["apt"], 123);
+        assert!(controller.rust().last_success["npm"] > 123);
+        assert_eq!(
+            serde_json::from_str::<Value>(&controller.report_state().to_string()).unwrap()["phase"],
+            "complete"
+        );
+    }
+    #[test]
+    fn retry_jobs_return_only_the_requested_view_and_preview() {
+        let package: Package = serde_json::from_value(json!({
+            "id": {"backend":"fixture", "name":"anonymous", "architecture":"all", "scope":"system"},
+            "display_name":"Anonymous", "summary":"Synthetic", "installed_version":"1",
+            "candidate_version":"2", "update":"available"
+        }))
+        .unwrap();
+        let mut engine = Engine::default();
+        engine
+            .register(Fixture {
+                package: package.clone(),
+                fail: false,
+            })
+            .unwrap();
+        let cancel = Cancellation::default();
+        for (view, query, count) in [
+            ("Search", "anonymous", 1),
+            ("Installed", "missing", 0),
+            ("Updates", "missing", 1),
+        ] {
+            let mut replies = Vec::new();
+            execute(
+                &mut engine,
+                Job::RetrySource(view.into(), query.into(), "fixture".into()),
+                &cancel,
+                &mut |reply| replies.push(reply),
+            );
+            assert_eq!(replies.len(), 1);
+            match replies.pop().unwrap() {
+                Reply::Done(Ok(Payload::RetryPackages(source, report))) => {
+                    assert_eq!(source, "fixture");
+                    assert_eq!(report.packages.len(), count);
+                    assert_eq!(report.successful_sources, ["fixture"]);
+                }
+                _ => panic!("expected a scoped package retry"),
+            }
+        }
+        let mut replies = Vec::new();
+        execute(
+            &mut engine,
+            Job::RetrySource("Clean".into(), "".into(), "fixture".into()),
+            &cancel,
+            &mut |reply| replies.push(reply),
+        );
+        assert!(
+            matches!(replies.pop(), Some(Reply::Done(Ok(Payload::RetryCleanup(source, _)))) if source == "fixture")
+        );
+        execute(
+            &mut engine,
+            Job::RetrySource("Sources".into(), "".into(), "fixture".into()),
+            &cancel,
+            &mut |reply| replies.push(reply),
+        );
+        assert!(
+            matches!(replies.pop(), Some(Reply::Done(Ok(Payload::RetrySources(source, sources)))) if source == "fixture" && sources.len() == 1)
+        );
+        execute(
+            &mut engine,
+            Job::PlanOperation(Operation::Install(package.id)),
+            &cancel,
+            &mut |reply| replies.push(reply),
+        );
+        assert!(matches!(
+            replies.pop(),
+            Some(Reply::Done(Ok(Payload::OperationPreview(
+                Operation::Install(_),
+                None
+            ))))
+        ));
+    }
+    #[test]
+    fn retry_cleanup_and_sources_replace_only_failed_source() {
+        let item = |source: &str, name: &str| CleanupItem {
+            id: CleanupId {
+                backend: source.into(),
+                key: name.into(),
+            },
+            kind: CleanupKind::OrphanDependencies,
+            title: name.into(),
+            summary: "Synthetic".into(),
+            preview: "No changes".into(),
+        };
+        let source = |name: &str, available| Source {
+            backend: name.into(),
+            capabilities: vec![],
+            availability: if available {
+                Ok(Availability::Available)
+            } else {
+                Err(EngineError::Unavailable {
+                    backend: name.into(),
+                    reason: "Synthetic".into(),
+                })
+            },
+        };
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller
+            .as_mut()
+            .apply(Ok(Payload::Cleanup(CleanupReport {
+                items: vec![item("apt", "keep"), item("npm", "old")],
+                failures: vec![],
+            })));
+        controller.as_mut().apply(Ok(Payload::RetryCleanup(
+            "npm".into(),
+            CleanupReport {
+                items: vec![item("npm", "new")],
+                failures: vec![],
+            },
+        )));
+        assert_eq!(
+            controller
+                .rust()
+                .cleanup
+                .iter()
+                .map(|item| item.title.as_str())
+                .collect::<Vec<_>>(),
+            ["keep", "new"]
+        );
+        controller.as_mut().apply(Ok(Payload::Sources(vec![
+            source("apt", true),
+            source("npm", false),
+        ])));
+        controller.as_mut().apply(Ok(Payload::RetrySources(
+            "npm".into(),
+            vec![source("npm", true)],
+        )));
+        assert_eq!(controller.rust().sources.len(), 2);
+        assert!(controller
+            .rust()
+            .sources
+            .iter()
+            .all(|source| source.availability.is_ok()));
+    }
+    #[test]
+    fn changed_plans_request_a_fresh_confirmation_for_the_same_targets() {
+        let package: Package = serde_json::from_value(json!({
+            "id": {"backend":"apt", "name":"anonymous", "architecture":"amd64", "scope":"system"},
+            "display_name":"Anonymous", "summary":"Synthetic", "installed_version":"1",
+            "candidate_version":"2", "update":"available"
+        }))
+        .unwrap();
+        let operation = Operation::Upgrade(package.id.clone());
+        let plan = TransactionPlan {
+            operation: operation.clone(),
+            native_preview: "Synthetic".into(),
+            changes: vec![],
+            download_bytes: None,
+            disk_bytes: None,
+            restart_required: None,
+        };
+        let drift = Err(EngineError::InvalidResponse {
+            backend: "apt".into(),
+            reason: "Transaction plan changed; review again".into(),
+        });
+        let single = Job::Write(operation.clone(), Some(Box::new(plan)));
+        assert!(
+            matches!(repreview_changed_plan(&single, &drift, std::slice::from_ref(&package)), Some(Job::PlanOperation(next)) if next == operation)
+        );
+        let batch = Job::UpgradeAll(
+            vec![operation.clone()],
+            Some(AptUpgradePlan {
+                preview: "Synthetic".into(),
+                upgrades: vec!["anonymous".into()],
+                installs: vec![],
+                removals: vec![],
+            }),
+        );
+        assert!(
+            matches!(repreview_changed_plan(&batch, &drift, &[package]), Some(Job::PlanUpgrade(next, 1)) if next == vec![operation])
+        );
+        assert!(repreview_changed_plan(&single, &Err(EngineError::NotFound), &[]).is_none());
+        assert!(
+            repreview_changed_plan(&Job::Load("Updates".into(), "".into()), &drift, &[]).is_none()
+        );
+    }
+    #[test]
+    fn retry_rejects_unknown_or_disabled_sources_without_starting_work() {
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller
+            .as_mut()
+            .retry_source("Unknown".into(), "".into(), "apt".into());
+        controller
+            .as_mut()
+            .retry_source("Updates".into(), "".into(), "unknown".into());
+        controller.as_mut().rust_mut().source_filter = vec!["apt".into()];
+        controller
+            .as_mut()
+            .retry_source("Updates".into(), "".into(), "npm".into());
+        assert!(controller.rust().worker.is_none());
+        assert!(controller.rust().queued.is_none());
+    }
     #[test]
     fn apt_removals_appear_first_in_update_confirmation() {
         let mut controller = ffi::create_controller();
@@ -1555,16 +2300,19 @@ mod tests {
             cancel: Cancellation::default(),
             job: Job::Load("Sources".into(), "".into()),
         });
-        controller.as_mut().rust_mut().pending = Some(Job::Write(Operation::Refresh {
-            backend: "fixture".into(),
-        }));
+        controller.as_mut().rust_mut().pending = Some(Job::Write(
+            Operation::Refresh {
+                backend: "fixture".into(),
+            },
+            None,
+        ));
         controller.as_mut().confirm(true);
         // The write waits for the background worker to wind down, but the
         // UI must already report busy so confirmed work is never read as
         // idle before it starts.
         assert!(matches!(
             &controller.rust().queued,
-            Some(Job::Write(Operation::Refresh { backend })) if backend == "fixture"
+            Some(Job::Write(Operation::Refresh { backend }, _)) if backend == "fixture"
         ));
         assert!(*controller.busy());
     }
@@ -1697,7 +2445,7 @@ mod tests {
             .contains("Remv synthetic-runtime"));
         assert!(matches!(
             controller.rust().pending,
-            Some(Job::Write(Operation::Clean(_)))
+            Some(Job::Write(Operation::Clean(_), _))
         ));
         controller.as_mut().propose("clean-all".into(), 0);
         assert!(controller
@@ -1918,7 +2666,7 @@ mod tests {
         controller.as_mut().propose("upgrade".into(), 0);
         assert!(matches!(
             &controller.rust().pending,
-            Some(Job::Write(Operation::Upgrade(_)))
+            Some(Job::Write(Operation::Upgrade(_), _))
         ));
         assert!(controller
             .confirmation()
@@ -2187,6 +2935,7 @@ mod tests {
             sources: vec![],
             rows: format!(r#"[{{"name":"{name}"}}]"#).as_str().into(),
             status: "cached".into(),
+            report_state: r#"{"phase":"cached"}"#.into(),
             upgradable: false,
             updates_view: false,
         }
@@ -2520,6 +3269,13 @@ mod tests {
             engine_source(&Job::Load("Installed".into(), "".into()), &[]),
             Vec::<String>::new()
         );
+        assert_eq!(
+            engine_source(
+                &Job::RetrySource("Updates".into(), "".into(), "apt".into()),
+                &["apt".into(), "npm".into()]
+            ),
+            vec!["apt".to_string()]
+        );
     }
     #[test]
     fn stale_details_replies_never_take_the_panel() {
@@ -2714,7 +3470,7 @@ mod tests {
             })
             .unwrap();
         for job in [
-            Job::Write(Operation::Upgrade(firmware.id.clone())),
+            Job::Write(Operation::Upgrade(firmware.id.clone()), None),
             Job::UpgradeAll(vec![Operation::Upgrade(firmware.id.clone())], None),
         ] {
             let mut replies = vec![];
@@ -2764,7 +3520,7 @@ mod tests {
                 Job::Load("Updates".into(), "".into()),
                 Job::Load("Sources".into(), "".into()),
                 Job::Details(id.clone()),
-                Job::Write(Operation::Upgrade(id.clone())),
+                Job::Write(Operation::Upgrade(id.clone()), None),
                 Job::UpgradeAll(
                     vec![Operation::UpgradeAll {
                         backend: id.backend.clone(),

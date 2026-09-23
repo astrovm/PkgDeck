@@ -9,7 +9,7 @@ supported operations; detection alone does not imply every operation is supporte
 
 | Format | Host reads/detection | Host writes | Validation |
 | --- | --- | --- | --- |
-| Native | Enabled | Enabled through the core and CLI | Synthetic process tests; real sudo/polkit and APT in a disposable Ubuntu x86_64 VM |
+| Native | Enabled | Enabled through the core and CLI | Synthetic process tests; real sudo/polkit and APT on a disposable GitHub-hosted Ubuntu x86_64 runner |
 | AppImage | Enabled, outside the bundle | Enabled through the same native boundary | Extract-and-run AppImage doctor probe, GUI and terminal smoke tests; environment-isolation tests |
 | Flatpak | Host managers through `flatpak-spawn --host` | Same typed operations and authorization as native | Installed host APT query, synthetic Homebrew lifecycle, and Flatpak lifecycle |
 | Snap (classic) | Enabled, outside `$SNAP` | Enabled through the same native boundary | Runtime isolation tests and installed package smoke tests in CI |
@@ -55,8 +55,8 @@ For example, the APT adapter invokes the fixed `/usr/bin/apt-get` path via eithe
 - `/usr/bin/pkexec --disable-internal-agent`, using an existing polkit agent/policy;
 - `/usr/bin/sudo -n --`, requiring an existing grant and never prompting.
 
-No passwords, policy files, or sudoers changes are installed by PkgDeck. The VM
-fixture grants privileges only inside its disposable guest to exercise success
+No passwords, policy files, or sudoers changes are installed by PkgDeck. The CI
+fixture grants privileges only on its disposable hosted runner to exercise success
 and denial. Interactive desktop authentication remains a release validation gate.
 The pkexec 126/127 outcomes are reported as cancellation/denial, respectively;
 see the [pkexec manual](https://polkit.pages.freedesktop.org/polkit/pkexec.1.html).
@@ -99,31 +99,18 @@ cargo test --locked -p pkgdeck-core -p pkd
 cargo run --locked -p pkd -- doctor
 ```
 
-Real authorization tests require QEMU, qemu-img, genisoimage, network access for
-Ubuntu package downloads, and an x86_64 build host. KVM is used when accessible;
-otherwise QEMU uses software emulation:
+Real authorization tests run in the x86_64 terminal CI job on a fresh GitHub-hosted
+Ubuntu 26.04 runner. The guarded script checks native backend detection, rejection
+of root frontends, denial for an unauthorized user, native lock contention, and
+installation/removal of a synthetic APT package through both sudo and polkit.
+`dpkg-query` and a fixture-owned file verify the resulting state. The script
+removes its fixtures afterward, and GitHub discards the runner. The `apt-probe`
+executable is never packaged.
 
-```sh
-cargo build --locked -p pkgdeck-core --example apt-probe
-cargo build --locked -p pkd
-scripts/test-host-vm.sh
-```
-
-The launcher verifies the SHA-256 of a dated Ubuntu 26.04 cloud image, creates a
-disposable overlay, and shares the checkout read-only. All package and policy
-changes occur inside the guest. It checks native backend detection, rejection of root frontends, denial for an unauthorized user, native
-lock contention, and installation/removal of `pkgdeck-fixture` through both sudo
-and polkit. `dpkg-query` and a fixture-owned file verify the resulting state.
-The guest also exercises CLI versioned APT and Homebrew lifecycles through
-install, refresh, update detection, upgrade, and removal, checking native state.
-Homebrew uses a controlled tap and the standard Linux prefix as an unprivileged
-user. The VM CPU exposes SSSE3, required by Homebrew on x86_64.
-Dependencies are prepared once in a verified cached VM image. Every test uses a
-fresh overlay, which is deleted on completion or failure. Logs stream live and
-remain in `build/host-vm/logs/`. See [prepared guests and Podman](development.md#prepared-qemu-guests)
-for cache invalidation and the faster container lifecycle checks. The development `apt-probe` executable is never packaged.
-
-The VM test runs in a separate x86_64 CI job. Synthetic boundary tests run on both
-native CI architectures. Real ARM authorization, an installed Flatpak host bridge,
-interactive auth-dialog dismissal, and FUSE-based AppImage launching
-remain explicit release gates; they are not claimed by the local VM result.
+Versioned APT and Homebrew lifecycles run in rootless Podman on both CI
+architectures, with a controlled package repository and Homebrew tap. See
+[local verification](development.md#local-verification-and-development-tools).
+Synthetic boundary tests also run on both native CI architectures. Real ARM
+authorization, an installed Flatpak host bridge, interactive auth-dialog
+dismissal, and FUSE-based AppImage launching remain explicit release gates;
+the hosted-runner test does not claim them.

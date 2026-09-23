@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Sourced only after the disposable guest guard in guest.sh.
+# Sourced after the disposable container or hosted-runner guard.
 set -euo pipefail
 cli() {
     local source=$1 user

@@ -1265,8 +1265,85 @@ fn parse_apt_upgrade_plan(output: &[u8]) -> Result<AptUpgradePlan, EngineError> 
     }
     Ok(plan)
 }
+fn parse_apt_transaction_plan(
+    operation: &Operation,
+    output: &[u8],
+) -> Result<TransactionPlan, EngineError> {
+    let parsed = parse_apt_upgrade_plan(output)?;
+    let mut changes = Vec::new();
+    for line in parsed.preview.lines() {
+        let mut fields = line.split_whitespace();
+        let kind = fields.next();
+        let Some(name) = fields.next() else { continue };
+        let action = match kind {
+            Some("Inst") if parsed.upgrades.iter().any(|item| item == name) => {
+                PlannedAction::Upgrade
+            }
+            Some("Inst") => PlannedAction::Install,
+            Some("Remv" | "Purg") => PlannedAction::Remove,
+            _ => continue,
+        };
+        let tokens: Vec<_> = fields.collect();
+        let installed_version = tokens
+            .iter()
+            .find(|field| field.starts_with('['))
+            .map(|field| field.trim_matches(['[', ']']).to_owned());
+        let candidate_version = if matches!(action, PlannedAction::Remove) {
+            None
+        } else {
+            tokens
+                .iter()
+                .find(|field| field.starts_with('('))
+                .map(|field| {
+                    field
+                        .trim_start_matches('(')
+                        .trim_end_matches(')')
+                        .to_owned()
+                })
+        };
+        changes.push(PlannedChange {
+            action,
+            name: name.into(),
+            installed_version,
+            candidate_version,
+        });
+    }
+    Ok(TransactionPlan {
+        operation: operation.clone(),
+        native_preview: parsed.preview,
+        changes,
+        download_bytes: None,
+        disk_bytes: None,
+        restart_required: None,
+    })
+}
 
 impl<T: Transport> Apt<T> {
+    fn simulated_operation(
+        &self,
+        operation: &Operation,
+        cancel: &Cancellation,
+    ) -> Result<Option<TransactionPlan>, EngineError> {
+        let (verb, id) = match operation {
+            Operation::Install(id) | Operation::Upgrade(id) => ("install", id),
+            Operation::Remove(id) => ("remove", id),
+            _ => return Ok(None),
+        };
+        let target = self.target(id)?;
+        let args = [
+            OsString::from("--simulate"),
+            OsString::from("-o"),
+            OsString::from("Debug::NoLocking=1"),
+            OsString::from(verb),
+            OsString::from(target),
+        ];
+        let output = bytes(
+            "apt",
+            self.transport
+                .system_manager("apt-get", &args, cancel, false)?,
+        )?;
+        parse_apt_transaction_plan(operation, &output).map(Some)
+    }
     fn simulated_upgrade(&self, cancel: &Cancellation) -> Result<AptUpgradePlan, EngineError> {
         let args = ["--simulate", "-o", "Debug::NoLocking=1", "dist-upgrade"].map(OsString::from);
         let output = bytes(
@@ -1407,6 +1484,13 @@ impl<T: Transport> Backend for Apt<T> {
     }
     fn apt_upgrade_plan(&mut self, cancel: &Cancellation) -> Result<AptUpgradePlan, EngineError> {
         self.simulated_upgrade(cancel)
+    }
+    fn operation_plan(
+        &mut self,
+        operation: &Operation,
+        cancel: &Cancellation,
+    ) -> Result<Option<TransactionPlan>, EngineError> {
+        self.simulated_operation(operation, cancel)
     }
     fn execute(
         &mut self,
@@ -4004,6 +4088,26 @@ mod tests {
         )
         .is_err());
         assert!(parse_apt_upgrade_plan(&[0xff]).is_err());
+    }
+
+    #[test]
+    fn apt_single_action_preview_keeps_exact_target_and_extra_removal() {
+        let operation = Operation::Install(PackageId {
+            backend: "apt".into(),
+            name: "anonymous".into(),
+            architecture: "amd64".into(),
+            scope: Scope::System,
+            remote: None,
+            reference: None,
+        });
+        let plan = parse_apt_transaction_plan(&operation, b"0 upgraded, 2 newly installed, 1 to remove and 0 not upgraded.\nInst anonymous (2.0 Ubuntu:stable [amd64])\nInst dependency (1.0 Ubuntu:stable [amd64])\nRemv obsolete [1.0]\n").unwrap();
+        assert_eq!(plan.operation, operation);
+        assert_eq!(plan.changes.len(), 3);
+        assert_eq!(plan.changes[0].action, PlannedAction::Install);
+        assert_eq!(plan.changes[0].candidate_version.as_deref(), Some("2.0"));
+        assert_eq!(plan.changes[2].action, PlannedAction::Remove);
+        assert_eq!(plan.changes[2].installed_version.as_deref(), Some("1.0"));
+        assert!(plan.download_bytes.is_none());
     }
 
     #[test]
