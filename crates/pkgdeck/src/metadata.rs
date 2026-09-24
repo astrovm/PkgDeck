@@ -119,7 +119,13 @@ pub fn cached_info(package: &Package) -> Option<AppInfo> {
 }
 static REMOTE: Mutex<BTreeMap<PackageId, (u64, AppInfo)>> = Mutex::new(BTreeMap::new());
 pub fn enrich(package: &mut Package) {
-    catalog().enrich(package);
+    let _ = catalog();
+    enrich_cached(package);
+}
+pub fn enrich_cached(package: &mut Package) {
+    if let Some(catalog) = CATALOG.cached() {
+        catalog.enrich(package);
+    }
     if let Some(info) = cached_info(package).filter(|info| !info.name.is_empty()) {
         package.display_name = info.name;
     }

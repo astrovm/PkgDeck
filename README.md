@@ -4,7 +4,7 @@ A desktop app and command-line tool for managing packages across multiple source
 Compare apps, manage repositories, and install updates from one place. Both
 frontends use the same Rust engine and your existing package managers.
 
-![PkgDeck search comparing application sources](docs/screenshots/search.png)
+![PkgDeck searching APT packages](docs/screenshots/search.png)
 
 ## Install
 

@@ -43,6 +43,21 @@ ColumnLayout {
             text: "Cancel queued"
             onClicked: pane.cancelQueued()
             Accessible.name: text
+            implicitHeight: Math.max(38, pane.textFont.pointSize * 3)
+            horizontalPadding: 16
+            background: Rectangle {
+                color: parent.hovered ? pane.surface : "transparent"
+                radius: 7
+                border.color: parent.activeFocus ? pane.accent : pane.line
+                border.width: parent.activeFocus ? 2 : 1
+            }
+            contentItem: Text {
+                text: parent.text
+                color: pane.ink
+                font: pane.textFont
+                horizontalAlignment: Text.AlignHCenter
+                verticalAlignment: Text.AlignVCenter
+            }
         }
     }
     ListView {

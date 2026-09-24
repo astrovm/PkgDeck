@@ -64,10 +64,12 @@ obsolete downloads when cleanup runs, then asks for system authentication.
 
 Views identify cached results and show them immediately for up to 60 seconds.
 Expired results stay visible while a new check runs. Failed source checks appear
-in a separate notice with details and a retry for that source. Installed and Updates share one inventory.
-Sources, Installed, Updates, and Clean preload sequentially in the background;
-foreground requests take priority. Package and repository changes invalidate the
-cache. Cleanup always checks the confirmed plan again before execution.
+in a separate notice with details and a retry for that source. Installed and
+Updates share one inventory. The source picker checks availability on demand
+without occupying the search worker. Installed, Updates, and Clean preload
+after leaving Search. Foreground requests take priority. Package and repository
+changes invalidate the cache. Cleanup always checks the confirmed plan again
+before execution.
 
 ## Updates
 
