@@ -326,7 +326,7 @@ fn inspect_with_host(
         suffix: suffix.into(),
         name,
         description,
-        digest: format!("{:x}", Sha256::digest(&bytes)),
+        digest: hex::encode(Sha256::digest(&bytes)),
     })
 }
 struct Staged(PathBuf);
@@ -354,7 +354,7 @@ fn apply_with_host(
         return Err(invalid("repository file changed since preview"));
     }
     let bytes = source_bytes(&import.source, cancel, host)?;
-    if format!("{:x}", Sha256::digest(&bytes)) != import.digest {
+    if hex::encode(Sha256::digest(&bytes)) != import.digest {
         return Err(invalid("repository file changed during staging"));
     }
     let path = std::env::temp_dir().join(format!(

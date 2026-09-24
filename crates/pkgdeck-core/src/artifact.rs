@@ -179,7 +179,7 @@ fn hash(path: &Path, cancel: &Cancellation) -> Result<String, EngineError> {
         }
         hash.update(&buffer[..count]);
     }
-    Ok(format!("{:x}", hash.finalize()))
+    Ok(hex::encode(hash.finalize()))
 }
 fn download(
     source: &str,

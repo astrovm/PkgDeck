@@ -55,7 +55,7 @@ fn digest(path: &Path, cancel: &Cancellation) -> Result<String, EngineError> {
         }
         hash.update(&buffer[..count]);
     }
-    Ok(format!("{:x}", hash.finalize()))
+    Ok(hex::encode(hash.finalize()))
 }
 
 fn field<'a>(text: &'a str, name: &str) -> Option<&'a str> {
@@ -227,7 +227,7 @@ pub fn stage(id: &PackageId, cancel: &Cancellation) -> Result<Option<StagedArchi
         if cancel.requested() {
             return Err(EngineError::Cancelled);
         }
-        if format!("{:x}", hash.finalize()) != expected {
+        if hex::encode(hash.finalize()) != expected {
             return Err(invalid("Debian archive changed during staging"));
         }
         Ok(())
