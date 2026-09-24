@@ -320,6 +320,15 @@ Controls.ApplicationWindow {
         addPackageDialog.close();
         root.openExternalInput(input);
     }
+    function toggleSourcePopup() {
+        if (sourcePopup.visible) {
+            sourcePopup.close();
+            return;
+        }
+        backend.checkSources();
+        rememberDialogFocus();
+        sourcePopup.open();
+    }
     function effectiveSources(view) {
         const enabled = checkedSources();
         const selected = viewSourceFilters[view || currentView];
@@ -1247,7 +1256,7 @@ Controls.ApplicationWindow {
                     visible: !root.compact && ["Search", "Installed", "Updates", "Clean"].indexOf(root.currentView) >= 0
                     text: root.viewSourceFilters[root.currentView] ? root.sourceSummary() : "Filter sources"
                     symbol: "sources"
-                    onClicked: { backend.checkSources(); root.rememberDialogFocus(); sourcePopup.open(); }
+                    onClicked: root.toggleSourcePopup()
                     Accessible.name: "Filter this page by package source"
                     Layout.preferredWidth: 160
                     Controls.Popup {
@@ -1262,6 +1271,8 @@ Controls.ApplicationWindow {
                         width: Math.min(340, root.width - 32)
                         height: Math.min(460, root.height - 100, implicitHeight)
                         padding: 10
+                        modal: true
+                        Controls.Overlay.modal: Rectangle { color: "transparent" }
                         closePolicy: Controls.Popup.CloseOnEscape | Controls.Popup.CloseOnPressOutside
                         onOpened: {
                             searchText = "";
@@ -1401,7 +1412,7 @@ Controls.ApplicationWindow {
                     text: root.viewSourceFilters[root.currentView] ? root.sourceSummary() : "Filter sources"
                     symbol: "sources"
                     Layout.fillWidth: true
-                    onClicked: { backend.checkSources(); root.rememberDialogFocus(); sourcePopup.open(); }
+                    onClicked: root.toggleSourcePopup()
                     Accessible.name: "Filter this page by package source"
                 }
             }

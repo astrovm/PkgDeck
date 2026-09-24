@@ -824,6 +824,26 @@ TestCase {
         verify(!filter.visible);
         verify(compactActivity.visible);
     }
+    function test_source_filter_button_toggles_its_popup() {
+        const popup = findChild(browser, "sourcePopup");
+        for (const width of [1100, 380]) {
+            browser.width = width;
+            browser.openView("Search");
+            waitForRendering(browser.contentItem);
+            const button = findChild(browser, width < 960 ? "compactSourceFilter" : "sourceFilter");
+            const checks = fake.sourceChecks;
+            clickDelegate(button);
+            tryCompare(popup, "visible", true);
+            compare(fake.sourceChecks, checks + 1);
+            clickDelegate(button);
+            tryCompare(popup, "visible", false);
+            compare(fake.sourceChecks, checks + 1);
+            clickDelegate(button);
+            tryCompare(popup, "visible", true);
+            popup.close();
+            tryCompare(popup, "visible", false);
+        }
+    }
     function test_returning_to_search_reloads_visible_query() {
         browser.openView("Search");
         const search = findChild(browser, "searchField");
