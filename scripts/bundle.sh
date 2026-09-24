@@ -3,7 +3,7 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 out=build/AppDir
 rm -rf -- "$out"
-mkdir -p "$out/usr/"{bin,lib,qml,plugins}
+mkdir -p "$out/usr/"{bin,lib,libexec,qml,plugins}
 case "$(uname -m)" in
     x86_64)
         updater_url='https://github.com/AppImageCommunity/AppImageUpdate/releases/download/2.0.0-alpha-1-20251018/appimageupdatetool-x86_64.AppImage'
@@ -21,6 +21,7 @@ printf '%s  %s\n' "$updater_sha256" "$out/usr/lib/pkgdeck/appimageupdatetool.App
 chmod +x "$out/usr/lib/pkgdeck/appimageupdatetool.AppImage"
 scripts/build-apt.sh "${CARGO_TARGET_DIR:-target}/release"
 cp "${CARGO_TARGET_DIR:-target}/release/"{pkd,pkgdeck,pkgdeck-apt-query} "$out/usr/bin/"
+cp "${CARGO_TARGET_DIR:-target}/release/pkgdeck-host-runner" "$out/usr/libexec/"
 for module in QtQuick QtQml QtCore QtNetwork org; do cp -a "$QT_QML_DIR/$module" "$out/usr/qml/"; done
 mkdir -p "$out/usr/qml/Qt/labs"
 cp -a "$QT_QML_DIR/Qt/labs/platform" "$out/usr/qml/Qt/labs/"
@@ -44,7 +45,7 @@ done
 printf '[Paths]\nPrefix=..\nLibraries=lib\nPlugins=plugins\nQmlImports=qml\n' >"$out/usr/bin/qt.conf"
 LD_LIBRARY_PATH="$(realpath "$out/usr/lib"):$QT_LIB_DIR"
 export LD_LIBRARY_PATH
-mapfile -d '' queue < <(find "$out" -type f \( -name '*.so*' -o -name pkd -o -name pkgdeck -o -name pkgdeck-apt-query \) -print0)
+mapfile -d '' queue < <(find "$out" -type f \( -name '*.so*' -o -name pkd -o -name pkgdeck -o -name pkgdeck-apt-query -o -name pkgdeck-host-runner \) -print0)
 for ((i = 0; i < ${#queue[@]}; i++)); do
     path=${queue[i]}
     links=$(ldd "$path") || {

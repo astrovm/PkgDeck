@@ -706,3 +706,41 @@ fn flatpak_failures_missing_tools_and_cancellation_are_diagnostic() {
     );
     thread.join().unwrap();
 }
+
+#[test]
+fn apt_group_preserves_exact_targets_and_rejects_mixed_verbs() {
+    let args = AptAction::group_arguments(&[
+        AptAction::Install("fixture-one:amd64".into()),
+        AptAction::Install("fixture-two:arm64".into()),
+    ])
+    .unwrap();
+    assert_eq!(
+        args[args.len() - 2..],
+        [
+            OsString::from("fixture-one:amd64"),
+            OsString::from("fixture-two:arm64")
+        ]
+    );
+    assert!(matches!(
+        AptAction::group_arguments(&[]),
+        Err(ExecutionError::Invalid(_))
+    ));
+    assert!(matches!(
+        AptAction::group_arguments(&[
+            AptAction::Install("fixture-one:amd64".into()),
+            AptAction::Remove("fixture-two:amd64".into()),
+        ]),
+        Err(ExecutionError::Invalid(_))
+    ));
+    assert!(matches!(
+        AptAction::group_arguments(&[AptAction::Refresh]),
+        Err(ExecutionError::Invalid(_))
+    ));
+    assert!(matches!(
+        AptAction::group_arguments(&[
+            AptAction::Install("--purge".into()),
+            AptAction::Install("fixture-two:amd64".into()),
+        ]),
+        Err(ExecutionError::Invalid(_))
+    ));
+}

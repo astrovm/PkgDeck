@@ -237,23 +237,20 @@ impl<T: Transport> Backend for Firmware<T> {
             }
             Operation::UpgradeAll { backend } if backend == "fwupd" => {
                 let updates = self.installed(cancel)?;
-                let mut outcome = OperationOutcome::default();
-                for package in updates
+                let available = updates
                     .into_iter()
                     .filter(|p| p.update == UpdateAvailability::Available)
-                {
-                    if cancel.requested() {
-                        return Err(EngineError::Cancelled);
-                    }
+                    .collect::<Vec<_>>();
+                if available.is_empty() {
+                    return Ok(OperationOutcome::default());
+                }
+                for package in available {
                     progress(Progress::Message(format!(
                         "{}: {}",
                         package.display_name, package.summary
                     )));
-                    outcome.cancellation_deferred |= self
-                        .write("update", Some(&package.id.name), cancel, progress)?
-                        .cancellation_deferred;
                 }
-                Ok(outcome)
+                self.write("update", None, cancel, progress)
             }
             _ => Err(self.unsupported(operation.capability())),
         }

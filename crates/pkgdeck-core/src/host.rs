@@ -391,7 +391,11 @@ impl Host {
         }))
     }
 
-    fn command(&self, executable: &Path, args: &[OsString]) -> Result<Command, ExecutionError> {
+    pub(crate) fn command(
+        &self,
+        executable: &Path,
+        args: &[OsString],
+    ) -> Result<Command, ExecutionError> {
         self.enabled()?;
         if !executable.is_absolute() {
             return Err(ExecutionError::Invalid(
@@ -723,6 +727,27 @@ impl Host {
         classify_apt(result)
     }
 
+    /// Execute one validated APT transaction with several exact targets.
+    pub fn apt_group(
+        &self,
+        actions: &[AptAction],
+        authorization: Authorization,
+        cancel: &Cancellation,
+    ) -> Result<Completion, ExecutionError> {
+        self.enabled()?;
+        if rustix::process::geteuid().is_root() {
+            return Err(ExecutionError::Invalid(
+                "run the frontend as an unprivileged user".into(),
+            ));
+        }
+        classify_apt(self.privileged(
+            Path::new("/usr/bin/apt-get"),
+            &AptAction::group_arguments(actions)?,
+            authorization,
+            cancel,
+        )?)
+    }
+
     /// Runs Flatpak from the invoking user's sanitized environment. System writes
     /// use the same non-interactive authorization boundary as APT.
     pub fn flatpak(
@@ -960,6 +985,9 @@ impl Host {
         authorization: Authorization,
         cancel: &Cancellation,
     ) -> Result<Completion, ExecutionError> {
+        if let Some(result) = crate::batch::run_in_scope(executable, args, cancel) {
+            return result;
+        }
         let (program, mut prefixed) = authorization.prefix(executable);
         prefixed.extend(args.iter().cloned());
         let mut host = self.clone();
@@ -1123,6 +1151,64 @@ mod flatpak_bridge_tests {
         assert!(output.contains("--env=HOMEBREW_NO_AUTO_UPDATE=1"));
         assert!(output.contains("--env=HOMEBREW_NO_INSTALL_CLEANUP=1"));
         assert!(output.contains("--env=HOMEBREW_NO_ANALYTICS=1"));
+    }
+
+    #[test]
+    fn system_writes_use_fixed_host_paths_and_fail_closed_when_unavailable() {
+        let mut host = Host::new(
+            Runtime::Flatpak,
+            [("PATH".into(), "/home/fixture/untrusted-bin".into())].into(),
+        );
+        host.bridge = "/bin/echo".into();
+        let cancel = Cancellation::default();
+        let flatpak = host
+            .flatpak(
+                &["--system".into(), "update".into()],
+                &cancel,
+                true,
+                true,
+                Authorization::SudoNonInteractive,
+            )
+            .unwrap();
+        let output = String::from_utf8(flatpak.stdout).unwrap();
+        assert!(output.contains("/usr/bin/sudo -n -- /usr/bin/flatpak --system update"));
+        assert!(!output.contains("/home/fixture/untrusted-bin/flatpak"));
+
+        let manager = host
+            .system_manager(
+                "dnf",
+                &["install".into(), "synthetic-package".into()],
+                &cancel,
+                true,
+                Authorization::Polkit,
+            )
+            .unwrap();
+        let output = String::from_utf8(manager.stdout).unwrap();
+        assert!(output.contains("/usr/bin/dnf install synthetic-package"));
+        assert!(!output.contains("/home/fixture/untrusted-bin/dnf"));
+
+        host.bridge = "/bin/false".into();
+        assert!(matches!(
+            host.flatpak(&[], &cancel, true, true, Authorization::Polkit),
+            Err(ExecutionError::Disabled(reason)) if reason == "system Flatpak not found"
+        ));
+        assert!(matches!(
+            host.system_manager("dnf", &[], &cancel, true, Authorization::Polkit),
+            Err(ExecutionError::Disabled(reason)) if reason == "dnf not found"
+        ));
+    }
+
+    #[test]
+    fn source_editor_checks_host_executable_before_launch() {
+        let mut host = Host::new(Runtime::Flatpak, BTreeMap::new());
+        host.bridge = "/bin/true".into();
+        host.open_source_editor().unwrap();
+
+        host.bridge = "/bin/false".into();
+        assert!(matches!(
+            host.open_source_editor(),
+            Err(ExecutionError::Disabled(reason)) if reason.contains("software-properties")
+        ));
     }
 
     #[test]
@@ -1455,7 +1541,7 @@ pub enum Authorization {
 }
 
 impl Authorization {
-    fn prefix(self, executable: &Path) -> (&'static str, Vec<OsString>) {
+    pub(crate) fn prefix(self, executable: &Path) -> (&'static str, Vec<OsString>) {
         match self {
             Self::Polkit => (
                 "/usr/bin/pkexec",
@@ -1469,7 +1555,7 @@ impl Authorization {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum AptAction {
     Refresh,
     Upgrade(String),
@@ -1482,6 +1568,27 @@ pub enum AptAction {
 }
 
 impl AptAction {
+    pub fn group_arguments(actions: &[Self]) -> Result<Vec<OsString>, ExecutionError> {
+        let Some(first) = actions.first() else {
+            return Err(ExecutionError::Invalid("empty APT transaction".into()));
+        };
+        let kind = std::mem::discriminant(first);
+        if !matches!(first, Self::Install(_) | Self::Remove(_) | Self::Upgrade(_))
+            || actions
+                .iter()
+                .any(|action| std::mem::discriminant(action) != kind)
+        {
+            return Err(ExecutionError::Invalid(
+                "mixed APT transaction verbs".into(),
+            ));
+        }
+        let mut arguments = first.arguments()?;
+        for action in &actions[1..] {
+            let next = action.arguments()?;
+            arguments.push(next.last().expect("validated target").clone());
+        }
+        Ok(arguments)
+    }
     pub fn arguments(&self) -> Result<Vec<OsString>, ExecutionError> {
         let (operation, package) = match self {
             Self::Refresh => {

@@ -93,6 +93,15 @@ pub trait Transport: Send {
         action: AptAction,
         cancel: &Cancellation,
     ) -> Result<Completion, ExecutionError>;
+    fn apt_write_group(
+        &self,
+        _actions: &[AptAction],
+        _cancel: &Cancellation,
+    ) -> Result<Completion, ExecutionError> {
+        Err(ExecutionError::Disabled(
+            "grouped APT transaction unavailable".into(),
+        ))
+    }
     fn brew(
         &self,
         args: &[OsString],
@@ -207,6 +216,13 @@ fn apt_query_executable(
 impl Transport for NativeTransport {
     fn repository_editor(&self) -> Result<(), ExecutionError> {
         self.host.open_source_editor()
+    }
+    fn apt_write_group(
+        &self,
+        actions: &[AptAction],
+        cancel: &Cancellation,
+    ) -> Result<Completion, ExecutionError> {
+        self.host.apt_group(actions, self.authorization, cancel)
     }
     fn apt_query(
         &self,
@@ -1633,6 +1649,40 @@ impl<T: Transport> Backend for Apt<T> {
         Ok(OperationOutcome {
             cancellation_deferred: result.cancellation_deferred,
         })
+    }
+    fn execute_group(
+        &mut self,
+        operations: &[Operation],
+        cancel: &Cancellation,
+        progress: &mut dyn FnMut(Progress),
+    ) -> Option<Result<Vec<OperationOutcome>, EngineError>> {
+        if operations.len() < 2 {
+            return None;
+        }
+        let grouped = (|| {
+            let actions = operations
+                .iter()
+                .map(|operation| match operation {
+                    Operation::Install(id) => Ok(AptAction::Install(self.target(id)?)),
+                    Operation::Remove(id) => Ok(AptAction::Remove(self.target(id)?)),
+                    Operation::Upgrade(id) => Ok(AptAction::Upgrade(self.target(id)?)),
+                    _ => Err(invalid("apt", "mixed APT batch")),
+                })
+                .collect::<Result<Vec<_>, EngineError>>()?;
+            AptAction::group_arguments(&actions)?;
+            progress(Progress::Message(format!(
+                "Running {} exact APT targets in one native transaction.",
+                actions.len()
+            )));
+            let result = self.transport.apt_write_group(&actions, cancel)?;
+            Ok(vec![
+                OperationOutcome {
+                    cancellation_deferred: result.cancellation_deferred
+                };
+                actions.len()
+            ])
+        })();
+        Some(grouped)
     }
 }
 
@@ -4052,6 +4102,7 @@ pub fn native_engine(
     let explicit = !sources.is_empty();
     let mut engine = Engine::default();
     let host = Host::current();
+    engine.enable_batch_authorization(host.clone(), authorization);
     if !discover && sources.is_empty() {
         if let Some(reason) = host.runtime.disabled_reason() {
             return Err(ExecutionError::Disabled(reason.into()).into());

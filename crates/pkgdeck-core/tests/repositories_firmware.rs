@@ -226,7 +226,9 @@ fn firmware_participates_in_engine_update_all_and_propagates_failure() {
         .lock()
         .unwrap()
         .iter()
-        .any(|(_, args, write, _)| *write && args.last().is_some_and(|s| s == DEVICE)));
+        .any(|(_, args, write, _)| *write
+            && args.last().is_some_and(|s| s == "update")
+            && args.contains(&"--no-reboot-check".into())));
     let mut failed = Firmware::new(Fixture {
         fail: true,
         ..Default::default()

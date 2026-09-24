@@ -1,5 +1,6 @@
 //! Synchronous orchestration for use on a frontend worker. No shell or UI dependencies.
 use crate::{
+    host::{Authorization, Host},
     package::*,
     process::{Cancellation, ExecutionError},
 };
@@ -155,6 +156,15 @@ pub trait Backend: Send {
     ) -> Result<OperationOutcome, EngineError> {
         Err(self.unsupported(operation.capability()))
     }
+    /// A manager may combine exact same-verb selections in one native write.
+    fn execute_group(
+        &mut self,
+        _operations: &[Operation],
+        _cancel: &Cancellation,
+        _progress: &mut dyn FnMut(Progress),
+    ) -> Option<Result<Vec<OperationOutcome>, EngineError>> {
+        None
+    }
     fn unsupported(&self, capability: Capability) -> EngineError {
         EngineError::Unsupported {
             backend: self.id().into(),
@@ -250,8 +260,14 @@ pub struct Engine {
     cleanup_plans: BTreeMap<CleanupId, CleanupItem>,
     apt_upgrade_plan: Option<AptUpgradePlan>,
     operation_plan: Option<TransactionPlan>,
+    batch_authorization: Option<(Host, Authorization)>,
 }
 impl Engine {
+    /// Native engines use one trusted runner for the protected part of a
+    /// confirmed batch when it is installed by the host package.
+    pub fn enable_batch_authorization(&mut self, host: Host, authorization: Authorization) {
+        self.batch_authorization = Some((host, authorization));
+    }
     /// Simulate the host APT solver before asking the user to approve a full update.
     pub fn plan_apt_upgrade(
         &mut self,
@@ -659,7 +675,19 @@ impl Engine {
         cancel: &Cancellation,
         events: &mut dyn FnMut(Event),
     ) -> Result<OperationOutcome, EngineError> {
-        events(Event::Started(operation.clone()));
+        self.execute_started(operation, cancel, events, false)
+    }
+
+    fn execute_started(
+        &mut self,
+        operation: &Operation,
+        cancel: &Cancellation,
+        events: &mut dyn FnMut(Event),
+        already_started: bool,
+    ) -> Result<OperationOutcome, EngineError> {
+        if !already_started {
+            events(Event::Started(operation.clone()));
+        }
         let expected = match operation {
             Operation::Clean(id) => self.cleanup_plans.remove(id),
             _ => None,
@@ -724,6 +752,56 @@ impl Engine {
         result
     }
 
+    /// Check every native preview and typed target before authorization. A
+    /// failure prevents every write in this confirmation scope.
+    fn preflight(
+        &mut self,
+        operation: &Operation,
+        cancel: &Cancellation,
+    ) -> Result<(), EngineError> {
+        let expected_apt = self.apt_upgrade_plan.clone();
+        let expected_cleanup = match operation {
+            Operation::Clean(id) => self.cleanup_plans.get(id).cloned(),
+            _ => None,
+        };
+        let expected_plan = self
+            .operation_plan
+            .as_ref()
+            .filter(|plan| &plan.operation == operation)
+            .cloned();
+        let backend = self.ready(operation.backend(), operation.capability(), cancel)?;
+        if matches!(operation, Operation::UpgradeAll { backend } if backend == "apt") {
+            let current = backend.apt_upgrade_plan(cancel)?;
+            if expected_apt.as_ref() != Some(&current) {
+                return Err(EngineError::InvalidResponse {
+                    backend: "apt".into(),
+                    reason: "APT upgrade plan changed or was not reviewed; preview it again."
+                        .into(),
+                });
+            }
+        }
+        if let Operation::Clean(id) = operation {
+            let current = backend.cleanup_plan(id, cancel)?;
+            if expected_cleanup.as_ref() != Some(&current) {
+                return Err(EngineError::InvalidResponse {
+                    backend: id.backend.clone(),
+                    reason: "Cleanup plan changed or expired; reload and review it again.".into(),
+                });
+            }
+        }
+        if let Some(expected) = expected_plan {
+            let current = backend.operation_plan(operation, cancel)?;
+            if current.as_ref() != Some(&expected) {
+                return Err(EngineError::InvalidResponse {
+                    backend: operation.backend().into(),
+                    reason: "Transaction plan changed; review the action again.".into(),
+                });
+            }
+        }
+        crate::batch::protected_commands(operation)?;
+        Ok(())
+    }
+
     /// Ordered, best-effort batch. Successful writes are not rolled back after another failure.
     /// Every input receives its own result and terminal event, including cancelled items.
     pub fn execute_batch(
@@ -732,16 +810,143 @@ impl Engine {
         cancel: &Cancellation,
         events: &mut dyn FnMut(Event),
     ) -> Vec<Result<OperationOutcome, EngineError>> {
-        operations
+        if operations.is_empty() {
+            return vec![];
+        }
+        if self.batch_authorization.is_none() {
+            return operations
+                .iter()
+                .map(|operation| self.execute(operation, cancel, events))
+                .collect();
+        }
+        let checked: Vec<_> = operations
             .iter()
-            .map(|operation| self.execute(operation, cancel, events))
-            .collect()
+            .map(|operation| self.preflight(operation, cancel))
+            .collect();
+        if checked.iter().any(Result::is_err) {
+            return operations.iter().zip(checked).map(|(operation, result)| {
+                let result = Err(result.err().unwrap_or_else(|| EngineError::InvalidResponse {
+                    backend: operation.backend().into(),
+                    reason: "Another operation in the batch failed validation; review the batch again.".into(),
+                }));
+                events(Event::Started(operation.clone()));
+                events(Event::Finished { operation: operation.clone(), result: result.clone() });
+                result
+            }).collect();
+        }
+        let protected = crate::batch::batch_commands(operations)
+            .expect("individual protected commands were validated above")
+            .iter()
+            .any(|commands| !commands.is_empty());
+        if !protected {
+            return operations
+                .iter()
+                .map(|operation| self.execute(operation, cancel, events))
+                .collect();
+        }
+        let (host, authorization) = self.batch_authorization.clone().expect("configured above");
+        events(Event::Started(operations[0].clone()));
+        events(Event::Progress {
+            operation: operations[0].clone(),
+            progress: Progress::Message("Authorizing system changes for this batch.".into()),
+        });
+        let guard = match crate::batch::begin(&host, authorization, operations, cancel) {
+            Ok(guard) => guard,
+            Err(error) => {
+                return operations
+                    .iter()
+                    .enumerate()
+                    .map(|(index, operation)| {
+                        if index != 0 {
+                            events(Event::Started(operation.clone()));
+                        }
+                        let result = Err(EngineError::from(error.clone()));
+                        events(Event::Finished {
+                            operation: operation.clone(),
+                            result: result.clone(),
+                        });
+                        result
+                    })
+                    .collect();
+            }
+        };
+        if guard.is_none() {
+            events(Event::Progress { operation: operations[0].clone(), progress: Progress::Message("Trusted batch runner unavailable; using the existing authorization method for each system command.".into()) });
+        }
+        let mut results = Vec::with_capacity(operations.len());
+        let mut index = 0;
+        while index < operations.len() {
+            let operation = &operations[index];
+            let mut end = index + 1;
+            if operation.backend() == "apt"
+                && matches!(
+                    operation,
+                    Operation::Install(_) | Operation::Remove(_) | Operation::Upgrade(_)
+                )
+            {
+                while end < operations.len()
+                    && operations[end].backend() == "apt"
+                    && std::mem::discriminant(&operations[end]) == std::mem::discriminant(operation)
+                {
+                    end += 1;
+                }
+            }
+            crate::batch::set_operation(index);
+            if end - index > 1 {
+                for (offset, member) in operations[index..end].iter().enumerate() {
+                    if index + offset != 0 {
+                        events(Event::Started(member.clone()));
+                    }
+                }
+                let rechecked = operations[index..end]
+                    .iter()
+                    .map(|member| self.preflight(member, cancel))
+                    .collect::<Vec<_>>();
+                let grouped = if let Some(error) = rechecked.into_iter().find_map(Result::err) {
+                    Err(error)
+                } else {
+                    self.ready("apt", operation.capability(), cancel)
+                        .and_then(|backend| {
+                            backend
+                                .execute_group(&operations[index..end], cancel, &mut |progress| {
+                                    events(Event::Progress {
+                                        operation: operation.clone(),
+                                        progress,
+                                    });
+                                })
+                                .unwrap_or_else(|| {
+                                    Err(EngineError::InvalidResponse {
+                                        backend: "apt".into(),
+                                        reason: "grouped APT operation unavailable".into(),
+                                    })
+                                })
+                        })
+                };
+                for member in &operations[index..end] {
+                    let result = match &grouped {
+                        Ok(outcomes) => Ok(outcomes[0].clone()),
+                        Err(error) => Err(error.clone()),
+                    };
+                    events(Event::Finished {
+                        operation: member.clone(),
+                        result: result.clone(),
+                    });
+                    results.push(result);
+                }
+            } else {
+                results.push(self.execute_started(operation, cancel, events, index == 0));
+            }
+            index = end;
+        }
+        drop(guard);
+        results
     }
 }
 
 #[cfg(test)]
 mod apt_upgrade_tests {
     use super::*;
+    use crate::host::Runtime;
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -812,6 +1017,137 @@ mod apt_upgrade_tests {
             assert_eq!(engine.execute(&op, &cancel, &mut |_| {}).is_ok(), succeeds);
             assert_eq!(writes.load(Ordering::SeqCst), usize::from(succeeds));
         }
+    }
+
+    #[test]
+    fn changed_later_plan_blocks_every_batch_write_before_authorization() {
+        struct UserFixture(Arc<AtomicUsize>);
+        impl Backend for UserFixture {
+            fn id(&self) -> &str {
+                "user"
+            }
+            fn capabilities(&self) -> &[Capability] {
+                &[Capability::Refresh]
+            }
+            fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
+                Ok(Availability::Available)
+            }
+            fn execute(
+                &mut self,
+                _: &Operation,
+                _: &Cancellation,
+                _: &mut dyn FnMut(Progress),
+            ) -> Result<OperationOutcome, EngineError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(OperationOutcome::default())
+            }
+        }
+        let writes = Arc::new(AtomicUsize::new(0));
+        let mut engine = Engine::default();
+        engine.register(UserFixture(writes.clone())).unwrap();
+        engine
+            .register(AptFixture {
+                reads: 0,
+                drift: true,
+                writes: writes.clone(),
+            })
+            .unwrap();
+        engine.enable_batch_authorization(
+            Host::new(Runtime::Native, Default::default()),
+            Authorization::Polkit,
+        );
+        let cancel = Cancellation::default();
+        engine.plan_apt_upgrade(&cancel).unwrap();
+        let operations = [
+            Operation::Refresh {
+                backend: "user".into(),
+            },
+            Operation::UpgradeAll {
+                backend: "apt".into(),
+            },
+        ];
+        let mut events = Vec::new();
+        let results = engine.execute_batch(&operations, &cancel, &mut |event| events.push(event));
+        assert!(results.iter().all(Result::is_err));
+        assert_eq!(writes.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, Event::Started(_)))
+                .count(),
+            2
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, Event::Finished { .. }))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn exact_apt_selections_share_one_native_transaction_and_keep_two_outcomes() {
+        struct GroupedFixture(Arc<AtomicUsize>);
+        impl Backend for GroupedFixture {
+            fn id(&self) -> &str {
+                "apt"
+            }
+            fn capabilities(&self) -> &[Capability] {
+                &[Capability::Install]
+            }
+            fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
+                Ok(Availability::Available)
+            }
+            fn execute_group(
+                &mut self,
+                operations: &[Operation],
+                _: &Cancellation,
+                _: &mut dyn FnMut(Progress),
+            ) -> Option<Result<Vec<OperationOutcome>, EngineError>> {
+                assert_eq!(operations.len(), 2);
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Some(Ok(vec![OperationOutcome::default(); 2]))
+            }
+            fn execute(
+                &mut self,
+                _: &Operation,
+                _: &Cancellation,
+                _: &mut dyn FnMut(Progress),
+            ) -> Result<OperationOutcome, EngineError> {
+                panic!("separate transaction")
+            }
+        }
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut engine = Engine::default();
+        engine.register(GroupedFixture(calls.clone())).unwrap();
+        engine.enable_batch_authorization(
+            Host::new(Runtime::Native, Default::default()),
+            Authorization::Polkit,
+        );
+        let selected = ["synthetic-one", "synthetic-two"].map(|name| {
+            Operation::Install(PackageId {
+                backend: "apt".into(),
+                name: name.into(),
+                architecture: "amd64".into(),
+                scope: Scope::System,
+                remote: None,
+                reference: None,
+            })
+        });
+        let mut events = Vec::new();
+        let outcomes = engine.execute_batch(&selected, &Cancellation::default(), &mut |event| {
+            events.push(event)
+        });
+        assert!(outcomes.iter().all(Result::is_ok));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, Event::Finished { .. }))
+                .count(),
+            2
+        );
     }
 }
 
