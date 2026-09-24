@@ -185,7 +185,14 @@ Controls.ApplicationWindow {
             sourcePopup.draftSources = root.effectiveSources().filter((id) => root.sourceInfo(id).availability_kind === "available" && root.sourceSupportsView(id));
     }
     readonly property var reportState: JSON.parse(backend.report_state || "{}")
-    readonly property var readFailures: (reportState.failures && reportState.failures.length ? reportState.failures : items.filter((row) => row.kind === "failure" && row.failure_kind !== "unsupported").map((row) => ({source: row.source, kind: row.failure_kind || "failed"}))).filter((failure) => effectiveSources().indexOf(failure.source) >= 0)
+    readonly property var readFailures: {
+        if (currentView !== resultView)
+            return [];
+        const failures = reportState.failures && reportState.failures.length ? reportState.failures :
+            items.filter((row) => row.kind === "failure" && row.failure_kind !== "unsupported")
+                .map((row) => ({source: row.source, kind: row.failure_kind || "failed"}));
+        return failures.filter((failure) => effectiveSources().indexOf(failure.source) >= 0);
+    }
     property string expandedFailure: ""
     function failureSummary(id) {
         const row = items.find((item) => item.kind === "failure" && item.source === id);
@@ -936,10 +943,14 @@ Controls.ApplicationWindow {
     function reload(force, preserveSelection) {
         // Do not present matches for an older search as matches for a new one.
         const sameQuery = currentView !== "Search" || searchPane.text.trim() === resultQuery;
+        // An empty search does not start a backend query. Invalidate rows
+        // left by another page or by a previous, nonempty search.
+        const emptySearch = currentView === "Search" && searchPane.text.trim().length === 0;
+        const clearSearchResults = emptySearch && (resultView !== "Search" || resultQuery.length > 0);
         retainedItems = currentView === resultView && sameQuery ? items.slice() : [];
         retainingResults = retainedItems.length > 0;
         revealedRows = new Set(retainedItems.map(rowIdentity));
-        resultView = currentView;
+        resultView = clearSearchResults ? "" : currentView;
         if (currentView === "Search")
             resultQuery = searchPane.text.trim();
         results.currentIndex = -1;
@@ -1672,7 +1683,7 @@ Controls.ApplicationWindow {
                 Layout.preferredHeight: root.viewItems.length === 0 && !backend.busy ? 150
                     : Math.min(root.shortResultsHeight(), detailsPanel.visible ? root.height * (root.compact ? 0.24 : 0.42) : root.height * 0.7)
                 Layout.minimumHeight: root.compact && detailsPanel.visible ? 100 : 130
-                visible: root.currentView !== "Settings" && root.currentView !== "Activity" &&
+                visible: root.currentView === root.resultView && root.currentView !== "Settings" && root.currentView !== "Activity" &&
                     (root.viewItems.length > 0 || root.readFailures.length === 0 || backend.busy) &&
                     (root.currentView !== "Search" || root.viewItems.length > 0 || backend.busy || searchPane.text.trim().length > 0)
                 color: root.surface

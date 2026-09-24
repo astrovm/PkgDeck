@@ -839,6 +839,35 @@ TestCase {
         fake.rows = JSON.stringify([{kind: "package", name: "fixture", source: "homebrew", architecture: "all", installed: null, candidate: "1.0", scope: "user", summary: "Synthetic package"}]);
         compare(browser.viewItems.length, 1);
     }
+    function test_returning_to_empty_search_hides_previous_section_rows() {
+        browser.openView("Sources");
+        fake.rows = JSON.stringify([{kind: "source", name: "APT", source: "apt", summary: "Available", available: true}]);
+        fake.report_state = JSON.stringify({phase: "partial", failures: [{source: "apt", kind: "failed", detail: "Synthetic source failure"}]});
+        compare(browser.viewItems.length, 1);
+        compare(browser.readFailures.length, 1);
+
+        browser.openView("Search");
+        compare(findChild(browser, "searchField").text, "");
+        compare(fake.lastView, "Search");
+        compare(fake.lastQuery, "");
+        compare(browser.items.length, 0);
+        compare(browser.viewItems.length, 0);
+        compare(browser.readFailures.length, 0);
+        verify(!findChild(browser, "resultsBox").visible);
+        fake.busy = true;
+        verify(!findChild(browser, "resultsBox").visible);
+        fake.busy = false;
+
+        browser.reload(true);
+        compare(browser.viewItems.length, 0);
+        verify(!findChild(browser, "resultsBox").visible);
+
+        const search = findChild(browser, "searchField");
+        search.text = "fixture";
+        mouseClick(findChild(browser, "searchButton"));
+        fake.rows = JSON.stringify([{kind: "package", name: "fixture", source: "apt", candidate: "1.0", summary: "Synthetic package"}]);
+        compare(browser.viewItems.length, 1);
+    }
     function test_confirmation_shows_summary_before_optional_details() {
         browser.openView("Search");
         fake.confirmation_data = JSON.stringify({action: "Install", summary: "Install synthetic-tool\nSource: apt\nScope: System", details: "Additional dependency: synthetic-library"});
@@ -953,11 +982,6 @@ TestCase {
         compare(findChild(browser, "columnHeader0").text, "SOURCE");
         compare(findChild(browser, "columnHeader1").text, "STATUS");
         verify(!findChild(browser, "columnHeader2").visible);
-        browser.openView("Search");
-        compare(findChild(browser, "columnHeader0").text, "NAME / SOURCE");
-        compare(findChild(browser, "columnHeader1").text, "VERSION");
-        compare(findChild(browser, "columnHeader2").text, "SUMMARY");
-        browser.reload();
         fake.rows = JSON.stringify([
             {
                 kind: "source",
@@ -971,6 +995,11 @@ TestCase {
         wait(30);
         compare(browser.items.length, 1);
         compare(browser.items[0].capabilities.join(","), "search,installed");
+        browser.openView("Search");
+        compare(findChild(browser, "columnHeader0").text, "NAME / SOURCE");
+        compare(findChild(browser, "columnHeader1").text, "VERSION");
+        compare(findChild(browser, "columnHeader2").text, "SUMMARY");
+        compare(browser.items.length, 0);
     }
     function test_search_focus_and_list_keys() {
         browser.openView("Search");
