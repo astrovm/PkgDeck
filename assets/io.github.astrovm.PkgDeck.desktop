@@ -2,7 +2,8 @@
 Type=Application
 Name=PkgDeck
 Comment=Unified package manager interface
-Exec=pkgdeck
+Exec=pkgdeck %u
 Icon=io.github.astrovm.PkgDeck
 Terminal=false
 Categories=System;PackageManager;
+MimeType=application/vnd.debian.binary-package;application/vnd.flatpak.ref;application/vnd.appimage;application/x-iso9660-appimage;x-scheme-handler/flatpak+https;

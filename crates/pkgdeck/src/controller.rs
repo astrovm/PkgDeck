@@ -2,6 +2,7 @@
 use cxx_qt::CxxQtType;
 use cxx_qt_lib::QString;
 use pkgdeck_core::activity::{History, Outcome, State};
+use pkgdeck_core::backends::AppImage;
 use pkgdeck_core::background::{self, Schedule};
 use pkgdeck_core::repositories::{self, Action as RepositoryAction};
 use pkgdeck_core::{engine::*, host::Authorization, package::*, process::Cancellation};
@@ -14,6 +15,51 @@ use std::{
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+
+fn local_input_path(input: &str) -> Result<PathBuf, String> {
+    let input = input.trim();
+    let path = if let Some(encoded) = input.strip_prefix("file://") {
+        let encoded = encoded
+            .strip_prefix("localhost/")
+            .map_or(encoded, |rest| rest);
+        let encoded = if input.starts_with("file://localhost/") {
+            format!("/{encoded}")
+        } else {
+            encoded.to_owned()
+        };
+        if !encoded.starts_with('/') {
+            return Err("Only local file URLs are supported.".into());
+        }
+        let mut bytes = Vec::with_capacity(encoded.len());
+        let mut chars = encoded.as_bytes().iter().copied();
+        while let Some(byte) = chars.next() {
+            if byte == b'%' {
+                let high = chars.next().and_then(|value| (value as char).to_digit(16));
+                let low = chars.next().and_then(|value| (value as char).to_digit(16));
+                let (Some(high), Some(low)) = (high, low) else {
+                    return Err("Invalid file URL encoding.".into());
+                };
+                let decoded = ((high << 4) | low) as u8;
+                if decoded == 0 {
+                    return Err("File URLs cannot contain NUL bytes.".into());
+                }
+                bytes.push(decoded);
+            } else {
+                bytes.push(byte);
+            }
+        }
+        String::from_utf8(bytes).map_err(|_| "File URL is not UTF-8.".to_owned())?
+    } else if input.contains("://") {
+        return Err("Unsupported link. Open a local package file or a flatpak+https link.".into());
+    } else {
+        input.to_owned()
+    };
+    let path = PathBuf::from(path);
+    if !path.is_absolute() {
+        return Err("Choose an absolute local file path.".into());
+    }
+    Ok(path)
+}
 
 // CXX-Qt generates the FFI boundary; application code below uses safe Rust.
 #[cxx_qt::bridge]
@@ -65,6 +111,9 @@ pub mod ffi {
         #[qinvokable]
         fn propose(self: Pin<&mut PackageController>, action: QString, index: i32);
         #[qinvokable]
+        #[cxx_name = "openInput"]
+        fn open_input(self: Pin<&mut PackageController>, input: QString);
+        #[qinvokable]
         #[cxx_name = "loadRepositories"]
         fn load_repositories(self: Pin<&mut PackageController>);
         #[qinvokable]
@@ -103,6 +152,7 @@ pub mod ffi {
 
 #[derive(Clone)]
 enum Job {
+    OpenInput(String),
     Repositories(Option<RepositoryAction>),
     Load(String, String),
     BackgroundUpdates(Vec<String>),
@@ -139,6 +189,7 @@ struct Confirmed {
     cleanup_preview: Vec<CleanupItem>,
 }
 enum Payload {
+    OpenPackage(Box<Package>),
     Repositories(repositories::Report),
     Packages(PackageReport),
     BackgroundUpdates(PackageReport),
@@ -162,6 +213,35 @@ enum Reply {
     Done(Result<Payload, EngineError>),
     Engine(Box<Engine>),
 }
+fn inspect_open_input(input: &str, cancel: &Cancellation) -> Result<Payload, EngineError> {
+    if let Some(url) = input.strip_prefix("flatpak+") {
+        return pkgdeck_core::flatpak_ref::inspect(url, cancel)
+            .map(|package| Payload::OpenPackage(Box::new(package)));
+    }
+    let path = local_input_path(input).map_err(|reason| EngineError::InvalidResponse {
+        backend: "open".into(),
+        reason,
+    })?;
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    let package = match extension {
+        "AppImage" => {
+            use pkgdeck_core::engine::Backend;
+            AppImage::native()
+                .search(&path.to_string_lossy(), cancel)
+                .and_then(|mut packages| packages.pop().ok_or(EngineError::NotFound))
+        }
+        "deb" => pkgdeck_core::local_deb::inspect(&path, cancel),
+        "flatpakref" => pkgdeck_core::flatpak_ref::inspect(&path.to_string_lossy(), cancel),
+        _ => Err(EngineError::InvalidResponse {
+            backend: "open".into(),
+            reason: "Supported local formats are .AppImage, .deb, and .flatpakref.".into(),
+        }),
+    };
+    package.map(|package| Payload::OpenPackage(Box::new(package)))
+}
 fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn FnMut(Reply)) {
     fn filter_updates(report: &mut PackageReport) {
         report
@@ -181,6 +261,7 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
         }
     }
     let result = match job {
+        Job::OpenInput(input) => inspect_open_input(&input, cancel),
         Job::Repositories(_) => Err(EngineError::NotFound),
         Job::BackgroundUpdates(_) => {
             let mut report = engine.installed(cancel);
@@ -474,11 +555,12 @@ fn encoded(value: impl serde::Serialize) -> QString {
 /// empty filter means every available backend.
 fn engine_source(job: &Job, filter: &[String]) -> Vec<String> {
     match job {
-        Job::BackgroundUpdates(sources) => sources.clone(),
-        Job::Write(operation, _) => vec![operation.backend().into()],
-        Job::UpgradeAll(operations, _) | Job::CleanAll(operations) => operations.iter().map(|op| op.backend().to_owned()).collect(),
+        Job::OpenInput(_) => vec![],
         Job::RetrySource(_, _, source) => vec![source.clone()],
         Job::PlanOperation(operation) => vec![operation.backend().into()],
+        Job::Write(operation, _) => vec![operation.backend().into()],
+        Job::BackgroundUpdates(sources) => sources.clone(),
+        Job::UpgradeAll(operations, _) | Job::CleanAll(operations) => operations.iter().map(|op| op.backend().to_owned()).collect(),
         Job::PlanCleanAll(operations) => operations.iter().map(|op| op.backend().to_owned()).collect(),
         // The picker needs to explain disabled and unavailable managers too.
         Job::Load(view, _) if view == "Sources" => vec![],
@@ -654,6 +736,7 @@ fn checked_upgrades(packages: &[Package], identities: &str) -> Vec<Operation> {
 struct CheckedPlan {
     operations: Vec<Operation>,
     confirmation: String,
+    details: String,
     status: Option<String>,
 }
 fn plan_checked_upgrade(packages: &[Package], identities: &str) -> CheckedPlan {
@@ -662,6 +745,7 @@ fn plan_checked_upgrade(packages: &[Package], identities: &str) -> CheckedPlan {
         return CheckedPlan {
             operations: vec![],
             confirmation: String::new(),
+            details: String::new(),
             status: Some("No selected packages can be updated.".into()),
         };
     }
@@ -674,6 +758,7 @@ fn plan_checked_upgrade(packages: &[Package], identities: &str) -> CheckedPlan {
     CheckedPlan {
         operations,
         confirmation: format!("Update {count} selected packages?\n\n{labels}\n\nUpdates use each source’s native updater. Native dependency changes may follow. Successful updates are not rolled back if another fails. Continue?"),
+        details: format!("{labels}\n\nNative dependency changes may follow."),
         status: None,
     }
 }
@@ -776,6 +861,7 @@ fn confirmation_preview(
     plan: Option<&TransactionPlan>,
 ) -> Value {
     let mut lines = vec![operation_label(operation)];
+    let mut summary = vec![operation_label(operation)];
     let mut title = action_name(operation).to_owned();
     if let Some(package) = packages.iter().find(|package| match operation {
         Operation::Install(id) | Operation::Remove(id) | Operation::Upgrade(id) => {
@@ -801,14 +887,28 @@ fn confirmation_preview(
         if let Some(version) = &package.candidate_version {
             lines.push(format!("Available: {version}"));
         }
+        if let (Some(old), Some(new)) = (&package.installed_version, &package.candidate_version) {
+            summary.push(format!("{old} → {new}"));
+        }
         if package.id.backend == "fwupd" {
             lines.push(package.summary.clone());
+            summary.push(package.summary.clone());
+        }
+        if (package.id.backend == "appimage"
+            || package.id.reference.as_deref().is_some_and(|value| {
+                value.starts_with("local-deb:") || value.starts_with("flatpakref:")
+            }))
+            && matches!(operation, Operation::Install(_))
+        {
+            lines.push(package.summary.clone());
+            summary.push(package.summary.clone());
         }
     }
     if let Operation::Clean(id) = operation {
         if let Some(item) = cleanup.iter().find(|item| item.id == *id) {
             title = format!("Clean {}", item.title);
             lines.push(item.preview.clone());
+            summary.push(item.preview.clone());
         }
     }
     if let Operation::Refresh { backend } = operation {
@@ -862,6 +962,25 @@ fn confirmation_preview(
             })
             .map(describe)
             .collect::<Vec<_>>();
+        if !changes.is_empty() {
+            let removals = plan
+                .changes
+                .iter()
+                .filter(|change| {
+                    change.action == PlannedAction::Remove
+                        && (Some(change.name.as_str()) != requested_name
+                            || Some(change.action) != requested_action)
+                })
+                .map(|change| change.name.as_str())
+                .collect::<Vec<_>>();
+            summary.push(format!("{} additional package changes", changes.len()));
+            if !removals.is_empty() {
+                summary.push(format!("Removes: {}", removals.join(", ")));
+            }
+        }
+        if plan.restart_required == Some(true) {
+            summary.push("Restart required".into());
+        }
         lines.push(if changes.is_empty() {
             "Native plan: no additional packages".into()
         } else {
@@ -884,12 +1003,16 @@ fn confirmation_preview(
         Operation::Install(_) | Operation::Remove(_) | Operation::Upgrade(_)
     ) {
         lines.push("Transaction preview unavailable; additional changes are unknown.".into());
+        summary.push("Additional changes cannot be previewed.".into());
     }
     if matches!(
         operation,
         Operation::Install(_) | Operation::Remove(_) | Operation::Upgrade(_)
     ) {
         lines.push("Data retention: manager-specific; details unavailable".into());
+        if matches!(operation, Operation::Remove(_)) {
+            summary.push("App data may remain after removal.".into());
+        }
     } else if matches!(operation, Operation::Clean(_)) {
         lines.push("Data removal: see native cleanup preview".into());
     }
@@ -906,7 +1029,7 @@ fn confirmation_preview(
     if title.chars().count() > 36 {
         title = format!("{}…", title.chars().take(35).collect::<String>());
     }
-    json!({"action": title, "body": lines.join("\n\n")})
+    json!({"action": title, "body": lines.join("\n\n"), "summary": summary.join("\n"), "details": lines.iter().skip(1).filter(|line| !summary.contains(line)).cloned().collect::<Vec<_>>().join("\n\n")})
 }
 fn package_row(p: &Package, same_from: &[String], same_group: Option<&str>) -> Value {
     json!({"name": p.id.name, "display_name": p.display_name, "source": p.id.backend, "architecture": p.id.architecture,
@@ -936,6 +1059,20 @@ fn update_detail_name(
 }
 
 impl ffi::PackageController {
+    pub fn open_input(mut self: Pin<&mut Self>, input: QString) {
+        if input.to_string().trim().is_empty() {
+            self.as_mut()
+                .set_status("Choose an installation file.".into());
+            return;
+        }
+        if self.rust().worker.is_some() && !self.rust().background {
+            self.as_mut().rust_mut().queued = Some(Job::OpenInput(input.to_string()));
+            self.as_mut()
+                .set_status("Opening the file after the current operation.".into());
+            return;
+        }
+        self.start(Job::OpenInput(input.to_string()));
+    }
     pub fn set_autostart(mut self: Pin<&mut Self>, enabled: bool) -> bool {
         let result = self
             .rust()
@@ -1226,6 +1363,11 @@ impl ffi::PackageController {
             }
             return;
         }
+        if matches!(job, Job::OpenInput(_)) {
+            self.as_mut().rust_mut().pending = None;
+            self.as_mut().set_confirmation(QString::default());
+            self.as_mut().set_confirmation_data("{}".into());
+        }
         let source_filter = self.rust().source_filter.clone();
         let authorization = if self.rust().sudo {
             Authorization::SudoNonInteractive
@@ -1285,6 +1427,10 @@ impl ffi::PackageController {
                         })
                 };
                 send(Reply::Done(result));
+                return;
+            }
+            if let Job::OpenInput(input) = &job {
+                send(Reply::Done(inspect_open_input(input, &token)));
                 return;
             }
             // Fast path: Details against a warm engine reuse detected state
@@ -1668,7 +1814,7 @@ impl ffi::PackageController {
                 .map(|item| format!("{} ({})\n{}", item.title, item.id.backend, item.preview))
                 .collect::<Vec<_>>()
                 .join("\n\n");
-            self.as_mut().set_confirmation_data(encoded(json!({"action":format!("Clean {} tasks", operations.len()), "body": format!("{labels}\n\nTasks run in order. Completed tasks cannot be undone.")})));
+            self.as_mut().set_confirmation_data(encoded(json!({"action":format!("Clean {} tasks", operations.len()), "body": format!("{labels}\n\nTasks run in order. Completed tasks cannot be undone."), "summary": format!("Clean {} tasks\nCompleted tasks cannot be undone.", operations.len()), "details": labels})));
             self.as_mut().set_confirmation(format!("Run {} cleanup tasks?\n\n{labels}\n\nTasks run in order. Completed tasks cannot be undone.", operations.len()).as_str().into());
             self.rust_mut().pending = Some(Job::CleanAll(operations));
             return;
@@ -1750,7 +1896,7 @@ impl ffi::PackageController {
             self.as_mut().set_confirmation_data("{}".into());
         } else {
             self.as_mut().set_confirmation_data(encoded(
-                json!({"action":format!("Update {} packages", plan.operations.len()), "body": plan.confirmation}),
+                json!({"action":format!("Update {} packages", plan.operations.len()), "body": plan.confirmation, "summary": format!("Update {} selected packages\nSuccessful updates cannot be rolled back if another fails.", plan.operations.len()), "details": plan.details}),
             ));
             self.as_mut()
                 .set_confirmation(plan.confirmation.as_str().into());
@@ -1809,6 +1955,21 @@ impl ffi::PackageController {
                     self.set_status(e.to_string().as_str().into());
                 }
             }
+            Ok(Payload::OpenPackage(package)) => {
+                let operation = Operation::Install(package.id.clone());
+                let apt = package.id.backend == "apt";
+                self.as_mut()
+                    .rust_mut()
+                    .packages
+                    .retain(|row| row.id != package.id);
+                self.as_mut().rust_mut().packages.push(*package);
+                if apt {
+                    self.as_mut().start(Job::PlanOperation(operation));
+                } else {
+                    self.as_mut()
+                        .apply(Ok(Payload::OperationPreview(operation, None)));
+                }
+            }
             Ok(Payload::UpgradePreview(operations, count, apt_plan)) => {
                 if let Some(entry) = self.as_mut().rust_mut().revalidating.take() {
                     if matches!(&entry.job, Job::UpgradeAll(previous, plan) if previous == &operations && plan == &apt_plan)
@@ -1826,7 +1987,14 @@ impl ffi::PackageController {
                 let apt = apt_plan.as_ref().map_or_else(String::new, |plan| {
                     format!("\n\nAPT transaction:\n{}", plan.summary())
                 });
-                self.as_mut().set_confirmation_data(encoded(json!({"action":format!("Update {count} packages"), "body": format!("{count} listed packages{apt}\n\n{labels}")})));
+                let removals = apt_plan.as_ref().map_or_else(String::new, |plan| {
+                    if plan.removals.is_empty() {
+                        String::new()
+                    } else {
+                        format!("\nRemoves: {}", plan.removals.join(", "))
+                    }
+                });
+                self.as_mut().set_confirmation_data(encoded(json!({"action":format!("Update {count} packages"), "body": format!("{count} listed packages{apt}\n\n{labels}"), "summary": format!("Update {count} packages{removals}\nSuccessful updates cannot be rolled back if another fails."), "details": format!("{apt}\n\n{labels}")})));
                 self.as_mut().set_confirmation(
                     format!("Update all {count} listed packages?{apt}\n\n{labels}\n\nContinue?")
                         .as_str()
@@ -1884,7 +2052,7 @@ impl ffi::PackageController {
                         })
                         .collect::<Vec<_>>()
                         .join("\n\n");
-                    self.as_mut().set_confirmation_data(encoded(json!({"action": format!("Clean {} tasks", operations.len()), "body": body})));
+                    self.as_mut().set_confirmation_data(encoded(json!({"action": format!("Clean {} tasks", operations.len()), "body": body, "summary": format!("Clean {} tasks\nCompleted tasks cannot be undone.", operations.len()), "details": body})));
                     self.as_mut().set_confirmation(body.as_str().into());
                     self.as_mut().rust_mut().pending = Some(Job::CleanAll(operations));
                 }
@@ -2353,6 +2521,191 @@ impl ffi::PackageController {
 mod tests {
     use super::*;
     #[test]
+    fn file_urls_preserve_spaces_and_unicode_and_reject_remote_hosts() {
+        assert_eq!(
+            local_input_path("file:///tmp/Sample%20%C3%B1.AppImage").unwrap(),
+            PathBuf::from("/tmp/Sample ñ.AppImage")
+        );
+        assert_eq!(
+            local_input_path("file://localhost/tmp/Sample%20App.deb").unwrap(),
+            PathBuf::from("/tmp/Sample App.deb")
+        );
+        assert!(local_input_path("file://remote/tmp/package.deb").is_err());
+        assert!(local_input_path("file:///tmp/bad%00.deb").is_err());
+        assert!(local_input_path("file:///tmp/bad%2Z.deb").is_err());
+        assert!(local_input_path("file:///tmp/bad%FF.deb").is_err());
+        assert!(local_input_path("relative.deb").is_err());
+        assert!(local_input_path("https://example.org/package.deb").is_err());
+        assert!(inspect_open_input("file:///tmp/bad%2Z.deb", &Cancellation::default()).is_err());
+    }
+    #[test]
+    fn opening_local_deb_reads_metadata_without_installing_it() {
+        let base = std::env::temp_dir().join(format!("pkgdeck-open-deb-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let control = base.join("staging/DEBIAN");
+        std::fs::create_dir_all(&control).unwrap();
+        std::fs::write(
+            control.join("control"),
+            "Package: pkgdeck-open-synthetic\nVersion: 1.2.3\nArchitecture: all\nMaintainer: PkgDeck tests <nobody@example.invalid>\nDescription: Synthetic local archive\n",
+        )
+        .unwrap();
+        let archive = base.join("Synthetic package.deb");
+        let status = std::process::Command::new("dpkg-deb")
+            .arg("--build")
+            .arg(base.join("staging"))
+            .arg(&archive)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let package = match inspect_open_input(archive.to_str().unwrap(), &Cancellation::default())
+            .unwrap()
+        {
+            Payload::OpenPackage(package) => package,
+            _ => panic!("local archive inspection must return a package"),
+        };
+        assert_eq!(package.id.backend, "apt");
+        assert_eq!(package.id.name, "pkgdeck-open-synthetic");
+        assert_eq!(package.candidate_version.as_deref(), Some("1.2.3"));
+        assert!(package
+            .id
+            .reference
+            .as_deref()
+            .unwrap()
+            .starts_with("local-deb:"));
+        assert!(archive.exists());
+        std::fs::remove_dir_all(base).unwrap();
+    }
+    #[test]
+    fn opening_appimage_previews_without_importing_until_confirmation() {
+        let base =
+            std::env::temp_dir().join(format!("pkgdeck-open-appimage-{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let source = base.join("Sample ñ.AppImage");
+        let mut elf = [0_u8; 64];
+        elf[..4].copy_from_slice(b"\x7fELF");
+        elf[4..7].copy_from_slice(&[2, 1, 1]);
+        elf[8..11].copy_from_slice(b"AI\x02");
+        let machine = if std::env::consts::ARCH == "aarch64" {
+            183_u16
+        } else {
+            62_u16
+        };
+        elf[18..20].copy_from_slice(&machine.to_le_bytes());
+        elf[20..24].copy_from_slice(&1_u32.to_le_bytes());
+        elf[52..54].copy_from_slice(&64_u16.to_le_bytes());
+        std::fs::write(&source, elf).unwrap();
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller
+            .as_mut()
+            .open_input(source.to_str().unwrap().into());
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while Instant::now() < deadline {
+            controller.as_mut().poll();
+            if !controller.confirmation().is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let preview = controller.confirmation().to_string();
+        assert!(
+            preview.contains("Sample ñ"),
+            "preview: {preview}; status: {}",
+            controller.status()
+        );
+        assert!(preview.contains("Managed file:"), "{preview}");
+        assert!(preview.contains("Desktop entry:"), "{preview}");
+        assert!(matches!(
+            controller.rust().pending,
+            Some(Job::Write(Operation::Install(_), _))
+        ));
+        controller.as_mut().confirm(false);
+        assert!(source.exists());
+        assert!(controller.confirmation().is_empty());
+        std::fs::remove_dir_all(base).unwrap();
+    }
+    #[test]
+    fn opening_flatpak_reference_uses_confirmation_and_rejects_unsupported_input() {
+        let base =
+            std::env::temp_dir().join(format!("pkgdeck-open-flatpakref-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let source = base.join("Synthetic ñ.flatpakref");
+        std::fs::write(
+            &source,
+            "[Flatpak Ref]\nName=org.example.Synthetic\nUrl=https://example.invalid/repo\n",
+        )
+        .unwrap();
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller
+            .as_mut()
+            .open_input(base.join("queued-unsupported.txt").to_str().unwrap().into());
+        controller
+            .as_mut()
+            .open_input(format!("file://{}", source.display()).into());
+        assert!(controller
+            .status()
+            .to_string()
+            .contains("Opening the file after the current operation"));
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while Instant::now() < deadline {
+            controller.as_mut().poll();
+            if !controller.confirmation().is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let preview = controller.confirmation().to_string();
+        assert!(preview.contains("org.example.Synthetic"), "{preview}");
+        assert!(
+            preview.contains("Repository to add if needed:"),
+            "{preview}"
+        );
+        assert!(matches!(
+            controller.rust().pending,
+            Some(Job::Write(Operation::Install(_), _))
+        ));
+        controller.as_mut().confirm(false);
+        assert!(source.exists());
+
+        controller
+            .as_mut()
+            .open_input(base.join("unsupported.txt").to_str().unwrap().into());
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while Instant::now() < deadline {
+            controller.as_mut().poll();
+            if !controller.busy() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(controller
+            .status()
+            .to_string()
+            .contains("Supported local formats"));
+        assert!(controller.confirmation().is_empty());
+        controller
+            .as_mut()
+            .open_input("flatpak+http://example.invalid/app.flatpakref".into());
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while Instant::now() < deadline {
+            controller.as_mut().poll();
+            if !controller.busy() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(controller.status().to_string().contains(".flatpakref"));
+        assert!(controller.confirmation().is_empty());
+        controller.as_mut().open_input(" ".into());
+        assert_eq!(
+            controller.status().to_string(),
+            "Choose an installation file."
+        );
+        std::fs::remove_dir_all(base).unwrap();
+    }
+    #[test]
     fn confirmation_preview_names_target_and_extra_native_changes() {
         let package: Package = serde_json::from_value(json!({
             "id": {"backend":"apt", "name":"anonymous", "architecture":"amd64", "scope":"system"},
@@ -2383,6 +2736,18 @@ mod tests {
         let preview =
             confirmation_preview(&operation, std::slice::from_ref(&package), &[], Some(&plan));
         assert_eq!(preview["action"], "Update Anonymous App");
+        assert!(preview["summary"]
+            .as_str()
+            .unwrap()
+            .contains("1 additional package changes"));
+        assert!(preview["summary"]
+            .as_str()
+            .unwrap()
+            .contains("Removes: old-library"));
+        assert!(preview["details"]
+            .as_str()
+            .unwrap()
+            .contains("Remove old-library (1)"));
         let body = preview["body"].as_str().unwrap();
         assert!(body.contains("Source: apt"));
         assert!(body.contains("Scope: System"));
@@ -2404,11 +2769,19 @@ mod tests {
         assert!(body.contains("Requested change: Update anonymous (1 → 2)"));
         assert!(body.contains("Remove anonymous (1)"));
         assert!(body.contains("Download: 2048 bytes · Disk impact: -512 bytes · Restart: required"));
+        assert!(preview["summary"]
+            .as_str()
+            .unwrap()
+            .contains("Restart required"));
         let unavailable = confirmation_preview(&operation, &[package], &[], None);
         assert!(unavailable["body"]
             .as_str()
             .unwrap()
             .contains("Transaction preview unavailable"));
+        assert!(unavailable["summary"]
+            .as_str()
+            .unwrap()
+            .contains("cannot be previewed"));
         let long = serde_json::from_value::<Package>(json!({
             "id": {"backend":"apt", "name":"anonymous", "architecture":"amd64", "scope":"system"},
             "display_name":"An extremely long synthetic application name for narrow windows", "summary":"Synthetic", "installed_version":"1", "candidate_version":"2", "update":"available"
@@ -2665,6 +3038,16 @@ mod tests {
         )));
         let confirmation = controller.confirmation().to_string();
         assert!(confirmation.contains("Remove (1): retired"));
+        let preview: Value =
+            serde_json::from_str(&controller.confirmation_data().to_string()).unwrap();
+        assert!(preview["summary"]
+            .as_str()
+            .unwrap()
+            .contains("Removes: retired"));
+        assert!(preview["details"]
+            .as_str()
+            .unwrap()
+            .contains("Remove (1): retired"));
         assert!(
             confirmation.find("Remove (1): retired")
                 < confirmation.find("Update all packages from apt")

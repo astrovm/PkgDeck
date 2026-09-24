@@ -324,6 +324,15 @@ fn apt_requests_cannot_inject_options_paths_or_other_backends() {
         .unwrap();
     assert!(install.contains(&"--no-remove".into()));
     assert!(install.contains(&"DPkg::Lock::Timeout=0".into()));
+    let local_path = std::path::PathBuf::from("/tmp/Synthetic package.deb");
+    let local = AptAction::InstallLocal(local_path.clone())
+        .arguments()
+        .unwrap();
+    assert_eq!(local.last(), Some(&local_path.into_os_string()));
+    assert!(local.contains(&"--no-remove".into()));
+    assert!(AptAction::InstallLocal("relative.deb".into())
+        .arguments()
+        .is_err());
     let remove = AptAction::Remove("pkgdeck-fixture".into())
         .arguments()
         .unwrap();

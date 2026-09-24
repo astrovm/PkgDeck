@@ -1239,6 +1239,7 @@ pub enum AptAction {
     Upgrade(String),
     UpgradeAll,
     Install(String),
+    InstallLocal(PathBuf),
     Remove(String),
     Autoremove,
     Autoclean,
@@ -1284,6 +1285,22 @@ impl AptAction {
                 return Ok(["--assume-yes", "-o", "DPkg::Lock::Timeout=0", "autoclean"]
                     .map(OsString::from)
                     .to_vec());
+            }
+            Self::InstallLocal(path) => {
+                if !path.is_absolute() || path.extension().is_none_or(|ext| ext != "deb") {
+                    return Err(ExecutionError::Invalid(
+                        "expected an absolute .deb path".into(),
+                    ));
+                }
+                return Ok(vec![
+                    "--assume-yes".into(),
+                    "-o".into(),
+                    "DPkg::Lock::Timeout=0".into(),
+                    "--no-remove".into(),
+                    "--".into(),
+                    "install".into(),
+                    path.as_os_str().to_os_string(),
+                ]);
             }
             Self::Upgrade(package) => ("install", package),
             Self::Install(package) => ("install", package),

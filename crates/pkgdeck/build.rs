@@ -21,6 +21,7 @@ fn main() {
         "native/network.cpp",
         "native/providers.cpp",
         "native/controller.cpp",
+        "native/opening.cpp",
     ])
     .build();
 }
