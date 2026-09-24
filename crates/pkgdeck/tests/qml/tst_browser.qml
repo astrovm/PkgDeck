@@ -34,6 +34,7 @@ TestCase {
         property string lastRetry: ""
         property string version: "9.9.9-test"
         property bool simulateLoading: false
+        property bool simulateOpening: false
         property bool busy: false
         property bool writing: false
         property bool upgradable: false
@@ -47,7 +48,7 @@ TestCase {
         property int cancels: 0
         property string lastChecked: ""
         property string lastOpenedInput: ""
-        function openInput(input) { lastOpenedInput = input; }
+        function openInput(input) { lastOpenedInput = input; if (simulateOpening) busy = true; }
         function load(view, query, source, sudo, force) {
             loadCount++;
             lastView = view;
@@ -121,6 +122,7 @@ TestCase {
         fake.manifest_preview = "{}";
         fake.lastInventorySelection = "";
         fake.simulateLoading = false;
+        fake.simulateOpening = false;
         fake.busy = false;
         fake.writing = false;
         fake.upgradable = false;
@@ -822,6 +824,26 @@ TestCase {
         verify(!filter.visible);
         verify(compactActivity.visible);
     }
+    function test_source_filter_button_toggles_its_popup() {
+        const popup = findChild(browser, "sourcePopup");
+        for (const width of [1100, 380]) {
+            browser.width = width;
+            browser.openView("Search");
+            waitForRendering(browser.contentItem);
+            const button = findChild(browser, width < 960 ? "compactSourceFilter" : "sourceFilter");
+            const checks = fake.sourceChecks;
+            clickDelegate(button);
+            tryCompare(popup, "visible", true);
+            compare(fake.sourceChecks, checks + 1);
+            clickDelegate(button);
+            tryCompare(popup, "visible", false);
+            compare(fake.sourceChecks, checks + 1);
+            clickDelegate(button);
+            tryCompare(popup, "visible", true);
+            popup.close();
+            tryCompare(popup, "visible", false);
+        }
+    }
     function test_returning_to_search_reloads_visible_query() {
         browser.openView("Search");
         const search = findChild(browser, "searchField");
@@ -839,18 +861,102 @@ TestCase {
         fake.rows = JSON.stringify([{kind: "package", name: "fixture", source: "homebrew", architecture: "all", installed: null, candidate: "1.0", scope: "user", summary: "Synthetic package"}]);
         compare(browser.viewItems.length, 1);
     }
+    function test_returning_to_empty_search_hides_previous_section_rows() {
+        browser.openView("Sources");
+        fake.rows = JSON.stringify([{kind: "source", name: "APT", source: "apt", summary: "Available", available: true}]);
+        fake.report_state = JSON.stringify({phase: "partial", failures: [{source: "apt", kind: "failed", detail: "Synthetic source failure"}]});
+        compare(browser.viewItems.length, 1);
+        compare(browser.readFailures.length, 1);
+
+        browser.openView("Search");
+        compare(findChild(browser, "searchField").text, "");
+        compare(fake.lastView, "Search");
+        compare(fake.lastQuery, "");
+        compare(browser.items.length, 0);
+        compare(browser.viewItems.length, 0);
+        compare(browser.readFailures.length, 0);
+        verify(!findChild(browser, "resultsBox").visible);
+        fake.busy = true;
+        verify(!findChild(browser, "resultsBox").visible);
+        fake.busy = false;
+
+        browser.reload(true);
+        compare(browser.viewItems.length, 0);
+        verify(!findChild(browser, "resultsBox").visible);
+
+        const search = findChild(browser, "searchField");
+        search.text = "fixture";
+        mouseClick(findChild(browser, "searchButton"));
+        fake.rows = JSON.stringify([{kind: "package", name: "fixture", source: "apt", candidate: "1.0", summary: "Synthetic package"}]);
+        compare(browser.viewItems.length, 1);
+    }
+    function test_search_field_stays_put_during_loading_and_results() {
+        browser.width = 1100;
+        browser.height = 700;
+        browser.openView("Settings");
+        fake.simulateLoading = true;
+        browser.openView("Search");
+        waitForRendering(browser.contentItem);
+        const field = findChild(browser, "searchField");
+        const top = field.mapToItem(browser.contentItem, 0, 0).y;
+        field.text = "synthetic";
+        mouseClick(findChild(browser, "searchButton"));
+        waitForRendering(browser.contentItem);
+        compare(field.mapToItem(browser.contentItem, 0, 0).y, top);
+        fake.rows = JSON.stringify(Array.from({length: 23}, (_, index) => ({
+            kind: "package", name: "synthetic-" + index, source: "apt", candidate: "1", scope: "system"
+        })));
+        fake.busy = false;
+        waitForRendering(browser.contentItem);
+        compare(field.mapToItem(browser.contentItem, 0, 0).y, top);
+    }
+    function test_result_status_stays_short_during_native_writes() {
+        browser.openView("Updates");
+        fake.status = "Update all packages from apt: Running apt-get; cancellation waits for the native transaction to finish.";
+        fake.busy = true;
+        fake.writing = true;
+        compare(browser.resultsHeading(), "Applying changes…");
+        compare(findChild(browser, "resultsHeading").text, "Applying changes…");
+    }
+    function test_opening_input_has_visible_feedback_until_preview_or_completion() {
+        fake.simulateOpening = true;
+        browser.openExternalInput("file:///tmp/synthetic.deb");
+        compare(fake.lastOpenedInput, "file:///tmp/synthetic.deb");
+        const notice = findChild(browser, "openingNotice");
+        verify(notice.visible);
+        fake.confirmation_data = JSON.stringify({action: "Install", summary: "Install synthetic-tool"});
+        fake.confirmation = "Install synthetic-tool";
+        tryCompare(notice, "visible", false);
+        findChild(browser, "confirmationDialog").reject();
+        fake.simulateOpening = true;
+        browser.openExternalInput("file:///tmp/invalid.deb");
+        verify(notice.visible);
+        fake.busy = false;
+        tryCompare(notice, "visible", false);
+    }
+    function test_activity_uses_short_readable_actions() {
+        browser.openView("Activity");
+        const activity = findChild(browser, "activityPane");
+        compare(activity.target({upgrade_all: {backend: "apt"}}), "Update all · apt");
+        compare(activity.target({install: {backend: "apt", name: "synthetic-tool", scope: "system"}}), "Install synthetic-tool · apt · System");
+        compare(activity.result({state: "running", outcomes: []}), "In progress");
+    }
     function test_confirmation_shows_summary_before_optional_details() {
         browser.openView("Search");
         fake.confirmation_data = JSON.stringify({action: "Install", summary: "Install synthetic-tool\nSource: apt\nScope: System", details: "Additional dependency: synthetic-library"});
         fake.confirmation = "Install synthetic-tool";
         const dialog = findChild(browser, "confirmationDialog");
         tryCompare(dialog, "opened", true);
-        compare(findChild(browser, "confirmationSummary").text, "Install synthetic-tool\nSource: apt\nScope: System");
+        compare(findChild(browser, "confirmationSummary").text, "Install synthetic-tool");
+        compare(findChild(browser, "confirmationSummaryMeta").text, "Source: apt\nScope: System");
+        const summary = findChild(browser, "confirmationSummary");
+        verify(summary.mapToItem(dialog.contentItem, 0, 0).x >= 20);
         const details = findChild(browser, "confirmationDetails");
         verify(!details.visible);
         clickDelegate(findChild(browser, "confirmationDetailsButton"));
         verify(details.visible);
         verify(details.text.indexOf("synthetic-library") >= 0);
+        verify(details.mapToItem(dialog.contentItem, 0, 0).x >= 20);
         dialog.reject();
     }
     function test_compact_confirmation_keeps_both_buttons_readable() {
@@ -898,9 +1004,9 @@ TestCase {
         keyClick(Qt.Key_Return);
         compare(browser.retainingResults, false);
         compare(browser.viewItems.length, 0);
-        compare(findChild(browser, "resultsHeading").text, "Searching packages…");
+        compare(findChild(browser, "resultsHeading").text, "Searching…");
         verify(findChild(browser, "emptyState").visible);
-        compare(findChild(browser, "emptyState").text, "Searching packages…");
+        compare(findChild(browser, "emptyState").text, "Searching…");
     }
     function test_compact_installed_filter_has_its_own_row() {
         browser.width = 360;
@@ -953,11 +1059,6 @@ TestCase {
         compare(findChild(browser, "columnHeader0").text, "SOURCE");
         compare(findChild(browser, "columnHeader1").text, "STATUS");
         verify(!findChild(browser, "columnHeader2").visible);
-        browser.openView("Search");
-        compare(findChild(browser, "columnHeader0").text, "NAME / SOURCE");
-        compare(findChild(browser, "columnHeader1").text, "VERSION");
-        compare(findChild(browser, "columnHeader2").text, "SUMMARY");
-        browser.reload();
         fake.rows = JSON.stringify([
             {
                 kind: "source",
@@ -971,6 +1072,11 @@ TestCase {
         wait(30);
         compare(browser.items.length, 1);
         compare(browser.items[0].capabilities.join(","), "search,installed");
+        browser.openView("Search");
+        compare(findChild(browser, "columnHeader0").text, "NAME / SOURCE");
+        compare(findChild(browser, "columnHeader1").text, "VERSION");
+        compare(findChild(browser, "columnHeader2").text, "SUMMARY");
+        compare(browser.items.length, 0);
     }
     function test_search_focus_and_list_keys() {
         browser.openView("Search");
@@ -1681,7 +1787,7 @@ TestCase {
         browser.openView("Updates");
         fake.rows = "[]";
         fake.report_state = JSON.stringify({phase: "loading", failures: []});
-        compare(browser.emptyStateMessage(), "Checking sources…");
+        compare(browser.emptyStateMessage(), "Loading…");
         fake.report_state = JSON.stringify({phase: "complete", failures: []});
         compare(browser.emptyStateMessage(), "You're up to date");
         fake.report_state = JSON.stringify({phase: "partial", failures: [{source: "npm", kind: "locked", detail: "Synthetic package lock"}]});

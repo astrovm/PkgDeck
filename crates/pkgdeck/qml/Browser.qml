@@ -8,12 +8,18 @@ import org.kde.kirigami as Kirigami
 
 Controls.ApplicationWindow {
     id: root
-    function openExternalInput(input) { backend.openInput(input); }
+    property bool openingInput: false
+    function openExternalInput(input) {
+        openingInput = true;
+        backend.openInput(input);
+        if (!backend.busy && !backend.confirmation.length)
+            openingInput = false;
+    }
     FileDialog {
         id: installationPicker
         title: "Open installation file"
         nameFilters: ["Packages and sources (*.AppImage *.deb *.rpm *.pkg.tar.zst *.pkg.tar.xz *.pkg.tar.gz *.pkg.tar.bz2 *.pkg.tar.lz4 *.flatpak *.flatpakref *.flatpakrepo *.snap *.repo *.sources *.list *.ymp)"]
-        onAccepted: backend.openInput(selectedFile.toString())
+        onAccepted: root.openExternalInput(selectedFile.toString())
     }
     ThemedDialog {
         id: addPackageDialog
@@ -64,7 +70,7 @@ Controls.ApplicationWindow {
         onEntered: (drag) => { if (!drag.hasUrls || drag.urls.length !== 1) drag.accepted = false; }
         onDropped: (drop) => {
             if (drop.urls.length === 1) {
-                backend.openInput(drop.urls[0].toString());
+                root.openExternalInput(drop.urls[0].toString());
                 drop.acceptProposedAction();
             } else drop.accepted = false;
         }
@@ -185,7 +191,14 @@ Controls.ApplicationWindow {
             sourcePopup.draftSources = root.effectiveSources().filter((id) => root.sourceInfo(id).availability_kind === "available" && root.sourceSupportsView(id));
     }
     readonly property var reportState: JSON.parse(backend.report_state || "{}")
-    readonly property var readFailures: (reportState.failures && reportState.failures.length ? reportState.failures : items.filter((row) => row.kind === "failure" && row.failure_kind !== "unsupported").map((row) => ({source: row.source, kind: row.failure_kind || "failed"}))).filter((failure) => effectiveSources().indexOf(failure.source) >= 0)
+    readonly property var readFailures: {
+        if (currentView !== resultView)
+            return [];
+        const failures = reportState.failures && reportState.failures.length ? reportState.failures :
+            items.filter((row) => row.kind === "failure" && row.failure_kind !== "unsupported")
+                .map((row) => ({source: row.source, kind: row.failure_kind || "failed"}));
+        return failures.filter((failure) => effectiveSources().indexOf(failure.source) >= 0);
+    }
     property string expandedFailure: ""
     function failureSummary(id) {
         const row = items.find((item) => item.kind === "failure" && item.source === id);
@@ -228,9 +241,9 @@ Controls.ApplicationWindow {
     }
     function emptyStateMessage() {
         if (backend.writing && currentView === "Search" && items.length === 0)
-            return "Search queued until the current operation finishes.";
+            return "Search will resume shortly.";
         if (backend.busy || reportState.phase === "loading")
-            return currentView === "Search" ? "Searching packages…" : "Checking sources…";
+            return currentView === "Search" ? "Searching…" : "Loading…";
         if (readFailures.length > 0)
             return reportState.phase === "partial" ? "No results from the sources that completed." : "Could not check these sources.";
         if (reportState.phase === "unsupported")
@@ -256,11 +269,11 @@ Controls.ApplicationWindow {
         return currentView === "Search" ? "No matching packages." : "No results to show.";
     }
     function resultsHeading() {
-        if (backend.writing && backend.status.length)
-            return backend.status;
+        if (backend.writing)
+            return "Applying changes…";
         if (backend.busy)
-            return retainingResults ? "Showing previous results · checking for changes…" :
-                (currentView === "Search" ? "Searching packages…" : "Checking sources…");
+            return retainingResults ? "Refreshing…" :
+                (currentView === "Search" ? "Searching…" : "Loading…");
         const count = viewItems.length;
         const noun = currentView === "Sources" ? "source" : currentView === "Clean" ? "cleanup task" :
             currentView === "Updates" ? "update" : "package";
@@ -305,7 +318,16 @@ Controls.ApplicationWindow {
         if (!/^(?:flatpak\+)?https:\/\/\S+$/.test(input))
             return;
         addPackageDialog.close();
-        backend.openInput(input);
+        root.openExternalInput(input);
+    }
+    function toggleSourcePopup() {
+        if (sourcePopup.visible) {
+            sourcePopup.close();
+            return;
+        }
+        backend.checkSources();
+        rememberDialogFocus();
+        sourcePopup.open();
     }
     function effectiveSources(view) {
         const enabled = checkedSources();
@@ -936,10 +958,14 @@ Controls.ApplicationWindow {
     function reload(force, preserveSelection) {
         // Do not present matches for an older search as matches for a new one.
         const sameQuery = currentView !== "Search" || searchPane.text.trim() === resultQuery;
+        // An empty search does not start a backend query. Invalidate rows
+        // left by another page or by a previous, nonempty search.
+        const emptySearch = currentView === "Search" && searchPane.text.trim().length === 0;
+        const clearSearchResults = emptySearch && (resultView !== "Search" || resultQuery.length > 0);
         retainedItems = currentView === resultView && sameQuery ? items.slice() : [];
         retainingResults = retainedItems.length > 0;
         revealedRows = new Set(retainedItems.map(rowIdentity));
-        resultView = currentView;
+        resultView = clearSearchResults ? "" : currentView;
         if (currentView === "Search")
             resultQuery = searchPane.text.trim();
         results.currentIndex = -1;
@@ -1018,6 +1044,9 @@ Controls.ApplicationWindow {
         }
         function onBusyChanged() {
             if (!backend.busy) {
+                // The preview or an error has arrived. A queued opening can
+                // briefly transition through idle before its worker starts.
+                Qt.callLater(() => { if (!backend.busy) root.openingInput = false; });
                 root.retainingResults = false;
                 root.markChangedRows();
                 if (!backend.writing && !postWriteReload.running)
@@ -1051,6 +1080,7 @@ Controls.ApplicationWindow {
         }
         function onConfirmationChanged() {
             if (backend.confirmation.length) {
+                root.openingInput = false;
                 if (!confirmation.opened)
                     root.rememberDialogFocus();
                 confirmation.open();
@@ -1120,7 +1150,7 @@ Controls.ApplicationWindow {
         reload();
         const opening = Qt.application.arguments.slice(1).filter((argument) => argument.startsWith("file://") || argument.startsWith("https://") || argument.startsWith("flatpak+https://") || argument.startsWith("/"));
         if (opening.length === 1)
-            Qt.callLater(() => backend.openInput(opening[0]));
+            Qt.callLater(() => root.openExternalInput(opening[0]));
     }
 
     RowLayout {
@@ -1180,6 +1210,7 @@ Controls.ApplicationWindow {
         ColumnLayout {
             Layout.fillWidth: true
             Layout.fillHeight: true
+            Layout.alignment: Qt.AlignTop
             Layout.margins: root.compact ? 12 : 28
             spacing: root.compact ? 10 : 14
             RowLayout {
@@ -1225,7 +1256,7 @@ Controls.ApplicationWindow {
                     visible: !root.compact && ["Search", "Installed", "Updates", "Clean"].indexOf(root.currentView) >= 0
                     text: root.viewSourceFilters[root.currentView] ? root.sourceSummary() : "Filter sources"
                     symbol: "sources"
-                    onClicked: { backend.checkSources(); root.rememberDialogFocus(); sourcePopup.open(); }
+                    onClicked: root.toggleSourcePopup()
                     Accessible.name: "Filter this page by package source"
                     Layout.preferredWidth: 160
                     Controls.Popup {
@@ -1240,6 +1271,8 @@ Controls.ApplicationWindow {
                         width: Math.min(340, root.width - 32)
                         height: Math.min(460, root.height - 100, implicitHeight)
                         padding: 10
+                        modal: true
+                        Controls.Overlay.modal: Rectangle { color: "transparent" }
                         closePolicy: Controls.Popup.CloseOnEscape | Controls.Popup.CloseOnPressOutside
                         onOpened: {
                             searchText = "";
@@ -1379,7 +1412,7 @@ Controls.ApplicationWindow {
                     text: root.viewSourceFilters[root.currentView] ? root.sourceSummary() : "Filter sources"
                     symbol: "sources"
                     Layout.fillWidth: true
-                    onClicked: { backend.checkSources(); root.rememberDialogFocus(); sourcePopup.open(); }
+                    onClicked: root.toggleSourcePopup()
                     Accessible.name: "Filter this page by package source"
                 }
             }
@@ -1410,6 +1443,29 @@ Controls.ApplicationWindow {
                             root.choose(0);
                     }
                     onQueryEdited: root.queryDirty = true
+                }
+            }
+            RowLayout {
+                objectName: "openingNotice"
+                visible: root.openingInput
+                Layout.fillWidth: true
+                spacing: 10
+                Controls.BusyIndicator {
+                    running: root.openingInput && root.motionEnabled
+                    visible: root.motionEnabled
+                    Layout.preferredWidth: 20
+                    Layout.preferredHeight: 20
+                }
+                Controls.Label {
+                    text: "Opening…"
+                    color: root.muted
+                    Layout.fillWidth: true
+                    Accessible.name: text
+                }
+                ActionButton {
+                    text: "Cancel"
+                    symbol: "cancel"
+                    onClicked: backend.cancel()
                 }
             }
             GridLayout {
@@ -1668,13 +1724,13 @@ Controls.ApplicationWindow {
                 id: resultsBox
                 objectName: "resultsBox"
                 Layout.fillWidth: true
-                Layout.fillHeight: backend.busy || root.viewItems.length > root.shortListLimit
+                Layout.fillHeight: (backend.busy && !root.openingInput) || root.viewItems.length > root.shortListLimit
                 Layout.preferredHeight: root.viewItems.length === 0 && !backend.busy ? 150
                     : Math.min(root.shortResultsHeight(), detailsPanel.visible ? root.height * (root.compact ? 0.24 : 0.42) : root.height * 0.7)
                 Layout.minimumHeight: root.compact && detailsPanel.visible ? 100 : 130
-                visible: root.currentView !== "Settings" && root.currentView !== "Activity" &&
+                visible: root.currentView === root.resultView && root.currentView !== "Settings" && root.currentView !== "Activity" &&
                     (root.viewItems.length > 0 || root.readFailures.length === 0 || backend.busy) &&
-                    (root.currentView !== "Search" || root.viewItems.length > 0 || backend.busy || searchPane.text.trim().length > 0)
+                    (root.currentView !== "Search" || root.viewItems.length > 0 || (backend.busy && !root.openingInput) || searchPane.text.trim().length > 0)
                 color: root.surface
                 radius: 10
                 border.color: results.activeFocus ? root.accent : root.line
@@ -2557,6 +2613,8 @@ Controls.ApplicationWindow {
             NumberAnimation { property: "opacity"; to: 0; duration: root.feedbackDuration; easing.type: Easing.OutCubic }
         }
         readonly property var preview: JSON.parse(backend.confirmation_data || "{}")
+        readonly property string summaryText: preview.summary || preview.body || backend.confirmation
+        readonly property var summaryLines: summaryText.split("\n")
         property bool detailsExpanded: false
         standardButtons: Controls.Dialog.NoButton
         onClosed: root.restoreDialogFocus()
@@ -2604,34 +2662,68 @@ Controls.ApplicationWindow {
         contentItem: Controls.ScrollView {
             id: confirmationScroll
             contentWidth: availableWidth
+            contentHeight: confirmationBody.implicitHeight + 32
             clip: true
             ColumnLayout {
                 id: confirmationBody
-                width: confirmationScroll.availableWidth
-                spacing: 10
-                Controls.Label {
-                    objectName: "confirmationSummary"
+                x: 20
+                y: 16
+                width: Math.max(0, confirmationScroll.availableWidth - 40)
+                spacing: 12
+                Rectangle {
                     Layout.fillWidth: true
-                    color: root.ink
-                    text: confirmation.preview.summary || confirmation.preview.body || backend.confirmation
-                    wrapMode: Text.WordWrap
-                    textFormat: Text.PlainText
+                    implicitHeight: summaryContent.implicitHeight + 28
+                    color: root.selection
+                    radius: 8
+                    ColumnLayout {
+                        id: summaryContent
+                        anchors.fill: parent
+                        anchors.margins: 14
+                        spacing: 6
+                        Controls.Label {
+                            objectName: "confirmationSummary"
+                            Layout.fillWidth: true
+                            color: root.ink
+                            font.bold: true
+                            text: confirmation.summaryLines[0] || ""
+                            wrapMode: Text.WrapAnywhere
+                            textFormat: Text.PlainText
+                        }
+                        Controls.Label {
+                            objectName: "confirmationSummaryMeta"
+                            visible: text.length > 0
+                            Layout.fillWidth: true
+                            color: root.muted
+                            text: confirmation.summaryLines.slice(1).join("\n").trim()
+                            wrapMode: Text.WrapAnywhere
+                            textFormat: Text.PlainText
+                        }
+                    }
                 }
                 ActionButton {
                     objectName: "confirmationDetailsButton"
                     visible: !!confirmation.preview.details
-                    text: confirmation.detailsExpanded ? "Hide details" : "Details"
-                    symbol: confirmation.detailsExpanded ? "cancel" : "help"
+                    text: confirmation.detailsExpanded ? "Hide details" : "Show details"
+                    symbol: ""
                     onClicked: confirmation.detailsExpanded = !confirmation.detailsExpanded
                 }
-                Controls.Label {
-                    objectName: "confirmationDetails"
+                Rectangle {
                     visible: confirmation.detailsExpanded && !!confirmation.preview.details
                     Layout.fillWidth: true
-                    color: root.muted
-                    text: confirmation.preview.details || ""
-                    wrapMode: Text.WordWrap
-                    textFormat: Text.PlainText
+                    implicitHeight: confirmationDetails.implicitHeight + 28
+                    color: root.surface
+                    radius: 8
+                    border.color: root.line
+                    Controls.Label {
+                        id: confirmationDetails
+                        objectName: "confirmationDetails"
+                        anchors.fill: parent
+                        anchors.margins: 14
+                        color: root.muted
+                        text: confirmation.preview.details || ""
+                        wrapMode: Text.WrapAnywhere
+                        textFormat: Text.PlainText
+                    }
                 }
             }
         }
