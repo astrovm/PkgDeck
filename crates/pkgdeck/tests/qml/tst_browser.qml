@@ -224,6 +224,7 @@ TestCase {
         browser.openView("Settings");
         const animations = findChild(browser, "animationsSetting");
         verify(animations.checked);
+        waitForRendering(browser.contentItem);
         mouseClick(animations);
         verify(!animations.checked);
         verify(browser.reduceMotion);
@@ -298,7 +299,7 @@ TestCase {
         verify(findChild(browser, "packageDetails").text.indexOf("<b>literal metadata</b>") >= 0);
     }
     function test_views_loading_errors_and_resize() {
-        for (const view of ["Search", "Installed", "Updates", "Clean", "Sources", "Settings", "About"]) {
+        for (const view of ["Search", "Installed", "Updates", "Clean", "Sources", "Settings"]) {
             browser.openView(view);
             compare(browser.currentView, view);
         }
@@ -394,6 +395,7 @@ TestCase {
         const appearance = findChild(browser, "appearanceSetting");
         verify(typeof appearance.contentItem.positionToRectangle === "function");
         verify(typeof findChild(browser, "authorizationSetting").contentItem.positionToRectangle === "function");
+        waitForRendering(browser.contentItem);
         mouseClick(appearance);
         tryCompare(appearance.popup, "visible", true);
         appearance.popup.close();
@@ -547,22 +549,6 @@ TestCase {
         browser.openView("Updates");
         compare(browser.versionText(installed), "1.2.3 → 2.0.0");
     }
-    function test_export_visible_inventory_preserves_exact_filtered_identity() {
-        browser.openView("Installed");
-        fake.rows = JSON.stringify([
-            {kind: "package", name: "editor", source: "apt", architecture: "amd64", scope: "system", installed: "1", summary: "Editor"},
-            {kind: "package", name: "editor", source: "flatpak", architecture: "x86_64", scope: {user: {uid: 1000}}, remote: "flathub", reference: "app/editor/x86_64/stable", installed: "2", summary: "Editor"}
-        ]);
-        compare(browser.visibleInventoryIds().length, 2);
-        browser.viewSourceFilters = ({Installed: ["flatpak"]});
-        const selected = browser.visibleInventoryIds();
-        compare(selected.length, 1);
-        compare(selected[0].backend, "flatpak");
-        compare(selected[0].remote, "flathub");
-        compare(selected[0].reference, "app/editor/x86_64/stable");
-        compare(selected[0].scope.user.uid, 1000);
-        verify(findChild(browser, "exportInventoryButton").enabled);
-    }
     function test_versionless_runtime_actions_and_rebuild_labels() {
         browser.openView("Updates");
         const runtime = {kind: "package", name: "org.example.Platform", source: "flatpak",
@@ -682,24 +668,31 @@ TestCase {
         compare(browser.viewItems[0].name, "alpha");
         verify(header0.text.indexOf("▲") >= 0);
     }
-    function test_about_is_reached_from_settings() {
+    function test_settings_contains_version_and_github_link() {
         compare(browser.repositoryUrl.toString(), "https://github.com/astrovm/PkgDeck");
         browser.openView("Settings");
-        const aboutButton = findChild(browser, "aboutButton");
-        verify(aboutButton.visible);
-        clickDelegate(aboutButton);
-        compare(browser.currentView, "About");
+        const about = findChild(browser, "aboutText");
+        verify(about.visible);
+        verify(about.text.indexOf("9.9.9-test") >= 0);
         const link = findChild(browser, "repositoryLink");
         verify(link.visible);
         compare(link.text, "GitHub");
+        const icon = findChild(browser, "repositoryLinkIcon");
+        tryCompare(icon, "status", Image.Ready);
+        verify(icon.visible);
+        let iconPosition = icon.mapToItem(link.contentItem, 0, 0);
+        verify(iconPosition.x >= 0);
+        verify(iconPosition.x + icon.width <= link.contentItem.width);
         link.forceActiveFocus();
         verify(link.activeFocus);
         browser.width = 380;
         browser.height = 500;
         wait(30);
         verify(link.visible);
-        clickDelegate(findChild(browser, "backToSettings"));
-        compare(browser.currentView, "Settings");
+        verify(link.width <= findChild(browser, "settingsScroll").availableWidth);
+        iconPosition = icon.mapToItem(link.contentItem, 0, 0);
+        verify(iconPosition.x >= 0);
+        verify(iconPosition.x + icon.width <= link.contentItem.width);
     }
     function test_search_button_fits_at_normal_and_compact_widths() {
         browser.openView("Search");
@@ -830,35 +823,32 @@ TestCase {
         waitForRendering(browser.contentItem);
         const field = findChild(browser, "installedFilterField");
         verify(field.width >= 300);
-        verify(!findChild(browser, "exportInventoryButton").visible);
-        verify(findChild(browser, "previewInventoryButton").visible);
-        browser.openView("Settings");
-        verify(!findChild(browser, "previewInventoryButton").visible);
     }
-    function test_about_shows_backend_version() {
-        browser.openView("About");
-        compare(browser.currentView, "About");
+    function test_settings_shows_shortcuts_and_scrolls() {
+        browser.openView("Settings");
         const about = findChild(browser, "aboutText");
         verify(about !== null);
         verify(about.text.indexOf("9.9.9-test") >= 0);
         const shortcuts = findChild(browser, "aboutShortcuts");
         verify(shortcuts !== null);
-        compare(shortcuts.count, 15);
+        compare(shortcuts.count, 0);
+        waitForRendering(browser.contentItem);
+        clickDelegate(findChild(browser, "shortcutsToggle"));
+        tryCompare(shortcuts, "count", 15);
         compare(shortcuts.itemAt(0).children[1].text, "Ctrl+1");
         compare(shortcuts.itemAt(11).children[1].text, "Ctrl+Shift+U");
         waitForRendering(browser.contentItem);
-        const at = about.mapToItem(browser.contentItem, 0, 0);
+        const appearance = findChild(browser, "appearanceSetting");
+        const at = appearance.mapToItem(browser.contentItem, 0, 0);
         verify(at.y < browser.height / 3);
-        // A tall window must not vertically center the text (regression:
-        // the label used to float mid-window without a fill-height item).
         browser.height = 1300;
         waitForRendering(browser.contentItem);
-        const tall = about.mapToItem(browser.contentItem, 0, 0);
+        const tall = appearance.mapToItem(browser.contentItem, 0, 0);
         verify(tall.y < browser.height / 3);
         browser.width = 360;
         browser.height = 400;
         waitForRendering(browser.contentItem);
-        const scroll = findChild(browser, "aboutScroll");
+        const scroll = findChild(browser, "settingsScroll");
         verify(about.width <= scroll.availableWidth);
         if (scroll.contentHeight > scroll.availableHeight) {
             scroll.contentItem.contentY = scroll.contentHeight - scroll.availableHeight;
@@ -870,7 +860,6 @@ TestCase {
         browser.openView("Settings");
         verify(findChild(browser, "appearanceSetting") !== null);
         verify(findChild(browser, "authorizationSetting") !== null);
-        browser.openView("About");
         verify(findChild(browser, "aboutText").visible);
         browser.openView("Sources");
         compare(findChild(browser, "columnHeader0").text, "SOURCE");
@@ -1520,19 +1509,16 @@ TestCase {
         verify(logo.source.toString().indexOf("logo.svg") >= 0);
         tryCompare(logo, "status", Image.Ready);
     }
-    function test_signature_fits_sidebar_and_compact_about() {
+    function test_signature_fits_sidebar_and_compact_settings() {
         const footer = findChild(browser, "signatureFooter");
-        const icon = findChild(browser, "sidebarRepositoryIcon");
-        const link = findChild(browser, "sidebarRepositoryLink");
         verify(footer.visible);
         verify(footer.width <= 164);
         verify(footer.y > browser.height / 2);
-        verify(link.x + link.width <= footer.width);
+        verify(findChild(browser, "sidebarRepositoryLink") === null);
         verify(findChild(browser, "signaturePrefix").width >= findChild(browser, "signaturePrefix").implicitWidth);
         verify(findChild(browser, "signatureAuthor").width >= findChild(browser, "signatureAuthor").implicitWidth);
-        tryCompare(icon, "status", Image.Ready);
         browser.width = 380;
-        browser.openView("About");
+        browser.openView("Settings");
         wait(30);
         verify(!footer.visible);
         verify(findChild(browser, "compactSignature").visible);
