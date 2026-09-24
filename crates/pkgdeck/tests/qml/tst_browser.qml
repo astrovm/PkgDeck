@@ -34,6 +34,7 @@ TestCase {
         property string lastRetry: ""
         property string version: "9.9.9-test"
         property bool simulateLoading: false
+        property bool simulateOpening: false
         property bool busy: false
         property bool writing: false
         property bool upgradable: false
@@ -47,7 +48,7 @@ TestCase {
         property int cancels: 0
         property string lastChecked: ""
         property string lastOpenedInput: ""
-        function openInput(input) { lastOpenedInput = input; }
+        function openInput(input) { lastOpenedInput = input; if (simulateOpening) busy = true; }
         function load(view, query, source, sudo, force) {
             loadCount++;
             lastView = view;
@@ -121,6 +122,7 @@ TestCase {
         fake.manifest_preview = "{}";
         fake.lastInventorySelection = "";
         fake.simulateLoading = false;
+        fake.simulateOpening = false;
         fake.busy = false;
         fake.writing = false;
         fake.upgradable = false;
@@ -868,18 +870,58 @@ TestCase {
         fake.rows = JSON.stringify([{kind: "package", name: "fixture", source: "apt", candidate: "1.0", summary: "Synthetic package"}]);
         compare(browser.viewItems.length, 1);
     }
+    function test_search_field_stays_put_during_loading_and_results() {
+        browser.width = 1100;
+        browser.height = 700;
+        browser.openView("Settings");
+        fake.simulateLoading = true;
+        browser.openView("Search");
+        waitForRendering(browser.contentItem);
+        const field = findChild(browser, "searchField");
+        const top = field.mapToItem(browser.contentItem, 0, 0).y;
+        field.text = "synthetic";
+        mouseClick(findChild(browser, "searchButton"));
+        waitForRendering(browser.contentItem);
+        compare(field.mapToItem(browser.contentItem, 0, 0).y, top);
+        fake.rows = JSON.stringify(Array.from({length: 23}, (_, index) => ({
+            kind: "package", name: "synthetic-" + index, source: "apt", candidate: "1", scope: "system"
+        })));
+        fake.busy = false;
+        waitForRendering(browser.contentItem);
+        compare(field.mapToItem(browser.contentItem, 0, 0).y, top);
+    }
+    function test_opening_input_has_visible_feedback_until_preview_or_completion() {
+        fake.simulateOpening = true;
+        browser.openExternalInput("file:///tmp/synthetic.deb");
+        compare(fake.lastOpenedInput, "file:///tmp/synthetic.deb");
+        const notice = findChild(browser, "openingNotice");
+        verify(notice.visible);
+        fake.confirmation_data = JSON.stringify({action: "Install", summary: "Install synthetic-tool"});
+        fake.confirmation = "Install synthetic-tool";
+        tryCompare(notice, "visible", false);
+        findChild(browser, "confirmationDialog").reject();
+        fake.simulateOpening = true;
+        browser.openExternalInput("file:///tmp/invalid.deb");
+        verify(notice.visible);
+        fake.busy = false;
+        tryCompare(notice, "visible", false);
+    }
     function test_confirmation_shows_summary_before_optional_details() {
         browser.openView("Search");
         fake.confirmation_data = JSON.stringify({action: "Install", summary: "Install synthetic-tool\nSource: apt\nScope: System", details: "Additional dependency: synthetic-library"});
         fake.confirmation = "Install synthetic-tool";
         const dialog = findChild(browser, "confirmationDialog");
         tryCompare(dialog, "opened", true);
-        compare(findChild(browser, "confirmationSummary").text, "Install synthetic-tool\nSource: apt\nScope: System");
+        compare(findChild(browser, "confirmationSummary").text, "Install synthetic-tool");
+        compare(findChild(browser, "confirmationSummaryMeta").text, "Source: apt\nScope: System");
+        const summary = findChild(browser, "confirmationSummary");
+        verify(summary.mapToItem(dialog.contentItem, 0, 0).x >= 20);
         const details = findChild(browser, "confirmationDetails");
         verify(!details.visible);
         clickDelegate(findChild(browser, "confirmationDetailsButton"));
         verify(details.visible);
         verify(details.text.indexOf("synthetic-library") >= 0);
+        verify(details.mapToItem(dialog.contentItem, 0, 0).x >= 20);
         dialog.reject();
     }
     function test_compact_confirmation_keeps_both_buttons_readable() {
