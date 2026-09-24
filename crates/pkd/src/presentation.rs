@@ -195,7 +195,14 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
             })
             .collect::<Vec<_>>();
         if rows.is_empty() {
-            output.push_str("No packages found.");
+            let failed = data["failures"]
+                .as_array()
+                .is_some_and(|failures| !failures.is_empty());
+            output.push_str(if failed {
+                "No packages returned from checked sources."
+            } else {
+                "No packages found."
+            });
         } else {
             output.push_str(&table(
                 &["NAME", "SOURCE", "VERSION", "SUMMARY"],
@@ -516,6 +523,13 @@ mod tests {
         assert!(empty.contains("No packages found."));
         assert!(!empty.contains("NAME"));
         assert!(!empty.contains("Not installed"));
+        let incomplete = human(
+            &json!({"packages": [], "failures": [{"backend":"apt", "error":"synthetic failure"}]}),
+            80,
+            false,
+        );
+        assert!(incomplete.contains("No packages returned from checked sources."));
+        assert!(incomplete.contains("Source failed"));
         let ambiguous = human(
             &json!({"error":{"Ambiguous":[
                 {"backend":"apt","name":"fixture","architecture":"amd64","scope":"system"},
