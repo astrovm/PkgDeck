@@ -23,12 +23,13 @@ modules:
     buildsystem: simple
     build-options:
       append-path: /usr/lib/sdk/rust-stable/bin
+      build-args:
+        - --share=network
       env:
         CARGO_HOME: /run/build/pkgdeck/cargo
-        CARGO_NET_OFFLINE: 'true'
     build-commands:
-      - cargo build --offline --release --locked -p pkgdeck -p pkd
-      - cargo build --offline --release --locked -p pkgdeck-core --bin pkgdeck-host-runner
+      - cargo build --release --locked -p pkgdeck -p pkd
+      - cargo build --release --locked -p pkgdeck-core --bin pkgdeck-host-runner
       - install -Dm755 target/release/pkgdeck /app/bin/pkgdeck
       - install -Dm755 target/release/pkd /app/bin/pkd
       # The sandbox cannot install a trusted host executable. This binary is
@@ -41,4 +42,3 @@ modules:
     sources:
       - type: dir
         path: ../..
-      - cargo-sources.json

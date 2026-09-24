@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
-scripts/flatpak-sources.sh --check
 scripts/tests/release-packages.sh
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
@@ -16,32 +15,6 @@ expect_code() {
         exit 1
     }
 }
-# A dependency change must fail the early check until sources are regenerated.
-mkdir -p "$work/flatpak/scripts" "$work/flatpak/packaging/flatpak"
-cp scripts/flatpak-sources.sh "$work/flatpak/scripts/"
-cat >"$work/flatpak/Cargo.lock" <<'EOF'
-version = 4
-[[package]]
-name = "synthetic-app"
-version = "0.1.0"
-[[package]]
-name = "synthetic-dependency"
-version = "1.2.3+fixture"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-EOF
-expect_code 0 "$work/flatpak/scripts/flatpak-sources.sh"
-expect_code 0 "$work/flatpak/scripts/flatpak-sources.sh" --check
-jq -e '[.[] | select(.type == "archive")] | length == 1 and
-    .[0].url == "https://static.crates.io/crates/synthetic-dependency/synthetic-dependency-1.2.3+fixture.crate" and
-    .[0].sha256 == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"' \
-    "$work/flatpak/packaging/flatpak/cargo-sources.json" >/dev/null
-sed -i 's/1.2.3+fixture/1.2.4+fixture/' "$work/flatpak/Cargo.lock"
-expect_code 1 "$work/flatpak/scripts/flatpak-sources.sh" --check
-expect_code 0 "$work/flatpak/scripts/flatpak-sources.sh"
-expect_code 0 "$work/flatpak/scripts/flatpak-sources.sh" --check
-sed -i 's|registry+https://github.com/rust-lang/crates.io-index|git+https://example.invalid/dependency|' "$work/flatpak/Cargo.lock"
-expect_code 5 "$work/flatpak/scripts/flatpak-sources.sh"
 for args in --help unknown 'fast --unknown'; do
     expected=2
     [[ $args != --help ]] || expected=0

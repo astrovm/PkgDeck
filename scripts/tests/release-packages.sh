@@ -12,7 +12,6 @@ printf '[workspace.package]\nversion = "9.8.7"\n' > "$work/Cargo.toml"
 printf '[Desktop Entry]\nIcon=synthetic\nExec=pkgdeck\n' > "$work/assets/io.github.astrovm.PkgDeck.desktop"
 printf '<svg/>\n' > "$work/assets/io.github.astrovm.PkgDeck.svg"
 cp packaging/snap/snap.yaml "$work/packaging/snap/snap.yaml"
-printf '#!/bin/bash\nexit 0\n' > "$work/scripts/flatpak-sources.sh"
 cat > "$work/bin/uname" <<'EOF'
 #!/bin/bash
 [[ $1 == -m ]] || exit 2
@@ -51,7 +50,7 @@ while [[ $# -gt 0 ]]; do
 done
 exit 2
 EOF
-chmod +x "$work/scripts/package.sh" "$work/scripts/flatpak-sources.sh" "$work/bin/"*
+chmod +x "$work/scripts/package.sh" "$work/bin/"*
 
 for arch in x86_64 aarch64; do
     case "$arch" in x86_64) snap_arch=amd64 ;; aarch64) snap_arch=arm64 ;; esac
@@ -71,7 +70,12 @@ done
 
 (cd "$work" && PATH="$work/bin:$PATH" scripts/flatpak-release-manifest.sh v9.8.7 release.yml)
 grep -Fq 'https://github.com/astrovm/PkgDeck/archive/refs/tags/v9.8.7.tar.gz' "$work/release.yml"
-grep -Fxq '      - PkgDeck-v9.8.7-cargo-sources.json' "$work/release.yml"
+if grep -q 'cargo-sources' "$work/release.yml"; then
+    echo 'Release manifest still references offline Cargo sources' >&2
+    exit 1
+fi
+grep -Fq -- '--share=network' "$work/release.yml"
+grep -Fq 'cargo build --release --locked' "$work/release.yml"
 grep -Fq "$(printf 'synthetic archive\n' | sha256sum | cut -d' ' -f1)" "$work/release.yml"
 
 if (cd "$work" && PKGDECK_VERSION=invalid scripts/package.sh appimage) > /dev/null 2>&1; then
