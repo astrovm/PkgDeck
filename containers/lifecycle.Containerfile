@@ -1,6 +1,6 @@
 FROM docker.io/library/ubuntu:26.04@sha256:513c074113a871b51a8d16ab445c88779d6452d937a164fb5cc479f32668a41d
 ENV DEBIAN_FRONTEND=noninteractive container=podman
-RUN sed -i 's|http://security.ubuntu.com/ubuntu/|http://archive.ubuntu.com/ubuntu/|' /etc/apt/sources.list.d/ubuntu.sources
+RUN sed -i 's|http://security.ubuntu.com/ubuntu/|http://azure.archive.ubuntu.com/ubuntu/|; s|http://archive.ubuntu.com/ubuntu/|http://azure.archive.ubuntu.com/ubuntu/|' /etc/apt/sources.list.d/ubuntu.sources
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
     && printf 'container\n' > /etc/pkgdeck-disposable-container
 COPY scripts/vm/prepare.sh /opt/pkgdeck/prepare.sh
