@@ -312,6 +312,84 @@ pub fn list_selected(
             Err(error) => report.errors.push(format!("{label}: {error}")),
         }
     }
+    for (backend, directory) in [("dnf", "etc/yum.repos.d"), ("zypper", "etc/zypp/repos.d")] {
+        if !allowed(backend, &Scope::System) {
+            continue;
+        }
+        let directory = root.join(directory);
+        let directory = if root == Path::new("/") {
+            crate::host::Host::current().filesystem_path(&directory)
+        } else {
+            directory
+        };
+        let entries = match std::fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                report.errors.push(format!("{backend}: {error}"));
+                continue;
+            }
+        };
+        for file in entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "repo"))
+        {
+            let text = match std::fs::read_to_string(&file) {
+                Ok(text) => text,
+                Err(error) => {
+                    report.errors.push(format!("{}: {error}", file.display()));
+                    continue;
+                }
+            };
+            let mut current: Option<Repository> = None;
+            for line in text
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty() && !line.starts_with(['#', ';']))
+            {
+                if let Some(name) = line
+                    .strip_prefix('[')
+                    .and_then(|line| line.strip_suffix(']'))
+                {
+                    if let Some(row) = current.take() {
+                        report.repositories.push(row);
+                    }
+                    if name.is_empty()
+                        || name.starts_with('-')
+                        || !name
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b"._-:".contains(&b))
+                    {
+                        continue;
+                    }
+                    current = Some(Repository {
+                        backend: backend.into(),
+                        name: name.into(),
+                        title: name.into(),
+                        url: String::new(),
+                        scope: Scope::System,
+                        enabled: true,
+                        priority: None,
+                    });
+                } else if let (Some(row), Some((key, value))) =
+                    (current.as_mut(), line.split_once('='))
+                {
+                    match key.trim() {
+                        "name" => row.title = value.trim().into(),
+                        "baseurl" | "mirrorlist" | "metalink" if row.url.is_empty() => {
+                            row.url = value.trim().into()
+                        }
+                        "enabled" => row.enabled = value.trim() != "0",
+                        _ => {}
+                    }
+                }
+            }
+            if let Some(row) = current {
+                report.repositories.push(row);
+            }
+        }
+    }
     if !allowed("apt", &Scope::System) {
         return report;
     }
@@ -395,4 +473,113 @@ pub fn list_selected(
         }
     }
     report
+}
+
+#[cfg(test)]
+mod repository_file_tests {
+    use super::*;
+    use crate::{
+        backends::NativeTransport,
+        host::{Authorization, Host},
+    };
+    #[test]
+    fn lists_synthetic_dnf_sections() {
+        let root = std::env::temp_dir().join(format!("pkgdeck-repos-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let directory = root.join("etc/yum.repos.d");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            directory.join("synthetic.repo"),
+            "[synthetic]\nname=Synthetic repo\nbaseurl=https://example.invalid/repo\nenabled=0\n",
+        )
+        .unwrap();
+        let transport = NativeTransport {
+            host: Host::current(),
+            authorization: Authorization::Polkit,
+        };
+        let report = list_selected(
+            &transport,
+            &root,
+            &Cancellation::default(),
+            &["dnf".into()],
+            None,
+        );
+        assert!(report.errors.is_empty());
+        assert_eq!(report.repositories.len(), 1);
+        assert_eq!(report.repositories[0].title, "Synthetic repo");
+        assert!(!report.repositories[0].enabled);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn zypper_repository_listing_skips_invalid_sections_and_honors_scope() {
+        let root = std::env::temp_dir().join(format!("pkgdeck-zypp-repos-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let directory = root.join("etc/zypp/repos.d");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("synthetic.repo"), "# synthetic\n[vendor:one]\nname=First repo\nbaseurl=https://example.invalid/one\nenabled=1\n[bad name]\nbaseurl=https://example.invalid/bad\n[two]\nmetalink=https://example.invalid/meta\nenabled=0\n").unwrap();
+        std::fs::write(
+            directory.join("ignored.txt"),
+            "[ignored]\nbaseurl=https://example.invalid/ignored\n",
+        )
+        .unwrap();
+        let transport = NativeTransport {
+            host: Host::current(),
+            authorization: Authorization::Polkit,
+        };
+        let report = list_selected(
+            &transport,
+            &root,
+            &Cancellation::default(),
+            &["zypper".into()],
+            Some(&Scope::System),
+        );
+        assert!(report.errors.is_empty());
+        assert_eq!(report.repositories.len(), 2);
+        assert_eq!(report.repositories[0].name, "vendor:one");
+        assert_eq!(report.repositories[0].title, "First repo");
+        assert_eq!(report.repositories[1].url, "https://example.invalid/meta");
+        assert!(!report.repositories[1].enabled);
+        let user = Scope::User {
+            uid: rustix::process::getuid().as_raw(),
+        };
+        assert!(list_selected(
+            &transport,
+            &root,
+            &Cancellation::default(),
+            &["zypper".into()],
+            Some(&user)
+        )
+        .repositories
+        .is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn repository_inventory_reports_unreadable_definitions_without_hiding_valid_ones() {
+        let root =
+            std::env::temp_dir().join(format!("pkgdeck-broken-repos-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dnf = root.join("etc/yum.repos.d");
+        std::fs::create_dir_all(&dnf).unwrap();
+        std::fs::write(dnf.join("broken.repo"), [0xff, 0xfe]).unwrap();
+        std::fs::write(
+            dnf.join("valid.repo"),
+            "[valid]\nname=Valid\nbaseurl=https://example.invalid/repo\nunknown=ignored\n",
+        )
+        .unwrap();
+        let transport = NativeTransport {
+            host: Host::current(),
+            authorization: Authorization::Polkit,
+        };
+        let cancel = Cancellation::default();
+        let report = list_selected(&transport, &root, &cancel, &["dnf".into()], None);
+        assert_eq!(report.repositories.len(), 1);
+        assert_eq!(report.repositories[0].name, "valid");
+        assert_eq!(report.errors.len(), 1);
+        std::fs::remove_dir_all(&dnf).unwrap();
+        std::fs::write(&dnf, b"not a directory").unwrap();
+        let report = list_selected(&transport, &root, &cancel, &["dnf".into()], None);
+        assert!(report.repositories.is_empty());
+        assert_eq!(report.errors.len(), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

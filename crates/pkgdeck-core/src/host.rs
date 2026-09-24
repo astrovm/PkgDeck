@@ -65,6 +65,170 @@ pub const BACKENDS: &[(&str, &str)] = &[
     ("RubyGems", "gem"),
 ];
 
+fn repository_install_args(
+    source: &Path,
+    backend: &str,
+    suffix: &str,
+    digest: &str,
+) -> Result<Vec<OsString>, ExecutionError> {
+    if !source.is_absolute()
+        || !source.is_file()
+        || digest.len() != 64
+        || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(ExecutionError::Invalid("invalid repository file".into()));
+    }
+    let directory = match (backend, suffix) {
+        ("apt", "sources" | "list") => "/etc/apt/sources.list.d",
+        ("dnf", "repo") => "/etc/yum.repos.d",
+        ("zypper", "repo") => "/etc/zypp/repos.d",
+        _ => {
+            return Err(ExecutionError::Invalid(
+                "unsupported repository format".into(),
+            ))
+        }
+    };
+    let destination = Path::new(directory).join(format!("pkgdeck-{digest}.{suffix}"));
+    Ok(vec![
+        "--mode=0644".into(),
+        "--no-target-directory".into(),
+        "--".into(),
+        source.as_os_str().to_os_string(),
+        destination.as_os_str().to_os_string(),
+    ])
+}
+
+#[cfg(test)]
+mod repository_install_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    #[test]
+    fn repository_destinations_are_fixed_and_content_addressed() {
+        let source =
+            std::env::temp_dir().join(format!("pkgdeck-repo-install-{}", std::process::id()));
+        std::fs::write(&source, b"synthetic source").unwrap();
+        let digest = "a".repeat(64);
+        for (backend, suffix, destination) in [
+            ("apt", "sources", "/etc/apt/sources.list.d"),
+            ("apt", "list", "/etc/apt/sources.list.d"),
+            ("dnf", "repo", "/etc/yum.repos.d"),
+            ("zypper", "repo", "/etc/zypp/repos.d"),
+        ] {
+            let args = repository_install_args(&source, backend, suffix, &digest).unwrap();
+            assert_eq!(args[0], "--mode=0644");
+            assert_eq!(args[2], "--");
+            assert_eq!(args[3], source.as_os_str());
+            assert_eq!(
+                Path::new(&args[4]).parent().unwrap(),
+                Path::new(destination)
+            );
+            assert_eq!(
+                Path::new(&args[4]).file_name().unwrap().to_str().unwrap(),
+                format!("pkgdeck-{digest}.{suffix}")
+            );
+        }
+        assert!(repository_install_args(&source, "apt", "repo", &digest).is_err());
+        assert!(repository_install_args(&source, "apt", "sources", "unsafe").is_err());
+        assert!(
+            repository_install_args(Path::new("relative.sources"), "apt", "sources", &digest)
+                .is_err()
+        );
+        std::fs::remove_file(source).unwrap();
+    }
+    #[test]
+    fn reviewed_repository_write_passes_only_fixed_install_arguments() {
+        let source =
+            std::env::temp_dir().join(format!("pkgdeck-reviewed-source-{}", std::process::id()));
+        std::fs::write(&source, b"synthetic source").unwrap();
+        let host = Host::new(Runtime::Native, BTreeMap::new());
+        let digest = "b".repeat(64);
+        let result = host
+            .install_repository_file_with(&source, "apt", "sources", &digest, |args| {
+                assert_eq!(args[0], "--mode=0644");
+                assert_eq!(args[1], "--no-target-directory");
+                assert_eq!(args[2], "--");
+                assert_eq!(args[3], source.as_os_str());
+                assert_eq!(
+                    args[4],
+                    OsString::from(format!("/etc/apt/sources.list.d/pkgdeck-{digest}.sources"))
+                );
+                Ok(Completion {
+                    code: Some(0),
+                    signal: None,
+                    stdout: vec![],
+                    stderr: vec![],
+                    truncated: false,
+                    cancellation_deferred: false,
+                })
+            })
+            .unwrap();
+        assert_eq!(result.code, Some(0));
+        assert!(host
+            .install_repository_file_with(&source, "apt", "repo", &digest, |_| panic!(
+                "must not run an unsupported write"
+            ))
+            .is_err());
+        assert!(host
+            .install_repository_file(
+                &source,
+                "apt",
+                "repo",
+                &digest,
+                Authorization::Polkit,
+                &Cancellation::default(),
+            )
+            .is_err());
+        std::fs::remove_file(source).unwrap();
+    }
+    #[test]
+    fn one_click_hands_the_reviewed_path_to_the_native_ui() {
+        let root = std::env::temp_dir().join(format!(
+            "pkgdeck-one-click-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("synthetic.ymp");
+        let record = root.join("record");
+        let executable = root.join("OneClickInstallUI");
+        let prepared = root.join("OneClickInstallUI.tmp");
+        std::fs::write(&source, b"<metapackage/>").unwrap();
+        std::fs::write(
+            &prepared,
+            format!("#!/bin/sh\nprintf '%s' \"$1\" > '{}'\n", record.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&prepared, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::rename(prepared, &executable).unwrap();
+        let host = Host::new(Runtime::Native, BTreeMap::new());
+        let cancel = Cancellation::default();
+        if !Path::new("/usr/sbin/OneClickInstallUI").exists()
+            && !Path::new("/usr/bin/OneClickInstallUI").exists()
+        {
+            assert!(matches!(
+                host.one_click(&source, &cancel),
+                Err(ExecutionError::Disabled(_))
+            ));
+        }
+        assert!(host
+            .one_click_with_candidates(&source, &cancel, &[Path::new("/missing/OneClickInstallUI")])
+            .is_err());
+        let result = host
+            .one_click_with_candidates(&source, &cancel, &[&executable])
+            .unwrap();
+        assert_eq!(result.code, Some(0));
+        assert_eq!(
+            std::fs::read_to_string(record).unwrap(),
+            source.to_str().unwrap()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
 impl Host {
     pub fn current() -> Self {
         let mut env = std::env::vars_os().collect();
@@ -663,6 +827,78 @@ impl Host {
             let _ = child.wait();
         });
         Ok(())
+    }
+
+    /// Install one reviewed repository definition under a content-addressed
+    /// filename. The caller validates both bytes and kind before this boundary.
+    pub(crate) fn install_repository_file(
+        &self,
+        source: &Path,
+        backend: &str,
+        suffix: &str,
+        digest: &str,
+        authorization: Authorization,
+        cancel: &Cancellation,
+    ) -> Result<Completion, ExecutionError> {
+        self.install_repository_file_with(source, backend, suffix, digest, |args| {
+            self.privileged(Path::new("/usr/bin/install"), args, authorization, cancel)
+        })
+    }
+
+    fn install_repository_file_with(
+        &self,
+        source: &Path,
+        backend: &str,
+        suffix: &str,
+        digest: &str,
+        execute: impl FnOnce(&[OsString]) -> Result<Completion, ExecutionError>,
+    ) -> Result<Completion, ExecutionError> {
+        self.enabled()?;
+        if rustix::process::geteuid().is_root() {
+            return Err(ExecutionError::Invalid(
+                "run the frontend as an unprivileged user".into(),
+            ));
+        }
+        let args = repository_install_args(source, backend, suffix, digest)?;
+        execute(&args)
+    }
+
+    /// The distro's One Click installer owns its own preview and authorization.
+    pub(crate) fn one_click(
+        &self,
+        source: &Path,
+        cancel: &Cancellation,
+    ) -> Result<Completion, ExecutionError> {
+        self.one_click_with_candidates(
+            source,
+            cancel,
+            &[
+                Path::new("/usr/sbin/OneClickInstallUI"),
+                Path::new("/usr/bin/OneClickInstallUI"),
+            ],
+        )
+    }
+
+    fn one_click_with_candidates(
+        &self,
+        source: &Path,
+        cancel: &Cancellation,
+        candidates: &[&Path],
+    ) -> Result<Completion, ExecutionError> {
+        self.enabled()?;
+        let executable = candidates
+            .iter()
+            .map(|path| path.to_path_buf())
+            .find(|path| self.host_file(path, true).unwrap_or(false))
+            .ok_or_else(|| {
+                ExecutionError::Disabled("openSUSE One Click installer is unavailable".into())
+            })?;
+        process::run(
+            self.command(&executable, &[source.as_os_str().to_os_string()])?,
+            Limits::default(),
+            cancel,
+            true,
+        )
     }
 
     /// Runs a distro package manager. Writes always use a fixed system path before

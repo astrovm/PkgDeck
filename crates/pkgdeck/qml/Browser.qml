@@ -12,7 +12,7 @@ Controls.ApplicationWindow {
     FileDialog {
         id: installationPicker
         title: "Open installation file"
-        nameFilters: ["Installation files (*.AppImage *.deb *.flatpakref)"]
+        nameFilters: ["Packages and sources (*.AppImage *.deb *.rpm *.pkg.tar.zst *.pkg.tar.xz *.pkg.tar.gz *.pkg.tar.bz2 *.pkg.tar.lz4 *.flatpak *.flatpakref *.flatpakrepo *.snap *.repo *.sources *.list *.ymp)"]
         onAccepted: backend.openInput(selectedFile.toString())
     }
     Controls.Dialog {
@@ -32,8 +32,8 @@ Controls.ApplicationWindow {
                 id: packageLink
                 objectName: "packageLink"
                 Layout.fillWidth: true
-                placeholderText: "flatpak+https://…flatpakref"
-                Accessible.name: "Flatpak link"
+                placeholderText: "Paste an HTTPS link"
+                Accessible.name: "Package or repository link"
                 selectByMouse: true
                 onAccepted: if (previewLink.enabled) root.openPackageLink()
             }
@@ -52,7 +52,7 @@ Controls.ApplicationWindow {
                     text: "Preview link"
                     symbol: "search"
                     primary: true
-                    enabled: /^flatpak\+https:\/\/\S+\.flatpakref(?:\?\S*)?$/.test(packageLink.text.trim())
+                    enabled: /^(?:flatpak\+)?https:\/\/\S+/.test(packageLink.text.trim())
                     onClicked: root.openPackageLink()
                 }
             }
@@ -1003,7 +1003,7 @@ Controls.ApplicationWindow {
             sortColumn = preferences.sortColumn;
         sortAscending = preferences.sortAscending;
         reload();
-        const opening = Qt.application.arguments.slice(1).filter((argument) => argument.startsWith("file://") || argument.startsWith("flatpak+https://") || argument.startsWith("/"));
+        const opening = Qt.application.arguments.slice(1).filter((argument) => argument.startsWith("file://") || argument.startsWith("https://") || argument.startsWith("flatpak+https://") || argument.startsWith("/"));
         if (opening.length === 1)
             Qt.callLater(() => backend.openInput(opening[0]));
     }
@@ -2106,7 +2106,7 @@ Controls.ApplicationWindow {
                             Controls.CheckBox {
                                 objectName: "repositoryEnabled"
                                 checked: modelData.enabled
-                                enabled: !backend.busy && modelData.backend !== "apt"
+                                enabled: !backend.busy && (modelData.backend === "flatpak" || modelData.backend === "fwupd")
                                 Accessible.name: "Enable " + (modelData.title || modelData.name)
                                 onClicked: {
                                     root.repositoryChange(modelData, "set_enabled", {enabled: checked});

@@ -5,6 +5,7 @@ use pkgdeck_core::activity::{History, Outcome, State};
 use pkgdeck_core::backends::AppImage;
 use pkgdeck_core::background::{self, Schedule};
 use pkgdeck_core::repositories::{self, Action as RepositoryAction};
+use pkgdeck_core::repository_input::{self, Import as RepositoryImport};
 use pkgdeck_core::{engine::*, host::Authorization, package::*, process::Cancellation};
 use serde_json::{json, Value};
 use std::{
@@ -50,7 +51,7 @@ fn local_input_path(input: &str) -> Result<PathBuf, String> {
         }
         String::from_utf8(bytes).map_err(|_| "File URL is not UTF-8.".to_owned())?
     } else if input.contains("://") {
-        return Err("Unsupported link. Open a local package file or a flatpak+https link.".into());
+        return Err("Unsupported link. Use an HTTPS package or repository link.".into());
     } else {
         input.to_owned()
     };
@@ -153,6 +154,7 @@ pub mod ffi {
 #[derive(Clone)]
 enum Job {
     OpenInput(String),
+    ImportRepository(RepositoryImport),
     Repositories(Option<RepositoryAction>),
     Load(String, String),
     BackgroundUpdates(Vec<String>),
@@ -173,6 +175,7 @@ impl Job {
                 | Self::UpgradeAll(..)
                 | Self::CleanAll(_)
                 | Self::Repositories(Some(_))
+                | Self::ImportRepository(_)
         )
     }
     fn operations(&self) -> Vec<Operation> {
@@ -190,6 +193,7 @@ struct Confirmed {
 }
 enum Payload {
     OpenPackage(Box<Package>),
+    OpenRepository(RepositoryImport),
     Repositories(repositories::Report),
     Packages(PackageReport),
     BackgroundUpdates(PackageReport),
@@ -218,10 +222,29 @@ fn inspect_open_input(input: &str, cancel: &Cancellation) -> Result<Payload, Eng
         return pkgdeck_core::flatpak_ref::inspect(url, cancel)
             .map(|package| Payload::OpenPackage(Box::new(package)));
     }
+    if input.starts_with("https://") {
+        if repository_input::supported(input) {
+            return repository_input::inspect(input, cancel).map(Payload::OpenRepository);
+        }
+        if input
+            .split(['?', '#'])
+            .next()
+            .is_some_and(|url| url.ends_with(".flatpakref"))
+        {
+            return pkgdeck_core::flatpak_ref::inspect(input, cancel)
+                .map(|package| Payload::OpenPackage(Box::new(package)));
+        }
+        return pkgdeck_core::artifact::inspect(input, cancel)
+            .map(|package| Payload::OpenPackage(Box::new(package)));
+    }
     let path = local_input_path(input).map_err(|reason| EngineError::InvalidResponse {
         backend: "open".into(),
         reason,
     })?;
+    if repository_input::supported(&path.to_string_lossy()) {
+        return repository_input::inspect(&path.to_string_lossy(), cancel)
+            .map(Payload::OpenRepository);
+    }
     let extension = path
         .extension()
         .and_then(|value| value.to_str())
@@ -235,10 +258,7 @@ fn inspect_open_input(input: &str, cancel: &Cancellation) -> Result<Payload, Eng
         }
         "deb" => pkgdeck_core::local_deb::inspect(&path, cancel),
         "flatpakref" => pkgdeck_core::flatpak_ref::inspect(&path.to_string_lossy(), cancel),
-        _ => Err(EngineError::InvalidResponse {
-            backend: "open".into(),
-            reason: "Supported local formats are .AppImage, .deb, and .flatpakref.".into(),
-        }),
+        _ => pkgdeck_core::artifact::inspect(&path.to_string_lossy(), cancel),
     };
     package.map(|package| Payload::OpenPackage(Box::new(package)))
 }
@@ -262,7 +282,7 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
     }
     let result = match job {
         Job::OpenInput(input) => inspect_open_input(&input, cancel),
-        Job::Repositories(_) => Err(EngineError::NotFound),
+        Job::Repositories(_) | Job::ImportRepository(_) => Err(EngineError::NotFound),
         Job::BackgroundUpdates(_) => {
             let mut report = engine.installed(cancel);
             filter_updates(&mut report);
@@ -555,7 +575,7 @@ fn encoded(value: impl serde::Serialize) -> QString {
 /// empty filter means every available backend.
 fn engine_source(job: &Job, filter: &[String]) -> Vec<String> {
     match job {
-        Job::OpenInput(_) => vec![],
+        Job::OpenInput(_) | Job::ImportRepository(_) => vec![],
         Job::RetrySource(_, _, source) => vec![source.clone()],
         Job::PlanOperation(operation) => vec![operation.backend().into()],
         Job::Write(operation, _) => vec![operation.backend().into()],
@@ -837,9 +857,28 @@ fn operation_label(operation: &Operation) -> String {
         Operation::UpgradeAll { backend } => return format!("Update all packages from {backend}"),
         Operation::Clean(id) => return format!("Clean {} with {}", id.key, id.backend),
     };
+    let name = if id.backend == "appimage"
+        && id
+            .reference
+            .as_deref()
+            .is_some_and(|reference| reference.starts_with("artifact:"))
+    {
+        id.name
+            .split(['?', '#'])
+            .next()
+            .unwrap_or(&id.name)
+            .rsplit('/')
+            .next()
+            .unwrap_or(&id.name)
+    } else {
+        &id.name
+    };
     format!(
         "{action} {}\nSource: {}\nArchitecture: {}\nScope: {}",
-        id.reference.as_deref().unwrap_or(&id.name),
+        id.reference
+            .as_deref()
+            .filter(|reference| !reference.starts_with("artifact:"))
+            .unwrap_or(name),
         id.backend,
         id.architecture,
         scope_label(&id.scope)
@@ -896,7 +935,9 @@ fn confirmation_preview(
         }
         if (package.id.backend == "appimage"
             || package.id.reference.as_deref().is_some_and(|value| {
-                value.starts_with("local-deb:") || value.starts_with("flatpakref:")
+                value.starts_with("local-deb:")
+                    || value.starts_with("flatpakref:")
+                    || value.starts_with("artifact:")
             }))
             && matches!(operation, Operation::Install(_))
         {
@@ -1426,6 +1467,21 @@ impl ffi::PackageController {
                             ))
                         })
                 };
+                send(Reply::Done(result));
+                return;
+            }
+            if let Job::ImportRepository(import) = &job {
+                let transport = pkgdeck_core::backends::NativeTransport {
+                    host: pkgdeck_core::host::Host::current(),
+                    authorization,
+                };
+                let result = repository_input::apply(import, authorization, &token).map(|_| {
+                    Payload::Repositories(repositories::list(
+                        &transport,
+                        std::path::Path::new("/"),
+                        &token,
+                    ))
+                });
                 send(Reply::Done(result));
                 return;
             }
@@ -1969,6 +2025,23 @@ impl ffi::PackageController {
                     self.as_mut()
                         .apply(Ok(Payload::OperationPreview(operation, None)));
                 }
+            }
+            Ok(Payload::OpenRepository(import)) => {
+                let action = if import.suffix == "ymp" {
+                    "Open native installer".to_owned()
+                } else {
+                    format!("Add {}", import.name)
+                };
+                let scope = if import.backend == "flatpak" {
+                    "User"
+                } else {
+                    "System"
+                };
+                let summary = format!("{action}\n{} · {scope}", import.backend);
+                let details = format!("{}\n{}", import.description, import.source);
+                self.as_mut().set_confirmation_data(encoded(json!({"action": action, "body": summary, "summary": summary, "details": details})));
+                self.as_mut().set_confirmation(summary.as_str().into());
+                self.rust_mut().pending = Some(Job::ImportRepository(import));
             }
             Ok(Payload::UpgradePreview(operations, count, apt_plan)) => {
                 if let Some(entry) = self.as_mut().rust_mut().revalidating.take() {
@@ -2539,6 +2612,209 @@ mod tests {
         assert!(inspect_open_input("file:///tmp/bad%2Z.deb", &Cancellation::default()).is_err());
     }
     #[test]
+    fn direct_https_links_route_to_their_native_previews() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = std::env::var_os("PKGDECK_OPEN_LINK_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                std::env::temp_dir().join(format!("pkgdeck-open-links-{}", std::process::id()))
+            });
+        if std::env::var_os("PKGDECK_OPEN_LINK_CHILD").is_none() {
+            let _ = std::fs::remove_dir_all(&base);
+            std::fs::create_dir_all(&base).unwrap();
+            let curl = base.join("curl");
+            let script = "#!/bin/sh\nout=''\nfor arg; do\n  if [ \"$previous\" = '--output' ]; then out=\"$arg\"; fi\n  previous=\"$arg\"\ndone\ncase \"$arg\" in\n  *.flatpakref) printf '[Flatpak Ref]\\nName=org.example.Synthetic\\nUrl=https://example.invalid/repo\\n' ;;\n  *.flatpakrepo) printf '[Flatpak Repo]\\nName=synthetic\\nUrl=https://example.invalid/repo\\nGPGKey=c3ludGhldGlj\\n' ;;\n  *.flatpak) printf 'synthetic bundle bytes' > \"$out\" ;;\nesac\n";
+            std::fs::write(&curl, script).unwrap();
+            std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "controller::tests::direct_https_links_route_to_their_native_previews",
+                    "--nocapture",
+                ])
+                .env("PKGDECK_OPEN_LINK_CHILD", "1")
+                .env("PKGDECK_OPEN_LINK_DIR", &base)
+                .env("PATH", &base)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            std::fs::remove_dir_all(base).unwrap();
+            return;
+        }
+        let cancel = Cancellation::default();
+        for link in [
+            "https://example.invalid/synthetic.flatpakref",
+            "flatpak+https://example.invalid/synthetic.flatpakref",
+        ] {
+            let Payload::OpenPackage(package) = inspect_open_input(link, &cancel).unwrap() else {
+                panic!("Flatpak reference must preview as a package");
+            };
+            assert_eq!(package.id.name, "org.example.Synthetic");
+        }
+        let Payload::OpenRepository(import) =
+            inspect_open_input("https://example.invalid/synthetic.flatpakrepo", &cancel).unwrap()
+        else {
+            panic!("Flatpak repository must preview as a source");
+        };
+        assert_eq!(import.name, "synthetic");
+        let Payload::OpenPackage(package) =
+            inspect_open_input("https://example.invalid/synthetic.flatpak", &cancel).unwrap()
+        else {
+            panic!("Flatpak bundle must preview as a package");
+        };
+        assert_eq!(package.id.backend, "flatpak");
+        assert!(inspect_open_input("https://example.invalid/unsupported.bin", &cancel).is_err());
+    }
+    #[test]
+    fn remote_appimage_confirmation_uses_the_filename() {
+        let id = PackageId {
+            backend: "appimage".into(),
+            name: "https://example.invalid/downloads/Synthetic.AppImage?version=1".into(),
+            architecture: "x86_64".into(),
+            scope: Scope::Environment {
+                path: PathBuf::from("/tmp/synthetic-appimages"),
+            },
+            remote: None,
+            reference: Some("artifact:appimage:synthetic".into()),
+        };
+        let label = operation_label(&Operation::Install(id));
+        assert!(label.contains("Install Synthetic.AppImage"));
+        assert!(!label.contains("?version=1"));
+    }
+    #[test]
+    fn opening_repository_file_previews_before_any_write() {
+        let base =
+            std::env::temp_dir().join(format!("pkgdeck-open-repository-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let source = base.join("synthetic.sources");
+        std::fs::write(&source, "Types: deb\nURIs: https://example.invalid/repo\nSuites: stable\nComponents: main\nSigned-By: /etc/apt/keyrings/synthetic.gpg\n").unwrap();
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller
+            .as_mut()
+            .open_input(source.to_str().unwrap().into());
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while Instant::now() < deadline && controller.confirmation().is_empty() {
+            controller.as_mut().poll();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(controller.confirmation().to_string().contains("APT source"));
+        assert!(matches!(
+            controller.rust().pending,
+            Some(Job::ImportRepository(_))
+        ));
+        controller.as_mut().confirm(false);
+        assert!(source.exists());
+        controller
+            .as_mut()
+            .open_input(source.to_str().unwrap().into());
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while Instant::now() < deadline && controller.confirmation().is_empty() {
+            controller.as_mut().poll();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::fs::write(&source, "Types: deb\nURIs: https://example.invalid/changed\nSuites: stable\nComponents: main\nSigned-By: /etc/apt/keyrings/synthetic.gpg\n").unwrap();
+        controller.as_mut().confirm(true);
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while Instant::now() < deadline && *controller.busy() {
+            controller.as_mut().poll();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(controller
+            .status()
+            .to_string()
+            .contains("changed since preview"));
+        let one_click = base.join("synthetic.ymp");
+        std::fs::write(&one_click, "<metapackage><group/></metapackage>\n").unwrap();
+        controller
+            .as_mut()
+            .open_input(one_click.to_str().unwrap().into());
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while Instant::now() < deadline && controller.confirmation().is_empty() {
+            controller.as_mut().poll();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(controller
+            .confirmation()
+            .to_string()
+            .contains("Open native installer"));
+        controller.as_mut().confirm(false);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+    #[test]
+    fn confirmed_flatpak_repository_reaches_the_native_manager() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = std::env::var_os("PKGDECK_CONTROLLER_REPO_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                std::env::temp_dir().join(format!("pkgdeck-controller-repo-{}", std::process::id()))
+            });
+        if std::env::var_os("PKGDECK_CONTROLLER_REPO_CHILD").is_none() {
+            let _ = std::fs::remove_dir_all(&base);
+            std::fs::create_dir_all(&base).unwrap();
+            let flatpak = base.join("flatpak");
+            std::fs::write(
+                &flatpak,
+                format!(
+                    "#!/bin/sh\ncase \"$*\" in\n *remote-add*) printf 'added' > '{}' ;;\nesac\n",
+                    base.join("record").display()
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&flatpak, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "controller::tests::confirmed_flatpak_repository_reaches_the_native_manager",
+                    "--nocapture",
+                ])
+                .env("PKGDECK_CONTROLLER_REPO_CHILD", "1")
+                .env("PKGDECK_CONTROLLER_REPO_DIR", &base)
+                .env("PATH", &base)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            std::fs::remove_dir_all(base).unwrap();
+            return;
+        }
+        let source = base.join("synthetic.flatpakrepo");
+        std::fs::write(&source, "[Flatpak Repo]\nName=synthetic\nUrl=https://example.invalid/repo\nGPGKey=c3ludGhldGlj\n").unwrap();
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller
+            .as_mut()
+            .open_input(source.to_str().unwrap().into());
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while Instant::now() < deadline && controller.confirmation().is_empty() {
+            controller.as_mut().poll();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(controller
+            .confirmation()
+            .to_string()
+            .contains("Add synthetic"));
+        controller.as_mut().confirm(true);
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline && !base.join("record").exists() {
+            controller.as_mut().poll();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            std::fs::read_to_string(base.join("record")).unwrap(),
+            "added"
+        );
+        assert!(source.exists());
+    }
+    #[test]
     fn opening_local_deb_reads_metadata_without_installing_it() {
         let base = std::env::temp_dir().join(format!("pkgdeck-open-deb-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
@@ -2683,7 +2959,7 @@ mod tests {
         assert!(controller
             .status()
             .to_string()
-            .contains("Supported local formats"));
+            .contains("unsupported package format"));
         assert!(controller.confirmation().is_empty());
         controller
             .as_mut()
