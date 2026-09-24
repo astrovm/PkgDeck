@@ -150,7 +150,7 @@ user at `/home/linuxbrew/.linuxbrew`. Each run starts a new writable container
 layer, which is removed on exit. The image contains dependencies only, with no
 installed synthetic packages or test authorization grants.
 
-Ubuntu and Rust base contents, Qt/KDE versions, and Homebrew 6.0.22 sources are
+Ubuntu and Rust base contents, Qt/KDE versions, and Homebrew 7.0.6 sources are
 pinned; the Homebrew tarball has a committed SHA-256. OS dependency installation
 still uses the distribution's current signed repositories. These builds are
 therefore reproducible from a retained image, not bit-for-bit reproducible rebuilds

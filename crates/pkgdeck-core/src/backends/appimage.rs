@@ -127,7 +127,7 @@ impl AppImage {
             }
             hash.update(&buffer[..count]);
         }
-        Ok(format!("{:x}", hash.finalize()))
+        Ok(hex::encode(hash.finalize()))
     }
     fn copy_bounded(
         input: &mut impl Read,

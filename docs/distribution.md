@@ -61,6 +61,11 @@ supported; a successful Linux build does not establish macOS compatibility.
    passes. A failed check leaves the PR open for review. After users run
    `brew update`, `brew install astrovm/pkgdeck/pkgdeck` installs the stable version.
 
+Configure `HOMEBREW_REPO_TOKEN` as a PkgDeck Actions secret using a fine-grained
+token restricted to `astrovm/PkgDeck` with Contents and Pull requests write
+permissions. It lets formula PRs created by the release workflow start CI and
+merge automatically. Publication fails clearly if the secret is missing.
+
 The formula builds from the tagged source archive; it does not provide a bottle.
 The `.app` uses Homebrew dependencies and is not a standalone downloadable
 macOS application.
