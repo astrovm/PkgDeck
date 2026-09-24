@@ -6,7 +6,6 @@ ColumnLayout {
     id: pane
     objectName: "activityPane"
     property var entries: []
-    property var backgroundState: ({})
     property color surface
     property color ink
     property color muted
@@ -36,22 +35,15 @@ ColumnLayout {
         return done + " finished" + (failed ? " · " + failed + " failed" : "") + (cancelled ? " · " + cancelled + " cancelled" : "");
     }
     RowLayout {
+        visible: pane.entries.some(entry => entry.state === "queued")
         Layout.fillWidth: true
-        Controls.Label { text: "Recent operations"; font.bold: true; color: pane.ink; Layout.fillWidth: true }
+        Item { Layout.fillWidth: true }
         Controls.Button {
             objectName: "cancelQueuedButton"
             text: "Cancel queued"
-            enabled: pane.entries.some(entry => entry.state === "queued")
             onClicked: pane.cancelQueued()
             Accessible.name: text
         }
-    }
-    Controls.Label {
-        Layout.fillWidth: true
-        visible: !!pane.backgroundState.last_check
-        color: pane.muted
-        text: pane.backgroundState.last_check ? "Updates checked " + new Date(pane.backgroundState.last_check * 1000).toLocaleString() + " · " + pane.backgroundState.available + " available" + (pane.backgroundState.failures && pane.backgroundState.failures.length ? " · " + pane.backgroundState.failures.length + " sources failed" : "") : ""
-        elide: Text.ElideRight
     }
     ListView {
         objectName: "activityList"

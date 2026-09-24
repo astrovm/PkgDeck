@@ -1,8 +1,9 @@
 # Graphical interface
 
 Launch `pkgdeck`. The sidebar contains Search, Installed, Updates, Clean, Sources,
-Settings, and About. Settings offers system, dark, and light appearance, reduced
-motion, and authorization preferences.
+and Settings. Activity is always available in the header; About is in Settings.
+Settings offers system, dark, and light appearance, reduced motion, and
+authorization preferences.
 
 ## Browse and compare
 
@@ -19,7 +20,7 @@ without desktop metadata keep their native names.
 
 ## Open installation files
 
-Choose **Open…**, drop one file onto the window, or pass a path or URL to
+On Search, choose **From file or link…**, drop one file onto the window, or pass a path or URL to
 `pkgdeck`. Supported inputs are local `.AppImage`, `.deb`, and `.flatpakref`
 files, plus `flatpak+https://…flatpakref` links. A second launch forwards its
 input to an already open PkgDeck window. Opening shows a confirmation preview;
@@ -44,8 +45,8 @@ unsupported, and ambiguous entries, with repository or source choices where
 needed. Preview makes no package or repository changes.
 
 Click column headings to sort; drag the name and version dividers to resize.
-Use the source picker to filter the current page. Enable managers separately in
-Settings; that choice persists between sessions. The picker shows unavailable
+Use the source picker to filter the current package page. Enable managers on
+Sources; that choice persists between sessions. The picker shows unavailable
 managers and why they cannot be used. **Reload** reads fresh package state.
 
 Docker daemon images and rootless Podman images are separate sources. Rows show
@@ -112,7 +113,7 @@ separately for User and System installations. Firmware remotes can be toggled.
 APT's editor button opens the native Software Sources tool. Repository changes
 use the manager's normal signature verification and authorization.
 
-The source picker filters one page; Settings controls which managers PkgDeck
+The source picker filters one package page; Sources controls which managers PkgDeck
 queries. Neither setting enables or disables repositories. Refresh sources
 updates metadata for selected managers.
 
@@ -121,7 +122,7 @@ updates metadata for selected managers.
 | Shortcut | Action |
 | --- | --- |
 | Ctrl+1 / Ctrl+2 / Ctrl+3 / Ctrl+4 / Ctrl+5 | Search / Installed / Updates / Clean / Sources |
-| Ctrl+F | Search field in Search, package filter in Installed, source picker in Updates/Clean/Sources; other pages open Search |
+| Ctrl+F | Search field in Search, package filter in Installed, source picker in Updates/Clean; other pages open Search |
 | Ctrl+R | Reload |
 | Ctrl+Shift+U | Update checked packages |
 | Ctrl+Q | Close; finish an active native transaction first |

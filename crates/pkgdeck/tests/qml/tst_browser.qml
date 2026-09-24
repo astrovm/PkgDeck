@@ -44,6 +44,8 @@ TestCase {
         property int writes: 0
         property int cancels: 0
         property string lastChecked: ""
+        property string lastOpenedInput: ""
+        function openInput(input) { lastOpenedInput = input; }
         function load(view, query, source, sudo, force) {
             loadCount++;
             lastView = view;
@@ -93,7 +95,6 @@ TestCase {
         id: window
         App.Browser {
             backend: fake
-            repositoryIconSource: Qt.resolvedUrl("../../assets/" + (dark ? "github-dark.svg" : "github.svg"))
             logoIconSource: Qt.resolvedUrl("../../assets/logo.svg")
         }
     }
@@ -122,6 +123,7 @@ TestCase {
         fake.writes = 0;
         fake.cancels = 0;
         fake.lastChecked = "";
+        fake.lastOpenedInput = "";
         fake.lastForce = false;
         fake.loadCount = 0;
         browser = createTemporaryObject(window, test);
@@ -445,8 +447,7 @@ TestCase {
     function test_upgrade_all_requires_available_updates_and_confirmation() {
         browser.openView("Updates");
         const button = findChild(browser, "upgradeAllButton");
-        verify(button.visible);
-        verify(!button.enabled);
+        verify(!button.visible);
         populate();
         fake.upgradable = true;
         waitForRendering(browser.contentItem);
@@ -617,7 +618,7 @@ TestCase {
         browser.togglePackage(browser.items[1]);
         compare(browser.selectedCount(), 1);
         compare(browser.uncheckedPackages.length, 1);
-        compare(upgradeBtn.text, "Update selected");
+        compare(upgradeBtn.text, "Update selected (1)");
         mouseClick(upgradeBtn);
         verify(fake.lastChecked !== "");
         const sent = JSON.parse(fake.lastChecked);
@@ -641,7 +642,7 @@ TestCase {
         browser.togglePackage(browser.items[1]);
         compare(browser.selectedCount(), 1);
         verify(upgradeBtn.visible);
-        compare(upgradeBtn.text, "Update selected");
+        compare(upgradeBtn.text, "Update selected (1)");
     }
     function test_columns_sort_resize_and_index_mapping() {
         browser.openView("Search");
@@ -679,28 +680,24 @@ TestCase {
         compare(browser.viewItems[0].name, "alpha");
         verify(header0.text.indexOf("▲") >= 0);
     }
-    function test_repository_sidebar() {
+    function test_about_is_reached_from_settings() {
         compare(browser.repositoryUrl.toString(), "https://github.com/astrovm/PkgDeck");
-        const icon = findChild(browser, "repositoryIcon");
-        tryCompare(icon, "status", Image.Ready);
+        browser.openView("Settings");
+        const aboutButton = findChild(browser, "aboutButton");
+        verify(aboutButton.visible);
+        clickDelegate(aboutButton);
+        compare(browser.currentView, "About");
         const link = findChild(browser, "repositoryLink");
         verify(link.visible);
+        compare(link.text, "GitHub");
         link.forceActiveFocus();
         verify(link.activeFocus);
         browser.width = 380;
         browser.height = 500;
         wait(30);
-        verify(!link.visible); // Attribution belongs to the sidebar, not a window footer.
-        browser.width = 1100;
-        wait(30);
         verify(link.visible);
-        compare(link.width, 26);
-        compare(link.height, 26);
-        compare(icon.width, 16);
-        compare(icon.height, 16);
-        verify(icon.source.toString().endsWith("github.svg") || icon.source.toString().endsWith("github-dark.svg"));
-        compare(icon.sourceSize.width, Math.ceil(icon.width * browser.screen.devicePixelRatio));
-        compare(icon.sourceSize.height, Math.ceil(icon.height * browser.screen.devicePixelRatio));
+        clickDelegate(findChild(browser, "backToSettings"));
+        compare(browser.currentView, "Settings");
     }
     function test_search_button_fits_at_normal_and_compact_widths() {
         browser.openView("Search");
@@ -722,6 +719,52 @@ TestCase {
         mouseClick(button);
         compare(fake.lastQuery, "Firefox");
         compare(browser.queryDirty, false);
+    }
+    function test_file_or_link_entry_is_search_only_and_validates_links() {
+        const add = findChild(browser, "addPackageButton");
+        const activity = findChild(browser, "activityIndicator");
+        const filter = findChild(browser, "sourceFilter");
+        browser.openView("Search");
+        verify(add.visible);
+        for (const width of [1100, 360]) {
+            browser.width = width;
+            waitForRendering(browser.contentItem);
+            verify(activity.visible);
+            verify(filter.visible);
+            verify(add.visible);
+            const right = add.mapToItem(browser.contentItem, add.width, 0).x;
+            verify(right <= browser.width);
+        }
+        clickDelegate(add);
+        const dialog = findChild(browser, "addPackageDialog");
+        tryCompare(dialog, "opened", true);
+        const link = findChild(browser, "packageLink");
+        const preview = findChild(browser, "previewPackageLink");
+        link.text = "https://example.invalid/app.flatpakref";
+        verify(!preview.enabled);
+        link.text = "flatpak+https://example.invalid/app.flatpakref";
+        verify(preview.enabled);
+        clickDelegate(preview);
+        compare(fake.lastOpenedInput, "flatpak+https://example.invalid/app.flatpakref");
+        browser.openView("Installed");
+        verify(!add.visible);
+        browser.openView("Settings");
+        verify(!filter.visible);
+        verify(activity.visible);
+    }
+    function test_confirmation_shows_summary_before_optional_details() {
+        browser.openView("Search");
+        fake.confirmation_data = JSON.stringify({action: "Install", summary: "Install synthetic-tool\nSource: apt\nScope: System", details: "Additional dependency: synthetic-library"});
+        fake.confirmation = "Install synthetic-tool";
+        const dialog = findChild(browser, "confirmationDialog");
+        tryCompare(dialog, "opened", true);
+        compare(findChild(browser, "confirmationSummary").text, "Install synthetic-tool\nSource: apt\nScope: System");
+        const details = findChild(browser, "confirmationDetails");
+        verify(!details.visible);
+        clickDelegate(findChild(browser, "confirmationDetailsButton"));
+        verify(details.visible);
+        verify(details.text.indexOf("synthetic-library") >= 0);
+        dialog.reject();
     }
     function test_about_shows_backend_version() {
         browser.openView("About");
@@ -1254,14 +1297,12 @@ TestCase {
     function test_source_picker_stays_inside_window() {
         browser.openView("Updates");
         const popup = findChild(browser, "sourcePopup");
-        const title = findChild(browser, "sourcePopupTitle");
         const apply = findChild(browser, "applySourceFilter");
         for (const width of [1100, 420, 360]) {
             browser.width = width;
             popup.open();
             tryCompare(popup, "visible", true);
             waitForRendering(browser.contentItem);
-            verify(!title.visible);
             for (const item of [popup.contentItem, apply]) {
                 const at = item.mapToItem(browser.contentItem, 0, 0);
                 verify(at.x >= 0);
@@ -1271,7 +1312,7 @@ TestCase {
             tryCompare(popup, "visible", false);
         }
     }
-    function test_source_picker_focus_and_settings_controls() {
+    function test_source_picker_focus_and_page_visibility() {
         browser.openView("Updates");
         const filter = findChild(browser, "sourceFilter");
         clickDelegate(filter);
@@ -1283,11 +1324,9 @@ TestCase {
         tryCompare(popup, "visible", false);
 
         browser.openView("Settings");
-        clickDelegate(filter);
-        tryCompare(popup, "visible", true);
-        tryVerify(() => findChild(browser, "sourcePickerSearch").activeFocus);
-        verify(!findChild(browser, "unavailableSourceToggle").visible);
-        popup.close();
+        verify(!filter.visible);
+        browser.openView("Sources");
+        verify(!filter.visible);
     }
     function test_compact_updates_keep_names_and_actions_readable() {
         browser.width = 360;
@@ -1454,24 +1493,35 @@ TestCase {
         compare(browser.emptyStateMessage(), "No results from selected sources.");
         compare(browser.sourceSummary(), "APT");
     }
-    function test_manager_settings_are_separate_from_page_filter() {
-        browser.openView("Settings");
-        const popup = findChild(browser, "sourcePopup");
-        popup.mode = "settings";
-        popup.open();
-        tryCompare(popup, "visible", true);
-        browser.toggleDraftSource("npm");
-        browser.applySourceDraft();
+    function test_sources_can_reenable_a_disabled_manager() {
+        browser.openView("Sources");
+        fake.rows = JSON.stringify([
+            {kind: "source", name: "apt", source: "apt", summary: "Available", available: true, capabilities: ["search"]},
+            {kind: "source", name: "npm", source: "npm", summary: "Available", available: true, capabilities: ["search"]}
+        ]);
+        const list = findChild(browser, "packageResults");
+        tryVerify(() => list.itemAtIndex(1) !== null);
+        const npmCheck = findChild(list.itemAtIndex(1), "managerEnabled");
+        verify(npmCheck.checked);
+        clickDelegate(npmCheck);
         verify(browser.sourceSelection.split(",").indexOf("npm") < 0);
-        compare(browser.viewSourceFilters["Installed"], undefined);
+        compare(fake.lastSource, ""); // The catalog still loads every manager.
+        compare(browser.viewItems.length, 2);
+        verify(!npmCheck.checked);
+        clickDelegate(npmCheck);
+        verify(npmCheck.checked);
+        compare(browser.sourceSelection, "");
+        browser.width = 360;
+        waitForRendering(browser.contentItem);
+        const right = npmCheck.mapToItem(browser.contentItem, npmCheck.width, 0).x;
+        verify(right <= browser.width);
         browser.openView("Installed");
-        verify(fake.lastSource.split(",").indexOf("npm") < 0);
-        popup.mode = "filter";
+        const popup = findChild(browser, "sourcePopup");
         popup.open();
         tryCompare(popup, "visible", true);
         browser.toggleDraftSource("apt");
         browser.applySourceDraft();
-        verify(browser.sourceSelection.split(",").indexOf("npm") < 0);
+        compare(browser.sourceSelection, "");
         verify(browser.viewSourceFilters["Installed"] !== undefined);
     }
     function test_source_picker_uses_discovered_capabilities() {
@@ -1481,7 +1531,6 @@ TestCase {
         ]);
         browser.openView("Updates");
         const popup = findChild(browser, "sourcePopup");
-        popup.mode = "filter";
         popup.open();
         tryCompare(popup, "visible", true);
         compare(browser.pickerItems().join(","), "apt");
@@ -1489,10 +1538,6 @@ TestCase {
         verify(browser.pickerItems().indexOf("npm") >= 0);
         verify(!browser.sourceCheckAt(browser.sourceIds.indexOf("npm")).enabled);
         popup.close();
-        popup.mode = "settings";
-        popup.open();
-        tryCompare(popup, "visible", true);
-        verify(browser.pickerItems().indexOf("npm") >= 0);
     }
     function test_close_requests_cancellation() {
         fake.busy = true;
