@@ -3568,9 +3568,149 @@ fn apt_local_archive_uses_exact_path_and_revalidates_before_install() {
         !staged.exists(),
         "staged archive must be removed after APT returns"
     );
+    let artifact = pkgdeck_core::artifact::inspect(archive.to_str().unwrap(), &cancel).unwrap();
+    let artifact_operation = Operation::Install(artifact.id);
+    let artifact_plan = apt
+        .operation_plan(&artifact_operation, &cancel)
+        .unwrap()
+        .unwrap();
+    assert_eq!(artifact_plan.changes[0].name, "pkgdeck-synthetic");
+    apt.execute(&artifact_operation, &cancel, &mut |_| {})
+        .unwrap();
+    let artifact_stage = fixture.local_install.lock().unwrap().clone().unwrap();
+    assert_ne!(artifact_stage, archive);
+    assert!(!artifact_stage.exists());
     std::fs::write(&archive, b"changed since preview").unwrap();
     assert!(apt.execute(&operation, &cancel, &mut |_| {}).is_err());
+    assert!(apt
+        .execute(&artifact_operation, &cancel, &mut |_| {})
+        .is_err());
     std::fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn flatpak_bundle_install_uses_a_private_reviewed_file() {
+    let base = std::env::temp_dir().join(format!("pkgdeck-flatpak-bundle-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    let bundle = base.join("synthetic.flatpak");
+    std::fs::write(&bundle, b"synthetic flatpak bundle").unwrap();
+    let cancel = Cancellation::default();
+    let package = pkgdeck_core::artifact::inspect(bundle.to_str().unwrap(), &cancel).unwrap();
+    let fixture = FlatpakFixture::default();
+    let mut backend = Flatpak::new(fixture.clone());
+    backend
+        .execute(
+            &Operation::Install(package.id.clone()),
+            &cancel,
+            &mut |_| {},
+        )
+        .unwrap();
+    let calls = fixture.calls.lock().unwrap();
+    let (args, write, system) = calls.last().unwrap();
+    assert!(*write && !*system);
+    assert!(args.contains(&"--bundle".into()));
+    let path = std::path::Path::new(args.last().unwrap());
+    assert_ne!(path, bundle);
+    assert!(!path.exists());
+    drop(calls);
+    std::fs::write(&bundle, b"changed flatpak bundle").unwrap();
+    assert!(backend
+        .execute(&Operation::Install(package.id), &cancel, &mut |_| {})
+        .is_err());
+    std::fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn local_archives_use_exact_native_managers() {
+    use std::os::unix::fs::PermissionsExt;
+    let base = std::env::var_os("PKGDECK_ARTIFACT_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::temp_dir().join(format!("pkgdeck-native-artifacts-{}", std::process::id()))
+        });
+    if std::env::var_os("PKGDECK_ARTIFACT_CHILD").is_none() {
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        for (name, response) in [
+            ("dnf", "exit 0"),
+            ("zypper", "exit 0"),
+            ("rpm", "printf 'synthetic-rpm|1.0-1|x86_64|Synthetic RPM'"),
+            ("pacman", "printf 'Name : synthetic-arch\\nVersion : 1.0-1\\nArchitecture : x86_64\\nDescription : Synthetic Arch\\n'"),
+            ("snap", "printf 'name: synthetic-snap\\nversion: 1.0\\nsummary: Synthetic Snap\\n'"),
+        ] {
+            let script = base.join(name);
+            std::fs::write(&script, format!("#!/bin/sh\n{response}\n")).unwrap();
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "local_archives_use_exact_native_managers",
+                "--nocapture",
+            ])
+            .env("PKGDECK_ARTIFACT_CHILD", "1")
+            .env("PKGDECK_ARTIFACT_DIR", &base)
+            .env("PATH", &base)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        std::fs::remove_dir_all(base).unwrap();
+        return;
+    }
+    let cancel = Cancellation::default();
+    for (file, backend_name) in [
+        ("sample.rpm", "dnf"),
+        ("zypper.rpm", "zypper"),
+        ("sample.pkg.tar.zst", "pacman"),
+        ("sample.snap", "snap"),
+    ] {
+        if backend_name == "zypper" {
+            std::fs::remove_file(base.join("dnf")).unwrap();
+        }
+        let archive = base.join(file);
+        std::fs::write(&archive, b"synthetic archive bytes").unwrap();
+        if file.ends_with(".snap") {
+            std::fs::write(base.join("sample.assert"), b"synthetic signed assertion").unwrap();
+        }
+        let package = pkgdeck_core::artifact::inspect(archive.to_str().unwrap(), &cancel).unwrap();
+        let fixture = Fixture {
+            record_writes: true,
+            ..Fixture::new()
+        };
+        let mut backend = match backend_name {
+            "dnf" => Dnf::dnf(fixture.clone()),
+            "zypper" => Zypper::zypper(fixture.clone()),
+            "pacman" => Pacman::pacman(fixture.clone()),
+            _ => Snap::snap(fixture.clone()),
+        };
+        backend
+            .execute(
+                &Operation::Install(package.id.clone()),
+                &cancel,
+                &mut |_| {},
+            )
+            .unwrap();
+        let writes = fixture.writes.lock().unwrap();
+        let (manager, args) = writes.last().unwrap();
+        assert_eq!(manager, backend_name);
+        assert!(args
+            .iter()
+            .any(|arg| arg.to_string_lossy().contains("pkgdeck-input-")));
+        if backend_name == "snap" {
+            assert_eq!(writes.len(), 2);
+            assert_eq!(writes[0].1[0], "ack");
+        }
+        drop(writes);
+        std::fs::write(&archive, b"changed after preview").unwrap();
+        assert!(backend
+            .execute(&Operation::Install(package.id), &cancel, &mut |_| {})
+            .is_err());
+    }
 }
 
 #[test]

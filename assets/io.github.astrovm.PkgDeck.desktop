@@ -6,4 +6,4 @@ Exec=pkgdeck %u
 Icon=io.github.astrovm.PkgDeck
 Terminal=false
 Categories=System;PackageManager;
-MimeType=application/vnd.debian.binary-package;application/vnd.flatpak.ref;application/vnd.appimage;application/x-iso9660-appimage;x-scheme-handler/flatpak+https;
+MimeType=application/vnd.debian.binary-package;application/x-rpm;application/vnd.flatpak;application/vnd.flatpak.ref;application/vnd.flatpak.repo;application/vnd.appimage;application/x-iso9660-appimage;application/vnd.snap;application/x-pacman-package;text/x-suse-ymp;x-scheme-handler/flatpak+https;

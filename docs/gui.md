@@ -18,13 +18,16 @@ dependencies supplied by that source. Details are optional and close with the
 × button. App names, icons, and screenshots depend on source metadata; packages
 without desktop metadata keep their native names.
 
-## Open installation files
+## Open packages and sources
 
 On Search, choose **From file or link…**, drop one file onto the window, or pass a path or URL to
-`pkgdeck`. Supported inputs are local `.AppImage`, `.deb`, and `.flatpakref`
-files, plus `flatpak+https://…flatpakref` links. A second launch forwards its
+`pkgdeck`. Package files: `.AppImage`, `.deb`, `.rpm`, `.pkg.tar.zst` (also
+`.xz`, `.gz`, `.bz2`, `.lz4`), `.flatpak`, `.flatpakref`, and `.snap` with a
+matching `.assert`. Repository files: `.flatpakrepo`, `.repo`, `.sources`,
+`.list`, and openSUSE `.ymp`. Direct HTTPS links to these files and
+`flatpak+https://…flatpakref` links work too. A second launch forwards its
 input to an already open PkgDeck window. Opening shows a confirmation preview;
-it never installs or launches a file by itself.
+it never installs a file by itself.
 
 AppImages are inspected as Type 2 ELF files without execution. The preview
 shows the managed destination, executable copy, desktop entry, and whether
@@ -33,6 +36,9 @@ Debian packages show APT's simulated package changes before system
 authorization. Flatpak references show the exact app, user scope, repository,
 signing key presence, and any runtime repository named in the reference.
 Flatpak may discover additional runtimes during installation.
+Native package managers inspect RPM, Arch, and Snap archives. Flatpak checks
+bundle contents during install. Repository files are checked again before
+they are added. `.ymp` opens the native openSUSE installer after confirmation.
 
 Installed supports filtering and a **Duplicate installs** view. AppStream identity
 and upstream homepage metadata associate related installations; grouping does not
