@@ -21,7 +21,7 @@ Controls.ApplicationWindow {
         parent: Controls.Overlay.overlay
         anchors.centerIn: parent
         width: Math.min(root.width - 32, 480)
-        title: "From file or link"
+        title: "Add from file or link"
         modal: true
         standardButtons: Controls.Dialog.Cancel
         onOpened: { packageLink.text = ""; packageLink.forceActiveFocus(); }
@@ -52,7 +52,7 @@ Controls.ApplicationWindow {
                     text: "Preview link"
                     symbol: "search"
                     primary: true
-                    enabled: /^(?:flatpak\+)?https:\/\/\S+/.test(packageLink.text.trim())
+                    enabled: /^(?:flatpak\+)?https:\/\/\S+$/.test(packageLink.text.trim())
                     onClicked: root.openPackageLink()
                 }
             }
@@ -210,7 +210,16 @@ Controls.ApplicationWindow {
     }
     function copyableDiagnostics() {
         return "View: " + currentView + "\nState: " + (reportState.phase || "unknown") + "\n" +
-            readFailures.map((failure) => failure.source + ": " + failure.kind).join("\n");
+            readFailures.map((failure) => failure.source + ": " + failure.kind + " — " + failureSummary(failure.source)).join("\n");
+    }
+    function failureHelp(kind) {
+        if (kind === "authorization")
+            return "Retry and approve the system prompt.";
+        if (kind === "locked")
+            return "Wait for the package manager to finish, then retry.";
+        if (kind === "unsupported")
+            return "This source does not support this page.";
+        return "Retry this source. If it still fails, check that its package manager is working.";
     }
     function retryFailedSource(id) {
         if (currentView === "Search" && queryDirty)
@@ -252,9 +261,14 @@ Controls.ApplicationWindow {
             return reportState.phase === "complete" ? "You're up to date" : "No updates to show.";
         if (currentView === "Clean")
             return "Nothing to clean";
+        if (currentView === "Installed")
+            return "No installed packages.";
+        if (currentView === "Sources")
+            return "No available sources.";
         return currentView === "Search" ? "No matching packages." : "No results to show.";
     }
     property string installedFilter: ""
+    property bool showUnavailableSources: false
     // Session-only filter showing just the apps installed from more than
     // one source. Session-only like the text filter: view state, not a
     // persisted preference.
@@ -289,7 +303,7 @@ Controls.ApplicationWindow {
     }
     function openPackageLink() {
         const input = packageLink.text.trim();
-        if (!/^flatpak\+https:\/\/\S+\.flatpakref(?:\?\S*)?$/.test(input))
+        if (!/^(?:flatpak\+)?https:\/\/\S+$/.test(input))
             return;
         addPackageDialog.close();
         backend.openInput(input);
@@ -550,6 +564,8 @@ Controls.ApplicationWindow {
         let rows = root.currentView === "Search" ? items.filter((row) => row.kind !== "failure" && !isFabricated(row)) : items.filter((row) => row.kind !== "failure");
         if (root.currentView === "Clean")
             rows = rows.filter(row => row.kind === "cleanup");
+        if (root.currentView === "Sources" && !root.showUnavailableSources)
+            rows = rows.filter(row => row.kind !== "source" || row.available);
         if (root.currentView !== "Sources")
             rows = rows.filter((row) => root.effectiveSources().indexOf(row.source) >= 0);
         // The Installed filter narrows the loaded rows as you type; the
@@ -792,6 +808,7 @@ Controls.ApplicationWindow {
     }
 
     property url logoIconSource: "qrc:/pkgdeck/logo.svg"
+    property url repositoryIconSource: dark ? "qrc:/pkgdeck/github-dark.svg" : "qrc:/pkgdeck/github.svg"
     readonly property url repositoryUrl: "https://github.com/astrovm/PkgDeck"
     width: 1100
     height: 760
@@ -815,10 +832,11 @@ Controls.ApplicationWindow {
         return found;
     }
     function openView(view) {
+        const changed = currentView !== view;
         queryDirty = false;
         selectedIdentity = null;
         uncheckedPackages = [];
-        if (currentView !== view) {
+        if (changed) {
             retainingResults = false;
             retainedItems = [];
             revealedRows = new Set();
@@ -826,9 +844,11 @@ Controls.ApplicationWindow {
         }
         currentView = view;
         results.currentIndex = -1;
-        if (view === "Search")
+        if (view === "Search") {
+            if (changed)
+                reload();
             searchPane.focusSearch(false);
-        else if (view === "Activity")
+        } else if (view === "Activity")
             backend.refreshActivity();
         else if (["Search", "Installed", "Updates", "Clean", "Sources"].indexOf(view) >= 0)
             reload();
@@ -1065,6 +1085,42 @@ Controls.ApplicationWindow {
                     }
                 }
                 Item { Layout.fillHeight: true }
+                RowLayout {
+                    objectName: "signatureFooter"
+                    Layout.fillWidth: true
+                    spacing: 3
+                    Controls.Label { objectName: "signaturePrefix"; text: "Made with"; color: root.muted; font.pointSize: root.font.pointSize * 0.8 }
+                    DeckIcon { name: "heart"; ink: "#e34b5f"; Layout.preferredWidth: 13; Layout.preferredHeight: 13 }
+                    Controls.Label { objectName: "signatureAuthor"; text: "by astro"; color: root.muted; font.pointSize: root.font.pointSize * 0.8 }
+                    Controls.ToolButton {
+                        objectName: "sidebarRepositoryLink"
+                        implicitWidth: 22
+                        implicitHeight: 22
+                        padding: 0
+                        Accessible.name: "Open PkgDeck on GitHub"
+                        Controls.ToolTip.visible: hovered
+                        Controls.ToolTip.text: Accessible.name
+                        onClicked: Qt.openUrlExternally(root.repositoryUrl)
+                        background: Rectangle {
+                            radius: 5
+                            color: parent.hovered ? root.selection : "transparent"
+                            border.color: parent.activeFocus ? root.accent : "transparent"
+                        }
+                        contentItem: Item {
+                            Image {
+                                objectName: "sidebarRepositoryIcon"
+                                anchors.centerIn: parent
+                                width: 16
+                                height: 16
+                                source: root.repositoryIconSource
+                                sourceSize.width: Math.ceil(width * (root.screen ? root.screen.devicePixelRatio : 1))
+                                sourceSize.height: Math.ceil(height * (root.screen ? root.screen.devicePixelRatio : 1))
+                                fillMode: Image.PreserveAspectFit
+                                Accessible.ignored: true
+                            }
+                        }
+                    }
+                }
             }
         }
         ColumnLayout {
@@ -1092,11 +1148,12 @@ Controls.ApplicationWindow {
                     Layout.fillWidth: true
                 }
                 ActionButton {
-                    text: "Open…"
-                    symbol: "installed"
+                    objectName: "addPackageButton"
+                    text: "Add…"
+                    symbol: "package"
                     enabled: !backend.writing
-                    onClicked: installationPicker.open()
-                    Accessible.name: "Open installation file"
+                    onClicked: { root.rememberDialogFocus(); addPackageDialog.open(); }
+                    Accessible.name: "Add from file or link"
                 }
                 ActionButton {
                     objectName: "activityIndicator"
@@ -1126,7 +1183,7 @@ Controls.ApplicationWindow {
                         x: sourceFilterButton.width - width
                         y: sourceFilterButton.height + 4
                         width: Math.min(340, root.width - 32)
-                        height: Math.min(460, root.height - 100)
+                        height: Math.min(460, root.height - 100, implicitHeight)
                         padding: 10
                         closePolicy: Controls.Popup.CloseOnEscape | Controls.Popup.CloseOnPressOutside
                         onOpened: {
@@ -1155,6 +1212,7 @@ Controls.ApplicationWindow {
                                 id: sourceList
                                 Layout.fillWidth: true
                                 Layout.fillHeight: true
+                                implicitHeight: checklist.height
                                 clip: true
                                 contentWidth: width
                                 contentHeight: checklist.height
@@ -1277,24 +1335,18 @@ Controls.ApplicationWindow {
                     }
                     onQueryEdited: root.queryDirty = true
                 }
-                ActionButton {
-                    objectName: "addPackageButton"
-                    text: root.compact ? "" : "From file or link…"
-                    symbol: "package"
-                    tooltipText: root.compact ? "From file or link" : ""
-                    Accessible.name: "Add package from file or link"
-                    Layout.preferredWidth: root.compact ? 40 : implicitWidth
-                    enabled: !backend.writing
-                    onClicked: { root.rememberDialogFocus(); addPackageDialog.open(); }
-                }
             }
-            RowLayout {
+            GridLayout {
+                columns: root.compact ? 2 : 3
+                columnSpacing: 8
+                rowSpacing: 8
                 Layout.fillWidth: true
                 visible: root.currentView === "Installed"
                 Controls.TextField {
                     id: installedFilterField
                     objectName: "installedFilterField"
                     Layout.fillWidth: true
+                    Layout.columnSpan: root.compact ? 2 : 1
                     text: root.installedFilter
                     placeholderText: "Filter installed packages"
                     Accessible.name: "Filter installed packages"
@@ -1325,12 +1377,14 @@ Controls.ApplicationWindow {
                 Controls.CheckBox {
                     id: multiSourceCheck
                     objectName: "multiSourceCheck"
+                    visible: root.items.some(row => row.kind === "package") || root.multiSourceOnly || backend.busy
                     text: "Duplicate installs"
                     checked: root.multiSourceOnly
                     enabled: true
                     onToggled: root.multiSourceOnly = checked
                     Accessible.name: "Show only packages installed from multiple sources"
                     Layout.alignment: Qt.AlignVCenter
+                    Layout.fillWidth: root.compact
                     indicator: TickBox {
                         x: 0
                         y: (multiSourceCheck.height - height) / 2
@@ -1345,6 +1399,7 @@ Controls.ApplicationWindow {
                 }
                 ActionButton {
                     objectName: "exportInventoryButton"
+                    visible: root.items.some(row => row.kind === "package")
                     text: root.compact ? "Export" : "Export shown"
                     symbol: "installed"
                     enabled: !backend.busy && root.viewItems.some(row => row.kind === "package") && root.readFailures.length === 0
@@ -1425,15 +1480,8 @@ Controls.ApplicationWindow {
                     objectName: "aboutButton"
                     text: "About PkgDeck"
                     symbol: "help"
+                    Layout.topMargin: 16
                     onClicked: root.openView("About")
-                }
-                Controls.Label { text: "Inventory" }
-                ActionButton {
-                    objectName: "previewInventoryButton"
-                    text: "Preview inventory"
-                    symbol: "installed"
-                    enabled: !backend.busy
-                    onClicked: { root.rememberDialogFocus(); previewInventoryFile.open(); }
                 }
                 // Absorbs leftover height so the settings stack stays top-anchored.
                 Item { Layout.fillHeight: true }
@@ -1514,6 +1562,15 @@ Controls.ApplicationWindow {
                             }
                         }
                     }
+                    RowLayout {
+                        objectName: "compactSignature"
+                        visible: root.compact
+                        Layout.topMargin: 12
+                        spacing: 4
+                        Controls.Label { text: "Made with"; color: root.muted }
+                        DeckIcon { name: "heart"; ink: "#e34b5f"; Layout.preferredWidth: 14; Layout.preferredHeight: 14 }
+                        Controls.Label { text: "by astro"; color: root.muted }
+                    }
                 }
             }
             RowLayout {
@@ -1547,10 +1604,14 @@ Controls.ApplicationWindow {
             }
             Rectangle {
                 id: resultsBox
+                objectName: "resultsBox"
                 Layout.fillWidth: true
-                Layout.fillHeight: true
+                Layout.fillHeight: backend.busy || (root.viewItems.length > 0 && (root.currentView !== "Sources" || root.viewItems.length >= 6))
+                Layout.preferredHeight: root.currentView === "Sources" && root.viewItems.length > 0 && root.viewItems.length < 6 ? (root.compact ? 60 : 85) + root.viewItems.length * (root.compact ? 68 : 56) : root.viewItems.length === 0 && !backend.busy ? 150 : -1
                 Layout.minimumHeight: 130
-                visible: root.currentView !== "Settings" && root.currentView !== "About" && root.currentView !== "Activity"
+                visible: root.currentView !== "Settings" && root.currentView !== "About" && root.currentView !== "Activity" &&
+                    (root.viewItems.length > 0 || root.readFailures.length === 0 || backend.busy) &&
+                    (root.currentView !== "Search" || root.viewItems.length > 0 || backend.busy || searchPane.text.trim().length > 0)
                 color: root.surface
                 radius: 10
                 border.color: results.activeFocus ? root.accent : root.line
@@ -1559,6 +1620,7 @@ Controls.ApplicationWindow {
                     anchors.margins: 1
                     spacing: 0
                     RowLayout {
+                        visible: results.count > 0 || backend.busy || backend.writing || (root.currentView === "Sources" && root.items.some(row => row.kind === "source" && !row.available))
                         Layout.fillWidth: true
                         Layout.margins: 14
                         Controls.Label {
@@ -1575,6 +1637,15 @@ Controls.ApplicationWindow {
                             Layout.preferredWidth: 18
                             Layout.preferredHeight: 18
                         }
+                        ActionButton {
+                            objectName: "unavailableSourcesButton"
+                            visible: root.currentView === "Sources" && root.items.some(row => row.kind === "source" && !row.available)
+                            text: root.showUnavailableSources ? "Hide unavailable" : "Show unavailable (" + root.items.filter(row => row.kind === "source" && !row.available).length + ")"
+                            symbol: ""
+                            implicitHeight: 30
+                            horizontalPadding: 10
+                            onClicked: root.showUnavailableSources = !root.showUnavailableSources
+                        }
                         Controls.Label {
                             text: "Working…"
                             visible: backend.busy && !root.motionEnabled
@@ -1590,9 +1661,9 @@ Controls.ApplicationWindow {
                             onClicked: backend.cancel()
                         }
                     }
-                    Rectangle { Layout.fillWidth: true; height: 1; color: root.line }
+                    Rectangle { Layout.fillWidth: true; height: 1; color: root.line; visible: results.count > 0 }
                     RowLayout {
-                        visible: !root.compact
+                        visible: !root.compact && results.count > 0
                         spacing: 14
                         Layout.fillWidth: true
                         Layout.leftMargin: 16
@@ -1608,6 +1679,7 @@ Controls.ApplicationWindow {
                             font.underline: sortNameArea.activeFocus
                             elide: Text.ElideRight
                             Layout.preferredWidth: root.nameWidth
+                            Layout.fillWidth: root.currentView === "Sources"
                             MouseArea {
                                 id: sortNameArea
                                 anchors.fill: parent
@@ -1666,6 +1738,7 @@ Controls.ApplicationWindow {
                         }
                         Controls.Label {
                             objectName: "columnHeader2"
+                            visible: root.currentView !== "Sources"
                             text: (root.currentView === "Sources" ? "CAPABILITIES" : "SUMMARY") + root.sortArrow(root.currentView === "Sources" ? "capabilities" : "summary")
                             color: root.muted
                             font.pointSize: root.font.pointSize * 0.9
@@ -1748,7 +1821,7 @@ Controls.ApplicationWindow {
                                 easing.type: Easing.OutCubic
                             }
                             width: ListView.view.width
-                            height: (root.compact ? Math.max(94, root.font.pointSize * 8.5) : Math.max(56, root.font.pointSize * 5)) + (modelData.groupStart ? 38 : 0)
+                            height: (root.compact ? (modelData.kind === "source" ? Math.max(68, root.font.pointSize * 5.5) : Math.max(94, root.font.pointSize * 8.5)) : Math.max(56, root.font.pointSize * 5)) + (modelData.groupStart ? 38 : 0)
                             topPadding: modelData.groupStart ? 38 : 0
                             leftPadding: 16
                             rightPadding: 16
@@ -1816,10 +1889,10 @@ Controls.ApplicationWindow {
                                 ColumnLayout {
                                     spacing: 4
                                     Layout.preferredWidth: root.compact ? -1 : root.nameWidth
-                                    Layout.fillWidth: root.compact
+                                    Layout.fillWidth: root.compact || modelData.kind === "source"
                                     Controls.Label {
                                         objectName: "packageName"
-                                        text: modelData.display_name || modelData.name
+                                        text: modelData.kind === "source" ? root.sourceDisplayName(modelData.source) : (modelData.display_name || modelData.name)
                                         color: root.ink
                                         font.bold: true
                                         textFormat: Text.PlainText
@@ -1827,6 +1900,7 @@ Controls.ApplicationWindow {
                                         Layout.fillWidth: true
                                     }
                                     RowLayout {
+                                        visible: modelData.kind !== "source"
                                         Layout.fillWidth: true
                                         spacing: 6
                                         DeckIcon {
@@ -1871,8 +1945,8 @@ Controls.ApplicationWindow {
                                         Layout.fillWidth: true
                                     }
                                     Controls.Label {
-                                        visible: root.compact
-                                        text: modelData.kind === "source" ? (modelData.capabilities || []).join(", ") : (modelData.summary || "")
+                                        visible: root.compact && modelData.kind !== "source"
+                                        text: modelData.summary || ""
                                         color: root.muted
                                         textFormat: Text.PlainText
                                         elide: Text.ElideRight
@@ -1891,9 +1965,9 @@ Controls.ApplicationWindow {
                                     font.pointSize: root.font.pointSize * 0.9
                                 }
                                 Controls.Label {
-                                    visible: !root.compact
+                                    visible: !root.compact && modelData.kind !== "source"
                                     Layout.fillWidth: true
-                                    text: modelData.kind === "source" ? (modelData.capabilities || []).join(", ") : (modelData.summary || "")
+                                    text: modelData.summary || ""
                                     color: root.muted
                                     textFormat: Text.PlainText
                                     elide: Text.ElideRight
@@ -1902,7 +1976,7 @@ Controls.ApplicationWindow {
                                     id: managerEnabled
                                     objectName: "managerEnabled"
                                     visible: root.currentView === "Sources" && modelData.kind === "source"
-                                    text: root.compact ? "" : "Enabled"
+                                    text: checked ? "Enabled" : "Disabled"
                                     checked: root.checkedSources().indexOf(modelData.source) >= 0
                                     enabled: !backend.writing && (!checked || root.checkedSources().length > 1)
                                     Accessible.name: (checked ? "Disable " : "Enable ") + root.sourceDisplayName(modelData.source)
@@ -2026,6 +2100,14 @@ Controls.ApplicationWindow {
                 spacing: 8
                 visible: ["Search", "Installed", "Updates", "Clean", "Sources"].indexOf(root.currentView) >= 0
                 ActionButton {
+                    objectName: "previewInventoryButton"
+                    visible: root.currentView === "Installed"
+                    text: "Preview inventory…"
+                    symbol: "installed"
+                    enabled: !backend.busy
+                    onClicked: { root.rememberDialogFocus(); previewInventoryFile.open(); }
+                }
+                ActionButton {
                     objectName: "cleanAllButton"
                     visible: root.currentView === "Clean" && root.items.some((row) => row.kind === "cleanup")
                     text: "Clean all"
@@ -2075,6 +2157,7 @@ Controls.ApplicationWindow {
                 }
                 ActionButton {
                     objectName: "reloadButton"
+                    visible: root.currentView !== "Search" || searchPane.text.trim().length > 0 || root.viewItems.length > 0
                     text: root.compact ? "" : "Reload"
                     symbol: "refresh"
                     Accessible.name: "Reload"
@@ -2082,6 +2165,11 @@ Controls.ApplicationWindow {
                     enabled: !backend.busy || backend.writing
                     onClicked: root.reload(true)
                 }
+            }
+            Item {
+                visible: ["Search", "Installed", "Updates", "Clean", "Sources"].indexOf(root.currentView) >= 0 && !backend.busy &&
+                    (root.viewItems.length === 0 || (root.currentView === "Sources" && root.viewItems.length < 6))
+                Layout.fillHeight: true
             }
         }
     }
@@ -2178,7 +2266,7 @@ Controls.ApplicationWindow {
         parent: Controls.Overlay.overlay
         anchors.centerIn: parent
         width: Math.min(root.width - 32, 850)
-        height: Math.min(root.height - 40, 640)
+        height: Math.min(root.height - 40, 640, Math.max(260, 160 + Math.min((root.repositoryReport.repositories || []).length, 4) * 125))
         title: "Repositories"
         modal: true
         standardButtons: Controls.Dialog.Close
@@ -2256,7 +2344,7 @@ Controls.ApplicationWindow {
                         }
                         Controls.Label {
                             objectName: "repositoryUrlLabel"
-                            visible: !!modelData.url
+                            visible: !!modelData.url && (modelData.title || modelData.name).indexOf(modelData.url) < 0
                             text: modelData.url || ""
                             textFormat: Text.PlainText
                             color: root.muted
@@ -2303,7 +2391,7 @@ Controls.ApplicationWindow {
                 }
             }
             Controls.Label { Layout.fillWidth: true; color: root.muted; textFormat: Text.PlainText; wrapMode: Text.WordWrap; text: (root.repositoryReport.errors || []).join("\n"); visible: text.length > 0 }
-            Controls.Label { Layout.fillWidth: true; color: root.muted; textFormat: Text.PlainText; wrapMode: Text.WordWrap; text: backend.status }
+            Controls.Label { Layout.fillWidth: true; color: root.muted; textFormat: Text.PlainText; wrapMode: Text.WordWrap; text: backend.status; visible: text.length > 0 && text !== "Repositories loaded." }
         }
     }
     Controls.Dialog {
@@ -2352,7 +2440,7 @@ Controls.ApplicationWindow {
         objectName: "sourceFailuresDialog"
         anchors.centerIn: parent
         width: Math.min(root.width - 32, 620)
-        height: Math.min(root.height - 32, 440)
+        height: Math.min(root.height - 32, 440, Math.max(190, 100 + Math.min(root.readFailures.length, 4) * 80 + (root.expandedFailure ? 45 : 0)))
         modal: true
         title: "Source checks"
         standardButtons: Controls.Dialog.Close
@@ -2389,7 +2477,7 @@ Controls.ApplicationWindow {
                                     onClicked: root.retryFailedSource(modelData.source)
                                 }
                                 ActionButton {
-                                    text: "Details"
+                                    text: root.expandedFailure === modelData.source ? "Hide help" : "Help"
                                     symbol: "help"
                                     onClicked: root.expandedFailure = root.expandedFailure === modelData.source ? "" : modelData.source
                                 }
@@ -2404,7 +2492,7 @@ Controls.ApplicationWindow {
                             }
                             Controls.Label {
                                 width: parent.width
-                                text: root.failureSummary(modelData.source) + "\nLast successful check: " + root.lastSuccessfulCheck(modelData.source)
+                                text: root.failureHelp(modelData.kind)
                                 textFormat: Text.PlainText
                                 wrapMode: Text.WordWrap
                                 color: root.muted
@@ -2468,7 +2556,7 @@ Controls.ApplicationWindow {
         parent: Controls.Overlay.overlay
         anchors.centerIn: parent
         width: Math.min(root.width - 32, 600)
-        height: Math.min(root.height - 32, 340)
+        height: Math.min(root.height - 32, Math.max(190, confirmationBody.implicitHeight + 95))
         background: Rectangle { color: root.surface; radius: 12; border.color: root.line }
         title: "Confirm changes"
         modal: true
@@ -2483,23 +2571,55 @@ Controls.ApplicationWindow {
         }
         readonly property var preview: JSON.parse(backend.confirmation_data || "{}")
         property bool detailsExpanded: false
-        standardButtons: Controls.Dialog.Ok | Controls.Dialog.Cancel
+        standardButtons: Controls.Dialog.NoButton
         onClosed: root.restoreDialogFocus()
         onOpened: {
             detailsExpanded = false;
-            // Let the buttons own their mnemonics. Separate Shortcuts collide
-            // with the automatic button mnemonics in KDE styles.
-            standardButton(Controls.Dialog.Ok).text = "&" + (preview.action || "Apply").replace(/&/g, "&&");
-            standardButton(Controls.Dialog.Cancel).text = "&Cancel";
-            standardButton(Controls.Dialog.Cancel).forceActiveFocus();
+            confirmationCancel.forceActiveFocus();
         }
         onAccepted: backend.confirm(true)
         onRejected: backend.confirm(false)
+        Shortcut {
+            sequence: "Alt+" + (confirmation.preview.action || "Apply").trim().charAt(0).toUpperCase()
+            enabled: confirmation.visible
+            onActivated: confirmation.accept()
+        }
+        Shortcut {
+            sequence: "Alt+C"
+            enabled: confirmation.visible
+            onActivated: confirmation.reject()
+        }
+        footer: Item {
+            implicitHeight: 54
+            RowLayout {
+                anchors.fill: parent
+                anchors.margins: 8
+                spacing: 8
+                Item { Layout.fillWidth: true }
+                ActionButton {
+                    objectName: "confirmationApply"
+                    text: (confirmation.preview.action || "Apply").trim().split(/\s+/)[0]
+                    symbol: ""
+                    primary: true
+                    Layout.minimumWidth: 80
+                    onClicked: confirmation.accept()
+                }
+                ActionButton {
+                    id: confirmationCancel
+                    objectName: "confirmationCancel"
+                    text: "Cancel"
+                    symbol: ""
+                    Layout.minimumWidth: 80
+                    onClicked: confirmation.reject()
+                }
+            }
+        }
         contentItem: Controls.ScrollView {
             id: confirmationScroll
             contentWidth: availableWidth
             clip: true
             ColumnLayout {
+                id: confirmationBody
                 width: confirmationScroll.availableWidth
                 spacing: 10
                 Controls.Label {
