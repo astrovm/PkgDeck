@@ -808,8 +808,12 @@ mod tests {
     #[test]
     fn remote_appimage_and_snap_keep_reviewed_bytes() {
         let base = std::env::temp_dir().join(format!(
-            "pkgdeck-artifact-remote-mixed-{}",
-            std::process::id()
+            "pkgdeck-artifact-remote-mixed-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         let _ = fs::remove_dir_all(&base);
         fs::create_dir_all(&base).unwrap();

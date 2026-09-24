@@ -182,19 +182,28 @@ mod repository_install_tests {
     }
     #[test]
     fn one_click_hands_the_reviewed_path_to_the_native_ui() {
-        let root = std::env::temp_dir().join(format!("pkgdeck-one-click-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "pkgdeck-one-click-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let source = root.join("synthetic.ymp");
         let record = root.join("record");
         let executable = root.join("OneClickInstallUI");
+        let prepared = root.join("OneClickInstallUI.tmp");
         std::fs::write(&source, b"<metapackage/>").unwrap();
         std::fs::write(
-            &executable,
+            &prepared,
             format!("#!/bin/sh\nprintf '%s' \"$1\" > '{}'\n", record.display()),
         )
         .unwrap();
-        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&prepared, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::rename(prepared, &executable).unwrap();
         let host = Host::new(Runtime::Native, BTreeMap::new());
         let cancel = Cancellation::default();
         if !Path::new("/usr/sbin/OneClickInstallUI").exists()
