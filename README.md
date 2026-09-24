@@ -20,8 +20,8 @@ Other Linux packages are available from [GitHub Releases](https://github.com/ast
 
 | Package | How to run it |
 | --- | --- |
-| AppImage | Download `PkgDeck-v0.1.3-x86_64.AppImage` or `PkgDeck-v0.1.3-aarch64.AppImage`. For x86_64, run `chmod +x PkgDeck-v0.1.3-x86_64.AppImage` and then `./PkgDeck-v0.1.3-x86_64.AppImage`. |
-| Snap | Download `PkgDeck-v0.1.3-x86_64.snap` or `PkgDeck-v0.1.3-aarch64.snap`. For x86_64, run `sudo snap install --dangerous --classic ./PkgDeck-v0.1.3-x86_64.snap`. The Snap is hosted on GitHub, not the Snap Store. |
+| AppImage | Download `PkgDeck-v0.1.4-x86_64.AppImage` or `PkgDeck-v0.1.4-aarch64.AppImage`. For x86_64, run `chmod +x PkgDeck-v0.1.4-x86_64.AppImage` and then `./PkgDeck-v0.1.4-x86_64.AppImage`. |
+| Snap | Download `PkgDeck-v0.1.4-x86_64.snap` or `PkgDeck-v0.1.4-aarch64.snap`. For x86_64, run `sudo snap install --dangerous --classic ./PkgDeck-v0.1.4-x86_64.snap`. The Snap is hosted on GitHub, not the Snap Store. |
 
 On macOS, install the GUI and CLI with Homebrew:
 
@@ -33,7 +33,7 @@ brew install astrovm/pkgdeck/pkgdeck
 Run `pkgdeck` from a terminal, or see [distribution](docs/distribution.md#homebrew) for the Applications shortcut. On Linux, the Homebrew formula installs only `pkd`; use a Linux package above for the GUI.
 The CLI is `pkd` on Homebrew, `pkgdeck.pkd` in Snap,
 `flatpak run --command=pkd io.github.astrovm.PkgDeck` in Flatpak, and
-`./PkgDeck-v0.1.3-x86_64.AppImage --cli` in AppImage (substitute your architecture).
+`./PkgDeck-v0.1.4-x86_64.AppImage --cli` in AppImage (substitute your architecture).
 
 To build on Linux from source, install the [development prerequisites](docs/development.md#sdk-and-prerequisites), then:
 
