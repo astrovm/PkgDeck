@@ -747,6 +747,51 @@ TestCase {
         compare(fake.lastQuery, "Firefox");
         compare(browser.queryDirty, false);
     }
+    function test_changing_button_labels_stay_inside_their_buttons() {
+        browser.openView("Updates");
+        browser.viewSourceFilters = ({Updates: ["claude"]});
+        fake.rows = JSON.stringify([
+            {kind: "package", name: "synthetic-editor", source: "apt", architecture: "all", installed: "1", candidate: "2", update: "available", scope: "system"},
+            {kind: "package", name: "synthetic-player", source: "flatpak", architecture: "x86_64", installed: "1", candidate: "2", update: "available", scope: "user"}
+        ]);
+        const filter = findChild(browser, "sourceFilter");
+        const compactFilter = findChild(browser, "compactSourceFilter");
+        const list = findChild(browser, "packageResults");
+        const fits = (button) => {
+            const contents = button.contentItem.children[0];
+            const at = contents.mapToItem(button.contentItem, 0, 0);
+            verify(at.x >= -1, button.objectName + " starts outside its content area");
+            verify(at.x + contents.width <= button.contentItem.width + 1,
+                button.objectName + " overflows its content area");
+            const label = contents.children.find((item) => item.text !== undefined);
+            const labelAt = label.mapToItem(button.contentItem, 0, 0);
+            verify(labelAt.x + label.width <= button.contentItem.width + 1,
+                button.objectName + " label overflows its content area");
+        };
+        browser.width = 1100;
+        waitForRendering(browser.contentItem);
+        verify(filter.width >= Math.min(240, filter.implicitWidth) - 1);
+        fits(filter);
+        browser.viewSourceFilters = ({});
+        tryVerify(() => list.itemAtIndex(0) !== null);
+        for (let index = 0; index < 2; index++) {
+            const action = findChild(list.itemAtIndex(index), "rowPackageAction");
+            verify(action.width >= action.implicitWidth - 1, action.text + " button is too narrow");
+            fits(action);
+        }
+        browser.togglePackage(JSON.parse(fake.rows)[0]);
+        const update = findChild(browser, "upgradeAllButton");
+        compare(update.text, "Update selected (1)");
+        for (const name of ["upgradeAllButton", "selectNoneButton", "selectAllButton"]) {
+            const button = findChild(browser, name);
+            verify(button.width >= button.contentItem.implicitWidth + button.leftPadding + button.rightPadding - 1,
+                name + " is too narrow");
+        }
+        browser.width = 360;
+        browser.viewSourceFilters = ({Updates: ["claude"]});
+        waitForRendering(browser.contentItem);
+        fits(compactFilter);
+    }
     function test_narrow_windows_use_layout_that_keeps_header_actions_inside() {
         browser.openView("Updates");
         const add = findChild(browser, "addPackageButton");

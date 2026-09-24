@@ -697,7 +697,7 @@ Controls.ApplicationWindow {
                 id: buttonContents
                 x: control.navigation ? 0 : (parent.width - width) / 2
                 anchors.verticalCenter: parent.verticalCenter
-                width: control.navigation ? parent.width : implicitWidth
+                width: Math.min(implicitWidth, parent.width)
                 height: implicitHeight
                 spacing: 8
                 DeckIcon {
@@ -725,9 +725,11 @@ Controls.ApplicationWindow {
                     visible: text.length > 0
                     font: control.font
                     color: !control.enabled && root.systemAppearance ? disabledPalette.buttonText : control.primary && control.enabled ? root.palette.highlightedText : root.ink
-                    Layout.fillWidth: control.navigation
+                    Layout.fillWidth: true
+                    Layout.minimumWidth: 0
                     Layout.alignment: Qt.AlignVCenter
                     verticalAlignment: Text.AlignVCenter
+                    elide: Text.ElideRight
                 }
             }
         }
@@ -1263,7 +1265,8 @@ Controls.ApplicationWindow {
                     symbol: "sources"
                     onClicked: root.toggleSourcePopup()
                     Accessible.name: "Filter this page by package source"
-                    Layout.preferredWidth: 160
+                    Layout.preferredWidth: Math.min(240, Math.max(160, implicitWidth))
+                    tooltipText: root.viewSourceFilters[root.currentView] ? root.sourceSummary() : ""
                     Controls.Popup {
                         id: sourcePopup
                         objectName: "sourcePopup"
@@ -1419,6 +1422,7 @@ Controls.ApplicationWindow {
                     Layout.fillWidth: true
                     onClicked: root.toggleSourcePopup()
                     Accessible.name: "Filter this page by package source"
+                    tooltipText: root.viewSourceFilters[root.currentView] ? root.sourceSummary() : ""
                 }
             }
             RowLayout {
@@ -2130,7 +2134,7 @@ Controls.ApplicationWindow {
                                     glyphColor: root.accent
                                     Accessible.name: "Pull " + (modelData.display_name || modelData.name) + " from " + modelData.source
                                     tooltipText: Accessible.name
-                                    Layout.preferredWidth: root.compact ? 38 : 80
+                                    Layout.preferredWidth: root.compact ? 38 : Math.max(80, implicitWidth)
                                     horizontalPadding: 8
                                     onClicked: backend.propose("upgrade", root.originalIndex(index))
                                 }
@@ -2143,7 +2147,7 @@ Controls.ApplicationWindow {
                                     glyphColor: (root.currentView === "Updates" || root.updateOnly(modelData.source)) ? root.accent : root.isInstalled(modelData) ? (root.dark ? "#f18b91" : "#b42332") : (root.dark ? "#77d6a0" : "#187442")
                                     Accessible.name: (modelData.kind === "cleanup" ? "Run cleanup " : ((root.currentView === "Updates" || root.updateOnly(modelData.source)) ? "Update " : (root.isInstalled(modelData) ? "Remove " : "Install "))) + (modelData.display_name || modelData.name) + " from " + modelData.source
                                     tooltipText: Accessible.name
-                                    Layout.preferredWidth: root.compact ? 38 : 88
+                                    Layout.preferredWidth: root.compact ? 38 : Math.max(88, implicitWidth)
                                     horizontalPadding: 8
                                     onClicked: backend.propose(modelData.kind === "cleanup" ? "clean" : ((root.currentView === "Updates" || root.updateOnly(modelData.source)) ? "upgrade" : (root.isInstalled(modelData) ? "remove" : "install")), root.originalIndex(index))
                                 }
