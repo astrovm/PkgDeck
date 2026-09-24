@@ -33,9 +33,9 @@ Flow {
     Controls.Button {
         id: upgradeButton
         objectName: "upgradeAllButton"
-        visible: actions.uncheckedCount === 0 || actions.selectedCount > 0
-        text: actions.uncheckedCount === 0 ? "Update all" : (actions.compact ? "Update" : "Update selected")
-        Accessible.name: actions.uncheckedCount === 0 ? "Update all" : "Update selected"
+        visible: actions.selectedCount > 0
+        text: actions.uncheckedCount === 0 ? "Update all" : (actions.compact ? "Update" : "Update selected (" + actions.selectedCount + ")")
+        Accessible.name: actions.uncheckedCount === 0 ? "Update all" : "Update selected (" + actions.selectedCount + ")"
         enabled: !actions.busy && (actions.uncheckedCount > 0 || actions.upgradable)
         implicitHeight: Math.max(38, actions.textFont.pointSize * 3)
         onClicked: actions.upgradeRequested()

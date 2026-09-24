@@ -777,6 +777,7 @@ fn checked_upgrades(packages: &[Package], identities: &str) -> Vec<Operation> {
 struct CheckedPlan {
     operations: Vec<Operation>,
     confirmation: String,
+    details: String,
     status: Option<String>,
 }
 fn plan_checked_upgrade(packages: &[Package], identities: &str) -> CheckedPlan {
@@ -785,6 +786,7 @@ fn plan_checked_upgrade(packages: &[Package], identities: &str) -> CheckedPlan {
         return CheckedPlan {
             operations: vec![],
             confirmation: String::new(),
+            details: String::new(),
             status: Some("No selected packages can be updated.".into()),
         };
     }
@@ -797,6 +799,7 @@ fn plan_checked_upgrade(packages: &[Package], identities: &str) -> CheckedPlan {
     CheckedPlan {
         operations,
         confirmation: format!("Update {count} selected packages?\n\n{labels}\n\nUpdates use each source’s native updater. Native dependency changes may follow. Successful updates are not rolled back if another fails. Continue?"),
+        details: format!("{labels}\n\nNative dependency changes may follow."),
         status: None,
     }
 }
@@ -899,6 +902,7 @@ fn confirmation_preview(
     plan: Option<&TransactionPlan>,
 ) -> Value {
     let mut lines = vec![operation_label(operation)];
+    let mut summary = vec![operation_label(operation)];
     let mut title = action_name(operation).to_owned();
     if let Some(package) = packages.iter().find(|package| match operation {
         Operation::Install(id) | Operation::Remove(id) | Operation::Upgrade(id) => {
@@ -924,8 +928,21 @@ fn confirmation_preview(
         if let Some(version) = &package.candidate_version {
             lines.push(format!("Available: {version}"));
         }
+        if let (Some(old), Some(new)) = (&package.installed_version, &package.candidate_version) {
+            summary.push(format!("{old} → {new}"));
+        }
         if package.id.backend == "fwupd" {
             lines.push(package.summary.clone());
+            summary.push(package.summary.clone());
+        }
+        if (package.id.backend == "appimage"
+            || package.id.reference.as_deref().is_some_and(|value| {
+                value.starts_with("local-deb:") || value.starts_with("flatpakref:")
+            }))
+            && matches!(operation, Operation::Install(_))
+        {
+            lines.push(package.summary.clone());
+            summary.push(package.summary.clone());
         }
         if (package.id.backend == "appimage"
             || package.id.reference.as_deref().is_some_and(|value| {
@@ -940,6 +957,7 @@ fn confirmation_preview(
         if let Some(item) = cleanup.iter().find(|item| item.id == *id) {
             title = format!("Clean {}", item.title);
             lines.push(item.preview.clone());
+            summary.push(item.preview.clone());
         }
     }
     if let Operation::Refresh { backend } = operation {
@@ -993,6 +1011,25 @@ fn confirmation_preview(
             })
             .map(describe)
             .collect::<Vec<_>>();
+        if !changes.is_empty() {
+            let removals = plan
+                .changes
+                .iter()
+                .filter(|change| {
+                    change.action == PlannedAction::Remove
+                        && (Some(change.name.as_str()) != requested_name
+                            || Some(change.action) != requested_action)
+                })
+                .map(|change| change.name.as_str())
+                .collect::<Vec<_>>();
+            summary.push(format!("{} additional package changes", changes.len()));
+            if !removals.is_empty() {
+                summary.push(format!("Removes: {}", removals.join(", ")));
+            }
+        }
+        if plan.restart_required == Some(true) {
+            summary.push("Restart required".into());
+        }
         lines.push(if changes.is_empty() {
             "Native plan: no additional packages".into()
         } else {
@@ -1015,12 +1052,16 @@ fn confirmation_preview(
         Operation::Install(_) | Operation::Remove(_) | Operation::Upgrade(_)
     ) {
         lines.push("Transaction preview unavailable; additional changes are unknown.".into());
+        summary.push("Additional changes cannot be previewed.".into());
     }
     if matches!(
         operation,
         Operation::Install(_) | Operation::Remove(_) | Operation::Upgrade(_)
     ) {
         lines.push("Data retention: manager-specific; details unavailable".into());
+        if matches!(operation, Operation::Remove(_)) {
+            summary.push("App data may remain after removal.".into());
+        }
     } else if matches!(operation, Operation::Clean(_)) {
         lines.push("Data removal: see native cleanup preview".into());
     }
@@ -1037,7 +1078,7 @@ fn confirmation_preview(
     if title.chars().count() > 36 {
         title = format!("{}…", title.chars().take(35).collect::<String>());
     }
-    json!({"action": title, "body": lines.join("\n\n")})
+    json!({"action": title, "body": lines.join("\n\n"), "summary": summary.join("\n"), "details": lines.iter().skip(1).filter(|line| !summary.contains(line)).cloned().collect::<Vec<_>>().join("\n\n")})
 }
 fn package_row(p: &Package, same_from: &[String], same_group: Option<&str>) -> Value {
     json!({"name": p.id.name, "display_name": p.display_name, "source": p.id.backend, "architecture": p.id.architecture,
@@ -1856,7 +1897,7 @@ impl ffi::PackageController {
                 .map(|item| format!("{} ({})\n{}", item.title, item.id.backend, item.preview))
                 .collect::<Vec<_>>()
                 .join("\n\n");
-            self.as_mut().set_confirmation_data(encoded(json!({"action":format!("Clean {} tasks", operations.len()), "body": format!("{labels}\n\nTasks run in order. Completed tasks cannot be undone.")})));
+            self.as_mut().set_confirmation_data(encoded(json!({"action":format!("Clean {} tasks", operations.len()), "body": format!("{labels}\n\nTasks run in order. Completed tasks cannot be undone."), "summary": format!("Clean {} tasks\nCompleted tasks cannot be undone.", operations.len()), "details": labels})));
             self.as_mut().set_confirmation(format!("Run {} cleanup tasks?\n\n{labels}\n\nTasks run in order. Completed tasks cannot be undone.", operations.len()).as_str().into());
             self.rust_mut().pending = Some(Job::CleanAll(operations));
             return;
@@ -1938,7 +1979,7 @@ impl ffi::PackageController {
             self.as_mut().set_confirmation_data("{}".into());
         } else {
             self.as_mut().set_confirmation_data(encoded(
-                json!({"action":format!("Update {} packages", plan.operations.len()), "body": plan.confirmation}),
+                json!({"action":format!("Update {} packages", plan.operations.len()), "body": plan.confirmation, "summary": format!("Update {} selected packages\nSuccessful updates cannot be rolled back if another fails.", plan.operations.len()), "details": plan.details}),
             ));
             self.as_mut()
                 .set_confirmation(plan.confirmation.as_str().into());
@@ -2029,7 +2070,14 @@ impl ffi::PackageController {
                 let apt = apt_plan.as_ref().map_or_else(String::new, |plan| {
                     format!("\n\nAPT transaction:\n{}", plan.summary())
                 });
-                self.as_mut().set_confirmation_data(encoded(json!({"action":format!("Update {count} packages"), "body": format!("{count} listed packages{apt}\n\n{labels}")})));
+                let removals = apt_plan.as_ref().map_or_else(String::new, |plan| {
+                    if plan.removals.is_empty() {
+                        String::new()
+                    } else {
+                        format!("\nRemoves: {}", plan.removals.join(", "))
+                    }
+                });
+                self.as_mut().set_confirmation_data(encoded(json!({"action":format!("Update {count} packages"), "body": format!("{count} listed packages{apt}\n\n{labels}"), "summary": format!("Update {count} packages{removals}\nSuccessful updates cannot be rolled back if another fails."), "details": format!("{apt}\n\n{labels}")})));
                 self.as_mut().set_confirmation(
                     format!("Update all {count} listed packages?{apt}\n\n{labels}\n\nContinue?")
                         .as_str()
@@ -2094,7 +2142,7 @@ impl ffi::PackageController {
                         })
                         .collect::<Vec<_>>()
                         .join("\n\n");
-                    self.as_mut().set_confirmation_data(encoded(json!({"action": format!("Clean {} tasks", operations.len()), "body": body})));
+                    self.as_mut().set_confirmation_data(encoded(json!({"action": format!("Clean {} tasks", operations.len()), "body": body, "summary": format!("Clean {} tasks\nCompleted tasks cannot be undone.", operations.len()), "details": body})));
                     self.as_mut().set_confirmation(body.as_str().into());
                     self.as_mut().rust_mut().pending = Some(Job::CleanAll(operations));
                 }
@@ -2778,6 +2826,18 @@ mod tests {
         let preview =
             confirmation_preview(&operation, std::slice::from_ref(&package), &[], Some(&plan));
         assert_eq!(preview["action"], "Update Anonymous App");
+        assert!(preview["summary"]
+            .as_str()
+            .unwrap()
+            .contains("1 additional package changes"));
+        assert!(preview["summary"]
+            .as_str()
+            .unwrap()
+            .contains("Removes: old-library"));
+        assert!(preview["details"]
+            .as_str()
+            .unwrap()
+            .contains("Remove old-library (1)"));
         let body = preview["body"].as_str().unwrap();
         assert!(body.contains("Source: apt"));
         assert!(body.contains("Scope: System"));
@@ -2799,11 +2859,19 @@ mod tests {
         assert!(body.contains("Requested change: Update anonymous (1 → 2)"));
         assert!(body.contains("Remove anonymous (1)"));
         assert!(body.contains("Download: 2048 bytes · Disk impact: -512 bytes · Restart: required"));
+        assert!(preview["summary"]
+            .as_str()
+            .unwrap()
+            .contains("Restart required"));
         let unavailable = confirmation_preview(&operation, &[package], &[], None);
         assert!(unavailable["body"]
             .as_str()
             .unwrap()
             .contains("Transaction preview unavailable"));
+        assert!(unavailable["summary"]
+            .as_str()
+            .unwrap()
+            .contains("cannot be previewed"));
         let long = serde_json::from_value::<Package>(json!({
             "id": {"backend":"apt", "name":"anonymous", "architecture":"amd64", "scope":"system"},
             "display_name":"An extremely long synthetic application name for narrow windows", "summary":"Synthetic", "installed_version":"1", "candidate_version":"2", "update":"available"
@@ -3060,6 +3128,16 @@ mod tests {
         )));
         let confirmation = controller.confirmation().to_string();
         assert!(confirmation.contains("Remove (1): retired"));
+        let preview: Value =
+            serde_json::from_str(&controller.confirmation_data().to_string()).unwrap();
+        assert!(preview["summary"]
+            .as_str()
+            .unwrap()
+            .contains("Removes: retired"));
+        assert!(preview["details"]
+            .as_str()
+            .unwrap()
+            .contains("Remove (1): retired"));
         assert!(
             confirmation.find("Remove (1): retired")
                 < confirmation.find("Update all packages from apt")
