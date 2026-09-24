@@ -88,6 +88,8 @@ class Pkgdeck < Formula
     end
     system "cargo", "install", *std_cargo_args(path: "crates/pkd")
     if OS.linux?
+      system "cargo", "install", *std_cargo_args(path: "crates/pkgdeck-core", root: buildpath/"runner")
+      libexec.install "runner/bin/pkgdeck-host-runner"
       # Preserve the optional distro APT reader outside Cargo's temporary build tree.
       Dir["target/release/build/pkgdeck-core-*/out/pkgdeck-apt-query"].each do |helper|
         bin.install helper
@@ -115,6 +117,7 @@ class Pkgdeck < Formula
       assert_match "PKGDECK_GUI_READY", shell_output("#{bin}/pkgdeck --smoke-test 2>&1")
     else
       refute_path_exists bin/"pkgdeck"
+      assert_path_exists libexec/"pkgdeck-host-runner"
     end
   end
 end

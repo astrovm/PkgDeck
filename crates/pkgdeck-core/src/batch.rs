@@ -12,7 +12,6 @@ use std::{
     ffi::OsString,
     fs,
     io::{Read, Write},
-    os::unix::fs::MetadataExt,
     os::unix::process::CommandExt,
     path::{Path, PathBuf},
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
@@ -430,7 +429,7 @@ impl Drop for ScopeGuard {
 }
 impl Drop for Session {
     fn drop(&mut self) {
-        // A pkexec runner is root-owned under the original child PID. The
+        // A pkexec runner runs as root under the original child PID. The
         // unprivileged frontend cannot signal it, so EOF must let it leave
         // its request loop before we wait for the child.
         self.input.take();
@@ -442,21 +441,7 @@ impl Drop for Session {
         let _ = self.child.wait();
     }
 }
-fn root_owned(path: &Path) -> bool {
-    let Ok(canonical) = fs::canonicalize(path) else {
-        return false;
-    };
-    let Ok(metadata) = fs::metadata(&canonical) else {
-        return false;
-    };
-    metadata.is_file()
-        && canonical.ancestors().skip(1).all(|parent| {
-            fs::metadata(parent).is_ok_and(|info| info.uid() == 0 && info.mode() & 0o022 == 0)
-        })
-        && metadata.uid() == 0
-        && metadata.mode() & 0o022 == 0
-}
-fn system_flatpak_runner(info: &str) -> Option<PathBuf> {
+fn flatpak_app_path(info: &str) -> Option<PathBuf> {
     let mut in_instance = false;
     let mut app_path = None;
     for line in info.lines() {
@@ -470,84 +455,70 @@ fn system_flatpak_runner(info: &str) -> Option<PathBuf> {
             }
         }
     }
-    let path = app_path?;
-    let deployment = path.strip_prefix("/var/lib/flatpak/app/io.github.astrovm.PkgDeck/")?;
-    let parts = deployment.split('/').collect::<Vec<_>>();
-    let [arch, branch, commit, "files"] = parts.as_slice() else {
-        return None;
-    };
-    if !matches!(*arch, "x86_64" | "aarch64")
-        || *branch != "master"
-        || commit.len() != 64
-        || !commit.bytes().all(|byte| byte.is_ascii_hexdigit())
+    let path = PathBuf::from(app_path?);
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|part| matches!(part, std::path::Component::ParentDir))
+        || path.file_name()? != "files"
     {
         return None;
     }
-    Some(Path::new(path).join("libexec/pkgdeck-host-runner"))
-}
-fn root_owned_on_host(host: &Host, path: &Path) -> bool {
-    // Flatpak maps host root to nobody inside the sandbox. Check the fixed
-    // system deployment on the host before handing its runner to pkexec.
-    if fs::canonicalize(path).ok().as_deref() != Some(path) {
-        return false;
+    let commit = path.parent()?;
+    let branch = commit.parent()?;
+    let architecture = branch.parent()?;
+    let app = architecture.parent()?;
+    let commit_name = commit.file_name()?.to_str()?;
+    if app.file_name()? != "io.github.astrovm.PkgDeck"
+        || app.parent()?.file_name()? != "app"
+        || !flatpak_identifier(architecture.file_name()?.to_str()?)
+        || !flatpak_identifier(branch.file_name()?.to_str()?)
+        || commit_name.len() != 64
+        || !commit_name.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return None;
     }
-    let ancestors = path.ancestors().collect::<Vec<_>>();
-    let mut args = vec!["-L".into(), "--printf=%u:%f\\n".into(), "--".into()];
-    args.extend(ancestors.iter().map(|path| path.as_os_str().to_owned()));
-    let Ok(result) = host.read(
-        Path::new("/usr/bin/stat"),
-        &args,
-        Limits::default(),
-        &Cancellation::default(),
-    ) else {
-        return false;
+    Some(path)
+}
+fn bundled_runner_path(runtime: Runtime, executable: &Path, flatpak_info: &str) -> Option<PathBuf> {
+    let package = if runtime == Runtime::Flatpak {
+        flatpak_app_path(flatpak_info)?
+    } else {
+        executable.parent()?.parent()?.to_path_buf()
     };
-    result.code == Some(0)
-        && !result.truncated
-        && trusted_stat_output(&result.stdout, ancestors.len())
+    Some(package.join("libexec/pkgdeck-host-runner"))
 }
-fn trusted_stat_output(output: &[u8], count: usize) -> bool {
-    let Ok(output) = std::str::from_utf8(output) else {
-        return false;
+fn find_runner(runtime: Runtime, executable: &Path, flatpak_info: &str) -> Option<PathBuf> {
+    let bundled = bundled_runner_path(runtime, executable, flatpak_info)?;
+    let executable_file = |path: &Path| {
+        path.is_file() && rustix::fs::access(path, rustix::fs::Access::EXEC_OK).is_ok()
     };
-    let lines = output.lines().collect::<Vec<_>>();
-    lines.len() == count
-        && lines.iter().enumerate().all(|(index, line)| {
-            let Some((owner, mode)) = line.split_once(':') else {
-                return false;
-            };
-            let Ok(mode) = u32::from_str_radix(mode, 16) else {
-                return false;
-            };
-            owner == "0"
-                && mode & 0o022 == 0
-                && mode & 0o170000 == if index == 0 { 0o100000 } else { 0o040000 }
-        })
-}
-fn runner_path(host: &Host) -> Option<PathBuf> {
-    let system = PathBuf::from("/usr/libexec/pkgdeck-host-runner");
-    if host.runtime == Runtime::Flatpak {
-        // Use a host-installed helper, or a root-owned system deployment of
-        // this Flatpak. A user installation remains untrusted for root use.
-        if root_owned(Path::new("/run/host/usr/libexec/pkgdeck-host-runner")) {
-            return Some(system);
-        }
-        let runner = system_flatpak_runner(&fs::read_to_string("/.flatpak-info").ok()?)?;
-        return root_owned_on_host(host, &runner).then_some(runner);
+    if executable_file(&bundled) {
+        return Some(bundled);
     }
-    if root_owned(&system) {
-        return Some(system);
-    }
-    if host.runtime == Runtime::Snap {
-        let snap = std::env::var_os("SNAP")?;
-        let path = PathBuf::from(snap).join("usr/libexec/pkgdeck-host-runner");
-        if fs::canonicalize(&path).is_ok_and(|canonical| canonical.starts_with("/snap/"))
-            && root_owned(&path)
-        {
-            return Some(path);
-        }
+    if runtime == Runtime::Native {
+        return [
+            executable.with_file_name("pkgdeck-host-runner"),
+            PathBuf::from("/usr/libexec/pkgdeck-host-runner"),
+        ]
+        .into_iter()
+        .find(|path| executable_file(path));
     }
     None
+}
+fn runner_path(host: &Host) -> Option<PathBuf> {
+    let info = if host.runtime == Runtime::Flatpak {
+        fs::read_to_string("/.flatpak-info").ok()?
+    } else {
+        String::new()
+    };
+    let executable = fs::canonicalize(std::env::current_exe().ok()?).ok()?;
+    find_runner(host.runtime, &executable, &info)
+}
+fn appimage_launcher(path: &Path) -> Option<PathBuf> {
+    let path = fs::canonicalize(path).ok()?;
+    (path.is_file() && rustix::fs::access(&path, rustix::fs::Access::EXEC_OK).is_ok())
+        .then_some(path)
 }
 pub fn begin(
     host: &Host,
@@ -565,10 +536,18 @@ pub fn begin(
     if !commands.iter().any(|entry| !entry.is_empty()) {
         return Ok(None);
     }
-    let Some(path) = runner_path(host) else {
+    let appimage = if host.runtime == Runtime::AppImage {
+        std::env::var_os("APPIMAGE").and_then(|path| appimage_launcher(Path::new(&path)))
+    } else {
+        None
+    };
+    let Some(path) = appimage.clone().or_else(|| runner_path(host)) else {
         return Ok(None);
     };
-    let (program, args) = authorization.prefix(&path);
+    let (program, mut args) = authorization.prefix(&path);
+    if appimage.is_some() {
+        args.push("--batch-runner".into());
+    }
     let mut command = host.command(Path::new(program), &args)?;
     command.stderr(Stdio::null()).process_group(0);
     begin_session(command, operations, commands, cancel)
@@ -744,7 +723,7 @@ pub fn run_in_scope(
     })
 }
 
-/// Entry point for the root-owned binary. No executable path or argument list
+/// Entry point for the elevated binary. No executable path or argument list
 /// is read from the frontend after its typed plan has been validated.
 pub fn serve() -> Result<(), ExecutionError> {
     if !rustix::process::geteuid().is_root() {
@@ -1438,51 +1417,103 @@ done"#;
     }
 
     #[test]
-    fn bundled_runner_path_requires_root_owned_nonwritable_ancestors() {
-        let temp =
-            std::env::temp_dir().join(format!("pkgdeck-runner-owner-{}", std::process::id()));
-        fs::write(&temp, b"fixture").unwrap();
-        assert!(!root_owned(&temp));
-        fs::remove_file(temp).unwrap();
-        assert!(!root_owned(Path::new("/missing-pkgdeck-host-runner")));
-        assert!(root_owned(Path::new("/bin/sh")));
-    }
-
-    #[test]
-    fn system_flatpak_runner_requires_an_exact_system_deployment() {
-        let commit = "a".repeat(64);
-        let path =
-            format!("/var/lib/flatpak/app/io.github.astrovm.PkgDeck/x86_64/master/{commit}/files");
-        let info =
-            format!("[Application]\nname=io.github.astrovm.PkgDeck\n[Instance]\napp-path={path}\n");
-        assert_eq!(
-            system_flatpak_runner(&info),
-            Some(Path::new(&path).join("libexec/pkgdeck-host-runner"))
-        );
-        for invalid in [
-            path.replace("/var/lib/flatpak", "/home/user/.local/share/flatpak"),
-            path.replace("io.github.astrovm.PkgDeck", "io.github.other.App"),
-            path.replace("/master/", "/../"),
-            path.replace("/x86_64/", "/other/"),
-            path.replace(&commit, "short"),
-            format!("{path}/extra"),
-        ] {
-            assert!(system_flatpak_runner(&format!("[Instance]\napp-path={invalid}\n")).is_none());
+    fn bundled_runner_path_is_the_same_for_native_appimage_snap_and_homebrew() {
+        for runtime in [Runtime::Native, Runtime::AppImage, Runtime::Snap] {
+            let executable = Path::new("/example/package/bin/pkd");
+            assert_eq!(
+                bundled_runner_path(runtime, executable, ""),
+                Some(PathBuf::from(
+                    "/example/package/libexec/pkgdeck-host-runner"
+                ))
+            );
         }
-        assert!(system_flatpak_runner(&format!("{info}app-path={path}\n")).is_none());
     }
 
     #[test]
-    fn host_ownership_probe_rejects_writable_or_user_owned_paths() {
-        let trusted = b"0:81ed\n0:41ed\n0:41ed\n";
-        assert!(trusted_stat_output(trusted, 3));
-        assert!(!trusted_stat_output(trusted, 4));
-        assert!(!trusted_stat_output(b"1000:81ed\n0:41ed\n", 2));
-        assert!(!trusted_stat_output(b"0:81ff\n0:41ed\n", 2));
-        assert!(!trusted_stat_output(b"0:81ed\n0:41ff\n", 2));
-        assert!(!trusted_stat_output(b"0:41ed\n0:41ed\n", 2));
-        assert!(!trusted_stat_output(b"0:81ed\n0:81ed\n", 2));
-        assert!(!trusted_stat_output(b"0:garbage\n0:41ed\n", 2));
+    fn flatpak_runner_uses_its_own_deployment_for_system_and_user_installs() {
+        let commit = "a".repeat(64);
+        for base in ["/var/lib/flatpak", "/home/user/.local/share/flatpak"] {
+            let path = format!("{base}/app/io.github.astrovm.PkgDeck/x86_64/master/{commit}/files");
+            let info = format!("[Instance]\napp-path={path}\n");
+            assert_eq!(
+                bundled_runner_path(Runtime::Flatpak, Path::new("/app/bin/pkd"), &info),
+                Some(Path::new(&path).join("libexec/pkgdeck-host-runner"))
+            );
+            assert!(flatpak_app_path(&format!("{info}app-path={path}\n")).is_none());
+        }
+        for invalid in [
+            "relative/files".to_owned(),
+            "/tmp/../files".to_owned(),
+            "/tmp/other".to_owned(),
+            format!("/tmp/app/io.github.other.App/x86_64/master/{commit}/files"),
+            "/tmp/app/io.github.astrovm.PkgDeck/x86_64/master/short/files".to_owned(),
+        ] {
+            assert!(flatpak_app_path(&format!("[Instance]\napp-path={invalid}\n")).is_none());
+        }
+    }
+
+    #[test]
+    fn user_owned_packaged_runners_are_available_to_every_linux_format() {
+        use std::os::unix::fs::PermissionsExt;
+        let root =
+            std::env::temp_dir().join(format!("pkgdeck-bundled-runner-{}", std::process::id()));
+        let runner = root.join("libexec/pkgdeck-host-runner");
+        fs::create_dir_all(runner.parent().unwrap()).unwrap();
+        fs::write(&runner, b"synthetic runner").unwrap();
+        fs::set_permissions(&runner, fs::Permissions::from_mode(0o755)).unwrap();
+        for runtime in [Runtime::Native, Runtime::AppImage, Runtime::Snap] {
+            assert_eq!(
+                find_runner(runtime, &root.join("bin/pkd"), ""),
+                Some(runner.clone())
+            );
+        }
+        let files = root
+            .join("app/io.github.astrovm.PkgDeck/x86_64/master")
+            .join("a".repeat(64))
+            .join("files");
+        let flatpak_runner = files.join("libexec/pkgdeck-host-runner");
+        fs::create_dir_all(flatpak_runner.parent().unwrap()).unwrap();
+        fs::write(&flatpak_runner, b"synthetic runner").unwrap();
+        fs::set_permissions(&flatpak_runner, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            find_runner(
+                Runtime::Flatpak,
+                Path::new("/app/bin/pkd"),
+                &format!("[Instance]\napp-path={}\n", files.display())
+            ),
+            Some(flatpak_runner)
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn appimage_launches_its_bundled_runner_from_a_fresh_mount() {
+        use std::os::unix::fs::PermissionsExt;
+        let root =
+            std::env::temp_dir().join(format!("pkgdeck-appimage-runner-{}", std::process::id()));
+        let launcher = root.join("AppRun");
+        let runner = root.join("usr/libexec/pkgdeck-host-runner");
+        fs::create_dir_all(runner.parent().unwrap()).unwrap();
+        fs::write(
+            &launcher,
+            include_str!("../../../packaging/appimage/AppRun"),
+        )
+        .unwrap();
+        fs::write(&runner, b"#!/bin/sh\nprintf 'runner:%s\n' \"$APPDIR\"\n").unwrap();
+        for path in [&launcher, &runner] {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert_eq!(appimage_launcher(&launcher), Some(launcher.clone()));
+        let output = Command::new(&launcher)
+            .arg("--batch-runner")
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            output.stdout,
+            format!("runner:{}\n", root.display()).as_bytes()
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

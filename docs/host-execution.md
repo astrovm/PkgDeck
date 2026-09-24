@@ -51,22 +51,21 @@ run as the invoking user. Frontends must stay unprivileged.
 
 Authorized commands use a fixed system PATH, excluding user tool directories.
 For a confirmed batch, the engine validates every typed operation and its saved
-native preview before any write. When a root-owned `pkgdeck-host-runner` is
-installed at `/usr/libexec/pkgdeck-host-runner`, PkgDeck starts it once through
-the selected authorization method. The runner independently derives its allowed
-commands from the typed operations, accepts only ordered, one-time requests for
-those commands, and exits with the batch. It never accepts a shell script or an
-arbitrary executable path. User-scoped commands stay in the unprivileged frontend.
+native preview before any write. PkgDeck starts the runner included with its
+package once through the selected authorization method. The runner independently
+derives its allowed commands from the typed operations. It accepts only ordered,
+one-time requests for those commands and exits with the batch. It never accepts
+a shell script or an arbitrary executable path. User-scoped commands stay in the
+unprivileged frontend.
 
-The native system package can install the runner at that path. Classic Snap uses
-its root-owned `$SNAP/usr/libexec/pkgdeck-host-runner`. A system-installed
-Flatpak can use its own deployed runner after verifying its fixed system path,
-root ownership, and non-writable ancestors on the host. A user-installed
-Flatpak and an AppImage need a separately installed trusted host runner. If no
-trusted runner is available, PkgDeck reports that it is using the existing
-per-command authorization path, which can require more than one prompt.
+Native, classic Snap, and Linux Homebrew installations locate their runner beside
+the packaged executables. An AppImage launches its bundled runner through AppRun
+so the elevated process mounts the AppImage itself. Both system and user Flatpak
+installations use the runner in their own deployment through `flatpak-spawn --host`.
+If a runner is missing, PkgDeck reports that it is using the existing per-command
+authorization path, which can require more than one prompt.
 
-For example, a single APT write without a trusted batch runner invokes the fixed
+For example, a single APT write without a batch runner invokes the fixed
 `/usr/bin/apt-get` path via either:
 
 - `/usr/bin/pkexec --disable-internal-agent`, using an existing polkit agent/policy;
