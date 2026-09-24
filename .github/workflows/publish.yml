@@ -6,6 +6,8 @@ on:
         type: string
         required: true
     secrets:
+      HOMEBREW_REPO_TOKEN:
+        required: false
       FLATPAK_REPO_TOKEN:
         required: false
   release:
@@ -41,6 +43,15 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: main
+          token: ${{ secrets.HOMEBREW_REPO_TOKEN }}
+      - name: Check Homebrew publication token
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_REPO_TOKEN }}
+        run: |
+          if [[ -z "$GH_TOKEN" ]]; then
+            echo '::error::HOMEBREW_REPO_TOKEN is required to publish the Homebrew formula.'
+            exit 1
+          fi
       - name: Add stable release to formula
         env:
           TAG: ${{ steps.release.outputs.tag }}
@@ -54,7 +65,7 @@ jobs:
       - name: Open formula update
         id: formula_pr
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.HOMEBREW_REPO_TOKEN }}
           TAG: ${{ steps.release.outputs.tag }}
           VERSION: ${{ steps.release.outputs.version }}
         run: |
@@ -98,7 +109,7 @@ jobs:
       - name: Merge formula after checks pass
         if: steps.formula_pr.outputs.pr != ''
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.HOMEBREW_REPO_TOKEN }}
           PR_URL: ${{ steps.formula_pr.outputs.pr }}
         run: |
           if [[ "$(gh pr view "$PR_URL" --json autoMergeRequest --jq '.autoMergeRequest != null')" != true ]]; then
