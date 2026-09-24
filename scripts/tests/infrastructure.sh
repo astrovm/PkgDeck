@@ -2,6 +2,7 @@
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 scripts/flatpak-sources.sh --check
+scripts/tests/release-packages.sh
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 expect_code() {

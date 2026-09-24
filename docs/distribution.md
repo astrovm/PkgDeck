@@ -56,10 +56,10 @@ supported; a successful Linux build does not establish macOS compatibility.
    the tested pull request and publishes only after that check and packaging pass.
 3. Publishing the GitHub release triggers `Publish / Homebrew`, which opens a PR
    with the immutable archive URL and SHA-256 while retaining `head` for development.
-   It dispatches a Homebrew-only CI run on the formula branch to test the
-   published URL and checksum on Linux and macOS.
-4. Review both Homebrew results before merging. After users run `brew update`,
-   `brew install astrovm/pkgdeck/pkgdeck` installs the stable version.
+   Pull request CI builds and tests the published formula on Linux and macOS.
+4. GitHub automatically squash-merges the formula PR after every required check
+   passes. A failed check leaves the PR open for review. After users run
+   `brew update`, `brew install astrovm/pkgdeck/pkgdeck` installs the stable version.
 
 The formula builds from the tagged source archive; it does not provide a bottle.
 The `.app` uses Homebrew dependencies and is not a standalone downloadable
@@ -76,7 +76,12 @@ flatpak install https://flatpak.4st.li/io.github.astrovm.PkgDeck.flatpakref
 The `.flatpakref` adds the repository for future updates. GitHub release
 `.flatpak` files are standalone bundles.
 
-The packaging scripts build AppImage, Flatpak, and Snap artifacts.
+The packaging scripts build AppImage, Flatpak, and Snap artifacts. Every GitHub
+release asset starts with `PkgDeck-v<version>-`, including checksums and Flatpak
+metadata. Linux packages add `x86_64` or `aarch64` before the extension.
+AppImages downloaded from v0.1.1 need one manual download of v0.1.2 because
+their embedded updater expects the old unversioned `.zsync` filename. AppImages
+from v0.1.2 onward follow the versioned filename pattern automatically.
 Use the same verified build environment as CI:
 
 ```sh

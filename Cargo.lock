@@ -522,7 +522,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "pkd"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "clap",
  "pkgdeck-core",
@@ -535,7 +535,7 @@ dependencies = [
 
 [[package]]
 name = "pkgdeck"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "cxx",
  "cxx-gen",
@@ -553,7 +553,7 @@ dependencies = [
 
 [[package]]
 name = "pkgdeck-core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "flate2",
  "rustix",
@@ -565,7 +565,7 @@ dependencies = [
 
 [[package]]
 name = "pkgdeck-tools"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "libc",
  "serde_json",
