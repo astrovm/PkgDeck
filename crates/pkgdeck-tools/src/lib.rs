@@ -334,6 +334,18 @@ pub fn gui_lifecycle(args: &[String]) {
             "operation {op}: {}",
             gui.logs()
         );
+        until(
+            || {
+                fs::read(dir.0.join("state.json"))
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                    .is_some_and(|current| {
+                        current["installed"] == installed
+                            && (op != "update" || current["candidate"] == "2.0")
+                    })
+            },
+            15,
+        );
         assert_eq!(
             state(&dir.0)["installed"],
             installed,

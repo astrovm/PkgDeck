@@ -2682,8 +2682,8 @@ mod tests {
             reference: Some("artifact:appimage:synthetic".into()),
         };
         let label = operation_label(&Operation::Install(id));
-        assert!(label.contains("Install Synthetic.AppImage"), "{label}");
-        assert!(!label.contains("?version=1"), "{label}");
+        assert!(label.contains("Install Synthetic.AppImage"));
+        assert!(!label.contains("?version=1"));
     }
     #[test]
     fn opening_repository_file_previews_before_any_write() {
