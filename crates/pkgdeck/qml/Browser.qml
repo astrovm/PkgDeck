@@ -604,7 +604,14 @@ Controls.ApplicationWindow {
         }
         return -1;
     }
-    readonly property bool compact: width < 760
+    readonly property bool compact: width < 960
+    readonly property int shortListLimit: compact ? 3 : 8
+    function shortResultsHeight() {
+        const rowHeight = (row) => (compact
+            ? (row.kind === "source" ? Math.max(68, font.pointSize * 5.5) : Math.max(94, font.pointSize * 8.5))
+            : Math.max(56, font.pointSize * 5)) + (row.groupStart ? 38 : 0);
+        return Math.max(130, (compact ? 60 : 85) + viewItems.reduce((height, row) => height + rowHeight(row), 0));
+    }
     readonly property bool systemAppearance: preferences.appearance === 0
     readonly property bool dark: preferences.appearance === 1 || (systemAppearance && Qt.styleHints.colorScheme === Qt.Dark)
     readonly property color canvas: systemAppearance ? systemPalette.window : (dark ? "#000000" : "#f3f5f8")
@@ -1104,8 +1111,9 @@ Controls.ApplicationWindow {
             RowLayout {
                 Layout.fillWidth: true
                 ThemedComboBox {
+                    objectName: "navigationView"
                     visible: root.compact
-                    model: ["Search", "Installed", "Updates", "Clean", "Sources", "Settings"]
+                    model: ["Search", "Installed", "Updates", "Clean", "Sources", "Activity", "Settings"]
                     currentIndex: model.indexOf(root.currentView)
                     onActivated: root.openView(currentText)
                     Accessible.name: "Navigation"
@@ -1130,6 +1138,7 @@ Controls.ApplicationWindow {
                 }
                 ActionButton {
                     objectName: "activityIndicator"
+                    visible: root.currentView !== "Activity"
                     text: root.compact ? "" : root.queuedCount > 0 ? "Activity · " + root.queuedCount : backend.writing ? "Working" : "Activity"
                     symbol: "updates"
                     Accessible.name: root.queuedCount > 0 ? "Activity, " + root.queuedCount + " queued" : backend.writing ? "Activity, working" : "Activity"
@@ -1553,8 +1562,9 @@ Controls.ApplicationWindow {
                 id: resultsBox
                 objectName: "resultsBox"
                 Layout.fillWidth: true
-                Layout.fillHeight: backend.busy || (root.viewItems.length > 0 && (root.currentView !== "Sources" || root.viewItems.length >= 6))
-                Layout.preferredHeight: root.currentView === "Sources" && root.viewItems.length > 0 && root.viewItems.length < 6 ? (root.compact ? 60 : 85) + root.viewItems.length * (root.compact ? 68 : 56) : root.viewItems.length === 0 && !backend.busy ? 150 : -1
+                Layout.fillHeight: backend.busy || root.viewItems.length > root.shortListLimit
+                Layout.preferredHeight: root.viewItems.length === 0 && !backend.busy ? 150
+                    : Math.min(root.shortResultsHeight(), detailsPanel.visible ? root.height * (root.compact ? 0.28 : 0.42) : root.height * 0.7)
                 Layout.minimumHeight: 130
                 visible: root.currentView !== "Settings" && root.currentView !== "Activity" &&
                     (root.viewItems.length > 0 || root.readFailures.length === 0 || backend.busy) &&
@@ -1653,6 +1663,7 @@ Controls.ApplicationWindow {
                         }
                         Controls.Label {
                             objectName: "columnHeader1"
+                            visible: root.currentView !== "Sources" || root.showUnavailableSources
                             text: (root.currentView === "Sources" ? "STATUS" : root.currentView === "Clean" ? "TYPE" : "VERSION") + root.sortArrow(root.currentView === "Sources" ? "status" : "version")
                             color: root.muted
                             font.pointSize: root.font.pointSize * 0.9
@@ -1882,7 +1893,7 @@ Controls.ApplicationWindow {
                                     }
                                     Controls.Label {
                                         objectName: "compactVersion"
-                                        visible: root.compact
+                                        visible: root.compact && (modelData.kind !== "source" || root.showUnavailableSources)
                                         text: root.versionText(modelData)
                                         font.family: "monospace"
                                         font.pointSize: root.font.pointSize * 0.9
@@ -1902,7 +1913,7 @@ Controls.ApplicationWindow {
                                 }
                                 Controls.Label {
                                     objectName: "wideVersion"
-                                    visible: !root.compact
+                                    visible: !root.compact && (modelData.kind !== "source" || root.showUnavailableSources)
                                     Layout.preferredWidth: root.versionWidth
                                     text: root.versionText(modelData)
                                     font.family: "monospace"
@@ -1922,7 +1933,7 @@ Controls.ApplicationWindow {
                                 Controls.CheckBox {
                                     id: managerEnabled
                                     objectName: "managerEnabled"
-                                    visible: root.currentView === "Sources" && modelData.kind === "source"
+                                    visible: root.currentView === "Sources" && modelData.kind === "source" && modelData.available
                                     text: checked ? "Enabled" : "Disabled"
                                     checked: root.checkedSources().indexOf(modelData.source) >= 0
                                     enabled: !backend.writing && (!checked || root.checkedSources().length > 1)
@@ -2107,7 +2118,7 @@ Controls.ApplicationWindow {
             }
             Item {
                 visible: ["Search", "Installed", "Updates", "Clean", "Sources"].indexOf(root.currentView) >= 0 && !backend.busy &&
-                    (root.viewItems.length === 0 || (root.currentView === "Sources" && root.viewItems.length < 6))
+                    root.viewItems.length <= root.shortListLimit
                 Layout.fillHeight: true
             }
         }
@@ -2243,7 +2254,15 @@ Controls.ApplicationWindow {
                 }
             }
             Controls.Label { Layout.fillWidth: true; color: root.muted; textFormat: Text.PlainText; wrapMode: Text.WordWrap; text: (root.repositoryReport.errors || []).join("\n"); visible: text.length > 0 }
-            Controls.Label { Layout.fillWidth: true; color: root.muted; textFormat: Text.PlainText; wrapMode: Text.WordWrap; text: backend.status; visible: text.length > 0 && text !== "Repositories loaded." }
+            Controls.Label {
+                objectName: "repositoryStatus"
+                Layout.fillWidth: true
+                color: root.muted
+                textFormat: Text.PlainText
+                wrapMode: Text.WordWrap
+                text: backend.status
+                visible: text.length > 0 && text !== "Ready" && text !== "Repositories loaded."
+            }
         }
     }
     Controls.Dialog {
@@ -2507,6 +2526,7 @@ Controls.ApplicationWindow {
     }
     Shortcut {
         sequence: "Ctrl+L"
+        enabled: resultsBox.visible && results.count > 0 && !root.retainingResults
         onActivated: results.forceActiveFocus()
     }
     Shortcut {

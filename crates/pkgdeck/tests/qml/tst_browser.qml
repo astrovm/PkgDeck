@@ -715,6 +715,61 @@ TestCase {
         compare(fake.lastQuery, "Firefox");
         compare(browser.queryDirty, false);
     }
+    function test_narrow_windows_use_layout_that_keeps_header_actions_inside() {
+        browser.openView("Updates");
+        const add = findChild(browser, "addPackageButton");
+        const activity = findChild(browser, "activityIndicator");
+        const sources = findChild(browser, "sourceFilter");
+        const navigation = findChild(browser, "navigationView");
+        for (const width of [760, 850, 920, 960]) {
+            browser.width = width;
+            waitForRendering(browser.contentItem);
+            compare(browser.compact, width < 960);
+            compare(navigation.visible, width < 960);
+            for (const button of [add, activity, sources]) {
+                const left = button.mapToItem(browser.contentItem, 0, 0).x;
+                const right = button.mapToItem(browser.contentItem, button.width, 0).x;
+                verify(left >= 0 && right <= width, button.objectName + " clips at " + width);
+            }
+        }
+    }
+    function test_short_result_lists_fit_their_rows() {
+        browser.openView("Installed");
+        fake.rows = JSON.stringify([
+            {kind: "package", name: "synthetic-one", source: "apt", installed: "1", candidate: "1", scope: "system", summary: "First package"},
+            {kind: "package", name: "synthetic-two", source: "apt", installed: "2", candidate: "2", scope: "system", summary: "Second package"}
+        ]);
+        const box = findChild(browser, "resultsBox");
+        const list = findChild(browser, "packageResults");
+        for (const width of [1100, 380]) {
+            browser.width = width;
+            waitForRendering(browser.contentItem);
+            compare(list.count, 2);
+            verify(box.height < 300, "Short list stretches at " + width);
+            verify(list.itemAtIndex(1) !== null);
+        }
+        browser.width = 1100;
+        fake.rows = JSON.stringify(Array.from({length: 8}, (_, index) => ({
+            kind: "package", name: "synthetic-" + index, source: "apt", installed: "1", candidate: "1", scope: "system", summary: "Synthetic package"
+        })));
+        waitForRendering(browser.contentItem);
+        browser.choose(0);
+        waitForRendering(browser.contentItem);
+        const actions = findChild(browser, "updatesActions");
+        const bottom = actions.mapToItem(browser.contentItem, 0, actions.height).y;
+        verify(bottom <= browser.height, "Details push actions outside the window");
+    }
+    function test_focus_results_shortcut_only_works_on_visible_results() {
+        const list = findChild(browser, "packageResults");
+        browser.openView("Settings");
+        keyClick(Qt.Key_L, Qt.ControlModifier);
+        verify(!list.activeFocus);
+        browser.openView("Installed");
+        fake.rows = JSON.stringify([{kind: "package", name: "synthetic-one", source: "apt", installed: "1", candidate: "1", scope: "system"}]);
+        waitForRendering(browser.contentItem);
+        keyClick(Qt.Key_L, Qt.ControlModifier);
+        tryCompare(list, "activeFocus", true);
+    }
     function test_file_or_link_entry_is_global_and_validates_links() {
         const add = findChild(browser, "addPackageButton");
         const activity = findChild(browser, "activityIndicator");
@@ -1012,6 +1067,17 @@ TestCase {
         verify(findChild(browser, "cancelQueuedButton").enabled);
         fake.writing = false;
         fake.busy = false;
+    }
+    function test_activity_has_a_name_in_compact_navigation() {
+        browser.width = 380;
+        browser.openView("Activity");
+        waitForRendering(browser.contentItem);
+        const navigation = findChild(browser, "navigationView");
+        compare(navigation.currentText, "Activity");
+        verify(!findChild(browser, "activityIndicator").visible);
+        browser.width = 1100;
+        waitForRendering(browser.contentItem);
+        verify(!findChild(browser, "activityIndicator").visible);
     }
     function test_background_mode_requires_a_usable_tray_to_hide() {
         browser.openView("Settings");
@@ -1657,6 +1723,42 @@ TestCase {
         compare(browser.viewItems.length, 2);
         mouseClick(toggle);
         compare(browser.viewItems.length, 1);
+    }
+    function test_sources_only_show_availability_when_it_differs() {
+        browser.openView("Sources");
+        fake.rows = JSON.stringify([
+            {kind: "source", name: "apt", source: "apt", summary: "Available", available: true, capabilities: ["search"]},
+            {kind: "source", name: "docker", source: "docker", summary: "Unavailable", available: false, capabilities: []}
+        ]);
+        const list = findChild(browser, "packageResults");
+        const statusHeader = findChild(browser, "columnHeader1");
+        tryCompare(list, "count", 1);
+        tryVerify(() => list.itemAtIndex(0) !== null);
+        verify(!statusHeader.visible);
+        verify(!findChild(list.itemAtIndex(0), "wideVersion").visible);
+        verify(findChild(list.itemAtIndex(0), "managerEnabled").visible);
+        mouseClick(findChild(browser, "unavailableSourcesButton"));
+        tryCompare(list, "count", 2);
+        tryVerify(() => list.itemAtIndex(1) !== null);
+        verify(statusHeader.visible);
+        const unavailable = list.itemAtIndex(1);
+        compare(findChild(unavailable, "wideVersion").text, "Unavailable");
+        verify(!findChild(unavailable, "managerEnabled").visible);
+        browser.width = 380;
+        waitForRendering(browser.contentItem);
+        verify(findChild(unavailable, "compactVersion").visible);
+    }
+    function test_repositories_hide_idle_status_but_show_feedback() {
+        browser.openView("Sources");
+        const dialog = findChild(browser, "repositoriesDialog");
+        dialog.open();
+        tryCompare(dialog, "opened", true);
+        const status = findChild(dialog, "repositoryStatus");
+        verify(!status.visible);
+        fake.status = "Repository failed";
+        verify(status.visible);
+        compare(status.text, "Repository failed");
+        dialog.close();
     }
     function test_source_picker_uses_discovered_capabilities() {
         fake.source_catalog = JSON.stringify([
