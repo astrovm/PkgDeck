@@ -845,8 +845,8 @@ fn plan_checked_upgrade(packages: &[Package], identities: &str) -> CheckedPlan {
         .join("\n\n");
     CheckedPlan {
         operations,
-        confirmation: format!("Update {count} selected {}?\n\n{labels}\n\nUpdates use each source’s native updater. Native dependency changes may follow. Successful updates are not rolled back if another fails. Continue?", if count == 1 { "package" } else { "packages" }),
-        details: format!("{labels}\n\nNative dependency changes may follow."),
+        confirmation: format!("Update {count} selected {}?\n\n{labels}\n\nOther packages may change. Some updates may finish if another fails.", if count == 1 { "package" } else { "packages" }),
+        details: format!("{labels}\n\nOther packages may change."),
         status: None,
     }
 }
@@ -995,7 +995,7 @@ fn confirmation_preview(
         };
         summary[0] = format!("{title}\n{}{scope}", package.id.backend);
         if !package.display_name.is_empty() && package.display_name != package.id.name {
-            lines.insert(0, package.display_name.clone());
+            lines.insert(1, package.display_name.clone());
         }
         if let Some(version) = &package.installed_version {
             lines.push(format!("Installed: {version}"));
@@ -1019,15 +1019,6 @@ fn confirmation_preview(
             && matches!(operation, Operation::Install(_))
         {
             lines.push(package.summary.clone());
-            summary.push(package.summary.clone());
-        }
-        if (package.id.backend == "appimage"
-            || package.id.reference.as_deref().is_some_and(|value| {
-                value.starts_with("local-deb:") || value.starts_with("flatpakref:")
-            }))
-            && matches!(operation, Operation::Install(_))
-        {
-            lines.push(package.summary.clone());
         }
     }
     if let Operation::Clean(id) = operation {
@@ -1039,6 +1030,12 @@ fn confirmation_preview(
     }
     if let Operation::Refresh { backend } = operation {
         title = format!("Refresh {backend}");
+    }
+    if !matches!(
+        operation,
+        Operation::Install(_) | Operation::Remove(_) | Operation::Upgrade(_)
+    ) {
+        summary[0] = title.clone();
     }
     if let Some(plan) = plan {
         let requested_name = match operation {
@@ -1077,7 +1074,7 @@ fn confirmation_preview(
             .map(describe)
             .collect::<Vec<_>>();
         if !requested.is_empty() {
-            lines.push(format!("Requested change: {}", requested.join(", ")));
+            lines.push(format!("Selected: {}", requested.join(", ")));
         }
         let changes = plan
             .changes
@@ -1099,7 +1096,15 @@ fn confirmation_preview(
                 })
                 .map(|change| change.name.as_str())
                 .collect::<Vec<_>>();
-            summary.push(format!("{} additional package changes", changes.len()));
+            summary.push(format!(
+                "{} other {} will change",
+                changes.len(),
+                if changes.len() == 1 {
+                    "package"
+                } else {
+                    "packages"
+                }
+            ));
             if !removals.is_empty() {
                 summary.push(format!("Removes: {}", removals.join(", ")));
             }
@@ -1107,50 +1112,27 @@ fn confirmation_preview(
         if plan.restart_required == Some(true) {
             summary.push("Restart required".into());
         }
-        lines.push(if changes.is_empty() {
-            "Native plan: no additional packages".into()
-        } else {
-            format!("Native plan — additional changes:\n{}", changes.join("\n"))
-        });
-        lines.push(format!(
-            "Download: {} · Disk impact: {} · Restart: {}",
-            plan.download_bytes
-                .map_or_else(|| "unknown".into(), |n| format!("{n} bytes")),
-            plan.disk_bytes
-                .map_or_else(|| "unknown".into(), |n| format!("{n:+} bytes")),
-            plan.restart_required.map_or("unknown", |needed| if needed {
-                "required"
-            } else {
-                "not indicated"
-            })
-        ));
+        if !changes.is_empty() {
+            lines.push(format!("Other changes:\n{}", changes.join("\n")));
+        }
+        let mut impact = Vec::new();
+        if let Some(bytes) = plan.download_bytes {
+            impact.push(format!("Download: {bytes} bytes"));
+        }
+        if let Some(bytes) = plan.disk_bytes {
+            impact.push(format!("Disk: {bytes:+} bytes"));
+        }
+        if !impact.is_empty() {
+            lines.push(impact.join(" · "));
+        }
     } else if matches!(
         operation,
         Operation::Install(_) | Operation::Remove(_) | Operation::Upgrade(_)
     ) {
-        lines.push("Transaction preview unavailable; additional changes are unknown.".into());
         summary.push("Other changes may be required.".into());
     }
-    if matches!(
-        operation,
-        Operation::Install(_) | Operation::Remove(_) | Operation::Upgrade(_)
-    ) {
-        lines.push("Data retention: manager-specific; details unavailable".into());
-        if matches!(operation, Operation::Remove(_)) {
-            summary.push("App data may remain after removal.".into());
-        }
-    } else if matches!(operation, Operation::Clean(_)) {
-        lines.push("Data removal: see native cleanup preview".into());
-    }
-    if matches!(
-        operation,
-        Operation::Install(_)
-            | Operation::Remove(_)
-            | Operation::Upgrade(_)
-            | Operation::UpgradeAll { .. }
-            | Operation::Refresh { .. }
-    ) {
-        lines.push("System authorization may be requested.".into());
+    if matches!(operation, Operation::Remove(_)) {
+        summary.push("App data may remain after removal.".into());
     }
     if title.chars().count() > 36 {
         title = format!("{}…", title.chars().take(35).collect::<String>());
@@ -2078,7 +2060,7 @@ impl ffi::PackageController {
             let count = plan.operations.len();
             let noun = if count == 1 { "package" } else { "packages" };
             let warning = if count > 1 {
-                "\nSuccessful updates cannot be rolled back if another fails."
+                "\nSome updates may finish if another fails."
             } else {
                 ""
             };
@@ -2189,7 +2171,7 @@ impl ffi::PackageController {
                     .collect::<Vec<_>>()
                     .join("\n\n");
                 let apt = apt_plan.as_ref().map_or_else(String::new, |plan| {
-                    format!("\n\nAPT transaction:\n{}", plan.summary())
+                    format!("\n\nAPT changes:\n{}", plan.summary())
                 });
                 let removals = apt_plan.as_ref().map_or_else(String::new, |plan| {
                     if plan.removals.is_empty() {
@@ -2200,7 +2182,7 @@ impl ffi::PackageController {
                 });
                 let noun = if count == 1 { "package" } else { "packages" };
                 let warning = if count > 1 {
-                    "\nSuccessful updates cannot be rolled back if another fails."
+                    "\nSome updates may finish if another fails."
                 } else {
                     ""
                 };
@@ -3211,7 +3193,7 @@ mod tests {
         assert!(preview["summary"]
             .as_str()
             .unwrap()
-            .contains("1 additional package changes"));
+            .contains("1 other package will change"));
         assert!(preview["summary"]
             .as_str()
             .unwrap()
@@ -3225,7 +3207,7 @@ mod tests {
         assert!(body.contains("Scope: System"));
         assert!(body.contains("Remove old-library (1)"));
         assert!(!body.contains("Install anonymous"));
-        assert!(body.contains("Data retention: manager-specific"));
+        assert!(!body.contains("unknown"));
         plan.changes.push(PlannedChange {
             action: PlannedAction::Remove,
             name: "anonymous".into(),
@@ -3238,9 +3220,9 @@ mod tests {
         let preview =
             confirmation_preview(&operation, std::slice::from_ref(&package), &[], Some(&plan));
         let body = preview["body"].as_str().unwrap();
-        assert!(body.contains("Requested change: Update anonymous (1 → 2)"));
+        assert!(body.contains("Selected: Update anonymous (1 → 2)"));
         assert!(body.contains("Remove anonymous (1)"));
-        assert!(body.contains("Download: 2048 bytes · Disk impact: -512 bytes · Restart: required"));
+        assert!(body.contains("Download: 2048 bytes · Disk: -512 bytes"));
         assert!(preview["summary"]
             .as_str()
             .unwrap()
@@ -3261,10 +3243,7 @@ mod tests {
             .unwrap()
             .contains("/synthetic/env"));
         let unavailable = confirmation_preview(&operation, &[package], &[], None);
-        assert!(unavailable["body"]
-            .as_str()
-            .unwrap()
-            .contains("Transaction preview unavailable"));
+        assert!(!unavailable["body"].as_str().unwrap().contains("unknown"));
         assert!(unavailable["summary"]
             .as_str()
             .unwrap()
@@ -3275,7 +3254,7 @@ mod tests {
         })).unwrap();
         let preview = confirmation_preview(&operation, std::slice::from_ref(&long), &[], None);
         assert!(preview["action"].as_str().unwrap().chars().count() <= 36);
-        assert!(preview["body"]
+        assert!(preview["summary"]
             .as_str()
             .unwrap()
             .contains(&long.display_name));

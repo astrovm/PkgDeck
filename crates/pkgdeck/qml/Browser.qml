@@ -241,9 +241,9 @@ Controls.ApplicationWindow {
     }
     function emptyStateMessage() {
         if (backend.writing && currentView === "Search" && items.length === 0)
-            return "Search queued until the current operation finishes.";
+            return "Search will resume shortly.";
         if (backend.busy || reportState.phase === "loading")
-            return currentView === "Search" ? "Searching packages…" : "Checking sources…";
+            return currentView === "Search" ? "Searching…" : "Loading…";
         if (readFailures.length > 0)
             return reportState.phase === "partial" ? "No results from the sources that completed." : "Could not check these sources.";
         if (reportState.phase === "unsupported")
@@ -269,11 +269,11 @@ Controls.ApplicationWindow {
         return currentView === "Search" ? "No matching packages." : "No results to show.";
     }
     function resultsHeading() {
-        if (backend.writing && backend.status.length)
-            return backend.status;
+        if (backend.writing)
+            return "Applying changes…";
         if (backend.busy)
-            return retainingResults ? "Showing previous results · checking for changes…" :
-                (currentView === "Search" ? "Searching packages…" : "Checking sources…");
+            return retainingResults ? "Refreshing…" :
+                (currentView === "Search" ? "Searching…" : "Loading…");
         const count = viewItems.length;
         const noun = currentView === "Sources" ? "source" : currentView === "Clean" ? "cleanup task" :
             currentView === "Updates" ? "update" : "package";
@@ -1446,7 +1446,7 @@ Controls.ApplicationWindow {
                     Layout.preferredHeight: 20
                 }
                 Controls.Label {
-                    text: "Opening package or source…"
+                    text: "Opening…"
                     color: root.muted
                     Layout.fillWidth: true
                     Accessible.name: text

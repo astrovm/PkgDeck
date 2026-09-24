@@ -890,6 +890,14 @@ TestCase {
         waitForRendering(browser.contentItem);
         compare(field.mapToItem(browser.contentItem, 0, 0).y, top);
     }
+    function test_result_status_stays_short_during_native_writes() {
+        browser.openView("Updates");
+        fake.status = "Update all packages from apt: Running apt-get; cancellation waits for the native transaction to finish.";
+        fake.busy = true;
+        fake.writing = true;
+        compare(browser.resultsHeading(), "Applying changes…");
+        compare(findChild(browser, "resultsHeading").text, "Applying changes…");
+    }
     function test_opening_input_has_visible_feedback_until_preview_or_completion() {
         fake.simulateOpening = true;
         browser.openExternalInput("file:///tmp/synthetic.deb");
@@ -905,6 +913,13 @@ TestCase {
         verify(notice.visible);
         fake.busy = false;
         tryCompare(notice, "visible", false);
+    }
+    function test_activity_uses_short_readable_actions() {
+        browser.openView("Activity");
+        const activity = findChild(browser, "activityPane");
+        compare(activity.target({upgrade_all: {backend: "apt"}}), "Update all · apt");
+        compare(activity.target({install: {backend: "apt", name: "synthetic-tool", scope: "system"}}), "Install synthetic-tool · apt · System");
+        compare(activity.result({state: "running", outcomes: []}), "In progress");
     }
     function test_confirmation_shows_summary_before_optional_details() {
         browser.openView("Search");
@@ -969,9 +984,9 @@ TestCase {
         keyClick(Qt.Key_Return);
         compare(browser.retainingResults, false);
         compare(browser.viewItems.length, 0);
-        compare(findChild(browser, "resultsHeading").text, "Searching packages…");
+        compare(findChild(browser, "resultsHeading").text, "Searching…");
         verify(findChild(browser, "emptyState").visible);
-        compare(findChild(browser, "emptyState").text, "Searching packages…");
+        compare(findChild(browser, "emptyState").text, "Searching…");
     }
     function test_compact_installed_filter_has_its_own_row() {
         browser.width = 360;
@@ -1752,7 +1767,7 @@ TestCase {
         browser.openView("Updates");
         fake.rows = "[]";
         fake.report_state = JSON.stringify({phase: "loading", failures: []});
-        compare(browser.emptyStateMessage(), "Checking sources…");
+        compare(browser.emptyStateMessage(), "Loading…");
         fake.report_state = JSON.stringify({phase: "complete", failures: []});
         compare(browser.emptyStateMessage(), "You're up to date");
         fake.report_state = JSON.stringify({phase: "partial", failures: [{source: "npm", kind: "locked", detail: "Synthetic package lock"}]});

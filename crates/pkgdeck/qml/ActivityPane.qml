@@ -20,15 +20,18 @@ ColumnLayout {
     function target(operation) {
         const kind = Object.keys(operation || {})[0] || "operation";
         const id = operation[kind];
+        const action = ({install: "Install", remove: "Remove", upgrade: "Update", upgrade_all: "Update all", refresh: "Refresh", clean: "Clean"})[kind] || "Change";
         if (typeof id !== "object" || id === null)
-            return kind;
+            return action;
+        const name = id.name || id.key || "";
+        const backend = id.backend || "";
         const scope = id.scope === "system" ? "System" : id.scope && id.scope.user ? "User " + id.scope.user.uid : id.scope && id.scope.environment ? id.scope.environment.path : "";
-        return kind.replace(/_/g, " ") + " · " + (id.name || id.key || id.backend || "") + " · " + (id.backend || "") + (scope ? " · " + scope : "");
+        return [action + (name ? " " + name : ""), backend, scope].filter(Boolean).join(" · ");
     }
     function result(entry) {
         const outcomes = entry.outcomes || [];
         if (!outcomes.length)
-            return entry.state;
+            return ({queued: "Queued", running: "In progress", finished: "Completed", failed: "Failed", cancelled: "Cancelled"})[entry.state] || "In progress";
         const done = outcomes.filter(value => value === "finished").length;
         const failed = outcomes.filter(value => value === "failed").length;
         const cancelled = outcomes.filter(value => value === "cancelled").length;
