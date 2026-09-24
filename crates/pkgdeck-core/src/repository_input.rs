@@ -539,12 +539,16 @@ mod tests {
         )
         .unwrap();
         let curl = base.join("curl");
+        let pending_curl = base.join("curl.pending");
         fs::write(
-            &curl,
+            &pending_curl,
             format!("#!/bin/sh\n/bin/cat '{}'\n", content.display()),
         )
         .unwrap();
-        fs::set_permissions(&curl, fs::Permissions::from_mode(0o755)).unwrap();
+        // Publish the executable after closing its writer so parallel tests
+        // never try to run a script while its inode is still being written.
+        fs::set_permissions(&pending_curl, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::rename(&pending_curl, &curl).unwrap();
         let mut env = BTreeMap::new();
         env.insert(OsString::from("PATH"), base.as_os_str().to_os_string());
         let host = Host::new(Runtime::Native, env);

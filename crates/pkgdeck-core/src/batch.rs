@@ -528,9 +528,7 @@ fn begin_session(
             operations: operations.to_vec(),
         },
     ) {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(error);
+        return Err(authorization_start_error(child, error));
     }
     let mut session = Session {
         child,
@@ -591,6 +589,23 @@ fn begin_session(
         *cell.borrow_mut() = Some(session);
         Ok(Some(ScopeGuard))
     })
+}
+
+fn authorization_start_error(mut child: Child, error: ExecutionError) -> ExecutionError {
+    // A helper can close stdin before its dismissal is observed. Treat that
+    // startup race as an authorization result, not an I/O failure.
+    let exit = child
+        .try_wait()
+        .ok()
+        .flatten()
+        .and_then(|status| status.code());
+    let _ = child.kill();
+    let _ = child.wait();
+    match error {
+        ExecutionError::Io(_) if exit == Some(126) => ExecutionError::AuthorizationCancelled,
+        ExecutionError::Io(_) => ExecutionError::AuthorizationDenied,
+        other => other,
+    }
 }
 
 pub fn set_operation(index: usize) {
@@ -1294,6 +1309,30 @@ done"#;
                 Err(ExecutionError::AuthorizationDenied | ExecutionError::AuthorizationCancelled)
             ));
         }
+    }
+
+    #[test]
+    fn authorization_start_failure_uses_helper_exit_status() {
+        for (script, cancelled) in [("exit 126", true), ("exit 1", false)] {
+            let mut child = Command::new("/bin/sh")
+                .arg("-c")
+                .arg(script)
+                .spawn()
+                .unwrap();
+            child.wait().unwrap();
+            let result = authorization_start_error(child, ExecutionError::Io("closed pipe".into()));
+            assert!(matches!(result, ExecutionError::AuthorizationCancelled) == cancelled);
+        }
+        let mut child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg("exit 126")
+            .spawn()
+            .unwrap();
+        child.wait().unwrap();
+        assert!(matches!(
+            authorization_start_error(child, ExecutionError::Invalid("synthetic".into())),
+            ExecutionError::Invalid(reason) if reason == "synthetic"
+        ));
     }
 
     #[test]
