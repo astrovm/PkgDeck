@@ -836,7 +836,7 @@ Controls.ApplicationWindow {
         delegate: Controls.ItemDelegate {
             required property var modelData
             required property int index
-            width: ListView.view.width
+            width: ListView.view ? ListView.view.width : combo.width
             text: modelData
             font: combo.font
             highlighted: combo.highlightedIndex === index
