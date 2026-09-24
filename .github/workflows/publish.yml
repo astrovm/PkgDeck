@@ -23,7 +23,6 @@ jobs:
   formula:
     name: Homebrew
     permissions:
-      actions: write
       contents: write
       pull-requests: write
     runs-on: ubuntu-26.04
@@ -83,30 +82,28 @@ jobs:
             fi
           fi
 
-          updated=false
           if [[ -n "$remote_sha" ]] &&
              [[ "$(git rev-parse 'HEAD^{tree}')" == "$(git rev-parse "$remote_sha^{tree}")" ]]; then
             echo "Formula branch already matches $TAG"
           else
             git push --force-with-lease="refs/heads/$branch:$remote_sha" origin "HEAD:refs/heads/$branch"
-            updated=true
           fi
           if [[ -n "$existing" ]]; then
             echo "Updated $existing"
           else
-            gh pr create --base main --head "$branch" --title "Publish Homebrew formula for $TAG" \
-              --body "Adds the immutable release archive and SHA-256 for $TAG. CI will build and test it on Linux and macOS before merge."
-            updated=true
+            existing=$(gh pr create --base main --head "$branch" --title "Publish Homebrew formula for $TAG" \
+              --body "Adds the immutable release archive and SHA-256 for $TAG. CI builds and tests the published formula before automatic merge.")
           fi
-          if [[ "$updated" == true ]]; then
-            echo 'updated=true' >> "$GITHUB_OUTPUT"
-          fi
-      - name: Validate published formula on Linux and macOS
-        if: steps.formula_pr.outputs.updated == 'true'
+          echo "pr=$existing" >> "$GITHUB_OUTPUT"
+      - name: Merge formula after checks pass
+        if: steps.formula_pr.outputs.pr != ''
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ steps.release.outputs.version }}
-        run: gh workflow run ci.yml --ref "release/homebrew-$VERSION" -f homebrew_only=true
+          PR_URL: ${{ steps.formula_pr.outputs.pr }}
+        run: |
+          if [[ "$(gh pr view "$PR_URL" --json autoMergeRequest --jq '.autoMergeRequest != null')" != true ]]; then
+            gh pr merge "$PR_URL" --auto --squash --delete-branch
+          fi
 
   flatpak:
     name: Flatpak

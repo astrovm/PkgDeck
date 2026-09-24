@@ -304,7 +304,7 @@ jobs:
             echo /home/linuxbrew/.linuxbrew/bin >> "$GITHUB_PATH"
           fi
       - name: Prepare formula for this checkout
-        if: '!inputs.homebrew_only'
+        if: ${{ !inputs.homebrew_only && !(github.event_name == 'pull_request' && startsWith(github.head_ref, 'release/homebrew-')) }}
         shell: bash
         run: |
           archive="$RUNNER_TEMP/pkgdeck-source.tar.gz"
@@ -322,7 +322,7 @@ jobs:
             File.write(ARGV.fetch(1), recipe)
           ' "$archive" "$recipe"
       - name: Use published formula from this checkout
-        if: inputs.homebrew_only
+        if: ${{ inputs.homebrew_only || (github.event_name == 'pull_request' && startsWith(github.head_ref, 'release/homebrew-')) }}
         shell: bash
         run: |
           brew tap-new --no-git astrovm/pkgdeck
@@ -395,18 +395,20 @@ jobs:
         env:
           APPIMAGETOOL: ${{ github.workspace }}/build/appimagetool
         run: |
+          version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)
+          image="build/artifacts/PkgDeck-v${version}-${{ matrix.arch }}.AppImage"
           curl -fL --retry 3 'https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-${{ matrix.arch }}.AppImage' -o "$APPIMAGETOOL"
           chmod +x "$APPIMAGETOOL"
           scripts/package.sh appimage
-          'build/artifacts/PkgDeck-${{ matrix.arch }}.AppImage' --appimage-extract 'usr/lib/pkgdeck/appimageupdatetool.AppImage' >/dev/null
+          "$image" --appimage-extract 'usr/lib/pkgdeck/appimageupdatetool.AppImage' >/dev/null
           test -x 'squashfs-root/usr/lib/pkgdeck/appimageupdatetool.AppImage'
           rm -rf squashfs-root
           unset LD_LIBRARY_PATH QML_IMPORT_PATH
           export APPIMAGE_EXTRACT_AND_RUN=1
-          scripts/xtask.sh gui 'build/artifacts/PkgDeck-${{ matrix.arch }}.AppImage'
-          'build/artifacts/PkgDeck-${{ matrix.arch }}.AppImage' --cli </dev/null | grep -F 'Usage: pkd'
-          'build/artifacts/PkgDeck-${{ matrix.arch }}.AppImage' --cli doctor
-          appimage=$PWD/build/artifacts/PkgDeck-${{ matrix.arch }}.AppImage
+          scripts/xtask.sh gui "$image"
+          "$image" --cli </dev/null | grep -F 'Usage: pkd'
+          "$image" --cli doctor
+          appimage=$PWD/$image
           scripts/tests/host-package.sh direct "$appimage" --cli
           data=$PWD/build/appimage-backend-data
           XDG_DATA_HOME="$data" "$appimage" --cli --json --yes --from appimage search "$appimage" | jq -e '.exit_code == 0'
@@ -465,10 +467,12 @@ jobs:
         run: cargo build --locked -p pkgdeck-tools
       - name: Build and test Flatpak
         run: |
+          version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)
+          bundle="build/artifacts/PkgDeck-v${version}-${{ matrix.arch }}.flatpak"
           sudo flatpak remote-add --system --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
           sudo flatpak install --system -y --noninteractive flathub org.kde.Platform//6.11 org.kde.Sdk//6.11 org.freedesktop.Sdk.Extension.rust-stable//25.08
           scripts/package.sh flatpak
-          sudo flatpak install --system -y --noninteractive 'build/artifacts/PkgDeck-${{ matrix.arch }}.flatpak'
+          sudo flatpak install --system -y --noninteractive "$bundle"
           scripts/xtask.sh gui flatpak run --env=QT_QPA_PLATFORM=offscreen --env=QT_QUICK_BACKEND=software io.github.astrovm.PkgDeck
           flatpak run --command=pkd io.github.astrovm.PkgDeck </dev/null | grep -F 'Usage: pkd'
           scripts/tests/flatpak-package.sh
@@ -476,7 +480,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: packages-linux-flatpak-${{ matrix.arch }}
-          path: build/artifacts/PkgDeck-${{ matrix.arch }}.flatpak
+          path: build/artifacts/PkgDeck-v*-${{ matrix.arch }}.flatpak
           if-no-files-found: error
 
   release-gate:
@@ -558,10 +562,21 @@ jobs:
           test "$version" = "$manifest_version"
           sudo apt-get update
           sudo apt-get install -y zsync
+          for arch in x86_64 aarch64; do
+            for suffix in AppImage flatpak snap; do
+              test -s "dist/PkgDeck-${GITHUB_REF_NAME}-${arch}.${suffix}"
+            done
+          done
           for image in dist/*.AppImage; do zsyncmake -u "$(basename "$image")" -o "$image.zsync" "$image"; done
-          scripts/flatpak-release-manifest.sh "$GITHUB_REF_NAME" dist/io.github.astrovm.PkgDeck.yml
-          cp packaging/flatpak/cargo-sources.json dist/cargo-sources.json
-          (cd dist && sha256sum -- * > SHA256SUMS)
+          scripts/flatpak-release-manifest.sh "$GITHUB_REF_NAME" "dist/PkgDeck-${GITHUB_REF_NAME}-flatpak-manifest.yml"
+          cp packaging/flatpak/cargo-sources.json "dist/PkgDeck-${GITHUB_REF_NAME}-cargo-sources.json"
+          (cd dist && sha256sum -- PkgDeck-"${GITHUB_REF_NAME}"-* > "PkgDeck-${GITHUB_REF_NAME}-SHA256SUMS")
+          for asset in dist/*; do
+            [[ $(basename "$asset") == PkgDeck-"${GITHUB_REF_NAME}"-* ]] || {
+              echo "::error::Release asset has no version: $asset"
+              exit 1
+            }
+          done
       - name: Attest release packages
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
@@ -575,7 +590,6 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: release
     permissions:
-      actions: write
       contents: write
       pull-requests: write
     uses: ./.github/workflows/publish.yml
