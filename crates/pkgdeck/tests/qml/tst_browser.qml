@@ -386,6 +386,7 @@ TestCase {
         browser.openView("Installed");
         populate();
         compare(browser.items.length, 2);
+        fake.simulateLoading = true;
         browser.openView("Search");
         compare(browser.items.length, 0);
         browser.openView("Settings");
@@ -720,7 +721,7 @@ TestCase {
         compare(fake.lastQuery, "Firefox");
         compare(browser.queryDirty, false);
     }
-    function test_file_or_link_entry_is_search_only_and_validates_links() {
+    function test_file_or_link_entry_is_global_and_validates_links() {
         const add = findChild(browser, "addPackageButton");
         const activity = findChild(browser, "activityIndicator");
         const filter = findChild(browser, "sourceFilter");
@@ -746,15 +747,37 @@ TestCase {
         verify(!preview.enabled);
         link.text = "https://example.invalid/app.rpm";
         verify(preview.enabled);
+        clickDelegate(preview);
+        compare(fake.lastOpenedInput, "https://example.invalid/app.rpm");
+        clickDelegate(add);
+        tryCompare(dialog, "opened", true);
         link.text = "flatpak+https://example.invalid/app.flatpakref";
         verify(preview.enabled);
         clickDelegate(preview);
         compare(fake.lastOpenedInput, "flatpak+https://example.invalid/app.flatpakref");
         browser.openView("Installed");
-        verify(!add.visible);
+        verify(add.visible);
         browser.openView("Settings");
+        verify(add.visible);
         verify(!filter.visible);
         verify(activity.visible);
+    }
+    function test_returning_to_search_reloads_visible_query() {
+        browser.openView("Search");
+        const search = findChild(browser, "searchField");
+        search.text = "fixture";
+        mouseClick(findChild(browser, "searchButton"));
+        fake.rows = JSON.stringify([{kind: "package", name: "fixture", source: "homebrew", architecture: "all", installed: null, candidate: "1.0", scope: "user", summary: "Synthetic package"}]);
+        compare(browser.viewItems.length, 1);
+        browser.openView("Installed");
+        fake.rows = "[]";
+        const before = fake.loadCount;
+        browser.openView("Search");
+        compare(fake.loadCount, before + 1);
+        compare(fake.lastView, "Search");
+        compare(fake.lastQuery, "fixture");
+        fake.rows = JSON.stringify([{kind: "package", name: "fixture", source: "homebrew", architecture: "all", installed: null, candidate: "1.0", scope: "user", summary: "Synthetic package"}]);
+        compare(browser.viewItems.length, 1);
     }
     function test_confirmation_shows_summary_before_optional_details() {
         browser.openView("Search");
@@ -770,6 +793,47 @@ TestCase {
         verify(details.text.indexOf("synthetic-library") >= 0);
         dialog.reject();
     }
+    function test_compact_confirmation_keeps_both_buttons_readable() {
+        browser.width = 360;
+        browser.height = 520;
+        fake.confirmation_data = JSON.stringify({action: "Update 1 package", summary: "Update 1 package", details: "Synthetic update details"});
+        fake.confirmation = "Update synthetic package";
+        const dialog = findChild(browser, "confirmationDialog");
+        tryCompare(dialog, "opened", true);
+        waitForRendering(browser.contentItem);
+        const apply = findChild(dialog, "confirmationApply");
+        const cancel = findChild(dialog, "confirmationCancel");
+        compare(apply.text, "Update");
+        compare(cancel.text, "Cancel");
+        verify(cancel.width >= cancel.contentItem.implicitWidth + cancel.leftPadding + cancel.rightPadding - 1);
+        verify(dialog.height < 260);
+        dialog.reject();
+    }
+    function test_empty_results_are_compact_and_search_starts_clear() {
+        browser.openView("Search");
+        const box = findChild(browser, "resultsBox");
+        waitForRendering(browser.contentItem);
+        verify(!box.visible);
+        verify(!findChild(browser, "reloadButton").visible);
+        browser.openView("Updates");
+        fake.report_state = JSON.stringify({phase: "complete", failures: []});
+        waitForRendering(browser.contentItem);
+        verify(box.visible);
+        verify(box.height <= 160);
+        verify(!findChild(browser, "columnHeader0").visible);
+        compare(findChild(browser, "emptyState").text, "You're up to date");
+    }
+    function test_compact_installed_filter_has_its_own_row() {
+        browser.width = 360;
+        browser.openView("Installed");
+        waitForRendering(browser.contentItem);
+        const field = findChild(browser, "installedFilterField");
+        verify(field.width >= 300);
+        verify(!findChild(browser, "exportInventoryButton").visible);
+        verify(findChild(browser, "previewInventoryButton").visible);
+        browser.openView("Settings");
+        verify(!findChild(browser, "previewInventoryButton").visible);
+    }
     function test_about_shows_backend_version() {
         browser.openView("About");
         compare(browser.currentView, "About");
@@ -781,6 +845,7 @@ TestCase {
         compare(shortcuts.count, 15);
         compare(shortcuts.itemAt(0).children[1].text, "Ctrl+1");
         compare(shortcuts.itemAt(11).children[1].text, "Ctrl+Shift+U");
+        waitForRendering(browser.contentItem);
         const at = about.mapToItem(browser.contentItem, 0, 0);
         verify(at.y < browser.height / 3);
         // A tall window must not vertically center the text (regression:
@@ -809,7 +874,7 @@ TestCase {
         browser.openView("Sources");
         compare(findChild(browser, "columnHeader0").text, "SOURCE");
         compare(findChild(browser, "columnHeader1").text, "STATUS");
-        compare(findChild(browser, "columnHeader2").text, "CAPABILITIES");
+        verify(!findChild(browser, "columnHeader2").visible);
         browser.openView("Search");
         compare(findChild(browser, "columnHeader0").text, "NAME / SOURCE");
         compare(findChild(browser, "columnHeader1").text, "VERSION");
@@ -1248,6 +1313,19 @@ TestCase {
         verify(urlBottom <= actionTop);
         dialog.close();
     }
+    function test_repositories_do_not_repeat_url_in_title() {
+        browser.openView("Sources");
+        const url = "https://example.invalid/packages";
+        fake.repositories = JSON.stringify({repositories: [{backend: "apt", name: "synthetic", title: url + " stable", url: url, scope: "system", enabled: true}], errors: []});
+        const dialog = findChild(browser, "repositoriesDialog");
+        dialog.open();
+        tryCompare(dialog, "visible", true);
+        const list = findChild(browser, "repositoryList");
+        tryVerify(() => list.itemAtIndex(0) !== null);
+        verify(!findChild(list.itemAtIndex(0), "repositoryUrlLabel").visible);
+        verify(dialog.height < 400);
+        dialog.close();
+    }
     function test_firmware_row_updates_instead_of_removing() {
         browser.openView("Installed");
         fake.rows = JSON.stringify([{kind: "package", name: "synthetic-device", display_name: "Synthetic BIOS", source: "fwupd", architecture: "device", installed: "1", candidate: "2", update: "available", scope: "system", summary: "Firmware · AC power required"}]);
@@ -1315,6 +1393,18 @@ TestCase {
             popup.close();
             tryCompare(popup, "visible", false);
         }
+    }
+    function test_source_picker_shrinks_to_few_sources() {
+        browser.width = 360;
+        browser.height = 520;
+        browser.openView("Search");
+        fake.source_catalog = JSON.stringify(["apt", "homebrew", "flatpak"].map(source => ({source, summary: "Available", availability_kind: "available", capabilities: ["search"]})));
+        const popup = findChild(browser, "sourcePopup");
+        popup.open();
+        tryCompare(popup, "visible", true);
+        waitForRendering(browser.contentItem);
+        verify(popup.height < 360);
+        popup.close();
     }
     function test_source_picker_focus_and_page_visibility() {
         browser.openView("Updates");
@@ -1412,10 +1502,14 @@ TestCase {
         wait(30);
         compare(browser.viewItems.length, 0);
         verify(findChild(browser, "sourceFailureNotice").visible);
+        verify(!findChild(browser, "resultsBox").visible);
         mouseClick(findChild(browser, "sourceFailureDetails"));
         const dialog = findChild(browser, "sourceFailuresDialog");
         tryCompare(dialog, "visible", true);
-        compare(browser.copyableDiagnostics(), "View: Search\nState: unknown\nnpm: failed");
+        verify(browser.failureHelp("failed").indexOf("Retry this source") >= 0);
+        verify(browser.failureHelp("failed").indexOf("Source failed") < 0);
+        verify(dialog.height < 320);
+        compare(browser.copyableDiagnostics(), "View: Search\nState: unknown\nnpm: failed — Source failed");
         browser.retryFailedSource("npm");
         compare(fake.lastRetry, "npm");
     }
@@ -1485,7 +1579,7 @@ TestCase {
         fake.report_state = JSON.stringify({phase: "partial", failures: [{source: "npm", kind: "locked", detail: "Synthetic package lock"}]});
         verify(browser.emptyStateMessage().indexOf("completed") >= 0);
         verify(browser.emptyStateMessage() !== "You're up to date");
-        compare(browser.copyableDiagnostics(), "View: Updates\nState: partial\nnpm: locked");
+        compare(browser.copyableDiagnostics(), "View: Updates\nState: partial\nnpm: locked — Synthetic package lock");
         fake.report_state = JSON.stringify({phase: "failed", failures: [{source: "apt", kind: "authorization"}]});
         compare(browser.emptyStateMessage(), "Could not check these sources.");
         fake.report_state = JSON.stringify({phase: "cached", failures: []});
@@ -1527,6 +1621,38 @@ TestCase {
         browser.applySourceDraft();
         compare(browser.sourceSelection, "");
         verify(browser.viewSourceFilters["Installed"] !== undefined);
+    }
+    function test_compact_source_row_uses_one_name_and_labeled_toggle() {
+        browser.width = 360;
+        browser.openView("Sources");
+        fake.rows = JSON.stringify([{kind: "source", name: "apt", source: "apt", summary: "Available", available: true, capabilities: ["search", "installed", "upgrade", "clean"]}]);
+        const list = findChild(browser, "packageResults");
+        tryVerify(() => list.itemAtIndex(0) !== null);
+        const row = list.itemAtIndex(0);
+        compare(findChild(row, "packageName").text, "APT");
+        verify(!findChild(row, "packageSourceLine").visible);
+        compare(findChild(row, "managerEnabled").text, "Enabled");
+    }
+    function test_sources_hide_unavailable_until_requested() {
+        browser.openView("Sources");
+        fake.rows = JSON.stringify([
+            {kind: "source", name: "apt", source: "apt", summary: "Available", available: true, capabilities: ["search"]},
+            {kind: "source", name: "npm", source: "npm", summary: "Unavailable", available: false, capabilities: []}
+        ]);
+        const toggle = findChild(browser, "unavailableSourcesButton");
+        compare(browser.viewItems.length, 1);
+        verify(toggle.visible);
+        compare(toggle.text, "Show unavailable (1)");
+        browser.width = 360;
+        browser.height = 520;
+        waitForRendering(browser.contentItem);
+        verify(toggle.mapToItem(browser.contentItem, toggle.width, 0).x <= browser.width);
+        verify(findChild(browser, "resultsBox").height < 220);
+        mouseClick(toggle);
+        compare(toggle.text, "Hide unavailable");
+        compare(browser.viewItems.length, 2);
+        mouseClick(toggle);
+        compare(browser.viewItems.length, 1);
     }
     function test_source_picker_uses_discovered_capabilities() {
         fake.source_catalog = JSON.stringify([

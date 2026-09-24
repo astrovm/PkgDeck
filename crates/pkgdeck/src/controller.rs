@@ -818,7 +818,7 @@ fn plan_checked_upgrade(packages: &[Package], identities: &str) -> CheckedPlan {
         .join("\n\n");
     CheckedPlan {
         operations,
-        confirmation: format!("Update {count} selected packages?\n\n{labels}\n\nUpdates use each source’s native updater. Native dependency changes may follow. Successful updates are not rolled back if another fails. Continue?"),
+        confirmation: format!("Update {count} selected {}?\n\n{labels}\n\nUpdates use each source’s native updater. Native dependency changes may follow. Successful updates are not rolled back if another fails. Continue?", if count == 1 { "package" } else { "packages" }),
         details: format!("{labels}\n\nNative dependency changes may follow."),
         status: None,
     }
@@ -958,6 +958,15 @@ fn confirmation_preview(
                 &package.display_name
             }
         );
+        let scope = match &package.id.scope {
+            Scope::System => " · System",
+            Scope::User { .. } => " · User",
+            Scope::Environment { path } => {
+                lines.push(format!("Location: {}", path.display()));
+                ""
+            }
+        };
+        summary[0] = format!("{title}\n{}{scope}", package.id.backend);
         if !package.display_name.is_empty() && package.display_name != package.id.name {
             lines.insert(0, package.display_name.clone());
         }
@@ -1093,7 +1102,7 @@ fn confirmation_preview(
         Operation::Install(_) | Operation::Remove(_) | Operation::Upgrade(_)
     ) {
         lines.push("Transaction preview unavailable; additional changes are unknown.".into());
-        summary.push("Additional changes cannot be previewed.".into());
+        summary.push("Other changes may be required.".into());
     }
     if matches!(
         operation,
@@ -2034,8 +2043,15 @@ impl ffi::PackageController {
             self.as_mut().set_confirmation(QString::default());
             self.as_mut().set_confirmation_data("{}".into());
         } else {
+            let count = plan.operations.len();
+            let noun = if count == 1 { "package" } else { "packages" };
+            let warning = if count > 1 {
+                "\nSuccessful updates cannot be rolled back if another fails."
+            } else {
+                ""
+            };
             self.as_mut().set_confirmation_data(encoded(
-                json!({"action":format!("Update {} packages", plan.operations.len()), "body": plan.confirmation, "summary": format!("Update {} selected packages\nSuccessful updates cannot be rolled back if another fails.", plan.operations.len()), "details": plan.details}),
+                json!({"action":"Update", "body": plan.confirmation, "summary": format!("Update {count} selected {noun}{warning}"), "details": plan.details}),
             ));
             self.as_mut()
                 .set_confirmation(plan.confirmation.as_str().into());
@@ -2150,9 +2166,15 @@ impl ffi::PackageController {
                         format!("\nRemoves: {}", plan.removals.join(", "))
                     }
                 });
-                self.as_mut().set_confirmation_data(encoded(json!({"action":format!("Update {count} packages"), "body": format!("{count} listed packages{apt}\n\n{labels}"), "summary": format!("Update {count} packages{removals}\nSuccessful updates cannot be rolled back if another fails."), "details": format!("{apt}\n\n{labels}")})));
+                let noun = if count == 1 { "package" } else { "packages" };
+                let warning = if count > 1 {
+                    "\nSuccessful updates cannot be rolled back if another fails."
+                } else {
+                    ""
+                };
+                self.as_mut().set_confirmation_data(encoded(json!({"action":"Update", "body": format!("{count} listed {noun}{apt}\n\n{labels}"), "summary": format!("Update {count} {noun}{removals}{warning}"), "details": format!("{apt}\n\n{labels}")})));
                 self.as_mut().set_confirmation(
-                    format!("Update all {count} listed packages?{apt}\n\n{labels}\n\nContinue?")
+                    format!("Update all {count} listed {noun}?{apt}\n\n{labels}\n\nContinue?")
                         .as_str()
                         .into(),
                 );
@@ -3105,6 +3127,14 @@ mod tests {
         assert!(preview["summary"]
             .as_str()
             .unwrap()
+            .starts_with("Update Anonymous App\napt · System\n1 → 2"));
+        assert!(!preview["summary"]
+            .as_str()
+            .unwrap()
+            .contains("Architecture:"));
+        assert!(preview["summary"]
+            .as_str()
+            .unwrap()
             .contains("1 additional package changes"));
         assert!(preview["summary"]
             .as_str()
@@ -3139,6 +3169,21 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("Restart required"));
+        let mut environment_package = package.clone();
+        environment_package.id.scope = Scope::Environment {
+            path: std::path::PathBuf::from("/synthetic/env"),
+        };
+        let environment_operation = Operation::Upgrade(environment_package.id.clone());
+        let environment =
+            confirmation_preview(&environment_operation, &[environment_package], &[], None);
+        assert!(environment["details"]
+            .as_str()
+            .unwrap()
+            .contains("Location: /synthetic/env"));
+        assert!(!environment["summary"]
+            .as_str()
+            .unwrap()
+            .contains("/synthetic/env"));
         let unavailable = confirmation_preview(&operation, &[package], &[], None);
         assert!(unavailable["body"]
             .as_str()
@@ -3147,7 +3192,7 @@ mod tests {
         assert!(unavailable["summary"]
             .as_str()
             .unwrap()
-            .contains("cannot be previewed"));
+            .contains("Other changes may be required"));
         let long = serde_json::from_value::<Package>(json!({
             "id": {"backend":"apt", "name":"anonymous", "architecture":"amd64", "scope":"system"},
             "display_name":"An extremely long synthetic application name for narrow windows", "summary":"Synthetic", "installed_version":"1", "candidate_version":"2", "update":"available"
@@ -5281,7 +5326,7 @@ mod tests {
         assert_eq!(plan.operations.len(), 1);
         assert!(matches!(&plan.operations[0], Operation::Upgrade(id) if id.name == "upgradable"));
         assert!(plan.status.is_none());
-        assert!(plan.confirmation.contains("Update 1 selected packages?"));
+        assert!(plan.confirmation.contains("Update 1 selected package?"));
         assert!(plan.confirmation.contains("Update upgradable"));
     }
     #[test]
