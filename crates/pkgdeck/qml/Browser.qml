@@ -15,7 +15,7 @@ Controls.ApplicationWindow {
         nameFilters: ["Packages and sources (*.AppImage *.deb *.rpm *.pkg.tar.zst *.pkg.tar.xz *.pkg.tar.gz *.pkg.tar.bz2 *.pkg.tar.lz4 *.flatpak *.flatpakref *.flatpakrepo *.snap *.repo *.sources *.list *.ymp)"]
         onAccepted: backend.openInput(selectedFile.toString())
     }
-    Controls.Dialog {
+    ThemedDialog {
         id: addPackageDialog
         objectName: "addPackageDialog"
         parent: Controls.Overlay.overlay
@@ -78,7 +78,6 @@ Controls.ApplicationWindow {
         backend.changeRepository(JSON.stringify(request));
     }
     property string currentView: "Search"
-    property bool shortcutsExpanded: false
     readonly property var activityRows: JSON.parse(backend.activity || "[]")
     readonly property int queuedCount: activityRows.filter(row => row.state === "queued").length
     readonly property var backgroundState: JSON.parse(backend.background_state || "{}")
@@ -95,6 +94,7 @@ Controls.ApplicationWindow {
     property var liveItems: JSON.parse(backend.rows || "[]")
     property var retainedItems: []
     property bool retainingResults: false
+    property string resultQuery: ""
     property var items: currentView === resultView ? (retainingResults ? retainedItems : liveItems) : []
     property bool reduceMotion: preferences.reduceMotion
     readonly property bool motionEnabled: !reduceMotion && Kirigami.Units.shortDuration > 0
@@ -230,7 +230,7 @@ Controls.ApplicationWindow {
         if (backend.writing && currentView === "Search" && items.length === 0)
             return "Search queued until the current operation finishes.";
         if (backend.busy || reportState.phase === "loading")
-            return retainingResults ? "Checking for current results…" : "Checking sources…";
+            return currentView === "Search" ? "Searching packages…" : "Checking sources…";
         if (readFailures.length > 0)
             return reportState.phase === "partial" ? "No results from the sources that completed." : "Could not check these sources.";
         if (reportState.phase === "unsupported")
@@ -254,6 +254,17 @@ Controls.ApplicationWindow {
         if (currentView === "Sources")
             return "No available sources.";
         return currentView === "Search" ? "No matching packages." : "No results to show.";
+    }
+    function resultsHeading() {
+        if (backend.writing && backend.status.length)
+            return backend.status;
+        if (backend.busy)
+            return retainingResults ? "Showing previous results · checking for changes…" :
+                (currentView === "Search" ? "Searching packages…" : "Checking sources…");
+        const count = viewItems.length;
+        const noun = currentView === "Sources" ? "source" : currentView === "Clean" ? "cleanup task" :
+            currentView === "Updates" ? "update" : "package";
+        return count + " " + noun + (count === 1 ? "" : "s");
     }
     property string installedFilter: ""
     property bool showUnavailableSources: false
@@ -719,6 +730,65 @@ Controls.ApplicationWindow {
         }
     }
 
+    component ThemedDialog: Controls.Dialog {
+        id: dialog
+        palette.window: root.surface
+        palette.base: root.surface
+        palette.text: root.ink
+        palette.windowText: root.ink
+        palette.button: root.surface
+        palette.buttonText: root.ink
+        background: Rectangle { color: root.surface; radius: 12; border.color: root.line }
+        header: Item {
+            implicitHeight: 54
+            Controls.Label {
+                anchors.left: parent.left
+                anchors.leftMargin: 16
+                anchors.verticalCenter: parent.verticalCenter
+                text: dialog.title
+                color: root.ink
+                font.bold: true
+            }
+            ActionButton {
+                anchors.right: parent.right
+                anchors.rightMargin: 8
+                anchors.verticalCenter: parent.verticalCenter
+                text: ""
+                symbol: "cancel"
+                tooltipText: "Close"
+                Accessible.name: "Close dialog"
+                onClicked: dialog.reject()
+            }
+        }
+        footer: Controls.DialogButtonBox {
+            standardButtons: dialog.standardButtons
+            alignment: Qt.AlignRight
+            padding: 8
+            spacing: 8
+            background: Rectangle { color: root.surface }
+            delegate: ActionButton { symbol: "" }
+            onAccepted: dialog.accept()
+            onRejected: dialog.reject()
+        }
+    }
+
+    component SettingCheckBox: Controls.CheckBox {
+        id: setting
+        implicitHeight: Math.max(32, root.font.pointSize * 2.5)
+        indicator: TickBox {
+            x: 0
+            y: (setting.height - height) / 2
+            ticked: setting.checked
+        }
+        contentItem: Text {
+            text: setting.text
+            color: setting.enabled ? root.ink : root.muted
+            font: setting.font
+            verticalAlignment: Text.AlignVCenter
+            leftPadding: 28
+        }
+    }
+
     component ThemedComboBox: Controls.ComboBox {
         id: combo
         implicitHeight: 38
@@ -864,10 +934,14 @@ Controls.ApplicationWindow {
     // Reload the current view. Without force, a cached snapshot serves
     // instantly with no worker; force always queries native managers.
     function reload(force, preserveSelection) {
-        retainedItems = currentView === resultView ? items.slice() : [];
+        // Do not present matches for an older search as matches for a new one.
+        const sameQuery = currentView !== "Search" || searchPane.text.trim() === resultQuery;
+        retainedItems = currentView === resultView && sameQuery ? items.slice() : [];
         retainingResults = retainedItems.length > 0;
         revealedRows = new Set(retainedItems.map(rowIdentity));
         resultView = currentView;
+        if (currentView === "Search")
+            resultQuery = searchPane.text.trim();
         results.currentIndex = -1;
         if (!preserveSelection)
             selectedIdentity = null;
@@ -1107,7 +1181,7 @@ Controls.ApplicationWindow {
             Layout.fillWidth: true
             Layout.fillHeight: true
             Layout.margins: root.compact ? 12 : 28
-            spacing: 14
+            spacing: root.compact ? 10 : 14
             RowLayout {
                 Layout.fillWidth: true
                 ThemedComboBox {
@@ -1132,38 +1206,37 @@ Controls.ApplicationWindow {
                     objectName: "addPackageButton"
                     text: "Add…"
                     symbol: "package"
+                    visible: root.currentView === "Search" || root.currentView === "Sources"
                     enabled: !backend.writing
                     onClicked: { root.rememberDialogFocus(); addPackageDialog.open(); }
                     Accessible.name: "Add from file or link"
                 }
                 ActionButton {
                     objectName: "activityIndicator"
-                    visible: root.currentView !== "Activity"
-                    text: root.compact ? "" : root.queuedCount > 0 ? "Activity · " + root.queuedCount : backend.writing ? "Working" : "Activity"
+                    visible: !root.compact && root.currentView !== "Activity"
+                    text: root.queuedCount > 0 ? "Activity · " + root.queuedCount : backend.writing ? "Working" : "Activity"
                     symbol: "updates"
                     Accessible.name: root.queuedCount > 0 ? "Activity, " + root.queuedCount + " queued" : backend.writing ? "Activity, working" : "Activity"
-                    tooltipText: root.compact ? Accessible.name : ""
-                    Layout.preferredWidth: root.compact ? 40 : implicitWidth
                     onClicked: root.openView("Activity")
                 }
                 ActionButton {
                     objectName: "sourceFilter"
                     id: sourceFilterButton
-                    visible: ["Search", "Installed", "Updates", "Clean"].indexOf(root.currentView) >= 0
-                    text: root.compact ? "" : root.sourceSummary()
+                    visible: !root.compact && ["Search", "Installed", "Updates", "Clean"].indexOf(root.currentView) >= 0
+                    text: root.viewSourceFilters[root.currentView] ? root.sourceSummary() : "Filter sources"
                     symbol: "sources"
-                    onClicked: { root.rememberDialogFocus(); sourcePopup.open(); }
+                    onClicked: { backend.checkSources(); root.rememberDialogFocus(); sourcePopup.open(); }
                     Accessible.name: "Filter this page by package source"
-                    tooltipText: root.compact ? Accessible.name : ""
-                    Layout.preferredWidth: root.compact ? 40 : 210
+                    Layout.preferredWidth: 160
                     Controls.Popup {
                         id: sourcePopup
                         objectName: "sourcePopup"
+                        parent: Controls.Overlay.overlay
                         property var draftSources: []
                         property string searchText: ""
                         property bool showUnavailable: false
-                        x: sourceFilterButton.width - width
-                        y: sourceFilterButton.height + 4
+                        x: root.width - width - (root.compact ? 12 : 28)
+                        y: root.compact ? 106 : 76
                         width: Math.min(340, root.width - 32)
                         height: Math.min(460, root.height - 100, implicitHeight)
                         padding: 10
@@ -1290,6 +1363,27 @@ Controls.ApplicationWindow {
                 }
             }
             RowLayout {
+                visible: root.compact && root.currentView !== "Activity"
+                Layout.fillWidth: true
+                spacing: 8
+                ActionButton {
+                    objectName: "compactActivityIndicator"
+                    text: root.queuedCount > 0 ? "Activity · " + root.queuedCount : backend.writing ? "Working" : "Activity"
+                    symbol: "updates"
+                    Layout.fillWidth: true
+                    onClicked: root.openView("Activity")
+                }
+                ActionButton {
+                    objectName: "compactSourceFilter"
+                    visible: ["Search", "Installed", "Updates", "Clean"].indexOf(root.currentView) >= 0
+                    text: root.viewSourceFilters[root.currentView] ? root.sourceSummary() : "Filter sources"
+                    symbol: "sources"
+                    Layout.fillWidth: true
+                    onClicked: { backend.checkSources(); root.rememberDialogFocus(); sourcePopup.open(); }
+                    Accessible.name: "Filter this page by package source"
+                }
+            }
+            RowLayout {
                 visible: root.currentView === "Search"
                 Layout.fillWidth: true
                 spacing: 8
@@ -1308,7 +1402,7 @@ Controls.ApplicationWindow {
                         root.currentView = "Search";
                         root.queryDirty = false;
                         root.sortColumn = "";
-                        root.reload(true);
+                        root.reload();
                     }
                     onDownRequested: {
                         results.forceActiveFocus();
@@ -1391,7 +1485,7 @@ Controls.ApplicationWindow {
                 ColumnLayout {
                     width: settingsScroll.availableWidth
                     spacing: 10
-                    Controls.Label { text: "Appearance" }
+                    Controls.Label { text: "Appearance"; color: root.ink; font.bold: true }
                     ThemedComboBox {
                         objectName: "appearanceSetting"
                         model: ["System", "Dark", "Light"]
@@ -1401,14 +1495,14 @@ Controls.ApplicationWindow {
                         Layout.fillWidth: true
                         Layout.maximumWidth: 420
                     }
-                    Controls.CheckBox {
+                    SettingCheckBox {
                         objectName: "animationsSetting"
                         text: "Animations"
                         checked: !root.reduceMotion
                         onToggled: root.reduceMotion = !checked
                         Accessible.name: "Enable interface animations"
                     }
-                    Controls.CheckBox {
+                    SettingCheckBox {
                         objectName: "backgroundModeSetting"
                         text: "Background checks"
                         checked: preferences.backgroundMode
@@ -1423,7 +1517,7 @@ Controls.ApplicationWindow {
                         }
                         Accessible.name: text
                     }
-                    Controls.CheckBox {
+                    SettingCheckBox {
                         objectName: "autostartSetting"
                         text: "Start in background at login"
                         checked: preferences.autostart
@@ -1438,6 +1532,8 @@ Controls.ApplicationWindow {
                     }
                     Controls.Label {
                         text: "Authentication"
+                        color: root.ink
+                        font.bold: true
                     }
                     ThemedComboBox {
                         objectName: "authorizationSetting"
@@ -1456,6 +1552,11 @@ Controls.ApplicationWindow {
                         Layout.preferredHeight: 1
                         Layout.topMargin: 16
                         color: root.line
+                    }
+                    Controls.Label {
+                        text: "About"
+                        color: root.ink
+                        font.bold: true
                     }
                     RowLayout {
                         Layout.fillWidth: true
@@ -1476,16 +1577,20 @@ Controls.ApplicationWindow {
                             onClicked: Qt.openUrlExternally(root.repositoryUrl)
                         }
                     }
-                    ActionButton {
-                        objectName: "shortcutsToggle"
+                    Controls.Label {
                         text: "Keyboard shortcuts"
-                        symbol: root.shortcutsExpanded ? "up" : "down"
-                        Layout.topMargin: 8
-                        onClicked: root.shortcutsExpanded = !root.shortcutsExpanded
+                        color: root.ink
+                        font.bold: true
+                        Layout.topMargin: 12
                     }
-                    Repeater {
-                        objectName: "aboutShortcuts"
-                        model: root.shortcutsExpanded ? [
+                    GridLayout {
+                        columns: root.compact ? 1 : 2
+                        columnSpacing: 28
+                        rowSpacing: 8
+                        Layout.fillWidth: true
+                        Repeater {
+                            objectName: "aboutShortcuts"
+                            model: [
                             {action: "Search", keys: "Ctrl+1"},
                             {action: "Installed", keys: "Ctrl+2"},
                             {action: "Updates", keys: "Ctrl+3"},
@@ -1501,20 +1606,21 @@ Controls.ApplicationWindow {
                             {action: "Refresh source", keys: "Ctrl+M"},
                             {action: "Reload", keys: "Ctrl+R"},
                             {action: "Cancel work", keys: "Esc"}
-                        ] : []
-                        delegate: RowLayout {
-                            required property var modelData
-                            Layout.fillWidth: true
-                            spacing: 12
-                            Controls.Label {
-                                text: modelData.action
-                                color: root.muted
-                                Layout.preferredWidth: root.compact ? 150 : 220
-                            }
-                            Controls.Label {
-                                text: modelData.keys
-                                color: root.ink
+                            ]
+                            delegate: RowLayout {
+                                required property var modelData
                                 Layout.fillWidth: true
+                                Layout.minimumWidth: root.compact ? 0 : 260
+                                spacing: 12
+                                Controls.Label {
+                                    text: modelData.action
+                                    color: root.muted
+                                    Layout.fillWidth: true
+                                }
+                                Controls.Label {
+                                    text: modelData.keys
+                                    color: root.ink
+                                }
                             }
                         }
                     }
@@ -1564,8 +1670,8 @@ Controls.ApplicationWindow {
                 Layout.fillWidth: true
                 Layout.fillHeight: backend.busy || root.viewItems.length > root.shortListLimit
                 Layout.preferredHeight: root.viewItems.length === 0 && !backend.busy ? 150
-                    : Math.min(root.shortResultsHeight(), detailsPanel.visible ? root.height * (root.compact ? 0.28 : 0.42) : root.height * 0.7)
-                Layout.minimumHeight: 130
+                    : Math.min(root.shortResultsHeight(), detailsPanel.visible ? root.height * (root.compact ? 0.24 : 0.42) : root.height * 0.7)
+                Layout.minimumHeight: root.compact && detailsPanel.visible ? 100 : 130
                 visible: root.currentView !== "Settings" && root.currentView !== "Activity" &&
                     (root.viewItems.length > 0 || root.readFailures.length === 0 || backend.busy) &&
                     (root.currentView !== "Search" || root.viewItems.length > 0 || backend.busy || searchPane.text.trim().length > 0)
@@ -1581,7 +1687,8 @@ Controls.ApplicationWindow {
                         Layout.fillWidth: true
                         Layout.margins: 14
                         Controls.Label {
-                            text: backend.writing && backend.status.length ? backend.status : root.viewItems.length + (root.currentView === "Sources" ? (root.viewItems.length === 1 ? " source" : " sources") : root.currentView === "Clean" ? (root.viewItems.length === 1 ? " cleanup task" : " cleanup tasks") : root.currentView === "Updates" ? (root.viewItems.length === 1 ? " update" : " updates") : (root.viewItems.length === 1 ? " package" : " packages"))
+                            objectName: "resultsHeading"
+                            text: root.resultsHeading()
                             color: root.muted
                             font.pointSize: root.font.pointSize * 0.9
                             elide: Text.ElideRight
@@ -1986,12 +2093,20 @@ Controls.ApplicationWindow {
                             width: parent.width - 32
                             spacing: 8
                             visible: results.count === 0
-                            Controls.BusyIndicator {
-                                running: backend.busy && root.motionEnabled
-                                visible: running
+                            DeckIcon {
+                                name: "refresh"
+                                ink: root.accent
+                                visible: backend.busy
                                 anchors.horizontalCenter: parent.horizontalCenter
-                                width: 32
-                                height: 32
+                                width: 28
+                                height: 28
+                                RotationAnimation on rotation {
+                                    running: backend.busy && root.motionEnabled
+                                    from: 0
+                                    to: 360
+                                    duration: 1200
+                                    loops: Animation.Infinite
+                                }
                             }
                             Controls.Label {
                                 objectName: "emptyState"
@@ -1999,7 +2114,7 @@ Controls.ApplicationWindow {
                                 horizontalAlignment: Text.AlignHCenter
                                 wrapMode: Text.WordWrap
                                 color: root.muted
-                                visible: text.length > 0 && (!backend.busy || !root.motionEnabled)
+                                visible: text.length > 0
                                 text: root.emptyStateMessage()
                             }
                             ActionButton {
@@ -2022,7 +2137,7 @@ Controls.ApplicationWindow {
                     && (root.selected.kind !== "package" || (root.detailMatchesSelection
                         && (root.detailText().length > 0 || root.visibleScreenshots.length > 0 || detailsPanel.metadataText.length > 0)))
                 Layout.fillWidth: true
-                Layout.preferredHeight: Math.min(root.height * (root.compact ? 0.35 : 0.48), detailsPanel.idealHeight)
+                Layout.preferredHeight: Math.min(root.height * (root.compact ? 0.32 : 0.48), detailsPanel.idealHeight)
                 selected: root.selected
                 selectionIdentity: root.rowIdentity(root.selected)
                 screenshots: root.visibleScreenshots
@@ -2123,13 +2238,13 @@ Controls.ApplicationWindow {
             }
         }
     }
-    Controls.Dialog {
+    ThemedDialog {
         id: repositoriesDialog
         objectName: "repositoriesDialog"
         parent: Controls.Overlay.overlay
         anchors.centerIn: parent
         width: Math.min(root.width - 32, 850)
-        height: Math.min(root.height - 40, 640, Math.max(260, 160 + Math.min((root.repositoryReport.repositories || []).length, 4) * 125))
+        height: Math.min(root.height - 40, 640, Math.max(260, 160 + Math.min((root.repositoryReport.repositories || []).length, 5) * (width < 620 ? 110 : 76)))
         title: "Repositories"
         modal: true
         standardButtons: Controls.Dialog.Close
@@ -2158,25 +2273,27 @@ Controls.ApplicationWindow {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 clip: true
-                spacing: 8
+                spacing: 2
                 model: root.repositoryReport.repositories || []
                 Controls.ScrollBar.vertical: Controls.ScrollBar {}
                 delegate: Rectangle {
                     required property var modelData
-                    width: ListView.view.width
-                    height: repositoryCard.implicitHeight + 16
+                    width: ListView.view.width - 14
+                    height: repositoryCard.implicitHeight + 12
                     color: root.surface
                     radius: 6
-                    ColumnLayout {
+                    GridLayout {
                         id: repositoryCard
                         anchors.left: parent.left
                         anchors.right: parent.right
                         anchors.top: parent.top
-                        anchors.margins: 8
-                        spacing: 6
+                        anchors.margins: 6
+                        columns: repositoriesDialog.width < 620 ? 1 : 2
+                        columnSpacing: 12
+                        rowSpacing: 4
                         RowLayout {
                             Layout.fillWidth: true
-                            spacing: 10
+                            spacing: 6
                             Controls.CheckBox {
                                 objectName: "repositoryEnabled"
                                 checked: modelData.enabled
@@ -2195,7 +2312,7 @@ Controls.ApplicationWindow {
                                     text: modelData.title || modelData.name
                                     textFormat: Text.PlainText
                                     color: root.ink
-                                    wrapMode: Text.WordWrap
+                                    elide: Text.ElideRight
                                     Layout.fillWidth: true
                                 }
                                 Controls.Label {
@@ -2203,27 +2320,26 @@ Controls.ApplicationWindow {
                                     color: root.muted
                                     font.pointSize: root.font.pointSize * 0.9
                                 }
+                                Controls.Label {
+                                    objectName: "repositoryUrlLabel"
+                                    visible: !!modelData.url && (modelData.title || modelData.name).indexOf(modelData.url) < 0
+                                    text: modelData.url || ""
+                                    textFormat: Text.PlainText
+                                    color: root.muted
+                                    font.pointSize: root.font.pointSize * 0.9
+                                    elide: Text.ElideMiddle
+                                    Layout.fillWidth: true
+                                }
                             }
                         }
-                        Controls.Label {
-                            objectName: "repositoryUrlLabel"
-                            visible: !!modelData.url && (modelData.title || modelData.name).indexOf(modelData.url) < 0
-                            text: modelData.url || ""
-                            textFormat: Text.PlainText
-                            color: root.muted
-                            font.pointSize: root.font.pointSize * 0.9
-                            wrapMode: Text.WrapAnywhere
-                            Layout.fillWidth: true
-                        }
                         RowLayout {
-                            Layout.fillWidth: true
+                            Layout.alignment: Qt.AlignVCenter | Qt.AlignRight
                             Controls.Label {
                                 visible: modelData.priority !== null && modelData.priority !== undefined
                                 text: "Priority " + modelData.priority
                                 color: root.muted
                                 font.pointSize: root.font.pointSize * 0.9
                             }
-                            Item { Layout.fillWidth: true }
                             ActionButton {
                                 text: ""; symbol: "up"; visible: modelData.backend === "flatpak"
                                 Accessible.name: "Increase repository priority"; enabled: !backend.busy && modelData.priority < 9999
@@ -2265,7 +2381,7 @@ Controls.ApplicationWindow {
             }
         }
     }
-    Controls.Dialog {
+    ThemedDialog {
         id: addRepositoryDialog
         objectName: "addRepositoryDialog"
         readonly property bool validName: /^[A-Za-z0-9._][A-Za-z0-9._-]*$/.test(repositoryName.text.trim())
@@ -2303,10 +2419,10 @@ Controls.ApplicationWindow {
                 wrapMode: Text.WordWrap
                 Layout.fillWidth: true
             }
-            Controls.ComboBox { id: repositoryScope; objectName: "repositoryScope"; model: ["User", "System"]; Accessible.name: "Installation scope"; Layout.fillWidth: true }
+            ThemedComboBox { id: repositoryScope; objectName: "repositoryScope"; model: ["User", "System"]; Accessible.name: "Installation scope"; Layout.fillWidth: true }
         }
     }
-    Controls.Dialog {
+    ThemedDialog {
         id: sourceFailuresDialog
         objectName: "sourceFailuresDialog"
         anchors.centerIn: parent
@@ -2386,7 +2502,7 @@ Controls.ApplicationWindow {
             }
         }
     }
-    Controls.Dialog {
+    ThemedDialog {
         id: screenshotDialog
         objectName: "screenshotDialog"
         anchors.centerIn: parent
@@ -2421,13 +2537,13 @@ Controls.ApplicationWindow {
             }
         }
     }
-    Controls.Dialog {
+    ThemedDialog {
         id: confirmation
         objectName: "confirmationDialog"
         parent: Controls.Overlay.overlay
         anchors.centerIn: parent
         width: Math.min(root.width - 32, 600)
-        height: Math.min(root.height - 32, Math.max(190, confirmationBody.implicitHeight + 95))
+        height: Math.min(root.height - 32, Math.max(230, confirmationBody.implicitHeight + 130))
         background: Rectangle { color: root.surface; radius: 12; border.color: root.line }
         title: "Confirm changes"
         modal: true

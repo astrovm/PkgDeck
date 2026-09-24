@@ -22,6 +22,8 @@ TestCase {
         property string confirmation: ""
         property string confirmation_data: "{}"
         property string source_catalog: "[]"
+        property int sourceChecks: 0
+        function checkSources() { sourceChecks++; }
         property string report_state: "{}"
         property string manifest_preview: "{}"
         property string lastInventorySelection: ""
@@ -106,6 +108,7 @@ TestCase {
     function init() {
         fake.repositories = "{}";
         fake.lastRepositoryChange = "";
+        fake.sourceChecks = 0;
         fake.rows = "[]";
         fake.details = "{}";
         fake.status = "Ready";
@@ -720,13 +723,19 @@ TestCase {
         const add = findChild(browser, "addPackageButton");
         const activity = findChild(browser, "activityIndicator");
         const sources = findChild(browser, "sourceFilter");
+        const compactActivity = findChild(browser, "compactActivityIndicator");
+        const compactSources = findChild(browser, "compactSourceFilter");
         const navigation = findChild(browser, "navigationView");
-        for (const width of [760, 850, 920, 960]) {
+        for (const width of [360, 760, 850, 920, 960]) {
             browser.width = width;
             waitForRendering(browser.contentItem);
             compare(browser.compact, width < 960);
             compare(navigation.visible, width < 960);
-            for (const button of [add, activity, sources]) {
+            verify(!add.visible);
+            const buttons = width < 960 ? [compactActivity, compactSources] : [activity, sources];
+            for (const button of buttons) {
+                verify(button.visible);
+                verify(button.text.length > 0);
                 const left = button.mapToItem(browser.contentItem, 0, 0).x;
                 const right = button.mapToItem(browser.contentItem, button.width, 0).x;
                 verify(left >= 0 && right <= width, button.objectName + " clips at " + width);
@@ -770,17 +779,19 @@ TestCase {
         keyClick(Qt.Key_L, Qt.ControlModifier);
         tryCompare(list, "activeFocus", true);
     }
-    function test_file_or_link_entry_is_global_and_validates_links() {
+    function test_file_or_link_entry_is_contextual_and_validates_links() {
         const add = findChild(browser, "addPackageButton");
         const activity = findChild(browser, "activityIndicator");
         const filter = findChild(browser, "sourceFilter");
+        const compactActivity = findChild(browser, "compactActivityIndicator");
+        const compactFilter = findChild(browser, "compactSourceFilter");
         browser.openView("Search");
         verify(add.visible);
         for (const width of [1100, 360]) {
             browser.width = width;
             waitForRendering(browser.contentItem);
-            verify(activity.visible);
-            verify(filter.visible);
+            verify((width < 960 ? compactActivity : activity).visible);
+            verify((width < 960 ? compactFilter : filter).visible);
             verify(add.visible);
             const right = add.mapToItem(browser.contentItem, add.width, 0).x;
             verify(right <= browser.width);
@@ -805,11 +816,11 @@ TestCase {
         clickDelegate(preview);
         compare(fake.lastOpenedInput, "flatpak+https://example.invalid/app.flatpakref");
         browser.openView("Installed");
-        verify(add.visible);
+        verify(!add.visible);
         browser.openView("Settings");
-        verify(add.visible);
+        verify(!add.visible);
         verify(!filter.visible);
-        verify(activity.visible);
+        verify(compactActivity.visible);
     }
     function test_returning_to_search_reloads_visible_query() {
         browser.openView("Search");
@@ -872,6 +883,25 @@ TestCase {
         verify(!findChild(browser, "columnHeader0").visible);
         compare(findChild(browser, "emptyState").text, "You're up to date");
     }
+    function test_new_search_does_not_show_previous_query_results() {
+        browser.openView("Search");
+        const search = findChild(browser, "searchField");
+        search.text = "vlc";
+        browser.reload();
+        fake.rows = JSON.stringify([{kind: "package", name: "vlc", source: "apt", installed: null, candidate: "1", scope: "system", summary: "Synthetic player"}]);
+        waitForRendering(browser.contentItem);
+        compare(browser.viewItems.length, 1);
+
+        search.text = "firefox";
+        fake.simulateLoading = true;
+        search.forceActiveFocus();
+        keyClick(Qt.Key_Return);
+        compare(browser.retainingResults, false);
+        compare(browser.viewItems.length, 0);
+        compare(findChild(browser, "resultsHeading").text, "Searching packages…");
+        verify(findChild(browser, "emptyState").visible);
+        compare(findChild(browser, "emptyState").text, "Searching packages…");
+    }
     function test_compact_installed_filter_has_its_own_row() {
         browser.width = 360;
         browser.openView("Installed");
@@ -886,12 +916,15 @@ TestCase {
         verify(about.text.indexOf("9.9.9-test") >= 0);
         const shortcuts = findChild(browser, "aboutShortcuts");
         verify(shortcuts !== null);
-        compare(shortcuts.count, 0);
+        compare(shortcuts.count, 15);
+        verify(findChild(browser, "shortcutsToggle") === null);
         waitForRendering(browser.contentItem);
-        clickDelegate(findChild(browser, "shortcutsToggle"));
-        tryCompare(shortcuts, "count", 15);
         compare(shortcuts.itemAt(0).children[1].text, "Ctrl+1");
         compare(shortcuts.itemAt(11).children[1].text, "Ctrl+Shift+U");
+        for (const name of ["animationsSetting", "backgroundModeSetting"]) {
+            const setting = findChild(browser, name);
+            compare(setting.contentItem.color.toString(), browser.ink.toString());
+        }
         waitForRendering(browser.contentItem);
         const appearance = findChild(browser, "appearanceSetting");
         const at = appearance.mapToItem(browser.contentItem, 0, 0);
@@ -1042,13 +1075,13 @@ TestCase {
         compare(browser.viewItems[0].name, "fire");
         compare(browser.viewItems[0].source, "apt");
         compare(browser.viewItems[3].name, "zzz");
-        // Submitting a fresh search resets to best-match order and forces
-        // a native query instead of serving the cached snapshot.
+        // Submitting a search resets to best-match order without discarding
+        // unrelated cached views.
         search.forceActiveFocus();
         keyClick(Qt.Key_Return);
         compare(browser.sortColumn, "");
         compare(browser.viewItems[0].name, "fire");
-        compare(fake.lastForce, true);
+        compare(fake.lastForce, false);
         compare(fake.lastView, "Search");
     }
     function test_activity_navigation_stays_available_during_write() {
@@ -1233,7 +1266,10 @@ TestCase {
         verify(galleryPosition.y + gallery.height <= panel.height - 12);
         const actions = findChild(browser, "updatesActions");
         const actionsPosition = actions.mapToItem(browser.contentItem, 0, 0);
-        verify(actionsPosition.y + actions.height <= browser.contentItem.height);
+        verify(actionsPosition.y + actions.height <= browser.contentItem.height,
+            "actions: y=" + actionsPosition.y + " height=" + actions.height +
+            " window=" + browser.contentItem.height + " results=" + findChild(browser, "resultsBox").height +
+            " details=" + panel.height);
         mouseClick(thumbnail);
         const viewer = findChild(browser, "screenshotDialog");
         tryCompare(viewer, "opened", true);
@@ -1295,6 +1331,7 @@ TestCase {
         clickDelegate(findChild(browser, "repositoriesButton"));
         const dialog = findChild(browser, "repositoriesDialog");
         tryCompare(dialog, "visible", true);
+        compare(dialog.background.color.toString(), browser.surface.toString());
         const list = findChild(browser, "repositoryList");
         tryCompare(list, "count", 2);
         tryVerify(() => list.itemAtIndex(1) !== null);
@@ -1509,7 +1546,7 @@ TestCase {
         browser.openView("Installed");
         const filter = findChild(browser, "sourceFilter");
         verify(filter !== null);
-        compare(filter.text, "Available sources");
+        compare(filter.text, "Filter sources");
         const popup = findChild(browser, "sourcePopup");
         verify(popup !== null);
         popup.open();
@@ -1533,7 +1570,7 @@ TestCase {
         browser.applySourceDraft();
         browser.viewSourceFilters = ({});
         compare(browser.sourceSelection, "");
-        compare(filter.text, "Available sources");
+        compare(filter.text, "Filter sources");
         const field = findChild(browser, "installedFilterField");
         verify(field !== null);
         browser.openView("Installed");
@@ -1630,8 +1667,9 @@ TestCase {
         browser.openView("Search");
         const popup = findChild(browser, "sourcePopup");
         verify(popup !== null);
-        popup.open();
+        clickDelegate(findChild(browser, "sourceFilter"));
         tryCompare(popup, "visible", true);
+        compare(fake.sourceChecks, 1);
         verify(browser.pickerItems().length > 0);
         const npmCheck = browser.sourceCheckAt(browser.sourceIds.indexOf("npm"));
         verify(npmCheck !== null);

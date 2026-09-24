@@ -109,6 +109,9 @@ pub mod ffi {
             force: bool,
         );
         #[qinvokable]
+        #[cxx_name = "checkSources"]
+        fn check_sources(self: Pin<&mut PackageController>);
+        #[qinvokable]
         fn select(self: Pin<&mut PackageController>, index: i32);
         #[qinvokable]
         #[cxx_name = "retrySource"]
@@ -472,9 +475,18 @@ struct Worker {
     cancel: Cancellation,
     job: Job,
 }
+struct CatalogWorker {
+    handle: thread::JoinHandle<()>,
+    receiver: mpsc::Receiver<Vec<Source>>,
+    cancel: Cancellation,
+}
 impl Drop for Controller {
     fn drop(&mut self) {
         if let Some(worker) = self.worker.take() {
+            worker.cancel.cancel();
+            let _ = worker.handle.join();
+        }
+        if let Some(worker) = self.catalog_worker.take() {
             worker.cancel.cancel();
             let _ = worker.handle.join();
         }
@@ -521,6 +533,9 @@ pub struct Controller {
     prefetched: BTreeMap<String, (Instant, Payload)>,
     background: bool,
     prefetch: Vec<String>,
+    active_view: String,
+    catalog_checked: bool,
+    catalog_worker: Option<CatalogWorker>,
     source_filter: Vec<String>,
     sudo: bool,
     worker: Option<Worker>,
@@ -576,9 +591,21 @@ impl Default for Controller {
             prefetched: BTreeMap::new(),
             background: false,
             prefetch: prefetch_views(),
+            active_view: "Search".into(),
+            catalog_checked: false,
+            catalog_worker: None,
             source_filter: Vec::new(),
             sudo: false,
             worker: None,
+        }
+    }
+}
+impl Controller {
+    fn next_prefetch(&mut self) -> Option<String> {
+        if self.active_view == "Search" {
+            None
+        } else {
+            self.prefetch.pop()
         }
     }
 }
@@ -827,7 +854,7 @@ fn plan_checked_upgrade(packages: &[Package], identities: &str) -> CheckedPlan {
 /// and elevation. The Installed filter is client-side, so it stays out of
 /// the key and shares the loaded rows while typing.
 fn prefetch_views() -> Vec<String> {
-    ["Installed", "Updates", "Sources", "Clean"]
+    ["Installed", "Updates", "Clean"]
         .into_iter()
         .rev()
         .map(str::to_owned)
@@ -1487,13 +1514,11 @@ impl ffi::PackageController {
             let sources_view = matches!(&job, Job::Load(view, _) | Job::RetrySource(view, ..) if view == "Sources");
             let mut send = |mut reply| {
                 match &mut reply {
-                    Reply::Partial(report)
-                    | Reply::Inventory(report)
-                    | Reply::Done(Ok(
+                    Reply::Done(Ok(
                         Payload::Packages(report) | Payload::RetryPackages(_, report),
                     )) => {
                         for package in &mut report.packages {
-                            crate::metadata::enrich(package);
+                            crate::metadata::enrich_cached(package);
                         }
                     }
                     Reply::Done(Ok(Payload::Details(details))) => {
@@ -1617,14 +1642,21 @@ impl ffi::PackageController {
             .filter(|s| !s.is_empty())
             .map(str::to_owned)
             .collect();
-        if !["Search", "Installed", "Updates", "Sources", "Clean"].contains(&view.as_str())
-            || (view == "Search" && query.trim().is_empty())
-        {
+        if !["Search", "Installed", "Updates", "Sources", "Clean"].contains(&view.as_str()) {
             return;
         }
         const KNOWN: &[&str] = pkgdeck_core::backends::BACKEND_IDS;
         if sources.iter().any(|s| !KNOWN.contains(&s.as_str())) {
             self.set_status("Unknown source.".into());
+            return;
+        }
+        self.as_mut().rust_mut().active_view = view.clone();
+        if view == "Search" && query.trim().is_empty() {
+            // Seed the selected sources before the first query starts.
+            if self.rust().worker.is_none() {
+                self.as_mut().rust_mut().source_filter = sources;
+                self.as_mut().rust_mut().sudo = sudo;
+            }
             return;
         }
         let key = cache_key(&view, &query, &sources, sudo);
@@ -2388,6 +2420,7 @@ impl ffi::PackageController {
                 if matches!(self.rust().queued, Some(Job::Load(..))) {
                     return;
                 }
+                self.as_mut().rust_mut().catalog_checked = true;
                 let rows: Vec<_> = sources.iter().map(source_row).collect();
                 let failures: Vec<_> = rows
                     .iter()
@@ -2487,9 +2520,51 @@ impl ffi::PackageController {
             .prefetched
             .insert(key, (Instant::now(), Payload::Packages(report)));
     }
+    pub fn check_sources(mut self: Pin<&mut Self>) {
+        self.as_mut().begin_catalog_check(|token| {
+            pkgdeck_core::backends::native_engine(&[], true, Authorization::Polkit, token)
+                .map(|mut engine| engine.discover(token))
+                .unwrap_or_default()
+        });
+    }
+    fn begin_catalog_check(
+        mut self: Pin<&mut Self>,
+        discover: impl FnOnce(&Cancellation) -> Vec<Source> + Send + 'static,
+    ) {
+        if self.rust().catalog_checked || self.rust().catalog_worker.is_some() {
+            return;
+        }
+        // Source availability uses a separate worker only when requested, so
+        // startup discovery cannot slow the first search.
+        let cancel = Cancellation::default();
+        let token = cancel.clone();
+        let (sender, receiver) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            let _ = sender.send(discover(&token));
+        });
+        self.as_mut().rust_mut().catalog_worker = Some(CatalogWorker {
+            handle,
+            receiver,
+            cancel,
+        });
+    }
     pub fn poll(mut self: Pin<&mut Self>) {
+        if let Some(worker) = &self.rust().catalog_worker {
+            if let Ok(sources) = worker.receiver.try_recv() {
+                let worker = self.as_mut().rust_mut().catalog_worker.take().unwrap();
+                let _ = worker.handle.join();
+                if !self.rust().catalog_checked {
+                    let rows: Vec<_> = sources.iter().map(source_row).collect();
+                    self.as_mut().set_source_catalog(encoded(rows));
+                    self.as_mut().rust_mut().catalog_checked = true;
+                }
+            }
+        }
         if self.rust().worker.is_none() && self.rust().pending.is_none() {
-            while let Some(view) = self.as_mut().rust_mut().prefetch.pop() {
+            loop {
+                // Full inventory preloads can hold up a foreground search.
+                let view = self.as_mut().rust_mut().next_prefetch();
+                let Some(view) = view else { break };
                 let key = cache_key(&view, "", &self.rust().source_filter, self.rust().sudo);
                 if self
                     .rust()
@@ -2549,6 +2624,7 @@ impl ffi::PackageController {
                                     if let Payload::Sources(sources) = &payload {
                                         let rows: Vec<_> = sources.iter().map(source_row).collect();
                                         self.as_mut().set_source_catalog(encoded(rows));
+                                        self.as_mut().rust_mut().catalog_checked = true;
                                     }
                                     let key = cache_key(
                                         view,
@@ -4375,11 +4451,72 @@ mod tests {
     }
 
     #[test]
-    fn prefetch_order_is_bounded_and_never_searches() {
-        let mut queue = prefetch_views();
-        let order: Vec<_> = std::iter::from_fn(|| queue.pop()).collect();
-        assert_eq!(order, ["Installed", "Updates", "Sources", "Clean"]);
-        assert!(queue.is_empty());
+    fn prefetch_waits_until_search_is_left() {
+        let mut controller = Controller::default();
+        assert_eq!(controller.next_prefetch(), None);
+        controller.active_view = "Installed".into();
+        let order: Vec<_> = std::iter::from_fn(|| controller.next_prefetch()).collect();
+        assert_eq!(order, ["Installed", "Updates", "Clean"]);
+        assert!(controller.prefetch.is_empty());
+    }
+
+    #[test]
+    fn source_catalog_check_is_lazy_and_single_flight() {
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        assert!(controller.rust().catalog_worker.is_none());
+        controller.as_mut().begin_catalog_check(|_| {
+            vec![Source {
+                backend: "apt".into(),
+                capabilities: vec![Capability::Search],
+                availability: Ok(Availability::Available),
+            }]
+        });
+        controller.as_mut().begin_catalog_check(|_| {
+            vec![Source {
+                backend: "unexpected".into(),
+                capabilities: vec![],
+                availability: Ok(Availability::Available),
+            }]
+        });
+        for _ in 0..100 {
+            controller.as_mut().poll();
+            if controller.rust().catalog_checked {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(controller.rust().catalog_checked);
+        let catalog: Value =
+            serde_json::from_str(&controller.source_catalog().to_string()).unwrap();
+        assert_eq!(catalog.as_array().unwrap().len(), 1);
+        assert_eq!(catalog[0]["source"], "apt");
+        assert_eq!(catalog[0]["availability_kind"], "available");
+        assert!(!*controller.busy());
+        assert!(controller.rust().worker.is_none());
+        controller.as_mut().begin_catalog_check(|_| Vec::new());
+        assert!(controller.rust().catalog_worker.is_none());
+    }
+
+    #[test]
+    fn dropping_controller_cancels_source_catalog_check() {
+        let cancel = Cancellation::default();
+        let token = cancel.clone();
+        let (sender, receiver) = mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            while !token.requested() {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            let _ = sender.send(Vec::<Source>::new());
+        });
+        let mut controller = Controller::default();
+        controller.catalog_worker = Some(CatalogWorker {
+            handle,
+            receiver,
+            cancel: cancel.clone(),
+        });
+        drop(controller);
+        assert!(cancel.requested());
     }
 
     #[test]
