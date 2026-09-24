@@ -25,6 +25,7 @@ extern "C" int pkgdeck_run_gui(int argc, char **argv, const char *version) {
         if (opening.isEmpty()
             && (argument.startsWith(QLatin1Char('/'))
                 || argument.startsWith(QStringLiteral("file://"))
+                || argument.startsWith(QStringLiteral("https://"))
                 || argument.startsWith(QStringLiteral("flatpak+https://")))) {
             opening = argument;
         }

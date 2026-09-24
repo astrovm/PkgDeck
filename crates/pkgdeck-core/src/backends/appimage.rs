@@ -69,6 +69,11 @@ impl AppImage {
     fn scope(&self) -> Scope {
         Scope::User { uid: self.uid }
     }
+    pub fn import_scope(&self) -> Scope {
+        Scope::Environment {
+            path: self.root.clone(),
+        }
+    }
     fn invalid(reason: impl Into<String>) -> EngineError {
         EngineError::InvalidResponse {
             backend: "appimage".into(),
@@ -437,6 +442,18 @@ impl AppImage {
             .collect())
     }
     fn import(&self, id: &PackageId, cancel: &Cancellation) -> Result<(), EngineError> {
+        if id
+            .reference
+            .as_deref()
+            .is_some_and(|value| value.starts_with("artifact:appimage:"))
+        {
+            let staged = crate::artifact::stage(id, cancel)?
+                .ok_or_else(|| Self::invalid("missing AppImage"))?;
+            let mut local = id.clone();
+            local.name = staged.path().to_string_lossy().into_owned();
+            local.reference = Some(Self::digest(staged.path())?);
+            return self.import(&local, cancel);
+        }
         if cancel.requested() {
             return Err(EngineError::Cancelled);
         }
@@ -812,6 +829,51 @@ mod tests {
         assert!(backend.installed(&cancel).unwrap().is_empty());
         assert!(source.exists());
         fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn imports_reviewed_https_appimage_without_executing_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = std::env::var_os("PKGDECK_REMOTE_APPIMAGE_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                std::env::temp_dir().join(format!("pkgdeck-remote-appimage-{}", std::process::id()))
+            });
+        if std::env::var_os("PKGDECK_REMOTE_APPIMAGE_CHILD").is_none() {
+            let _ = fs::remove_dir_all(&base);
+            fs::create_dir_all(&base).unwrap();
+            let image = base.join("payload");
+            type2(&image);
+            let curl = base.join("curl");
+            fs::write(&curl, format!("#!/bin/sh\nfor arg; do\n if [ \"$previous\" = '--output' ]; then output=\"$arg\"; fi\n previous=\"$arg\"\ndone\n/bin/cp '{}' \"$output\"\n", image.display())).unwrap();
+            fs::set_permissions(&curl, fs::Permissions::from_mode(0o755)).unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "backends::appimage::tests::imports_reviewed_https_appimage_without_executing_it", "--nocapture"])
+                .env("PKGDECK_REMOTE_APPIMAGE_CHILD", "1")
+                .env("PKGDECK_REMOTE_APPIMAGE_DIR", &base)
+                .env("XDG_DATA_HOME", base.join("data"))
+                .env("PATH", &base)
+                .output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            fs::remove_dir_all(base).unwrap();
+            return;
+        }
+        let cancel = Cancellation::default();
+        let url = "https://example.invalid/Synthetic.AppImage";
+        let package = crate::artifact::inspect(url, &cancel).unwrap();
+        assert_eq!(package.id.scope, AppImage::native().import_scope());
+        let mut backend = AppImage::native();
+        backend
+            .execute(&Operation::Install(package.id), &cancel, &mut |_| {})
+            .unwrap();
+        let installed = backend.installed(&cancel).unwrap();
+        assert_eq!(installed.len(), 1);
+        assert_eq!(installed[0].id.backend, "appimage");
+        assert!(backend.root.join(&installed[0].id.name).is_file());
     }
 
     #[test]

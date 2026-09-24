@@ -741,7 +741,11 @@ TestCase {
         const link = findChild(browser, "packageLink");
         const preview = findChild(browser, "previewPackageLink");
         link.text = "https://example.invalid/app.flatpakref";
+        verify(preview.enabled);
+        link.text = "http://example.invalid/app.rpm";
         verify(!preview.enabled);
+        link.text = "https://example.invalid/app.rpm";
+        verify(preview.enabled);
         link.text = "flatpak+https://example.invalid/app.flatpakref";
         verify(preview.enabled);
         clickDelegate(preview);

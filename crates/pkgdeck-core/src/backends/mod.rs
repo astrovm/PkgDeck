@@ -914,6 +914,41 @@ impl<T: Transport> Backend for Flatpak<T> {
         progress: &mut dyn FnMut(Progress),
     ) -> Result<OperationOutcome, EngineError> {
         if let Operation::Install(id) = operation {
+            if id
+                .reference
+                .as_deref()
+                .is_some_and(|value| value.starts_with("artifact:flatpak:"))
+            {
+                let staged = crate::artifact::stage(id, cancel)?
+                    .ok_or_else(|| invalid("flatpak", "missing bundle"))?;
+                let (system, scope) = match id.scope {
+                    Scope::System => (true, "--system"),
+                    Scope::User { uid } if uid == rustix::process::getuid().as_raw() => {
+                        (false, "--user")
+                    }
+                    _ => return Err(invalid("flatpak", "invalid Flatpak scope")),
+                };
+                progress(Progress::Message(format!(
+                    "Installing Flatpak bundle {}.",
+                    id.name
+                )));
+                let result = self.call(
+                    &[
+                        scope,
+                        "install",
+                        "--noninteractive",
+                        "--assumeyes",
+                        "--bundle",
+                        &staged.path().to_string_lossy(),
+                    ],
+                    cancel,
+                    true,
+                    system,
+                )?;
+                return Ok(OperationOutcome {
+                    cancellation_deferred: result.cancellation_deferred,
+                });
+            }
             if let Some(bytes) = crate::flatpak_ref::verified_source(id, cancel)? {
                 let (system, scope) = match id.scope {
                     Scope::System => (true, "--system"),
@@ -1380,7 +1415,14 @@ impl<T: Transport> Apt<T> {
             Operation::Remove(id) => ("remove", id),
             _ => return Ok(None),
         };
-        let target = if matches!(operation, Operation::Install(_)) {
+        let artifact = if matches!(operation, Operation::Install(_)) {
+            crate::artifact::stage(id, cancel)?
+        } else {
+            None
+        };
+        let target = if let Some(staged) = artifact.as_ref() {
+            staged.path().display().to_string()
+        } else if matches!(operation, Operation::Install(_)) {
             crate::local_deb::verified_path(id, cancel)?
                 .map_or_else(|| self.target(id), |path| Ok(path.display().to_string()))?
         } else {
@@ -1554,16 +1596,25 @@ impl<T: Transport> Backend for Apt<T> {
         cancel: &Cancellation,
         progress: &mut dyn FnMut(Progress),
     ) -> Result<OperationOutcome, EngineError> {
+        let staged_artifact = match operation {
+            Operation::Install(id) => crate::artifact::stage(id, cancel)?,
+            _ => None,
+        };
         let staged = match operation {
             Operation::Install(id) => crate::local_deb::stage(id, cancel)?,
             _ => None,
         };
         let action = match operation {
             Operation::Refresh { backend } if backend == "apt" => AptAction::Refresh,
-            Operation::Install(id) => match staged.as_ref() {
-                Some(archive) => AptAction::InstallLocal(archive.path().to_owned()),
-                None => AptAction::Install(self.target(id)?),
-            },
+            Operation::Install(id) => {
+                if let Some(archive) = staged_artifact.as_ref() {
+                    AptAction::InstallLocal(archive.path().to_owned())
+                } else if let Some(archive) = staged.as_ref() {
+                    AptAction::InstallLocal(archive.path().to_owned())
+                } else {
+                    AptAction::Install(self.target(id)?)
+                }
+            }
             Operation::Remove(id) => AptAction::Remove(self.target(id)?),
             Operation::Upgrade(id) => AptAction::Upgrade(self.target(id)?),
             Operation::UpgradeAll { backend } if backend == "apt" => AptAction::UpgradeAll,
@@ -2443,6 +2494,63 @@ impl<T: Transport> Backend for SystemManager<T> {
     ) -> Result<OperationOutcome, EngineError> {
         if operation.backend() != self.kind.id() {
             return Err(invalid(self.kind.id(), "foreign operation"));
+        }
+        let artifact = match operation {
+            Operation::Install(id)
+                if id
+                    .reference
+                    .as_deref()
+                    .is_some_and(|value| value.starts_with("artifact:")) =>
+            {
+                if !matches!(
+                    self.kind,
+                    ManagerKind::Dnf
+                        | ManagerKind::Pacman
+                        | ManagerKind::Zypper
+                        | ManagerKind::Snap
+                ) {
+                    return Err(invalid(self.kind.id(), "unsupported local archive"));
+                }
+                crate::artifact::stage(id, cancel)?
+            }
+            _ => None,
+        };
+        if let Some(staged) = artifact.as_ref() {
+            let path = staged.path().as_os_str().to_os_string();
+            let args: Vec<OsString> = match self.kind {
+                ManagerKind::Dnf => vec!["-y".into(), "install".into(), "--".into(), path],
+                ManagerKind::Pacman => vec!["-U".into(), "--noconfirm".into(), "--".into(), path],
+                ManagerKind::Zypper => vec![
+                    "--non-interactive".into(),
+                    "install".into(),
+                    "--auto-agree-with-licenses".into(),
+                    "--".into(),
+                    path,
+                ],
+                ManagerKind::Snap => {
+                    let assertion = staged
+                        .assertion()
+                        .ok_or_else(|| invalid("snap", "matching assertion is required"))?;
+                    bytes(
+                        "snap",
+                        self.call(
+                            vec!["ack".into(), assertion.as_os_str().to_os_string()],
+                            cancel,
+                            true,
+                        )?,
+                    )?;
+                    vec!["install".into(), path]
+                }
+            };
+            progress(Progress::Message(format!(
+                "Installing local {} package.",
+                self.kind.id()
+            )));
+            let result = self.call(args, cancel, true)?;
+            bytes(self.kind.id(), result.clone())?;
+            return Ok(OperationOutcome {
+                cancellation_deferred: result.cancellation_deferred,
+            });
         }
         let name = match operation {
             Operation::Refresh { .. } => None,

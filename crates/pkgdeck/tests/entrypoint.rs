@@ -19,6 +19,12 @@ fn packaged_desktop_entry_passes_supported_inputs_to_the_gui() {
     for supported in [
         "application/vnd.debian.binary-package",
         "application/vnd.flatpak.ref",
+        "application/vnd.flatpak",
+        "application/vnd.flatpak.repo",
+        "application/x-rpm",
+        "application/vnd.snap",
+        "application/x-pacman-package",
+        "text/x-suse-ymp",
         "application/vnd.appimage",
         "x-scheme-handler/flatpak+https",
     ] {

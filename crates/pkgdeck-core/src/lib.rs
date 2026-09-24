@@ -10,6 +10,7 @@ pub mod inspection;
 pub mod process;
 
 pub mod activity;
+pub mod artifact;
 pub mod background;
 pub mod engine;
 pub mod flatpak_ref;
@@ -20,3 +21,4 @@ pub mod package;
 pub mod backends;
 
 pub mod repositories;
+pub mod repository_input;
