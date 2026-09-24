@@ -96,6 +96,7 @@ TestCase {
         App.Browser {
             backend: fake
             logoIconSource: Qt.resolvedUrl("../../assets/logo.svg")
+            repositoryIconSource: Qt.resolvedUrl("../../assets/github.svg")
         }
     }
     function initTestCase() {
@@ -1518,6 +1519,23 @@ TestCase {
         verify(logo !== null);
         verify(logo.source.toString().indexOf("logo.svg") >= 0);
         tryCompare(logo, "status", Image.Ready);
+    }
+    function test_signature_fits_sidebar_and_compact_about() {
+        const footer = findChild(browser, "signatureFooter");
+        const icon = findChild(browser, "sidebarRepositoryIcon");
+        const link = findChild(browser, "sidebarRepositoryLink");
+        verify(footer.visible);
+        verify(footer.width <= 164);
+        verify(footer.y > browser.height / 2);
+        verify(link.x + link.width <= footer.width);
+        verify(findChild(browser, "signaturePrefix").width >= findChild(browser, "signaturePrefix").implicitWidth);
+        verify(findChild(browser, "signatureAuthor").width >= findChild(browser, "signatureAuthor").implicitWidth);
+        tryCompare(icon, "status", Image.Ready);
+        browser.width = 380;
+        browser.openView("About");
+        wait(30);
+        verify(!footer.visible);
+        verify(findChild(browser, "compactSignature").visible);
     }
     function test_upgrade_all_hint() {
         browser.openView("Updates");

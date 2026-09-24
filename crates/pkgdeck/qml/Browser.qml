@@ -808,6 +808,7 @@ Controls.ApplicationWindow {
     }
 
     property url logoIconSource: "qrc:/pkgdeck/logo.svg"
+    property url repositoryIconSource: dark ? "qrc:/pkgdeck/github-dark.svg" : "qrc:/pkgdeck/github.svg"
     readonly property url repositoryUrl: "https://github.com/astrovm/PkgDeck"
     width: 1100
     height: 760
@@ -1084,6 +1085,42 @@ Controls.ApplicationWindow {
                     }
                 }
                 Item { Layout.fillHeight: true }
+                RowLayout {
+                    objectName: "signatureFooter"
+                    Layout.fillWidth: true
+                    spacing: 3
+                    Controls.Label { objectName: "signaturePrefix"; text: "Made with"; color: root.muted; font.pointSize: root.font.pointSize * 0.8 }
+                    DeckIcon { name: "heart"; ink: "#e34b5f"; Layout.preferredWidth: 13; Layout.preferredHeight: 13 }
+                    Controls.Label { objectName: "signatureAuthor"; text: "by astro"; color: root.muted; font.pointSize: root.font.pointSize * 0.8 }
+                    Controls.ToolButton {
+                        objectName: "sidebarRepositoryLink"
+                        implicitWidth: 22
+                        implicitHeight: 22
+                        padding: 0
+                        Accessible.name: "Open PkgDeck on GitHub"
+                        Controls.ToolTip.visible: hovered
+                        Controls.ToolTip.text: Accessible.name
+                        onClicked: Qt.openUrlExternally(root.repositoryUrl)
+                        background: Rectangle {
+                            radius: 5
+                            color: parent.hovered ? root.selection : "transparent"
+                            border.color: parent.activeFocus ? root.accent : "transparent"
+                        }
+                        contentItem: Item {
+                            Image {
+                                objectName: "sidebarRepositoryIcon"
+                                anchors.centerIn: parent
+                                width: 16
+                                height: 16
+                                source: root.repositoryIconSource
+                                sourceSize.width: Math.ceil(width * (root.screen ? root.screen.devicePixelRatio : 1))
+                                sourceSize.height: Math.ceil(height * (root.screen ? root.screen.devicePixelRatio : 1))
+                                fillMode: Image.PreserveAspectFit
+                                Accessible.ignored: true
+                            }
+                        }
+                    }
+                }
             }
         }
         ColumnLayout {
@@ -1524,6 +1561,15 @@ Controls.ApplicationWindow {
                                 Layout.fillWidth: true
                             }
                         }
+                    }
+                    RowLayout {
+                        objectName: "compactSignature"
+                        visible: root.compact
+                        Layout.topMargin: 12
+                        spacing: 4
+                        Controls.Label { text: "Made with"; color: root.muted }
+                        DeckIcon { name: "heart"; ink: "#e34b5f"; Layout.preferredWidth: 14; Layout.preferredHeight: 14 }
+                        Controls.Label { text: "by astro"; color: root.muted }
                     }
                 }
             }
