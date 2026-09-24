@@ -119,6 +119,32 @@ fn safe_name(name: &str) -> bool {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
 }
+fn safe_repo_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 128
+        && !name.starts_with('-')
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-:".contains(&byte))
+}
+fn safe_repo_key(source: &str) -> bool {
+    if crate::artifact::https_source(source) {
+        return true;
+    }
+    source
+        .strip_prefix("file:///etc/pki/rpm-gpg/")
+        .is_some_and(|name| {
+            let name = name
+                .replace("$releasever", "release")
+                .replace("$basearch", "arch")
+                .replace("$arch", "arch");
+            !name.is_empty()
+                && !name.starts_with('.')
+                && name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+        })
+}
 fn unique_keys(text: &str, keys: &[&str]) -> bool {
     keys.iter().all(|key| {
         text.lines()
@@ -129,19 +155,22 @@ fn unique_keys(text: &str, keys: &[&str]) -> bool {
     })
 }
 fn validate_repo_section(name: &str, section: &str) -> Result<(), EngineError> {
-    let url = value(section, "baseurl").ok_or_else(|| invalid("repository lacks a base URL"))?;
+    let locations: Vec<_> = ["baseurl", "metalink", "mirrorlist"]
+        .into_iter()
+        .filter_map(|key| value(section, key))
+        .collect();
     if !unique_keys(
         section,
         &["baseurl", "gpgcheck", "gpgkey", "mirrorlist", "metalink"],
-    ) || value(section, "mirrorlist").is_some()
-        || value(section, "metalink").is_some()
-        || !safe_name(name)
-        || !crate::artifact::https_source(url)
+    ) || locations.len() != 1
+        || !safe_repo_name(name)
+        || !crate::artifact::https_source(locations[0])
         || value(section, "gpgcheck") != Some("1")
-        || value(section, "gpgkey").is_some_and(|key| !crate::artifact::https_source(key))
+        || value(section, "gpgkey")
+            .is_some_and(|keys| keys.is_empty() || !keys.split_whitespace().all(safe_repo_key))
     {
         return Err(invalid(
-            "every repository needs an HTTPS base URL and enabled GPG checks",
+            "every repository needs one HTTPS source and enabled GPG checks",
         ));
     }
     Ok(())
@@ -201,7 +230,10 @@ fn validate(
                     .join("\n");
                 validate_repo_section(section_name, &section)?;
             }
-            let url = value(text, "baseurl").unwrap_or("");
+            let url = ["baseurl", "metalink", "mirrorlist"]
+                .into_iter()
+                .find_map(|key| value(text, key))
+                .unwrap_or("");
             let backend = if host.resolve("dnf")?.is_some() {
                 "dnf"
             } else if host.resolve("zypper")?.is_some() {
@@ -431,6 +463,35 @@ mod tests {
         )
         .is_err());
         assert!(validate_repo_section("override", "baseurl=https://example.invalid/signed\nbaseurl=http://example.invalid/unsigned\ngpgcheck=1").is_err());
+        assert!(validate_repo_section(
+            "vendor:stable",
+            "baseurl=https://example.invalid/repo\ngpgcheck=1\ngpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-synthetic"
+        ).is_ok());
+        assert!(validate_repo_section(
+            "fedora:stable",
+            "baseurl=https://example.invalid/repo\ngpgcheck=1\ngpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-fedora-$releasever-$basearch"
+        ).is_ok());
+        assert!(validate_repo_section(
+            "fedora:stable",
+            "metalink=https://example.invalid/metalink?repo=fedora-$releasever&arch=$basearch\ngpgcheck=1\ngpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-fedora-$releasever-$basearch"
+        ).is_ok());
+        assert!(validate_repo_section(
+            "fedora:stable",
+            "baseurl=https://example.invalid/repo\nmetalink=https://example.invalid/metalink\ngpgcheck=1"
+        ).is_err());
+        assert!(validate_repo_section(
+            "vendor:stable",
+            "baseurl=https://example.invalid/repo\ngpgcheck=1\ngpgkey=file:///tmp/untrusted-key"
+        )
+        .is_err());
+        assert!(validate_repo_section(
+            "vendor:stable",
+            "baseurl=https://example.invalid/repo\ngpgcheck=1\ngpgkey=file:///etc/pki/rpm-gpg/../untrusted-key"
+        ).is_err());
+        assert!(validate_repo_section(
+            "vendor:stable",
+            "baseurl=https://example.invalid/repo\ngpgcheck=1\ngpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-$unknown"
+        ).is_err());
     }
     #[test]
     fn previews_repository_formats_and_rejects_changed_files() {
@@ -618,6 +679,13 @@ mod tests {
         fs::set_permissions(&zypper, fs::Permissions::from_mode(0o755)).unwrap();
         let import = inspect_with_host(source.to_str().unwrap(), &cancel, &host).unwrap();
         assert_eq!(import.backend, "zypper");
+        fs::write(
+            &source,
+            "[synthetic]\nmetalink=https://example.invalid/metalink\ngpgcheck=1\n",
+        )
+        .unwrap();
+        let import = inspect_with_host(source.to_str().unwrap(), &cancel, &host).unwrap();
+        assert_eq!(import.description, "https://example.invalid/metalink");
         assert!(super::validate("unknown", "synthetic", &host).is_err());
         assert!(
             inspect_with_host(base.join("unknown.txt").to_str().unwrap(), &cancel, &host).is_err()

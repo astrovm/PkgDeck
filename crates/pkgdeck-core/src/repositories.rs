@@ -359,7 +359,7 @@ pub fn list_selected(
                         || name.starts_with('-')
                         || !name
                             .bytes()
-                            .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+                            .all(|b| b.is_ascii_alphanumeric() || b"._-:".contains(&b))
                     {
                         continue;
                     }
@@ -516,7 +516,7 @@ mod repository_file_tests {
         let _ = std::fs::remove_dir_all(&root);
         let directory = root.join("etc/zypp/repos.d");
         std::fs::create_dir_all(&directory).unwrap();
-        std::fs::write(directory.join("synthetic.repo"), "# synthetic\n[one]\nname=First repo\nbaseurl=https://example.invalid/one\nenabled=1\n[bad name]\nbaseurl=https://example.invalid/bad\n[two]\nmetalink=https://example.invalid/meta\nenabled=0\n").unwrap();
+        std::fs::write(directory.join("synthetic.repo"), "# synthetic\n[vendor:one]\nname=First repo\nbaseurl=https://example.invalid/one\nenabled=1\n[bad name]\nbaseurl=https://example.invalid/bad\n[two]\nmetalink=https://example.invalid/meta\nenabled=0\n").unwrap();
         std::fs::write(
             directory.join("ignored.txt"),
             "[ignored]\nbaseurl=https://example.invalid/ignored\n",
@@ -535,6 +535,7 @@ mod repository_file_tests {
         );
         assert!(report.errors.is_empty());
         assert_eq!(report.repositories.len(), 2);
+        assert_eq!(report.repositories[0].name, "vendor:one");
         assert_eq!(report.repositories[0].title, "First repo");
         assert_eq!(report.repositories[1].url, "https://example.invalid/meta");
         assert!(!report.repositories[1].enabled);
