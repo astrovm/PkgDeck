@@ -456,14 +456,84 @@ fn root_owned(path: &Path) -> bool {
         && metadata.uid() == 0
         && metadata.mode() & 0o022 == 0
 }
+fn system_flatpak_runner(info: &str) -> Option<PathBuf> {
+    let mut in_instance = false;
+    let mut app_path = None;
+    for line in info.lines() {
+        if line.starts_with('[') {
+            in_instance = line == "[Instance]";
+        } else if in_instance {
+            if let Some(path) = line.strip_prefix("app-path=") {
+                if app_path.replace(path).is_some() {
+                    return None;
+                }
+            }
+        }
+    }
+    let path = app_path?;
+    let deployment = path.strip_prefix("/var/lib/flatpak/app/io.github.astrovm.PkgDeck/")?;
+    let parts = deployment.split('/').collect::<Vec<_>>();
+    let [arch, branch, commit, "files"] = parts.as_slice() else {
+        return None;
+    };
+    if !matches!(*arch, "x86_64" | "aarch64")
+        || *branch != "master"
+        || commit.len() != 64
+        || !commit.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return None;
+    }
+    Some(Path::new(path).join("libexec/pkgdeck-host-runner"))
+}
+fn root_owned_on_host(host: &Host, path: &Path) -> bool {
+    // Flatpak maps host root to nobody inside the sandbox. Check the fixed
+    // system deployment on the host before handing its runner to pkexec.
+    if fs::canonicalize(path).ok().as_deref() != Some(path) {
+        return false;
+    }
+    let ancestors = path.ancestors().collect::<Vec<_>>();
+    let mut args = vec!["-L".into(), "--printf=%u:%f\\n".into(), "--".into()];
+    args.extend(ancestors.iter().map(|path| path.as_os_str().to_owned()));
+    let Ok(result) = host.read(
+        Path::new("/usr/bin/stat"),
+        &args,
+        Limits::default(),
+        &Cancellation::default(),
+    ) else {
+        return false;
+    };
+    result.code == Some(0)
+        && !result.truncated
+        && trusted_stat_output(&result.stdout, ancestors.len())
+}
+fn trusted_stat_output(output: &[u8], count: usize) -> bool {
+    let Ok(output) = std::str::from_utf8(output) else {
+        return false;
+    };
+    let lines = output.lines().collect::<Vec<_>>();
+    lines.len() == count
+        && lines.iter().enumerate().all(|(index, line)| {
+            let Some((owner, mode)) = line.split_once(':') else {
+                return false;
+            };
+            let Ok(mode) = u32::from_str_radix(mode, 16) else {
+                return false;
+            };
+            owner == "0"
+                && mode & 0o022 == 0
+                && mode & 0o170000 == if index == 0 { 0o100000 } else { 0o040000 }
+        })
+}
 fn runner_path(host: &Host) -> Option<PathBuf> {
     let system = PathBuf::from("/usr/libexec/pkgdeck-host-runner");
     if host.runtime == Runtime::Flatpak {
-        // A bundled sandbox executable is not a trusted host executable.
+        // Use a host-installed helper, or a root-owned system deployment of
+        // this Flatpak. A user installation remains untrusted for root use.
         if root_owned(Path::new("/run/host/usr/libexec/pkgdeck-host-runner")) {
             return Some(system);
         }
-        return None;
+        let runner = system_flatpak_runner(&fs::read_to_string("/.flatpak-info").ok()?)?;
+        return root_owned_on_host(host, &runner).then_some(runner);
     }
     if root_owned(&system) {
         return Some(system);
@@ -1376,6 +1446,43 @@ done"#;
         fs::remove_file(temp).unwrap();
         assert!(!root_owned(Path::new("/missing-pkgdeck-host-runner")));
         assert!(root_owned(Path::new("/bin/sh")));
+    }
+
+    #[test]
+    fn system_flatpak_runner_requires_an_exact_system_deployment() {
+        let commit = "a".repeat(64);
+        let path =
+            format!("/var/lib/flatpak/app/io.github.astrovm.PkgDeck/x86_64/master/{commit}/files");
+        let info =
+            format!("[Application]\nname=io.github.astrovm.PkgDeck\n[Instance]\napp-path={path}\n");
+        assert_eq!(
+            system_flatpak_runner(&info),
+            Some(Path::new(&path).join("libexec/pkgdeck-host-runner"))
+        );
+        for invalid in [
+            path.replace("/var/lib/flatpak", "/home/user/.local/share/flatpak"),
+            path.replace("io.github.astrovm.PkgDeck", "io.github.other.App"),
+            path.replace("/master/", "/../"),
+            path.replace("/x86_64/", "/other/"),
+            path.replace(&commit, "short"),
+            format!("{path}/extra"),
+        ] {
+            assert!(system_flatpak_runner(&format!("[Instance]\napp-path={invalid}\n")).is_none());
+        }
+        assert!(system_flatpak_runner(&format!("{info}app-path={path}\n")).is_none());
+    }
+
+    #[test]
+    fn host_ownership_probe_rejects_writable_or_user_owned_paths() {
+        let trusted = b"0:81ed\n0:41ed\n0:41ed\n";
+        assert!(trusted_stat_output(trusted, 3));
+        assert!(!trusted_stat_output(trusted, 4));
+        assert!(!trusted_stat_output(b"1000:81ed\n0:41ed\n", 2));
+        assert!(!trusted_stat_output(b"0:81ff\n0:41ed\n", 2));
+        assert!(!trusted_stat_output(b"0:81ed\n0:41ff\n", 2));
+        assert!(!trusted_stat_output(b"0:41ed\n0:41ed\n", 2));
+        assert!(!trusted_stat_output(b"0:81ed\n0:81ed\n", 2));
+        assert!(!trusted_stat_output(b"0:garbage\n0:41ed\n", 2));
     }
 
     #[test]

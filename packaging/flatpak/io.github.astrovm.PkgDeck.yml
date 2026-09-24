@@ -33,9 +33,9 @@ modules:
       - cargo build --release --locked -p pkgdeck-core --bin pkgdeck-host-runner
       - install -Dm755 target/release/pkgdeck /app/bin/pkgdeck
       - install -Dm755 target/release/pkd /app/bin/pkd
-      # The sandbox cannot install a trusted host executable. This binary is
-      # included for distribution inspection; host execution requires a
-      # separately installed root-owned /usr/libexec/pkgdeck-host-runner.
+      # A system installation can use this root-owned deployment copy for
+      # one authorization per batch. User installations need a trusted host
+      # runner to avoid the per-command authorization fallback.
       - install -Dm755 target/release/pkgdeck-host-runner /app/libexec/pkgdeck-host-runner
       - install -Dm644 assets/io.github.astrovm.PkgDeck.desktop /app/share/applications/io.github.astrovm.PkgDeck.desktop
       - install -Dm644 assets/io.github.astrovm.PkgDeck.metainfo.xml /app/share/metainfo/io.github.astrovm.PkgDeck.metainfo.xml

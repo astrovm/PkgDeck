@@ -622,9 +622,14 @@ TestCase {
         verify(fake.lastChecked !== "");
         const sent = JSON.parse(fake.lastChecked);
         compare(sent.length, 1);
-        // Identities mirror the controller shape: [source, name, arch, remote, scope].
-        verify(sent[0].indexOf("synthetic-tool") >= 0);
-        verify(sent[0].indexOf("apt") >= 0);
+        // The controller expects identity arrays, not JSON strings.
+        verify(Array.isArray(sent[0]));
+        compare(sent[0][0], "apt");
+        compare(sent[0][1], "synthetic-tool");
+        compare(sent[0][2], "all");
+        compare(sent[0][3], null);
+        compare(sent[0][4], "system");
+        compare(sent[0][5], null);
         // Select none hides the upgrade button; re-checking shows it again.
         mouseClick(selectNone);
         compare(browser.selectedCount(), 0);
@@ -642,6 +647,22 @@ TestCase {
         compare(browser.selectedCount(), 1);
         verify(upgradeBtn.visible);
         compare(upgradeBtn.text, "Update selected (1)");
+    }
+    function test_update_selected_flatpak_keeps_its_exact_identity() {
+        browser.openView("Updates");
+        const reference = "app/io.github.astrovm.AdventureMods/x86_64/master";
+        fake.rows = JSON.stringify([
+            {kind: "package", name: "io.github.astrovm.AdventureMods", source: "flatpak",
+                architecture: "x86_64", remote: "astrovm", reference: reference,
+                scope: "system", installed: "0.3.14", candidate: "", update: "available"},
+            {kind: "package", name: "synthetic-tool", source: "apt", architecture: "all",
+                scope: "system", installed: "1", candidate: "2", update: "available"}
+        ]);
+        waitForRendering(browser.contentItem);
+        browser.togglePackage(browser.items[1]);
+        mouseClick(findChild(browser, "upgradeAllButton"));
+        compare(JSON.stringify(JSON.parse(fake.lastChecked)),
+            JSON.stringify([["flatpak", "io.github.astrovm.AdventureMods", "x86_64", "astrovm", "system", reference]]));
     }
     function test_columns_sort_resize_and_index_mapping() {
         browser.openView("Search");

@@ -59,11 +59,12 @@ those commands, and exits with the batch. It never accepts a shell script or an
 arbitrary executable path. User-scoped commands stay in the unprivileged frontend.
 
 The native system package can install the runner at that path. Classic Snap uses
-its root-owned `$SNAP/usr/libexec/pkgdeck-host-runner`. AppImage and Flatpak may
-use a separately installed host runner; their bundled copies are not trusted as
-host executables. If no trusted runner is available, PkgDeck reports that it is
-using the existing per-command authorization path. This fallback retains the
-current behavior and can require more than one prompt.
+its root-owned `$SNAP/usr/libexec/pkgdeck-host-runner`. A system-installed
+Flatpak can use its own deployed runner after verifying its fixed system path,
+root ownership, and non-writable ancestors on the host. A user-installed
+Flatpak and an AppImage need a separately installed trusted host runner. If no
+trusted runner is available, PkgDeck reports that it is using the existing
+per-command authorization path, which can require more than one prompt.
 
 For example, a single APT write without a trusted batch runner invokes the fixed
 `/usr/bin/apt-get` path via either:

@@ -480,7 +480,7 @@ Controls.ApplicationWindow {
         if (uncheckedPackages.length === 0)
             root.propose("upgrade-all");
         else
-            backend.proposeChecked(JSON.stringify(checkedIdentities()));
+            backend.proposeChecked(JSON.stringify(checkedIdentities().map((id) => JSON.parse(id))));
     }
     // Column widths (drag the header gutter) and the active sort. Sorting
     // is QML-side over a copied array: the backend keeps its own order,
