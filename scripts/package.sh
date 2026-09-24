@@ -13,7 +13,6 @@ case "${1:?Usage: scripts/package.sh appimage|flatpak|snap}" in
             -u "$update_information" "$PWD/build/AppDir" "$PWD/build/artifacts/$name.AppImage"
         ;;
     flatpak)
-        scripts/flatpak-sources.sh --check
         flatpak-builder --user --force-clean --repo=build/flatpak-repo build/flatpak packaging/flatpak/io.github.astrovm.PkgDeck.yml
         flatpak build-bundle build/flatpak-repo "build/artifacts/$name.flatpak" io.github.astrovm.PkgDeck
         ;;

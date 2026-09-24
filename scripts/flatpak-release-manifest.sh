@@ -11,7 +11,7 @@ trap 'rm -f "$archive"' EXIT
 curl -fL --retry 3 "$url" -o "$archive"
 sha=$(sha256sum "$archive" | cut -d' ' -f1)
 
-awk -v url="$url" -v sha="$sha" -v sources="PkgDeck-$tag-cargo-sources.json" '
+awk -v url="$url" -v sha="$sha" '
   /^      - type: dir$/ {
     print "      - type: archive"
     print "        url: " url
@@ -19,6 +19,5 @@ awk -v url="$url" -v sha="$sha" -v sources="PkgDeck-$tag-cargo-sources.json" '
     getline
     next
   }
-  /^      - cargo-sources.json$/ { print "      - " sources; next }
   { print }
 ' packaging/flatpak/io.github.astrovm.PkgDeck.yml > "$output"

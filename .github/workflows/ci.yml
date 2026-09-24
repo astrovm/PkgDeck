@@ -569,7 +569,6 @@ jobs:
           done
           for image in dist/*.AppImage; do zsyncmake -u "$(basename "$image")" -o "$image.zsync" "$image"; done
           scripts/flatpak-release-manifest.sh "$GITHUB_REF_NAME" "dist/PkgDeck-${GITHUB_REF_NAME}-flatpak-manifest.yml"
-          cp packaging/flatpak/cargo-sources.json "dist/PkgDeck-${GITHUB_REF_NAME}-cargo-sources.json"
           (cd dist && sha256sum -- PkgDeck-"${GITHUB_REF_NAME}"-* > "PkgDeck-${GITHUB_REF_NAME}-SHA256SUMS")
           for asset in dist/*; do
             [[ $(basename "$asset") == PkgDeck-"${GITHUB_REF_NAME}"-* ]] || {
