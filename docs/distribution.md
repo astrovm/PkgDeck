@@ -96,10 +96,11 @@ release with AppImage update metadata, Flatpak bundles, Snap packages,
 checksums, and provenance. It does not repeat the full test matrix or Homebrew
 builds. Snap packages are published on GitHub only; no Snap Store upload runs.
 `Publish Flatpak repository` dispatches the immutable
-release bundles to [`astrovm/flatpak`](https://github.com/astrovm/flatpak) when
-`FLATPAK_REPO_TOKEN` is configured and `FLATPAK_REPO_AUTOMATIC=true` is set
-as a repository variable. Until then, the automatic Flatpak check is skipped;
-manually dispatch `publish.yml` in `astrovm/flatpak` with
+release bundles to [`astrovm/flatpak`](https://github.com/astrovm/flatpak).
+Configure `FLATPAK_REPO_TOKEN` as a PkgDeck Actions secret using a fine-grained
+token restricted to `astrovm/flatpak` with Contents write permission. The
+publication job fails clearly if it is missing.
+For an existing release, manually dispatch `publish.yml` in `astrovm/flatpak` with
 `repository=astrovm/PkgDeck` and the release tag. Flatpak packages use the host bridge for
 all supported managers, with explicit host filesystem access and the same
 confirmation and authorization rules as native execution.

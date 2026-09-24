@@ -322,6 +322,11 @@ pub fn dispatch(
         }
         Commands::Inspect { command } => {
             let mut inventory = engine.installed(cancel);
+            if args.from.is_empty() {
+                inventory
+                    .failures
+                    .retain(|failure| !matches!(failure.error, EngineError::Unavailable { .. }));
+            }
             inventory
                 .packages
                 .retain(|p| args.scope.is_none_or(|scope| scope.native() == p.id.scope));
@@ -680,12 +685,25 @@ pub fn run(args: &Args) -> u8 {
         signal_hook::low_level::unregister(signal);
         return emit(args, data, code);
     }
-    let mut engine = match pkgdeck_core::backends::native_engine(
-        &args.from,
-        matches!(args.command, Some(Commands::Sources)),
-        args.auth.into(),
-        &cancel,
-    ) {
+    // Native ownership databases can only identify these package managers.
+    // Querying every unrelated inventory makes a simple PATH lookup slow.
+    let inspection = matches!(args.command, Some(Commands::Inspect { .. }));
+    let sources = if inspection {
+        inspection_sources(&args.from)
+    } else {
+        args.from.clone()
+    };
+    let selected_engine = if inspection && sources.is_empty() {
+        Ok(Engine::default())
+    } else {
+        pkgdeck_core::backends::native_engine(
+            &sources,
+            matches!(args.command, Some(Commands::Sources)),
+            args.auth.into(),
+            &cancel,
+        )
+    };
+    let mut engine = match selected_engine {
         Ok(engine) => engine,
         Err(e) => {
             signal_hook::low_level::unregister(signal);
@@ -718,6 +736,22 @@ pub fn run(args: &Args) -> u8 {
     );
     signal_hook::low_level::unregister(signal);
     emit(args, data, code)
+}
+
+fn inspection_sources(requested: &[String]) -> Vec<String> {
+    const NATIVE_OWNERS: [&str; 4] = ["apt", "dnf", "pacman", "zypper"];
+    if requested.is_empty() {
+        NATIVE_OWNERS
+            .iter()
+            .map(|source| (*source).into())
+            .collect()
+    } else {
+        requested
+            .iter()
+            .filter(|source| NATIVE_OWNERS.contains(&source.as_str()))
+            .cloned()
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -1246,6 +1280,12 @@ mod tests {
     }
     #[test]
     fn inspection_commands_are_read_only_and_preserve_report_shapes() {
+        assert_eq!(inspection_sources(&[]), ["apt", "dnf", "pacman", "zypper"]);
+        assert_eq!(
+            inspection_sources(&["flatpak".into(), "apt".into()]),
+            ["apt"]
+        );
+        assert!(inspection_sources(&["flatpak".into()]).is_empty());
         let mut engine = engine();
         let (inspected, code) = call(&mut engine, &["inspect", "pkgdeck-fixture-missing"], false);
         assert_eq!(code, 0);
@@ -1264,6 +1304,33 @@ mod tests {
             audited["audit"]["installed_copies"][0]["package"]["backend"],
             "apt"
         );
+        let mut unavailable = Engine::default();
+        unavailable
+            .register(Fixture {
+                backend: "dnf".into(),
+                installed: false,
+                fail: None,
+                read_failure: Some(EngineError::Unavailable {
+                    backend: "dnf".into(),
+                    reason: "synthetic missing manager".into(),
+                }),
+                verified: true,
+            })
+            .unwrap();
+        let (implicit, code) = call(
+            &mut unavailable,
+            &["inspect", "pkgdeck-fixture-missing"],
+            false,
+        );
+        assert_eq!(code, 0);
+        assert!(implicit["failures"].as_array().unwrap().is_empty());
+        let (explicit, code) = call(
+            &mut unavailable,
+            &["--from", "dnf", "inspect", "pkgdeck-fixture-missing"],
+            false,
+        );
+        assert_eq!(code, 8);
+        assert_eq!(explicit["failures"].as_array().unwrap().len(), 1);
     }
     #[test]
     fn apt_removals_require_separate_cli_consent() {

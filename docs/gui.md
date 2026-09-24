@@ -19,7 +19,7 @@ without desktop metadata keep their native names.
 
 ## Open packages and sources
 
-On Search, choose **From file or link…**, drop one file onto the window, or pass a path or URL to
+On Search, choose **Add…**, drop one file onto the window, or pass a path or URL to
 `pkgdeck`. Package files: `.AppImage`, `.deb`, `.rpm`, `.pkg.tar.zst` (also
 `.xz`, `.gz`, `.bz2`, `.lz4`), `.flatpak`, `.flatpakref`, and `.snap` with a
 matching `.assert`. Repository files: `.flatpakrepo`, `.repo`, `.sources`,

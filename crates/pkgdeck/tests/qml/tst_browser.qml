@@ -361,6 +361,12 @@ TestCase {
         dialog.reject();
         tryCompare(dialog, "visible", false);
         const all = findChild(browser, "cleanAllButton");
+        verify(!all.visible);
+        fake.rows = JSON.stringify([
+            {kind: "cleanup", name: "Unused dependencies", source: "apt", summary: "One package", cleanup_key: "autoremove"},
+            {kind: "cleanup", name: "Cached downloads", source: "apt", summary: "Two files", cleanup_key: "autoclean"}
+        ]);
+        wait(20);
         verify(all.visible);
         mouseClick(all);
         verify(fake.confirmation.indexOf("clean-all") >= 0);
@@ -728,13 +734,14 @@ TestCase {
         const compactActivity = findChild(browser, "compactActivityIndicator");
         const compactSources = findChild(browser, "compactSourceFilter");
         const navigation = findChild(browser, "navigationView");
-        for (const width of [360, 760, 850, 920, 960]) {
+        for (const width of [360, 760, 800, 820, 850, 920, 960]) {
             browser.width = width;
             waitForRendering(browser.contentItem);
             compare(browser.compact, width < 960);
-            compare(navigation.visible, width < 960);
+            compare(browser.navigationCollapsed, width < 820);
+            compare(navigation.visible, width < 820);
             verify(!add.visible);
-            const buttons = width < 960 ? [compactActivity, compactSources] : [activity, sources];
+            const buttons = width < 820 ? [compactActivity, compactSources] : [activity, sources];
             for (const button of buttons) {
                 verify(button.visible);
                 verify(button.text.length > 0);
@@ -792,8 +799,8 @@ TestCase {
         for (const width of [1100, 360]) {
             browser.width = width;
             waitForRendering(browser.contentItem);
-            verify((width < 960 ? compactActivity : activity).visible);
-            verify((width < 960 ? compactFilter : filter).visible);
+            verify((width < 820 ? compactActivity : activity).visible);
+            verify((width < 820 ? compactFilter : filter).visible);
             verify(add.visible);
             const right = add.mapToItem(browser.contentItem, add.width, 0).x;
             verify(right <= browser.width);
@@ -830,7 +837,7 @@ TestCase {
             browser.width = width;
             browser.openView("Search");
             waitForRendering(browser.contentItem);
-            const button = findChild(browser, width < 960 ? "compactSourceFilter" : "sourceFilter");
+            const button = findChild(browser, width < 820 ? "compactSourceFilter" : "sourceFilter");
             const checks = fake.sourceChecks;
             clickDelegate(button);
             tryCompare(popup, "visible", true);
@@ -1005,8 +1012,8 @@ TestCase {
         compare(browser.retainingResults, false);
         compare(browser.viewItems.length, 0);
         compare(findChild(browser, "resultsHeading").text, "Searching…");
-        verify(findChild(browser, "emptyState").visible);
-        compare(findChild(browser, "emptyState").text, "Searching…");
+        verify(!findChild(browser, "emptyState").visible);
+        compare(findChild(browser, "emptyState").text, "");
     }
     function test_compact_installed_filter_has_its_own_row() {
         browser.width = 360;
@@ -1648,6 +1655,22 @@ TestCase {
         compare(update.text, "Update");
         compare(reload.mapToItem(browser.contentItem, 0, 0).y, update.mapToItem(browser.contentItem, 0, 0).y);
     }
+    function test_results_leave_room_for_the_scrollbar() {
+        browser.width = 1100;
+        browser.height = 400;
+        browser.openView("Installed");
+        fake.rows = JSON.stringify(Array.from({length: 20}, (_, index) => ({
+            kind: "package", name: "synthetic-" + index, source: "apt",
+            installed: "1", candidate: "1", scope: "system"
+        })));
+        const list = findChild(browser, "packageResults");
+        tryVerify(() => list.itemAtIndex(0) !== null);
+        waitForRendering(browser.contentItem);
+        const row = list.itemAtIndex(0);
+        const action = findChild(row, "rowPackageAction");
+        compare(list.width - row.width, 16);
+        verify(action.mapToItem(list, action.width, 0).x <= row.width);
+    }
     function test_header_source_checklist_and_installed_filter() {
         browser.openView("Installed");
         const filter = findChild(browser, "sourceFilter");
@@ -1787,7 +1810,7 @@ TestCase {
         browser.openView("Updates");
         fake.rows = "[]";
         fake.report_state = JSON.stringify({phase: "loading", failures: []});
-        compare(browser.emptyStateMessage(), "Loading…");
+        compare(browser.emptyStateMessage(), "");
         fake.report_state = JSON.stringify({phase: "complete", failures: []});
         compare(browser.emptyStateMessage(), "You're up to date");
         fake.report_state = JSON.stringify({phase: "partial", failures: [{source: "npm", kind: "locked", detail: "Synthetic package lock"}]});
@@ -1797,7 +1820,7 @@ TestCase {
         fake.report_state = JSON.stringify({phase: "failed", failures: [{source: "apt", kind: "authorization"}]});
         compare(browser.emptyStateMessage(), "Could not check these sources.");
         fake.report_state = JSON.stringify({phase: "cached", failures: []});
-        compare(browser.emptyStateMessage(), "No results in the last check.");
+        compare(browser.emptyStateMessage(), "No updates in the last check.");
         fake.report_state = JSON.stringify({phase: "complete", failures: []});
         fake.rows = JSON.stringify([{kind: "package", name: "anonymous", source: "homebrew", installed: "1", candidate: "2", update: "available"}]);
         browser.viewSourceFilters = ({Updates: ["apt"]});

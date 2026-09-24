@@ -194,15 +194,26 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
                 ]
             })
             .collect::<Vec<_>>();
-        output.push_str(&table(
-            &["NAME", "SOURCE", "VERSION", "SUMMARY"],
-            &rows,
-            width,
-        ));
-        output.push_str(&format!(
-            "\n\n{} packages · Use pkd info <name> for details.\n[ ] Not installed   [x] Installed   [^] Update available",
-            rows.len()
-        ));
+        if rows.is_empty() {
+            let failed = data["failures"]
+                .as_array()
+                .is_some_and(|failures| !failures.is_empty());
+            output.push_str(if failed {
+                "No packages returned from checked sources."
+            } else {
+                "No packages found."
+            });
+        } else {
+            output.push_str(&table(
+                &["NAME", "SOURCE", "VERSION", "SUMMARY"],
+                &rows,
+                width,
+            ));
+            output.push_str(&format!(
+                "\n\n{} packages · Use pkd info <name> for details.\n[ ] Not installed   [x] Installed   [^] Update available",
+                rows.len()
+            ));
+        }
         if let Some(failures) = data["failures"].as_array() {
             for failure in failures {
                 output.push_str(&format!("\n[!] Source failed: {}", value(failure)));
@@ -409,6 +420,17 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
             "[!] Error: {}",
             value(data.get("message").unwrap_or(&data["error"]))
         ));
+        if let Some(matches) = data["error"]["Ambiguous"].as_array() {
+            for id in matches {
+                output.push_str(&format!(
+                    "\n  {} · {} · {} · {}",
+                    value(&id["backend"]),
+                    value(&id["name"]),
+                    value(&id["architecture"]),
+                    value(&id["scope"])
+                ));
+            }
+        }
     }
     if data.get("inspection").is_some() || data.get("audit").is_some() {
         if let Some(failures) = data["failures"].as_array() {
@@ -494,6 +516,30 @@ mod tests {
         assert!(output.contains("[^] fixture"));
         assert!(output.contains("[^] Update available"));
         assert!(!output.contains('\u{1b}'));
+    }
+    #[test]
+    fn empty_results_and_ambiguous_choices_are_actionable() {
+        let empty = human(&json!({"packages": [], "failures": []}), 80, false);
+        assert!(empty.contains("No packages found."));
+        assert!(!empty.contains("NAME"));
+        assert!(!empty.contains("Not installed"));
+        let incomplete = human(
+            &json!({"packages": [], "failures": [{"backend":"apt", "error":"synthetic failure"}]}),
+            80,
+            false,
+        );
+        assert!(incomplete.contains("No packages returned from checked sources."));
+        assert!(incomplete.contains("Source failed"));
+        let ambiguous = human(
+            &json!({"error":{"Ambiguous":[
+                {"backend":"apt","name":"fixture","architecture":"amd64","scope":"system"},
+                {"backend":"apt","name":"fixture","architecture":"i386","scope":"system"}
+            ]},"message":"2 packages match; select a backend, architecture, or scope"}),
+            80,
+            false,
+        );
+        assert!(ambiguous.contains("apt · fixture · amd64 · system"));
+        assert!(ambiguous.contains("apt · fixture · i386 · system"));
     }
     #[test]
     fn inspection_and_audit_render_exact_read_only_evidence() {

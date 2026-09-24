@@ -243,7 +243,7 @@ Controls.ApplicationWindow {
         if (backend.writing && currentView === "Search" && items.length === 0)
             return "Search will resume shortly.";
         if (backend.busy || reportState.phase === "loading")
-            return currentView === "Search" ? "Searching…" : "Loading…";
+            return "";
         if (readFailures.length > 0)
             return reportState.phase === "partial" ? "No results from the sources that completed." : "Could not check these sources.";
         if (reportState.phase === "unsupported")
@@ -257,7 +257,7 @@ Controls.ApplicationWindow {
         if (viewSourceFilters[currentView] && items.length > 0)
             return "No results from selected sources.";
         if (reportState.phase === "cached" || reportState.phase === "stale")
-            return "No results in the last check.";
+            return currentView === "Updates" ? "No updates in the last check." : "No results in the last check.";
         if (currentView === "Updates")
             return reportState.phase === "complete" ? "You're up to date" : "No updates to show.";
         if (currentView === "Clean")
@@ -638,6 +638,7 @@ Controls.ApplicationWindow {
         return -1;
     }
     readonly property bool compact: width < 960
+    readonly property bool navigationCollapsed: width < 820
     readonly property int shortListLimit: compact ? 3 : 8
     function shortResultsHeight() {
         const rowHeight = (row) => (compact
@@ -647,7 +648,7 @@ Controls.ApplicationWindow {
     }
     readonly property bool systemAppearance: preferences.appearance === 0
     readonly property bool dark: preferences.appearance === 1 || (systemAppearance && Qt.styleHints.colorScheme === Qt.Dark)
-    readonly property color canvas: systemAppearance ? systemPalette.window : (dark ? "#000000" : "#f3f5f8")
+    readonly property color canvas: systemAppearance ? systemPalette.window : (dark ? "#0c0e12" : "#f3f5f8")
     readonly property color surface: systemAppearance ? systemPalette.base : (dark ? "#101014" : "#ffffff")
     readonly property color ink: systemAppearance ? systemPalette.text : (dark ? "#ecf1f8" : "#1c2b3e")
     readonly property color muted: systemAppearance ? systemPalette.placeholderText : (dark ? "#a2b1c4" : "#57677e")
@@ -1148,6 +1149,10 @@ Controls.ApplicationWindow {
             sortColumn = preferences.sortColumn;
         sortAscending = preferences.sortAscending;
         reload();
+        Qt.callLater(() => {
+            if (root.visible && root.currentView === "Search")
+                searchPane.focusSearch(false);
+        });
         const opening = Qt.application.arguments.slice(1).filter((argument) => argument.startsWith("file://") || argument.startsWith("https://") || argument.startsWith("flatpak+https://") || argument.startsWith("/"));
         if (opening.length === 1)
             Qt.callLater(() => root.openExternalInput(opening[0]));
@@ -1159,7 +1164,7 @@ Controls.ApplicationWindow {
         Rectangle {
             Layout.fillHeight: true
             Layout.preferredWidth: 196
-            visible: !root.compact
+            visible: !root.navigationCollapsed
             color: root.surface
             ColumnLayout {
                 anchors.fill: parent
@@ -1217,7 +1222,7 @@ Controls.ApplicationWindow {
                 Layout.fillWidth: true
                 ThemedComboBox {
                     objectName: "navigationView"
-                    visible: root.compact
+                    visible: root.navigationCollapsed
                     model: ["Search", "Installed", "Updates", "Clean", "Sources", "Activity", "Settings"]
                     currentIndex: model.indexOf(root.currentView)
                     onActivated: root.openView(currentText)
@@ -1225,7 +1230,7 @@ Controls.ApplicationWindow {
                     Layout.fillWidth: true
                 }
                 Kirigami.Heading {
-                    visible: !root.compact
+                    visible: !root.navigationCollapsed
                     text: root.currentView
                     color: root.ink
                     level: 1
@@ -1244,7 +1249,7 @@ Controls.ApplicationWindow {
                 }
                 ActionButton {
                     objectName: "activityIndicator"
-                    visible: !root.compact && root.currentView !== "Activity"
+                    visible: !root.navigationCollapsed && root.currentView !== "Activity"
                     text: root.queuedCount > 0 ? "Activity · " + root.queuedCount : backend.writing ? "Working" : "Activity"
                     symbol: "updates"
                     Accessible.name: root.queuedCount > 0 ? "Activity, " + root.queuedCount + " queued" : backend.writing ? "Activity, working" : "Activity"
@@ -1253,7 +1258,7 @@ Controls.ApplicationWindow {
                 ActionButton {
                     objectName: "sourceFilter"
                     id: sourceFilterButton
-                    visible: !root.compact && ["Search", "Installed", "Updates", "Clean"].indexOf(root.currentView) >= 0
+                    visible: !root.navigationCollapsed && ["Search", "Installed", "Updates", "Clean"].indexOf(root.currentView) >= 0
                     text: root.viewSourceFilters[root.currentView] ? root.sourceSummary() : "Filter sources"
                     symbol: "sources"
                     onClicked: root.toggleSourcePopup()
@@ -1266,8 +1271,8 @@ Controls.ApplicationWindow {
                         property var draftSources: []
                         property string searchText: ""
                         property bool showUnavailable: false
-                        x: root.width - width - (root.compact ? 12 : 28)
-                        y: root.compact ? 106 : 76
+                        x: root.width - width - (root.navigationCollapsed ? 12 : 28)
+                        y: root.navigationCollapsed ? 106 : 76
                         width: Math.min(340, root.width - 32)
                         height: Math.min(460, root.height - 100, implicitHeight)
                         padding: 10
@@ -1396,7 +1401,7 @@ Controls.ApplicationWindow {
                 }
             }
             RowLayout {
-                visible: root.compact && root.currentView !== "Activity"
+                visible: root.navigationCollapsed && root.currentView !== "Activity"
                 Layout.fillWidth: true
                 spacing: 8
                 ActionButton {
@@ -1682,7 +1687,7 @@ Controls.ApplicationWindow {
                     }
                     RowLayout {
                         objectName: "compactSignature"
-                        visible: root.compact
+                        visible: root.navigationCollapsed
                         Layout.topMargin: 12
                         spacing: 4
                         Controls.Label { text: "Made with"; color: root.muted }
@@ -1941,7 +1946,7 @@ Controls.ApplicationWindow {
                                 duration: root.revealDuration
                                 easing.type: Easing.OutCubic
                             }
-                            width: ListView.view.width
+                            width: Math.max(0, ListView.view.width - 16)
                             height: (root.compact ? (modelData.kind === "source" ? Math.max(68, root.font.pointSize * 5.5) : Math.max(94, root.font.pointSize * 8.5)) : Math.max(56, root.font.pointSize * 5)) + (modelData.groupStart ? 38 : 0)
                             topPadding: modelData.groupStart ? 38 : 0
                             leftPadding: 16
@@ -2230,7 +2235,7 @@ Controls.ApplicationWindow {
                 visible: ["Search", "Installed", "Updates", "Clean", "Sources"].indexOf(root.currentView) >= 0
                 ActionButton {
                     objectName: "cleanAllButton"
-                    visible: root.currentView === "Clean" && root.items.some((row) => row.kind === "cleanup")
+                    visible: root.currentView === "Clean" && root.items.filter((row) => row.kind === "cleanup").length > 1
                     text: "Clean all"
                     symbol: "remove"
                     primary: true
