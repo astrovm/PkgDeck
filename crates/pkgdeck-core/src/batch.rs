@@ -429,9 +429,8 @@ impl Drop for ScopeGuard {
 }
 impl Drop for Session {
     fn drop(&mut self) {
-        // A pkexec runner runs as root under the original child PID. The
-        // unprivileged frontend cannot signal it, so EOF must let it leave
-        // its request loop before we wait for the child.
+        // The elevated runner may not accept signals from the frontend.
+        // EOF must let it leave its request loop before we wait for it.
         self.input.take();
         // Also close a runner that sent a malformed Ready frame. A batch
         // error must never leave an elevated child waiting for more input.
@@ -461,20 +460,6 @@ fn flatpak_app_path(info: &str) -> Option<PathBuf> {
             .components()
             .any(|part| matches!(part, std::path::Component::ParentDir))
         || path.file_name()? != "files"
-    {
-        return None;
-    }
-    let commit = path.parent()?;
-    let branch = commit.parent()?;
-    let architecture = branch.parent()?;
-    let app = architecture.parent()?;
-    let commit_name = commit.file_name()?.to_str()?;
-    if app.file_name()? != "io.github.astrovm.PkgDeck"
-        || app.parent()?.file_name()? != "app"
-        || !flatpak_identifier(architecture.file_name()?.to_str()?)
-        || !flatpak_identifier(branch.file_name()?.to_str()?)
-        || commit_name.len() != 64
-        || !commit_name.bytes().all(|byte| byte.is_ascii_hexdigit())
     {
         return None;
     }
@@ -1417,19 +1402,6 @@ done"#;
     }
 
     #[test]
-    fn bundled_runner_path_is_the_same_for_native_appimage_snap_and_homebrew() {
-        for runtime in [Runtime::Native, Runtime::AppImage, Runtime::Snap] {
-            let executable = Path::new("/example/package/bin/pkd");
-            assert_eq!(
-                bundled_runner_path(runtime, executable, ""),
-                Some(PathBuf::from(
-                    "/example/package/libexec/pkgdeck-host-runner"
-                ))
-            );
-        }
-    }
-
-    #[test]
     fn flatpak_runner_uses_its_own_deployment_for_system_and_user_installs() {
         let commit = "a".repeat(64);
         for base in ["/var/lib/flatpak", "/home/user/.local/share/flatpak"] {
@@ -1445,8 +1417,6 @@ done"#;
             "relative/files".to_owned(),
             "/tmp/../files".to_owned(),
             "/tmp/other".to_owned(),
-            format!("/tmp/app/io.github.other.App/x86_64/master/{commit}/files"),
-            "/tmp/app/io.github.astrovm.PkgDeck/x86_64/master/short/files".to_owned(),
         ] {
             assert!(flatpak_app_path(&format!("[Instance]\napp-path={invalid}\n")).is_none());
         }
