@@ -78,6 +78,7 @@ Controls.ApplicationWindow {
         backend.changeRepository(JSON.stringify(request));
     }
     property string currentView: "Search"
+    property bool shortcutsExpanded: false
     readonly property var activityRows: JSON.parse(backend.activity || "[]")
     readonly property int queuedCount: activityRows.filter(row => row.state === "queued").length
     readonly property var backgroundState: JSON.parse(backend.background_state || "{}")
@@ -95,19 +96,6 @@ Controls.ApplicationWindow {
     property var retainedItems: []
     property bool retainingResults: false
     property var items: currentView === resultView ? (retainingResults ? retainedItems : liveItems) : []
-    property var inventorySelection: []
-    readonly property var inventoryPreview: JSON.parse(backend.manifest_preview || "{}")
-    function visibleInventoryIds() {
-        return viewItems.filter(row => row.kind === "package").map(row => ({
-            backend: row.source, name: row.name, architecture: row.architecture,
-            scope: row.scope, remote: row.remote || null, reference: row.reference || null
-        }));
-    }
-    function exportVisibleInventory() {
-        inventorySelection = visibleInventoryIds();
-        rememberDialogFocus();
-        exportInventoryFile.open();
-    }
     property bool reduceMotion: preferences.reduceMotion
     readonly property bool motionEnabled: !reduceMotion && Kirigami.Units.shortDuration > 0
     readonly property int feedbackDuration: motionEnabled ? Math.round(Kirigami.Units.shortDuration * 0.8) : 0
@@ -642,6 +630,7 @@ Controls.ApplicationWindow {
         property bool primary: false
         property bool navigation: false
         property string symbol: "package"
+        property url iconSource: ""
         property string tooltipText: ""
         Accessible.name: text
         Controls.ToolTip.visible: hovered && tooltipText.length > 0
@@ -677,6 +666,18 @@ Controls.ApplicationWindow {
                     Layout.preferredWidth: 18
                     Layout.preferredHeight: 18
                     Layout.alignment: Qt.AlignVCenter
+                }
+                Image {
+                    objectName: control.iconSource.toString().length > 0 ? control.objectName + "Icon" : ""
+                    source: control.iconSource
+                    visible: control.iconSource.toString().length > 0
+                    sourceSize.width: Math.ceil(width * (root.screen ? root.screen.devicePixelRatio : 1))
+                    sourceSize.height: Math.ceil(height * (root.screen ? root.screen.devicePixelRatio : 1))
+                    fillMode: Image.PreserveAspectFit
+                    Layout.preferredWidth: 18
+                    Layout.preferredHeight: 18
+                    Layout.alignment: Qt.AlignVCenter
+                    Accessible.ignored: true
                 }
                 Text {
                     text: control.text
@@ -1088,38 +1089,10 @@ Controls.ApplicationWindow {
                 RowLayout {
                     objectName: "signatureFooter"
                     Layout.fillWidth: true
-                    spacing: 3
-                    Controls.Label { objectName: "signaturePrefix"; text: "Made with"; color: root.muted; font.pointSize: root.font.pointSize * 0.8 }
-                    DeckIcon { name: "heart"; ink: "#e34b5f"; Layout.preferredWidth: 13; Layout.preferredHeight: 13 }
-                    Controls.Label { objectName: "signatureAuthor"; text: "by astro"; color: root.muted; font.pointSize: root.font.pointSize * 0.8 }
-                    Controls.ToolButton {
-                        objectName: "sidebarRepositoryLink"
-                        implicitWidth: 22
-                        implicitHeight: 22
-                        padding: 0
-                        Accessible.name: "Open PkgDeck on GitHub"
-                        Controls.ToolTip.visible: hovered
-                        Controls.ToolTip.text: Accessible.name
-                        onClicked: Qt.openUrlExternally(root.repositoryUrl)
-                        background: Rectangle {
-                            radius: 5
-                            color: parent.hovered ? root.selection : "transparent"
-                            border.color: parent.activeFocus ? root.accent : "transparent"
-                        }
-                        contentItem: Item {
-                            Image {
-                                objectName: "sidebarRepositoryIcon"
-                                anchors.centerIn: parent
-                                width: 16
-                                height: 16
-                                source: root.repositoryIconSource
-                                sourceSize.width: Math.ceil(width * (root.screen ? root.screen.devicePixelRatio : 1))
-                                sourceSize.height: Math.ceil(height * (root.screen ? root.screen.devicePixelRatio : 1))
-                                fillMode: Image.PreserveAspectFit
-                                Accessible.ignored: true
-                            }
-                        }
-                    }
+                    spacing: 4
+                    Controls.Label { objectName: "signaturePrefix"; text: "Made with"; color: root.muted; font.pointSize: root.font.pointSize * 0.9 }
+                    DeckIcon { name: "heart"; ink: "#e34b5f"; Layout.preferredWidth: 14; Layout.preferredHeight: 14 }
+                    Controls.Label { objectName: "signatureAuthor"; text: "by astro"; color: root.muted; font.pointSize: root.font.pointSize * 0.9 }
                 }
             }
         }
@@ -1133,7 +1106,7 @@ Controls.ApplicationWindow {
                 ThemedComboBox {
                     visible: root.compact
                     model: ["Search", "Installed", "Updates", "Clean", "Sources", "Settings"]
-                    currentIndex: model.indexOf(root.currentView === "About" ? "Settings" : root.currentView)
+                    currentIndex: model.indexOf(root.currentView)
                     onActivated: root.openView(currentText)
                     Accessible.name: "Navigation"
                     Layout.fillWidth: true
@@ -1397,139 +1370,113 @@ Controls.ApplicationWindow {
                         leftPadding: 28
                     }
                 }
-                ActionButton {
-                    objectName: "exportInventoryButton"
-                    visible: root.items.some(row => row.kind === "package")
-                    text: root.compact ? "Export" : "Export shown"
-                    symbol: "installed"
-                    enabled: !backend.busy && root.viewItems.some(row => row.kind === "package") && root.readFailures.length === 0
-                    onClicked: root.exportVisibleInventory()
-                    Accessible.name: "Export shown installed packages"
-                }
-            }
-            ColumnLayout {
-                visible: root.currentView === "Settings"
-                Layout.fillWidth: true
-                Layout.fillHeight: true
-                Controls.Label { text: "Appearance" }
-                ThemedComboBox {
-                    objectName: "appearanceSetting"
-                    model: ["System", "Dark", "Light"]
-                    currentIndex: preferences.appearance
-                    onActivated: preferences.appearance = currentIndex
-                    Accessible.name: "Appearance"
-                    Layout.fillWidth: true
-                    Layout.maximumWidth: 420
-                }
-                Controls.CheckBox {
-                    objectName: "animationsSetting"
-                    text: "Animations"
-                    checked: !root.reduceMotion
-                    onToggled: root.reduceMotion = !checked
-                    Accessible.name: "Enable interface animations"
-                }
-                Controls.CheckBox {
-                    objectName: "backgroundModeSetting"
-                    text: "Background checks"
-                    checked: preferences.backgroundMode
-                    onClicked: {
-                        if (!checked && preferences.autostart && !backend.setAutostart(false)) {
-                            checked = true;
-                            return;
-                        }
-                        preferences.backgroundMode = checked;
-                        if (!checked)
-                            preferences.autostart = false;
-                    }
-                    Accessible.name: text
-                }
-                Controls.CheckBox {
-                    objectName: "autostartSetting"
-                    text: "Start in background at login"
-                    checked: preferences.autostart
-                    enabled: preferences.backgroundMode && root.trayAvailable
-                    onClicked: {
-                        if (backend.setAutostart(checked))
-                            preferences.autostart = checked;
-                        else
-                            checked = preferences.autostart;
-                    }
-                    Accessible.name: text
-                }
-                Controls.Label {
-                    text: "Authentication"
-                }
-                ThemedComboBox {
-                    objectName: "authorizationSetting"
-                    model: ["System prompt", "Existing sudo session"]
-                    currentIndex: root.useSudo ? 1 : 0
-                    onActivated: {
-                        root.useSudo = currentIndex === 1;
-                        preferences.authorization = root.useSudo ? "sudo" : "polkit";
-                    }
-                    Accessible.name: "Authentication"
-                    Layout.fillWidth: true
-                    Layout.maximumWidth: 420
-                }
-                Controls.Label {
-                    Layout.fillWidth: true
-                    wrapMode: Text.WordWrap
-                    text: "Choose how PkgDeck authorizes system changes."
-                }
-                ActionButton {
-                    objectName: "aboutButton"
-                    text: "About PkgDeck"
-                    symbol: "help"
-                    Layout.topMargin: 16
-                    onClicked: root.openView("About")
-                }
-                // Absorbs leftover height so the settings stack stays top-anchored.
-                Item { Layout.fillHeight: true }
             }
             Controls.ScrollView {
-                id: aboutScroll
-                objectName: "aboutScroll"
-                visible: root.currentView === "About"
+                id: settingsScroll
+                objectName: "settingsScroll"
+                visible: root.currentView === "Settings"
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 contentWidth: availableWidth
                 clip: true
                 ColumnLayout {
-                    width: aboutScroll.availableWidth
+                    width: settingsScroll.availableWidth
                     spacing: 10
-                    Controls.Label {
-                        objectName: "aboutText"
-                        text: "PkgDeck " + backend.version
-                        color: root.ink
-                        font.bold: true
-                        font.pointSize: root.font.pointSize * 1.3
+                    Controls.Label { text: "Appearance" }
+                    ThemedComboBox {
+                        objectName: "appearanceSetting"
+                        model: ["System", "Dark", "Light"]
+                        currentIndex: preferences.appearance
+                        onActivated: preferences.appearance = currentIndex
+                        Accessible.name: "Appearance"
                         Layout.fillWidth: true
+                        Layout.maximumWidth: 420
+                    }
+                    Controls.CheckBox {
+                        objectName: "animationsSetting"
+                        text: "Animations"
+                        checked: !root.reduceMotion
+                        onToggled: root.reduceMotion = !checked
+                        Accessible.name: "Enable interface animations"
+                    }
+                    Controls.CheckBox {
+                        objectName: "backgroundModeSetting"
+                        text: "Background checks"
+                        checked: preferences.backgroundMode
+                        onClicked: {
+                            if (!checked && preferences.autostart && !backend.setAutostart(false)) {
+                                checked = true;
+                                return;
+                            }
+                            preferences.backgroundMode = checked;
+                            if (!checked)
+                                preferences.autostart = false;
+                        }
+                        Accessible.name: text
+                    }
+                    Controls.CheckBox {
+                        objectName: "autostartSetting"
+                        text: "Start in background at login"
+                        checked: preferences.autostart
+                        enabled: preferences.backgroundMode && root.trayAvailable
+                        onClicked: {
+                            if (backend.setAutostart(checked))
+                                preferences.autostart = checked;
+                            else
+                                checked = preferences.autostart;
+                        }
+                        Accessible.name: text
+                    }
+                    Controls.Label {
+                        text: "Authentication"
+                    }
+                    ThemedComboBox {
+                        objectName: "authorizationSetting"
+                        model: ["System prompt", "Existing sudo session"]
+                        currentIndex: root.useSudo ? 1 : 0
+                        onActivated: {
+                            root.useSudo = currentIndex === 1;
+                            preferences.authorization = root.useSudo ? "sudo" : "polkit";
+                        }
+                        Accessible.name: "Authentication"
+                        Layout.fillWidth: true
+                        Layout.maximumWidth: 420
+                    }
+                    Rectangle {
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: 1
+                        Layout.topMargin: 16
+                        color: root.line
                     }
                     RowLayout {
                         Layout.fillWidth: true
-                        ActionButton {
-                            objectName: "backToSettings"
-                            text: "Settings"
-                            symbol: "settings"
-                            onClicked: root.openView("Settings")
+                        Controls.Label {
+                            objectName: "aboutText"
+                            text: "PkgDeck " + backend.version
+                            color: root.ink
+                            font.bold: true
+                            font.pointSize: root.font.pointSize * 1.3
+                            Layout.fillWidth: true
                         }
                         ActionButton {
                             objectName: "repositoryLink"
                             text: "GitHub"
                             symbol: ""
+                            iconSource: root.repositoryIconSource
                             Accessible.name: "Open PkgDeck on GitHub"
                             onClicked: Qt.openUrlExternally(root.repositoryUrl)
                         }
                     }
-                    Controls.Label {
+                    ActionButton {
+                        objectName: "shortcutsToggle"
                         text: "Keyboard shortcuts"
-                        color: root.ink
-                        font.bold: true
-                        Layout.topMargin: 10
+                        symbol: root.shortcutsExpanded ? "up" : "down"
+                        Layout.topMargin: 8
+                        onClicked: root.shortcutsExpanded = !root.shortcutsExpanded
                     }
                     Repeater {
                         objectName: "aboutShortcuts"
-                        model: [
+                        model: root.shortcutsExpanded ? [
                             {action: "Search", keys: "Ctrl+1"},
                             {action: "Installed", keys: "Ctrl+2"},
                             {action: "Updates", keys: "Ctrl+3"},
@@ -1545,7 +1492,7 @@ Controls.ApplicationWindow {
                             {action: "Refresh source", keys: "Ctrl+M"},
                             {action: "Reload", keys: "Ctrl+R"},
                             {action: "Cancel work", keys: "Esc"}
-                        ]
+                        ] : []
                         delegate: RowLayout {
                             required property var modelData
                             Layout.fillWidth: true
@@ -1609,7 +1556,7 @@ Controls.ApplicationWindow {
                 Layout.fillHeight: backend.busy || (root.viewItems.length > 0 && (root.currentView !== "Sources" || root.viewItems.length >= 6))
                 Layout.preferredHeight: root.currentView === "Sources" && root.viewItems.length > 0 && root.viewItems.length < 6 ? (root.compact ? 60 : 85) + root.viewItems.length * (root.compact ? 68 : 56) : root.viewItems.length === 0 && !backend.busy ? 150 : -1
                 Layout.minimumHeight: 130
-                visible: root.currentView !== "Settings" && root.currentView !== "About" && root.currentView !== "Activity" &&
+                visible: root.currentView !== "Settings" && root.currentView !== "Activity" &&
                     (root.viewItems.length > 0 || root.readFailures.length === 0 || backend.busy) &&
                     (root.currentView !== "Search" || root.viewItems.length > 0 || backend.busy || searchPane.text.trim().length > 0)
                 color: root.surface
@@ -2100,14 +2047,6 @@ Controls.ApplicationWindow {
                 spacing: 8
                 visible: ["Search", "Installed", "Updates", "Clean", "Sources"].indexOf(root.currentView) >= 0
                 ActionButton {
-                    objectName: "previewInventoryButton"
-                    visible: root.currentView === "Installed"
-                    text: "Preview inventory…"
-                    symbol: "installed"
-                    enabled: !backend.busy
-                    onClicked: { root.rememberDialogFocus(); previewInventoryFile.open(); }
-                }
-                ActionButton {
                     objectName: "cleanAllButton"
                     visible: root.currentView === "Clean" && root.items.some((row) => row.kind === "cleanup")
                     text: "Clean all"
@@ -2170,93 +2109,6 @@ Controls.ApplicationWindow {
                 visible: ["Search", "Installed", "Updates", "Clean", "Sources"].indexOf(root.currentView) >= 0 && !backend.busy &&
                     (root.viewItems.length === 0 || (root.currentView === "Sources" && root.viewItems.length < 6))
                 Layout.fillHeight: true
-            }
-        }
-    }
-    FileDialog {
-        id: exportInventoryFile
-        title: "Export inventory"
-        fileMode: FileDialog.SaveFile
-        nameFilters: ["PkgDeck inventory (*.json)"]
-        onAccepted: {
-            backend.exportInventory(selectedFile, JSON.stringify(root.inventorySelection));
-            root.restoreDialogFocus();
-        }
-        onRejected: root.restoreDialogFocus()
-    }
-    FileDialog {
-        id: previewInventoryFile
-        title: "Preview inventory"
-        fileMode: FileDialog.OpenFile
-        nameFilters: ["PkgDeck inventory (*.json)", "JSON files (*.json)"]
-        onAccepted: {
-            backend.previewInventory(selectedFile);
-            inventoryPreviewDialog.open();
-        }
-        onRejected: root.restoreDialogFocus()
-    }
-    Controls.Dialog {
-        id: inventoryPreviewDialog
-        objectName: "inventoryPreviewDialog"
-        parent: Controls.Overlay.overlay
-        anchors.centerIn: parent
-        width: Math.min(root.width - 32, 660)
-        height: Math.min(root.height - 32, 540)
-        modal: true
-        title: "Inventory preview"
-        standardButtons: Controls.Dialog.Close
-        onClosed: root.restoreDialogFocus()
-        background: Rectangle { color: root.surface; radius: 10; border.color: root.line }
-        contentItem: Controls.ScrollView {
-            clip: true
-            contentWidth: availableWidth
-            ColumnLayout {
-                width: parent.width
-                spacing: 8
-                Controls.BusyIndicator {
-                    running: backend.busy && !root.inventoryPreview.packages
-                    visible: running
-                    Layout.alignment: Qt.AlignHCenter
-                }
-                Controls.Label {
-                    visible: !backend.busy && !root.inventoryPreview.packages
-                    text: backend.status
-                    textFormat: Text.PlainText
-                    wrapMode: Text.WordWrap
-                    color: root.muted
-                    Layout.fillWidth: true
-                }
-                Repeater {
-                    model: root.inventoryPreview.packages || []
-                    delegate: ColumnLayout {
-                        required property var modelData
-                        Layout.fillWidth: true
-                        Controls.Label {
-                            text: modelData.package.name + " · " + modelData.package.backend
-                            color: root.ink
-                            font.bold: true
-                            Layout.fillWidth: true
-                        }
-                        Controls.Label {
-                            text: modelData.status.replaceAll("_", " ") + (modelData.reason ? " · " + modelData.reason : "")
-                            textFormat: Text.PlainText
-                            wrapMode: Text.WordWrap
-                            color: root.muted
-                            Layout.fillWidth: true
-                        }
-                        Repeater {
-                            model: modelData.proposed_changes || []
-                            delegate: Controls.Label {
-                                required property var modelData
-                                text: modelData.detail
-                                textFormat: Text.PlainText
-                                wrapMode: Text.WordWrap
-                                color: root.muted
-                                Layout.fillWidth: true
-                            }
-                        }
-                    }
-                }
             }
         }
     }

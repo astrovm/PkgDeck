@@ -1,9 +1,8 @@
 # Graphical interface
 
 Launch `pkgdeck`. The sidebar contains Search, Installed, Updates, Clean, Sources,
-and Settings. Activity is always available in the header; About is in Settings.
-Settings offers system, dark, and light appearance, reduced motion, and
-authorization preferences.
+and Settings. Activity is always available in the header. Settings includes
+appearance, authorization, version, GitHub, and keyboard shortcuts.
 
 ## Browse and compare
 
@@ -43,12 +42,6 @@ they are added. `.ymp` opens the native openSUSE installer after confirmation.
 Installed supports filtering and a **Duplicate installs** view. AppStream identity
 and upstream homepage metadata associate related installations; grouping does not
 merge packages or change what an action targets.
-
-**Export shown** saves the installed packages currently visible after filters to
-a portable JSON inventory. In Settings, **Preview inventory** checks one of these
-files against this machine. It shows installed, installable, unavailable,
-unsupported, and ambiguous entries, with repository or source choices where
-needed. Preview makes no package or repository changes.
 
 Click column headings to sort; drag the name and version dividers to resize.
 Use the source picker to filter the current package page. Enable managers on
