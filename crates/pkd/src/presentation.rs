@@ -208,6 +208,36 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
                 output.push_str(&format!("\n[!] Source failed: {}", value(failure)));
             }
         }
+    } else if let Some(export) = data.get("manifest_export") {
+        output.push_str(&format!(
+            "Exported {} packages to {}",
+            value(&export["packages"]),
+            value(&export["path"])
+        ));
+    } else if let Some(preview) = data.get("manifest_preview") {
+        let rows = preview["packages"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|entry| {
+                vec![
+                    value(&entry["package"]["name"]),
+                    value(&entry["package"]["backend"]),
+                    value(&entry["status"]),
+                    value(&entry["reason"]),
+                ]
+            })
+            .collect::<Vec<_>>();
+        output.push_str(&table(
+            &["PACKAGE", "SOURCE", "STATUS", "DETAIL"],
+            &rows,
+            width,
+        ));
+        for entry in preview["packages"].as_array().into_iter().flatten() {
+            for proposed in entry["proposed_changes"].as_array().into_iter().flatten() {
+                output.push_str(&format!("\n  {}", value(&proposed["detail"])));
+            }
+        }
     } else if let Some(report) = data.get("inspection") {
         output.push_str(&format!(
             "Command: {}\nEnvironment: {}\nPATH: {}\nResolved: {}\n",
@@ -394,6 +424,27 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn portable_inventory_summary_shows_status_and_proposed_change() {
+        let exported = human(
+            &json!({"manifest_export":{"path":"synthetic.json", "packages":2}}),
+            100,
+            false,
+        );
+        assert!(exported.contains("Exported 2 packages to synthetic.json"));
+        let preview = human(
+            &json!({"manifest_preview":{"packages":[
+                {"package":{"name":"org.example.App", "backend":"flatpak"},
+                 "status":"ambiguous", "reason":"choose a repository",
+                 "proposed_changes":[{"kind":"repository_addition", "detail":"Review flathub"}]}
+            ]}}),
+            100,
+            false,
+        );
+        assert!(preview.contains("org.example.App"));
+        assert!(preview.contains("ambiguous"));
+        assert!(preview.contains("Review flathub"));
+    }
     #[test]
     fn repository_and_firmware_labels_are_human_readable() {
         let output = human(

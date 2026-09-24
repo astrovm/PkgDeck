@@ -1,12 +1,18 @@
 //! Thin Qt facade: native work runs on a worker; Qt properties change only on the GUI thread.
 use cxx_qt::CxxQtType;
-use cxx_qt_lib::QString;
+use cxx_qt_lib::{QString, QUrl};
 use pkgdeck_core::activity::{History, Outcome, State};
 use pkgdeck_core::backends::AppImage;
 use pkgdeck_core::background::{self, Schedule};
 use pkgdeck_core::repositories::{self, Action as RepositoryAction};
 use pkgdeck_core::repository_input::{self, Import as RepositoryImport};
-use pkgdeck_core::{engine::*, host::Authorization, package::*, process::Cancellation};
+use pkgdeck_core::{
+    engine::*,
+    host::Authorization,
+    manifest,
+    package::*,
+    process::{Cancellation, ExecutionError},
+};
 use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -67,10 +73,12 @@ fn local_input_path(input: &str) -> Result<PathBuf, String> {
 pub mod ffi {
     unsafe extern "C++" {
         include!("cxx-qt-lib/qstring.h");
+        include!("cxx-qt-lib/qurl.h");
         include!("pkgdeck/native/controller.h");
         #[allow(dead_code)] // Test constructor; QML constructs production instances.
         fn create_controller() -> UniquePtr<PackageController>;
         type QString = cxx_qt_lib::QString;
+        type QUrl = cxx_qt_lib::QUrl;
     }
     extern "RustQt" {
         #[qobject]
@@ -81,6 +89,7 @@ pub mod ffi {
         #[qproperty(QString, repositories)]
         #[qproperty(QString, source_catalog)]
         #[qproperty(QString, report_state)]
+        #[qproperty(QString, manifest_preview)]
         #[qproperty(QString, activity)]
         #[qproperty(QString, background_state)]
         #[qproperty(QString, confirmation)]
@@ -130,6 +139,12 @@ pub mod ffi {
         #[qinvokable]
         fn poll(self: Pin<&mut PackageController>);
         #[qinvokable]
+        #[cxx_name = "exportInventory"]
+        fn export_inventory(self: Pin<&mut PackageController>, url: QUrl, identities: QString);
+        #[qinvokable]
+        #[cxx_name = "previewInventory"]
+        fn preview_inventory(self: Pin<&mut PackageController>, url: QUrl);
+        #[qinvokable]
         #[cxx_name = "refreshActivity"]
         fn refresh_activity(self: Pin<&mut PackageController>);
         #[qinvokable]
@@ -166,6 +181,8 @@ enum Job {
     PlanUpgrade(Vec<Operation>, usize),
     UpgradeAll(Vec<Operation>, Option<AptUpgradePlan>),
     CleanAll(Vec<Operation>),
+    ManifestExport(PathBuf, Vec<PackageId>),
+    ManifestPreview(PathBuf),
 }
 impl Job {
     fn writes(&self) -> bool {
@@ -207,6 +224,8 @@ enum Payload {
     Cleanup(CleanupReport),
     UpgradePreview(Vec<Operation>, usize, Option<AptUpgradePlan>),
     OperationPreview(Operation, Option<Box<TransactionPlan>>),
+    ManifestExport(usize),
+    ManifestPreview(manifest::Preview),
     CleanPreview(Vec<Operation>, Vec<CleanupItem>),
 }
 enum Reply {
@@ -283,6 +302,25 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
     let result = match job {
         Job::OpenInput(input) => inspect_open_input(&input, cancel),
         Job::Repositories(_) | Job::ImportRepository(_) => Err(EngineError::NotFound),
+        Job::ManifestExport(path, selected) => {
+            let installed = engine.installed(cancel);
+            if installed.failures.is_empty() {
+                manifest::export(&installed.packages, &selected)
+                    .and_then(|document| {
+                        manifest::write_new(&path, &document)?;
+                        Ok(Payload::ManifestExport(document.packages.len()))
+                    })
+                    .map_err(|error| EngineError::Execution(ExecutionError::Invalid(error.to_string())))
+            } else {
+                Err(EngineError::Execution(ExecutionError::Invalid(
+                    "some package sources could not be read; retry the export".into(),
+                )))
+            }
+        }
+        Job::ManifestPreview(path) => manifest::read(&path)
+            .and_then(|document| manifest::inspect(engine, &document, cancel))
+            .map(Payload::ManifestPreview)
+            .map_err(|error| EngineError::Execution(ExecutionError::Invalid(error.to_string()))),
         Job::BackgroundUpdates(_) => {
             let mut report = engine.installed(cancel);
             filter_updates(&mut report);
@@ -451,6 +489,7 @@ pub struct Controller {
     repositories: QString,
     source_catalog: QString,
     report_state: QString,
+    manifest_preview: QString,
     activity: QString,
     background_state: QString,
     version: QString,
@@ -497,6 +536,7 @@ impl Default for Controller {
             repositories: "{}".into(),
             source_catalog: "[]".into(),
             report_state: r#"{"phase":"idle"}"#.into(),
+            manifest_preview: "{}".into(),
             activity: "[]".into(),
             background_state: "{}".into(),
             version: pkgdeck_core::VERSION.into(),
@@ -585,6 +625,7 @@ fn engine_source(job: &Job, filter: &[String]) -> Vec<String> {
         // The picker needs to explain disabled and unavailable managers too.
         Job::Load(view, _) if view == "Sources" => vec![],
         Job::Details(id) => vec![id.backend.clone()],
+        Job::ManifestPreview(_) => vec![],
         Job::PlanUpgrade(operations, _)
             if operations.iter().any(|operation| {
                 matches!(operation, Operation::UpgradeAll { backend } if backend == "apt")
@@ -943,6 +984,14 @@ fn confirmation_preview(
         {
             lines.push(package.summary.clone());
             summary.push(package.summary.clone());
+        }
+        if (package.id.backend == "appimage"
+            || package.id.reference.as_deref().is_some_and(|value| {
+                value.starts_with("local-deb:") || value.starts_with("flatpakref:")
+            }))
+            && matches!(operation, Operation::Install(_))
+        {
+            lines.push(package.summary.clone());
         }
     }
     if let Operation::Clean(id) = operation {
@@ -1793,6 +1842,40 @@ impl ffi::PackageController {
             self.start(Job::Repositories(None));
         }
     }
+    pub fn export_inventory(self: Pin<&mut Self>, url: QUrl, identities: QString) {
+        if self.rust().worker.is_some() && !self.rust().background {
+            return;
+        }
+        let Some(path) = url
+            .to_local_file()
+            .map(|path| PathBuf::from(path.to_string()))
+        else {
+            self.set_status("Choose a local inventory file.".into());
+            return;
+        };
+        let selected: Vec<PackageId> = match serde_json::from_str(&identities.to_string()) {
+            Ok(selected) => selected,
+            Err(_) => {
+                self.set_status("Invalid package selection.".into());
+                return;
+            }
+        };
+        self.start(Job::ManifestExport(path, selected));
+    }
+    pub fn preview_inventory(mut self: Pin<&mut Self>, url: QUrl) {
+        if self.rust().worker.is_some() && !self.rust().background {
+            return;
+        }
+        let Some(path) = url
+            .to_local_file()
+            .map(|path| PathBuf::from(path.to_string()))
+        else {
+            self.set_status("Choose a local inventory file.".into());
+            return;
+        };
+        self.as_mut().set_manifest_preview("{}".into());
+        self.start(Job::ManifestPreview(path));
+    }
     pub fn change_repository(mut self: Pin<&mut Self>, action: QString) {
         let action = match repositories::parse_action(&action.to_string()) {
             Ok(action) => action,
@@ -2094,6 +2177,13 @@ impl ffi::PackageController {
                 self.as_mut().set_confirmation_data(encoded(data));
                 self.as_mut().set_confirmation(body.as_str().into());
                 self.rust_mut().pending = Some(Job::Write(operation, plan));
+            }
+            Ok(Payload::ManifestExport(count)) => {
+                self.set_status(format!("Exported {count} packages.").as_str().into());
+            }
+            Ok(Payload::ManifestPreview(preview)) => {
+                self.as_mut().set_manifest_preview(encoded(preview));
+                self.set_status("Inventory preview ready.".into());
             }
             Ok(Payload::CleanPreview(operations, fresh)) => {
                 if let Some(entry) = self.as_mut().rust_mut().revalidating.take() {
@@ -4770,6 +4860,128 @@ mod tests {
                 })
             }
         }
+    }
+    #[test]
+    fn inventory_jobs_export_and_preview_exact_installed_identity() {
+        let package: Package = serde_json::from_value(json!({
+            "id":{"backend":"fixture", "name":"synthetic-editor", "architecture":"x86_64", "scope":"system"},
+            "display_name":"Synthetic Editor", "summary":"Fixture", "installed_version":"1", "candidate_version":null, "update":"current"
+        })).unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "pkgdeck-gui-inventory-{}-{:?}.json",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let mut engine = Engine::default();
+        engine
+            .register(Fixture {
+                package: package.clone(),
+                fail: false,
+            })
+            .unwrap();
+        let mut replies = Vec::new();
+        execute(
+            &mut engine,
+            Job::ManifestExport(path.clone(), vec![package.id.clone()]),
+            &Cancellation::default(),
+            &mut |reply| replies.push(reply),
+        );
+        assert!(matches!(
+            replies.pop(),
+            Some(Reply::Done(Ok(Payload::ManifestExport(1))))
+        ));
+        let saved = manifest::read(&path).unwrap();
+        assert_eq!(saved.packages[0].name, "synthetic-editor");
+        execute(
+            &mut engine,
+            Job::ManifestPreview(path.clone()),
+            &Cancellation::default(),
+            &mut |reply| replies.push(reply),
+        );
+        let Some(Reply::Done(Ok(Payload::ManifestPreview(preview)))) = replies.pop() else {
+            panic!("preview failed");
+        };
+        assert_eq!(
+            preview.packages[0].status,
+            manifest::PreviewStatus::AlreadyInstalled
+        );
+        execute(
+            &mut engine,
+            Job::ManifestExport(path.clone(), vec![]),
+            &Cancellation::default(),
+            &mut |reply| replies.push(reply),
+        );
+        assert!(matches!(replies.pop(), Some(Reply::Done(Err(_)))));
+        std::fs::remove_file(path).unwrap();
+    }
+    #[test]
+    fn inventory_picker_rejects_remote_paths_and_bad_selection() {
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller
+            .as_mut()
+            .export_inventory(QUrl::from("https://example.invalid/list.json"), "[]".into());
+        assert!(controller.status().to_string().contains("local inventory"));
+        controller
+            .as_mut()
+            .preview_inventory(QUrl::from("https://example.invalid/list.json"));
+        assert!(controller.status().to_string().contains("local inventory"));
+        let file = QUrl::from_local_file(&"/tmp/synthetic-list.json".into());
+        controller.as_mut().export_inventory(file, "broken".into());
+        assert!(controller
+            .status()
+            .to_string()
+            .contains("Invalid package selection"));
+        controller
+            .as_mut()
+            .apply(Ok(Payload::ManifestPreview(manifest::Preview {
+                schema_version: manifest::SCHEMA_VERSION,
+                packages: vec![],
+            })));
+        assert!(controller
+            .manifest_preview()
+            .to_string()
+            .contains("packages"));
+        controller.as_mut().apply(Ok(Payload::ManifestExport(2)));
+        assert!(controller
+            .status()
+            .to_string()
+            .contains("Exported 2 packages"));
+
+        // A foreground picker request can preempt a background read without
+        // touching the host while it waits for the worker to wind down.
+        let (sender, receiver) = mpsc::channel();
+        drop(sender);
+        let cancellation = Cancellation::default();
+        controller.as_mut().rust_mut().background = true;
+        controller.as_mut().rust_mut().worker = Some(Worker {
+            handle: thread::spawn(|| {}),
+            receiver,
+            cancel: cancellation.clone(),
+            job: Job::Load("Installed".into(), String::new()),
+        });
+        let local = QUrl::from_local_file(&"/tmp/synthetic-list.json".into());
+        controller.as_mut().preview_inventory(local.clone());
+        assert!(matches!(
+            controller.rust().queued,
+            Some(Job::ManifestPreview(_))
+        ));
+        assert!(cancellation.requested());
+        controller.as_mut().export_inventory(local, "[]".into());
+        assert!(matches!(
+            controller.rust().queued,
+            Some(Job::ManifestExport(_, _))
+        ));
+        controller
+            .as_mut()
+            .rust_mut()
+            .worker
+            .take()
+            .unwrap()
+            .handle
+            .join()
+            .unwrap();
+        controller.as_mut().rust_mut().queued = None;
     }
     fn cached_view(name: &str) -> CachedView {
         CachedView {
