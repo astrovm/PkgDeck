@@ -32,6 +32,7 @@ TestCase {
         function previewInventory(url) {}
         property string activity: "[]"
         property string background_state: "{}"
+        property string notification_history: "{}"
         property string lastRetry: ""
         property string version: "9.9.9-test"
         property bool simulateLoading: false
@@ -95,6 +96,8 @@ TestCase {
         function refreshActivity() {}
         function cancelQueued() {}
         function checkUpdates(sources, enabled, offline, metered, force) {}
+        function restoreNotificationHistory(history) { notification_history = history; }
+        function acknowledgeNotification() {}
         function setAutostart(enabled) { return true; }
     }
     Component {
@@ -122,6 +125,7 @@ TestCase {
         fake.report_state = "{}";
         fake.activity = "[]";
         fake.background_state = "{}";
+        fake.notification_history = "{}";
         fake.lastRetry = "";
         fake.manifest_preview = "{}";
         fake.lastInventorySelection = "";
@@ -1420,6 +1424,29 @@ TestCase {
         verify(browser.visible);
         browser.close();
         verify(!browser.visible);
+    }
+    function test_background_status_and_test_notification_control() {
+        browser.openView("Settings");
+        const status = findChild(browser, "backgroundCheckStatus");
+        const failures = findChild(browser, "backgroundCheckFailures");
+        const availability = findChild(browser, "notificationAvailability");
+        const button = findChild(browser, "testNotificationButton");
+        verify(status.text.indexOf("never") >= 0);
+        verify(!button.enabled);
+        browser.backgroundMode = true;
+        browser.trayAvailable = true;
+        browser.notificationAvailable = true;
+        fake.background_state = JSON.stringify({last_check: 1234567890, available: 2,
+            failures: [{source: "fixture", kind: "unavailable"}], notify: false});
+        verify(status.text.indexOf("2 updates found") >= 0);
+        verify(failures.visible);
+        verify(failures.text.indexOf("fixture") >= 0);
+        compare(availability.text, "Desktop notifications available");
+        verify(button.enabled);
+        let requested = 0;
+        browser.testNotificationRequested.connect(() => requested++);
+        button.clicked();
+        compare(requested, 1);
     }
     function test_container_reference_uses_explicit_search_submission() {
         browser.openView("Search");

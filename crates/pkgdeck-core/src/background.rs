@@ -7,8 +7,9 @@ use crate::{
     host::Runtime,
     package::{PackageId, UpdateAvailability},
 };
+use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     ffi::OsString,
     fs::{self, OpenOptions},
     io::{self, Write},
@@ -20,14 +21,36 @@ pub const CHECK_INTERVAL_SECONDS: u64 = 30 * 60;
 #[derive(Default)]
 pub struct Schedule {
     next_due: u64,
-    last_complete_set: Option<Vec<(PackageId, Option<String>)>>,
+    notified: BTreeMap<String, BTreeSet<(PackageId, Option<String>)>>,
+    pending: BTreeMap<String, BTreeSet<(PackageId, Option<String>)>>,
+}
+#[derive(Default, Serialize, Deserialize)]
+struct NotificationHistory {
+    #[serde(default)]
+    notified: BTreeMap<String, BTreeSet<(PackageId, Option<String>)>>,
 }
 pub struct CheckResult {
     pub count: usize,
     pub failures: usize,
-    pub changed: bool,
+    pub notify: bool,
 }
 impl Schedule {
+    pub fn restore_notifications(&mut self, encoded: &str) {
+        if let Ok(history) = serde_json::from_str::<NotificationHistory>(encoded) {
+            self.notified = history.notified;
+        }
+    }
+    pub fn notification_history(&self) -> String {
+        serde_json::to_string(&NotificationHistory {
+            notified: self.notified.clone(),
+        })
+        .expect("notification history is serializable")
+    }
+    pub fn acknowledge_notification(&mut self) {
+        for (source, updates) in std::mem::take(&mut self.pending) {
+            self.notified.insert(source, updates);
+        }
+    }
     pub fn ready(
         &mut self,
         now: u64,
@@ -44,26 +67,33 @@ impl Schedule {
         true
     }
     pub fn complete(&mut self, report: &PackageReport) -> CheckResult {
-        let mut updates: Vec<_> = report
+        let mut current: BTreeMap<String, BTreeSet<_>> = report
+            .successful_sources
+            .iter()
+            .map(|source| (source.clone(), BTreeSet::new()))
+            .collect();
+        for package in report
             .packages
             .iter()
             .filter(|package| package.update == UpdateAvailability::Available)
-            .map(|package| (package.id.clone(), package.candidate_version.clone()))
-            .collect();
-        updates.sort();
-        updates.dedup();
-        let changed = report.failures.is_empty()
-            && self
-                .last_complete_set
-                .as_ref()
-                .is_some_and(|previous| previous != &updates);
-        if report.failures.is_empty() {
-            self.last_complete_set = Some(updates.clone());
+        {
+            if let Some(updates) = current.get_mut(&package.id.backend) {
+                updates.insert((package.id.clone(), package.candidate_version.clone()));
+            }
+        }
+        let count = current.values().map(BTreeSet::len).sum();
+        self.pending.clear();
+        for (source, updates) in current {
+            let notified = self.notified.entry(source.clone()).or_default();
+            notified.retain(|update| updates.contains(update));
+            if updates.iter().any(|update| !notified.contains(update)) {
+                self.pending.insert(source, updates);
+            }
         }
         CheckResult {
-            count: updates.len(),
+            count,
             failures: report.failures.len(),
-            changed,
+            notify: !self.pending.is_empty(),
         }
     }
 }
@@ -189,28 +219,58 @@ mod tests {
         ));
     }
     #[test]
-    fn changed_complete_set_notifies_once_but_partial_does_not_replace_baseline() {
+    fn first_check_notifies_once_and_history_survives_restart() {
         let mut schedule = Schedule::default();
         let mut report = PackageReport::default();
-        assert!(!schedule.complete(&report).changed);
-        assert!(!schedule.complete(&report).changed);
+        report.successful_sources.push("apt".into());
+        assert!(!schedule.complete(&report).notify);
         let package = serde_json::from_value(serde_json::json!({
             "id": {"backend":"apt", "name":"synthetic", "architecture":"amd64", "scope":"system"},
             "display_name":"Synthetic", "summary":"Test", "installed_version":"1", "candidate_version":"2", "update":"available"
         })).unwrap();
         report.packages.push(package);
-        assert!(schedule.complete(&report).changed);
-        assert!(!schedule.complete(&report).changed);
-        // A failed source cannot prove that the update set shrank.
+        assert!(schedule.complete(&report).notify);
+        assert!(schedule.complete(&report).notify); // Delivery has not been acknowledged.
+        schedule.acknowledge_notification();
+        assert!(!schedule.complete(&report).notify);
+        let history = schedule.notification_history();
+        let mut restarted = Schedule::default();
+        restarted.restore_notifications(&history);
+        assert!(!restarted.complete(&report).notify);
+        report.packages[0].candidate_version = Some("3".into());
+        assert!(restarted.complete(&report).notify);
+        restarted.acknowledge_notification();
         report.packages.clear();
+        assert!(!restarted.complete(&report).notify); // Removal is not an alert.
+        assert!(!restarted.notification_history().is_empty());
+    }
+    #[test]
+    fn failed_source_does_not_silence_successful_source_or_erase_its_history() {
+        let mut schedule = Schedule::default();
+        let mut report = PackageReport::default();
+        let package = serde_json::from_value(serde_json::json!({
+            "id": {"backend":"apt", "name":"synthetic", "architecture":"amd64", "scope":"system"},
+            "display_name":"Synthetic", "summary":"Test", "installed_version":"1", "candidate_version":"2", "update":"available"
+        })).unwrap();
+        report.packages.push(package);
+        report.successful_sources.push("apt".into());
         report.failures.push(crate::engine::BackendFailure {
-            backend: "fixture".into(),
+            backend: "other".into(),
             error: crate::engine::EngineError::Cancelled,
         });
-        assert!(!schedule.complete(&report).changed);
+        assert!(schedule.complete(&report).notify);
+        schedule.acknowledge_notification();
+        report.packages.clear();
+        report.successful_sources.clear();
+        report.failures[0].backend = "apt".into();
+        assert!(!schedule.complete(&report).notify);
         report.failures.clear();
-        assert!(schedule.complete(&report).changed);
-        assert!(!schedule.complete(&report).changed);
+        report.successful_sources.push("apt".into());
+        report.packages.push(serde_json::from_value(serde_json::json!({
+            "id": {"backend":"apt", "name":"synthetic", "architecture":"amd64", "scope":"system"},
+            "display_name":"Synthetic", "summary":"Test", "installed_version":"1", "candidate_version":"2", "update":"available"
+        })).unwrap());
+        assert!(!schedule.complete(&report).notify);
     }
     #[test]
     fn autostart_is_reversible() {

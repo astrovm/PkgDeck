@@ -93,6 +93,7 @@ pub mod ffi {
         #[qproperty(QString, manifest_preview)]
         #[qproperty(QString, activity)]
         #[qproperty(QString, background_state)]
+        #[qproperty(QString, notification_history)]
         #[qproperty(QString, confirmation)]
         #[qproperty(QString, confirmation_data)]
         #[qproperty(QString, version)]
@@ -167,6 +168,12 @@ pub mod ffi {
             metered: bool,
             force: bool,
         );
+        #[qinvokable]
+        #[cxx_name = "restoreNotificationHistory"]
+        fn restore_notification_history(self: Pin<&mut PackageController>, history: QString);
+        #[qinvokable]
+        #[cxx_name = "acknowledgeNotification"]
+        fn acknowledge_notification(self: Pin<&mut PackageController>);
         #[qinvokable]
         #[cxx_name = "setAutostart"]
         fn set_autostart(self: Pin<&mut PackageController>, enabled: bool) -> bool;
@@ -584,6 +591,7 @@ pub struct Controller {
     manifest_preview: QString,
     activity: QString,
     background_state: QString,
+    notification_history: QString,
     version: QString,
     busy: bool,
     writing: bool,
@@ -636,6 +644,7 @@ impl Default for Controller {
             manifest_preview: "{}".into(),
             activity: "[]".into(),
             background_state: "{}".into(),
+            notification_history: "{}".into(),
             version: pkgdeck_core::VERSION.into(),
             busy: false,
             writing: false,
@@ -1383,6 +1392,24 @@ impl ffi::PackageController {
         self.as_mut().rust_mut().background = true;
         self.start(Job::BackgroundUpdates(sources));
     }
+    pub fn restore_notification_history(mut self: Pin<&mut Self>, history: QString) {
+        self.as_mut()
+            .rust_mut()
+            .background_schedule
+            .restore_notifications(&history.to_string());
+        let saved = self.rust().background_schedule.notification_history();
+        self.as_mut()
+            .set_notification_history(saved.as_str().into());
+    }
+    pub fn acknowledge_notification(mut self: Pin<&mut Self>) {
+        self.as_mut()
+            .rust_mut()
+            .background_schedule
+            .acknowledge_notification();
+        let saved = self.rust().background_schedule.notification_history();
+        self.as_mut()
+            .set_notification_history(saved.as_str().into());
+    }
     fn finish_background_check(mut self: Pin<&mut Self>, report: PackageReport) {
         let result = self
             .as_mut()
@@ -1398,7 +1425,10 @@ impl ffi::PackageController {
             .iter()
             .map(|failure| json!({"source": failure.backend, "kind": failure_kind(&failure.error)}))
             .collect();
-        self.as_mut().set_background_state(encoded(json!({"last_check": checked, "available": result.count, "failures": failures, "notify": result.changed && result.count > 0})));
+        let saved = self.rust().background_schedule.notification_history();
+        self.as_mut()
+            .set_notification_history(saved.as_str().into());
+        self.as_mut().set_background_state(encoded(json!({"last_check": checked, "available": result.count, "failures": failures, "notify": result.notify})));
     }
     fn finish_background_error(mut self: Pin<&mut Self>, error: &EngineError) {
         let available = serde_json::from_str::<Value>(&self.background_state().to_string())
@@ -4013,8 +4043,13 @@ mod tests {
         let state: Value =
             serde_json::from_str(&controller.background_state().to_string()).unwrap();
         assert_eq!(state["available"], 1);
-        assert_eq!(state["notify"], false);
+        assert_eq!(state["notify"], true);
         assert_eq!(controller.rows().to_string(), "current view");
+        controller.as_mut().acknowledge_notification();
+        controller.as_mut().finish_background_check(report.clone());
+        let state: Value =
+            serde_json::from_str(&controller.background_state().to_string()).unwrap();
+        assert_eq!(state["notify"], false);
 
         let mut changed = report;
         changed.packages[0].candidate_version = Some("3".into());

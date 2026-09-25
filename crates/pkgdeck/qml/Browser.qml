@@ -111,7 +111,9 @@ Controls.ApplicationWindow {
     property string currentView: "Search"
     readonly property var activityRows: JSON.parse(backend.activity || "[]")
     readonly property int queuedCount: activityRows.filter(row => row.state === "queued").length
-    readonly property var backgroundState: JSON.parse(backend.background_state || "{}")
+    readonly property var backgroundState: JSON.parse(backend.background_state && backend.background_state !== "{}" ? backend.background_state : preferences.lastBackgroundState)
+    property bool notificationAvailable: false
+    signal testNotificationRequested()
     property bool startHidden: Qt.application.arguments.indexOf("--background") >= 0
     property bool forceQuit: false
     property bool trayAvailable: false
@@ -1036,6 +1038,8 @@ Controls.ApplicationWindow {
         property bool sortAscending: true
         property bool backgroundMode: false
         property bool autostart: false
+        property string notificationHistory: "{}"
+        property string lastBackgroundState: "{}"
     }
     onClosing: function (close) {
         if (!forceQuit && preferences.backgroundMode && trayAvailable) {
@@ -1051,6 +1055,14 @@ Controls.ApplicationWindow {
     }
     Connections {
         target: backend
+        function onNotificationHistoryChanged() {
+            preferences.notificationHistory = backend.notification_history;
+        }
+        function onBackgroundStateChanged() {
+            const state = JSON.parse(backend.background_state || "{}");
+            if (state.last_check)
+                preferences.lastBackgroundState = JSON.stringify({last_check: state.last_check, available: state.available, failures: state.failures || [], notify: false});
+        }
         function onDetailsChanged() {
             if (root.motionEnabled && root.selected !== null && backend.details !== "{}")
                 detailsReveal.restart();
@@ -1141,6 +1153,7 @@ Controls.ApplicationWindow {
         }
     }
     Component.onCompleted: {
+        backend.restoreNotificationHistory(preferences.notificationHistory);
         // Explicit --from flags seed the session checklist without
         // persisting; otherwise restore the stored list, migrating the
         // legacy single-source preference on first sight.
@@ -1643,6 +1656,40 @@ Controls.ApplicationWindow {
                                 checked = preferences.autostart;
                         }
                         Accessible.name: text
+                    }
+                    Controls.Label {
+                        objectName: "backgroundCheckStatus"
+                        text: root.backgroundState.last_check
+                            ? "Last check: " + new Date(root.backgroundState.last_check * 1000).toLocaleString()
+                                + ", " + (root.backgroundState.available || 0) + " updates found"
+                            : "Last check: never"
+                        color: root.muted
+                        wrapMode: Text.WordWrap
+                        Layout.fillWidth: true
+                    }
+                    Controls.Label {
+                        objectName: "backgroundCheckFailures"
+                        visible: (root.backgroundState.failures || []).length > 0
+                        text: "Could not check: " + (root.backgroundState.failures || []).map((failure) => failure.source).join(", ")
+                        color: root.muted
+                        wrapMode: Text.WordWrap
+                        Layout.fillWidth: true
+                    }
+                    Controls.Label {
+                        objectName: "notificationAvailability"
+                        text: !root.trayAvailable ? "Desktop notifications unavailable: no system tray"
+                            : !root.notificationAvailable ? "Desktop notifications unavailable in this tray"
+                            : "Desktop notifications available"
+                        color: root.muted
+                        wrapMode: Text.WordWrap
+                        Layout.fillWidth: true
+                    }
+                    ActionButton {
+                        objectName: "testNotificationButton"
+                        text: "Test notification"
+                        symbol: "updates"
+                        enabled: preferences.backgroundMode && root.notificationAvailable
+                        onClicked: root.testNotificationRequested()
                     }
                     Controls.Label {
                         text: "Authentication"

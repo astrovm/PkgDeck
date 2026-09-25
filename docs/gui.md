@@ -134,6 +134,22 @@ The Add file picker only lists formats for managers available on this computer.
 Linux AppImages, desktop login autostart, and system authorization settings are
 omitted on macOS.
 
+## Background update notifications
+
+Enable **Background checks** in Settings to check selected package sources while
+PkgDeck is running. The first check starts about 30 seconds after launch; later
+checks run no more often than every 30 minutes. Checks wait while the computer is
+offline, on a metered connection, or busy with another package operation. On
+Linux, **Start in background at login** keeps these checks running after login.
+
+PkgDeck notifies you when a successful check finds updates it has not notified
+you about before, including on the first check. It remembers notified updates
+across restarts and does not alert when updates disappear. A failed source does
+not prevent alerts for sources that completed successfully. Settings shows the
+last check, the count from successful sources, any source errors, and whether
+the desktop tray supports notifications. **Test notification** sends a sample
+message when background checks and tray notifications are available.
+
 The source picker filters one package page; Sources controls which managers PkgDeck
 queries. Neither setting enables or disables repositories. Refresh sources
 updates metadata for selected managers.

@@ -6,6 +6,8 @@ Browser {
     id: browser
     backend: PackageController {}
     trayAvailable: tray.available
+    notificationAvailable: tray.available && tray.supportsMessages
+    onTestNotificationRequested: tray.showMessage("PkgDeck test", "Desktop notifications are working.", Platform.SystemTrayIcon.Information, 8000)
     Platform.SystemTrayIcon {
         id: tray
         visible: browser.backgroundMode && available
@@ -21,8 +23,13 @@ Browser {
     Connections {
         target: browser
         function onBackgroundStateChanged() {
-            if (browser.backgroundState.notify && tray.visible && tray.supportsMessages)
-                tray.showMessage("PkgDeck updates", browser.backgroundState.available + " updates available", Platform.SystemTrayIcon.Information, 8000);
+            if (browser.backgroundState.notify && tray.visible && tray.supportsMessages) {
+                const failures = browser.backgroundState.failures || [];
+                const message = browser.backgroundState.available + " updates available"
+                    + (failures.length ? ". Some sources could not be checked." : "");
+                tray.showMessage("PkgDeck updates", message, Platform.SystemTrayIcon.Information, 8000);
+                browser.backend.acknowledgeNotification();
+            }
         }
     }
     Timer {
