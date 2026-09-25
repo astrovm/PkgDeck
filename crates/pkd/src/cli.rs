@@ -1,3 +1,4 @@
+use crate::live::Live;
 use clap::{Parser, Subcommand, ValueEnum};
 use pkgdeck_core::{
     activity::{History, Outcome, State},
@@ -9,6 +10,7 @@ use pkgdeck_core::{
     process::{Cancellation, ExecutionError},
 };
 use serde_json::{json, Value};
+use std::cell::{Cell, RefCell};
 use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 
@@ -144,11 +146,14 @@ pub enum RepoCommand {
     Edit,
 }
 impl Commands {
+    /// Commands that change installed software and so need approval.
+    /// Refreshing package lists changes nothing you would review, so it runs
+    /// without asking, like the app's background refresh.
     fn writes(&self) -> bool {
         matches!(self, Self::Repos { command: Some(command) } if !matches!(command, RepoCommand::List))
             || matches!(
                 self,
-                Self::Install { .. } | Self::Remove { .. } | Self::Update | Self::Upgrade { .. }
+                Self::Install { .. } | Self::Remove { .. } | Self::Upgrade { .. }
             )
             || matches!(self, Self::Clean { targets, all, .. } if *all || !targets.is_empty())
     }
@@ -168,7 +173,8 @@ fn error_code(error: &EngineError) -> u8 {
 }
 fn failure(error: EngineError) -> (Value, u8) {
     let code = error_code(&error);
-    (json!({"error": error, "message": error.to_string()}), code)
+    let message = crate::presentation::error_message(&error);
+    (json!({"error": error, "message": message}), code)
 }
 fn select(
     engine: &mut Engine,
@@ -195,11 +201,24 @@ fn select(
     })
 }
 
+#[cfg(test)]
 pub fn dispatch(
     engine: &mut Engine,
     args: &Args,
     cancel: &Cancellation,
     confirm: &mut dyn FnMut(&[Operation]) -> bool,
+    events: &mut dyn FnMut(Event),
+) -> (Value, u8) {
+    dispatch_with(engine, args, cancel, confirm, &mut |_| Ok(()), events)
+}
+/// `authorize` runs once approved changes are about to start, so a password
+/// prompt comes after the review and never before it.
+pub fn dispatch_with(
+    engine: &mut Engine,
+    args: &Args,
+    cancel: &Cancellation,
+    confirm: &mut dyn FnMut(&[Operation]) -> bool,
+    authorize: &mut dyn FnMut(&[Operation]) -> Result<(), EngineError>,
     events: &mut dyn FnMut(Event),
 ) -> (Value, u8) {
     let command = args.command.as_ref().expect("CLI command");
@@ -373,19 +392,37 @@ pub fn dispatch(
     }
     let planned = (|| -> Result<Vec<Operation>, EngineError> {
         match command {
-            Commands::Update => engine
-                .discover(cancel)
-                .into_iter()
-                .map(|source| match source.availability? {
-                    Availability::Available => Ok(Operation::Refresh {
-                        backend: source.backend,
-                    }),
-                    Availability::Unavailable(reason) => Err(EngineError::Unavailable {
-                        backend: source.backend,
-                        reason,
-                    }),
-                })
-                .collect(),
+            // Only sources that keep package lists can refresh them. Missing
+            // managers are skipped unless they were asked for by name.
+            Commands::Update => {
+                let mut operations = Vec::new();
+                for source in engine.discover(cancel) {
+                    match source.availability {
+                        Ok(Availability::Available)
+                            if source.capabilities.contains(&Capability::Refresh) =>
+                        {
+                            operations.push(Operation::Refresh {
+                                backend: source.backend,
+                            })
+                        }
+                        Ok(Availability::Available) if !args.from.is_empty() => {
+                            return Err(EngineError::Unsupported {
+                                backend: source.backend,
+                                capability: Capability::Refresh,
+                            })
+                        }
+                        Ok(Availability::Unavailable(reason)) if !args.from.is_empty() => {
+                            return Err(EngineError::Unavailable {
+                                backend: source.backend,
+                                reason,
+                            })
+                        }
+                        Err(error) if !args.from.is_empty() => return Err(error),
+                        _ => {}
+                    }
+                }
+                Ok(operations)
+            }
             Commands::Upgrade { names, .. } if names.is_empty() => {
                 let report = engine.installed(cancel);
                 if !report.failures.is_empty() {
@@ -518,11 +555,20 @@ pub fn dispatch(
             }
         }
     }
-    if !operations.is_empty() && !args.yes && !confirm(&operations) {
+    if !operations.is_empty()
+        && !args.yes
+        && !matches!(command, Commands::Update)
+        && !confirm(&operations)
+    {
         return (
             json!({"error": "confirmation_declined", "message": "Cancelled. Nothing was changed."}),
             7,
         );
+    }
+    if !operations.is_empty() {
+        if let Err(error) = authorize(&operations) {
+            return failure(error);
+        }
     }
     let history = History::default_store();
     let activity_id = history
@@ -548,36 +594,158 @@ pub fn dispatch(
     } else {
         error_code(results.iter().find_map(|r| r.as_ref().err()).unwrap())
     };
-    (
-        json!({"operations": operations.into_iter().zip(results).map(|(operation, result)| json!({"operation":operation,"result":result})).collect::<Vec<_>>()}),
-        code,
-    )
+    let operations = operations
+        .into_iter()
+        .zip(results)
+        .map(|(operation, result)| match &result {
+            Ok(_) => json!({"operation": operation, "result": result}),
+            Err(error) => json!({
+                "operation": operation,
+                "result": result,
+                "message": crate::presentation::error_message(error),
+            }),
+        })
+        .collect::<Vec<_>>();
+    (json!({ "operations": operations }), code)
 }
-fn emit(args: &Args, data: Value, code: u8) -> u8 {
+fn color_for(stream: &impl IsTerminal) -> bool {
+    stream.is_terminal()
+        && std::env::var_os("NO_COLOR").is_none()
+        && std::env::var("TERM").is_ok_and(|term| term != "dumb")
+}
+/// `results_shown` means each change already got its own line on stderr, so
+/// stdout only needs the closing summary.
+fn emit(args: &Args, data: Value, code: u8, results_shown: bool) -> u8 {
     let text = if args.json {
         serde_json::to_string(&json!({"schema_version":1,"exit_code":code,"data":data}))
             .expect("serializable result")
     } else {
-        let terminal = io::stdout().is_terminal();
-        let width = if terminal {
-            rustix::termios::tcgetwinsize(io::stdout()).map_or(100, |size| usize::from(size.ws_col))
+        let color = color_for(&io::stdout());
+        if results_shown && data["operations"].is_array() {
+            format!(
+                "\n{}",
+                crate::presentation::operations_summary(&data, color)
+            )
         } else {
-            100
-        };
-        let color = terminal
-            && std::env::var_os("NO_COLOR").is_none()
-            && std::env::var("TERM").is_ok_and(|term| term != "dumb");
-        crate::presentation::human(&data, width, color)
+            let width = if io::stdout().is_terminal() {
+                rustix::termios::tcgetwinsize(io::stdout())
+                    .map_or(100, |size| usize::from(size.ws_col))
+            } else {
+                100
+            };
+            crate::presentation::human(&data, width, color)
+        }
     };
     if writeln!(io::stdout().lock(), "{text}").is_err() {
         return 1;
     }
     code
 }
+fn ask(question: &str) -> bool {
+    eprint!("{question} [y/N] ");
+    let _ = io::stderr().flush();
+    let mut answer = String::new();
+    io::stdin().read_line(&mut answer).is_ok()
+        && matches!(answer.trim().to_lowercase().as_str(), "y" | "yes")
+}
+/// What the spinner says while a command reads from package managers.
+fn working_label(command: &Commands) -> Option<String> {
+    Some(match command {
+        Commands::Search { query } => {
+            format!("Searching for {}", crate::presentation::clean(query))
+        }
+        Commands::Info { name } => format!("Looking up {}", crate::presentation::clean(name)),
+        Commands::Inspect { command } => {
+            format!("Inspecting {}", crate::presentation::clean(command))
+        }
+        Commands::List | Commands::Inventory { .. } => "Reading installed packages".into(),
+        Commands::Audit => "Looking for duplicates and leftovers".into(),
+        Commands::Sources => "Checking package managers".into(),
+        Commands::Update => "Checking package managers".into(),
+        Commands::Upgrade { names, .. } if names.is_empty() => "Checking for updates".into(),
+        Commands::Install { .. } | Commands::Remove { .. } | Commands::Upgrade { .. } => {
+            "Finding packages".into()
+        }
+        Commands::Clean { .. } => "Looking for cleanup tasks".into(),
+        Commands::Repos { .. } => "Reading repositories".into(),
+        Commands::Doctor => return None,
+    })
+}
+/// Package managers whose changes need administrator access in this batch.
+fn protected_sources(operations: &[Operation]) -> Vec<String> {
+    let Ok(commands) = pkgdeck_core::batch::batch_commands(operations) else {
+        return vec![];
+    };
+    let mut sources: Vec<String> = Vec::new();
+    for (operation, commands) in operations.iter().zip(commands) {
+        let backend = operation.backend().to_string();
+        if !commands.is_empty() && !sources.contains(&backend) {
+            sources.push(backend);
+        }
+    }
+    sources
+}
+/// `sudo -n` only works with a cached login, so ask sudo for the password in
+/// the terminal first. sudo reads it, not PkgDeck.
+fn sudo_login(
+    live: &Live,
+    operations: &[Operation],
+    cancel: &Cancellation,
+) -> Result<(), EngineError> {
+    use pkgdeck_core::host::Runtime;
+    let sources = protected_sources(operations);
+    if sources.is_empty()
+        || !io::stdin().is_terminal()
+        || !io::stderr().is_terminal()
+        || !matches!(Host::current().runtime, Runtime::Native | Runtime::AppImage)
+    {
+        return Ok(());
+    }
+    let sudo = std::path::Path::new("/usr/bin/sudo");
+    let quiet = |args: &[&str]| {
+        std::process::Command::new(sudo)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    };
+    if quiet(&["-n", "-v"]) {
+        return Ok(());
+    }
+    live.clear();
+    let paint = |code: &str, text: &str| {
+        if live.color() {
+            format!("\x1b[{code}m{text}\x1b[0m")
+        } else {
+            text.into()
+        }
+    };
+    eprintln!(
+        "{}",
+        paint(
+            "2",
+            &format!("Administrator access is needed for {}.", sources.join(", "))
+        )
+    );
+    let granted = std::process::Command::new(sudo)
+        .args(["-v", "-p", "Password for %p: "])
+        .status()
+        .is_ok_and(|status| status.success());
+    if granted {
+        Ok(())
+    } else if cancel.requested() {
+        Err(ExecutionError::AuthorizationCancelled.into())
+    } else {
+        Err(ExecutionError::AuthorizationDenied.into())
+    }
+}
 fn repository_command(
     args: &Args,
     command: &Option<RepoCommand>,
     cancel: &Cancellation,
+    live: &Live,
 ) -> (Value, u8) {
     use pkgdeck_core::{backends::NativeTransport, host::Host};
     let host = Host::current();
@@ -595,11 +763,9 @@ fn repository_command(
         command,
         cancel,
         &mut |label| {
+            live.clear();
             eprintln!("{}", crate::presentation::clean(label));
-            eprint!("Apply this repository change? [y/N] ");
-            let _ = io::stderr().flush();
-            let mut answer = String::new();
-            io::stdin().read_line(&mut answer).is_ok() && matches!(answer.trim(), "y" | "Y" | "yes")
+            ask("Apply this repository change?")
         },
     )
 }
@@ -679,21 +845,30 @@ pub fn run(args: &Args) -> u8 {
             args,
             json!({"error":"confirmation_required","message":"add --yes to approve changes in JSON or non-interactive mode"}),
             2,
+            false,
         );
     }
     let cancel = Cancellation::default();
     let signal = match signal_hook::flag::register(signal_hook::consts::SIGINT, cancel.flag()) {
         Ok(id) => id,
-        Err(e) => return emit(args, json!({"error":e.to_string()}), 1),
+        Err(e) => return emit(args, json!({"error":e.to_string()}), 1, false),
     };
-    if let Some(Commands::Repos { command }) = &args.command {
-        let (data, code) = repository_command(args, command, &cancel);
+    let command = args.command.as_ref().expect("CLI command");
+    let live = Live::new(!args.json && color_for(&io::stderr()));
+    if !args.json {
+        if let Some(label) = working_label(command) {
+            live.status(label);
+        }
+    }
+    if let Commands::Repos { command } = command {
+        let (data, code) = repository_command(args, command, &cancel, &live);
         signal_hook::low_level::unregister(signal);
-        return emit(args, data, code);
+        drop(live);
+        return emit(args, data, code, false);
     }
     // Native ownership databases can only identify these package managers.
     // Querying every unrelated inventory makes a simple PATH lookup slow.
-    let inspection = matches!(args.command, Some(Commands::Inspect { .. }));
+    let inspection = matches!(command, Commands::Inspect { .. });
     let sources = if inspection {
         inspection_sources(&args.from)
     } else {
@@ -704,7 +879,7 @@ pub fn run(args: &Args) -> u8 {
     } else {
         pkgdeck_core::backends::native_engine(
             &sources,
-            matches!(args.command, Some(Commands::Sources)),
+            matches!(command, Commands::Sources),
             args.auth.into(),
             &cancel,
         )
@@ -713,35 +888,111 @@ pub fn run(args: &Args) -> u8 {
         Ok(engine) => engine,
         Err(e) => {
             signal_hook::low_level::unregister(signal);
+            drop(live);
             let (data, code) = failure(e);
-            return emit(args, data, code);
+            return emit(args, data, code, false);
         }
     };
-    let (data, code) = dispatch(
+    let color = live.color();
+    let paint = crate::presentation::Paint(color);
+    // Details a backend reports while planning, such as the APT transaction,
+    // belong in the review. Messages after that are live progress.
+    let notes = RefCell::new(Vec::<(Operation, String)>::new());
+    let reviewed = Cell::new(false);
+    let executing = Cell::new(false);
+    let position = Cell::new(0);
+    let total = Cell::new(0);
+    let shown = Cell::new(false);
+    let review = |operations: &[Operation]| {
+        live.clear();
+        eprintln!(
+            "{}\n",
+            crate::presentation::plan(operations, &notes.borrow(), color)
+        );
+        reviewed.set(true);
+    };
+    let (data, code) = dispatch_with(
         &mut engine,
         args,
         &cancel,
         &mut |operations| {
-            for operation in operations {
-                eprintln!("{}", crate::presentation::operation(operation));
-            }
-            eprint!("Apply these changes, including any dependency changes? [y/N] ");
-            let _ = io::stderr().flush();
-            let mut answer = String::new();
-            io::stdin().read_line(&mut answer).is_ok() && matches!(answer.trim(), "y" | "Y" | "yes")
+            review(operations);
+            let count = operations.len();
+            ask(&paint.bold(&format!(
+                "Apply {}?",
+                if count == 1 {
+                    "this change".to_string()
+                } else {
+                    format!("these {count} changes")
+                }
+            )))
         },
-        &mut |event| {
-            if let Event::Progress {
+        &mut |operations| {
+            let refresh = matches!(command, Commands::Update);
+            if !reviewed.get() && !refresh && !args.json {
+                review(operations);
+            }
+            if matches!(args.auth, Auth::Sudo) && !args.json {
+                sudo_login(&live, operations, &cancel)?;
+            }
+            total.set(operations.len());
+            executing.set(true);
+            Ok(())
+        },
+        &mut |event| match event {
+            Event::Started(operation) => {
+                position.set(position.get() + 1);
+                let counter = if total.get() > 1 {
+                    format!(" ({}/{})", position.get(), total.get())
+                } else {
+                    String::new()
+                };
+                live.status(format!(
+                    "{}{counter}",
+                    crate::presentation::operation_progress(&operation)
+                ));
+            }
+            Event::Progress {
+                operation,
                 progress: Progress::Message(message),
+            } => {
+                if executing.get() {
+                    live.detail(&message);
+                } else {
+                    notes.borrow_mut().push((operation, message));
+                }
+            }
+            Event::Progress {
+                progress: Progress::Transfer { completed, total },
                 ..
-            } = event
-            {
-                eprintln!("{}", crate::presentation::clean(&message));
+            } => live.detail(&match total {
+                Some(total) if total > 0 => format!("{}%", completed * 100 / total),
+                _ => format!("{} KB", completed / 1024),
+            }),
+            Event::Finished { operation, result } => {
+                if !live.animated() {
+                    return;
+                }
+                let error = result
+                    .as_ref()
+                    .err()
+                    .map(crate::presentation::error_message);
+                let deferred = result
+                    .as_ref()
+                    .is_ok_and(|outcome| outcome.cancellation_deferred);
+                live.line(&crate::presentation::result_line(
+                    &operation,
+                    error.as_deref(),
+                    deferred,
+                    color,
+                ));
+                shown.set(true);
             }
         },
     );
     signal_hook::low_level::unregister(signal);
-    emit(args, data, code)
+    drop(live);
+    emit(args, data, code, shown.get())
 }
 
 fn inspection_sources(requested: &[String]) -> Vec<String> {
@@ -1439,6 +1690,39 @@ mod tests {
         assert_eq!(call(&mut engine, &["upgrade"], true).1, 4);
     }
 
+    struct NoRefresh(&'static str);
+    impl Backend for NoRefresh {
+        fn id(&self) -> &str {
+            self.0
+        }
+        fn capabilities(&self) -> &[Capability] {
+            &[Capability::Search, Capability::Installed]
+        }
+        fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
+            Ok(Availability::Available)
+        }
+    }
+    #[test]
+    fn update_refreshes_only_capable_sources_without_asking() {
+        let mut engine = engine();
+        engine.register(NoRefresh("npm")).unwrap();
+        let args = Args::try_parse_from(["pkd", "update"]).unwrap();
+        assert!(!args.command.as_ref().unwrap().writes());
+        let (data, code) = dispatch(
+            &mut engine,
+            &args,
+            &Cancellation::default(),
+            &mut |_| panic!("refreshing package lists must not ask for approval"),
+            &mut |_| {},
+        );
+        assert_eq!(code, 0, "{data}");
+        assert_eq!(
+            data["operations"],
+            json!([{"operation":{"refresh":{"backend":"apt"}},"result":{"Ok":{"cancellation_deferred":false}}}])
+        );
+        // Asking for a source that cannot refresh by name is still an error.
+        assert_eq!(call(&mut engine, &["--from", "npm", "update"], true).1, 1);
+    }
     #[test]
     fn upgrade_all_handles_empty_and_incomplete_installed_reports() {
         let mut empty = Engine::default();

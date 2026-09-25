@@ -191,7 +191,7 @@ fn terminal_confirmation_defaults_to_no_and_accepts_explicit_approval() {
     let output = String::from_utf8_lossy(&declined.stdout);
     assert_eq!(declined.status.code(), Some(7), "{output}");
     assert!(output.contains("Install fixture"));
-    assert!(output.contains("Source: homebrew"));
+    assert!(output.contains("homebrew"));
     assert!(output.contains("[y/N]"));
     assert!(output.contains("Cancelled. Nothing was changed."));
     assert!(output.contains("\x1b["));
@@ -201,7 +201,8 @@ fn terminal_confirmation_defaults_to_no_and_accepts_explicit_approval() {
         let approved = fixture.terminal_install("yes\n", true);
         let output = String::from_utf8_lossy(&approved.stdout);
         assert!(approved.status.success(), "{output}");
-        assert!(output.contains("[OK] Completed"));
+        assert!(output.contains("✓ Install fixture"));
+        assert!(output.contains("Done. 1 change applied."));
         assert!(!output.contains('\x1b'));
         let state: Value =
             serde_json::from_slice(&fs::read(fixture.0.join("state.json")).unwrap()).unwrap();
