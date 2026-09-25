@@ -724,8 +724,9 @@ impl Engine {
                     if expected.as_ref() != Some(&current) {
                         return Err(EngineError::InvalidResponse {
                             backend: id.backend.clone(),
-                            reason: "Cleanup plan changed or expired; reload and review it again."
-                                .into(),
+                            reason:
+                                "This cleanup task changed or expired. Reload and review it again."
+                                    .into(),
                         });
                     }
                 }
@@ -734,7 +735,8 @@ impl Engine {
                     if current.as_ref() != Some(expected) {
                         return Err(EngineError::InvalidResponse {
                             backend: operation.backend().into(),
-                            reason: "Transaction plan changed; review the action again.".into(),
+                            reason: "The planned changes are different now. Review them again."
+                                .into(),
                         });
                     }
                 }
@@ -785,7 +787,8 @@ impl Engine {
             if expected_cleanup.as_ref() != Some(&current) {
                 return Err(EngineError::InvalidResponse {
                     backend: id.backend.clone(),
-                    reason: "Cleanup plan changed or expired; reload and review it again.".into(),
+                    reason: "This cleanup task changed or expired. Reload and review it again."
+                        .into(),
                 });
             }
         }
@@ -794,7 +797,7 @@ impl Engine {
             if current.as_ref() != Some(&expected) {
                 return Err(EngineError::InvalidResponse {
                     backend: operation.backend().into(),
-                    reason: "Transaction plan changed; review the action again.".into(),
+                    reason: "The planned changes are different now. Review them again.".into(),
                 });
             }
         }
@@ -827,7 +830,7 @@ impl Engine {
             return operations.iter().zip(checked).map(|(operation, result)| {
                 let result = Err(result.err().unwrap_or_else(|| EngineError::InvalidResponse {
                     backend: operation.backend().into(),
-                    reason: "Another operation in the batch failed validation; review the batch again.".into(),
+                    reason: "Another change in this batch could not be checked. Review the batch again.".into(),
                 }));
                 events(Event::Started(operation.clone()));
                 events(Event::Finished { operation: operation.clone(), result: result.clone() });
@@ -874,7 +877,7 @@ impl Engine {
             events(Event::Progress {
                 operation: operations[0].clone(),
                 progress: Progress::Message(
-                    "Batch runner missing. System changes may request separate authorization."
+                    "Batch helper not found. You may be asked for permission more than once."
                         .into(),
                 ),
             });

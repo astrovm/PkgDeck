@@ -410,7 +410,7 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
             } else {
                 output.push_str("\n  [OK] Completed");
                 if item["result"]["Ok"]["cancellation_deferred"] == true {
-                    output.push_str(" after cancellation; native changes were not rolled back");
+                    output.push_str(" after cancellation was requested; changes were kept");
                 }
                 output.push('\n');
             }

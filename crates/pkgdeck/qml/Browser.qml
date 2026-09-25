@@ -237,11 +237,11 @@ Controls.ApplicationWindow {
     function failureSummary(id) {
         const row = items.find((item) => item.kind === "failure" && item.source === id);
         const reportFailure = (reportState.failures || []).find((failure) => failure.source === id);
-        return (row && row.summary) || (reportFailure && reportFailure.detail) || (currentView === "Sources" ? sourceInfo(id).summary : "") || "Source check did not complete.";
+        return (row && row.summary) || (reportFailure && reportFailure.detail) || (currentView === "Sources" ? sourceInfo(id).summary : "") || "This source could not be checked.";
     }
     function lastSuccessfulCheck(id) {
         const seconds = (reportState.last_success || {})[id];
-        return seconds ? new Date(seconds * 1000).toLocaleString() : "Not checked successfully this session";
+        return seconds ? new Date(seconds * 1000).toLocaleString() : "No successful check yet";
     }
     function copyableDiagnostics() {
         return "View: " + currentView + "\nState: " + (reportState.phase || "unknown") + "\n" +
@@ -272,7 +272,7 @@ Controls.ApplicationWindow {
         if (readFailures.length > 0)
             return sourceFailureTitle();
         if (reportState.phase === "unsupported")
-            return "No enabled sources support this view.";
+            return "None of your enabled sources support this page.";
         if (currentView === "Search" && queryDirty)
             return "";
         if (currentView === "Search" && searchPane.text.trim().length === 0)
@@ -1688,9 +1688,9 @@ Controls.ApplicationWindow {
                     }
                     Controls.Label {
                         objectName: "notificationAvailability"
-                        text: !root.trayAvailable ? "Desktop notifications unavailable: no system tray"
-                            : !root.notificationAvailable ? "Desktop notifications unavailable in this tray"
-                            : "Desktop notifications available"
+                        text: !root.trayAvailable ? "Notifications unavailable: no system tray found"
+                            : !root.notificationAvailable ? "This system tray does not support notifications"
+                            : "Notifications available"
                         color: root.muted
                         wrapMode: Text.WordWrap
                         Layout.fillWidth: true
@@ -2593,7 +2593,7 @@ Controls.ApplicationWindow {
             Controls.TextField { id: repositoryName; objectName: "repositoryName"; placeholderText: "Name"; Accessible.name: "Repository name"; Layout.fillWidth: true }
             Controls.Label {
                 objectName: "repositoryNameError"
-                text: "Use letters, numbers, . _ - (no leading -)."
+                text: "Use letters, numbers, dots, dashes, or underscores. Do not start with a dash."
                 visible: repositoryName.text.length > 0 && !addRepositoryDialog.validName
                 color: root.dark ? "#f18b91" : "#b42332"
                 wrapMode: Text.WordWrap

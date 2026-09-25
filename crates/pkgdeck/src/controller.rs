@@ -44,18 +44,19 @@ fn local_input_path(input: &str) -> Result<PathBuf, String> {
                 let high = chars.next().and_then(|value| (value as char).to_digit(16));
                 let low = chars.next().and_then(|value| (value as char).to_digit(16));
                 let (Some(high), Some(low)) = (high, low) else {
-                    return Err("Invalid file URL encoding.".into());
+                    return Err("This file link is not encoded correctly.".into());
                 };
                 let decoded = ((high << 4) | low) as u8;
                 if decoded == 0 {
-                    return Err("File URLs cannot contain NUL bytes.".into());
+                    return Err("This file link contains invalid characters.".into());
                 }
                 bytes.push(decoded);
             } else {
                 bytes.push(byte);
             }
         }
-        String::from_utf8(bytes).map_err(|_| "File URL is not UTF-8.".to_owned())?
+        String::from_utf8(bytes)
+            .map_err(|_| "This file link contains invalid characters.".to_owned())?
     } else if input.contains("://") {
         return Err("Unsupported link. Use an HTTPS package or repository link.".into());
     } else {
@@ -522,7 +523,7 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
                 });
                 let outcome = match result {
                     Ok(outcome) if outcome.cancellation_deferred => {
-                        "Completed after cancellation; changes were not rolled back.".into()
+                        "Finished before it could be cancelled. Changes were kept.".into()
                     }
                     Ok(_) => "Completed".into(),
                     Err(error) => error.to_string(),
@@ -530,7 +531,7 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
                 status.push_str(&format!("\n{}: {outcome}", operation_label(operation)));
             }
             if operations.iter().any(|op| matches!(op, Operation::Upgrade(id) if id.backend == "fwupd")) {
-                status.push_str("\nFirmware: follow the device restart or shutdown requirements shown before updating.");
+                status.push_str("\nFirmware: Restart or shut down the device if the update asked for it.");
             }
             Ok(Payload::Batch(status, outcomes))
         }
@@ -552,9 +553,9 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
             .map(|outcome| {
                 if matches!(&op, Operation::Upgrade(id) if id.backend == "fwupd") {
                     Payload::Batch(if outcome.cancellation_deferred {
-                        "Firmware completed after cancellation. Follow the device restart or shutdown requirements.".into()
+                        "Firmware update finished before it could be cancelled. Restart or shut down the device if required.".into()
                     } else {
-                        "Firmware completed. Follow the device restart or shutdown requirements.".into()
+                        "Firmware update finished. Restart or shut down the device if required.".into()
                     }, vec![Outcome::Finished])
                 } else { Payload::Written(outcome) }
             }),
@@ -978,7 +979,7 @@ fn plan_checked_upgrade(packages: &[Package], identities: &str) -> CheckedPlan {
         .join("\n\n");
     CheckedPlan {
         operations,
-        confirmation: format!("Update {count} selected {}?\n\n{labels}\n\nOther packages may change. Some updates may finish if another fails.", if count == 1 { "package" } else { "packages" }),
+        confirmation: format!("Update {count} selected {}?\n\n{labels}\n\nOther packages may also change. If one update fails, the others can still finish.", if count == 1 { "package" } else { "packages" }),
         details: format!("{labels}\n\nOther packages may change."),
         status: None,
     }
@@ -1325,7 +1326,7 @@ impl ffi::PackageController {
         if self.rust().worker.is_some() && !self.rust().background {
             self.as_mut().rust_mut().queued = Some(Job::OpenInput(input.to_string()));
             self.as_mut()
-                .set_status("Opening the file after the current operation.".into());
+                .set_status("The file will open when the current operation finishes.".into());
             return;
         }
         self.start(Job::OpenInput(input.to_string()));
@@ -2212,8 +2213,10 @@ impl ffi::PackageController {
                 .map(|item| format!("{} ({})\n{}", item.title, item.id.backend, item.preview))
                 .collect::<Vec<_>>()
                 .join("\n\n");
-            self.as_mut().set_confirmation_data(encoded(json!({"action":format!("Clean {} tasks", operations.len()), "body": format!("{labels}\n\nTasks run in order. Completed tasks cannot be undone."), "summary": format!("Clean {} tasks\nCompleted tasks cannot be undone.", operations.len()), "details": labels})));
-            self.as_mut().set_confirmation(format!("Run {} cleanup tasks?\n\n{labels}\n\nTasks run in order. Completed tasks cannot be undone.", operations.len()).as_str().into());
+            let count = operations.len();
+            let noun = if count == 1 { "task" } else { "tasks" };
+            self.as_mut().set_confirmation_data(encoded(json!({"action":format!("Clean {count} {noun}"), "body": format!("{labels}\n\nTasks run in order. Finished tasks cannot be undone."), "summary": format!("Clean {count} {noun}\nFinished tasks cannot be undone."), "details": labels})));
+            self.as_mut().set_confirmation(format!("Run {count} cleanup {noun}?\n\n{labels}\n\nTasks run in order. Finished tasks cannot be undone.").as_str().into());
             self.rust_mut().pending = Some(Job::CleanAll(operations));
             return;
         }
@@ -2296,7 +2299,7 @@ impl ffi::PackageController {
             let count = plan.operations.len();
             let noun = if count == 1 { "package" } else { "packages" };
             let warning = if count > 1 {
-                "\nSome updates may finish if another fails."
+                "\nIf one update fails, the others can still finish."
             } else {
                 ""
             };
@@ -2334,9 +2337,8 @@ impl ffi::PackageController {
         }
         if let Some(worker) = &self.rust().worker {
             worker.cancel.cancel();
-            self.as_mut().set_status(
-                "Cancellation requested; waiting for the native operation to finish safely.".into(),
-            );
+            self.as_mut()
+                .set_status("Cancelling… Waiting for the package manager to finish safely.".into());
         }
     }
     fn apply(mut self: Pin<&mut Self>, result: Result<Payload, EngineError>) {
@@ -2418,7 +2420,7 @@ impl ffi::PackageController {
                 });
                 let noun = if count == 1 { "package" } else { "packages" };
                 let warning = if count > 1 {
-                    "\nSome updates may finish if another fails."
+                    "\nIf one update fails, the others can still finish."
                 } else {
                     ""
                 };
@@ -2503,7 +2505,12 @@ impl ffi::PackageController {
                         })
                         .collect::<Vec<_>>()
                         .join("\n\n");
-                    self.as_mut().set_confirmation_data(encoded(json!({"action": format!("Clean {} tasks", operations.len()), "body": body, "summary": format!("Clean {} tasks\nCompleted tasks cannot be undone.", operations.len()), "details": body})));
+                    let noun = if operations.len() == 1 {
+                        "task"
+                    } else {
+                        "tasks"
+                    };
+                    self.as_mut().set_confirmation_data(encoded(json!({"action": format!("Clean {} {noun}", operations.len()), "body": body, "summary": format!("Clean {} {noun}\nFinished tasks cannot be undone.", operations.len()), "details": body})));
                     self.as_mut().set_confirmation(body.as_str().into());
                     self.as_mut().rust_mut().pending = Some(Job::CleanAll(operations));
                 }
@@ -2731,9 +2738,9 @@ impl ffi::PackageController {
                 self.as_mut().set_phase("stale");
                 self.set_status(
                     if outcome.cancellation_deferred {
-                        "Completed after cancellation; native changes were not rolled back."
+                        "Finished before it could be cancelled. Changes were kept."
                     } else {
-                        "Completed. Refreshing package state."
+                        "Done. Refreshing the package list."
                     }
                     .into(),
                 );
@@ -2996,7 +3003,8 @@ impl ffi::PackageController {
                 }
             }
             if joined.is_err() && !self.rust().background {
-                self.as_mut().set_status("Backend worker failed.".into());
+                self.as_mut()
+                    .set_status("A background task failed. Try again.".into());
             } else if joined.is_err() {
                 self.as_mut()
                     .finish_background_error(&EngineError::InvalidResponse {
@@ -3418,7 +3426,7 @@ mod tests {
         assert!(controller
             .status()
             .to_string()
-            .contains("Opening the file after the current operation"));
+            .contains("The file will open when the current operation finishes"));
         let deadline = Instant::now() + Duration::from_secs(15);
         while Instant::now() < deadline {
             controller.as_mut().poll();
@@ -4969,7 +4977,7 @@ mod tests {
         assert!(controller
             .confirmation()
             .to_string()
-            .contains("Run 1 cleanup tasks"));
+            .contains("Run 1 cleanup task?"));
         assert!(matches!(controller.rust().pending, Some(Job::CleanAll(_))));
         controller.as_mut().confirm(false);
 
@@ -5261,7 +5269,7 @@ mod tests {
         assert!(controller
             .status()
             .to_string()
-            .contains("waiting for the native operation"));
+            .contains("Waiting for the package manager to finish"));
         sender
             .send(Reply::Done(Ok(Payload::Repositories(
                 repositories::Report::default(),
@@ -5346,7 +5354,7 @@ mod tests {
         assert!(controller
             .status()
             .to_string()
-            .contains("Completed after cancellation"));
+            .contains("Finished before it could be cancelled"));
     }
     #[test]
     fn qt_new_view_discards_superseded_reports_and_cancellation_errors() {
@@ -6125,7 +6133,7 @@ mod tests {
             let Reply::Done(Ok(Payload::Batch(status, _))) = replies.pop().unwrap() else {
                 panic!("firmware completion status missing")
             };
-            assert!(status.contains("restart or shutdown"));
+            assert!(status.contains("Restart or shut down"));
         }
 
         let mut other = package.clone();

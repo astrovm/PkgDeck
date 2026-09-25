@@ -1,65 +1,69 @@
 # PkgDeck
 
-PkgDeck brings your package managers into one desktop app. Search for software, see what is installed, review updates, and clean up unused packages. A command-line tool, `pkd`, uses the same engine.
+**All your package managers in one app.**
+
+PkgDeck lets you search, install, update, and clean up software from every package manager on your computer, all in one place. It also comes with a command-line tool, `pkd`, which runs on the same engine.
 
 ![PkgDeck showing search results](docs/screenshots/search.png)
 
+## Features
+
+| Page          | What it does                                                                |
+| ------------- | --------------------------------------------------------------------------- |
+| **Search**    | Compare software across sources and choose the exact version and scope      |
+| **Installed** | Browse installed packages and spot duplicate installs                       |
+| **Updates**   | Apply one update, a selection, or everything at once                        |
+| **Clean**     | Preview what will be removed before you confirm                             |
+| **Sources**   | Turn package managers on or off and manage repositories                     |
+
+PkgDeck works with the package managers you already have, such as APT, Flatpak, Snap, Homebrew, developer tools, and container images. Some features are only available for certain managers. See [supported sources](docs/gui.md) for details.
+
 ## Install
 
-[Install PkgDeck](https://flatpak.4st.li/apps/io.github.astrovm.PkgDeck/install/), or use the terminal:
+### Linux (Flatpak, recommended)
+
+[Install PkgDeck](https://flatpak.4st.li/apps/io.github.astrovm.PkgDeck/install/) with one click, or run:
 
 ```sh
 flatpak install https://flatpak.4st.li/io.github.astrovm.PkgDeck.flatpakref
 ```
 
-Open PkgDeck from your app menu or run:
+Open PkgDeck from your app menu, or run `flatpak run io.github.astrovm.PkgDeck`. Updates arrive through your software manager or `flatpak update`.
 
-```sh
-flatpak run io.github.astrovm.PkgDeck
-```
+**Other options:** [GitHub Releases](https://github.com/astrovm/PkgDeck/releases/latest) also has AppImage and Snap packages.
 
-Flatpak updates arrive through your software manager or `flatpak update`. [GitHub Releases](https://github.com/astrovm/PkgDeck/releases/latest) also provides AppImage and Snap packages for Linux.
-
-On macOS, install the GUI and CLI with Homebrew:
+### macOS (Homebrew)
 
 ```sh
 brew tap astrovm/pkgdeck https://github.com/astrovm/PkgDeck
 brew install astrovm/pkgdeck/pkgdeck
 ```
 
-On Linux, the Homebrew formula installs the CLI only. Use Flatpak, AppImage, or Snap for the GUI.
-
-## Use
-
-- **Search:** compare software across available sources and choose the exact version or installation scope.
-- **Installed:** find packages and duplicate installs.
-- **Updates:** review and apply one update, a selection, or all available updates.
-- **Clean:** preview cleanup before confirming it.
-- **Sources:** enable package managers and manage repositories.
-
-PkgDeck uses the package managers already on your computer, including APT, Flatpak, Snap, Homebrew, developer tools, and container images. Available features depend on each manager. See [supported sources](docs/gui.md) for details.
+This installs both the app and the `pkd` CLI. On Linux, the same formula installs only the CLI.
 
 ## Command line
 
-The Flatpak includes `pkd`:
+With Flatpak, run the CLI like this:
 
 ```sh
 flatpak run --command=pkd io.github.astrovm.PkgDeck
 ```
 
-In native builds, run `pkd` directly. For example:
+With other installs, run `pkd` directly:
 
 ```sh
-pkd sources
-pkd search vlc --from flatpak
-pkd list --from apt
+pkd sources                      # list available package managers
+pkd search vlc --from flatpak    # search one source
+pkd list --from apt              # list installed packages
+pkd update                       # refresh package metadata
+pkd upgrade                      # install available updates
 ```
 
-`pkd update` refreshes package metadata; `pkd upgrade` installs available updates. Changes require confirmation, and system changes may ask for authorization. See the [CLI guide](docs/cli.md) for exact selectors and more commands.
+PkgDeck asks you to confirm every change, and system-wide changes may ask for your password. See the [CLI guide](docs/cli.md) for all commands.
 
 ## Build from source
 
-Install the [development prerequisites](docs/development.md#sdk-and-prerequisites), then:
+Install the [prerequisites](docs/development.md#sdk-and-prerequisites), then run:
 
 ```sh
 source scripts/dev-env.sh
@@ -73,5 +77,3 @@ cargo run --locked -p pkgdeck
 - [Development and tests](docs/development.md)
 - [Packages and releases](docs/distribution.md)
 - [Host access and authorization](docs/host-execution.md)
-
-Licensed under [MIT](LICENSE). The optional APT reader and bundled dependencies retain their own licenses; package scripts include their notices.

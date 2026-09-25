@@ -293,7 +293,7 @@ impl AppImage {
                 reference: None,
             },
             display_name: "Imported AppImage".into(),
-            summary: format!("PkgDeck-managed local Type 2 AppImage ({digest})"),
+            summary: format!("AppImage managed by PkgDeck ({digest})"),
             installed_version: Some(digest.into()),
             candidate_version: Some(digest.into()),
             update: if Self::has_update_metadata(&path)? && self.updater().is_ok() {
@@ -408,7 +408,7 @@ impl AppImage {
                             reference: None,
                         },
                         display_name,
-                        summary: "Externally managed local Type 2 AppImage".into(),
+                        summary: "AppImage not managed by PkgDeck".into(),
                         installed_version: Some(version.clone()),
                         candidate_version: Some(version),
                         update: if Self::has_update_metadata(&canonical).ok()?
@@ -690,7 +690,7 @@ impl Backend for AppImage {
         match operation {
             Operation::Install(id) => {
                 progress(Progress::Message(
-                    "Importing AppImage without executing it.".into(),
+                    "Importing AppImage without running it.".into(),
                 ));
                 self.import(id, cancel)?;
             }
@@ -700,7 +700,7 @@ impl Backend for AppImage {
                     && Self::managed_name(&id.name) =>
             {
                 progress(Progress::Message(
-                    "Removing PkgDeck-managed AppImage and desktop entry.".into(),
+                    "Removing the AppImage and its desktop entry.".into(),
                 ));
                 fs::remove_file(self.root.join(&id.name))
                     .map_err(|e| Self::invalid(e.to_string()))?;
@@ -726,7 +726,7 @@ impl Backend for AppImage {
             }
             Operation::Upgrade(id) if id.backend == "appimage" => {
                 progress(Progress::Message(
-                    "Updating AppImage with its embedded update information.".into(),
+                    "Updating AppImage with its built-in updater.".into(),
                 ));
                 self.update(id, cancel)?;
             }

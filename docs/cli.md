@@ -1,228 +1,239 @@
-# Command-line interface
+# Command line (`pkd`)
 
-The `pkd` command exposes the shared engine. Native and AppImage execution
-use the host boundary. Classic Snap uses that same boundary. The Flatpak build can
-manage host package managers through its explicit host bridge.
-`pkd` without a subcommand prints help and exits successfully, including with
-redirected input/output. Use `pkgdeck` to launch the GUI.
+`pkd` is PkgDeck's command-line tool. It uses the same engine as the app.
+Running `pkd` with no command prints help. Use `pkgdeck` to open the app.
 
-![Read-only package details in the CLI](screenshots/cli.png)
-
-## Commands and selection
+In the Flatpak build, run it with:
 
 ```sh
-pkd sources
-pkd search neovim --from apt
-pkd info neovim --from homebrew
-pkd inspect git
-pkd audit --json
-pkd list --json
-pkd install neovim --from apt --yes
-pkd update --from apt --yes
-pkd upgrade neovim --from apt --yes
-pkd remove neovim --from apt --yes
+flatpak run --command=pkd io.github.astrovm.PkgDeck
 ```
 
-`--from` accepts `fwupd`, `apt`, `dnf`, `pacman`, `zypper`, `snap`, `homebrew`, `homebrew-cask`, `appimage`, `flatpak`, `docker`, `podman`, `cargo`, `npm`, `pnpm`, `bun`, `pip`, `pipx`, `uv`, `composer`, `gem`, `codex`, `claude`, `grok`, or `opencode`, and repeats to select several sources. Without it, queries cover detected managers;
-missing optional managers are omitted, while detection/query failures remain
-visible. `sources` includes unavailable managers and their reasons. Search uses
-literal case-insensitive substrings: APT names/summaries, Homebrew formula names,
-and cask tokens.
-Results rank best-match-first (exact name, name prefix, name substring, then
-summary matches). Unverified name guesses are omitted.
-Homebrew identities preserve tap-qualified names (for example
-`owner/tap/formula`). Aliases and fuzzy matches are not installation selectors.
+![Package details in the CLI](screenshots/cli.png)
 
-Install, info, remove, and named upgrades require an exact package identifier.
-Matching identifiers across managers are ambiguous until a single `--from` pins the source.
-Use `--arch` to distinguish APT architectures. Homebrew's detected prefix is part
-of each identity; the CLI operates on the `brew` executable in the invoking user's
-host PATH. It does not merge packages across prefixes or treat equal names as the
-same application. Failed source queries prevent potentially ambiguous selection.
-
-`install`, `remove`, and `upgrade` accept multiple names. Resolve all names before
-any write; then execute each distinct operation in order. Execution failures do
-not roll back successful operations. `upgrade` without names selects all installed
-packages with native-reported updates, optionally restricted by `--from`/`--arch`.
-`update` refreshes metadata and never upgrades installed packages itself.
-
-## Portable inventory
-
+## Quick reference
 
 ```sh
-pkd inventory export software.json                 # every installed package
-pkd --from apt inventory export apt.json bash      # one exact package
-pkd inventory preview software.json                # read-only on this machine
+pkd sources                              # show package managers and what they support
+pkd search neovim --from apt             # search one source
+pkd info neovim --from homebrew          # show package details
+pkd list --json                          # list installed packages as JSON
+pkd install neovim --from apt --yes      # install
+pkd remove neovim --from apt --yes       # remove
+pkd update --from apt --yes              # refresh package lists (installs nothing)
+pkd upgrade neovim --from apt --yes      # update one package
+pkd upgrade                              # update everything
+pkd clean                                # list cleanup tasks
+pkd inspect git                          # find which package provides a command
+pkd audit                                # find apps installed more than once
+pkd doctor                               # check that PkgDeck can reach your package managers
 ```
 
-The versioned JSON records native package identities and intended scopes, not
-credentials, scripts, user IDs, or environment paths. Export creates a new file
-and refuses to overwrite an existing path. Preview checks installed packages
-and queries the named source for exact offers. It reports installed, installable,
-unavailable, unsupported, or ambiguous entries without changing packages or
-repositories. Recorded versions are informational; import does not pin or
-install them. Applying an inventory is not supported.
+## Global options
 
-For a named Flatpak present in both installations, choose `--scope user` or
-`--scope system`, for example `pkd --from flatpak --scope system install org.example.App`.
-Without a scope, ambiguous targets require an explicit choice.
-
-## Read-only inspection
-
-`pkd inspect COMMAND` reads the invoking host's sanitized `PATH` in order. It
-shows the first executable path, other candidates, symlink targets, and
-ownership reported by native package databases. It never runs `COMMAND`.
-Missing ownership is shown as unknown; a manager record without a matching
-installed inventory identity is shown as unmatched. Use `--json` for exact
-`PackageId` links, including backend, architecture, scope, remote, and ref.
-
-`pkd audit` reports exact installed copies and groups copies only when shared
-AppStream IDs or upstream homepages identify the same application. Versions
-are never compared across managers. The residual-data section lists only
-existing paths explicitly recorded as residual configuration by dpkg; paths
-claimed by more than one package are omitted. PkgDeck does not scan arbitrary
-home directories or guess leftover data from package names. Unknown data
-remains unknown. `--from` and `--scope` restrict the installed inventory used
-for the report.
-
-## Confirmation and authorization
-
-Non-interactive and `--json` writes require `--yes`; otherwise they return exit 2
-before looking up packages. In a terminal, show the resolved operations and ask
-for approval of native package and dependency changes. Approval does not grant
-system privileges. The default `--auth sudo` uses an existing `sudo -n` grant;
-`--auth polkit` uses an existing desktop agent/policy. The frontend does not read
-passwords, change authorization policy, or elevate Homebrew.
-
-APT uses `--no-remove` for installations and targeted upgrades, with
-`--only-upgrade` for targeted upgrades. An all-package APT update simulates
-`dist-upgrade`, shows its planned updates, installs, and removals, and checks
-the plan again before the privileged write. If removals are planned, pass
-`--allow-removals` after reviewing them; `--yes` alone never approves removals.
-Explicit removal retains APT's normal dependency behavior. Homebrew
-retains its native dependency checks, locks, and tap trust policy. Removal uses
-`brew uninstall --force --formula` to remove every installed version of the selected
-formula, including older kegs retained after an upgrade; it does not pass
-`--ignore-dependencies`. This follows Homebrew's
-[documented removal behavior](https://docs.brew.sh/FAQ#how-do-i-uninstall-a-formula). Automatic
-Homebrew updates and post-install cleanup are disabled for package operations;
-explicit `update` still refreshes Homebrew and tap metadata.
-
-Docker and Podman expose the local image inventory through their structured CLI
-format. The immutable image ID is the package identity; tags and digests remain
-display metadata and the first sorted tag is the pull reference. Docker images
-use the system daemon scope. Podman images use the invoking user's rootless
-scope. A tagged image can be refreshed with `pkd --from docker upgrade IMAGE_ID`
-or `pkd --from podman upgrade IMAGE_ID`; PkgDeck passes the exact stored tag to
-`pull`. `pkd --from docker install registry.example/team/image:tag` (or the
-equivalent Podman command) pulls a new exact reference. Registry offers are only
-created when one container source is explicitly selected, so ordinary package
-searches never invent container results. Removing an image passes its exact immutable ID to `image rm`, including
-dangling images shown as cleanup candidates. Pull and removal require the normal
-interactive confirmation or `--yes`. PkgDeck never invokes a shell, silently
-forces dependent-container removal, prunes volumes, or claims a mutable tag has
-an update without checking a registry digest.
-
-Ctrl-C cancels reads and pending operations. A native write already in progress
-finishes before cancellation takes effect; its result records
-`cancellation_deferred`. Inspect individual results after any failed batch.
-
-## Cleaning unused files and dependencies
-
-`pkd clean` asks supported managers for their native dry-run cleanup plans and
-does not change the system. Each result has a stable key such as
-`apt:autoremove` and includes the exact bounded preview returned by the manager.
-
-Run selected plans with `pkd clean apt:autoremove` or every discovered plan with
-`pkd clean --all`. Writes use the same confirmation, authorization, cancellation,
-and partial-failure rules as package operations. `--yes` skips the interactive
-confirmation; `--json` exposes typed items and per-source failures.
-
-Cleanup includes APT unused dependencies and obsolete downloads; Homebrew unused
-formulae and old downloads; Docker/Podman dangling images; Docker Buildx reclaimable immutable cache; and
-npm, pip, and uv caches. Volumes are never included. pip requires an explicit
-virtual environment, as with its other operations. pnpm pruning and Podman build
-cache cleanup and Flatpak unused-runtime removal are not offered because an accurate native preview is unavailable.
-
-`pkd clean` lists tasks without authentication. APT determines which cached downloads
-are obsolete when cleaning; the list only counts cached files. Confirmed plans are
-revalidated before execution. Sources without cleanup support are omitted.
-
-## Output contract, version 1
-
-`--json` emits exactly one document to stdout for application results:
-
-```json
-{"schema_version":1,"exit_code":0,"data":{"packages":[],"failures":[]}}
-```
-
-Search/list data contain `packages` and per-backend `failures`; info returns package
-details; sources returns `sources`; clean discovery returns typed `items` and
-per-backend `failures`; writes return `operations`, each with its
-operation and `result` (`{"Ok":...}` or `{"Err":...}`). Selection and other top-level
-failures contain `error` and, when available, a human-readable `message`.
-If an APT full upgrade plans removals without `--allow-removals`, the error is
-`apt_removals_require_consent` and includes the typed `plan`.
-A failing source row means the underlying manager errored: the message carries
-the manager's own diagnostic where available, and the same command run directly
-in a terminal shows complete output. Failed sources block ambiguous selection
-and batch upgrades until every queried source answers.
-Package IDs include `backend`, `name`, `architecture`, and `scope`, with remote
-and reference fields where the manager needs them.
-Versions remain native strings and update availability is `unknown`, `current`,
-or `available`. Native version semantics determine update availability.
-
-Progress goes to stderr. Human mode prints indented records with the same data.
-`doctor` is a text-only diagnostic; `doctor --json` returns exit 2. Clap's usage,
-help, and version responses keep their normal text behavior, including malformed
-arguments supplied with `--json`.
-
-| Exit | Meaning |
+| Option | Meaning |
 | --- | --- |
-| 0 | Success (including empty query results or no available updates) |
-| 1 | Backend, availability, metadata, or other execution failure |
-| 2 | Invalid usage or required non-interactive confirmation missing |
-| 3 | No exact matching package |
-| 4 | Ambiguous or incomplete selection |
-| 5 | Authorization denied/unavailable |
-| 6 | APT lock busy |
-| 7 | Cancelled or confirmation declined |
-| 8 | Query has source failures, or a write batch has both successes and failures |
+| `--from SOURCE` | Only use this source. Repeat it to pick several. |
+| `--arch ARCH` | Pick a package architecture, such as `amd64` or `i386` for APT. |
+| `--scope user\|system` | Pick the user or system installation. |
+| `--yes`, `-y` | Approve changes without asking. |
+| `--auth sudo\|polkit` | How to get permission for system changes. Default: `sudo`. |
+| `--json` | Print machine-readable JSON. See [JSON output](#json-output). |
 
-A batch where every operation fails returns the first operation's failure code.
-Source discovery reports unavailable managers as data; detection errors return 1.
+Sources for `--from`: `fwupd`, `apt`, `dnf`, `pacman`, `zypper`, `snap`,
+`homebrew`, `homebrew-cask`, `appimage`, `flatpak`, `docker`, `podman`,
+`cargo`, `npm`, `pnpm`, `bun`, `pip`, `pipx`, `uv`, `composer`, `gem`,
+`codex`, `claude`, `grok`, and `opencode`.
 
-## Repositories and firmware
+Without `--from`, PkgDeck uses every package manager it finds. Package managers
+that aren't installed are skipped. Sources that fail are reported, not
+hidden. `pkd sources` lists every source, including unavailable ones and why.
+
+## Searching
+
+Search is case-insensitive and matches part of the name or description.
+Results are ranked: exact name, then names that start with the query, then
+names that contain it, then description matches. Homebrew searches formula and
+cask names only.
+
+## Choosing packages
+
+`install`, `info`, `remove`, and `upgrade NAME` need the exact package name. No
+fuzzy matching or aliases.
+
+- If the same name exists in more than one source, pick one with `--from`.
+- Use `--arch` to choose between APT architectures.
+- If a Flatpak is installed for both User and System, add `--scope`:
+  `pkd --from flatpak --scope system install org.example.App`
+- Homebrew tap packages keep their full name, such as `owner/tap/formula`. PkgDeck
+  uses the `brew` found in your `PATH`.
+- If a source fails to answer, PkgDeck won't guess which package you meant.
+  Retry, or pick a working source with `--from`.
+
+You can pass several names at once. PkgDeck finds every package before
+changing anything, then runs each change in order. If one fails, earlier
+changes are kept.
+
+`pkd upgrade` without names updates every installed package that has an
+update. `--from` and `--arch` narrow it down. `pkd update` only refreshes
+package lists. It never installs updates.
+
+## Confirmation and passwords
+
+In a terminal, PkgDeck shows what it will change and asks before doing it.
+In scripts, or with `--json`, you must pass `--yes`. Otherwise the command stops
+with exit code 2 before doing anything.
+
+Approving a change doesn't give PkgDeck admin rights, and PkgDeck never reads
+your password:
+
+- `--auth sudo` (default) only works if `sudo` already has a cached login or a
+  password-free rule.
+- `--auth polkit` uses your desktop's password prompt.
+
+Homebrew always runs as your user.
+
+### APT
+
+- Installs and single-package upgrades never remove other packages.
+- A full upgrade (`pkd upgrade` with APT) does a dry run first and shows every
+  update, install, and removal. It checks the plan again right before running.
+- If the upgrade would remove packages, review the list and add
+  `--allow-removals`. `--yes` alone never approves removals.
+- `pkd remove` behaves like normal APT removal.
+
+### Homebrew
+
+Homebrew keeps its own dependency checks, locks, and tap rules. `pkd remove`
+runs `brew uninstall --force --formula`, which removes every installed version
+of that formula, following
+[Homebrew's documented behavior](https://docs.brew.sh/FAQ#how-do-i-uninstall-a-formula).
+It never skips dependency checks. Homebrew's automatic update and cleanup are
+turned off during package changes. `pkd update` still refreshes Homebrew.
+
+### Docker and Podman
+
+Docker and Podman list your local images. Each image is identified by its
+image ID. Docker images are system-wide, while Podman images belong to your
+user.
 
 ```sh
-pkd repos
+pkd --from docker upgrade IMAGE_ID                         # pull the image's tag again
+pkd --from docker install registry.example/team/image:tag  # pull a new image
+pkd --from docker remove IMAGE_ID                          # remove an image
+```
+
+Replace `docker` with `podman` for Podman. Registry images only show up when
+exactly one container source is selected, so normal searches don't return
+container results. PkgDeck never force-removes images used by containers and
+never deletes volumes. A tag isn't marked as updated unless the registry is
+actually checked.
+
+### Cancelling
+
+Ctrl+C cancels reads and pending changes. If a package manager is already
+making changes, it finishes first. The result then shows
+`cancellation_deferred`. After a batch with failures, check each result.
+
+## Cleaning up
+
+```sh
+pkd clean                     # list cleanup tasks (changes nothing)
+pkd clean apt:autoremove      # run one task
+pkd clean --all               # run every task
+```
+
+Each task has a key like `apt:autoremove` and a preview from the package
+manager itself. Running a task uses the same confirmation, permission, and
+cancellation rules as other changes. PkgDeck checks the task again right
+before running it.
+
+| Source | What it cleans |
+| --- | --- |
+| APT | Unused dependencies and old downloaded packages |
+| Homebrew | Unused dependencies and old downloads |
+| Docker, Podman | Untagged images |
+| Docker Buildx | Unused build cache |
+| npm, pip, uv | Download caches |
+
+- Volumes are never cleaned.
+- pip needs a virtual environment, like its other commands.
+- pnpm, the Podman build cache, and unused Flatpak runtimes aren't offered,
+  because their package managers can't show an exact preview.
+- Listing APT tasks doesn't need a password. The list only counts cached
+  downloads. APT decides which ones are old when the cleanup runs.
+
+## Inspecting your system
+
+`pkd inspect COMMAND` shows which file runs when you type `COMMAND` and which
+package installed it. It searches your `PATH` in order, shows other matches
+and symlink targets, and asks your package managers who owns each file.
+It never runs the command.
+
+- "unknown" means no package manager claims the file.
+- "unmatched" means a package manager claims the file, but PkgDeck can't match
+  it to an installed package.
+- `--json` includes the full package ID.
+
+`pkd audit` shows apps installed more than once. Copies are grouped only when
+they share an AppStream ID or homepage, and versions aren't compared across
+package managers. It also lists leftover config files that dpkg recorded for
+removed packages. PkgDeck doesn't scan your home folder or guess leftovers.
+Use `--from` and `--scope` to narrow the report.
+
+## Exporting your software list
+
+```sh
+pkd inventory export software.json               # every installed package
+pkd --from apt inventory export apt.json bash    # one package
+pkd inventory preview software.json              # check the list on this machine
+```
+
+The export is a versioned JSON file with package names, sources, and scopes.
+It doesn't include passwords, scripts, user IDs, or paths. Export never
+overwrites an existing file.
+
+`preview` checks each entry on the current machine. It reports whether it's
+installed, installable, unavailable, unsupported, or ambiguous, without
+changing anything. Recorded versions are for reference only. Installing from
+an inventory isn't supported yet.
+
+## Repositories
+
+```sh
+pkd repos                                         # list repositories
 pkd repos list --from flatpak --scope system
 pkd repos add example https://example.org/example.flatpakrepo --from flatpak --scope user
 pkd repos disable example --from flatpak --scope user
 pkd repos enable example --from flatpak --scope user
-pkd repos priority example 10 --from flatpak --scope user
+pkd repos priority example 10 --from flatpak --scope user   # 0–9999, higher wins
 pkd repos remove example --from flatpak --scope user
-pkd repos edit --from apt
+pkd repos edit --from apt                         # open Software Sources
 pkd repos enable lvfs --from fwupd
-pkd list --from fwupd
-pkd upgrade --from fwupd
 ```
 
-Repository writes require one `--from` and confirmation (or `--yes`). Flatpak
-repository operations default to User; specify `--scope system` for system remotes.
-APT editing launches the native Software Sources editor. fwupd supports toggling
-configured remotes. Repository definitions retain native signature verification.
+Changes need exactly one `--from` and a confirmation (or `--yes`). Flatpak uses
+User by default. Add `--scope system` for system repositories. Removing a
+Flatpak repository doesn't force-remove apps installed from it. Repositories
+keep their normal signature checks.
 
-With `fwupdmgr` installed, normal `pkd upgrade` includes available firmware updates.
-A named firmware update uses the exact device ID from `pkd list --from fwupd --json`.
-Device power and restart requirements are printed before confirmation. PkgDeck
-never automatically reboots, downgrades, or forces firmware updates.
+## Firmware
+
+If `fwupdmgr` is installed, `pkd upgrade` includes firmware updates.
+
+```sh
+pkd list --from fwupd                    # list devices
+pkd upgrade --from fwupd                 # update all firmware
+```
+
+To update one device, use the device ID from `pkd list --from fwupd --json`.
+Power and restart requirements are shown before you confirm. PkgDeck never
+restarts your computer, downgrades firmware, or forces an update.
 
 ## Standalone CLI tools
 
-PkgDeck detects upstream standalone installations of Codex, Claude Code, Grok,
-and OpenCode. They appear in `pkd list` and normal `pkd upgrade` plans. Source IDs
-are `codex`, `claude`, `grok`, and `opencode`:
+PkgDeck finds Codex, Claude Code, Grok, and OpenCode when they were installed
+with their official installers. They appear in `pkd list` and `pkd upgrade`.
 
 ```sh
 pkd list --from codex --json
@@ -231,36 +242,80 @@ pkd upgrade codex --from codex
 pkd upgrade --from claude --from grok --from opencode
 ```
 
-These sources update existing installations only; they do not install or remove
-tools. npm/Homebrew installations remain with those package managers. Detection
-requires an executable owned by the current user in the upstream install layout;
-arbitrary PATH wrappers and binaries elsewhere are not adopted. Supported layouts:
+PkgDeck only updates these tools. It can't install or remove them. Copies
+installed with npm or Homebrew are handled by that package manager. The
+program must be owned by you and installed in the official location:
 
-- Codex: `~/.local/bin/codex` pointing into
-  `~/.codex/packages/standalone/releases`, with its package manifest.
-  `CODEX_HOME` and `CODEX_INSTALL_DIR` overrides are supported.
-- Claude Code: `~/.local/bin/claude` pointing into
-  `$XDG_DATA_HOME/claude/versions` (default `~/.local/share/claude/versions`).
-  `CLAUDE_CONFIG_DIR` is respected when reading the update channel.
-- Grok: `~/.grok/bin/grok` pointing into `~/.grok/downloads`;
-  `GROK_BIN_DIR` overrides are supported.
-- OpenCode: `~/.opencode/bin/opencode`.
+| Tool | Location | Overrides |
+| --- | --- | --- |
+| Codex | `~/.local/bin/codex`, linking into `~/.codex/packages/standalone/releases` | `CODEX_HOME`, `CODEX_INSTALL_DIR` |
+| Claude Code | `~/.local/bin/claude`, linking into `~/.local/share/claude/versions` | `XDG_DATA_HOME`; `CLAUDE_CONFIG_DIR` for the update channel |
+| Grok | `~/.grok/bin/grok`, linking into `~/.grok/downloads` | `GROK_BIN_DIR` |
+| OpenCode | `~/.opencode/bin/opencode` | |
 
-Checks are read-only and bounded. Codex and OpenCode use upstream stable release
-metadata; Claude uses the configured stable/latest channel from user/managed
-settings; Grok uses `update --check --json`. A failed check is a source error,
-not an invented update or an “up to date” result. `curl` is required for the
-HTTP metadata checks and Codex installer download.
+How updates are checked and installed:
 
-Updates require normal confirmation or `--yes`, run without privilege escalation,
-and revalidate the installation before writing. Codex uses its official installer,
-downloaded to a private temporary directory and given the selected release;
-Claude uses `claude update`; Grok uses its native versioned updater; OpenCode uses
-`upgrade VERSION --method curl`. Native update policies remain effective. A newer
-installed version is never downgraded. PkgDeck verifies the version after the
-updater completes; existing CLI sessions may need restarting.
+| Tool | Checks with | Updates with |
+| --- | --- | --- |
+| Codex | Latest stable release | Official installer, run from a private temporary folder |
+| Claude Code | Your configured stable or latest channel | `claude update` |
+| Grok | `grok update --check --json` | Grok's own updater |
+| OpenCode | Latest stable release | `opencode upgrade VERSION --method curl` |
 
-Upstream contracts: [Codex](https://learn.chatgpt.com/docs/codex/cli),
+`curl` is needed for the release checks and the Codex installer. If a check
+fails, it's reported as an error, never as "up to date". Updates need
+confirmation, run without admin rights, and never downgrade a newer version.
+PkgDeck checks the version after updating. Restart open sessions of the tool
+to use the new version.
+
+Official docs: [Codex](https://learn.chatgpt.com/docs/codex/cli),
 [Claude Code](https://code.claude.com/docs/en/setup),
-[Grok](https://docs.x.ai/build/enterprise), and
+[Grok](https://docs.x.ai/build/enterprise),
 [OpenCode](https://opencode.ai/docs/cli/#upgrade).
+
+## JSON output
+
+With `--json`, `pkd` prints exactly one JSON document to stdout. Progress goes
+to stderr.
+
+```json
+{"schema_version":1,"exit_code":0,"data":{"packages":[],"failures":[]}}
+```
+
+| Command | `data` contains |
+| --- | --- |
+| `search`, `list` | `packages`, plus `failures` for each source that failed |
+| `info` | Package details |
+| `sources` | `sources` |
+| `clean` | Cleanup `items` and `failures` |
+| Changes | `operations`, each with a `result` of `{"Ok":...}` or `{"Err":...}` |
+| Errors | `error`, and a readable `message` when available |
+
+- Package IDs have `backend`, `name`, `architecture`, and `scope`, plus remote
+  and ref fields when the source needs them.
+- Versions are the package manager's own strings. `update` is `unknown`,
+  `current`, or `available`.
+- If an APT full upgrade would remove packages and `--allow-removals` wasn't
+  passed, the error is `apt_removals_require_consent` and includes the `plan`.
+- A failed source includes the package manager's own error message when
+  available. Run the same command directly in a terminal for full output.
+- `doctor` is text-only. `doctor --json` exits with 2. Help, version, and usage
+  errors are always plain text.
+
+## Exit codes
+
+| Code | Meaning |
+| --- | --- |
+| 0 | Success, including no results or no updates |
+| 1 | A package manager or other error |
+| 2 | Invalid usage, or `--yes` is required |
+| 3 | No package with that exact name |
+| 4 | More than one match, or a source failed to answer |
+| 5 | Permission denied or unavailable |
+| 6 | APT is busy (locked by another program) |
+| 7 | Cancelled or declined |
+| 8 | Some sources failed, or some changes succeeded and others failed |
+
+If every change in a batch fails, the exit code is the first failure's code.
+`pkd sources` lists unavailable package managers as normal output. It only
+returns 1 if detection itself fails.

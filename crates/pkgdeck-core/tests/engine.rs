@@ -867,7 +867,7 @@ fn cleanup_revalidates_confirmed_preview_before_writing() {
     let mut events = Vec::new();
     assert!(matches!(
         engine.execute(&operation, &cancel, &mut |event| events.push(event)),
-        Err(EngineError::InvalidResponse { reason, .. }) if reason.contains("reload")
+        Err(EngineError::InvalidResponse { reason, .. }) if reason.contains("Reload")
     ));
     assert_eq!(events.len(), 2);
     let plan = engine.cleanup(&cancel).items.remove(0);
@@ -1026,7 +1026,7 @@ fn batch_rejects_a_changed_or_misdirected_native_preview() {
     );
     let results = changed.execute_batch(&[operation], &cancel, &mut |_| {});
     assert!(
-        matches!(&results[0], Err(EngineError::InvalidResponse { reason, .. }) if reason.contains("Transaction plan changed"))
+        matches!(&results[0], Err(EngineError::InvalidResponse { reason, .. }) if reason.contains("planned changes are different now"))
     );
 }
 

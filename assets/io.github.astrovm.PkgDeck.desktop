@@ -1,7 +1,7 @@
 [Desktop Entry]
 Type=Application
 Name=PkgDeck
-Comment=Unified package manager interface
+Comment=All your package managers in one app
 Exec=pkgdeck %u
 Icon=io.github.astrovm.PkgDeck
 Terminal=false

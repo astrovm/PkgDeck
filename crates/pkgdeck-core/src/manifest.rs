@@ -280,7 +280,7 @@ pub fn preview(
             {
                 (
                     PreviewStatus::Unavailable,
-                    "Source query failed; retry the preview".into(),
+                    "The source could not be checked. Try the preview again.".into(),
                 )
             } else if let Some(source) = sources.iter().find(|s| s.backend == entry.backend) {
                 match &source.availability {
@@ -300,7 +300,7 @@ pub fn preview(
                         }) {
                             (
                                 PreviewStatus::Ambiguous,
-                                "Scope, architecture, repository, or ref differs; choose explicitly"
+                                "Scope, architecture, repository, or ref is different here. Choose one explicitly."
                                     .into(),
                             )
                         } else {
@@ -680,7 +680,7 @@ mod tests {
             .unwrap();
         let result = inspect(&mut engine, &manifest, &Cancellation::default()).unwrap();
         assert_eq!(result.packages[0].status, PreviewStatus::Unavailable);
-        assert!(result.packages[0].reason.contains("query failed"));
+        assert!(result.packages[0].reason.contains("could not be checked"));
         assert!(result.packages[0].proposed_changes.is_empty());
         assert_eq!(calls.load(Ordering::SeqCst), 2);
     }

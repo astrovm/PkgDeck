@@ -165,8 +165,7 @@ impl<T: Transport> Firmware<T> {
             progress(Progress::Message(String::from_utf8_lossy(&output).into()));
         }
         progress(Progress::Message(
-            "Firmware operation completed. Follow any restart or shutdown instructions above."
-                .into(),
+            "Firmware update finished. Restart or shut down if the messages above say so.".into(),
         ));
         Ok(OperationOutcome {
             cancellation_deferred: deferred,

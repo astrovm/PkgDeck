@@ -1,137 +1,156 @@
-# Shared package engine
+# Package engine
 
-`pkgdeck-core` owns package identity, backend discovery, selection, and operations.
-It has no Qt or CLI parsing dependency. The synchronous engine owns `Send` backends;
-the GUI runs queries on workers and consumes typed results and progress events.
-See the [CLI contract](cli.md) for selection and output behavior.
+`pkgdeck-core` is the engine behind both the app and `pkd`. It handles package
+identity, finding package managers, choosing packages, and running changes. It
+doesn't depend on Qt or on CLI parsing. The engine is synchronous and owns its
+`Send` backends. The GUI runs queries on worker threads and receives typed
+results and progress events. For CLI behavior, see the [CLI guide](cli.md).
 
-## Identity and metadata
+## Package identity
 
-`PackageId` consists of backend ID, backend package identifier, architecture, and
-installation scope, plus optional remote and native reference fields. Scopes
-distinguish the system, a user UID, and an explicitly selected environment path. Adapters must supply stable identifiers and canonical
-host environment paths. Display names are presentation data, not identity.
+A `PackageId` is made of:
 
-`Package` carries summary information, optional installed/candidate versions, and
-explicit update availability: unknown, current, or available. Version strings are
-opaque: each backend applies its own version comparison rules. `PackageDetails`
-adds description, homepage, and dependency identifiers.
+- the backend ID
+- the backend's own package name
+- the architecture
+- the scope: system, a user (by UID), or a chosen environment path
+- optional remote and native ref fields
 
-A `Selector` matches the exact backend package identifier, with optional backend,
-architecture, and scope constraints. It never infers application equivalence from
-a matching name. Zero matches produce `NotFound`; multiple identities produce
-`Ambiguous` with all candidates. Repeated copies of the same identity do not make
-an additional candidate.
+Backends must return stable names and canonical environment paths. Display
+names are only for showing to people. They're never part of the identity.
 
-## Backend contract
+A `Package` has a summary, optional installed and available versions, and an
+update state: `unknown`, `current`, or `available`. Versions are plain strings.
+Each backend compares them its own way. `PackageDetails` adds a description,
+homepage, and dependencies.
 
-| Method | Responsibility |
+A `Selector` matches the exact package name, optionally narrowed by backend,
+architecture, and scope. It never assumes two packages are the same app just
+because their names match.
+
+- No match returns `NotFound`.
+- More than one identity returns `Ambiguous` with every candidate.
+- The same identity reported twice counts once.
+
+## Backends
+
+| Method | What it does |
 | --- | --- |
-| `id` / `capabilities` | Stable backend registration ID and the operations actually supported |
-| `detect` | Available/unavailable status, or a typed failure |
-| `search` | Structured package results for a search term |
-| `installed` | Structured package results with installed versions |
-| `details` | Details for exactly the requested identity |
-| `cleanup` | Safe manager-native cleanup plans obtained through dry-run/list operations |
-| `apt_upgrade_plan` | Read-only APT full-upgrade simulation for review before a write |
-| `execute` | A typed install, remove, metadata refresh, package upgrade, or cleanup, with progress |
+| `id` / `capabilities` | Stable backend ID and the operations it really supports |
+| `detect` | Whether the package manager is available, or a typed error |
+| `search` | Packages matching a search term |
+| `installed` | Installed packages with their versions |
+| `details` | Details for exactly the requested package |
+| `cleanup` | Safe cleanup tasks, found with the manager's own dry-run or list commands |
+| `apt_upgrade_plan` | Dry run of an APT full upgrade, for review before running |
+| `execute` | Runs an install, remove, refresh, upgrade, or cleanup, with progress |
 
-Methods other than detection have explicit unsupported defaults. Before dispatch,
-the engine checks cancellation, registration, capabilities, and availability.
-Duplicate backend registrations are rejected without replacing the existing one.
+Every method except `detect` defaults to "unsupported". Before calling a
+backend, the engine checks for cancellation, registration, capabilities, and
+availability. Registering the same backend twice is rejected. The first one
+stays.
 
-Adapters should prefer documented APIs and structured output. Command adapters
-use the [host execution boundary](host-execution.md) with absolute executables
-and argument arrays, and propagate its typed errors through `EngineError`.
-There is no frontend-specific package-manager logic or shell execution in the engine.
+Backends should use documented APIs and structured output. Commands go through
+the [host execution layer](host-execution.md) with full paths and argument
+lists, and errors are passed up as `EngineError`. The engine never runs a
+shell and has no frontend-specific code.
 
-The engine rejects a query's entire backend result if it contains foreign or
-duplicate identities, or an installed listing without an installed version. It
-also rejects details for a different identity, including a changed scope.
+The engine rejects a whole backend result if it has packages from another
+backend, duplicate identities, or installed packages with no installed
+version. It also rejects details for a different package, including a
+different scope.
 
-## Partial results and selection
+## Partial results
 
-Search and installed listing return a `PackageReport` with successful packages,
-the successful source ids, and per-backend failures. One failed source does not discard another source's
-results. Backend traversal and package ordering are deterministic.
+`search` and `installed` return a `PackageReport` with the packages found, the
+sources that worked, and an error for each source that failed. One failed
+source doesn't hide results from the others. Sources and packages are always
+returned in the same order.
 
-A name cannot safely resolve while a relevant source's query failed. Selection
-therefore reports `Incomplete`, even if one successful source has a matching
-package. Explicitly selecting a successful backend ignores failures in other
-backends; failures in the chosen backend still block selection. This prevents
-silently installing the only visible result from an incomplete search.
+If a relevant source failed, selecting a package by name returns `Incomplete`,
+even when another source has a match. This stops PkgDeck from installing the
+only visible result of an incomplete search. If you explicitly pick a working
+backend, failures in other backends are ignored. Failures in the chosen backend
+still block.
 
-## Streaming queries and remembered detection
+## Streaming and cached detection
 
-`search_stream` fans the query out over worker threads,
-emitting the cumulative sorted report as each backend answers; the terminal
-emission equals the synchronous query. Frontends render partials for perceived
-speed while the final state stays deterministic. Backends return to the engine
-afterwards for reuse. Cancellation surfaces per backend exactly like the
-synchronous query; there is no cross-backend rollback. The synchronous
-`search`/`installed` used by scripting stays single-shot and unchanged.
+`search_stream` queries every backend in parallel and sends the sorted results
+so far each time a backend answers. The last update is identical to the
+synchronous `search`. The GUI shows partial results so it feels fast, while
+the final result stays predictable. Backends go back to the engine afterward
+for reuse. Cancellation works per backend, the same as a normal query, and
+nothing is rolled back. The synchronous `search` and `installed` used by the
+CLI are unchanged.
 
-`native_engine` remembers definitive detection outcomes on the engine, so the
-immediately following query skips its own detection round instead of paying
-for the same probe twice. Failed detections are never cached: the query
-retries them, preserving today's behavior under transient failures. Engines
-are short-lived per query, so entries cannot go stale. `details_reuse`
-extends the same idea to selections on a warm engine; prefer `details` for
-cold engines, where availability is re-validated first.
+`native_engine` remembers successful detection results, so the next query
+doesn't detect again. Failed detections aren't remembered and are retried.
+Engines only live for one query, so the cache can't go stale. `details_reuse`
+does the same for details on an engine that has already run a query. Use
+`details` on a fresh engine, which checks availability first.
 
-## Operations and progress
+## Running changes
 
-`Operation::Refresh` targets one backend's metadata. `Operation::Upgrade` targets
-an explicit installed package identity. These are different capabilities and
-requests; the engine never substitutes one for the other.
+`Operation::Refresh` refreshes one backend's package lists.
+`Operation::Upgrade` updates one exact installed package. The engine never
+swaps one for the other.
 
-APT `UpgradeAll` requires a reviewed solver plan. The engine compares it with
-a fresh simulation before dispatching `dist-upgrade`; missing, changed, or
-incomplete plans stop the write. The GUI computes the preview on a worker so
-the window remains responsive.
+**APT `UpgradeAll`** needs a reviewed plan. The engine runs a fresh dry run and
+compares it before running `dist-upgrade`. If the plan is missing, changed, or
+incomplete, it stops. The GUI builds the preview on a worker thread so the
+window stays responsive.
 
-Adapters may also provide a structured `operation_plan` for one exact operation.
-The default is unavailable. APT simulates individual install, remove, and update
-operations and reports native package changes; sizes and restart needs remain
-unknown when APT does not supply them. The engine checks the plan again before
-the write. If it changed, the GUI prepares a new confirmation.
+**Single changes.** Backends can also return an `operation_plan` for one
+change. By default there is none. APT dry-runs single installs, removals, and
+updates and reports the package changes. Size and restart info stay unknown
+when APT doesn't provide them. The engine checks the plan again before
+running. If it changed, the GUI asks for confirmation again.
 
-Each dispatch emits `Started`, zero or more backend progress events, and exactly
-one `Finished` event carrying its result during normal error-returning execution.
-`Started` includes preflight checks and does not imply authorization or a native
-write has begun. Progress includes messages and transfer counts with optional
-totals; adapters should not invent percentages when a manager supplies no total.
+**Events.** Each change sends `Started`, then any progress events, then exactly
+one `Finished` with the result. `Started` covers pre-checks. It doesn't mean
+authorization or changes have begun. Progress has messages and transfer counts
+with optional totals. Backends shouldn't make up percentages when there's no
+total.
 
-`execute_batch` validates each operation and stored native plan before starting
-the confirmed batch. If any validation fails, every request receives a terminal
-error without a write. When the packaged batch runner is available, it asks for
-authorization once before any user or system write and binds protected commands
-to that batch. Consecutive exact APT selections with the same verb share one
-native transaction while retaining one result per selection. `execute_batch`
-preserves request order and returns one result per request. It
-continues after failures and does not roll back successful native operations.
-Pending requests after cancellation receive cancellation results and terminal
-events. Cancellation during a native write is controlled by the host boundary:
-a completed write with deferred cancellation stays a successful completion,
-not a claimed rollback. Backends must forward the cancellation token to their
-underlying operations and preserve this distinction.
+**Batches.** `execute_batch` checks every change and its saved plan first. If
+any check fails, every change gets an error and nothing runs. When the bundled
+helper is available, it asks for permission once, before any change, and only
+allows the commands in that batch. Consecutive APT changes of the same kind
+run in one APT transaction but still get one result each.
 
-Cleanup identities contain a backend and a fixed backend-defined key. They never
-contain shell fragments or arbitrary paths. A backend advertises `Clean` only
-when it can discover a plan without writing and map that key back to a fixed
-native command. Frontends display the preview and require confirmation before
-dispatch. Sources without those guarantees return `Unsupported` explicitly.
+- Results come back in request order, one per request.
+- A failure doesn't stop the rest, and finished changes aren't undone.
+- Changes after a cancellation get a cancelled result and a final event.
+- If cancellation arrives while a package manager is already making changes,
+  that change finishes and is reported as successful. It isn't reported as
+  rolled back.
 
-## Local verification
+Backends must pass the cancellation token to their commands and keep this
+distinction.
+
+**Cleanup.** A cleanup task is identified by a backend and a fixed key. It
+never contains shell code or arbitrary paths. A backend only supports `Clean`
+if it can find a plan without changing anything, and map the key back to a
+fixed command. The app and CLI show the preview and ask before running it.
+Backends that can't do this return `Unsupported`.
+
+## Tests
 
 ```sh
 cargo test --locked -p pkgdeck-core --test engine
 ```
 
-The in-memory synthetic backends exercise discovery, cross-source selection,
-architecture/user/environment disambiguation, details, installed state, the
-install → refresh → upgrade → remove lifecycle, unsupported capabilities,
-availability/query/write failures, malformed responses, cancellation, and event
-ordering. Their state is inspected after operations to verify refresh does not
-upgrade packages and partial batch failure preserves completed writes. These tests
-never invoke a real package manager or alter host package state.
+Fake in-memory backends test:
+
+- detection and choosing between sources
+- telling apart architectures, users, and environments
+- details and installed state
+- install → refresh → upgrade → remove
+- unsupported actions
+- availability, query, and change failures
+- malformed responses
+- cancellation and event order
+
+The tests check that refresh doesn't upgrade anything, and that finished
+changes are kept when a later one fails. They never run a real package
+manager or change your system.
