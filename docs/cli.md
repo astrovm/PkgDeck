@@ -213,7 +213,7 @@ pkd repos list --from flatpak --scope system
 pkd repos add example https://example.org/example.flatpakrepo --from flatpak --scope user
 pkd repos disable example --from flatpak --scope user
 pkd repos enable example --from flatpak --scope user
-pkd repos priority example 10 --from flatpak --scope user   # 0–9999, higher wins
+pkd repos priority example 10 --from flatpak --scope user   # 0 to 9999, higher wins
 pkd repos remove example --from flatpak --scope user
 pkd repos edit --from apt                         # open Software Sources
 pkd repos enable lvfs --from fwupd

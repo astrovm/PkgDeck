@@ -249,7 +249,7 @@ Controls.ApplicationWindow {
     }
     function copyableDiagnostics() {
         return "View: " + currentView + "\nState: " + (reportState.phase || "unknown") + "\n" +
-            readFailures.map((failure) => failure.source + ": " + failure.kind + " — " + failureSummary(failure.source)).join("\n");
+            readFailures.map((failure) => failure.source + " (" + failure.kind + "): " + failureSummary(failure.source)).join("\n");
     }
     function retryFailedSource(id) {
         if (currentView === "Search" && queryDirty)
@@ -386,6 +386,15 @@ Controls.ApplicationWindow {
         if (containerSource(id))
             return "Containers";
         return "Developer tools";
+    }
+    // The empty Search page's second line: how many sources a search covers.
+    function searchHint() {
+        const names = effectiveSources("Search")
+            .filter((id) => sourceInfo(id).availability_kind === "available" && sourceInfo(id).capabilities.indexOf("search") >= 0)
+            .map((id) => sourceDisplayName(id));
+        if (names.length === 0)
+            return sourceCatalog.length ? "No enabled source can search. Turn one on in Sources." : "";
+        return "Searches " + (names.length === 1 ? names[0] : names.length + " sources") + " as you type.";
     }
     function sourceSupportsView(id) {
         const capability = ({"Search":"search", "Installed":"installed", "Updates":"upgrade", "Clean":"clean"})[currentView];
@@ -1105,11 +1114,11 @@ Controls.ApplicationWindow {
             return row.available ? "Available" : "Unavailable";
         if (row.update === "available") {
             if (!row.installed || !row.candidate || row.installed === row.candidate)
-                return row.installed || row.candidate || "—";
+                return row.installed || row.candidate || "Unknown";
             return row.installed + " → " + row.candidate;
         }
         if (isInstalled(row))
-            return row.installed || "—";
+            return row.installed || "Unknown";
         return row.candidate || "Unknown";
     }
     // Local icon files become file:// URLs. Paths come from the backend and
@@ -1196,9 +1205,13 @@ Controls.ApplicationWindow {
     function choose(index) {
         if (retainingResults || index < 0 || index >= viewItems.length)
             return;
+        const identity = rowIdentity(viewItems[index]);
+        // Arrowing into the row that is already open must not load it again.
+        const same = results.currentIndex === index && selectedIdentity === identity;
         results.currentIndex = index;
-        selectedIdentity = rowIdentity(viewItems[index]);
-        backend.select(originalIndex(index));
+        selectedIdentity = identity;
+        if (!same)
+            backend.select(originalIndex(index));
     }
     function restoreSelection() {
         if (!selectedIdentity || retainingResults)
@@ -1542,7 +1555,7 @@ Controls.ApplicationWindow {
                 ActionButton {
                     objectName: "activityIndicator"
                     visible: !root.navigationCollapsed && root.currentView !== "Activity"
-                    text: root.queuedCount > 0 ? "Activity · " + root.queuedCount : backend.writing ? "Working" : "Activity"
+                    text: root.queuedCount > 0 ? "Activity (" + root.queuedCount + ")" : backend.writing ? "Working" : "Activity"
                     symbol: "activity"
                     glyphColor: backend.writing ? root.accent : root.ink
                     Accessible.name: root.queuedCount > 0 ? "Activity, " + root.queuedCount + " queued" : backend.writing ? "Activity, working" : "Activity"
@@ -1730,7 +1743,7 @@ Controls.ApplicationWindow {
                 spacing: 8
                 ActionButton {
                     objectName: "compactActivityIndicator"
-                    text: root.queuedCount > 0 ? "Activity · " + root.queuedCount : backend.writing ? "Working" : "Activity"
+                    text: root.queuedCount > 0 ? "Activity (" + root.queuedCount + ")" : backend.writing ? "Working" : "Activity"
                     symbol: "activity"
                     glyphColor: backend.writing ? root.accent : root.ink
                     Layout.fillWidth: true
@@ -1776,6 +1789,45 @@ Controls.ApplicationWindow {
                             root.submitSearch();
                         else
                             searchDebounce.restart();
+                    }
+                }
+            }
+            // Empty Search: a quiet centered prompt, like the other empty states.
+            Item {
+                id: searchEmptyState
+                objectName: "searchEmptyState"
+                visible: root.currentView === "Search" && searchPane.text.trim().length === 0 && !root.openingInput
+                    && root.viewItems.length === 0 && searchHint.text.length > 0
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                Column {
+                    anchors.centerIn: parent
+                    // Slightly above center reads as centered in the page.
+                    anchors.verticalCenterOffset: -parent.height * 0.1
+                    width: Math.min(parent.width - 32, 420)
+                    spacing: 8
+                    DeckIcon {
+                        name: "search"
+                        ink: root.muted
+                        width: 34
+                        height: 34
+                        anchors.horizontalCenter: parent.horizontalCenter
+                    }
+                    Controls.Label {
+                        text: "Find apps and packages"
+                        color: root.ink
+                        font.weight: Font.DemiBold
+                        width: parent.width
+                        horizontalAlignment: Text.AlignHCenter
+                    }
+                    Controls.Label {
+                        id: searchHint
+                        objectName: "searchHint"
+                        text: root.searchHint()
+                        color: root.muted
+                        width: parent.width
+                        wrapMode: Text.WordWrap
+                        horizontalAlignment: Text.AlignHCenter
                     }
                 }
             }
@@ -2134,6 +2186,86 @@ Controls.ApplicationWindow {
                     Item { Layout.preferredHeight: 4 }
                 }
             }
+            // The outcome of the last change. Failures stay until dismissed;
+            // success fades on its own.
+            Rectangle {
+                id: noticeBanner
+                objectName: "changeNotice"
+                readonly property var notice: JSON.parse(backend.notice || "{}")
+                readonly property color toneColor: notice.kind === "error" ? root.danger : notice.kind === "success" ? root.success : root.muted
+                visible: notice.title !== undefined && root.currentView !== "Settings"
+                Layout.fillWidth: true
+                implicitHeight: noticeRow.implicitHeight + 18
+                radius: root.controlRadius + 1
+                color: root.tint(toneColor, root.dark ? 0.12 : 0.08)
+                border.color: root.tint(toneColor, 0.35)
+                opacity: visible ? 1 : 0
+                Behavior on opacity { NumberAnimation { duration: root.revealDuration } }
+                onNoticeChanged: {
+                    if (notice.kind === "success" || notice.kind === "info")
+                        noticeTimer.restart();
+                    else
+                        noticeTimer.stop();
+                }
+                Timer {
+                    id: noticeTimer
+                    interval: 4000
+                    onTriggered: backend.dismissNotice()
+                }
+                RowLayout {
+                    id: noticeRow
+                    anchors.fill: parent
+                    anchors.leftMargin: 12
+                    anchors.rightMargin: 8
+                    spacing: 10
+                    DeckIcon {
+                        name: noticeBanner.notice.kind === "error" ? "warning" : "installed"
+                        ink: noticeBanner.toneColor
+                        Layout.preferredWidth: 18
+                        Layout.preferredHeight: 18
+                        Layout.alignment: Qt.AlignTop
+                        Layout.topMargin: 2
+                    }
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: 2
+                        Controls.Label {
+                            objectName: "changeNoticeTitle"
+                            text: noticeBanner.notice.title || ""
+                            textFormat: Text.PlainText
+                            color: root.ink
+                            font.weight: Font.DemiBold
+                            wrapMode: Text.WordWrap
+                            Layout.fillWidth: true
+                        }
+                        Controls.Label {
+                            objectName: "changeNoticeDetail"
+                            text: noticeBanner.notice.detail || ""
+                            textFormat: Text.PlainText
+                            visible: text.length > 0
+                            color: root.muted
+                            wrapMode: Text.WordWrap
+                            Layout.fillWidth: true
+                        }
+                    }
+                    ActionButton {
+                        objectName: "changeNoticeSettings"
+                        visible: noticeBanner.notice.action === "settings" && root.systemAuthorizationSupported
+                        text: "Settings"
+                        symbol: "settings"
+                        flat: true
+                        onClicked: root.openView("Settings")
+                    }
+                    ClearFieldButton {
+                        objectName: "dismissChangeNotice"
+                        ink: root.muted
+                        hoverColor: root.line
+                        clearLabel: "Dismiss"
+                        Layout.alignment: Qt.AlignTop
+                        onClicked: backend.dismissNotice()
+                    }
+                }
+            }
             Rectangle {
                 visible: root.readFailures.length > 0 && root.viewItems.length > 0 &&
                     ["Search", "Installed", "Updates", "Clean", "Sources"].indexOf(root.currentView) >= 0
@@ -2434,7 +2566,7 @@ Controls.ApplicationWindow {
                                         Layout.fillWidth: true
                                     }
                                     Controls.Label {
-                                        text: (modelData.groupCount || 0) + " packages · " + (modelData.groupSources || []).join(" + ")
+                                        text: (modelData.groupCount || 0) + " packages: " + (modelData.groupSources || []).join(", ")
                                         color: root.accent
                                         font.pointSize: root.font.pointSize * 0.9
                                     }
@@ -2518,7 +2650,7 @@ Controls.ApplicationWindow {
                                         }
                                         Controls.Label {
                                         objectName: "packageSourceLine"
-                                        text: root.sourceDisplayName(modelData.source) + (modelData.remote ? " · " + modelData.remote : "") + ((modelData.source === "flatpak" || root.containerSource(modelData.source)) ? " · " + (modelData.scope === "system" ? "System" : "User") : "")
+                                        text: root.sourceDisplayName(modelData.source) + (modelData.remote ? ", " + modelData.remote : "") + ((modelData.source === "flatpak" || root.containerSource(modelData.source)) ? ", " + (modelData.scope === "system" ? "System" : "User") : "")
                                         color: root.muted
                                         font.pointSize: root.font.pointSize * 0.9
                                         elide: Text.ElideRight
@@ -2547,7 +2679,9 @@ Controls.ApplicationWindow {
                                 }
                                 ColumnLayout {
                                     visible: !root.compact && (modelData.kind !== "source" || root.showUnavailableSources)
+                                    // Fixed width keeps every summary aligned, elided or not.
                                     Layout.preferredWidth: root.versionWidth
+                                    Layout.minimumWidth: root.versionWidth
                                     Layout.maximumWidth: root.versionWidth
                                     spacing: 3
                                     // Updates show the new version, with the installed one below.
@@ -2576,6 +2710,8 @@ Controls.ApplicationWindow {
                                 Controls.Label {
                                     visible: !root.compact && modelData.kind !== "source"
                                     Layout.fillWidth: true
+                                    // Long text must not squeeze the fixed columns.
+                                    Layout.preferredWidth: 0
                                     text: modelData.summary || ""
                                     color: root.muted
                                     textFormat: Text.PlainText
@@ -2838,7 +2974,7 @@ Controls.ApplicationWindow {
             }
             Item {
                 visible: ["Search", "Installed", "Updates", "Clean", "Sources"].indexOf(root.currentView) >= 0 && !backend.busy &&
-                    root.viewItems.length <= root.shortListLimit
+                    root.viewItems.length <= root.shortListLimit && !searchEmptyState.visible
                 Layout.fillHeight: true
             }
         }
@@ -2933,7 +3069,7 @@ Controls.ApplicationWindow {
                                     Layout.fillWidth: true
                                 }
                                 Controls.Label {
-                                    text: modelData.backend.toUpperCase() + " · " + (modelData.scope === "system" ? "System" : "User")
+                                    text: modelData.backend.toUpperCase() + ", " + (modelData.scope === "system" ? "System" : "User")
                                     color: root.muted
                                     font.pointSize: root.font.pointSize * 0.9
                                 }

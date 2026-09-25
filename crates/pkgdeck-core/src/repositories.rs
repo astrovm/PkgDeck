@@ -105,7 +105,7 @@ impl Action {
             Change::SetPriority { priority } => format!("Set repository priority to {priority}"),
             Change::OpenEditor => "Open Software Sources".into(),
         };
-        format!("{change}\n{} · {} · {scope}", self.backend, self.name)
+        format!("{change}\n{}, {}, {scope}", self.backend, self.name)
     }
     pub fn validate(&self) -> Result<(), EngineError> {
         system(&self.scope)?;
@@ -297,12 +297,12 @@ pub fn list_selected(
     for (backend, label, installation) in [
         (
             "flatpak",
-            "Flatpak · User",
+            "Flatpak (User)",
             Scope::User {
                 uid: rustix::process::getuid().as_raw(),
             },
         ),
-        ("flatpak", "Flatpak · System", Scope::System),
+        ("flatpak", "Flatpak (System)", Scope::System),
         ("fwupd", "Firmware", Scope::System),
     ] {
         if !allowed(backend, &installation) {
@@ -443,7 +443,7 @@ pub fn list_selected(
             Err(error) => {
                 report
                     .errors
-                    .push(format!("APT · {}: {error}", file.display()));
+                    .push(format!("APT {}: {error}", file.display()));
                 continue;
             }
         };
@@ -462,7 +462,7 @@ pub fn list_selected(
                 report.repositories.push(Repository {
                     backend: "apt".into(),
                     name: format!("{}:{index}", file.display()),
-                    title: format!("{} · {}", field("URIs:"), field("Suites:")),
+                    title: format!("{} {}", field("URIs:"), field("Suites:")),
                     url: field("URIs:").into(),
                     scope: Scope::System,
                     enabled: field("Enabled:") != "no",

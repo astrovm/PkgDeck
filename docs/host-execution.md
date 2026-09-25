@@ -22,7 +22,9 @@ when PkgDeck itself is packaged.
 The same rules apply to reads, finding programs, and changes. If both Snap or
 Flatpak and AppImage markers are present, Snap or Flatpak wins.
 
-**Flatpak** runs host commands with `flatpak-spawn --host`, which needs access
+### Flatpak
+
+The Flatpak runs host commands with `flatpak-spawn --host`, which needs access
 to `org.freedesktop.Flatpak` on the session bus. It reads your environment
 once, keeps only the allowed variables, and starts each command with a clean
 environment. If host access is missing, commands fail instead of falling back
@@ -31,7 +33,9 @@ to something else. Inside the Flatpak, APT data comes from the host's
 runtime cleanup isn't offered yet. See the
 [Flatpak command reference](https://docs.flatpak.org/en/latest/flatpak-command-reference.html#flatpak-spawn).
 
-**Snap** uses classic confinement because PkgDeck needs to run the package
+### Snap
+
+The Snap uses classic confinement because PkgDeck needs to run the package
 managers already on your system. The Snap Store must manually approve classic
 confinement. See
 [Snap confinement](https://snapcraft.io/docs/explanation/security/snap-confinement/).
@@ -59,7 +63,9 @@ System package managers, Flatpak system installs, repository changes, and
 firmware updates need admin rights. Those commands use a fixed system `PATH`
 without your personal tool folders.
 
-**One prompt per batch.** When you confirm a batch of changes, PkgDeck:
+### One prompt per batch
+
+When you confirm a batch of changes, PkgDeck:
 
 1. Checks every change and its saved preview before changing anything.
 2. Starts its bundled helper once through your chosen method (sudo or
@@ -70,7 +76,7 @@ without your personal tool folders.
 
 User-level commands never go through the helper.
 
-**Where the helper lives.**
+### Where the helper lives
 
 - Native, classic Snap, and Linux Homebrew: next to the PkgDeck executables.
 - AppImage: started through AppRun, so the elevated process can mount the
@@ -95,22 +101,28 @@ reported as "cancelled" and "denied". See the
 
 ## Locks, cancelling, and failures
 
-**APT locks.** APT uses its normal locks. PkgDeck sets
+### APT locks
+
+APT uses its normal locks. PkgDeck sets
 `DPkg::Lock::Timeout=0`, so if APT is busy you're told right away. PkgDeck
 never creates its own locks or deletes APT's lock files.
 
-**APT safety.** Installs and single-package upgrades use `--no-remove`. For
+### APT safety
+
+Installs and single-package upgrades use `--no-remove`. For
 **Update all**, PkgDeck runs `dist-upgrade` as a dry run without admin rights
 and shows the installs and removals. It runs the dry run again right before
 the real upgrade. If the plan changed or is incomplete, it stops. See the
 [CLI guide](cli.md) for how the CLI confirms changes.
 
-**Reads** have a time limit and keep up to 128 KiB of output per stream. Extra
+### Reads
+
+Reads have a time limit and keep up to 128 KiB of output per stream. Extra
 output is discarded and marked as cut off. When a read is cancelled or times
 out, its whole process group is stopped, so a leftover child process can't
 hang PkgDeck.
 
-**Cancelling.**
+### Cancelling
 
 - Cancelling before authorization or before a change starts stops it
   completely.
@@ -119,7 +131,9 @@ hang PkgDeck.
   finish. The result notes that you asked to cancel. The app and CLI show that
   the change is finishing, instead of claiming it stopped.
 
-**Failures.** Permission errors, locks, interruptions, and other failures are
+### Failures
+
+Permission errors, locks, interruptions, and other failures are
 reported separately. If a package manager was interrupted, for example by
 a signal or an interrupted dpkg run, check your system before trying again. If
 PkgDeck crashes or the computer shuts down during a change, the change may be

@@ -81,7 +81,7 @@ impl<T: Transport> Firmware<T> {
                 let summary = std::iter::once("Firmware")
                     .chain(requirements)
                     .collect::<Vec<_>>()
-                    .join(" · ");
+                    .join(", ");
                 let description = [
                     device["Summary"].as_str().unwrap_or(""),
                     device["UpdateError"].as_str().unwrap_or(""),

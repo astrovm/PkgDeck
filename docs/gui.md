@@ -33,16 +33,16 @@ confirmation.
 
 What the preview shows:
 
-- **AppImage:** where the app will be copied, its desktop entry, and whether it
+- AppImage: where the app will be copied, its desktop entry, and whether it
   can update itself. PkgDeck never runs the file to inspect it, and your
   original file is kept.
-- **Debian package (`.deb`):** the changes APT would make, before it asks for
+- Debian package (`.deb`): the changes APT would make, before it asks for
   your password.
-- **Flatpak reference:** the app, its repository, whether a signing key is
+- Flatpak reference: the app, its repository, whether a signing key is
   included, and any extra repository it needs. Choose User or System here.
   Flatpak may still download extra runtimes during install.
-- **RPM, Arch, and Snap files:** checked by their own package manager.
-- **Repository files:** checked again right before they are added. `.ymp` files
+- RPM, Arch, and Snap files: checked by their own package manager.
+- Repository files: checked again right before they are added. `.ymp` files
   open the openSUSE installer.
 
 The file picker only lists formats that some package manager on this
@@ -61,7 +61,7 @@ These controls work on every package page:
   use, with the reason.
 - **Reload** gets fresh package data.
 
-**Docker and Podman images** are shown as separate sources. Each row shows
+Docker and Podman images are shown as separate sources. Each row shows
 tags, size, age, and image ID. You can pull a tagged image again or remove it.
 Untagged ("dangling") images can only be removed. To pull a new image, select
 only Docker or Podman and search for the full image name with its tag.
@@ -84,14 +84,14 @@ Every change opens a confirmation. It shows the package, source, scope, and
 any extra changes the package manager plans to make. **Cancel** is selected by
 default.
 
-- **APT** does a dry run first and checks it again right before making changes.
+- APT does a dry run first and checks it again right before making changes.
   For **Update all**, packages that will be installed or removed are listed at
   the top. If the plan changes, the update stops before asking for your
   password.
-- **Firmware** confirmations list power and restart requirements. PkgDeck never
+- Firmware confirmations list power and restart requirements. PkgDeck never
   restarts your computer.
-- **Failed sources:** **Update all** retries sources that failed to check. If a
-  source still fails, the confirmation says so and its updates are skipped. The
+- **Update all** retries sources that failed to check. If a source still
+  fails, the confirmation says so and its updates are skipped. The
   rest still work, and **Retry** is available in the error notice.
 
 ### Cancelling

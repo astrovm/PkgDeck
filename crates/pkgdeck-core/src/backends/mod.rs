@@ -648,7 +648,7 @@ impl<T: Transport> Flatpak<T> {
                 },
                 display_name: fields[0].into(),
                 summary: if runtime {
-                    format!("Runtime · {} · {}", fields[2], fields[4])
+                    format!("Runtime {} ({})", fields[2], fields[4])
                 } else {
                     fields[4].into()
                 },
@@ -723,8 +723,13 @@ impl<T: Transport> Flatpak<T> {
                 system,
             )?,
         )?;
-        String::from_utf8(output)
-            .map_err(|e| invalid("flatpak", e))?
+        let output = String::from_utf8(output).map_err(|e| invalid("flatpak", e))?;
+        // Without matches flatpak prints a translated notice such as
+        // "No matches found" instead of rows. Every real row has tabs.
+        if !output.contains('\t') {
+            return Ok(vec![]);
+        }
+        output
             .lines()
             .filter(|line| !line.trim().is_empty())
             .map(|line| {

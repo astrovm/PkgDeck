@@ -95,24 +95,32 @@ does the same for details on an engine that has already run a query. Use
 `Operation::Upgrade` updates one exact installed package. The engine never
 swaps one for the other.
 
-**APT `UpgradeAll`** needs a reviewed plan. The engine runs a fresh dry run and
+### APT upgrade plans
+
+APT `UpgradeAll` needs a reviewed plan. The engine runs a fresh dry run and
 compares it before running `dist-upgrade`. If the plan is missing, changed, or
 incomplete, it stops. The GUI builds the preview on a worker thread so the
 window stays responsive.
 
-**Single changes.** Backends can also return an `operation_plan` for one
+### Single changes
+
+Backends can also return an `operation_plan` for one
 change. By default there is none. APT dry-runs single installs, removals, and
 updates and reports the package changes. Size and restart info stay unknown
 when APT doesn't provide them. The engine checks the plan again before
 running. If it changed, the GUI asks for confirmation again.
 
-**Events.** Each change sends `Started`, then any progress events, then exactly
+### Events
+
+Each change sends `Started`, then any progress events, then exactly
 one `Finished` with the result. `Started` covers pre-checks. It doesn't mean
 authorization or changes have begun. Progress has messages and transfer counts
 with optional totals. Backends shouldn't make up percentages when there's no
 total.
 
-**Batches.** `execute_batch` checks every change and its saved plan first. If
+### Batches
+
+`execute_batch` checks every change and its saved plan first. If
 any check fails, every change gets an error and nothing runs. When the bundled
 helper is available, it asks for permission once, before any change, and only
 allows the commands in that batch. Consecutive APT changes of the same kind
@@ -128,7 +136,9 @@ run in one APT transaction but still get one result each.
 Backends must pass the cancellation token to their commands and keep this
 distinction.
 
-**Cleanup.** A cleanup task is identified by a backend and a fixed key. It
+### Cleanup
+
+A cleanup task is identified by a backend and a fixed key. It
 never contains shell code or arbitrary paths. A backend only supports `Clean`
 if it can find a plan without changing anything, and map the key back to a
 fixed command. The app and CLI show the preview and ask before running it.

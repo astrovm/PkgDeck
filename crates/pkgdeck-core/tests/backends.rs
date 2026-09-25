@@ -1316,6 +1316,55 @@ fn flatpak_search_rejects_malformed_remote_metadata() {
 }
 
 #[test]
+fn flatpak_search_without_matches_is_empty_not_malformed() {
+    // flatpak prints a (translated) notice instead of rows when nothing
+    // matches, such as for an installation without remotes.
+    #[derive(Clone)]
+    struct Notice(&'static str);
+    impl Transport for Notice {
+        fn apt_query(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &Cancellation,
+        ) -> Result<Completion, ExecutionError> {
+            unreachable!()
+        }
+        fn apt_write(&self, _: AptAction, _: &Cancellation) -> Result<Completion, ExecutionError> {
+            unreachable!()
+        }
+        fn brew(
+            &self,
+            _: &[OsString],
+            _: &Cancellation,
+            _: bool,
+        ) -> Result<Completion, ExecutionError> {
+            unreachable!()
+        }
+        fn flatpak(
+            &self,
+            args: &[OsString],
+            _: &Cancellation,
+            _: bool,
+            _: bool,
+        ) -> Result<Completion, ExecutionError> {
+            // Only search prints the notice; an empty list prints nothing.
+            Ok(output(if args.contains(&"search".into()) {
+                self.0
+            } else {
+                ""
+            }))
+        }
+    }
+    let cancel = Cancellation::default();
+    for notice in ["No matches found\n", "Keine Treffer gefunden\n", "\n"] {
+        let mut backend = Flatpak::new(Notice(notice));
+        assert_eq!(backend.search("htop", &cancel), Ok(vec![]), "{notice:?}");
+    }
+}
+
+#[test]
 fn flatpak_detect_reports_unavailable_backend() {
     let cancel = Cancellation::default();
     let mut backend = Flatpak::new(FailingFlatpak(ExecutionError::Disabled("missing".into())));

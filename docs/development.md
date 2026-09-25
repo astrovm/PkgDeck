@@ -142,13 +142,15 @@ packages. It runs the same `setup-dev.sh` and `verify.sh` as native builds and
 CI. Base images are pinned by digest and support x86_64 and aarch64. Tests use
 your machine's architecture.
 
-**Caches.** Images are tagged by their inputs and architecture. Cargo
+### Caches
+
+Images are tagged by their inputs and architecture. Cargo
 downloads and build output are kept in `$XDG_CACHE_HOME/pkgdeck/containers`
 (or `~/.cache/pkgdeck/containers`), separated by checkout path and image. Set
 `PKGDECK_CONTAINER_CACHE` to move them. Later runs reuse them. The first run
 also builds the image and dependencies.
 
-**Isolation.**
+### Isolation
 
 - Files are created with your user ID (`--userns=keep-id`).
 - Your local `target/` is hidden inside the container, so the two builds never
@@ -164,7 +166,9 @@ packages but has no root access on your machine. Homebrew runs as a normal
 user at `/home/linuxbrew/.linuxbrew`. Each run starts fresh and is deleted
 afterward.
 
-**Reproducibility.** Ubuntu and Rust base images, Qt/KDE versions, and
+### Reproducibility
+
+Ubuntu and Rust base images, Qt/KDE versions, and
 Homebrew 7.0.6 are pinned. The Homebrew tarball has a committed SHA-256. OS
 packages still come from the distro's current signed repositories, so a
 rebuild can differ from a saved image. The exact OS package list is saved to
@@ -190,16 +194,16 @@ Flatpak/Snap bridges, FUSE, or a real display.
 
 ## Tools
 
-- **`cargo xtask`** runs the Rust acceptance tests: `gui`, `gui-failure`,
+- `cargo xtask` runs the Rust acceptance tests: `gui`, `gui-failure`,
   `gui-lifecycle`, `gui-write`, `apt-lock-probe`, and `qml`. Build it once with
   `cargo build -p pkgdeck-tools`; `scripts/xtask.sh` runs it for package
   checks. GUI tests use private Xvfb displays and temporary settings. These
   test tools don't count toward the 95% coverage gate.
-- **`scripts/build-apt.sh`** builds the separate APT reader (GPL-2.0-or-later)
+- `scripts/build-apt.sh` builds the separate APT reader (GPL-2.0-or-later)
   from `libapt-pkg-dev`. It stays a separate program so APT isn't linked into
   the app. `scripts/bundle.sh` bundles its libraries and license notices, so
   users don't need development headers. Package changes still use the
   system's own package manager and password prompt.
-- **`scripts/check-no-python.sh`** rejects Python scripts and Python calls in
+- `scripts/check-no-python.sh` rejects Python scripts and Python calls in
   this project. It doesn't apply to the OS, cloud-init, Qt, or package
   managers.

@@ -168,8 +168,8 @@ fn draw(state: &mut State, frame: usize, width: usize, color: bool) {
     let mut line = format!("\r{spin}{}{reset} {label}", FRAMES[frame]);
     let mut columns = 2 + display_width(&label);
     if !detail.is_empty() {
-        line.push_str(&format!("{dim} · {detail}{reset}"));
-        columns += 3 + display_width(&detail);
+        line.push_str(&format!("{dim}  {detail}{reset}"));
+        columns += 2 + display_width(&detail);
     }
     if !timer.is_empty() {
         line.push_str(&format!("{dim}{timer}{reset}"));

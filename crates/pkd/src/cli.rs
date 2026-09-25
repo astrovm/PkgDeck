@@ -140,7 +140,7 @@ pub enum RepoCommand {
     Enable { name: String },
     /// Disable a Flatpak or firmware repository.
     Disable { name: String },
-    /// Set a Flatpak repository priority (0–9999, higher wins).
+    /// Set a Flatpak repository priority (0 to 9999, higher wins).
     Priority { name: String, priority: i32 },
     /// Open the Software Sources editor for APT.
     Edit,
@@ -522,7 +522,14 @@ pub fn dispatch_with(
         };
         events(Event::Progress {
             operation: operation.clone(),
-            progress: Progress::Message(format!("APT transaction:\n{}", plan.summary())),
+            // Shown under "Update all apt packages"; empty sections add nothing.
+            progress: Progress::Message(
+                plan.summary()
+                    .lines()
+                    .filter(|line| !line.ends_with(": none"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
         });
         if !plan.removals.is_empty()
             && !matches!(

@@ -31,6 +31,8 @@ Architecture: amd64
 Version: $version
 Description: Synthetic "quoted" café fixture
  Long description with a backslash \\ and a newline.
+ .
+ Second paragraph.
 Homepage: https://example.invalid/pkgdeck
 Depends: synthetic-dependency (>= 1)
 Filename: fixture-$version.deb
@@ -52,7 +54,7 @@ APT_CONFIG="$work/config" apt-get update -qq
 rm -f "$work/var/cache/apt/"*.bin
 query() { APT_CONFIG="$work/config" "$helper" "$@"; }
 query detect '' '' | jq -e '.==[]'
-query details pkgdeck-fixture amd64 | jq -e 'length==1 and .[0].package.installed_version=="1.0" and .[0].package.candidate_version=="2.0" and .[0].package.update=="available" and (.[0].description | contains("Long description")) and .[0].homepage=="https://example.invalid/pkgdeck" and .[0].dependencies==["synthetic-dependency (>= 1)"]'
+query details pkgdeck-fixture amd64 | jq -e 'length==1 and .[0].package.installed_version=="1.0" and .[0].package.candidate_version=="2.0" and .[0].package.update=="available" and .[0].description=="Synthetic \"quoted\" café fixture\nLong description with a backslash \\ and a newline.\n\nSecond paragraph." and .[0].homepage=="https://example.invalid/pkgdeck" and .[0].dependencies==["synthetic-dependency (>= 1)"]'
 query details pkgdeck-fixture arm64 | jq -e 'length==1 and .[0].package.id.architecture=="arm64" and .[0].package.installed_version==null'
 query search QUOTED '' | jq -e 'length==1'
 query search CAFÉ '' | jq -e 'length==1'

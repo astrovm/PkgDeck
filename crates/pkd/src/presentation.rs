@@ -64,7 +64,7 @@ pub fn operation_context(op: &Operation) -> String {
                 Scope::System if id.backend == "flatpak" => parts.push("system".into()),
                 _ => {}
             }
-            parts.join(" · ")
+            parts.join(", ")
         }
     }
 }
@@ -161,15 +161,12 @@ pub fn error_text(error: &Value) -> String {
                         .as_array()
                         .into_iter()
                         .flatten()
-                        .map(|failure| {
-                            format!(
-                                "{}: {}",
-                                field(failure, "backend"),
-                                error_text(&failure["error"])
-                            )
-                        })
+                        .map(failure_text)
                         .collect();
-                    format!("Some sources didn't answer. {}", failed.join(" "))
+                    format!(
+                        "Some sources didn't answer, so nothing was changed. {} Try again, or leave them out with --from.",
+                        failed.join(" ")
+                    )
                 }
                 "Ambiguous" => format!(
                     "{} packages have this name. Pick one with --from, --arch, or --scope.",
@@ -220,7 +217,16 @@ fn execution_text(error: &Value) -> String {
 }
 fn failure_text(failure: &Value) -> String {
     match failure["backend"].as_str() {
-        Some(backend) => format!("{}: {}", clean(backend), error_text(&failure["error"])),
+        Some(backend) => {
+            let text = error_text(&failure["error"]);
+            // Many errors already start with their source; don't repeat it.
+            if text.starts_with(&format!("{backend}:")) || text.starts_with(&format!("{backend} "))
+            {
+                text
+            } else {
+                format!("{}: {text}", clean(backend))
+            }
+        }
         None => value(failure),
     }
 }
@@ -422,6 +428,15 @@ fn table(headers: &[&str], rows: &[Vec<(String, Style)>], width: usize, paint: P
 fn failure_line(paint: Paint, detail: &str) -> String {
     format!("\n{} {detail}", paint.yellow("!"))
 }
+/// "already_installed" reads as "Already installed".
+fn humanize(token: &str) -> String {
+    let text = token.replace('_', " ");
+    let mut chars = text.chars();
+    chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
+}
 fn scope_label(scope: &Value) -> Option<&'static str> {
     match scope {
         Value::String(s) if s == "system" => Some("system"),
@@ -553,12 +568,12 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
             ));
             let count = rows.len();
             output.push_str(&format!(
-                "\n\n{} {}\n{}",
+                "\n\n{}{}\n{}",
                 paint.bold(&format!(
                     "{count} package{}",
                     if count == 1 { "" } else { "s" }
                 )),
-                paint.dim("· run `pkd info <name>` for details"),
+                paint.dim(". Run `pkd info <name>` for details."),
                 paint.dim("○ not installed   ● installed   ↑ update available")
             ));
         }
@@ -569,8 +584,11 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
         }
     } else if let Some(export) = data.get("manifest_export") {
         output.push_str(&paint.green(&format!(
-            "Exported {} packages to {}",
-            value(&export["packages"]),
+            "Exported {} to {}",
+            match export["packages"].as_u64() {
+                Some(1) => "1 package".to_string(),
+                count => format!("{} packages", count.unwrap_or_default()),
+            },
             value(&export["path"])
         )));
     } else if let Some(preview) = data.get("manifest_preview") {
@@ -582,7 +600,7 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
                 vec![
                     (value(&entry["package"]["name"]), Paint::bold as Style),
                     (value(&entry["package"]["backend"]), Paint::dim as Style),
-                    (value(&entry["status"]), plain as Style),
+                    (humanize(&value(&entry["status"])), plain as Style),
                     (value(&entry["reason"]), Paint::dim as Style),
                 ]
             })
@@ -633,9 +651,9 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
                         if let Some(packages) = owner["packages"].as_array() {
                             for package in packages {
                                 output.push_str(&format!(
-                                    "\n    Exact copy: {} · {} · {}",
-                                    value(&package["backend"]),
+                                    "\n    Exact copy: {} from {}, {}",
                                     value(&package["name"]),
+                                    value(&package["backend"]),
                                     value(&package["scope"])
                                 ));
                             }
@@ -650,15 +668,19 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
         ));
     } else if let Some(report) = data.get("audit") {
         if let Some(groups) = report["groups"].as_array() {
-            output.push_str(&paint.bold(&format!("{} known duplicate groups\n", groups.len())));
+            output.push_str(&paint.bold(&match groups.len() {
+                0 => "No apps installed more than once.\n".to_string(),
+                1 => "1 app installed more than once\n".to_string(),
+                count => format!("{count} apps installed more than once\n"),
+            }));
             for group in groups {
                 output.push_str(&format!("\n{}\n", paint.bold(&value(&group["key"]))));
                 if let Some(copies) = group["copies"].as_array() {
                     for copy in copies {
                         output.push_str(&format!(
-                            "  {} · {} · {} · {}\n",
-                            value(&copy["package"]["backend"]),
+                            "  {} from {}, {}, version {}\n",
                             value(&copy["package"]["name"]),
+                            value(&copy["package"]["backend"]),
                             value(&copy["package"]["scope"]),
                             value(&copy["installed_version"])
                         ));
@@ -667,17 +689,18 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
             }
         }
         if let Some(leftovers) = report["leftovers"].as_array() {
-            output.push_str(&paint.bold(&format!(
-                "\n{} manager-reported residual files\n",
-                leftovers.len()
-            )));
+            output.push_str(&paint.bold(&match leftovers.len() {
+                0 => "\nNo leftover files from removed packages.\n".to_string(),
+                1 => "\n1 leftover file from removed packages\n".to_string(),
+                count => format!("\n{count} leftover files from removed packages\n"),
+            }));
             for row in leftovers {
                 output.push_str(&format!(
-                    "  {} · {} · {} · {} bytes\n",
-                    value(&row["manager"]),
-                    value(&row["native_name"]),
+                    "  {} ({} bytes, from {} package {})\n",
                     value(&row["path"]),
-                    value(&row["size_bytes"])
+                    value(&row["size_bytes"]),
+                    value(&row["manager"]),
+                    value(&row["native_name"])
                 ));
             }
         }
@@ -735,7 +758,10 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
                         },
                     ),
                     (value(&r["backend"]), Paint::dim as Style),
-                    (value(&r["scope"]), Paint::dim as Style),
+                    (
+                        scope_label(&r["scope"]).map_or_else(|| value(&r["scope"]), str::to_string),
+                        Paint::dim as Style,
+                    ),
                     (value(&r["url"]), Paint::dim as Style),
                 ]
             })
@@ -752,8 +778,12 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
             }
         }
     } else if let Some(sources) = data["sources"].as_array() {
+        // Usable sources first; the rest explain why they are unavailable.
+        let available = |s: &&Value| value(&s["availability"]) == "available";
         let rows = sources
             .iter()
+            .filter(available)
+            .chain(sources.iter().filter(|s| !available(s)))
             .map(|s| {
                 let availability = value(&s["availability"]);
                 let (status, detail) = match availability.split_once(": ") {
@@ -814,13 +844,61 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
             value(data.get("message").unwrap_or(&data["error"]))
         ));
         if let Some(matches) = data["error"]["Ambiguous"].as_array() {
-            for id in matches {
+            // Each match with the flags that pick it: --from, plus --arch or
+            // --scope when the same source has more than one match.
+            let flags: Vec<_> = matches
+                .iter()
+                .map(|id| {
+                    let same: Vec<_> = matches
+                        .iter()
+                        .filter(|other| other["backend"] == id["backend"])
+                        .collect();
+                    let mut flags = vec![format!("--from {}", value(&id["backend"]))];
+                    if same
+                        .iter()
+                        .any(|other| other["architecture"] != id["architecture"])
+                    {
+                        flags.push(format!("--arch {}", value(&id["architecture"])));
+                    }
+                    let scope = scope_label(&id["scope"]);
+                    if scope.is_some()
+                        && same
+                            .iter()
+                            .any(|other| scope_label(&other["scope"]) != scope)
+                    {
+                        flags.push(format!("--scope {}", scope.unwrap_or_default()));
+                    }
+                    flags.join(" ")
+                })
+                .collect();
+            let width = flags.iter().map(|flag| flag.width()).max().unwrap_or(0);
+            for (id, flag) in matches.iter().zip(flags) {
+                // Flags can't tell apart matches that differ only by
+                // reference, such as two Flatpak branches. The reference
+                // selects the exact one, so show it in place of the name.
+                let twin = matches.iter().any(|other| {
+                    other != id
+                        && other["backend"] == id["backend"]
+                        && other["architecture"] == id["architecture"]
+                        && scope_label(&other["scope"]) == scope_label(&id["scope"])
+                });
+                let name = match id["reference"].as_str() {
+                    Some(reference) if twin && !reference.is_empty() => clean(reference),
+                    _ => value(&id["name"]),
+                };
+                let mut parts = vec![name];
+                if matches!(
+                    id["backend"].as_str(),
+                    Some("apt" | "dnf" | "pacman" | "zypper")
+                ) {
+                    parts.push(value(&id["architecture"]));
+                }
+                parts.extend(scope_label(&id["scope"]).map(str::to_string));
                 output.push_str(&format!(
-                    "\n  {} · {} · {} · {}",
-                    value(&id["backend"]),
-                    value(&id["name"]),
-                    value(&id["architecture"]),
-                    value(&id["scope"])
+                    "\n  {}{}  {}",
+                    paint.bold(&flag),
+                    " ".repeat(width - flag.width()),
+                    parts.join(", ")
                 ));
             }
         }
@@ -857,7 +935,15 @@ mod tests {
             false,
         );
         assert!(preview.contains("org.example.App"));
-        assert!(preview.contains("ambiguous"));
+        assert!(preview.contains("Ambiguous"));
+        assert_eq!(humanize("already_installed"), "Already installed");
+        assert_eq!(humanize(""), "");
+        let one = human(
+            &json!({"manifest_export":{"path":"one.json", "packages":1}}),
+            100,
+            false,
+        );
+        assert!(one.contains("Exported 1 package to one.json"));
         assert!(preview.contains("Review flathub"));
     }
     #[test]
@@ -933,8 +1019,56 @@ mod tests {
             80,
             false,
         );
-        assert!(ambiguous.contains("apt · fixture · amd64 · system"));
-        assert!(ambiguous.contains("apt · fixture · i386 · system"));
+        assert!(ambiguous.contains("--from apt --arch amd64  fixture, amd64, system"));
+        assert!(ambiguous.contains("--from apt --arch i386   fixture, i386, system"));
+        let scopes = human(
+            &json!({"error":{"Ambiguous":[
+                {"backend":"flatpak","name":"org.example.App","architecture":"x86_64","scope":"system"},
+                {"backend":"flatpak","name":"org.example.App","architecture":"x86_64","scope":{"user":{"uid":1000}}}
+            ]},"message":"2 packages match"}),
+            100,
+            false,
+        );
+        assert!(
+            scopes.contains("--from flatpak --scope system  org.example.App, system"),
+            "{scopes}"
+        );
+        assert!(
+            scopes.contains("--from flatpak --scope user    org.example.App, user"),
+            "{scopes}"
+        );
+        let branches = human(
+            &json!({"error":{"Ambiguous":[
+                {"backend":"flatpak","name":"org.example.App","architecture":"x86_64","scope":"system","reference":"org.example.App/x86_64/stable"},
+                {"backend":"flatpak","name":"org.example.App","architecture":"x86_64","scope":"system","reference":"org.example.App/x86_64/beta"}
+            ]},"message":"2 packages match"}),
+            100,
+            false,
+        );
+        assert!(
+            branches.contains("--from flatpak  org.example.App/x86_64/stable, system"),
+            "{branches}"
+        );
+        assert!(
+            branches.contains("--from flatpak  org.example.App/x86_64/beta, system"),
+            "{branches}"
+        );
+        let mixed = human(
+            &json!({"error":{"Ambiguous":[
+                {"backend":"apt","name":"htop","architecture":"amd64","scope":"system"},
+                {"backend":"pipx","name":"htop","architecture":"x86_64","scope":{"environment":{"path":"/venv"}}}
+            ]},"message":"2 packages match"}),
+            80,
+            false,
+        );
+        assert!(
+            mixed.contains("--from apt   htop, amd64, system"),
+            "{mixed}"
+        );
+        assert!(
+            mixed.contains("--from pipx  htop") && !mixed.contains("/venv"),
+            "{mixed}"
+        );
     }
     #[test]
     fn inspection_and_audit_render_exact_read_only_evidence() {
@@ -946,12 +1080,20 @@ mod tests {
         let output = human(&command, 100, false);
         assert!(output.contains("Resolved  /first/tool"));
         assert!(output.contains("/target/tool"));
-        assert!(output.contains("Exact copy: apt · fixture · system"));
+        assert!(output.contains("Exact copy: fixture from apt, system"));
         let audited = json!({"audit":{"groups":[{"key":"fixture","copies":[{"package":{"backend":"apt","name":"fixture","scope":"system"},"installed_version":"1"}]}],
             "leftovers":[{"manager":"apt","native_name":"old-fixture","path":"/etc/old.conf","size_bytes":4}],
             "data_note":"Unknown data remains unknown."}});
         let output = human(&audited, 100, false);
-        assert!(output.contains("1 known duplicate groups"));
+        assert!(output.contains("1 app installed more than once"));
+        assert!(output.contains("1 leftover file from removed packages"));
+        let empty = human(
+            &json!({"audit":{"groups":[],"leftovers":[],"data_note":"Note."}}),
+            100,
+            false,
+        );
+        assert!(empty.contains("No apps installed more than once."));
+        assert!(empty.contains("No leftover files from removed packages."));
         assert!(output.contains("/etc/old.conf"));
         assert!(output.contains("Unknown data remains unknown."));
     }
@@ -1020,19 +1162,19 @@ mod tests {
                 Operation::Install(id("apt", "i386", Scope::System)),
                 "Install tool",
                 "Installing tool",
-                "apt · i386",
+                "apt, i386",
             ),
             (
                 Operation::Remove(id("flatpak", "x86_64", Scope::System)),
                 "Remove tool",
                 "Removing tool",
-                "flatpak · system",
+                "flatpak, system",
             ),
             (
                 Operation::Upgrade(id("npm", "all", Scope::User { uid: 1 })),
                 "Update tool",
                 "Updating tool",
-                "npm · user",
+                "npm, user",
             ),
             (
                 Operation::Refresh {
@@ -1114,7 +1256,7 @@ mod tests {
             ),
             (
                 json!({"Incomplete": [{"backend": "apt", "error": {"Execution": "TimedOut"}}]}),
-                "Some sources didn't answer. apt: The package manager took too long",
+                "Some sources didn't answer, so nothing was changed. apt: The package manager took too long to answer. Try again, or leave them out with --from.",
             ),
             (json!({"Ambiguous": [{}, {}]}), "2 packages have this name"),
             (json!({"UnknownBackend": "x"}), "UnknownBackend: x"),
@@ -1164,6 +1306,30 @@ mod tests {
             "failures": [{"backend": "dnf", "error": {"Execution": "TimedOut"}}]});
         assert!(human(&inspection, 80, false).contains("! dnf: The package manager took too long"));
         assert_eq!(error_text(&json!({"Execution": "Disabled"})), "Disabled");
+    }
+    #[test]
+    fn sources_list_usable_ones_first_and_errors_name_their_source_once() {
+        let sources = json!({"sources": [
+            {"backend": "bun", "availability": {"Ok": {"unavailable": "Bun not found"}}, "capabilities": []},
+            {"backend": "apt", "availability": {"Ok": "available"}, "capabilities": ["search"]}
+        ]});
+        let output = human(&sources, 120, false);
+        assert!(
+            output.find("apt").unwrap() < output.find("bun").unwrap(),
+            "{output}"
+        );
+        let failure = json!({"backend": "flatpak", "error": {"InvalidResponse": {"backend": "flatpak", "reason": "bad"}}});
+        assert_eq!(failure_text(&failure), "flatpak: bad");
+        let failure = json!({"backend": "dnf", "error": {"Unavailable": {"backend": "dnf", "reason": "missing"}}});
+        assert_eq!(failure_text(&failure), "dnf isn't available: missing");
+        let repositories = json!({"repositories": [
+            {"title": "Flathub", "backend": "flatpak", "scope": {"user": {"uid": 1000}}, "enabled": true, "url": "https://dl.flathub.org/repo/"}
+        ]});
+        let output = human(&repositories, 120, false);
+        assert!(
+            output.contains("user") && !output.contains("uid"),
+            "{output}"
+        );
     }
     #[test]
     fn batch_summaries_count_what_happened() {
