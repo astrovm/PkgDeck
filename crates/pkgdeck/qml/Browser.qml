@@ -192,7 +192,11 @@ Controls.ApplicationWindow {
                 .map((row) => ({source: row.source, kind: row.failure_kind || "failed"}));
         return failures.filter((failure) => effectiveSources().indexOf(failure.source) >= 0);
     }
-    property string expandedFailure: ""
+    function sourceFailureTitle() {
+        return readFailures.length === 1
+            ? "Couldn't check " + sourceDisplayName(readFailures[0].source)
+            : "Couldn't check " + readFailures.length + " sources";
+    }
     function failureSummary(id) {
         const row = items.find((item) => item.kind === "failure" && item.source === id);
         const reportFailure = (reportState.failures || []).find((failure) => failure.source === id);
@@ -205,15 +209,6 @@ Controls.ApplicationWindow {
     function copyableDiagnostics() {
         return "View: " + currentView + "\nState: " + (reportState.phase || "unknown") + "\n" +
             readFailures.map((failure) => failure.source + ": " + failure.kind + " — " + failureSummary(failure.source)).join("\n");
-    }
-    function failureHelp(kind) {
-        if (kind === "authorization")
-            return "Retry and approve the system prompt.";
-        if (kind === "locked")
-            return "Wait for the package manager to finish, then retry.";
-        if (kind === "unsupported")
-            return "This source does not support this page.";
-        return "Retry this source. If it still fails, check that its package manager is working.";
     }
     function retryFailedSource(id) {
         if (currentView === "Search" && queryDirty)
@@ -238,7 +233,7 @@ Controls.ApplicationWindow {
         if (backend.busy || reportState.phase === "loading")
             return "";
         if (readFailures.length > 0)
-            return reportState.phase === "partial" ? "No results from the sources that completed." : "Could not check these sources.";
+            return sourceFailureTitle();
         if (reportState.phase === "unsupported")
             return "No enabled sources support this view.";
         if (currentView === "Search" && queryDirty)
@@ -911,7 +906,7 @@ Controls.ApplicationWindow {
     minimumWidth: 360
     minimumHeight: 400
     visible: !startHidden || !preferences.backgroundMode || !trayAvailable
-    title: "PkgDeck — " + currentView + (backend.busy ? " — Working" : "")
+    title: "PkgDeck"
     function argument(name, fallback) {
         const index = Qt.application.arguments.indexOf(name);
         return index >= 0 ? Qt.application.arguments[index + 1] : fallback;
@@ -1706,19 +1701,20 @@ Controls.ApplicationWindow {
                 }
             }
             RowLayout {
-                visible: root.readFailures.length > 0 && ["Search", "Installed", "Updates", "Clean", "Sources"].indexOf(root.currentView) >= 0
+                visible: root.readFailures.length > 0 && root.viewItems.length > 0 &&
+                    ["Search", "Installed", "Updates", "Clean", "Sources"].indexOf(root.currentView) >= 0
                 Layout.fillWidth: true
                 DeckIcon { name: "warning"; ink: root.accent; Layout.preferredWidth: 20; Layout.preferredHeight: 20 }
                 Controls.Label {
                     objectName: "sourceFailureNotice"
-                    text: root.readFailures.length + (root.readFailures.length === 1 ? " source needs attention" : " sources need attention")
+                    text: root.sourceFailureTitle() + (root.currentView === "Updates" ? ". Update all is unavailable." : "")
                     color: root.muted
                     wrapMode: Text.WordWrap
                     Layout.fillWidth: true
                 }
                 ActionButton {
                     objectName: "sourceFailureDetails"
-                    text: "Review"
+                    text: "Details"
                     symbol: "help"
                     onClicked: { root.rememberDialogFocus(); sourceFailuresDialog.open(); }
                 }
@@ -1744,8 +1740,8 @@ Controls.ApplicationWindow {
                     : Math.min(root.shortResultsHeight(), detailsPanel.visible ? root.height * (root.compact ? 0.24 : 0.42) : root.height * 0.7)
                 Layout.minimumHeight: root.compact && detailsPanel.visible ? 100 : 130
                 visible: root.currentView === root.resultView && root.currentView !== "Settings" && root.currentView !== "Activity" &&
-                    (root.viewItems.length > 0 || root.readFailures.length === 0 || backend.busy) &&
-                    (root.currentView !== "Search" || root.viewItems.length > 0 || (backend.busy && !root.openingInput) || searchPane.text.trim().length > 0)
+                    (root.currentView !== "Search" || root.viewItems.length > 0 || root.readFailures.length > 0 ||
+                        (backend.busy && !root.openingInput) || searchPane.text.trim().length > 0)
                 color: root.surface
                 radius: 10
                 border.color: results.activeFocus ? root.accent : root.line
@@ -2160,9 +2156,36 @@ Controls.ApplicationWindow {
                                 width: parent.width
                                 horizontalAlignment: Text.AlignHCenter
                                 wrapMode: Text.WordWrap
-                                color: root.muted
+                                color: root.readFailures.length > 0 ? root.ink : root.muted
                                 visible: text.length > 0
                                 text: root.emptyStateMessage()
+                            }
+                            Controls.Label {
+                                objectName: "sourceFailureEmptyHint"
+                                width: parent.width
+                                horizontalAlignment: Text.AlignHCenter
+                                wrapMode: Text.WordWrap
+                                color: root.muted
+                                visible: root.readFailures.length > 0 && !backend.busy
+                                text: root.currentView === "Updates" ? "Retry to check for updates." : "Retry to check again."
+                            }
+                            Row {
+                                anchors.horizontalCenter: parent.horizontalCenter
+                                spacing: 8
+                                visible: root.readFailures.length > 0 && !backend.busy
+                                ActionButton {
+                                    objectName: "sourceFailureRetry"
+                                    text: root.readFailures.length === 1 ? "Retry" : "Reload"
+                                    symbol: "refresh"
+                                    onClicked: root.readFailures.length === 1
+                                        ? root.retryFailedSource(root.readFailures[0].source) : root.reload(true)
+                                }
+                                ActionButton {
+                                    objectName: "sourceFailureEmptyDetails"
+                                    text: "Details"
+                                    symbol: "help"
+                                    onClicked: { root.rememberDialogFocus(); sourceFailuresDialog.open(); }
+                                }
                             }
                             ActionButton {
                                 objectName: "clearResultFilters"
@@ -2237,7 +2260,6 @@ Controls.ApplicationWindow {
                     upgradable: backend.upgradable
                     selectedCount: root.selectedCount()
                     uncheckedCount: root.uncheckedPackages.length
-                    failed: root.items.some((row) => row.kind === "failure")
                     textFont: root.font
                     surface: root.surface
                     ink: root.ink
@@ -2474,11 +2496,10 @@ Controls.ApplicationWindow {
         objectName: "sourceFailuresDialog"
         anchors.centerIn: parent
         width: Math.min(root.width - 32, 620)
-        height: Math.min(root.height - 32, 440, Math.max(190, 100 + Math.min(root.readFailures.length, 4) * 80 + (root.expandedFailure ? 45 : 0)))
+        height: Math.min(root.height - 32, 440, Math.max(230, 120 + Math.min(root.readFailures.length, 4) * 90))
         modal: true
         title: "Source checks"
         standardButtons: Controls.Dialog.Close
-        onOpened: root.expandedFailure = ""
         onClosed: root.restoreDialogFocus()
         contentItem: ColumnLayout {
             spacing: 10
@@ -2510,27 +2531,14 @@ Controls.ApplicationWindow {
                                     enabled: !backend.busy && modelData.kind !== "unsupported" && !(root.currentView === "Search" && root.queryDirty)
                                     onClicked: root.retryFailedSource(modelData.source)
                                 }
-                                ActionButton {
-                                    text: root.expandedFailure === modelData.source ? "Hide help" : "Help"
-                                    symbol: "help"
-                                    onClicked: root.expandedFailure = root.expandedFailure === modelData.source ? "" : modelData.source
-                                }
                             }
                             Controls.Label {
+                                objectName: "sourceFailureReason"
                                 width: parent.width
-                                text: modelData.kind === "unsupported" ? "This source does not support this view." :
-                                    modelData.kind === "authorization" ? "Authorization is required." :
-                                    modelData.kind === "locked" ? "The package manager is busy." :
-                                    modelData.kind === "cancelled" ? "The check was cancelled." : "The source could not be checked."
-                                color: root.muted
-                            }
-                            Controls.Label {
-                                width: parent.width
-                                text: root.failureHelp(modelData.kind)
+                                text: root.failureSummary(modelData.source)
                                 textFormat: Text.PlainText
                                 wrapMode: Text.WordWrap
                                 color: root.muted
-                                visible: root.expandedFailure === modelData.source
                             }
                         }
                     }
@@ -2661,6 +2669,19 @@ Controls.ApplicationWindow {
                 y: 16
                 width: Math.max(0, confirmationScroll.availableWidth - 40)
                 spacing: 12
+                RowLayout {
+                    visible: !!confirmation.preview.flatpak_ref_scope
+                    Layout.fillWidth: true
+                    Controls.Label { text: "Install for"; color: root.muted }
+                    ThemedComboBox {
+                        objectName: "flatpakRefScope"
+                        Layout.fillWidth: true
+                        model: ["User", "System"]
+                        currentIndex: confirmation.preview.flatpak_ref_scope === "system" ? 1 : 0
+                        Accessible.name: "Installation scope"
+                        onActivated: backend.setOpenFlatpakScope(currentIndex === 1)
+                    }
+                }
                 Rectangle {
                     Layout.fillWidth: true
                     implicitHeight: summaryContent.implicitHeight + 28

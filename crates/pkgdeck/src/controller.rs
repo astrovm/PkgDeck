@@ -128,6 +128,9 @@ pub mod ffi {
         #[cxx_name = "openInput"]
         fn open_input(self: Pin<&mut PackageController>, input: QString);
         #[qinvokable]
+        #[cxx_name = "setOpenFlatpakScope"]
+        fn set_open_flatpak_scope(self: Pin<&mut PackageController>, system: bool);
+        #[qinvokable]
         #[cxx_name = "loadRepositories"]
         fn load_repositories(self: Pin<&mut PackageController>);
         #[qinvokable]
@@ -1217,7 +1220,23 @@ fn confirmation_preview(
     if title.chars().count() > 36 {
         title = format!("{}…", title.chars().take(35).collect::<String>());
     }
-    json!({"action": title, "body": lines.join("\n\n"), "summary": summary.join("\n"), "details": lines.iter().skip(1).filter(|line| !summary.contains(line)).cloned().collect::<Vec<_>>().join("\n\n")})
+    let flatpak_ref_scope = match operation {
+        Operation::Install(id)
+            if id.backend == "flatpak"
+                && id
+                    .reference
+                    .as_deref()
+                    .is_some_and(|value| value.starts_with("flatpakref:")) =>
+        {
+            match &id.scope {
+                Scope::System => "system",
+                Scope::User { .. } => "user",
+                _ => "",
+            }
+        }
+        _ => "",
+    };
+    json!({"action": title, "body": lines.join("\n\n"), "summary": summary.join("\n"), "details": lines.iter().skip(1).filter(|line| !summary.contains(line)).cloned().collect::<Vec<_>>().join("\n\n"), "flatpak_ref_scope": flatpak_ref_scope})
 }
 fn package_row(p: &Package, same_from: &[String], same_group: Option<&str>) -> Value {
     json!({"name": p.id.name, "display_name": p.display_name, "source": p.id.backend, "architecture": p.id.architecture,
@@ -1260,6 +1279,47 @@ impl ffi::PackageController {
             return;
         }
         self.start(Job::OpenInput(input.to_string()));
+    }
+    pub fn set_open_flatpak_scope(mut self: Pin<&mut Self>, system: bool) {
+        let Some(Job::Write(Operation::Install(previous), None)) = &self.rust().pending else {
+            return;
+        };
+        if previous.backend != "flatpak"
+            || !previous
+                .reference
+                .as_deref()
+                .is_some_and(|value| value.starts_with("flatpakref:"))
+        {
+            return;
+        }
+        let previous = previous.clone();
+        let scope = if system {
+            Scope::System
+        } else {
+            Scope::User {
+                uid: rustix::process::getuid().as_raw(),
+            }
+        };
+        if previous.scope == scope {
+            return;
+        }
+        {
+            let mut rust = self.as_mut().rust_mut();
+            let Some(package) = rust
+                .packages
+                .iter_mut()
+                .find(|package| package.id == previous)
+            else {
+                return;
+            };
+            package.id.scope = scope.clone();
+        }
+        let mut selected = previous;
+        selected.scope = scope;
+        self.as_mut().apply(Ok(Payload::OperationPreview(
+            Operation::Install(selected),
+            None,
+        )));
     }
     pub fn set_autostart(mut self: Pin<&mut Self>, enabled: bool) -> bool {
         let result = self
@@ -3251,6 +3311,20 @@ mod tests {
             controller.rust().pending,
             Some(Job::Write(Operation::Install(_), _))
         ));
+        let data: Value =
+            serde_json::from_str(&controller.confirmation_data().to_string()).unwrap();
+        assert_eq!(data["flatpak_ref_scope"], "user");
+        controller.as_mut().set_open_flatpak_scope(true);
+        assert!(controller.confirmation().to_string().contains("System"));
+        assert!(matches!(
+            &controller.rust().pending,
+            Some(Job::Write(Operation::Install(id), _)) if id.scope == Scope::System
+        ));
+        let data: Value =
+            serde_json::from_str(&controller.confirmation_data().to_string()).unwrap();
+        assert_eq!(data["flatpak_ref_scope"], "system");
+        controller.as_mut().set_open_flatpak_scope(false);
+        assert!(controller.confirmation().to_string().contains("User"));
         controller.as_mut().confirm(false);
         assert!(source.exists());
 

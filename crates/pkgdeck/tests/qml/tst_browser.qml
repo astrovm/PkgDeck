@@ -50,6 +50,8 @@ TestCase {
         property string lastChecked: ""
         property string lastOpenedInput: ""
         function openInput(input) { lastOpenedInput = input; if (simulateOpening) busy = true; }
+        function setOpenFlatpakScope(system) { lastFlatpakScope = system ? "system" : "user"; }
+        property string lastFlatpakScope: ""
         function load(view, query, source, sudo, force) {
             loadCount++;
             lastView = view;
@@ -132,6 +134,7 @@ TestCase {
         fake.cancels = 0;
         fake.lastChecked = "";
         fake.lastOpenedInput = "";
+        fake.lastFlatpakScope = "";
         fake.lastForce = false;
         fake.loadCount = 0;
         browser = createTemporaryObject(window, test);
@@ -417,6 +420,8 @@ TestCase {
         fake.rows = JSON.stringify([{kind: "failure", name: "apt", source: "apt", summary: "Synthetic preview failure"}]);
         wait(20);
         compare(browser.viewItems.length, 0);
+        verify(findChild(browser, "resultsBox").visible);
+        verify(!findChild(browser, "sourceFailureNotice").visible);
         verify(!findChild(browser, "cleanAllButton").visible);
     }
     function test_appearance_and_search_does_not_relabel_old_results() {
@@ -792,6 +797,18 @@ TestCase {
             verify(labelAt.x + label.width <= button.contentItem.width + 1,
                 button.objectName + " label overflows its content area");
         };
+        const actionFits = (name) => {
+            const button = findChild(browser, name);
+            if (!button.visible)
+                return;
+            verify(button.width >= button.contentItem.implicitWidth + button.leftPadding + button.rightPadding - 1,
+                name + " is too narrow");
+            const label = button.contentItem.children.find((item) => item.text !== undefined);
+            const at = label.mapToItem(button, 0, 0);
+            verify(at.x >= button.leftPadding - 1, name + " has no left padding");
+            verify(at.x + label.width <= button.width - button.rightPadding + 1,
+                name + " clips its label");
+        };
         browser.width = 1100;
         waitForRendering(browser.contentItem);
         verify(filter.width >= Math.min(240, filter.implicitWidth) - 1);
@@ -804,18 +821,21 @@ TestCase {
             compare(action.width, 38);
             fits(action);
         }
+        actionFits("upgradeAllButton");
+        actionFits("selectNoneButton");
         browser.togglePackage(JSON.parse(fake.rows)[0]);
         const update = findChild(browser, "upgradeAllButton");
         compare(update.text, "Update selected (1)");
         for (const name of ["upgradeAllButton", "selectNoneButton", "selectAllButton"]) {
-            const button = findChild(browser, name);
-            verify(button.width >= button.contentItem.implicitWidth + button.leftPadding + button.rightPadding - 1,
-                name + " is too narrow");
+            actionFits(name);
         }
         browser.width = 360;
         browser.viewSourceFilters = ({Updates: ["claude"]});
         waitForRendering(browser.contentItem);
         fits(compactFilter);
+        actionFits("upgradeAllButton");
+        actionFits("selectNoneButton");
+        actionFits("selectAllButton");
     }
     function test_narrow_windows_use_layout_that_keeps_header_actions_inside() {
         browser.openView("Updates");
@@ -1846,16 +1866,26 @@ TestCase {
         fake.rows = JSON.stringify([{kind: "failure", name: "npm", source: "npm", summary: "Source failed"}]);
         wait(30);
         compare(browser.viewItems.length, 0);
-        verify(findChild(browser, "sourceFailureNotice").visible);
-        verify(!findChild(browser, "resultsBox").visible);
-        mouseClick(findChild(browser, "sourceFailureDetails"));
+        verify(!findChild(browser, "sourceFailureNotice").visible);
+        verify(findChild(browser, "resultsBox").visible);
+        compare(findChild(browser, "emptyState").text, "Couldn't check npm");
+        mouseClick(findChild(browser, "sourceFailureEmptyDetails"));
         const dialog = findChild(browser, "sourceFailuresDialog");
         tryCompare(dialog, "visible", true);
-        verify(browser.failureHelp("failed").indexOf("Retry this source") >= 0);
-        verify(browser.failureHelp("failed").indexOf("Source failed") < 0);
+        function findInDialog(item, name) {
+            if (!item) return null;
+            if (item.objectName === name) return item;
+            for (const child of item.children || []) {
+                const found = findInDialog(child, name);
+                if (found) return found;
+            }
+            return item.contentItem && item.contentItem !== item ? findInDialog(item.contentItem, name) : null;
+        }
+        compare(findInDialog(dialog.contentItem, "sourceFailureReason").text, "Source failed");
         verify(dialog.height < 320);
         compare(browser.copyableDiagnostics(), "View: Search\nState: unknown\nnpm: failed — Source failed");
-        browser.retryFailedSource("npm");
+        dialog.close();
+        mouseClick(findChild(browser, "sourceFailureRetry"));
         compare(fake.lastRetry, "npm");
     }
     function test_sidebar_shows_app_logo() {
@@ -1878,17 +1908,58 @@ TestCase {
         verify(!footer.visible);
         verify(findChild(browser, "compactSignature").visible);
     }
-    function test_upgrade_all_hint() {
+    function test_update_failure_has_one_explanation() {
         browser.openView("Updates");
         fake.rows = JSON.stringify([
             {kind: "package", name: "tool", source: "apt", architecture: "all", installed: "1", candidate: "2", update: "available", summary: "Updatable"},
             {kind: "failure", name: "npm", source: "npm", summary: "boom", available: false}
         ]);
         wait(30);
-        const hint = findChild(browser, "upgradeAllHint");
-        verify(hint.visible);
-        verify(hint.text.indexOf("source has failed") >= 0);
+        const notice = findChild(browser, "sourceFailureNotice");
+        verify(notice.visible);
+        compare(notice.text, "Couldn't check npm. Update all is unavailable.");
+        verify(findChild(browser, "upgradeAllHint") === null);
         verify(!findChild(browser, "upgradeAllButton").enabled);
+    }
+    function test_update_failure_without_rows_has_retry_card() {
+        browser.openView("Updates");
+        fake.rows = JSON.stringify([{kind: "failure", name: "flatpak", source: "flatpak", summary: "Synthetic source timeout"}]);
+        wait(30);
+        verify(findChild(browser, "resultsBox").visible);
+        verify(!findChild(browser, "sourceFailureNotice").visible);
+        compare(findChild(browser, "emptyState").text, "Couldn't check Flatpak");
+        compare(findChild(browser, "sourceFailureEmptyHint").text, "Retry to check for updates.");
+        browser.width = 380;
+        browser.height = 500;
+        wait(30);
+        const box = findChild(browser, "resultsBox");
+        const retry = findChild(browser, "sourceFailureRetry");
+        const details = findChild(browser, "sourceFailureEmptyDetails");
+        verify(retry.mapToItem(box, 0, 0).x >= 0);
+        verify(details.mapToItem(box, details.width, 0).x <= box.width);
+        mouseClick(findChild(browser, "sourceFailureRetry"));
+        compare(fake.lastRetry, "flatpak");
+    }
+    function test_window_title_stays_pkgdeck() {
+        browser.openView("Updates");
+        fake.busy = true;
+        compare(browser.title, "PkgDeck");
+        fake.busy = false;
+        browser.openView("Settings");
+        compare(browser.title, "PkgDeck");
+    }
+    function test_flatpak_reference_confirmation_can_choose_system_scope() {
+        fake.confirmation_data = JSON.stringify({action: "Install PkgDeck", summary: "Install PkgDeck\nflatpak User", flatpak_ref_scope: "user"});
+        fake.confirmation = "Install PkgDeck";
+        const dialog = findChild(browser, "confirmationDialog");
+        tryCompare(dialog, "visible", true);
+        const scope = findChild(browser, "flatpakRefScope");
+        verify(scope.visible);
+        compare(scope.currentIndex, 0);
+        scope.currentIndex = 1;
+        scope.activated(1);
+        compare(fake.lastFlatpakScope, "system");
+        dialog.reject();
     }
     function test_selection_survives_streaming_partials() {
         browser.openView("Search");
@@ -1937,11 +2008,11 @@ TestCase {
         fake.report_state = JSON.stringify({phase: "complete", failures: []});
         compare(browser.emptyStateMessage(), "You're up to date");
         fake.report_state = JSON.stringify({phase: "partial", failures: [{source: "npm", kind: "locked", detail: "Synthetic package lock"}]});
-        verify(browser.emptyStateMessage().indexOf("completed") >= 0);
+        compare(browser.emptyStateMessage(), "Couldn't check npm");
         verify(browser.emptyStateMessage() !== "You're up to date");
         compare(browser.copyableDiagnostics(), "View: Updates\nState: partial\nnpm: locked — Synthetic package lock");
         fake.report_state = JSON.stringify({phase: "failed", failures: [{source: "apt", kind: "authorization"}]});
-        compare(browser.emptyStateMessage(), "Could not check these sources.");
+        compare(browser.emptyStateMessage(), "Couldn't check APT");
         fake.report_state = JSON.stringify({phase: "cached", failures: []});
         compare(browser.emptyStateMessage(), "No updates in the last check.");
         fake.report_state = JSON.stringify({phase: "complete", failures: []});

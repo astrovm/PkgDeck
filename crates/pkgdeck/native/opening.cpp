@@ -17,10 +17,13 @@ void deliver_pending(QQmlApplicationEngine &engine, QStringList &pending) {
     if (engine.rootObjects().isEmpty()) return;
     auto *root = engine.rootObjects().first();
     for (const auto &input : pending) {
-        QMetaObject::invokeMethod(root, "openExternalInput", Q_ARG(QVariant, QVariant(input)));
+        if (!input.isEmpty())
+            QMetaObject::invokeMethod(root, "openExternalInput", Q_ARG(QVariant, QVariant(input)));
     }
     if (!pending.isEmpty()) {
         if (auto *window = qobject_cast<QWindow *>(root)) {
+            if (window->windowState() == Qt::WindowMinimized) window->showNormal();
+            else window->show();
             window->raise();
             window->requestActivate();
         }
@@ -33,7 +36,7 @@ bool register_open_handler(QQmlApplicationEngine &engine, const QString &input) 
     const auto runtime = QStandardPaths::writableLocation(QStandardPaths::RuntimeLocation);
     if (runtime.isEmpty()) return false;
     const auto name = runtime + "/pkgdeck-open-" + QString::number(geteuid());
-    if (!input.isEmpty()) {
+    const auto forward = [&] {
         QLocalSocket existing;
         existing.connectToServer(name, QIODevice::WriteOnly);
         if (existing.waitForConnected(200)) {
@@ -45,10 +48,16 @@ bool register_open_handler(QQmlApplicationEngine &engine, const QString &input) 
             existing.disconnectFromServer();
             return true;
         }
-    }
+        return false;
+    };
+    if (forward()) return true;
     auto *server = new QLocalServer(&engine);
     server->setSocketOptions(QLocalServer::UserAccessOption);
     if (!server->listen(name)) {
+        if (forward()) {
+            delete server;
+            return true;
+        }
         QLocalSocket probe;
         probe.connectToServer(name, QIODevice::WriteOnly);
         if (!probe.waitForConnected(200)
