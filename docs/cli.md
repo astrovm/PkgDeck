@@ -20,7 +20,7 @@ pkd info neovim --from homebrew          # show package details
 pkd list --json                          # list installed packages as JSON
 pkd install neovim --from apt --yes      # install
 pkd remove neovim --from apt --yes       # remove
-pkd update --from apt --yes              # refresh package lists (installs nothing)
+pkd update                               # refresh package lists (installs nothing)
 pkd upgrade neovim --from apt --yes      # update one package
 pkd upgrade                              # update everything
 pkd clean                                # list cleanup tasks
@@ -81,13 +81,20 @@ package lists. It never installs updates.
 ## Confirmation and passwords
 
 In a terminal, PkgDeck shows what it will change and asks before doing it.
-In scripts, or with `--json`, you must pass `--yes`. Otherwise the command stops
-with exit code 2 before doing anything.
+While it works, a spinner shows the current step, and each change gets a
+✓ or ✗ line as it finishes. In scripts, or with `--json`, you must pass `--yes`
+to install, remove, upgrade, or clean. Otherwise the command stops with exit
+code 2 before doing anything.
+
+`pkd update` only refreshes package lists, so it never asks. It skips package
+managers that don't keep package lists, such as npm or Cargo.
 
 Approving a change doesn't give PkgDeck admin rights, and PkgDeck never reads
 your password:
 
-- `--auth sudo` (default) only works if `sudo` already has a cached login or a
+- `--auth sudo` (default): if a change needs admin rights and `sudo` has no
+  cached login, `sudo` asks for your password in the terminal before the
+  changes start. In scripts, it only works with a cached login or a
   password-free rule.
 - `--auth polkit` uses your desktop's password prompt.
 

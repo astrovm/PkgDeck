@@ -1,5 +1,8 @@
 //! Human-readable command-line presentation.
-use pkgdeck_core::package::{Operation, Scope};
+use pkgdeck_core::{
+    engine::EngineError,
+    package::{Operation, PackageId, Scope},
+};
 use serde_json::Value;
 use unicode_width::UnicodeWidthStr;
 
@@ -8,45 +11,270 @@ pub fn clean(text: &str) -> String {
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect()
 }
-/// ASCII markers remain legible with stock terminal fonts, including NO_COLOR.
+/// One-cell markers that read well with or without color.
 pub fn package_marker(installed: bool, update: bool) -> &'static str {
     if update {
-        "[^]"
+        "↑"
     } else if installed {
-        "[x]"
+        "●"
     } else {
-        "[ ]"
+        "○"
     }
 }
-pub fn scope(scope: &Scope) -> String {
-    match scope {
-        Scope::System => "System".into(),
-        Scope::User { uid } => format!("User {uid}"),
-        Scope::Environment { path } => path.display().to_string(),
+fn target(id: &PackageId) -> String {
+    clean(id.reference.as_deref().unwrap_or(&id.name))
+}
+/// Short imperative title for a planned change, such as "Install neovim".
+pub fn operation_title(op: &Operation) -> String {
+    match op {
+        Operation::Refresh { backend } => format!("Refresh {}", clean(backend)),
+        Operation::UpgradeAll { backend } => format!("Update all {} packages", clean(backend)),
+        Operation::Clean(id) => format!("Clean up {}", clean(&id.key)),
+        Operation::Install(id) => format!("Install {}", target(id)),
+        Operation::Remove(id) => format!("Remove {}", target(id)),
+        Operation::Upgrade(id) => format!("Update {}", target(id)),
     }
 }
+/// What PkgDeck is doing right now, for the spinner.
+pub fn operation_progress(op: &Operation) -> String {
+    match op {
+        Operation::Refresh { backend } => format!("Refreshing {}", clean(backend)),
+        Operation::UpgradeAll { backend } => format!("Updating all {} packages", clean(backend)),
+        Operation::Clean(id) => format!("Cleaning up {}", clean(&id.key)),
+        Operation::Install(id) => format!("Installing {}", target(id)),
+        Operation::Remove(id) => format!("Removing {}", target(id)),
+        Operation::Upgrade(id) => format!("Updating {}", target(id)),
+    }
+}
+/// Where a change happens: the source, plus architecture and scope when they matter.
+pub fn operation_context(op: &Operation) -> String {
+    match op {
+        Operation::Refresh { .. } | Operation::UpgradeAll { .. } => String::new(),
+        Operation::Clean(id) => clean(&id.backend),
+        Operation::Install(id) | Operation::Remove(id) | Operation::Upgrade(id) => {
+            let mut parts = vec![clean(&id.backend)];
+            // Architecture only tells native packages apart (amd64 vs i386).
+            if matches!(id.backend.as_str(), "apt" | "dnf" | "pacman" | "zypper")
+                && !matches!(id.architecture.as_str(), "" | "all" | "any" | "noarch")
+            {
+                parts.push(clean(&id.architecture));
+            }
+            match id.scope {
+                Scope::User { .. } => parts.push("user".into()),
+                Scope::System if id.backend == "flatpak" => parts.push("system".into()),
+                _ => {}
+            }
+            parts.join(" · ")
+        }
+    }
+}
+fn operation_icon(paint: Paint, op: &Operation) -> String {
+    match op {
+        Operation::Install(_) => paint.green("+"),
+        Operation::Remove(_) => paint.red("-"),
+        Operation::Upgrade(_) | Operation::UpgradeAll { .. } => paint.cyan("↑"),
+        Operation::Refresh { .. } => paint.cyan("↻"),
+        Operation::Clean(_) => paint.yellow("~"),
+    }
+}
+/// Title plus context on one line, without color.
+#[cfg(test)]
 pub fn operation(op: &Operation) -> String {
-    let (verb, id) = match op {
-        Operation::Refresh { backend } => {
-            return format!("Refresh metadata from {}", clean(backend))
+    operation_line(Paint(false), op)
+}
+fn operation_line(paint: Paint, op: &Operation) -> String {
+    let context = operation_context(op);
+    if context.is_empty() {
+        operation_title(op)
+    } else {
+        format!("{}  {}", operation_title(op), paint.dim(&context))
+    }
+}
+/// The review shown before asking to apply changes. `notes` are extra
+/// details for one change, such as an APT transaction preview.
+pub fn plan(operations: &[Operation], notes: &[(Operation, String)], color: bool) -> String {
+    let paint = Paint(color);
+    let count = operations.len();
+    let mut output = paint.bold(&format!(
+        "{count} change{}",
+        if count == 1 { "" } else { "s" }
+    ));
+    for op in operations {
+        output.push_str(&format!(
+            "\n  {} {}",
+            operation_icon(paint, op),
+            operation_line(paint, op)
+        ));
+        for (_, note) in notes.iter().filter(|(noted, _)| noted == op) {
+            for line in note.lines().filter(|line| !line.trim().is_empty()) {
+                output.push_str(&format!("\n      {}", paint.dim(&clean(line.trim()))));
+            }
         }
-        Operation::UpgradeAll { backend } => {
-            return format!("Upgrade all packages from {}", clean(backend))
+    }
+    output
+}
+fn capability_verb(capability: &str) -> String {
+    match capability {
+        "search" => "search".into(),
+        "details" => "show package details".into(),
+        "installed" => "list installed packages".into(),
+        "install" => "install packages".into(),
+        "remove" => "remove packages".into(),
+        "refresh" => "refresh package lists".into(),
+        "upgrade" => "update packages".into(),
+        "clean" => "clean up".into(),
+        other => clean(other),
+    }
+}
+/// A plain-language error, with what to do next when there is something to do.
+pub fn error_message(error: &EngineError) -> String {
+    serde_json::to_value(error).map_or_else(|_| clean(&error.to_string()), |v| error_text(&v))
+}
+/// The same wording for an error already serialized in a report.
+pub fn error_text(error: &Value) -> String {
+    let field = |v: &Value, key: &str| clean(v[key].as_str().unwrap_or_default());
+    match error {
+        Value::String(kind) => match kind.as_str() {
+            "Cancelled" => "Cancelled.".into(),
+            "NotFound" => "No package has that exact name. Use `pkd search` to find it.".into(),
+            other => clean(other),
+        },
+        Value::Object(fields) if fields.len() == 1 => {
+            let (kind, inner) = fields.iter().next().expect("one field");
+            match kind.as_str() {
+                "Execution" => execution_text(inner),
+                "Unsupported" => format!(
+                    "{} can't {}.",
+                    field(inner, "backend"),
+                    capability_verb(inner["capability"].as_str().unwrap_or_default())
+                ),
+                "Unavailable" => format!(
+                    "{} isn't available: {}",
+                    field(inner, "backend"),
+                    field(inner, "reason")
+                ),
+                "InvalidResponse" => {
+                    format!("{}: {}", field(inner, "backend"), field(inner, "reason"))
+                }
+                "Incomplete" => {
+                    let failed: Vec<_> = inner
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(|failure| {
+                            format!(
+                                "{}: {}",
+                                field(failure, "backend"),
+                                error_text(&failure["error"])
+                            )
+                        })
+                        .collect();
+                    format!("Some sources didn't answer. {}", failed.join(" "))
+                }
+                "Ambiguous" => format!(
+                    "{} packages have this name. Pick one with --from, --arch, or --scope.",
+                    inner.as_array().map_or(0, Vec::len)
+                ),
+                _ => value(error),
+            }
         }
-        Operation::Clean(id) => {
-            return format!("Clean {} with {}", clean(&id.key), clean(&id.backend))
+        other => value(other),
+    }
+}
+fn execution_text(error: &Value) -> String {
+    match error.as_str() {
+        Some("AuthorizationDenied") => "Administrator access was denied. Run it again and enter your password, or add --auth polkit.".into(),
+        Some("AuthorizationCancelled") => "Administrator access was cancelled. Nothing was changed.".into(),
+        Some("LockBusy") => "Another package manager is running. Wait for it to finish, then try again.".into(),
+        Some("Interrupted") => "The package manager was interrupted. Check its state before trying again.".into(),
+        Some("TimedOut") => "The package manager took too long to answer.".into(),
+        Some("Cancelled") => "Cancelled.".into(),
+        Some(other) => clean(other),
+        None => {
+            if let Some(text) = ["Invalid", "Io", "Disabled"]
+                .iter()
+                .find_map(|kind| error.get(*kind).and_then(Value::as_str))
+            {
+                clean(text)
+            } else if let Some(result) = error.get("Failed") {
+                let stderr = result["stderr"].as_str().unwrap_or_default();
+                let tail: Vec<_> = stderr
+                    .lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty())
+                    .collect();
+                let tail = tail[tail.len().saturating_sub(3)..].join(" ");
+                let code = result["code"]
+                    .as_i64()
+                    .map_or_else(|| "was stopped".into(), |code| format!("exited with code {code}"));
+                if tail.is_empty() {
+                    format!("The package manager {code}.")
+                } else {
+                    format!("The package manager {code}: {}", clean(&tail))
+                }
+            } else {
+                value(error)
+            }
         }
-        Operation::Install(id) => ("Install", id),
-        Operation::Remove(id) => ("Remove", id),
-        Operation::Upgrade(id) => ("Upgrade", id),
+    }
+}
+fn failure_text(failure: &Value) -> String {
+    match failure["backend"].as_str() {
+        Some(backend) => format!("{}: {}", clean(backend), error_text(&failure["error"])),
+        None => value(failure),
+    }
+}
+/// One finished change: a check or a cross, then the reason on its own line.
+pub fn result_line(op: &Operation, error: Option<&str>, deferred: bool, color: bool) -> String {
+    let paint = Paint(color);
+    let mut line = match error {
+        None => format!("{} {}", paint.green("✓"), operation_line(paint, op)),
+        Some(_) => format!("{} {}", paint.red("✗"), operation_line(paint, op)),
     };
-    format!(
-        "{verb} {}\n  Source: {} · Architecture: {} · Scope: {}",
-        clean(id.reference.as_deref().unwrap_or(&id.name)),
-        clean(&id.backend),
-        clean(&id.architecture),
-        clean(&scope(&id.scope))
-    )
+    if deferred {
+        line.push_str(&paint.dim("  finished after you cancelled; changes were kept"));
+    }
+    if let Some(error) = error {
+        line.push_str(&format!("\n  {}", paint.red(&clean(error))));
+    }
+    line
+}
+/// Closing line for a batch of changes.
+pub fn operations_summary(data: &Value, color: bool) -> String {
+    let paint = Paint(color);
+    let operations = data["operations"].as_array().map_or(&[][..], Vec::as_slice);
+    let total = operations.len();
+    let failed = operations
+        .iter()
+        .filter(|item| item["result"].get("Err").is_some())
+        .count();
+    if total == 0 {
+        paint.green("Nothing to do. Everything is up to date.")
+    } else if failed == 0
+        && operations
+            .iter()
+            .all(|item| item["operation"].get("refresh").is_some())
+    {
+        paint.green("Package lists are up to date.")
+    } else if failed == 0 {
+        paint.green(&format!(
+            "Done. {total} change{} applied.",
+            if total == 1 { "" } else { "s" }
+        ))
+    } else if failed == total {
+        paint.red(&format!(
+            "{} failed.",
+            if total == 1 {
+                "The change".into()
+            } else {
+                format!("All {total} changes")
+            }
+        ))
+    } else {
+        paint.yellow(&format!(
+            "{failed} of {total} changes failed. The rest were applied."
+        ))
+    }
 }
 fn value(value: &Value) -> String {
     match value {
@@ -83,7 +311,7 @@ fn cell(text: &str, width: usize) -> String {
 }
 /// ANSI styling that disappears entirely when color is off.
 #[derive(Clone, Copy)]
-struct Paint(bool);
+pub struct Paint(pub bool);
 impl Paint {
     fn wrap(self, code: &str, text: &str) -> String {
         if self.0 && !text.is_empty() {
@@ -92,10 +320,10 @@ impl Paint {
             text.into()
         }
     }
-    fn bold(self, text: &str) -> String {
+    pub fn bold(self, text: &str) -> String {
         self.wrap("1", text)
     }
-    fn dim(self, text: &str) -> String {
+    pub fn dim(self, text: &str) -> String {
         self.wrap("2", text)
     }
     fn green(self, text: &str) -> String {
@@ -191,8 +419,8 @@ fn table(headers: &[&str], rows: &[Vec<(String, Style)>], width: usize, paint: P
     }
     result
 }
-fn failure_line(paint: Paint, label: &str, detail: &str) -> String {
-    format!("\n{} {detail}", paint.yellow(&format!("[!] {label}")))
+fn failure_line(paint: Paint, detail: &str) -> String {
+    format!("\n{} {detail}", paint.yellow("!"))
 }
 fn scope_label(scope: &Value) -> Option<&'static str> {
     match scope {
@@ -232,16 +460,23 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
                 paint.dim("Run one with `pkd clean <key>`, or all with `pkd clean --all`. Add --json to see each preview.")
             ));
         }
-        if let Some(failures) = data["failures"].as_array() {
-            for failure in failures {
-                let unsupported = failure["error"].get("Unsupported").is_some()
-                    || failure["error"].get("unsupported").is_some();
-                output.push_str(&if unsupported {
-                    format!("\n{} {}", paint.dim("[-] Unsupported:"), value(failure))
-                } else {
-                    failure_line(paint, "Failed:", &value(failure))
-                });
-            }
+        let failures = data["failures"].as_array().map_or(&[][..], Vec::as_slice);
+        let (unsupported, failed): (Vec<_>, Vec<_>) = failures.iter().partition(|failure| {
+            failure["error"].get("Unsupported").is_some()
+                || failure["error"].get("unsupported").is_some()
+        });
+        for failure in failed {
+            output.push_str(&failure_line(paint, &failure_text(failure)));
+        }
+        if !unsupported.is_empty() {
+            let names: Vec<_> = unsupported
+                .iter()
+                .map(|failure| value(&failure["backend"]))
+                .collect();
+            output.push_str(&format!(
+                "\n\n{}",
+                paint.dim(&format!("No cleanup tasks in: {}", names.join(", ")))
+            ));
         }
     } else if let Some(packages) = data["packages"].as_array() {
         let rows = packages
@@ -324,12 +559,12 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
                     if count == 1 { "" } else { "s" }
                 )),
                 paint.dim("· run `pkd info <name>` for details"),
-                paint.dim("[ ] Not installed   [x] Installed   [^] Update available")
+                paint.dim("○ not installed   ● installed   ↑ update available")
             ));
         }
         if let Some(failures) = data["failures"].as_array() {
             for failure in failures {
-                output.push_str(&failure_line(paint, "Source failed:", &value(failure)));
+                output.push_str(&failure_line(paint, &failure_text(failure)));
             }
         }
     } else if let Some(export) = data.get("manifest_export") {
@@ -492,11 +727,7 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
                 let enabled = r["enabled"] == true;
                 vec![
                     (
-                        format!(
-                            "{} {}",
-                            if enabled { "[x]" } else { "[ ]" },
-                            value(&r["title"])
-                        ),
+                        format!("{} {}", if enabled { "●" } else { "○" }, value(&r["title"])),
                         if enabled {
                             plain as Style
                         } else {
@@ -517,7 +748,7 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
         ));
         if let Some(errors) = data["errors"].as_array() {
             for error in errors {
-                output.push_str(&failure_line(paint, "", &value(error)));
+                output.push_str(&failure_line(paint, &value(error)));
             }
         }
     } else if let Some(sources) = data["sources"].as_array() {
@@ -558,33 +789,28 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
             paint,
         ));
     } else if let Some(operations) = data["operations"].as_array() {
-        if operations.is_empty() {
-            output.push_str("Nothing to do. No package changes are needed.");
-        }
         for item in operations {
             let op: Operation =
                 serde_json::from_value(item["operation"].clone()).expect("typed operation");
-            output.push_str(&operation(&op));
-            if let Some(error) = item["result"].get("Err") {
-                output.push_str(&format!(
-                    "\n  {} {}\n",
-                    paint.red("[!] Failed:"),
-                    value(error)
-                ));
-            } else {
-                output.push_str(&format!("\n  {}", paint.green("[OK] Completed")));
-                if item["result"]["Ok"]["cancellation_deferred"] == true {
-                    output.push_str(" after cancellation was requested; changes were kept");
-                }
-                output.push('\n');
-            }
+            let error = item["result"].get("Err").map(|error| {
+                item["message"]
+                    .as_str()
+                    .map_or_else(|| error_text(error), str::to_string)
+            });
+            let deferred = item["result"]["Ok"]["cancellation_deferred"] == true;
+            output.push_str(&result_line(&op, error.as_deref(), deferred, color));
+            output.push('\n');
         }
+        if !operations.is_empty() {
+            output.push('\n');
+        }
+        output.push_str(&operations_summary(data, color));
     } else if data["error"] == "confirmation_declined" {
         output.push_str(&paint.dim(&value(&data["message"])));
     } else {
         output.push_str(&format!(
             "{} {}",
-            paint.red("[!] Error:"),
+            paint.red("✗"),
             value(data.get("message").unwrap_or(&data["error"]))
         ));
         if let Some(matches) = data["error"]["Ambiguous"].as_array() {
@@ -602,7 +828,7 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
     if data.get("inspection").is_some() || data.get("audit").is_some() {
         if let Some(failures) = data["failures"].as_array() {
             for failure in failures {
-                output.push_str(&failure_line(paint, "Source failed:", &value(failure)));
+                output.push_str(&failure_line(paint, &failure_text(failure)));
             }
         }
     }
@@ -644,8 +870,8 @@ mod tests {
             120,
             false,
         );
-        assert!(output.contains("[x] Synthetic"));
-        assert!(output.contains("[ ] Disabled"));
+        assert!(output.contains("● Synthetic"));
+        assert!(output.contains("○ Disabled"));
         assert!(output.contains("system"));
         assert!(output.contains("Synthetic failure"));
         let output = human(
@@ -674,16 +900,16 @@ mod tests {
     }
     #[test]
     fn package_states_have_portable_markers() {
-        assert_eq!(package_marker(false, false), "[ ]");
-        assert_eq!(package_marker(true, false), "[x]");
-        assert_eq!(package_marker(true, true), "[^]");
+        assert_eq!(package_marker(false, false), "○");
+        assert_eq!(package_marker(true, false), "●");
+        assert_eq!(package_marker(true, true), "↑");
         let output = human(
             &json!({"packages":[{"id":{"name":"fixture","backend":"apt"},"installed_version":"1","update":"available"}]}),
             100,
             false,
         );
-        assert!(output.contains("[^] fixture"));
-        assert!(output.contains("[^] Update available"));
+        assert!(output.contains("↑ fixture"));
+        assert!(output.contains("↑ update available"));
         assert!(!output.contains('\u{1b}'));
     }
     #[test]
@@ -698,7 +924,7 @@ mod tests {
             false,
         );
         assert!(incomplete.contains("No packages returned from checked sources."));
-        assert!(incomplete.contains("Source failed"));
+        assert!(incomplete.contains("! apt: synthetic failure"));
         let ambiguous = human(
             &json!({"error":{"Ambiguous":[
                 {"backend":"apt","name":"fixture","architecture":"amd64","scope":"system"},
@@ -736,13 +962,13 @@ mod tests {
                 backend: "apt".into(),
                 key: "autoremove".into(),
             })),
-            "Clean autoremove with apt"
+            "Clean up autoremove  apt"
         );
         assert_eq!(
             operation(&Operation::UpgradeAll {
                 backend: "homebrew".into(),
             }),
-            "Upgrade all packages from homebrew"
+            "Update all homebrew packages"
         );
         let plans = json!({
             "items": [{
@@ -759,8 +985,8 @@ mod tests {
         assert!(output.contains("apt:autoremove"));
         assert!(output.contains("Unused dependencies"));
         assert!(output.contains("pkd clean --all"));
-        assert!(output.contains("Unsupported:"));
-        assert!(output.contains("Failed:"));
+        assert!(output.contains("No cleanup tasks in: snap"));
+        assert!(output.contains("homebrew: synthetic failure"));
 
         let empty = human(&json!({"items": [], "failures": []}), 80, false);
         assert!(empty.contains("Nothing to clean"));
@@ -778,6 +1004,194 @@ mod tests {
         assert!(output.contains("1.2.3"));
         assert!(output.contains("4.5.6"));
         assert!(!output.contains("9.9.9"));
+    }
+    #[test]
+    fn every_change_kind_has_a_title_progress_and_context() {
+        let id = |backend: &str, arch: &str, scope: Scope| PackageId {
+            backend: backend.into(),
+            name: "tool".into(),
+            architecture: arch.into(),
+            scope,
+            remote: None,
+            reference: None,
+        };
+        let cases = [
+            (
+                Operation::Install(id("apt", "i386", Scope::System)),
+                "Install tool",
+                "Installing tool",
+                "apt · i386",
+            ),
+            (
+                Operation::Remove(id("flatpak", "x86_64", Scope::System)),
+                "Remove tool",
+                "Removing tool",
+                "flatpak · system",
+            ),
+            (
+                Operation::Upgrade(id("npm", "all", Scope::User { uid: 1 })),
+                "Update tool",
+                "Updating tool",
+                "npm · user",
+            ),
+            (
+                Operation::Refresh {
+                    backend: "apt".into(),
+                },
+                "Refresh apt",
+                "Refreshing apt",
+                "",
+            ),
+            (
+                Operation::UpgradeAll {
+                    backend: "snap".into(),
+                },
+                "Update all snap packages",
+                "Updating all snap packages",
+                "",
+            ),
+            (
+                Operation::Clean(pkgdeck_core::package::CleanupId {
+                    backend: "apt".into(),
+                    key: "autoclean".into(),
+                }),
+                "Clean up autoclean",
+                "Cleaning up autoclean",
+                "apt",
+            ),
+        ];
+        let operations: Vec<_> = cases.iter().map(|case| case.0.clone()).collect();
+        for (operation, title, progress, context) in &cases {
+            assert_eq!(operation_title(operation), *title);
+            assert_eq!(operation_progress(operation), *progress);
+            assert_eq!(operation_context(operation), *context);
+        }
+        let notes = [(operations[4].clone(), "Update (1): snapd\n".to_string())];
+        for color in [false, true] {
+            let review = plan(&operations, &notes, color);
+            assert!(review.contains("6 changes"), "{review}");
+            assert!(review.contains("Update (1): snapd"), "{review}");
+            assert!(plan(&operations[..1], &[], color).contains("1 change"));
+            let done = result_line(&operations[0], None, false, color);
+            assert!(done.contains("Install tool"));
+            let failed = result_line(&operations[1], Some("busy"), true, color);
+            assert!(failed.contains("busy") && failed.contains("after you cancelled"));
+        }
+    }
+    #[test]
+    fn errors_read_as_plain_language_with_next_steps() {
+        let failed = |code: Option<i64>, stderr: &str| json!({"Execution": {"Failed": {"code": code, "stderr": stderr}}});
+        for (error, expected) in [
+            (json!("Cancelled"), "Cancelled."),
+            (json!("NotFound"), "Use `pkd search`"),
+            (json!("Other"), "Other"),
+            (
+                json!({"Execution": "AuthorizationCancelled"}),
+                "was cancelled",
+            ),
+            (
+                json!({"Execution": "LockBusy"}),
+                "Another package manager is running",
+            ),
+            (json!({"Execution": "Interrupted"}), "was interrupted"),
+            (json!({"Execution": "TimedOut"}), "took too long"),
+            (json!({"Execution": "Cancelled"}), "Cancelled."),
+            (json!({"Execution": {"Invalid": "bad input"}}), "bad input"),
+            (json!({"Execution": {"Io": "broken pipe"}}), "broken pipe"),
+            (
+                failed(Some(100), "E: one\n\nE: two\n"),
+                "exited with code 100: E: one E: two",
+            ),
+            (failed(None, ""), "The package manager was stopped."),
+            (json!({"Execution": {"Unknown": 1}}), "Unknown"),
+            (
+                json!({"Unavailable": {"backend": "dnf", "reason": "not found"}}),
+                "dnf isn't available: not found",
+            ),
+            (
+                json!({"InvalidResponse": {"backend": "apt", "reason": "odd"}}),
+                "apt: odd",
+            ),
+            (
+                json!({"Incomplete": [{"backend": "apt", "error": {"Execution": "TimedOut"}}]}),
+                "Some sources didn't answer. apt: The package manager took too long",
+            ),
+            (json!({"Ambiguous": [{}, {}]}), "2 packages have this name"),
+            (json!({"UnknownBackend": "x"}), "UnknownBackend: x"),
+            (json!(7), "7"),
+        ] {
+            let text = error_text(&error);
+            assert!(text.contains(expected), "{error} -> {text}");
+        }
+        for (capability, verb) in [
+            ("search", "search"),
+            ("details", "show package details"),
+            ("installed", "list installed packages"),
+            ("install", "install packages"),
+            ("remove", "remove packages"),
+            ("upgrade", "update packages"),
+            ("clean", "clean up"),
+            ("other", "other"),
+        ] {
+            assert_eq!(capability_verb(capability), verb);
+        }
+        assert_eq!(error_message(&EngineError::Cancelled), "Cancelled.");
+        assert_eq!(failure_text(&json!("plain")), "plain");
+    }
+    #[test]
+    fn scopes_updates_unavailable_sources_and_source_errors_render() {
+        let packages = json!({"packages": [
+            {"id": {"name": "org.example.App", "backend": "flatpak", "scope": {"user": {"uid": 1}}},
+             "installed_version": "1", "candidate_version": "2", "update": "available"},
+            {"id": {"name": "org.example.App", "backend": "flatpak", "scope": "system"},
+             "installed_version": "1"}
+        ]});
+        let output = human(&packages, 120, true);
+        assert!(output.contains("flatpak (user)") && output.contains("flatpak (system)"));
+        assert!(output.contains("1 → 2"));
+        let sources = json!({"sources": [
+            {"backend": "apt", "availability": {"Ok": "available"}, "capabilities": ["search"]},
+            {"backend": "dnf", "availability": {"Ok": {"unavailable": "not installed"}}, "capabilities": []}
+        ]});
+        let output = human(&sources, 120, true);
+        assert!(output.contains("not installed"), "{output}");
+        let repositories = json!({"repositories": [], "errors": ["Synthetic error"]});
+        assert!(human(&repositories, 120, false).contains("! Synthetic error"));
+        let details =
+            json!({"package": {"id": {"name": "tool", "backend": "apt"}, "update": "available"}});
+        assert!(human(&details, 80, true).contains("available"));
+        let inspection = json!({"inspection": {"command": "tool", "candidates": []},
+            "failures": [{"backend": "dnf", "error": {"Execution": "TimedOut"}}]});
+        assert!(human(&inspection, 80, false).contains("! dnf: The package manager took too long"));
+        assert_eq!(error_text(&json!({"Execution": "Disabled"})), "Disabled");
+    }
+    #[test]
+    fn batch_summaries_count_what_happened() {
+        let op =
+            |result: Value| json!({"operation": {"refresh": {"backend": "apt"}}, "result": result});
+        let install = |result: Value| json!({"operation": {"install": {"name": "tool", "backend": "apt", "architecture": "all", "scope": "system"}}, "result": result});
+        for (operations, expected) in [
+            (vec![], "Nothing to do"),
+            (vec![op(json!({"Ok": {}}))], "Package lists are up to date."),
+            (
+                vec![install(json!({"Ok": {}})), install(json!({"Ok": {}}))],
+                "Done. 2 changes applied.",
+            ),
+            (vec![install(json!({"Err": "x"}))], "The change failed."),
+            (
+                vec![install(json!({"Err": "x"})), install(json!({"Err": "y"}))],
+                "All 2 changes failed.",
+            ),
+            (
+                vec![install(json!({"Ok": {}})), install(json!({"Err": "y"}))],
+                "1 of 2 changes failed",
+            ),
+        ] {
+            for color in [false, true] {
+                let summary = operations_summary(&json!({"operations": operations}), color);
+                assert!(summary.contains(expected), "{summary}");
+            }
+        }
     }
     #[test]
     fn details_failures_and_operations_are_readable() {
@@ -806,30 +1220,35 @@ mod tests {
             80,
             false
         )
-        .contains("Source failed:"));
+        .contains("fixture: offline"));
         let ops = json!({"operations":[{"operation":{"install":id},"result":{"Ok":{"cancellation_deferred":true}}},{"operation":{"remove":id},"result":{"Err":"denied"}},{"operation":{"upgrade":id},"result":{"Ok":{}}},{"operation":{"refresh":{"backend":"fixture"}},"result":{"Ok":{}}}]});
         let output = human(&ops, 80, false);
         for expected in [
-            "Install synthetic",
-            "Remove synthetic",
-            "Upgrade synthetic",
-            "Refresh metadata",
-            "Failed: denied",
-            "after cancellation",
-            "Scope: System",
+            "✓ Install synthetic  fixture",
+            "✗ Remove synthetic",
+            "  denied",
+            "✓ Update synthetic",
+            "✓ Refresh fixture",
+            "after you cancelled",
+            "1 of 4 changes failed",
         ] {
-            assert!(output.contains(expected));
+            assert!(output.contains(expected), "{output}");
         }
+        let denied = json!({"operations":[{"operation":{"upgrade_all":{"backend":"apt"}},"result":{"Err":{"Execution":"AuthorizationDenied"}}}]});
+        let output = human(&denied, 80, false);
+        assert!(output.contains("✗ Update all apt packages"), "{output}");
+        assert!(
+            output.contains("Administrator access was denied"),
+            "{output}"
+        );
+        assert!(output.contains("The change failed."), "{output}");
+        assert_eq!(
+            error_text(&json!({"Unsupported":{"backend":"npm","capability":"refresh"}})),
+            "npm can't refresh package lists."
+        );
         assert!(human(&json!({"operations":[]}), 80, false).contains("Nothing to do"));
-        assert!(human(&json!({"error":"declined"}), 80, false).contains("Error: declined"));
+        assert!(human(&json!({"error":"declined"}), 80, false).contains("✗ declined"));
         assert!(human(&json!({"message":"Retry", "error":1}), 80, false).contains("Retry"));
         assert_eq!(value(&json!(2)), "2");
-        assert_eq!(scope(&Scope::User { uid: 42 }), "User 42");
-        assert_eq!(
-            scope(&Scope::Environment {
-                path: "/synthetic".into()
-            }),
-            "/synthetic"
-        );
     }
 }

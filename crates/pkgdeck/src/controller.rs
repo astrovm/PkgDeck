@@ -569,6 +569,17 @@ struct Worker {
     cancel: Cancellation,
     job: Job,
 }
+/// Preloads one section on its own thread so opening it is instant and a
+/// foreground search never waits behind it.
+struct PrefetchWorker {
+    handle: thread::JoinHandle<()>,
+    receiver: mpsc::Receiver<Reply>,
+    cancel: Cancellation,
+    view: String,
+    key: String,
+    /// Sources or elevation changed, or a write started: drop its result.
+    stale: bool,
+}
 struct CatalogWorker {
     handle: thread::JoinHandle<()>,
     receiver: mpsc::Receiver<Vec<Source>>,
@@ -630,6 +641,14 @@ pub struct Controller {
     prefetched: BTreeMap<String, (Instant, Payload)>,
     background: bool,
     prefetch: Vec<String>,
+    prefetch_worker: Option<PrefetchWorker>,
+    /// The visible section is waiting for the prefetch already loading it.
+    awaiting_prefetch: bool,
+    last_rewarm: Instant,
+    /// Scope, elevation, and detection time of `engine`, so searches can
+    /// reuse detected managers instead of rediscovering on every query.
+    engine_scope: Option<(Vec<String>, bool, Instant)>,
+    reused_engine_born: Option<Instant>,
     active_view: String,
     catalog_checked: bool,
     catalog_worker: Option<CatalogWorker>,
@@ -691,6 +710,11 @@ impl Default for Controller {
             prefetched: BTreeMap::new(),
             background: false,
             prefetch: prefetch_views(),
+            prefetch_worker: None,
+            awaiting_prefetch: false,
+            last_rewarm: Instant::now(),
+            engine_scope: None,
+            reused_engine_born: None,
             active_view: "Search".into(),
             catalog_checked: false,
             catalog_worker: None,
@@ -701,11 +725,18 @@ impl Default for Controller {
     }
 }
 impl Controller {
+    /// Sections preload on their own worker from startup, Search included.
     fn next_prefetch(&mut self) -> Option<String> {
-        if self.active_view == "Search" {
-            None
-        } else {
-            self.prefetch.pop()
+        self.prefetch.pop()
+    }
+    /// Forget preloaded sections and load them again from scratch.
+    fn invalidate_prefetch(&mut self) {
+        self.prefetched.clear();
+        self.prefetch = prefetch_views();
+        self.awaiting_prefetch = false;
+        if let Some(worker) = &mut self.prefetch_worker {
+            worker.cancel.cancel();
+            worker.stale = true;
         }
     }
 }
@@ -988,15 +1019,24 @@ fn plan_checked_upgrade(packages: &[Package], identities: &str) -> CheckedPlan {
 /// and elevation. The Installed filter is client-side, so it stays out of
 /// the key and shares the loaded rows while typing.
 fn prefetch_views() -> Vec<String> {
-    ["Installed", "Updates", "Clean"]
+    ["Installed", "Updates", "Clean", "Sources"]
         .into_iter()
         .rev()
         .map(str::to_owned)
         .collect()
 }
 const VIEW_TTL: Duration = Duration::from_secs(60);
+/// Preloaded sections older than this are loaded again in the background
+/// while the app is open, so switching stays instant.
+const REWARM_AFTER: Duration = Duration::from_secs(300);
 fn cache_key(view: &str, query: &str, sources: &[String], sudo: bool) -> String {
-    format!("{view}\0{query}\0{}\0{sudo}", sources.join(","))
+    // Sources always lists every manager, whatever the filter.
+    let sources = if view == "Sources" {
+        String::new()
+    } else {
+        sources.join(",")
+    };
+    format!("{view}\0{query}\0{sources}\0{sudo}")
 }
 /// Per-view snapshots so switching sections is instant after the first
 /// visit. Small Vec, oldest evicted: views are few and searches share keys
@@ -1018,7 +1058,7 @@ struct CachedView {
     updates_view: bool,
 }
 impl ViewCache {
-    const CAPACITY: usize = 8;
+    const CAPACITY: usize = 32;
     fn get(&self, key: &str) -> Option<&CachedView> {
         self.entries
             .iter()
@@ -1028,7 +1068,14 @@ impl ViewCache {
     fn insert(&mut self, key: String, view: CachedView) {
         self.entries.retain(|(candidate, _)| candidate != &key);
         if self.entries.len() >= Self::CAPACITY {
-            self.entries.remove(0);
+            // Typing a search creates many entries; evict those first so
+            // they never push out a preloaded section.
+            let oldest = self
+                .entries
+                .iter()
+                .position(|(candidate, _)| candidate.starts_with("Search\0"))
+                .unwrap_or(0);
+            self.entries.remove(oldest);
         }
         self.entries.push((key, view));
     }
@@ -1694,13 +1741,32 @@ impl ffi::PackageController {
         } else {
             Authorization::Polkit
         };
+        if job.writes() {
+            // A write changes what a preload would show; load it again after.
+            let mut controller = self.as_mut().rust_mut();
+            if let Some(worker) = &mut controller.prefetch_worker {
+                worker.cancel.cancel();
+                worker.stale = true;
+            }
+            controller.prefetch = prefetch_views();
+        }
         let cancel = Cancellation::default();
         let token = cancel.clone();
         let (sender, receiver) = mpsc::channel();
         let worker_job = job.clone();
         // Loads rebuild for fresh discovery; the previous engine is dropped.
         // Details can reuse a warm engine; mutation jobs always rediscover.
+        // Searches reuse a recent engine with the same scope, so typing
+        // does not detect every package manager again for each query.
         let cached = self.as_mut().rust_mut().engine.take();
+        let scope = self.as_mut().rust_mut().engine_scope.take();
+        let search_scope = engine_source(&job, &source_filter);
+        let warm_search = matches!(&job, Job::Load(view, _) if view == "Search")
+            && scope.as_ref().is_some_and(|(sources, sudo, born)| {
+                *sources == search_scope && *sudo == self.rust().sudo && born.elapsed() < VIEW_TTL
+            });
+        self.as_mut().rust_mut().reused_engine_born =
+            scope.filter(|_| warm_search).map(|(_, _, born)| born);
         let cleanup = self.rust().cleanup.clone();
         // Keep read snapshots while a native write owns the worker. The UI
         // can browse them, clearly marked stale, until the queue drains.
@@ -1767,6 +1833,13 @@ impl ffi::PackageController {
             if let Job::OpenInput(input) = &job {
                 send(Reply::Done(inspect_open_input(input, &token)));
                 return;
+            }
+            if warm_search {
+                if let Some(mut engine) = cached {
+                    execute(&mut engine, job, &token, &mut send);
+                    send(Reply::Engine(Box::new(engine)));
+                    return;
+                }
             }
             // Fast path: Details against a warm engine reuse detected state
             // outright. A filter change since discovery surfaces as
@@ -1842,7 +1915,13 @@ impl ffi::PackageController {
     ) {
         let writing = self.rust().worker.as_ref().is_some_and(|w| w.job.writes());
         let view = view.to_string();
-        let query = query.to_string();
+        // Only Search takes a query. Sections ignore any leftover search
+        // text, so it can never split their cache or miss a preload.
+        let query = if view == "Search" {
+            query.to_string()
+        } else {
+            String::new()
+        };
         // Comma-joined checked source ids; empty means every available source.
         let sources: Vec<String> = sources
             .to_string()
@@ -1859,7 +1938,15 @@ impl ffi::PackageController {
             self.set_status("Unknown source.".into());
             return;
         }
+        // Sources lists every manager; opening it must not reset the filter
+        // the other sections and their preloads use.
+        let sources = if view == "Sources" {
+            self.rust().source_filter.clone()
+        } else {
+            sources
+        };
         self.as_mut().rust_mut().active_view = view.clone();
+        self.as_mut().rust_mut().awaiting_prefetch = false;
         if view == "Search" && query.trim().is_empty() {
             // Seed the selected sources before the first query starts.
             if self.rust().worker.is_none() {
@@ -1896,24 +1983,26 @@ impl ffi::PackageController {
         }
         let changed = self.rust().source_filter != sources || self.rust().sudo != sudo;
         if force || changed {
-            self.as_mut().rust_mut().prefetched.clear();
-            self.as_mut().rust_mut().prefetch = prefetch_views();
+            self.as_mut().rust_mut().invalidate_prefetch();
+            if changed {
+                self.as_mut().rust_mut().engine_scope = None;
+            }
         }
         if !force {
+            // A preloaded section shows at once. An old one still shows at
+            // once and is refreshed below, like any stale snapshot.
             if let Some((loaded, payload)) = self.as_mut().rust_mut().prefetched.remove(&key) {
-                if loaded.elapsed() < VIEW_TTL {
-                    self.as_mut().rust_mut().updates_view = view == "Updates";
-                    self.as_mut().rust_mut().queued = None;
-                    self.as_mut().rust_mut().packages.clear();
-                    self.as_mut().rust_mut().cleanup.clear();
-                    self.as_mut().rust_mut().sources.clear();
-                    self.as_mut().rust_mut().failures.clear();
-                    self.as_mut().apply(Ok(payload));
-                    let upgradable =
-                        view == "Updates" && !upgrade_plan(&self.rust().packages).is_empty();
-                    self.as_mut().set_upgradable(upgradable);
-                    self.as_mut().stash_current(key.clone());
-                }
+                self.as_mut().rust_mut().updates_view = view == "Updates";
+                self.as_mut().rust_mut().queued = None;
+                self.as_mut().rust_mut().packages.clear();
+                self.as_mut().rust_mut().cleanup.clear();
+                self.as_mut().rust_mut().sources.clear();
+                self.as_mut().rust_mut().failures.clear();
+                self.as_mut().apply(Ok(payload));
+                let upgradable =
+                    view == "Updates" && !upgrade_plan(&self.rust().packages).is_empty();
+                self.as_mut().set_upgradable(upgradable);
+                self.as_mut().stash_current_at(key.clone(), loaded);
             }
             if let Some(cached) = self.rust().view_cache.get(&key).cloned() {
                 self.as_mut().set_upgradable(cached.upgradable);
@@ -1959,8 +2048,8 @@ impl ffi::PackageController {
         if force {
             crate::metadata::invalidate();
             self.as_mut().rust_mut().view_cache.clear();
-            self.as_mut().rust_mut().prefetched.clear();
-            self.as_mut().rust_mut().prefetch = prefetch_views();
+            self.as_mut().rust_mut().invalidate_prefetch();
+            self.as_mut().rust_mut().engine_scope = None;
             self.as_mut().rust_mut().detail_cache.clear();
         }
         self.as_mut().rust_mut().packages.clear();
@@ -1974,6 +2063,27 @@ impl ffi::PackageController {
         self.as_mut().set_rows("[]".into());
         self.as_mut().set_details("{}".into());
         self.as_mut().set_phase("loading");
+        // The section is already preloading: wait for that result instead
+        // of querying every manager a second time.
+        if !force
+            && self.rust().prefetch_worker.as_ref().is_some_and(|worker| {
+                // One inventory read fills both Installed and Updates.
+                !worker.stale
+                    && (worker.key == key
+                        || worker.view == "Installed"
+                            && view == "Updates"
+                            && worker.key
+                                == cache_key("Installed", "", &self.rust().source_filter, sudo))
+            })
+        {
+            self.as_mut().rust_mut().awaiting_prefetch = true;
+            if let Some(worker) = &self.rust().worker {
+                worker.cancel.cancel();
+                self.as_mut().rust_mut().background = true;
+            }
+            self.as_mut().set_busy(true);
+            return;
+        }
         // Reads are preemptible: cancel the in-flight load or details
         // query and run this one next. Native writes keep the lock. Report
         // busy at once: the fresh rows are not on screen yet, and a silent
@@ -1991,7 +2101,12 @@ impl ffi::PackageController {
         {
             return;
         }
-        let (view, query, source) = (view.to_string(), query.to_string(), source.to_string());
+        let (view, source) = (view.to_string(), source.to_string());
+        let query = if view == "Search" {
+            query.to_string()
+        } else {
+            String::new()
+        };
         if !["Search", "Installed", "Updates", "Clean", "Sources"].contains(&view.as_str())
             || !pkgdeck_core::backends::BACKEND_IDS.contains(&source.as_str())
             || !self.rust().source_filter.is_empty() && !self.rust().source_filter.contains(&source)
@@ -2004,8 +2119,11 @@ impl ffi::PackageController {
     /// Snapshot the current table under `key`. Called after a terminal view
     /// report lands; the caller guarantees no newer load superseded it.
     fn stash_current(self: Pin<&mut Self>, key: String) {
+        self.stash_current_at(key, Instant::now());
+    }
+    fn stash_current_at(self: Pin<&mut Self>, key: String, loaded: Instant) {
         let view = CachedView {
-            loaded: Instant::now(),
+            loaded,
             cleanup: self.rust().cleanup.clone(),
             packages: self.rust().packages.clone(),
             failures: self.rust().failures.clone(),
@@ -2517,7 +2635,7 @@ impl ffi::PackageController {
             }
             Ok(Payload::RetryPackages(source, retry)) => {
                 self.as_mut().rust_mut().view_cache.clear();
-                self.as_mut().rust_mut().prefetched.clear();
+                self.as_mut().rust_mut().invalidate_prefetch();
                 let report = merge_retried_packages(
                     &self.rust().packages,
                     &self.rust().failures,
@@ -2531,7 +2649,7 @@ impl ffi::PackageController {
             }
             Ok(Payload::RetryFailedUpdates(sources, retry)) => {
                 self.as_mut().rust_mut().view_cache.clear();
-                self.as_mut().rust_mut().prefetched.clear();
+                self.as_mut().rust_mut().invalidate_prefetch();
                 let report = merge_retried_packages(
                     &self.rust().packages,
                     &self.rust().failures,
@@ -2545,7 +2663,7 @@ impl ffi::PackageController {
             }
             Ok(Payload::RetryCleanup(source, retry)) => {
                 self.as_mut().rust_mut().view_cache.clear();
-                self.as_mut().rust_mut().prefetched.clear();
+                self.as_mut().rust_mut().invalidate_prefetch();
                 let mut items = self.rust().cleanup.clone();
                 items.retain(|item| item.id.backend != source);
                 items.extend(retry.items);
@@ -2558,7 +2676,7 @@ impl ffi::PackageController {
             }
             Ok(Payload::RetrySources(source, retry)) => {
                 self.as_mut().rust_mut().view_cache.clear();
-                self.as_mut().rust_mut().prefetched.clear();
+                self.as_mut().rust_mut().invalidate_prefetch();
                 let mut sources = self.rust().sources.clone();
                 sources.retain(|row| row.backend != source);
                 sources.extend(retry);
@@ -2653,8 +2771,7 @@ impl ffi::PackageController {
             }
             Ok(Payload::Repositories(report)) => {
                 self.as_mut().rust_mut().view_cache.clear();
-                self.as_mut().rust_mut().prefetched.clear();
-                self.as_mut().rust_mut().prefetch = prefetch_views();
+                self.as_mut().rust_mut().invalidate_prefetch();
                 self.as_mut().rust_mut().detail_cache.clear();
                 crate::metadata::invalidate();
                 self.as_mut().set_repositories(encoded(report));
@@ -2700,9 +2817,17 @@ impl ffi::PackageController {
                     &details.package,
                 ) {
                     self.as_mut().set_rows(encoded(rows));
-                    self.as_mut().rust_mut().view_cache.clear();
-                    self.as_mut().rust_mut().prefetched.clear();
-                    self.as_mut().rust_mut().prefetch = prefetch_views();
+                    // Patch the name in cached sections instead of dropping
+                    // them, so opening details never makes sections reload.
+                    for (_, cached) in &mut self.as_mut().rust_mut().view_cache.entries {
+                        if let Some(rows) = update_detail_name(
+                            &mut cached.packages,
+                            &cached.rows.to_string(),
+                            &details.package,
+                        ) {
+                            cached.rows = encoded(rows);
+                        }
+                    }
                 }
                 let info = crate::metadata::cached_info(&details.package);
                 let data = encoded(
@@ -2732,8 +2857,8 @@ impl ffi::PackageController {
             Ok(Payload::Written(outcome)) => {
                 crate::metadata::invalidate();
                 self.as_mut().set_upgradable(false);
-                self.as_mut().rust_mut().prefetched.clear();
-                self.as_mut().rust_mut().prefetch = prefetch_views();
+                self.as_mut().rust_mut().invalidate_prefetch();
+                self.as_mut().rust_mut().engine_scope = None;
                 self.as_mut().rust_mut().detail_cache.clear();
                 self.as_mut().set_phase("stale");
                 self.set_status(
@@ -2792,6 +2917,151 @@ impl ffi::PackageController {
             cancel,
         });
     }
+    fn start_prefetch(mut self: Pin<&mut Self>, view: String, key: String) {
+        let sources = self.rust().source_filter.clone();
+        let authorization = if self.rust().sudo {
+            Authorization::SudoNonInteractive
+        } else {
+            Authorization::Polkit
+        };
+        let job = Job::Load(view.clone(), String::new());
+        let scope = engine_source(&job, &sources);
+        let sources_view = view == "Sources";
+        let cancel = Cancellation::default();
+        let token = cancel.clone();
+        let (sender, receiver) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            let mut send = |mut reply| {
+                if let Reply::Done(Ok(Payload::Packages(report))) = &mut reply {
+                    for package in &mut report.packages {
+                        crate::metadata::enrich_cached(package);
+                    }
+                }
+                // Streaming partials are only for a visible load.
+                if !matches!(reply, Reply::Partial(_)) {
+                    let _ = sender.send(reply);
+                }
+            };
+            match pkgdeck_core::backends::native_engine(&scope, sources_view, authorization, &token)
+            {
+                Ok(mut engine) => execute(&mut engine, job, &token, &mut send),
+                Err(error) => send(Reply::Done(Err(error))),
+            }
+        });
+        self.as_mut().rust_mut().prefetch_worker = Some(PrefetchWorker {
+            handle,
+            receiver,
+            cancel,
+            view,
+            key,
+            stale: false,
+        });
+    }
+    fn poll_prefetch(mut self: Pin<&mut Self>) {
+        if let Some(worker) = &self.rust().prefetch_worker {
+            let finished = worker.handle.is_finished();
+            let replies: Vec<_> = worker.receiver.try_iter().collect();
+            let (stale, key, view) = (worker.stale, worker.key.clone(), worker.view.clone());
+            let replies = if finished {
+                let worker = self.as_mut().rust_mut().prefetch_worker.take().unwrap();
+                let _ = worker.handle.join();
+                replies
+                    .into_iter()
+                    .chain(worker.receiver.try_iter())
+                    .collect()
+            } else {
+                replies
+            };
+            if !stale {
+                for reply in replies {
+                    match reply {
+                        Reply::Inventory(report) => self.as_mut().warm_inventory(report),
+                        Reply::Done(Ok(payload)) => {
+                            if let Payload::Sources(sources) = &payload {
+                                let rows: Vec<_> = sources.iter().map(source_row).collect();
+                                self.as_mut().set_source_catalog(encoded(rows));
+                                self.as_mut().rust_mut().catalog_checked = true;
+                            }
+                            self.as_mut()
+                                .rust_mut()
+                                .prefetched
+                                .insert(key.clone(), (Instant::now(), payload));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            // Show the result if the visible section was waiting for it,
+            // or load it directly if the preload failed.
+            let active = self.rust().active_view.clone();
+            if finished
+                && !stale
+                && self.rust().awaiting_prefetch
+                && (active == view || view == "Installed" && active == "Updates")
+            {
+                self.as_mut().rust_mut().awaiting_prefetch = false;
+                let view = active;
+                let sources = self.rust().source_filter.join(",");
+                let sudo = self.rust().sudo;
+                let busy = self.rust().worker.is_some();
+                self.as_mut().set_busy(busy);
+                self.as_mut().load(
+                    view.as_str().into(),
+                    QString::default(),
+                    sources.as_str().into(),
+                    sudo,
+                    false,
+                );
+            }
+            if !finished {
+                return;
+            }
+        }
+        // Keep sections warm while the app stays open.
+        if self.rust().prefetch.is_empty()
+            && self.rust().last_rewarm.elapsed() >= Duration::from_secs(30)
+        {
+            self.as_mut().rust_mut().last_rewarm = Instant::now();
+            let (sources, sudo) = (self.rust().source_filter.clone(), self.rust().sudo);
+            // prefetch_views() is in pop order, so Installed (which also
+            // fills Updates) still loads first.
+            let old: Vec<String> = prefetch_views()
+                .into_iter()
+                .filter(|view| {
+                    let key = cache_key(view, "", &sources, sudo);
+                    let cached = self.rust().view_cache.get(&key).map(|v| v.loaded);
+                    let preloaded = self.rust().prefetched.get(&key).map(|(loaded, _)| *loaded);
+                    cached
+                        .max(preloaded)
+                        .is_none_or(|loaded| loaded.elapsed() >= REWARM_AFTER)
+                })
+                .collect();
+            self.as_mut().rust_mut().prefetch = old;
+        }
+        let writing = self.rust().worker.as_ref().is_some_and(|w| w.job.writes())
+            || !self.rust().confirmed_queue.is_empty()
+            || self.rust().pending.is_some();
+        if writing {
+            return;
+        }
+        while let Some(view) = self.as_mut().rust_mut().next_prefetch() {
+            let key = cache_key(&view, "", &self.rust().source_filter, self.rust().sudo);
+            let fresh = self
+                .rust()
+                .view_cache
+                .get(&key)
+                .is_some_and(|v| v.loaded.elapsed() < VIEW_TTL)
+                || self
+                    .rust()
+                    .prefetched
+                    .get(&key)
+                    .is_some_and(|(loaded, _)| loaded.elapsed() < VIEW_TTL);
+            if !fresh {
+                self.start_prefetch(view, key);
+                break;
+            }
+        }
+    }
     pub fn poll(mut self: Pin<&mut Self>) {
         if let Some(worker) = &self.rust().catalog_worker {
             if let Ok(sources) = worker.receiver.try_recv() {
@@ -2804,26 +3074,7 @@ impl ffi::PackageController {
                 }
             }
         }
-        if self.rust().worker.is_none() && self.rust().pending.is_none() {
-            loop {
-                // Full inventory preloads can hold up a foreground search.
-                let view = self.as_mut().rust_mut().next_prefetch();
-                let Some(view) = view else { break };
-                let key = cache_key(&view, "", &self.rust().source_filter, self.rust().sudo);
-                if self
-                    .rust()
-                    .view_cache
-                    .get(&key)
-                    .is_some_and(|v| v.loaded.elapsed() < VIEW_TTL)
-                    || self.rust().prefetched.contains_key(&key)
-                {
-                    continue;
-                }
-                self.as_mut().rust_mut().background = true;
-                self.as_mut().start(Job::Load(view, String::new()));
-                break;
-            }
-        }
+        self.as_mut().poll_prefetch();
         let Some(worker) = &self.rust().worker else {
             return;
         };
@@ -2890,6 +3141,20 @@ impl ffi::PackageController {
                 match reply {
                     // The join above guarantees the thread finished sending.
                     Reply::Engine(engine) => {
+                        // Remember what this engine detected so the next
+                        // search can reuse it. Only reads leave a reusable one.
+                        let born = self.as_mut().rust_mut().reused_engine_born.take();
+                        let scope =
+                            matches!(worker.job, Job::Load(ref view, _) if view != "Sources").then(
+                                || {
+                                    (
+                                        engine_source(&worker.job, &self.rust().source_filter),
+                                        self.rust().sudo,
+                                        born.unwrap_or_else(Instant::now),
+                                    )
+                                },
+                            );
+                        self.as_mut().rust_mut().engine_scope = scope;
                         self.as_mut().rust_mut().engine = Some(*engine);
                     }
                     Reply::Partial(report) => self.as_mut().apply(Ok(Payload::Packages(report))),
@@ -3018,7 +3283,8 @@ impl ffi::PackageController {
             self.as_mut().rust_mut().progress_state = None;
             self.as_mut().set_progress("{}".into());
             self.as_mut().set_writing(false);
-            self.as_mut().set_busy(false);
+            let awaiting = self.rust().awaiting_prefetch;
+            self.as_mut().set_busy(awaiting);
             if let Some(entry) = self.as_mut().rust_mut().validated_confirmed.take() {
                 self.as_mut().rust_mut().queued = queued;
                 self.start_confirmed(entry);
@@ -4861,13 +5127,349 @@ mod tests {
     }
 
     #[test]
-    fn prefetch_waits_until_search_is_left() {
+    fn sections_preload_from_startup_in_order() {
         let mut controller = Controller::default();
-        assert_eq!(controller.next_prefetch(), None);
-        controller.active_view = "Installed".into();
+        assert_eq!(controller.active_view, "Search");
         let order: Vec<_> = std::iter::from_fn(|| controller.next_prefetch()).collect();
-        assert_eq!(order, ["Installed", "Updates", "Clean"]);
+        assert_eq!(order, ["Installed", "Updates", "Clean", "Sources"]);
         assert!(controller.prefetch.is_empty());
+        controller.invalidate_prefetch();
+        assert_eq!(controller.prefetch.len(), 4);
+    }
+    fn synthetic_package(name: &str, display_name: &str) -> Package {
+        Package {
+            id: PackageId {
+                backend: "apt".into(),
+                name: name.into(),
+                architecture: "all".into(),
+                scope: Scope::System,
+                remote: None,
+                reference: None,
+            },
+            display_name: display_name.into(),
+            summary: "Synthetic package".into(),
+            installed_version: Some("1".into()),
+            candidate_version: Some("1".into()),
+            update: UpdateAvailability::Unknown,
+            icon: None,
+            component_ids: vec![],
+            homepages: vec![],
+        }
+    }
+    fn wait_until(
+        controller: &mut Pin<&mut ffi::PackageController>,
+        done: impl Fn(&ffi::PackageController) -> bool,
+    ) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline && !done(controller) {
+            controller.as_mut().poll();
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(done(controller));
+    }
+    fn fake_prefetch(view: &str, key: String, replies: Vec<Reply>, stale: bool) -> PrefetchWorker {
+        let (sender, receiver) = mpsc::channel();
+        for reply in replies {
+            sender.send(reply).unwrap();
+        }
+        PrefetchWorker {
+            handle: thread::spawn(move || drop(sender)),
+            receiver,
+            cancel: Cancellation::default(),
+            view: view.into(),
+            key,
+            stale,
+        }
+    }
+    #[test]
+    fn finished_preloads_fill_sections_and_the_source_catalog() {
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        // A pending review blocks new preloads, so only these fakes run.
+        controller.as_mut().rust_mut().pending = Some(Job::Load("Search".into(), String::new()));
+        let mut inventory = PackageReport::default();
+        inventory.packages.push(synthetic_package("warm", "warm"));
+        let sources = vec![Source {
+            backend: "apt".into(),
+            capabilities: vec![Capability::Search],
+            availability: Ok(Availability::Available),
+        }];
+        let key = cache_key("Sources", "", &[], false);
+        controller.as_mut().rust_mut().prefetch_worker = Some(fake_prefetch(
+            "Sources",
+            key.clone(),
+            vec![
+                Reply::Inventory(inventory),
+                Reply::Done(Ok(Payload::Sources(sources))),
+            ],
+            false,
+        ));
+        wait_until(&mut controller, |c| c.rust().prefetch_worker.is_none());
+        assert!(controller.rust().prefetched.contains_key(&key));
+        assert!(controller
+            .rust()
+            .prefetched
+            .contains_key(&cache_key("Updates", "", &[], false)));
+        assert!(controller.rust().catalog_checked);
+        assert!(controller.source_catalog().to_string().contains("apt"));
+        // A preload made stale by a write or filter change is dropped.
+        controller.as_mut().rust_mut().prefetched.clear();
+        let key = cache_key("Clean", "", &[], false);
+        controller.as_mut().rust_mut().prefetch_worker = Some(fake_prefetch(
+            "Clean",
+            key.clone(),
+            vec![Reply::Done(Ok(Payload::Cleanup(CleanupReport::default())))],
+            true,
+        ));
+        wait_until(&mut controller, |c| c.rust().prefetch_worker.is_none());
+        assert!(controller.rust().prefetched.is_empty());
+    }
+    #[test]
+    fn open_sections_are_reloaded_when_their_preload_gets_old() {
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().rust_mut().pending = Some(Job::Load("Search".into(), String::new()));
+        controller.as_mut().rust_mut().prefetch.clear();
+        let fresh = cached_view("fresh");
+        let mut old = cached_view("old");
+        old.loaded = Instant::now() - REWARM_AFTER;
+        controller
+            .as_mut()
+            .rust_mut()
+            .view_cache
+            .insert(cache_key("Installed", "", &[], false), old);
+        controller
+            .as_mut()
+            .rust_mut()
+            .view_cache
+            .insert(cache_key("Clean", "", &[], false), fresh);
+        controller.as_mut().rust_mut().last_rewarm = Instant::now() - Duration::from_secs(60);
+        controller.as_mut().poll();
+        // Installed (old), Updates and Sources (never loaded) reload,
+        // Installed first because it also fills Updates.
+        let mut order = controller.rust().prefetch.clone();
+        order.reverse();
+        assert_eq!(order, ["Installed", "Updates", "Sources"]);
+        // Checked at most every 30 seconds.
+        controller.as_mut().rust_mut().prefetch.clear();
+        controller.as_mut().poll();
+        assert!(controller.rust().prefetch.is_empty());
+    }
+    #[test]
+    fn preloads_start_on_their_own_worker_and_report_back() {
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        // A standalone tool keeps detection cheap and read-only.
+        controller.as_mut().rust_mut().source_filter = vec!["grok".into()];
+        controller.as_mut().rust_mut().prefetch = vec!["Clean".into()];
+        controller.as_mut().poll();
+        assert!(controller.rust().prefetch_worker.is_some());
+        assert!(controller.rust().worker.is_none());
+        wait_until(&mut controller, |c| c.rust().prefetch_worker.is_none());
+        assert!(
+            controller.rust().prefetched.contains_key(&cache_key(
+                "Clean",
+                "",
+                &["grok".into()],
+                false
+            )) || controller.rust().prefetch_worker.is_none()
+        );
+    }
+    #[test]
+    fn searches_reuse_a_recent_engine_and_keep_its_detection_time() {
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().rust_mut().prefetch.clear();
+        let job = Job::Load("Search".into(), "anything".into());
+        let born = Instant::now() - Duration::from_secs(5);
+        let scope = engine_source(&job, &[]);
+        controller.as_mut().rust_mut().engine = Some(Engine::default());
+        controller.as_mut().rust_mut().engine_scope = Some((scope.clone(), false, born));
+        controller.as_mut().start(job);
+        wait_until(&mut controller, |c| c.rust().worker.is_none());
+        let (sources, sudo, kept) = controller.rust().engine_scope.clone().unwrap();
+        assert_eq!((sources, sudo, kept), (scope, false, born));
+        assert!(controller.rust().engine.is_some());
+        // Changing the sources forgets it.
+        controller.as_mut().rust_mut().view_cache.insert(
+            cache_key("Installed", "", &["apt".into()], false),
+            cached_view("apt only"),
+        );
+        controller
+            .as_mut()
+            .load("Installed".into(), "".into(), "apt".into(), false, false);
+        assert!(controller.rust().engine_scope.is_none());
+        assert!(controller.rows().to_string().contains("apt only"));
+    }
+    #[test]
+    fn a_better_name_from_details_updates_cached_sections_too() {
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        let package = synthetic_package("org.example.app", "org.example.app");
+        let rows = encoded(vec![
+            json!({"name": "org.example.app", "display_name": "org.example.app"}),
+        ]);
+        controller.as_mut().rust_mut().packages = vec![package.clone()];
+        controller.as_mut().set_rows(rows.clone());
+        let mut cached = cached_view("unused");
+        cached.packages = vec![package.clone()];
+        cached.rows = rows;
+        controller
+            .as_mut()
+            .rust_mut()
+            .view_cache
+            .insert(cache_key("Installed", "", &[], false), cached);
+        let mut named = package;
+        named.display_name = "Example App".into();
+        controller
+            .as_mut()
+            .apply(Ok(Payload::Details(Box::new(PackageDetails {
+                package: named,
+                description: String::new(),
+                homepage: None,
+                dependencies: vec![],
+            }))));
+        assert!(controller.rows().to_string().contains("Example App"));
+        let cached = controller
+            .rust()
+            .view_cache
+            .get(&cache_key("Installed", "", &[], false))
+            .unwrap();
+        assert!(cached.rows.to_string().contains("Example App"));
+        assert_eq!(cached.packages[0].display_name, "Example App");
+    }
+    #[test]
+    fn updates_wait_for_an_installed_preload_and_cancel_older_reads() {
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().rust_mut().prefetch.clear();
+        let (release, gate) = mpsc::channel::<()>();
+        let (sender, receiver) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            let _ = gate.recv();
+            let mut report = PackageReport::default();
+            let mut package = synthetic_package("pending", "pending");
+            package.update = UpdateAvailability::Available;
+            package.candidate_version = Some("2".into());
+            report.packages.push(package);
+            report.successful_sources.push("apt".into());
+            let _ = sender.send(Reply::Inventory(report.clone()));
+            let _ = sender.send(Reply::Done(Ok(Payload::Packages(report))));
+        });
+        controller.as_mut().rust_mut().prefetch_worker = Some(PrefetchWorker {
+            handle,
+            receiver,
+            cancel: Cancellation::default(),
+            view: "Installed".into(),
+            key: cache_key("Installed", "", &[], false),
+            stale: false,
+        });
+        // An older foreground read is cancelled and its reply ignored.
+        controller
+            .as_mut()
+            .start(Job::Load("Search".into(), "zzz-no-such-package".into()));
+        controller
+            .as_mut()
+            .load("Updates".into(), "".into(), "".into(), false, false);
+        assert!(controller.rust().awaiting_prefetch);
+        assert!(controller.rust().background);
+        release.send(()).unwrap();
+        wait_until(&mut controller, |c| !*c.busy() && c.rust().worker.is_none());
+        assert!(controller.rows().to_string().contains("pending"));
+    }
+    #[test]
+    fn retrying_a_source_in_a_section_ignores_search_text() {
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().rust_mut().prefetch.clear();
+        controller.as_mut().rust_mut().source_filter = vec!["grok".into()];
+        controller
+            .as_mut()
+            .retry_source("Clean".into(), "leftover text".into(), "grok".into());
+        assert!(matches!(
+            controller.rust().worker.as_ref().map(|worker| &worker.job),
+            Some(Job::RetrySource(view, query, _)) if view == "Clean" && query.is_empty()
+        ));
+        wait_until(&mut controller, |c| c.rust().worker.is_none());
+    }
+    #[test]
+    fn opening_a_preloading_section_waits_for_that_preload() {
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().rust_mut().prefetch.clear();
+        let key = cache_key("Installed", "", &[], false);
+        let (sender, receiver) = mpsc::channel();
+        let (release, gate) = mpsc::channel::<()>();
+        let handle = thread::spawn(move || {
+            let _ = gate.recv();
+            let mut report = PackageReport::default();
+            report.packages.push(Package {
+                id: PackageId {
+                    backend: "apt".into(),
+                    name: "preloaded".into(),
+                    architecture: "all".into(),
+                    scope: Scope::System,
+                    remote: None,
+                    reference: None,
+                },
+                display_name: "preloaded".into(),
+                summary: "Preloaded package".into(),
+                installed_version: Some("1".into()),
+                candidate_version: Some("1".into()),
+                update: UpdateAvailability::Unknown,
+                icon: None,
+                component_ids: vec![],
+                homepages: vec![],
+            });
+            report.successful_sources.push("apt".into());
+            let _ = sender.send(Reply::Done(Ok(Payload::Packages(report))));
+        });
+        controller.as_mut().rust_mut().prefetch_worker = Some(PrefetchWorker {
+            handle,
+            receiver,
+            cancel: Cancellation::default(),
+            view: "Installed".into(),
+            key,
+            stale: false,
+        });
+        controller
+            .as_mut()
+            .load("Installed".into(), "".into(), "".into(), false, false);
+        // No second query: the section waits for the preload in flight.
+        assert!(controller.rust().worker.is_none());
+        assert!(controller.rust().awaiting_prefetch);
+        assert!(*controller.busy());
+        release.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline && *controller.busy() {
+            controller.as_mut().poll();
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(!*controller.busy());
+        assert!(controller.rows().to_string().contains("preloaded"));
+        assert!(controller.rust().worker.is_none());
+    }
+    #[test]
+    fn typed_searches_never_evict_preloaded_sections() {
+        let mut cache = ViewCache { entries: vec![] };
+        cache.insert(
+            cache_key("Installed", "", &[], false),
+            cached_view("installed"),
+        );
+        for index in 0..100 {
+            cache.insert(
+                cache_key("Search", &format!("query {index}"), &[], false),
+                cached_view("search"),
+            );
+        }
+        assert!(cache.get(&cache_key("Installed", "", &[], false)).is_some());
+        assert!(cache
+            .get(&cache_key("Search", "query 99", &[], false))
+            .is_some());
+        assert_eq!(
+            cache_key("Sources", "", &["apt".into()], false),
+            cache_key("Sources", "", &[], false)
+        );
     }
 
     #[test]

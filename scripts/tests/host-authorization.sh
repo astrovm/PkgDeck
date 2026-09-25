@@ -66,8 +66,8 @@ source scripts/vm/lifecycle.sh
 apt_fixture
 
 doctor=$(runuser -u pkgdeck-test -- "$binaries/pkd" doctor)
-[[ $doctor == *'Runtime: Native'* && $doctor == *'Host architecture: x86_64'* &&
-    $doctor == *'APT: /usr/bin/apt-get'* ]]
+[[ $doctor =~ Runtime\ +native && $doctor =~ Architecture\ +x86_64 &&
+    $doctor =~ ✓\ APT\ +/usr/bin/apt-get ]]
 cat >"$rule" <<'RULE'
 polkit.addRule(function(action, subject) {
     if (action.id == "org.freedesktop.policykit.exec" && action.lookup("program") == "/usr/bin/apt-get") {
