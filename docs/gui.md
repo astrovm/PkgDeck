@@ -111,9 +111,28 @@ Open **Sources → Repositories** to inspect configured repositories.
 ![Repository management in PkgDeck](screenshots/repositories.png)
 
 Flatpak repositories can be added, removed, enabled, disabled, and prioritized,
-separately for User and System installations. Firmware remotes can be toggled.
-APT's editor button opens the native Software Sources tool. Repository changes
-use the manager's normal signature verification and authorization.
+separately for User and System installations when each installation can be
+changed. A system installation that can only be read stays visible without edit
+controls. Firmware remotes can be toggled.
+On APT systems with a supported editor and a graphical authorization prompt,
+**Edit APT sources** opens the distro's Software Sources tool. DNF and Zypper
+repositories can be viewed, and signed repository files can be opened for import.
+PkgDeck does not edit Pacman repositories or Homebrew taps. Controls without an
+available manager or working equivalent are hidden. Repository changes use the
+manager's normal signature verification and authorization.
+
+| Platform or manager | Repository controls |
+| --- | --- |
+| APT | View sources; open Software Sources when its editor is available |
+| DNF and Zypper | View repositories; import reviewed `.repo` files |
+| Pacman | No repository editor; import local package archives |
+| Flatpak | Manage available User and System installations |
+| Firmware on Linux | Enable or disable available remotes |
+| macOS with Homebrew | No repository editor; manage formulae and casks in the package views |
+
+The Add file picker only lists formats for managers available on this computer.
+Linux AppImages, desktop login autostart, and system authorization settings are
+omitted on macOS.
 
 The source picker filters one package page; Sources controls which managers PkgDeck
 queries. Neither setting enables or disables repositories. Refresh sources

@@ -21,6 +21,7 @@ struct Fixture {
     fail: bool,
     no_updates: bool,
     deferred: bool,
+    system_flatpak_writable: bool,
 }
 fn completion(text: &str) -> Completion {
     Completion {
@@ -34,10 +35,16 @@ fn completion(text: &str) -> Completion {
 }
 impl Default for Fixture {
     fn default() -> Self {
-        Self { calls: Default::default(), devices: format!(r#"{{"Devices":[{{"DeviceId":"{DEVICE}","Name":"Synthetic BIOS","Version":"1","Flags":["require-ac","needs-reboot","needs-shutdown"]}}]}}"#), updates: format!(r#"{{"Devices":[{{"DeviceId":"{DEVICE}","Releases":[{{"Version":"2","Description":"Synthetic release"}}]}}]}}"#), remotes: r#"{"Remotes":[{"Id":"lvfs","Title":"Firmware service","Enabled":true,"MetadataUri":"https://example.invalid/metadata.xml.gz"}]}Trailing status"#.into(), fail: false, no_updates: false, deferred: false }
+        Self { calls: Default::default(), devices: format!(r#"{{"Devices":[{{"DeviceId":"{DEVICE}","Name":"Synthetic BIOS","Version":"1","Flags":["require-ac","needs-reboot","needs-shutdown"]}}]}}"#), updates: format!(r#"{{"Devices":[{{"DeviceId":"{DEVICE}","Releases":[{{"Version":"2","Description":"Synthetic release"}}]}}]}}"#), remotes: r#"{"Remotes":[{"Id":"lvfs","Title":"Firmware service","Enabled":true,"MetadataUri":"https://example.invalid/metadata.xml.gz"}]}Trailing status"#.into(), fail: false, no_updates: false, deferred: false, system_flatpak_writable: true }
     }
 }
 impl Transport for Fixture {
+    fn system_flatpak_writable(&self) -> bool {
+        self.system_flatpak_writable
+    }
+    fn repository_editor_available(&self) -> bool {
+        true
+    }
     fn apt_query(
         &self,
         _: &str,
@@ -331,6 +338,9 @@ fn repositories_keep_scopes_and_apt_enabled_states() {
     .unwrap();
     let report = repositories::list(&Fixture::default(), &root, &Cancellation::default());
     assert!(report.errors.is_empty());
+    assert!(report.features.flatpak_user);
+    assert!(report.features.flatpak_system);
+    assert!(report.features.apt_editor);
     assert_eq!(report.repositories.len(), 6);
     assert_ne!(report.repositories[0].scope, report.repositories[1].scope);
     assert!(!report.repositories[0].enabled);
@@ -360,7 +370,22 @@ fn repositories_keep_scopes_and_apt_enabled_states() {
         &Cancellation::default(),
     );
     assert_eq!(failed.errors.len(), 2);
+    assert!(failed.features.flatpak_user);
+    assert!(!failed.features.flatpak_system);
     assert!(failed.repositories.iter().any(|r| r.scope == user()));
+    let read_only_system = repositories::list(
+        &Fixture {
+            system_flatpak_writable: false,
+            ..Default::default()
+        },
+        &root,
+        &Cancellation::default(),
+    );
+    assert!(!read_only_system.features.flatpak_system);
+    assert!(read_only_system
+        .repositories
+        .iter()
+        .any(|r| r.backend == "flatpak" && r.scope == Scope::System));
     std::fs::remove_dir_all(root).unwrap();
 }
 #[test]

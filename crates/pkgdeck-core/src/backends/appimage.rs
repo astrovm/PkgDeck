@@ -612,10 +612,12 @@ impl Backend for AppImage {
     }
     fn detect(&mut self, cancel: &Cancellation) -> Result<Availability, EngineError> {
         if cancel.requested() {
-            Err(EngineError::Cancelled)
-        } else {
-            Ok(Availability::Available)
+            return Err(EngineError::Cancelled);
         }
+        #[cfg(not(target_os = "linux"))]
+        return Ok(Availability::Unavailable("AppImage requires Linux".into()));
+        #[cfg(target_os = "linux")]
+        Ok(Availability::Available)
     }
     fn search(&mut self, query: &str, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
         let source = PathBuf::from(query);

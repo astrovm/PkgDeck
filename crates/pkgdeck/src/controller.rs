@@ -4844,6 +4844,7 @@ mod tests {
                     priority: Some(1),
                 }],
                 errors: vec!["Synthetic partial failure".into()],
+                features: repositories::Features::default(),
             })));
         let report: Value = serde_json::from_str(&controller.repositories().to_string()).unwrap();
         assert_eq!(report["repositories"][0]["scope"], "system");
