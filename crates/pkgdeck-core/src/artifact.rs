@@ -380,6 +380,10 @@ fn inspect_with_host(
     host: &Host,
 ) -> Result<Package, EngineError> {
     let kind = kind(source).ok_or_else(|| invalid("unsupported package format"))?;
+    #[cfg(not(target_os = "linux"))]
+    if kind == Kind::AppImage {
+        return Err(invalid("AppImage requires Linux"));
+    }
     if source.starts_with("https://") && !https_source(source) {
         return Err(invalid("invalid HTTPS package link"));
     }

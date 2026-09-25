@@ -10,7 +10,8 @@ fn main() {
             .qml_file("qml/PackageDetails.qml")
             .qml_file("qml/ActivityPane.qml")
             .qml_file("qml/ActionProgress.qml")
-            .qml_file("qml/DeckIcon.qml"),
+            .qml_file("qml/DeckIcon.qml")
+            .qml_file("qml/ClearFieldButton.qml"),
     )
     .qrc("resources.qrc")
     .file("src/controller.rs")

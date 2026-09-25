@@ -76,6 +76,12 @@ pub fn update_only(id: &str) -> bool {
 
 /// A narrow transport seam lets adapter tests supply synthetic native responses.
 pub trait Transport: Send {
+    fn system_flatpak_writable(&self) -> bool {
+        true
+    }
+    fn repository_editor_available(&self) -> bool {
+        false
+    }
     fn repository_editor(&self) -> Result<(), ExecutionError> {
         Err(ExecutionError::Disabled(
             "Software Sources editor unavailable".into(),
@@ -214,8 +220,14 @@ fn apt_query_executable(
 }
 
 impl Transport for NativeTransport {
+    fn system_flatpak_writable(&self) -> bool {
+        self.host.system_flatpak_available()
+    }
+    fn repository_editor_available(&self) -> bool {
+        self.host.source_editor_available(self.authorization)
+    }
     fn repository_editor(&self) -> Result<(), ExecutionError> {
-        self.host.open_source_editor()
+        self.host.open_source_editor(self.authorization)
     }
     fn apt_write_group(
         &self,

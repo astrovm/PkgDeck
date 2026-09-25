@@ -1288,6 +1288,47 @@ TestCase {
         wait(30);
         verify(filter.activeFocus);
     }
+    function test_search_and_filter_clear_buttons() {
+        browser.openView("Search");
+        const search = findChild(browser, "searchField");
+        const clearSearch = findChild(browser, "clearSearchButton");
+        verify(!clearSearch.visible);
+        search.text = "synthetic";
+        verify(clearSearch.visible);
+        mouseClick(clearSearch);
+        compare(search.text, "");
+        verify(search.activeFocus);
+        verify(!clearSearch.visible);
+
+        browser.openView("Installed");
+        populate();
+        const filter = findChild(browser, "installedFilterField");
+        const clearFilter = findChild(browser, "clearInstalledFilterButton");
+        verify(!clearFilter.visible);
+        filter.text = "homebrew";
+        compare(browser.viewItems.length, 1);
+        verify(clearFilter.visible);
+        mouseClick(clearFilter);
+        compare(filter.text, "");
+        compare(browser.viewItems.length, 2);
+        verify(filter.activeFocus);
+        verify(!clearFilter.visible);
+
+        const popup = findChild(browser, "sourcePopup");
+        popup.open();
+        tryCompare(popup, "visible", true);
+        const picker = findChild(browser, "sourcePickerSearch");
+        const clearPicker = findChild(browser, "clearSourceSearchButton");
+        verify(!clearPicker.visible);
+        picker.text = "npm";
+        verify(clearPicker.visible);
+        mouseClick(clearPicker);
+        compare(picker.text, "");
+        compare(popup.searchText, "");
+        verify(picker.activeFocus);
+        verify(!clearPicker.visible);
+        popup.close();
+    }
     function test_update_selection_cache_tracks_rows_and_deselections() {
         browser.openView("Updates");
         populate();
@@ -1580,7 +1621,7 @@ TestCase {
             {backend: "flatpak", name: "fixture", title: "Fixture", url: "https://example.invalid", scope: {user: {uid: 1000}}, enabled: true, priority: 1},
             {backend: "flatpak", name: "fixture", title: "Fixture", url: "https://example.invalid", scope: "system", enabled: false, priority: 2}
         ];
-        fake.repositories = JSON.stringify({repositories: rows, errors: []});
+        fake.repositories = JSON.stringify({repositories: rows, errors: [], features: {flatpak_user: true, flatpak_system: true}});
         waitForRendering(browser.contentItem);
         clickDelegate(findChild(browser, "repositoriesButton"));
         const dialog = findChild(browser, "repositoriesDialog");
@@ -1604,6 +1645,77 @@ TestCase {
         request = JSON.parse(fake.lastRepositoryChange);
         compare(request.url, "https://example.invalid/new.flatpakrepo");
         compare(request.scope, "system");
+    }
+    function test_add_is_available_before_source_discovery() {
+        fake.source_catalog = "[]";
+        const add = findChild(browser, "addPackageButton");
+        browser.openView("Search");
+        compare(fake.sourceChecks, 0);
+        if (Qt.platform.os !== "linux") {
+            verify(!add.visible);
+            compare(browser.supportedFilePatterns().length, 0);
+            return;
+        }
+        verify(add.visible);
+        compare(browser.supportedFilePatterns().join(" "), "*.AppImage");
+        clickDelegate(add);
+        compare(fake.sourceChecks, 1);
+        fake.source_catalog = JSON.stringify([
+            {source: "appimage", availability_kind: "available", capabilities: []},
+            {source: "apt", availability_kind: "available", capabilities: []}
+        ]);
+        verify(add.visible);
+        verify(browser.supportedFilePatterns().indexOf("*.deb") >= 0);
+        findChild(browser, "addPackageDialog").close();
+    }
+    function test_platform_actions_only_show_supported_equivalents() {
+        browser.openView("Sources");
+        fake.source_catalog = JSON.stringify([
+            {source: "homebrew", availability_kind: "available", capabilities: ["search", "installed"]}
+        ]);
+        compare(browser.supportedFilePatterns().length, 0);
+        verify(!findChild(browser, "addPackageButton").visible);
+        verify(!findChild(browser, "repositoriesButton").visible);
+        browser.desktopAutostartSupported = false;
+        browser.systemAuthorizationSupported = false;
+        browser.openView("Settings");
+        verify(!findChild(browser, "autostartSetting").visible);
+        verify(!findChild(browser, "authorizationSetting").visible);
+
+        browser.openView("Sources");
+        fake.source_catalog = JSON.stringify([
+            {source: "dnf", availability_kind: "available", capabilities: ["search", "installed"]}
+        ]);
+        verify(browser.supportedFilePatterns().indexOf("*.rpm") >= 0);
+        verify(findChild(browser, "addPackageButton").visible);
+        verify(findChild(browser, "repositoriesButton").visible);
+        fake.repositories = JSON.stringify({repositories: [], errors: [], features: {}});
+        const dialog = findChild(browser, "repositoriesDialog");
+        dialog.open();
+        tryCompare(dialog, "visible", true);
+        verify(!findChild(dialog, "addFlatpakRepositoryButton").visible);
+        verify(!findChild(dialog, "editAptSourcesButton").visible);
+
+        fake.repositories = JSON.stringify({repositories: [], errors: [], features: {flatpak_system: true, apt_editor: true}});
+        verify(findChild(dialog, "addFlatpakRepositoryButton").visible);
+        verify(findChild(dialog, "editAptSourcesButton").visible);
+        findChild(dialog, "addFlatpakRepositoryButton").clicked();
+        const addDialog = findChild(browser, "addRepositoryDialog");
+        tryCompare(addDialog, "visible", true);
+        compare(findChild(addDialog, "repositoryScope").model.join(","), "System");
+        addDialog.close();
+        dialog.close();
+        tryCompare(dialog, "visible", false);
+
+        fake.repositories = JSON.stringify({repositories: [
+            {backend: "flatpak", name: "system", title: "System", url: "https://example.invalid/system", scope: "system", enabled: true, priority: 1}
+        ], errors: [], features: {flatpak_user: true, flatpak_system: false}});
+        dialog.open();
+        const list = findChild(browser, "repositoryList");
+        tryVerify(() => list.itemAtIndex(0) !== null);
+        verify(!findChild(list.itemAtIndex(0), "repositoryEnabled").visible);
+        verify(!findChild(list.itemAtIndex(0), "removeRepositoryButton").visible);
+        dialog.close();
     }
     function test_repository_form_validates_before_submitting() {
         const dialog = findChild(browser, "addRepositoryDialog");
@@ -1640,7 +1752,7 @@ TestCase {
         browser.openView("Sources");
         const title = "A synthetic repository with a long name";
         const url = "https://example.invalid/long/path/to/a/synthetic-repository.flatpakrepo";
-        fake.repositories = JSON.stringify({repositories: [{backend: "flatpak", name: "synthetic-repo", title: title, url: url, scope: "user", enabled: true, priority: 1}], errors: []});
+        fake.repositories = JSON.stringify({repositories: [{backend: "flatpak", name: "synthetic-repo", title: title, url: url, scope: "user", enabled: true, priority: 1}], errors: [], features: {flatpak_user: true}});
         const dialog = findChild(browser, "repositoriesDialog");
         dialog.open();
         tryCompare(dialog, "visible", true);
@@ -1669,6 +1781,7 @@ TestCase {
         tryCompare(dialog, "visible", true);
         const list = findChild(browser, "repositoryList");
         tryVerify(() => list.itemAtIndex(0) !== null);
+        verify(!findChild(list.itemAtIndex(0), "repositoryEnabled").visible);
         verify(!findChild(list.itemAtIndex(0), "repositoryUrlLabel").visible);
         verify(dialog.height < 400);
         dialog.close();

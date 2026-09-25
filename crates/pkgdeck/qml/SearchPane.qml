@@ -38,6 +38,7 @@ RowLayout {
         color: pane.ink
         placeholderTextColor: pane.muted
         leftPadding: 14
+        rightPadding: 42
         background: Rectangle {
             color: pane.surface
             radius: 8
@@ -47,6 +48,18 @@ RowLayout {
         onAccepted: pane.submitted()
         Keys.onDownPressed: pane.downRequested()
         onTextChanged: pane.queryEdited()
+        ClearFieldButton {
+            objectName: "clearSearchButton"
+            anchors.right: parent.right
+            anchors.rightMargin: 5
+            anchors.verticalCenter: parent.verticalCenter
+            visible: search.text.length > 0
+            enabled: search.enabled
+            ink: pane.muted
+            hoverColor: pane.line
+            clearLabel: "Clear search"
+            onClicked: { search.clear(); search.forceActiveFocus(); }
+        }
     }
     Controls.Button {
         id: searchButton

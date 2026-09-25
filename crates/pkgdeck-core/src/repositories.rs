@@ -22,6 +22,13 @@ pub struct Repository {
 pub struct Report {
     pub repositories: Vec<Repository>,
     pub errors: Vec<String>,
+    pub features: Features,
+}
+#[derive(Default, Serialize)]
+pub struct Features {
+    pub flatpak_user: bool,
+    pub flatpak_system: bool,
+    pub apt_editor: bool,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
@@ -302,12 +309,21 @@ pub fn list_selected(
             continue;
         }
         let result = if backend == "flatpak" {
-            flatpak(transport, installation, cancel)
+            flatpak(transport, installation.clone(), cancel)
         } else {
             firmware(transport, cancel)
         };
         match result {
-            Ok(rows) => report.repositories.extend(rows),
+            Ok(rows) => {
+                if backend == "flatpak" {
+                    if installation == Scope::System {
+                        report.features.flatpak_system = transport.system_flatpak_writable();
+                    } else {
+                        report.features.flatpak_user = true;
+                    }
+                }
+                report.repositories.extend(rows);
+            }
             Err(EngineError::Execution(ExecutionError::Disabled(_))) => (),
             Err(error) => report.errors.push(format!("{label}: {error}")),
         }
@@ -393,6 +409,7 @@ pub fn list_selected(
     if !allowed("apt", &Scope::System) {
         return report;
     }
+    report.features.apt_editor = transport.repository_editor_available();
     let apt = root.join("etc/apt");
     let apt = if root == Path::new("/") {
         crate::host::Host::current().filesystem_path(&apt)

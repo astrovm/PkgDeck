@@ -1,8 +1,10 @@
 //! Policy for opt-in, read-only update checks. The caller supplies a clock and
 //! network state so scheduling can be tested without waiting or networking.
+#[cfg(target_os = "linux")]
+use crate::host::Host;
 use crate::{
     engine::PackageReport,
-    host::{Host, Runtime},
+    host::Runtime,
     package::{PackageId, UpdateAvailability},
 };
 use std::{
@@ -67,11 +69,17 @@ impl Schedule {
 }
 
 pub fn autostart_path() -> Option<PathBuf> {
-    // In Flatpak, Host::current reads the host user's XDG paths through the
-    // bridge, instead of the sandbox's private configuration directory.
-    let host = Host::current();
-    autostart_path_from(host.var("XDG_CONFIG_HOME"), host.var("HOME"))
+    #[cfg(not(target_os = "linux"))]
+    return None;
+    #[cfg(target_os = "linux")]
+    {
+        // In Flatpak, Host::current reads the host user's XDG paths through the
+        // bridge, instead of the sandbox's private configuration directory.
+        let host = Host::current();
+        autostart_path_from(host.var("XDG_CONFIG_HOME"), host.var("HOME"))
+    }
 }
+#[cfg(any(target_os = "linux", test))]
 fn autostart_path_from(config: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
     let base = config
         .filter(|p| Path::new(p).is_absolute())
@@ -252,7 +260,11 @@ mod tests {
     #[test]
     fn autostart_path_uses_absolute_user_config_and_falls_back_to_home() {
         let suffix = Path::new("autostart/io.github.astrovm.PkgDeck.desktop");
-        assert!(autostart_path().unwrap().ends_with(suffix));
+        if cfg!(target_os = "linux") {
+            assert!(autostart_path().unwrap().ends_with(suffix));
+        } else {
+            assert!(autostart_path().is_none());
+        }
         assert_eq!(
             autostart_path_from(
                 Some("/home/fixture/.config-alt".into()),

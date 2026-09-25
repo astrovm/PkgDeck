@@ -802,6 +802,13 @@ impl Host {
 }
 
 impl Host {
+    pub fn system_flatpak_available(&self) -> bool {
+        cfg!(target_os = "linux")
+            && self
+                .host_file(Path::new("/usr/bin/flatpak"), true)
+                .unwrap_or(false)
+    }
+
     fn flatpak_host_command(
         &self,
         executable: &Path,
@@ -838,20 +845,97 @@ impl Host {
         Ok(command)
     }
 
-    /// Open the distro editor as the current user; its native policy handles writes.
-    pub fn open_source_editor(&self) -> Result<(), ExecutionError> {
-        self.enabled()?;
-        let path = ["/usr/bin/software-properties-qt", "/usr/bin/software-properties-gtk"]
-            .into_iter().map(PathBuf::from).find(|path| self.host_file(path, true).unwrap_or(false))
-            .ok_or_else(|| ExecutionError::Disabled("Install software-properties-qt or software-properties-gtk to manage APT repositories".into()))?;
-        let mut child = self
-            .command(&path, &[])?
-            .spawn()
+    fn source_editor_path(
+        &self,
+        authorization: Authorization,
+    ) -> Result<Option<PathBuf>, ExecutionError> {
+        let authenticator = match authorization {
+            Authorization::Polkit => Path::new("/usr/bin/pkexec"),
+            Authorization::SudoNonInteractive => Path::new("/usr/bin/sudo"),
+        };
+        self.source_editor_path_with(
+            authenticator,
+            Path::new("/usr/bin/env"),
+            &[
+                Path::new("/usr/bin/software-properties-qt"),
+                Path::new("/usr/bin/software-properties-gtk"),
+            ],
+        )
+    }
+
+    fn source_editor_path_with(
+        &self,
+        authenticator: &Path,
+        env: &Path,
+        editors: &[&Path],
+    ) -> Result<Option<PathBuf>, ExecutionError> {
+        if !cfg!(target_os = "linux")
+            || self.resolve("apt-get")?.is_none()
+            || !self.host_file(authenticator, true)?
+            || !self.host_file(env, true)?
+            || self.var("DISPLAY").is_none()
+        {
+            return Ok(None);
+        }
+        for path in editors {
+            if self.host_file(path, true)? {
+                return Ok(Some((*path).to_owned()));
+            }
+        }
+        Ok(None)
+    }
+
+    pub fn source_editor_available(&self, authorization: Authorization) -> bool {
+        self.source_editor_path(authorization)
+            .ok()
+            .flatten()
+            .is_some()
+    }
+
+    fn source_editor_command(
+        &self,
+        authorization: Authorization,
+        editor: &Path,
+    ) -> Result<Command, ExecutionError> {
+        let authenticator = match authorization {
+            Authorization::Polkit => Path::new("/usr/bin/pkexec"),
+            Authorization::SudoNonInteractive => Path::new("/usr/bin/sudo"),
+        };
+        let mut args = match authorization {
+            Authorization::Polkit => vec!["--disable-internal-agent".into()],
+            Authorization::SudoNonInteractive => vec!["-n".into(), "--".into()],
+        };
+        args.push(Path::new("/usr/bin/env").as_os_str().to_owned());
+        for name in ["DISPLAY", "XAUTHORITY"] {
+            if let Some(value) = self.var(name) {
+                let mut assignment = OsString::from(format!("{name}="));
+                assignment.push(value);
+                args.push(assignment);
+            }
+        }
+        args.push(editor.as_os_str().to_owned());
+        self.command(authenticator, &args)
+    }
+
+    fn run_source_editor(mut command: Command) -> Result<(), ExecutionError> {
+        let status = command
+            .status()
             .map_err(|error| ExecutionError::Io(error.to_string()))?;
-        std::thread::spawn(move || {
-            let _ = child.wait();
-        });
-        Ok(())
+        if status.success() {
+            Ok(())
+        } else {
+            Err(ExecutionError::Io(format!(
+                "Software Sources exited with {status}"
+            )))
+        }
+    }
+
+    /// Run the distro editor with the authentication its desktop entry expects.
+    pub fn open_source_editor(&self, authorization: Authorization) -> Result<(), ExecutionError> {
+        let path = self.source_editor_path(authorization)?.ok_or_else(|| {
+            ExecutionError::Disabled("APT Software Sources editor is unavailable".into())
+        })?;
+        Self::run_source_editor(self.source_editor_command(authorization, &path)?)
     }
 
     /// Install one reviewed repository definition under a content-addressed
@@ -1199,16 +1283,123 @@ mod flatpak_bridge_tests {
     }
 
     #[test]
-    fn source_editor_checks_host_executable_before_launch() {
+    fn source_editor_requires_an_apt_desktop_session() {
+        let host = Host::new(Runtime::Native, BTreeMap::new());
+        assert!(!host.source_editor_available(Authorization::Polkit));
+        assert!(matches!(
+            host.open_source_editor(Authorization::Polkit),
+            Err(ExecutionError::Disabled(reason)) if reason.contains("APT Software Sources")
+        ));
+    }
+
+    #[test]
+    fn source_editor_reports_the_child_result() {
+        assert!(Host::run_source_editor(Command::new("/bin/true")).is_ok());
+        let mut rejected = Command::new("/bin/sh");
+        rejected.args(["-c", "exit 7"]);
+        assert!(matches!(
+            Host::run_source_editor(rejected),
+            Err(ExecutionError::Io(message)) if message.contains("exit status: 7")
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn source_editor_requires_real_helpers_and_chooses_an_available_editor() {
+        let directory = std::env::temp_dir().join(format!(
+            "pkgdeck-editor-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let executable = |name: &str| {
+            let path = directory.join(name);
+            std::fs::write(&path, b"#!/bin/sh\nexit 0\n").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        };
+        executable("apt-get");
+        let authenticator = executable("pkexec");
+        let env = executable("env");
+        let first = directory.join("software-properties-qt");
+        let second = executable("software-properties-gtk");
+        let host = Host::new(
+            Runtime::Native,
+            [
+                ("PATH".into(), directory.as_os_str().to_owned()),
+                ("DISPLAY".into(), ":91".into()),
+            ]
+            .into(),
+        );
+        assert_eq!(
+            host.source_editor_path_with(&authenticator, &env, &[&first, &second])
+                .unwrap(),
+            Some(second)
+        );
+        let first = executable("software-properties-qt");
+        assert_eq!(
+            host.source_editor_path_with(
+                &authenticator,
+                &env,
+                &[&first, &directory.join("missing")]
+            )
+            .unwrap(),
+            Some(first.clone())
+        );
+        std::fs::remove_file(&authenticator).unwrap();
+        assert!(host
+            .source_editor_path_with(&authenticator, &env, &[&first])
+            .unwrap()
+            .is_none());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn system_flatpak_write_availability_uses_the_host_namespace() {
         let mut host = Host::new(Runtime::Flatpak, BTreeMap::new());
         host.bridge = "/bin/true".into();
-        host.open_source_editor().unwrap();
-
+        assert_eq!(host.system_flatpak_available(), cfg!(target_os = "linux"));
         host.bridge = "/bin/false".into();
-        assert!(matches!(
-            host.open_source_editor(),
-            Err(ExecutionError::Disabled(reason)) if reason.contains("software-properties")
-        ));
+        assert!(!host.system_flatpak_available());
+    }
+
+    #[test]
+    fn source_editor_pins_privileged_helpers_despite_untrusted_path() {
+        let host = Host::new(
+            Runtime::Native,
+            [
+                ("PATH".into(), "/tmp/untrusted-bin:/usr/bin".into()),
+                ("DISPLAY".into(), ":91".into()),
+                ("XAUTHORITY".into(), "/tmp/synthetic-auth".into()),
+            ]
+            .into(),
+        );
+        for (authorization, expected_program, prefix) in [
+            (
+                Authorization::Polkit,
+                "/usr/bin/pkexec",
+                "--disable-internal-agent",
+            ),
+            (Authorization::SudoNonInteractive, "/usr/bin/sudo", "-n"),
+        ] {
+            let command = host
+                .source_editor_command(authorization, Path::new("/tmp/synthetic-editor"))
+                .unwrap();
+            assert_eq!(command.get_program(), expected_program);
+            let args = command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
+            assert_eq!(args[0], prefix);
+            assert!(args.contains(&"/usr/bin/env".into()));
+            assert!(args.contains(&"DISPLAY=:91".into()));
+            assert!(args.contains(&"XAUTHORITY=/tmp/synthetic-auth".into()));
+            assert_eq!(args.last().unwrap(), "/tmp/synthetic-editor");
+            assert!(!args.iter().any(|arg| arg.contains("/tmp/untrusted-bin")));
+        }
     }
 
     #[test]

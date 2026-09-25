@@ -18,7 +18,7 @@ Controls.ApplicationWindow {
     FileDialog {
         id: installationPicker
         title: "Open installation file"
-        nameFilters: ["Packages and sources (*.AppImage *.deb *.rpm *.pkg.tar.zst *.pkg.tar.xz *.pkg.tar.gz *.pkg.tar.bz2 *.pkg.tar.lz4 *.flatpak *.flatpakref *.flatpakrepo *.snap *.repo *.sources *.list *.ymp)"]
+        nameFilters: ["Packages and sources (" + root.supportedFilePatterns().join(" ") + ")"]
         onAccepted: root.openExternalInput(selectedFile.toString())
     }
     ThemedDialog {
@@ -80,6 +80,30 @@ Controls.ApplicationWindow {
     required property var backend
     readonly property var actionProgress: JSON.parse(backend.progress || "{}")
     readonly property var repositoryReport: JSON.parse(backend.repositories || "{}")
+    readonly property var repositoryFeatures: repositoryReport.features || ({})
+    property bool desktopAutostartSupported: Qt.platform.os !== "osx"
+    property bool systemAuthorizationSupported: Qt.platform.os !== "osx"
+    function managerAvailable(id) { return sourceInfo(id).availability_kind === "available"; }
+    function supportedFilePatterns() {
+        // AppImage is always available on Linux, including before source discovery.
+        if (sourceCatalog.length === 0)
+            return Qt.platform.os === "linux" ? ["*.AppImage"] : [];
+        let patterns = [];
+        if (managerAvailable("appimage")) patterns.push("*.AppImage");
+        if (managerAvailable("apt")) patterns.push("*.deb", "*.sources", "*.list");
+        if (managerAvailable("dnf") || managerAvailable("zypper")) patterns.push("*.rpm", "*.repo");
+        if (managerAvailable("pacman")) patterns.push("*.pkg.tar.zst", "*.pkg.tar.xz", "*.pkg.tar.gz", "*.pkg.tar.bz2", "*.pkg.tar.lz4");
+        if (managerAvailable("flatpak")) patterns.push("*.flatpak", "*.flatpakref", "*.flatpakrepo");
+        if (managerAvailable("snap")) patterns.push("*.snap");
+        if (managerAvailable("zypper")) patterns.push("*.ymp");
+        return patterns;
+    }
+    readonly property bool repositorySourcesAvailable: ["flatpak", "fwupd", "apt", "dnf", "zypper"].some((id) => managerAvailable(id))
+    function repositoryEditable(row) {
+        if (row.backend === "fwupd") return true;
+        if (row.backend !== "flatpak") return false;
+        return row.scope === "system" ? !!repositoryFeatures.flatpak_system : !!repositoryFeatures.flatpak_user;
+    }
     function repositoryChange(row, action, extra) {
         const request = Object.assign({backend: row.backend, name: row.name, scope: row.scope, action: action}, extra || {});
         backend.changeRepository(JSON.stringify(request));
@@ -1230,9 +1254,9 @@ Controls.ApplicationWindow {
                     objectName: "addPackageButton"
                     text: "Add…"
                     symbol: "package"
-                    visible: root.currentView === "Search" || root.currentView === "Sources"
+                    visible: (root.currentView === "Search" || root.currentView === "Sources") && root.supportedFilePatterns().length > 0
                     enabled: !backend.writing
-                    onClicked: { root.rememberDialogFocus(); addPackageDialog.open(); }
+                    onClicked: { backend.checkSources(); root.rememberDialogFocus(); addPackageDialog.open(); }
                     Accessible.name: "Add from file or link"
                 }
                 ActionButton {
@@ -1288,7 +1312,19 @@ Controls.ApplicationWindow {
                                 Layout.fillWidth: true
                                 placeholderText: "Find a source"
                                 Accessible.name: "Find a source"
+                                rightPadding: 40
                                 onTextChanged: sourcePopup.searchText = text
+                                ClearFieldButton {
+                                    objectName: "clearSourceSearchButton"
+                                    anchors.right: parent.right
+                                    anchors.rightMargin: 4
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    visible: pickerSearch.text.length > 0
+                                    ink: root.muted
+                                    hoverColor: root.line
+                                    clearLabel: "Clear source search"
+                                    onClicked: { pickerSearch.clear(); pickerSearch.forceActiveFocus(); }
+                                }
                             }
                             Flickable {
                                 id: sourceList
@@ -1497,6 +1533,7 @@ Controls.ApplicationWindow {
                     color: root.ink
                     placeholderTextColor: root.muted
                     leftPadding: 14
+                    rightPadding: 42
                     background: Rectangle {
                         color: root.surface
                         radius: 8
@@ -1513,6 +1550,17 @@ Controls.ApplicationWindow {
                         results.forceActiveFocus();
                         if (root.viewItems.length > 0)
                             root.choose(0);
+                    }
+                    ClearFieldButton {
+                        objectName: "clearInstalledFilterButton"
+                        anchors.right: parent.right
+                        anchors.rightMargin: 5
+                        anchors.verticalCenter: parent.verticalCenter
+                        visible: installedFilterField.text.length > 0
+                        ink: root.muted
+                        hoverColor: root.line
+                        clearLabel: "Clear installed filter"
+                        onClicked: { installedFilterField.clear(); installedFilterField.forceActiveFocus(); }
                     }
                 }
                 Controls.CheckBox {
@@ -1585,6 +1633,7 @@ Controls.ApplicationWindow {
                     SettingCheckBox {
                         objectName: "autostartSetting"
                         text: "Start in background at login"
+                        visible: root.desktopAutostartSupported
                         checked: preferences.autostart
                         enabled: preferences.backgroundMode && root.trayAvailable
                         onClicked: {
@@ -1597,11 +1646,13 @@ Controls.ApplicationWindow {
                     }
                     Controls.Label {
                         text: "Authentication"
+                        visible: root.systemAuthorizationSupported
                         color: root.ink
                         font.bold: true
                     }
                     ThemedComboBox {
                         objectName: "authorizationSetting"
+                        visible: root.systemAuthorizationSupported
                         model: ["System prompt", "Existing sudo session"]
                         currentIndex: root.useSudo ? 1 : 0
                         onActivated: {
@@ -2274,7 +2325,7 @@ Controls.ApplicationWindow {
                 }
                 ActionButton {
                     objectName: "repositoriesButton"
-                    visible: root.currentView === "Sources"
+                    visible: root.currentView === "Sources" && root.repositorySourcesAvailable
                     text: "Repositories"
                     symbol: "sources"
                     enabled: !backend.busy
@@ -2325,12 +2376,16 @@ Controls.ApplicationWindow {
                 Layout.fillWidth: true
                 spacing: 8
                 ActionButton {
+                    objectName: "addFlatpakRepositoryButton"
                     text: "Add Flatpak repository"; symbol: "install"
+                    visible: root.repositoryFeatures.flatpak_user || root.repositoryFeatures.flatpak_system || false
                     enabled: !backend.busy
                     onClicked: { root.rememberDialogFocus(); addRepositoryDialog.open(); }
                 }
                 ActionButton {
-                    text: "Software Sources"; symbol: "settings"
+                    objectName: "editAptSourcesButton"
+                    text: "Edit APT sources"; symbol: "settings"
+                    visible: root.repositoryFeatures.apt_editor || false
                     enabled: !backend.busy
                     onClicked: root.repositoryChange({backend: "apt", name: "sources", scope: "system"}, "open_editor")
                 }
@@ -2365,13 +2420,20 @@ Controls.ApplicationWindow {
                             spacing: 6
                             Controls.CheckBox {
                                 objectName: "repositoryEnabled"
+                                visible: root.repositoryEditable(modelData)
                                 checked: modelData.enabled
-                                enabled: !backend.busy && (modelData.backend === "flatpak" || modelData.backend === "fwupd")
+                                enabled: !backend.busy
                                 Accessible.name: "Enable " + (modelData.title || modelData.name)
                                 onClicked: {
                                     root.repositoryChange(modelData, "set_enabled", {enabled: checked});
                                     checked = Qt.binding(() => modelData.enabled);
                                 }
+                            }
+                            Controls.Label {
+                                visible: !root.repositoryEditable(modelData)
+                                text: modelData.enabled ? "Enabled" : "Disabled"
+                                color: root.muted
+                                font.pointSize: root.font.pointSize * 0.9
                             }
                             ColumnLayout {
                                 Layout.fillWidth: true
@@ -2410,26 +2472,20 @@ Controls.ApplicationWindow {
                                 font.pointSize: root.font.pointSize * 0.9
                             }
                             ActionButton {
-                                text: ""; symbol: "up"; visible: modelData.backend === "flatpak"
+                                text: ""; symbol: "up"; visible: modelData.backend === "flatpak" && root.repositoryEditable(modelData)
                                 Accessible.name: "Increase repository priority"; enabled: !backend.busy && modelData.priority < 9999
                                 tooltipText: Accessible.name
                                 onClicked: root.repositoryChange(modelData, "set_priority", {priority: modelData.priority + 1})
                             }
                             ActionButton {
-                                text: ""; symbol: "down"; visible: modelData.backend === "flatpak"
+                                text: ""; symbol: "down"; visible: modelData.backend === "flatpak" && root.repositoryEditable(modelData)
                                 Accessible.name: "Decrease repository priority"; enabled: !backend.busy && modelData.priority > 0
                                 tooltipText: Accessible.name
                                 onClicked: root.repositoryChange(modelData, "set_priority", {priority: modelData.priority - 1})
                             }
                             ActionButton {
-                                text: ""; symbol: "settings"; visible: modelData.backend === "apt"
-                                Accessible.name: "Edit software sources"; enabled: !backend.busy
-                                tooltipText: Accessible.name
-                                onClicked: root.repositoryChange({backend: "apt", name: "sources", scope: "system"}, "open_editor")
-                            }
-                            ActionButton {
                                 objectName: "removeRepositoryButton"
-                                text: ""; symbol: "remove"; visible: modelData.backend === "flatpak"
+                                text: ""; symbol: "remove"; visible: modelData.backend === "flatpak" && root.repositoryEditable(modelData)
                                 Accessible.name: "Remove " + modelData.name; enabled: !backend.busy
                                 tooltipText: Accessible.name
                                 onClicked: root.repositoryChange(modelData, "remove")
@@ -2468,7 +2524,7 @@ Controls.ApplicationWindow {
             repositoryName.forceActiveFocus();
         }
         onClosed: root.restoreDialogFocus()
-        onAccepted: root.repositoryChange({backend: "flatpak", name: repositoryName.text.trim(), scope: repositoryScope.currentIndex === 0 ? "user" : "system"}, "add", {url: repositoryUrl.text.trim()})
+        onAccepted: root.repositoryChange({backend: "flatpak", name: repositoryName.text.trim(), scope: repositoryScope.currentText === "System" ? "system" : "user"}, "add", {url: repositoryUrl.text.trim()})
         contentItem: ColumnLayout {
             Controls.TextField { id: repositoryName; objectName: "repositoryName"; placeholderText: "Name"; Accessible.name: "Repository name"; Layout.fillWidth: true }
             Controls.Label {
@@ -2488,7 +2544,13 @@ Controls.ApplicationWindow {
                 wrapMode: Text.WordWrap
                 Layout.fillWidth: true
             }
-            ThemedComboBox { id: repositoryScope; objectName: "repositoryScope"; model: ["User", "System"]; Accessible.name: "Installation scope"; Layout.fillWidth: true }
+            ThemedComboBox {
+                id: repositoryScope
+                objectName: "repositoryScope"
+                model: [root.repositoryFeatures.flatpak_user ? "User" : "", root.repositoryFeatures.flatpak_system ? "System" : ""].filter(Boolean)
+                Accessible.name: "Installation scope"
+                Layout.fillWidth: true
+            }
         }
     }
     ThemedDialog {
