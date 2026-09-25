@@ -63,6 +63,41 @@ static std::string lower(const std::string &s) {
   }
   return folded;
 }
+// Modern indexes keep only a checksum in Packages; the long text lives in
+// Translation-* files, which apt-cache show reads the same way. Only details
+// pays for the extra lookup. Returns Debian's folded text unfolded: one
+// leading space removed per line and " ." as an empty line.
+static std::string description(pkgRecords &records,
+                               pkgCache::VerIterator version,
+                               const std::string &mode) {
+  std::string text;
+  if (mode == "details") {
+    auto translated = version.TranslatedDescription();
+    if (!translated.end())
+      text = records.Lookup(translated.FileList()).LongDesc();
+  }
+  if (text.empty())
+    text = records.Lookup(version.FileList()).LongDesc();
+  std::string unfolded;
+  size_t start = 0;
+  while (start <= text.size()) {
+    size_t end = text.find('\n', start);
+    if (end == std::string::npos)
+      end = text.size();
+    std::string line = text.substr(start, end - start);
+    if (start > 0) {
+      if (!line.empty() && line[0] == ' ')
+        line.erase(0, 1);
+      if (line == ".")
+        line.clear();
+      unfolded += '\n';
+    }
+    unfolded += line;
+    start = end + 1;
+  }
+  return unfolded;
+}
+
 int main(int argc, char **argv) {
   if (argc != 4) {
     std::cerr << "Usage: pkgdeck-apt-query detect|search|installed|details "
@@ -130,6 +165,8 @@ int main(int argc, char **argv) {
     const std::string name = item.Name(), architecture = version.Arch();
     auto &record = records.Lookup(version.FileList());
     const std::string summary = record.ShortDesc();
+    const std::string homepage = record.Homepage();
+    const std::string depends = record.RecordField("Depends");
     if (mode == "search" &&
         lower(name + " " + summary).find(needle) == std::string::npos)
       continue;
@@ -152,11 +189,10 @@ int main(int argc, char **argv) {
               << json(upgradable        ? "available"
                       : installed.end() ? "unknown"
                                         : "current")
-              << "},\"description\":" << json(record.LongDesc())
+              << "},\"description\":" << json(description(records, version, mode))
               << ",\"homepage\":"
-              << (record.Homepage().empty() ? "null" : json(record.Homepage()))
+              << (homepage.empty() ? "null" : json(homepage))
               << ",\"dependencies\":[";
-    auto depends = record.RecordField("Depends");
     if (!depends.empty())
       std::cout << json(depends);
     std::cout << "]}";

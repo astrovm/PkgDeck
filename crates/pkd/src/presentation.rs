@@ -161,15 +161,12 @@ pub fn error_text(error: &Value) -> String {
                         .as_array()
                         .into_iter()
                         .flatten()
-                        .map(|failure| {
-                            format!(
-                                "{}: {}",
-                                field(failure, "backend"),
-                                error_text(&failure["error"])
-                            )
-                        })
+                        .map(failure_text)
                         .collect();
-                    format!("Some sources didn't answer. {}", failed.join(" "))
+                    format!(
+                        "Some sources didn't answer, so PkgDeck won't guess which package you meant. {} Try again, or pick a source with --from.",
+                        failed.join(" ")
+                    )
                 }
                 "Ambiguous" => format!(
                     "{} packages have this name. Pick one with --from, --arch, or --scope.",
@@ -220,7 +217,16 @@ fn execution_text(error: &Value) -> String {
 }
 fn failure_text(failure: &Value) -> String {
     match failure["backend"].as_str() {
-        Some(backend) => format!("{}: {}", clean(backend), error_text(&failure["error"])),
+        Some(backend) => {
+            let text = error_text(&failure["error"]);
+            // Many errors already start with their source; don't repeat it.
+            if text.starts_with(&format!("{backend}:")) || text.starts_with(&format!("{backend} "))
+            {
+                text
+            } else {
+                format!("{}: {text}", clean(backend))
+            }
+        }
         None => value(failure),
     }
 }
@@ -422,6 +428,15 @@ fn table(headers: &[&str], rows: &[Vec<(String, Style)>], width: usize, paint: P
 fn failure_line(paint: Paint, detail: &str) -> String {
     format!("\n{} {detail}", paint.yellow("!"))
 }
+/// "already_installed" reads as "Already installed".
+fn humanize(token: &str) -> String {
+    let text = token.replace('_', " ");
+    let mut chars = text.chars();
+    chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
+}
 fn scope_label(scope: &Value) -> Option<&'static str> {
     match scope {
         Value::String(s) if s == "system" => Some("system"),
@@ -569,8 +584,11 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
         }
     } else if let Some(export) = data.get("manifest_export") {
         output.push_str(&paint.green(&format!(
-            "Exported {} packages to {}",
-            value(&export["packages"]),
+            "Exported {} to {}",
+            match export["packages"].as_u64() {
+                Some(1) => "1 package".to_string(),
+                count => format!("{} packages", count.unwrap_or_default()),
+            },
             value(&export["path"])
         )));
     } else if let Some(preview) = data.get("manifest_preview") {
@@ -582,7 +600,7 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
                 vec![
                     (value(&entry["package"]["name"]), Paint::bold as Style),
                     (value(&entry["package"]["backend"]), Paint::dim as Style),
-                    (value(&entry["status"]), plain as Style),
+                    (humanize(&value(&entry["status"])), plain as Style),
                     (value(&entry["reason"]), Paint::dim as Style),
                 ]
             })
@@ -650,7 +668,11 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
         ));
     } else if let Some(report) = data.get("audit") {
         if let Some(groups) = report["groups"].as_array() {
-            output.push_str(&paint.bold(&format!("{} known duplicate groups\n", groups.len())));
+            output.push_str(&paint.bold(&match groups.len() {
+                0 => "No apps installed more than once.\n".to_string(),
+                1 => "1 app installed more than once\n".to_string(),
+                count => format!("{count} apps installed more than once\n"),
+            }));
             for group in groups {
                 output.push_str(&format!("\n{}\n", paint.bold(&value(&group["key"]))));
                 if let Some(copies) = group["copies"].as_array() {
@@ -667,10 +689,11 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
             }
         }
         if let Some(leftovers) = report["leftovers"].as_array() {
-            output.push_str(&paint.bold(&format!(
-                "\n{} manager-reported residual files\n",
-                leftovers.len()
-            )));
+            output.push_str(&paint.bold(&match leftovers.len() {
+                0 => "\nNo leftover files from removed packages.\n".to_string(),
+                1 => "\n1 leftover file from removed packages\n".to_string(),
+                count => format!("\n{count} leftover files from removed packages\n"),
+            }));
             for row in leftovers {
                 output.push_str(&format!(
                     "  {} · {} · {} · {} bytes\n",
@@ -735,7 +758,10 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
                         },
                     ),
                     (value(&r["backend"]), Paint::dim as Style),
-                    (value(&r["scope"]), Paint::dim as Style),
+                    (
+                        scope_label(&r["scope"]).map_or_else(|| value(&r["scope"]), str::to_string),
+                        Paint::dim as Style,
+                    ),
                     (value(&r["url"]), Paint::dim as Style),
                 ]
             })
@@ -752,8 +778,12 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
             }
         }
     } else if let Some(sources) = data["sources"].as_array() {
+        // Usable sources first; the rest explain why they are unavailable.
+        let available = |s: &&Value| value(&s["availability"]) == "available";
         let rows = sources
             .iter()
+            .filter(available)
+            .chain(sources.iter().filter(|s| !available(s)))
             .map(|s| {
                 let availability = value(&s["availability"]);
                 let (status, detail) = match availability.split_once(": ") {
@@ -814,13 +844,26 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
             value(data.get("message").unwrap_or(&data["error"]))
         ));
         if let Some(matches) = data["error"]["Ambiguous"].as_array() {
-            for id in matches {
+            // Each match with the flag that picks it.
+            let flags: Vec<_> = matches
+                .iter()
+                .map(|id| format!("--from {}", value(&id["backend"])))
+                .collect();
+            let width = flags.iter().map(|flag| flag.width()).max().unwrap_or(0);
+            for (id, flag) in matches.iter().zip(flags) {
+                let mut parts = vec![value(&id["name"])];
+                if matches!(
+                    id["backend"].as_str(),
+                    Some("apt" | "dnf" | "pacman" | "zypper")
+                ) {
+                    parts.push(value(&id["architecture"]));
+                }
+                parts.extend(scope_label(&id["scope"]).map(str::to_string));
                 output.push_str(&format!(
-                    "\n  {} · {} · {} · {}",
-                    value(&id["backend"]),
-                    value(&id["name"]),
-                    value(&id["architecture"]),
-                    value(&id["scope"])
+                    "\n  {}{}  {}",
+                    paint.bold(&flag),
+                    " ".repeat(width - flag.width()),
+                    parts.join(" · ")
                 ));
             }
         }
@@ -857,7 +900,15 @@ mod tests {
             false,
         );
         assert!(preview.contains("org.example.App"));
-        assert!(preview.contains("ambiguous"));
+        assert!(preview.contains("Ambiguous"));
+        assert_eq!(humanize("already_installed"), "Already installed");
+        assert_eq!(humanize(""), "");
+        let one = human(
+            &json!({"manifest_export":{"path":"one.json", "packages":1}}),
+            100,
+            false,
+        );
+        assert!(one.contains("Exported 1 package to one.json"));
         assert!(preview.contains("Review flathub"));
     }
     #[test]
@@ -933,8 +984,24 @@ mod tests {
             80,
             false,
         );
-        assert!(ambiguous.contains("apt · fixture · amd64 · system"));
-        assert!(ambiguous.contains("apt · fixture · i386 · system"));
+        assert!(ambiguous.contains("--from apt  fixture · amd64 · system"));
+        assert!(ambiguous.contains("--from apt  fixture · i386 · system"));
+        let mixed = human(
+            &json!({"error":{"Ambiguous":[
+                {"backend":"apt","name":"htop","architecture":"amd64","scope":"system"},
+                {"backend":"pipx","name":"htop","architecture":"x86_64","scope":{"environment":{"path":"/venv"}}}
+            ]},"message":"2 packages match"}),
+            80,
+            false,
+        );
+        assert!(
+            mixed.contains("--from apt   htop · amd64 · system"),
+            "{mixed}"
+        );
+        assert!(
+            mixed.contains("--from pipx  htop") && !mixed.contains("/venv"),
+            "{mixed}"
+        );
     }
     #[test]
     fn inspection_and_audit_render_exact_read_only_evidence() {
@@ -951,7 +1018,15 @@ mod tests {
             "leftovers":[{"manager":"apt","native_name":"old-fixture","path":"/etc/old.conf","size_bytes":4}],
             "data_note":"Unknown data remains unknown."}});
         let output = human(&audited, 100, false);
-        assert!(output.contains("1 known duplicate groups"));
+        assert!(output.contains("1 app installed more than once"));
+        assert!(output.contains("1 leftover file from removed packages"));
+        let empty = human(
+            &json!({"audit":{"groups":[],"leftovers":[],"data_note":"Note."}}),
+            100,
+            false,
+        );
+        assert!(empty.contains("No apps installed more than once."));
+        assert!(empty.contains("No leftover files from removed packages."));
         assert!(output.contains("/etc/old.conf"));
         assert!(output.contains("Unknown data remains unknown."));
     }
@@ -1114,7 +1189,7 @@ mod tests {
             ),
             (
                 json!({"Incomplete": [{"backend": "apt", "error": {"Execution": "TimedOut"}}]}),
-                "Some sources didn't answer. apt: The package manager took too long",
+                "won't guess which package you meant. apt: The package manager took too long to answer. Try again, or pick a source with --from.",
             ),
             (json!({"Ambiguous": [{}, {}]}), "2 packages have this name"),
             (json!({"UnknownBackend": "x"}), "UnknownBackend: x"),
@@ -1164,6 +1239,30 @@ mod tests {
             "failures": [{"backend": "dnf", "error": {"Execution": "TimedOut"}}]});
         assert!(human(&inspection, 80, false).contains("! dnf: The package manager took too long"));
         assert_eq!(error_text(&json!({"Execution": "Disabled"})), "Disabled");
+    }
+    #[test]
+    fn sources_list_usable_ones_first_and_errors_name_their_source_once() {
+        let sources = json!({"sources": [
+            {"backend": "bun", "availability": {"Ok": {"unavailable": "Bun not found"}}, "capabilities": []},
+            {"backend": "apt", "availability": {"Ok": "available"}, "capabilities": ["search"]}
+        ]});
+        let output = human(&sources, 120, false);
+        assert!(
+            output.find("apt").unwrap() < output.find("bun").unwrap(),
+            "{output}"
+        );
+        let failure = json!({"backend": "flatpak", "error": {"InvalidResponse": {"backend": "flatpak", "reason": "bad"}}});
+        assert_eq!(failure_text(&failure), "flatpak: bad");
+        let failure = json!({"backend": "dnf", "error": {"Unavailable": {"backend": "dnf", "reason": "missing"}}});
+        assert_eq!(failure_text(&failure), "dnf isn't available: missing");
+        let repositories = json!({"repositories": [
+            {"title": "Flathub", "backend": "flatpak", "scope": {"user": {"uid": 1000}}, "enabled": true, "url": "https://dl.flathub.org/repo/"}
+        ]});
+        let output = human(&repositories, 120, false);
+        assert!(
+            output.contains("user") && !output.contains("uid"),
+            "{output}"
+        );
     }
     #[test]
     fn batch_summaries_count_what_happened() {

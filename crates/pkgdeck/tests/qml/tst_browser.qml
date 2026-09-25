@@ -19,6 +19,9 @@ TestCase {
         property string rows: "[]"
         property string details: "{}"
         property string status: "Ready"
+        property string notice: "{}"
+        property int noticeDismissals: 0
+        function dismissNotice() { notice = "{}"; noticeDismissals++; }
         property string progress: "{}"
         property string confirmation: ""
         property string confirmation_data: "{}"
@@ -120,6 +123,8 @@ TestCase {
         fake.rows = "[]";
         fake.details = "{}";
         fake.status = "Ready";
+        fake.notice = "{}";
+        fake.noticeDismissals = 0;
         fake.progress = "{}";
         fake.confirmation = "";
         fake.confirmation_data = "{}";
@@ -1062,6 +1067,66 @@ TestCase {
         verify(notice.visible);
         fake.busy = false;
         tryCompare(notice, "visible", false);
+    }
+    function test_change_results_show_a_banner() {
+        browser.openView("Search");
+        const banner = findChild(browser, "changeNotice");
+        verify(!banner.visible);
+        fake.notice = JSON.stringify({kind: "error", title: "Install htop · apt failed",
+            detail: "PkgDeck couldn't get administrator access.", action: "settings"});
+        verify(banner.visible);
+        compare(findChild(browser, "changeNoticeTitle").text, "Install htop · apt failed");
+        compare(findChild(browser, "changeNoticeDetail").text, "PkgDeck couldn't get administrator access.");
+        // Failures stay until dismissed and can open Settings.
+        wait(50);
+        verify(banner.visible);
+        mouseClick(findChild(browser, "changeNoticeSettings"));
+        compare(browser.currentView, "Settings");
+        verify(!banner.visible);
+        browser.openView("Search");
+        mouseClick(findChild(browser, "dismissChangeNotice"));
+        compare(fake.noticeDismissals, 1);
+        verify(!banner.visible);
+        // Success needs no action and clears itself.
+        fake.notice = JSON.stringify({kind: "success", title: "Install htop · apt finished"});
+        verify(banner.visible);
+        verify(!findChild(browser, "changeNoticeSettings").visible);
+        verify(!findChild(browser, "changeNoticeDetail").visible);
+        tryCompare(fake, "noticeDismissals", 2, 6000);
+    }
+    function test_empty_search_names_the_sources_it_searches() {
+        browser.openView("Search");
+        const hint = findChild(browser, "searchHint");
+        fake.source_catalog = JSON.stringify([
+            {source: "apt", availability_kind: "available", capabilities: ["search"]},
+            {source: "flatpak", availability_kind: "available", capabilities: ["search"]},
+            {source: "fwupd", availability_kind: "available", capabilities: ["upgrade"]},
+            {source: "dnf", availability_kind: "unavailable", capabilities: ["search"]}
+        ]);
+        verify(hint.visible);
+        compare(hint.text, "Searches APT and Flatpak.");
+        fake.source_catalog = JSON.stringify([{source: "apt", availability_kind: "available", capabilities: ["search"]}]);
+        compare(hint.text, "Searches APT.");
+        fake.source_catalog = JSON.stringify(["apt", "flatpak", "npm"].map((id) => ({source: id, availability_kind: "available", capabilities: ["search"]})));
+        compare(hint.text, "Searches APT, Flatpak, and npm.");
+        fake.source_catalog = JSON.stringify([{source: "fwupd", availability_kind: "available", capabilities: ["upgrade"]}]);
+        compare(hint.text, "No enabled source can search. Turn one on in Sources.");
+        findChild(browser, "searchField").text = "vim";
+        verify(!hint.visible);
+    }
+    function test_activity_results_read_as_states() {
+        const pane = findChild(browser, "activityPane");
+        compare(pane.result({outcomes: ["failed"]}), "Failed");
+        compare(pane.result({outcomes: ["finished"]}), "Completed");
+        compare(pane.result({outcomes: ["cancelled"]}), "Cancelled");
+        compare(pane.result({outcomes: ["finished", "finished"]}), "All 2 completed");
+        compare(pane.result({outcomes: ["finished", "failed", "cancelled"]}), "1 completed · 1 failed · 1 cancelled");
+        compare(pane.result({outcomes: ["failed", "failed"]}), "2 failed");
+        compare(pane.target(undefined), "Change");
+        // A running entry without operations must not throw.
+        fake.activity = JSON.stringify([{id: 7, state: "running", started_at: 1, operations: [], outcomes: []}]);
+        browser.openView("Activity");
+        wait(30);
     }
     function test_activity_uses_short_readable_actions() {
         browser.openView("Activity");

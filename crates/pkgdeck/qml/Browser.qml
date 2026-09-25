@@ -387,6 +387,18 @@ Controls.ApplicationWindow {
             return "Containers";
         return "Developer tools";
     }
+    // "Searches APT, Flatpak, and npm." for the empty Search page.
+    function searchHint() {
+        const names = effectiveSources("Search")
+            .filter((id) => sourceInfo(id).availability_kind === "available" && sourceInfo(id).capabilities.indexOf("search") >= 0)
+            .map((id) => sourceDisplayName(id));
+        if (names.length === 0)
+            return sourceCatalog.length ? "No enabled source can search. Turn one on in Sources." : "";
+        const list = names.length === 1 ? names[0]
+            : names.length === 2 ? names[0] + " and " + names[1]
+            : names.slice(0, -1).join(", ") + ", and " + names[names.length - 1];
+        return "Searches " + list + ".";
+    }
     function sourceSupportsView(id) {
         const capability = ({"Search":"search", "Installed":"installed", "Updates":"upgrade", "Clean":"clean"})[currentView];
         return !capability || sourceInfo(id).capabilities.indexOf(capability) >= 0;
@@ -1779,6 +1791,16 @@ Controls.ApplicationWindow {
                     }
                 }
             }
+            Controls.Label {
+                objectName: "searchHint"
+                visible: root.currentView === "Search" && searchPane.text.trim().length === 0 && !root.openingInput
+                    && root.viewItems.length === 0 && text.length > 0
+                text: root.searchHint()
+                color: root.muted
+                wrapMode: Text.WordWrap
+                Layout.fillWidth: true
+                Layout.leftMargin: 4
+            }
             RowLayout {
                 objectName: "openingNotice"
                 visible: root.openingInput
@@ -2132,6 +2154,86 @@ Controls.ApplicationWindow {
                         }
                     }
                     Item { Layout.preferredHeight: 4 }
+                }
+            }
+            // The outcome of the last change. Failures stay until dismissed;
+            // success fades on its own.
+            Rectangle {
+                id: noticeBanner
+                objectName: "changeNotice"
+                readonly property var notice: JSON.parse(backend.notice || "{}")
+                readonly property color toneColor: notice.kind === "error" ? root.danger : notice.kind === "success" ? root.success : root.muted
+                visible: notice.title !== undefined && root.currentView !== "Settings"
+                Layout.fillWidth: true
+                implicitHeight: noticeRow.implicitHeight + 18
+                radius: root.controlRadius + 1
+                color: root.tint(toneColor, root.dark ? 0.12 : 0.08)
+                border.color: root.tint(toneColor, 0.35)
+                opacity: visible ? 1 : 0
+                Behavior on opacity { NumberAnimation { duration: root.revealDuration } }
+                onNoticeChanged: {
+                    if (notice.kind === "success" || notice.kind === "info")
+                        noticeTimer.restart();
+                    else
+                        noticeTimer.stop();
+                }
+                Timer {
+                    id: noticeTimer
+                    interval: 4000
+                    onTriggered: backend.dismissNotice()
+                }
+                RowLayout {
+                    id: noticeRow
+                    anchors.fill: parent
+                    anchors.leftMargin: 12
+                    anchors.rightMargin: 8
+                    spacing: 10
+                    DeckIcon {
+                        name: noticeBanner.notice.kind === "error" ? "warning" : "installed"
+                        ink: noticeBanner.toneColor
+                        Layout.preferredWidth: 18
+                        Layout.preferredHeight: 18
+                        Layout.alignment: Qt.AlignTop
+                        Layout.topMargin: 2
+                    }
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: 2
+                        Controls.Label {
+                            objectName: "changeNoticeTitle"
+                            text: noticeBanner.notice.title || ""
+                            textFormat: Text.PlainText
+                            color: root.ink
+                            font.weight: Font.DemiBold
+                            wrapMode: Text.WordWrap
+                            Layout.fillWidth: true
+                        }
+                        Controls.Label {
+                            objectName: "changeNoticeDetail"
+                            text: noticeBanner.notice.detail || ""
+                            textFormat: Text.PlainText
+                            visible: text.length > 0
+                            color: root.muted
+                            wrapMode: Text.WordWrap
+                            Layout.fillWidth: true
+                        }
+                    }
+                    ActionButton {
+                        objectName: "changeNoticeSettings"
+                        visible: noticeBanner.notice.action === "settings" && root.systemAuthorizationSupported
+                        text: "Settings"
+                        symbol: "settings"
+                        flat: true
+                        onClicked: root.openView("Settings")
+                    }
+                    ClearFieldButton {
+                        objectName: "dismissChangeNotice"
+                        ink: root.muted
+                        hoverColor: root.line
+                        clearLabel: "Dismiss"
+                        Layout.alignment: Qt.AlignTop
+                        onClicked: backend.dismissNotice()
+                    }
                 }
             }
             Rectangle {
@@ -2547,7 +2649,9 @@ Controls.ApplicationWindow {
                                 }
                                 ColumnLayout {
                                     visible: !root.compact && (modelData.kind !== "source" || root.showUnavailableSources)
+                                    // Fixed width keeps every summary aligned, elided or not.
                                     Layout.preferredWidth: root.versionWidth
+                                    Layout.minimumWidth: root.versionWidth
                                     Layout.maximumWidth: root.versionWidth
                                     spacing: 3
                                     // Updates show the new version, with the installed one below.
@@ -2576,6 +2680,8 @@ Controls.ApplicationWindow {
                                 Controls.Label {
                                     visible: !root.compact && modelData.kind !== "source"
                                     Layout.fillWidth: true
+                                    // Long text must not squeeze the fixed columns.
+                                    Layout.preferredWidth: 0
                                     text: modelData.summary || ""
                                     color: root.muted
                                     textFormat: Text.PlainText

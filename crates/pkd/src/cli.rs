@@ -522,7 +522,14 @@ pub fn dispatch_with(
         };
         events(Event::Progress {
             operation: operation.clone(),
-            progress: Progress::Message(format!("APT transaction:\n{}", plan.summary())),
+            // Shown under "Update all apt packages"; empty sections add nothing.
+            progress: Progress::Message(
+                plan.summary()
+                    .lines()
+                    .filter(|line| !line.ends_with(": none"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
         });
         if !plan.removals.is_empty()
             && !matches!(
