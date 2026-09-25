@@ -85,6 +85,9 @@ Controls.ApplicationWindow {
     property bool systemAuthorizationSupported: Qt.platform.os !== "osx"
     function managerAvailable(id) { return sourceInfo(id).availability_kind === "available"; }
     function supportedFilePatterns() {
+        // AppImage is always available on Linux, including before source discovery.
+        if (sourceCatalog.length === 0)
+            return Qt.platform.os === "linux" ? ["*.AppImage"] : [];
         let patterns = [];
         if (managerAvailable("appimage")) patterns.push("*.AppImage");
         if (managerAvailable("apt")) patterns.push("*.deb", "*.sources", "*.list");
@@ -1253,7 +1256,7 @@ Controls.ApplicationWindow {
                     symbol: "package"
                     visible: (root.currentView === "Search" || root.currentView === "Sources") && root.supportedFilePatterns().length > 0
                     enabled: !backend.writing
-                    onClicked: { root.rememberDialogFocus(); addPackageDialog.open(); }
+                    onClicked: { backend.checkSources(); root.rememberDialogFocus(); addPackageDialog.open(); }
                     Accessible.name: "Add from file or link"
                 }
                 ActionButton {

@@ -917,19 +917,25 @@ impl Host {
         self.command(authenticator, &args)
     }
 
-    /// Launch the distro editor with the authentication its desktop entry expects.
+    fn run_source_editor(mut command: Command) -> Result<(), ExecutionError> {
+        let status = command
+            .status()
+            .map_err(|error| ExecutionError::Io(error.to_string()))?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(ExecutionError::Io(format!(
+                "Software Sources exited with {status}"
+            )))
+        }
+    }
+
+    /// Run the distro editor with the authentication its desktop entry expects.
     pub fn open_source_editor(&self, authorization: Authorization) -> Result<(), ExecutionError> {
         let path = self.source_editor_path(authorization)?.ok_or_else(|| {
             ExecutionError::Disabled("APT Software Sources editor is unavailable".into())
         })?;
-        let mut child = self
-            .source_editor_command(authorization, &path)?
-            .spawn()
-            .map_err(|error| ExecutionError::Io(error.to_string()))?;
-        std::thread::spawn(move || {
-            let _ = child.wait();
-        });
-        Ok(())
+        Self::run_source_editor(self.source_editor_command(authorization, &path)?)
     }
 
     /// Install one reviewed repository definition under a content-addressed
@@ -1283,6 +1289,17 @@ mod flatpak_bridge_tests {
         assert!(matches!(
             host.open_source_editor(Authorization::Polkit),
             Err(ExecutionError::Disabled(reason)) if reason.contains("APT Software Sources")
+        ));
+    }
+
+    #[test]
+    fn source_editor_reports_the_child_result() {
+        assert!(Host::run_source_editor(Command::new("/bin/true")).is_ok());
+        let mut rejected = Command::new("/bin/sh");
+        rejected.args(["-c", "exit 7"]);
+        assert!(matches!(
+            Host::run_source_editor(rejected),
+            Err(ExecutionError::Io(message)) if message.contains("exit status: 7")
         ));
     }
 

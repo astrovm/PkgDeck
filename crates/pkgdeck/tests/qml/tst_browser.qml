@@ -1646,6 +1646,28 @@ TestCase {
         compare(request.url, "https://example.invalid/new.flatpakrepo");
         compare(request.scope, "system");
     }
+    function test_add_is_available_before_source_discovery() {
+        fake.source_catalog = "[]";
+        const add = findChild(browser, "addPackageButton");
+        browser.openView("Search");
+        compare(fake.sourceChecks, 0);
+        if (Qt.platform.os !== "linux") {
+            verify(!add.visible);
+            compare(browser.supportedFilePatterns().length, 0);
+            return;
+        }
+        verify(add.visible);
+        compare(browser.supportedFilePatterns().join(" "), "*.AppImage");
+        clickDelegate(add);
+        compare(fake.sourceChecks, 1);
+        fake.source_catalog = JSON.stringify([
+            {source: "appimage", availability_kind: "available", capabilities: []},
+            {source: "apt", availability_kind: "available", capabilities: []}
+        ]);
+        verify(add.visible);
+        verify(browser.supportedFilePatterns().indexOf("*.deb") >= 0);
+        findChild(browser, "addPackageDialog").close();
+    }
     function test_platform_actions_only_show_supported_equivalents() {
         browser.openView("Sources");
         fake.source_catalog = JSON.stringify([
