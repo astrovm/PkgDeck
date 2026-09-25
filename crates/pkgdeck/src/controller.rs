@@ -188,6 +188,7 @@ enum Job {
     Load(String, String),
     BackgroundUpdates(Vec<String>),
     RetrySource(String, String, String),
+    RetryFailedUpdates(Vec<String>),
     Details(PackageId),
     PlanOperation(Operation),
     PlanCleanAll(Vec<Operation>),
@@ -229,6 +230,7 @@ enum Payload {
     Packages(PackageReport),
     BackgroundUpdates(PackageReport),
     RetryPackages(String, PackageReport),
+    RetryFailedUpdates(Vec<String>, PackageReport),
     RetryCleanup(String, CleanupReport),
     RetrySources(String, Vec<Source>),
     Sources(Vec<Source>),
@@ -467,6 +469,11 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
                 Ok(Payload::RetryPackages(source, report))
             }
         }
+        Job::RetryFailedUpdates(sources) => {
+            let mut report = engine.installed(cancel);
+            filter_updates(&mut report);
+            Ok(Payload::RetryFailedUpdates(sources, report))
+        }
         Job::Details(id) => engine
             .details(&id, cancel)
             .map(|d| Payload::Details(Box::new(d))),
@@ -601,7 +608,7 @@ pub struct Controller {
     cleanup: Vec<CleanupItem>,
     failures: Vec<BackendFailure>,
     last_success: BTreeMap<String, u64>,
-    retrying_source: Option<String>,
+    retrying_sources: Option<Vec<String>>,
     detail_cache: BTreeMap<PackageId, QString>,
     sources: Vec<Source>,
     pending: Option<Job>,
@@ -654,7 +661,7 @@ impl Default for Controller {
             cleanup: vec![],
             failures: vec![],
             last_success: BTreeMap::new(),
-            retrying_source: None,
+            retrying_sources: None,
             detail_cache: BTreeMap::new(),
             sources: vec![],
             pending: None,
@@ -736,6 +743,7 @@ fn engine_source(job: &Job, filter: &[String]) -> Vec<String> {
     match job {
         Job::OpenInput(_) | Job::ImportRepository(_) => vec![],
         Job::RetrySource(_, _, source) => vec![source.clone()],
+        Job::RetryFailedUpdates(sources) => sources.clone(),
         Job::PlanOperation(operation) => vec![operation.backend().into()],
         Job::Write(operation, _) => vec![operation.backend().into()],
         Job::BackgroundUpdates(sources) => sources.clone(),
@@ -866,6 +874,39 @@ fn failure_kind(error: &EngineError) -> &'static str {
 }
 fn read_failed(failure: &BackendFailure) -> bool {
     !matches!(failure.error, EngineError::Unsupported { .. })
+}
+fn merge_retried_packages(
+    current: &[Package],
+    failures: &[BackendFailure],
+    successful_sources: Vec<String>,
+    retried: &[String],
+    retry: PackageReport,
+) -> PackageReport {
+    let mut packages: Vec<_> = current
+        .iter()
+        .filter(|package| !retried.contains(&package.id.backend))
+        .cloned()
+        .collect();
+    packages.extend(retry.packages);
+    packages.sort_by(|a, b| a.id.cmp(&b.id));
+    let mut failures: Vec<_> = failures
+        .iter()
+        .filter(|failure| !retried.contains(&failure.backend))
+        .cloned()
+        .collect();
+    failures.extend(retry.failures);
+    let mut successful_sources: Vec<_> = successful_sources
+        .into_iter()
+        .filter(|source| !retried.contains(source))
+        .collect();
+    successful_sources.extend(retry.successful_sources);
+    successful_sources.sort();
+    successful_sources.dedup();
+    PackageReport {
+        packages,
+        failures,
+        successful_sources,
+    }
 }
 /// Details for a failed source row. Served from the stored report without a
 /// backend roundtrip: the query already failed, re-querying cannot help.
@@ -1585,11 +1626,11 @@ impl ffi::PackageController {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        let retried = self.rust().retrying_source.clone();
+        let retried = self.rust().retrying_sources.clone();
         for source in report
             .successful_sources
             .iter()
-            .filter(|source| retried.as_ref().is_none_or(|id| id == *source))
+            .filter(|source| retried.as_ref().is_none_or(|ids| ids.contains(source)))
         {
             self.as_mut()
                 .rust_mut()
@@ -1865,13 +1906,8 @@ impl ffi::PackageController {
                     self.as_mut().rust_mut().sources.clear();
                     self.as_mut().rust_mut().failures.clear();
                     self.as_mut().apply(Ok(payload));
-                    let upgradable = view == "Updates"
-                        && self
-                            .rust()
-                            .failures
-                            .iter()
-                            .all(|failure| !read_failed(failure))
-                        && !upgrade_plan(&self.rust().packages).is_empty();
+                    let upgradable =
+                        view == "Updates" && !upgrade_plan(&self.rust().packages).is_empty();
                     self.as_mut().set_upgradable(upgradable);
                     self.as_mut().stash_current(key.clone());
                 }
@@ -2119,10 +2155,25 @@ impl ffi::PackageController {
             .is_some_and(|worker| worker.job.writes());
         let action = action.to_string();
         if action == "upgrade-all" {
-            if !self.upgradable {
+            let operations = upgrade_plan(&self.rust().packages);
+            if !self.rust().updates_view || operations.is_empty() {
                 return;
             }
-            let operations = upgrade_plan(&self.rust().packages);
+            let mut failed_sources: Vec<_> = self
+                .rust()
+                .failures
+                .iter()
+                .filter(|failure| read_failed(failure))
+                .map(|failure| failure.backend.clone())
+                .collect();
+            failed_sources.sort();
+            failed_sources.dedup();
+            if !failed_sources.is_empty() && !writing {
+                self.as_mut()
+                    .set_status("Retrying failed source checks before updating.".into());
+                self.start(Job::RetryFailedUpdates(failed_sources));
+                return;
+            }
             let count = self
                 .rust()
                 .packages
@@ -2369,9 +2420,25 @@ impl ffi::PackageController {
                 } else {
                     ""
                 };
-                self.as_mut().set_confirmation_data(encoded(json!({"action":"Update", "body": format!("{count} listed {noun}{apt}\n\n{labels}"), "summary": format!("Update {count} {noun}{removals}{warning}"), "details": format!("{apt}\n\n{labels}")})));
+                let failed_sources = self
+                    .rust()
+                    .failures
+                    .iter()
+                    .filter(|failure| read_failed(failure))
+                    .count();
+                let incomplete = if failed_sources == 0 {
+                    String::new()
+                } else {
+                    let noun = if failed_sources == 1 {
+                        "source"
+                    } else {
+                        "sources"
+                    };
+                    format!("\n{failed_sources} {noun} could not be checked. Updates from them are not included.")
+                };
+                self.as_mut().set_confirmation_data(encoded(json!({"action":"Update", "body": format!("{count} listed {noun}{incomplete}{apt}\n\n{labels}"), "summary": format!("Update {count} {noun}{removals}{warning}{incomplete}"), "details": format!("{incomplete}{apt}\n\n{labels}")})));
                 self.as_mut().set_confirmation(
-                    format!("Update all {count} listed {noun}?{apt}\n\n{labels}\n\nContinue?")
+                    format!("Update all {count} listed {noun}?{incomplete}{apt}\n\n{labels}\n\nContinue?")
                         .as_str()
                         .into(),
                 );
@@ -2442,24 +2509,30 @@ impl ffi::PackageController {
             Ok(Payload::RetryPackages(source, retry)) => {
                 self.as_mut().rust_mut().view_cache.clear();
                 self.as_mut().rust_mut().prefetched.clear();
-                let mut packages = self.rust().packages.clone();
-                packages.retain(|package| package.id.backend != source);
-                packages.extend(retry.packages);
-                packages.sort_by(|a, b| a.id.cmp(&b.id));
-                let mut failures = self.rust().failures.clone();
-                failures.retain(|failure| failure.backend != source);
-                failures.extend(retry.failures);
-                let mut successful_sources = self.successful_sources();
-                successful_sources.retain(|id| id != &source);
-                successful_sources.extend(retry.successful_sources);
-                successful_sources.sort();
-                self.as_mut().rust_mut().retrying_source = Some(source.clone());
-                self.as_mut().apply(Ok(Payload::Packages(PackageReport {
-                    packages,
-                    failures,
-                    successful_sources,
-                })));
-                self.as_mut().rust_mut().retrying_source = None;
+                let report = merge_retried_packages(
+                    &self.rust().packages,
+                    &self.rust().failures,
+                    self.successful_sources(),
+                    std::slice::from_ref(&source),
+                    retry,
+                );
+                self.as_mut().rust_mut().retrying_sources = Some(vec![source]);
+                self.as_mut().apply(Ok(Payload::Packages(report)));
+                self.as_mut().rust_mut().retrying_sources = None;
+            }
+            Ok(Payload::RetryFailedUpdates(sources, retry)) => {
+                self.as_mut().rust_mut().view_cache.clear();
+                self.as_mut().rust_mut().prefetched.clear();
+                let report = merge_retried_packages(
+                    &self.rust().packages,
+                    &self.rust().failures,
+                    self.successful_sources(),
+                    &sources,
+                    retry,
+                );
+                self.as_mut().rust_mut().retrying_sources = Some(sources);
+                self.as_mut().apply(Ok(Payload::Packages(report)));
+                self.as_mut().rust_mut().retrying_sources = None;
             }
             Ok(Payload::RetryCleanup(source, retry)) => {
                 self.as_mut().rust_mut().view_cache.clear();
@@ -2487,14 +2560,11 @@ impl ffi::PackageController {
                 if matches!(self.rust().queued, Some(Job::Load(..))) {
                     return;
                 }
-                // Upgrade gating waits for the terminal report, when no
-                // worker remains: partials cannot promise complete
-                // failures, so an early partial must not enable it. Rows,
-                // status, and failures below update on every partial.
+                // Only the terminal report enables the upgrade action.
+                // Partial rows and failures can still change while reading.
                 if self.rust().worker.is_none() {
-                    let upgradable = self.rust().updates_view
-                        && report.failures.iter().all(|failure| !read_failed(failure))
-                        && !upgrade_plan(&report.packages).is_empty();
+                    let upgradable =
+                        self.rust().updates_view && !upgrade_plan(&report.packages).is_empty();
                     self.as_mut().set_upgradable(upgradable);
                 }
                 let loading = self.rust().worker.is_some();
@@ -2893,6 +2963,30 @@ impl ffi::PackageController {
                         if stashable {
                             if let Some(key) = key {
                                 self.as_mut().stash_current(key);
+                            }
+                        }
+                        if matches!(worker.job, Job::RetryFailedUpdates(_))
+                            && self.rust().queued.is_none()
+                            && !worker.cancel.requested()
+                            && self.rust().active_view == "Updates"
+                        {
+                            let operations = upgrade_plan(&self.rust().packages);
+                            if operations.is_empty() {
+                                self.as_mut().set_status(
+                                    "No available updates after retrying source checks.".into(),
+                                );
+                            } else {
+                                let count = self
+                                    .rust()
+                                    .packages
+                                    .iter()
+                                    .filter(|package| {
+                                        package.installed_version.is_some()
+                                            && package.update == UpdateAvailability::Available
+                                    })
+                                    .count();
+                                self.as_mut().rust_mut().queued =
+                                    Some(Job::PlanUpgrade(operations, count));
                             }
                         }
                     }
@@ -3536,6 +3630,74 @@ mod tests {
         );
     }
     #[test]
+    fn failed_update_check_keeps_known_updates_and_retry_merges_new_ones() {
+        let package = |backend: &str| -> Package {
+            serde_json::from_value(json!({
+                "id": {"backend":backend, "name":"synthetic-tool", "architecture":"all", "scope":"system"},
+                "display_name":"Synthetic tool", "summary":"Synthetic", "installed_version":"1", "candidate_version":"2", "update":"available"
+            }))
+            .unwrap()
+        };
+        let failure = BackendFailure {
+            backend: "codex".into(),
+            error: EngineError::InvalidResponse {
+                backend: "codex".into(),
+                reason: "synthetic timeout".into(),
+            },
+        };
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().rust_mut().updates_view = true;
+        controller
+            .as_mut()
+            .apply(Ok(Payload::Packages(PackageReport {
+                packages: vec![package("apt")],
+                failures: vec![failure.clone()],
+                successful_sources: vec!["apt".into()],
+            })));
+        assert!(*controller.upgradable());
+        assert_eq!(upgrade_plan(&controller.rust().packages).len(), 1);
+        let apt_checked = controller.rust().last_success["apt"];
+
+        controller.as_mut().apply(Ok(Payload::RetryFailedUpdates(
+            vec!["codex".into()],
+            PackageReport {
+                packages: vec![],
+                failures: vec![failure],
+                successful_sources: vec![],
+            },
+        )));
+        assert!(*controller.upgradable());
+        assert_eq!(controller.rust().packages, vec![package("apt")]);
+        assert_eq!(controller.rust().last_success["apt"], apt_checked);
+        controller.as_mut().apply(Ok(Payload::UpgradePreview(
+            vec![Operation::UpgradeAll {
+                backend: "apt".into(),
+            }],
+            1,
+            None,
+        )));
+        assert!(controller
+            .confirmation()
+            .to_string()
+            .contains("Updates from them are not included"));
+        controller.as_mut().confirm(false);
+
+        controller.as_mut().apply(Ok(Payload::RetryFailedUpdates(
+            vec!["codex".into()],
+            PackageReport {
+                packages: vec![package("codex")],
+                failures: vec![],
+                successful_sources: vec!["codex".into()],
+            },
+        )));
+        assert_eq!(controller.rust().packages.len(), 2);
+        assert_eq!(upgrade_plan(&controller.rust().packages).len(), 2);
+        assert!(controller.rust().failures.is_empty());
+        assert_eq!(controller.rust().last_success["apt"], apt_checked);
+        assert!(controller.rust().last_success.contains_key("codex"));
+    }
+    #[test]
     fn retry_jobs_return_only_the_requested_view_and_preview() {
         let package: Package = serde_json::from_value(json!({
             "id": {"backend":"fixture", "name":"anonymous", "architecture":"all", "scope":"system"},
@@ -3573,6 +3735,17 @@ mod tests {
                 _ => panic!("expected a scoped package retry"),
             }
         }
+        let mut replies = Vec::new();
+        execute(
+            &mut engine,
+            Job::RetryFailedUpdates(vec!["fixture".into()]),
+            &cancel,
+            &mut |reply| replies.push(reply),
+        );
+        assert!(
+            matches!(replies.pop(), Some(Reply::Done(Ok(Payload::RetryFailedUpdates(sources, report))))
+            if sources == ["fixture"] && report.packages == [package.clone()])
+        );
         let mut replies = Vec::new();
         execute(
             &mut engine,

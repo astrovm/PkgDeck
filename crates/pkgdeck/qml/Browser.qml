@@ -1816,10 +1816,17 @@ Controls.ApplicationWindow {
                 DeckIcon { name: "warning"; ink: root.accent; Layout.preferredWidth: 20; Layout.preferredHeight: 20 }
                 Controls.Label {
                     objectName: "sourceFailureNotice"
-                    text: root.sourceFailureTitle() + (root.currentView === "Updates" ? ". Update all is unavailable." : "")
+                    text: root.sourceFailureTitle() + (root.currentView === "Updates" ? ". Update all will retry the check." : "")
                     color: root.muted
                     wrapMode: Text.WordWrap
                     Layout.fillWidth: true
+                }
+                ActionButton {
+                    objectName: "sourceFailureRetryNotice"
+                    text: "Retry"
+                    symbol: "refresh"
+                    enabled: !backend.busy && !(root.currentView === "Search" && root.queryDirty)
+                    onClicked: root.reload(true)
                 }
                 ActionButton {
                     objectName: "sourceFailureDetails"
@@ -2366,7 +2373,6 @@ Controls.ApplicationWindow {
                     compact: root.compact
                     busy: backend.busy && !backend.writing
                     writing: false
-                    upgradable: backend.upgradable
                     selectedCount: root.selectedCount()
                     uncheckedCount: root.uncheckedPackages.length
                     textFont: root.font
@@ -2927,7 +2933,7 @@ Controls.ApplicationWindow {
     }
     Shortcut {
         sequence: "Ctrl+Shift+U"
-        enabled: root.currentView === "Updates" && (!backend.busy || backend.writing) && root.selectedCount() > 0 && (root.uncheckedPackages.length > 0 || backend.upgradable)
+        enabled: root.currentView === "Updates" && (!backend.busy || backend.writing) && root.selectedCount() > 0
         onActivated: root.upgradeUpdates()
     }
     Shortcut {

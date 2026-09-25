@@ -499,7 +499,6 @@ TestCase {
         const button = findChild(browser, "upgradeAllButton");
         verify(!button.visible);
         populate();
-        fake.upgradable = true;
         waitForRendering(browser.contentItem);
         verify(button.enabled); // No individual selection required.
         mouseClick(button);
@@ -2073,7 +2072,7 @@ TestCase {
         verify(!footer.visible);
         verify(findChild(browser, "compactSignature").visible);
     }
-    function test_update_failure_has_one_explanation() {
+    function test_update_failure_keeps_update_all_and_retry_available() {
         browser.openView("Updates");
         fake.rows = JSON.stringify([
             {kind: "package", name: "tool", source: "apt", architecture: "all", installed: "1", candidate: "2", update: "available", summary: "Updatable"},
@@ -2082,9 +2081,19 @@ TestCase {
         wait(30);
         const notice = findChild(browser, "sourceFailureNotice");
         verify(notice.visible);
-        compare(notice.text, "Couldn't check npm. Update all is unavailable.");
+        compare(notice.text, "Couldn't check npm. Update all will retry the check.");
         verify(findChild(browser, "upgradeAllHint") === null);
-        verify(!findChild(browser, "upgradeAllButton").enabled);
+        const updateAll = findChild(browser, "upgradeAllButton");
+        verify(updateAll.enabled);
+        mouseClick(updateAll);
+        verify(fake.confirmation.indexOf("upgrade-all") === 0);
+        const dialog = findChild(browser, "confirmationDialog");
+        dialog.reject();
+        tryCompare(dialog, "visible", false);
+        const previousLoads = fake.loadCount;
+        mouseClick(findChild(browser, "sourceFailureRetryNotice"));
+        compare(fake.loadCount, previousLoads + 1);
+        verify(fake.lastForce);
     }
     function test_update_failure_without_rows_has_retry_card() {
         browser.openView("Updates");

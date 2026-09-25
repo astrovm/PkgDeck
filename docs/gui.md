@@ -86,8 +86,10 @@ Review the target, source, scope, and available native plan before applying
 changes. The confirmation button names the action; Cancel has focus by default.
 APT provides a dry run for individual package changes and rechecks it before
 writing. Other managers may not provide a transaction preview. Firmware confirmations include
-power and restart requirements; PkgDeck does not reboot automatically. Failed
-sources are shown explicitly and block Update all until the result is complete.
+power and restart requirements; PkgDeck does not reboot automatically. If a
+source check fails, Update all retries that source before confirmation. Updates
+from sources that still fail are excluded, and the confirmation says so. Other
+available updates remain actionable. The failure notice also has a Retry button.
 For APT, Update all previews the `dist-upgrade` transaction. Planned installs
 and removals appear at the top of the confirmation, and a changed plan stops
 the update before authorization.

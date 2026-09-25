@@ -8,7 +8,6 @@ Flow {
     property bool compact: false
     property bool busy: false
     property bool writing: false
-    property bool upgradable: false
     property int selectedCount: 0
     property int uncheckedCount: 0
     property color surface
@@ -34,7 +33,7 @@ Flow {
         visible: actions.selectedCount > 0
         text: actions.uncheckedCount === 0 ? "Update all" : (actions.compact ? "Update" : "Update selected (" + actions.selectedCount + ")")
         Accessible.name: actions.uncheckedCount === 0 ? "Update all" : "Update selected (" + actions.selectedCount + ")"
-        enabled: !actions.busy && (actions.uncheckedCount > 0 || actions.upgradable)
+        enabled: !actions.busy
         implicitWidth: contentItem.implicitWidth + leftPadding + rightPadding
         implicitHeight: Math.max(38, actions.textFont.pointSize * 3)
         horizontalPadding: 12
