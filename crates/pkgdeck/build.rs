@@ -9,6 +9,7 @@ fn main() {
             .qml_file("qml/UpdatesActions.qml")
             .qml_file("qml/PackageDetails.qml")
             .qml_file("qml/ActivityPane.qml")
+            .qml_file("qml/ActionProgress.qml")
             .qml_file("qml/DeckIcon.qml"),
     )
     .qrc("resources.qrc")

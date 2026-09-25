@@ -19,6 +19,7 @@ TestCase {
         property string rows: "[]"
         property string details: "{}"
         property string status: "Ready"
+        property string progress: "{}"
         property string confirmation: ""
         property string confirmation_data: "{}"
         property string source_catalog: "[]"
@@ -113,6 +114,7 @@ TestCase {
         fake.rows = "[]";
         fake.details = "{}";
         fake.status = "Ready";
+        fake.progress = "{}";
         fake.confirmation = "";
         fake.confirmation_data = "{}";
         fake.report_state = "{}";
@@ -213,6 +215,26 @@ TestCase {
         fake.busy = false; // Empty completion must discard the old snapshot.
         compare(browser.items.length, 0);
     }
+    function test_row_actions_stay_steady_during_refresh() {
+        populate();
+        const rows = fake.rows;
+        const list = findChild(browser, "packageResults");
+        const action = findChild(list.itemAtIndex(0), "rowPackageAction");
+        compare(action.text, "");
+        compare(action.width, 38);
+        verify(action.tooltipText.indexOf("Install") >= 0);
+        fake.simulateLoading = true;
+        browser.reload(true);
+        verify(!action.enabled);
+        compare(list.opacity, 1);
+        compare(action.opacity, 1);
+        fake.rows = rows;
+        waitForRendering(browser.contentItem);
+        compare(list.opacity, 1);
+        compare(findChild(list.itemAtIndex(0), "rowPackageAction").opacity, 1);
+        fake.busy = false;
+        compare(findChild(list.itemAtIndex(0), "rowPackageAction").opacity, 1);
+    }
     function test_motion_can_be_disabled_without_delaying_interactions() {
         const panel = findChild(browser, "detailsPanel");
         verify(!panel.visible);
@@ -279,7 +301,9 @@ TestCase {
         compare(fake.selection, 0);
         const firstAction = findChild(list.itemAtIndex(0), "rowPackageAction");
         verify(firstAction.enabled);
-        compare(firstAction.text, "Install");
+        compare(firstAction.text, "");
+        compare(firstAction.width, 38);
+        verify(firstAction.tooltipText.indexOf("Install") >= 0);
         verify(firstAction.tooltipText.indexOf("apt") >= 0);
         waitForRendering(browser.contentItem);
         mouseClick(findChild(list.itemAtIndex(0), "rowPackageAction"));
@@ -747,7 +771,7 @@ TestCase {
         compare(fake.lastQuery, "Firefox");
         compare(browser.queryDirty, false);
     }
-    function test_changing_button_labels_stay_inside_their_buttons() {
+    function test_dynamic_buttons_fit_at_wide_and_compact_widths() {
         browser.openView("Updates");
         browser.viewSourceFilters = ({Updates: ["claude"]});
         fake.rows = JSON.stringify([
@@ -776,7 +800,8 @@ TestCase {
         tryVerify(() => list.itemAtIndex(0) !== null);
         for (let index = 0; index < 2; index++) {
             const action = findChild(list.itemAtIndex(index), "rowPackageAction");
-            verify(action.width >= action.implicitWidth - 1, action.text + " button is too narrow");
+            compare(action.text, "");
+            compare(action.width, 38);
             fits(action);
         }
         browser.togglePackage(JSON.parse(fake.rows)[0]);
@@ -1013,6 +1038,36 @@ TestCase {
         compare(activity.target({upgrade_all: {backend: "apt"}}), "Update all · apt");
         compare(activity.target({install: {backend: "apt", name: "synthetic-tool", scope: "system"}}), "Install synthetic-tool · apt · System");
         compare(activity.result({state: "running", outcomes: []}), "In progress");
+    }
+    function test_action_progress_shows_batch_steps_and_single_transfer() {
+        browser.openView("Updates");
+        fake.writing = true;
+        fake.progress = JSON.stringify({activity_id: 42, label: "Update synthetic-tool from apt", done: 2, total: 3});
+        const strip = findChild(browser, "operationProgress");
+        const bar = findChild(strip, "actionProgressBar");
+        verify(strip.visible);
+        compare(strip.label, "Update synthetic-tool from apt");
+        compare(bar.indeterminate, false);
+        compare(bar.value, 2);
+        compare(bar.to, 3);
+        browser.openView("Activity");
+        verify(strip.visible);
+        fake.activity = JSON.stringify([{id: 42, state: "running", started_at: 1,
+            operations: [{upgrade: {backend: "apt", name: "synthetic-tool", scope: "system"}}], outcomes: []}]);
+        verify(!strip.visible);
+        const list = findChild(browser, "activityList");
+        tryVerify(() => list.itemAtIndex(0) !== null);
+        const activityProgress = findChild(list.itemAtIndex(0), "activityProgress");
+        verify(activityProgress.visible);
+        compare(findChild(activityProgress, "actionProgressBar").value, 2);
+        fake.progress = JSON.stringify({activity_id: 42, label: "Install synthetic-tool from apt", done: 0, total: 1});
+        compare(findChild(activityProgress, "actionProgressBar").indeterminate, true);
+        fake.progress = JSON.stringify({activity_id: 42, label: "Install synthetic-tool from apt", done: 0, total: 1,
+            transferred: 50, transfer_total: 100});
+        compare(findChild(activityProgress, "actionProgressBar").indeterminate, false);
+        compare(findChild(activityProgress, "actionProgressBar").value, 50);
+        fake.writing = false;
+        verify(!strip.visible);
     }
     function test_confirmation_shows_summary_before_optional_details() {
         browser.openView("Search");
@@ -1638,6 +1693,8 @@ TestCase {
         const pull = findChild(tagged, "rowContainerPull");
         const remove = findChild(tagged, "rowPackageAction");
         verify(pull.visible);
+        compare(pull.text, "");
+        compare(pull.width, 38);
         compare(pull.symbol, "updates");
         compare(remove.symbol, "remove");
         clickDelegate(pull);

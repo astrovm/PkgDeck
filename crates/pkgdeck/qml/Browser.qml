@@ -78,6 +78,7 @@ Controls.ApplicationWindow {
     SystemPalette { id: systemPalette }
     SystemPalette { id: disabledPalette; colorGroup: SystemPalette.Disabled }
     required property var backend
+    readonly property var actionProgress: JSON.parse(backend.progress || "{}")
     readonly property var repositoryReport: JSON.parse(backend.repositories || "{}")
     function repositoryChange(row, action, extra) {
         const request = Object.assign({backend: row.backend, name: row.name, scope: row.scope, action: action}, extra || {});
@@ -106,16 +107,8 @@ Controls.ApplicationWindow {
     readonly property bool motionEnabled: !reduceMotion && Kirigami.Units.shortDuration > 0
     readonly property int feedbackDuration: motionEnabled ? Math.round(Kirigami.Units.shortDuration * 0.8) : 0
     readonly property int revealDuration: motionEnabled ? Math.round(Kirigami.Units.shortDuration * 1.2) : 0
-    property var revealedRows: new Set()
     property var beforeWrite: null
     property var completedRows: []
-    function revealRow(row) {
-        const identity = rowIdentity(row);
-        if (revealedRows.has(identity))
-            return false;
-        revealedRows.add(identity);
-        return motionEnabled;
-    }
     function packageState(row) {
         return JSON.stringify([row.installed, row.candidate, row.update]);
     }
@@ -686,7 +679,7 @@ Controls.ApplicationWindow {
         background: Rectangle {
             radius: 7
             Behavior on color { ColorAnimation { duration: root.feedbackDuration } }
-            color: !control.enabled && root.systemAppearance ? disabledPalette.button : control.primary && control.enabled ? root.accent : (control.hovered ? root.selection : root.surface)
+            color: !control.enabled && root.systemAppearance ? disabledPalette.button : control.primary && control.enabled ? root.accent : (control.enabled && control.hovered ? root.selection : root.surface)
             border.color: control.activeFocus ? root.accent : !control.enabled && root.systemAppearance ? disabledPalette.mid : (control.navigation ? "transparent" : root.line)
             border.width: control.activeFocus ? 2 : 1
         }
@@ -942,7 +935,6 @@ Controls.ApplicationWindow {
         if (changed) {
             retainingResults = false;
             retainedItems = [];
-            revealedRows = new Set();
             completedRows = [];
         }
         currentView = view;
@@ -967,7 +959,6 @@ Controls.ApplicationWindow {
         const clearSearchResults = emptySearch && (resultView !== "Search" || resultQuery.length > 0);
         retainedItems = currentView === resultView && sameQuery ? items.slice() : [];
         retainingResults = retainedItems.length > 0;
-        revealedRows = new Set(retainedItems.map(rowIdentity));
         resultView = clearSearchResults ? "" : currentView;
         if (currentView === "Search")
             resultQuery = searchPane.text.trim();
@@ -1477,6 +1468,20 @@ Controls.ApplicationWindow {
                     onClicked: backend.cancel()
                 }
             }
+            ActionProgress {
+                objectName: "operationProgress"
+                visible: backend.writing && !!root.actionProgress.label && (root.currentView !== "Activity" ||
+                    !root.activityRows.some(entry => entry.id === root.actionProgress.activity_id && (entry.state === "running" || entry.state === "authorizing")))
+                Layout.fillWidth: true
+                label: root.actionProgress.label || ""
+                done: root.actionProgress.done || 0
+                total: root.actionProgress.total || 1
+                transferred: root.actionProgress.transferred || 0
+                transferTotal: root.actionProgress.transfer_total || 0
+                ink: root.ink
+                muted: root.muted
+                accent: root.accent
+            }
             GridLayout {
                 columns: root.compact ? 2 : 3
                 columnSpacing: 8
@@ -1721,6 +1726,7 @@ Controls.ApplicationWindow {
             ActivityPane {
                 visible: root.currentView === "Activity"
                 entries: root.activityRows
+                progress: root.actionProgress
                 surface: root.surface
                 ink: root.ink
                 muted: root.muted
@@ -1897,8 +1903,6 @@ Controls.ApplicationWindow {
                         clip: true
                         reuseItems: true
                         enabled: !root.retainingResults
-                        opacity: root.retainingResults ? 0.65 : 1
-                        Behavior on opacity { NumberAnimation { duration: root.feedbackDuration } }
                         currentIndex: -1
                         onCountChanged: {
                             if (!root.selectedIdentity)
@@ -1926,30 +1930,6 @@ Controls.ApplicationWindow {
                             id: packageRow
                             required property var modelData
                             required property int index
-                            function reveal() {
-                                rowReveal.complete();
-                                opacity = 1;
-                                if (root.revealRow(modelData))
-                                    rowReveal.restart();
-                            }
-                            Component.onCompleted: reveal()
-                            ListView.onReused: reveal()
-                            Connections {
-                                target: root
-                                function onMotionEnabledChanged() {
-                                    if (!root.motionEnabled)
-                                        rowReveal.complete();
-                                }
-                            }
-                            NumberAnimation {
-                                id: rowReveal
-                                target: packageRow
-                                property: "opacity"
-                                from: 0.65
-                                to: 1
-                                duration: root.revealDuration
-                                easing.type: Easing.OutCubic
-                            }
                             width: Math.max(0, ListView.view.width - 16)
                             height: (root.compact ? (modelData.kind === "source" ? Math.max(68, root.font.pointSize * 5.5) : Math.max(94, root.font.pointSize * 8.5)) : Math.max(56, root.font.pointSize * 5)) + (modelData.groupStart ? 38 : 0)
                             topPadding: modelData.groupStart ? 38 : 0
@@ -2129,26 +2109,28 @@ Controls.ApplicationWindow {
                                     objectName: "rowContainerPull"
                                     visible: modelData.kind === "package" && root.containerSource(modelData.source) && root.isInstalled(modelData) && !!modelData.reference
                                     enabled: (!backend.busy || backend.writing) && !root.retainingResults
-                                    text: root.compact ? "" : "Pull"
+                                    text: ""
                                     symbol: "updates"
                                     glyphColor: root.accent
                                     Accessible.name: "Pull " + (modelData.display_name || modelData.name) + " from " + modelData.source
                                     tooltipText: Accessible.name
-                                    Layout.preferredWidth: root.compact ? 38 : Math.max(80, implicitWidth)
+                                    Layout.preferredWidth: 38
                                     horizontalPadding: 8
+                                    opacity: 1
                                     onClicked: backend.propose("upgrade", root.originalIndex(index))
                                 }
                                 ActionButton {
                                     objectName: "rowPackageAction"
                                     visible: (modelData.kind === "package" && (!root.updateOnly(modelData.source) || modelData.update === "available")) || modelData.kind === "cleanup"
                                     enabled: (!backend.busy || backend.writing) && !root.retainingResults
-                                    text: root.compact ? "" : (modelData.kind === "cleanup" ? "Clean" : (root.currentView === "Updates" || root.updateOnly(modelData.source) ? "Update" : (root.isInstalled(modelData) ? "Remove" : "Install")))
+                                    text: ""
                                     symbol: modelData.kind === "cleanup" ? "remove" : (root.currentView === "Updates" || root.updateOnly(modelData.source)) ? "updates" : (root.isInstalled(modelData) ? "remove" : "install")
                                     glyphColor: (root.currentView === "Updates" || root.updateOnly(modelData.source)) ? root.accent : root.isInstalled(modelData) ? (root.dark ? "#f18b91" : "#b42332") : (root.dark ? "#77d6a0" : "#187442")
                                     Accessible.name: (modelData.kind === "cleanup" ? "Run cleanup " : ((root.currentView === "Updates" || root.updateOnly(modelData.source)) ? "Update " : (root.isInstalled(modelData) ? "Remove " : "Install "))) + (modelData.display_name || modelData.name) + " from " + modelData.source
                                     tooltipText: Accessible.name
-                                    Layout.preferredWidth: root.compact ? 38 : Math.max(88, implicitWidth)
+                                    Layout.preferredWidth: 38
                                     horizontalPadding: 8
+                                    opacity: 1
                                     onClicked: backend.propose(modelData.kind === "cleanup" ? "clean" : ((root.currentView === "Updates" || root.updateOnly(modelData.source)) ? "upgrade" : (root.isInstalled(modelData) ? "remove" : "install")), root.originalIndex(index))
                                 }
                             }
