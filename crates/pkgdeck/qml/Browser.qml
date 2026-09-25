@@ -119,6 +119,17 @@ Controls.ApplicationWindow {
     property bool trayAvailable: false
     property alias backgroundMode: preferences.backgroundMode
     property alias autostartEnabled: preferences.autostart
+    function showFromTray() {
+        root.show();
+        root.raise();
+        root.requestActivate();
+    }
+    function toggleFromTray() {
+        if (root.visible)
+            root.hide();
+        else
+            root.showFromTray();
+    }
     function checkUpdates(force) {
         const offline = NetworkInformation.reachability === NetworkInformation.Reachability.Disconnected || NetworkInformation.isBehindCaptivePortal;
         backend.checkUpdates(root.checkedSources().join(","), preferences.backgroundMode, offline, NetworkInformation.isMetered, force === true);

@@ -13,12 +13,16 @@ Browser {
         visible: browser.backgroundMode && available
         icon.source: browser.logoIconSource
         tooltip: "PkgDeck"
+        onActivated: function(reason) {
+            if (reason === Platform.SystemTrayIcon.Trigger)
+                browser.toggleFromTray();
+        }
         menu: Platform.Menu {
-            Platform.MenuItem { text: "Open"; onTriggered: { browser.show(); browser.raise(); browser.requestActivate(); } }
+            Platform.MenuItem { text: "Open"; onTriggered: browser.showFromTray() }
             Platform.MenuItem { text: "Check now"; onTriggered: browser.checkUpdates(true) }
             Platform.MenuItem { text: "Quit"; onTriggered: { browser.forceQuit = true; Qt.quit(); } }
         }
-        onMessageClicked: { browser.show(); browser.raise(); browser.requestActivate(); browser.openView("Updates"); }
+        onMessageClicked: { browser.showFromTray(); browser.openView("Updates"); }
     }
     Connections {
         target: browser

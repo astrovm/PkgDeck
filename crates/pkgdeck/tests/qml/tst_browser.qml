@@ -1427,6 +1427,16 @@ TestCase {
         browser.close();
         verify(!browser.visible);
     }
+    function test_tray_click_toggles_window_visibility() {
+        browser.startHidden = true;
+        browser.backgroundMode = true;
+        browser.trayAvailable = true;
+        verify(!browser.visible);
+        browser.toggleFromTray();
+        verify(browser.visible);
+        browser.toggleFromTray();
+        verify(!browser.visible);
+    }
     function test_background_status_and_test_notification_control() {
         browser.openView("Settings");
         const status = findChild(browser, "backgroundCheckStatus");

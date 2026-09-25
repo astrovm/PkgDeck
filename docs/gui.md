@@ -141,6 +141,8 @@ PkgDeck is running. The first check starts about 30 seconds after launch; later
 checks run no more often than every 30 minutes. Checks wait while the computer is
 offline, on a metered connection, or busy with another package operation. On
 Linux, **Start in background at login** keeps these checks running after login.
+Click the tray icon to hide or show the window. Its menu also offers Check now
+and Quit; clicking an update notification opens Updates.
 
 PkgDeck notifies you when a successful check finds updates it has not notified
 you about before, including on the first check. It remembers notified updates
