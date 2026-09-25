@@ -3172,6 +3172,7 @@ impl ffi::PackageController {
         let Some(worker) = &self.rust().details_worker else {
             return;
         };
+        let id = worker.id.clone();
         let finished = worker.handle.is_finished();
         let mut replies: Vec<_> = worker.receiver.try_iter().collect();
         if finished {
@@ -3181,14 +3182,46 @@ impl ffi::PackageController {
         }
         for reply in replies {
             // Only the current selection may fill the details pane (see
-            // apply); a failure keeps the row preview already shown.
+            // apply). A failure replaces the row preview with the reason,
+            // unless the user already cancelled or a newer load is waiting.
             match reply {
                 Reply::DetailsPreview(details) | Reply::Done(Ok(Payload::Details(details))) => {
                     self.as_mut().apply(Ok(Payload::Details(details)));
                 }
+                Reply::Done(Err(error)) => self.as_mut().show_details_error(&id, &error),
                 _ => {}
             }
         }
+    }
+    /// The parallel details lookup failed. Keep the open package selected
+    /// and say why the rest of its details are missing. Do not cache the
+    /// failure: choosing the package again tries the lookup once more.
+    fn show_details_error(mut self: Pin<&mut Self>, id: &PackageId, error: &EngineError) {
+        if matches!(
+            error,
+            EngineError::Cancelled
+                | EngineError::Execution(pkgdeck_core::process::ExecutionError::Cancelled)
+        ) || matches!(self.rust().queued, Some(Job::Load(..)))
+            || self.rust().selected.as_ref() != Some(id)
+        {
+            return;
+        }
+        let Some(package) = self
+            .rust()
+            .packages
+            .iter()
+            .find(|package| package.id == *id)
+            .cloned()
+        else {
+            return;
+        };
+        let message = write_error_text(error, self.rust().sudo);
+        let same = same_app_sources(&self.rust().packages, id);
+        self.as_mut().set_details(encoded(json!({
+            "package": package_row(&package, &same, None),
+            "description": format!("Details couldn't be loaded. {message}"),
+        })));
+        self.set_status(message.as_str().into());
     }
     fn start_prefetch(mut self: Pin<&mut Self>, view: String, key: String) {
         let sources = self.rust().source_filter.clone();
@@ -5800,13 +5833,66 @@ mod tests {
         assert!(controller.status().to_string().contains("Cancelling"));
         // The channel was dropped with the worker, so nothing further can land.
         assert!(sender
-            .send(Reply::Done(Ok(Payload::Details(Box::new(PackageDetails {
-                package,
-                description: "still should not land".into(),
-                homepage: None,
-                dependencies: vec![],
-            })))))
+            .send(Reply::Done(Ok(Payload::Details(Box::new(
+                PackageDetails {
+                    package,
+                    description: "still should not land".into(),
+                    homepage: None,
+                    dependencies: vec![],
+                }
+            )))))
             .is_err());
+    }
+    #[test]
+    fn parallel_details_failure_replaces_the_row_preview() {
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        let package = synthetic_package("fixture", "Fixture");
+        controller.as_mut().rust_mut().packages = vec![package.clone()];
+        controller.as_mut().rust_mut().selected = Some(package.id.clone());
+        controller.as_mut().set_details(encoded(json!({
+            "package": package_row(&package, &[], None),
+            "description": package.summary,
+        })));
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(Reply::Done(Err(EngineError::Unavailable {
+                backend: "homebrew".into(),
+                reason: "brew is not installed".into(),
+            })))
+            .unwrap();
+        controller.as_mut().rust_mut().details_worker = Some(DetailsWorker {
+            handle: thread::spawn(|| {}),
+            receiver,
+            cancel: Cancellation::default(),
+            id: package.id.clone(),
+        });
+        controller.as_mut().poll();
+        let details: Value = serde_json::from_str(&controller.details().to_string()).unwrap();
+        assert!(details["description"]
+            .as_str()
+            .unwrap()
+            .contains("Details couldn't be loaded"));
+        assert!(details["description"]
+            .as_str()
+            .unwrap()
+            .contains("brew is not installed"));
+        assert_eq!(details["package"]["name"], "fixture");
+        assert!(controller.rust().detail_cache.is_empty());
+        // A cancelled lookup stays quiet and leaves the preview in place.
+        controller.as_mut().set_details("{}".into());
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(Reply::Done(Err(EngineError::Cancelled)))
+            .unwrap();
+        controller.as_mut().rust_mut().details_worker = Some(DetailsWorker {
+            handle: thread::spawn(|| {}),
+            receiver,
+            cancel: Cancellation::default(),
+            id: package.id,
+        });
+        controller.as_mut().poll();
+        assert_eq!(controller.details().to_string(), "{}");
     }
     #[test]
     fn finished_preloads_fill_sections_and_the_source_catalog() {
