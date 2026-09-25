@@ -86,6 +86,7 @@ pub mod ffi {
         #[qproperty(QString, rows)]
         #[qproperty(QString, details)]
         #[qproperty(QString, status)]
+        #[qproperty(QString, progress)]
         #[qproperty(QString, repositories)]
         #[qproperty(QString, source_catalog)]
         #[qproperty(QString, report_state)]
@@ -233,11 +234,80 @@ enum Payload {
 }
 enum Reply {
     Progress(String),
+    ProgressEvent(Event),
     Partial(PackageReport),
     Inventory(PackageReport),
     DetailsPreview(Box<PackageDetails>),
     Done(Result<Payload, EngineError>),
     Engine(Box<Engine>),
+}
+#[derive(serde::Serialize)]
+struct ProgressState {
+    activity_id: Option<u64>,
+    label: String,
+    done: usize,
+    total: usize,
+    transferred: u64,
+    transfer_total: Option<u64>,
+}
+impl ProgressState {
+    fn new(job: &Job, activity_id: Option<u64>) -> Self {
+        let operations = job.operations();
+        let label = operations
+            .first()
+            .map(operation_label)
+            .unwrap_or_else(|| match job {
+                Job::ImportRepository(import) => format!("Add {} repository", import.name),
+                Job::Repositories(Some(action)) => match &action.change {
+                    repositories::Change::Add { .. } => format!("Add {} repository", action.name),
+                    repositories::Change::Remove => format!("Remove {} repository", action.name),
+                    repositories::Change::SetEnabled { enabled: true } => {
+                        format!("Enable {} repository", action.name)
+                    }
+                    repositories::Change::SetEnabled { enabled: false } => {
+                        format!("Disable {} repository", action.name)
+                    }
+                    repositories::Change::SetPriority { .. } => {
+                        format!("Change {} priority", action.name)
+                    }
+                    repositories::Change::OpenEditor => "Open software sources".into(),
+                },
+                _ => "Working".into(),
+            });
+        Self {
+            activity_id,
+            label,
+            done: 0,
+            total: operations.len().max(1),
+            transferred: 0,
+            transfer_total: None,
+        }
+    }
+    fn apply(&mut self, event: &Event) {
+        match event {
+            Event::Started(operation) => {
+                self.label = operation_label(operation);
+                self.transferred = 0;
+                self.transfer_total = None;
+            }
+            Event::Progress {
+                progress: Progress::Transfer { completed, total },
+                ..
+            } => {
+                self.transferred = *completed;
+                self.transfer_total = (*total).filter(|total| *total > 0);
+            }
+            Event::Finished { .. } => {
+                self.done = (self.done + 1).min(self.total);
+                self.transferred = 0;
+                self.transfer_total = None;
+            }
+            Event::Progress { .. } => {}
+        }
+    }
+    fn snapshot(&self) -> QString {
+        encoded(self)
+    }
 }
 fn inspect_open_input(input: &str, cancel: &Cancellation) -> Result<Payload, EngineError> {
     if let Some(url) = input.strip_prefix("flatpak+") {
@@ -412,12 +482,15 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
                 if let Event::Progress {
                     operation,
                     progress: Progress::Message(message),
-                } = event
+                } = &event
                 {
                     send(Reply::Progress(format!(
                         "{}: {message}",
-                        operation_label(&operation)
+                        operation_label(operation)
                     )));
+                }
+                if !matches!(&event, Event::Progress { progress: Progress::Message(_), .. }) {
+                    send(Reply::ProgressEvent(event));
                 }
             });
             let completed = results.iter().filter(|r| r.is_ok()).count();
@@ -446,14 +519,17 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
         }
         Job::Write(op, _) => engine
             .execute(&op, cancel, &mut |event| {
-                if let Event::Progress { progress, .. } = event {
+                if let Event::Progress { progress, .. } = &event {
                     send(Reply::Progress(match progress {
-                        Progress::Message(message) => message,
+                        Progress::Message(message) => message.clone(),
                         Progress::Transfer { completed, total } => match total {
                             Some(total) => format!("Transferred {completed} of {total}"),
                             None => format!("Transferred {completed}"),
                         },
                     }));
+                }
+                if !matches!(&event, Event::Progress { progress: Progress::Message(_), .. }) {
+                    send(Reply::ProgressEvent(event));
                 }
             })
             .map(|outcome| {
@@ -496,6 +572,7 @@ pub struct Controller {
     rows: QString,
     details: QString,
     status: QString,
+    progress: QString,
     confirmation: QString,
     confirmation_data: QString,
     repositories: QString,
@@ -520,6 +597,7 @@ pub struct Controller {
     queued: Option<Job>,
     confirmed_queue: VecDeque<Confirmed>,
     active_activity_id: Option<u64>,
+    progress_state: Option<ProgressState>,
     revalidating: Option<Confirmed>,
     discard_revalidation: bool,
     validated_confirmed: Option<Confirmed>,
@@ -546,6 +624,7 @@ impl Default for Controller {
             rows: "[]".into(),
             details: "{}".into(),
             status: "Choose a view or search for a package.".into(),
+            progress: "{}".into(),
             confirmation: QString::default(),
             confirmation_data: "{}".into(),
             repositories: "{}".into(),
@@ -570,6 +649,7 @@ impl Default for Controller {
             queued: None,
             confirmed_queue: VecDeque::new(),
             active_activity_id: None,
+            progress_state: None,
             revalidating: None,
             discard_revalidation: false,
             validated_confirmed: None,
@@ -1595,15 +1675,28 @@ impl ffi::PackageController {
             }
         });
         let writing = worker_job.writes();
+        let progress =
+            writing.then(|| ProgressState::new(&worker_job, self.rust().active_activity_id));
         self.as_mut().rust_mut().worker = Some(Worker {
             handle,
             receiver,
             cancel,
             job: worker_job,
         });
+        if let Some(progress) = progress {
+            self.as_mut().set_progress(progress.snapshot());
+            self.as_mut().rust_mut().progress_state = Some(progress);
+        }
         let foreground = !self.rust().background;
         self.as_mut().set_busy(foreground);
         self.set_writing(writing);
+    }
+    fn update_progress(mut self: Pin<&mut Self>, event: &Event) {
+        if let Some(state) = self.as_mut().rust_mut().progress_state.as_mut() {
+            state.apply(event);
+            let snapshot = state.snapshot();
+            self.as_mut().set_progress(snapshot);
+        }
     }
     pub fn load(
         mut self: Pin<&mut Self>,
@@ -2713,7 +2806,7 @@ impl ffi::PackageController {
                             }
                         }
                     }
-                    Reply::Progress(_) | Reply::Inventory(_) => {}
+                    Reply::Progress(_) | Reply::ProgressEvent(_) | Reply::Inventory(_) => {}
                 }
             }
             if joined.is_err() && !self.rust().background {
@@ -2728,6 +2821,8 @@ impl ffi::PackageController {
             self.as_mut().rust_mut().background = false;
             self.as_mut().rust_mut().discard_revalidation = false;
             let queued = self.as_mut().rust_mut().queued.take();
+            self.as_mut().rust_mut().progress_state = None;
+            self.as_mut().set_progress("{}".into());
             self.as_mut().set_writing(false);
             self.as_mut().set_busy(false);
             if let Some(entry) = self.as_mut().rust_mut().validated_confirmed.take() {
@@ -2753,6 +2848,7 @@ impl ffi::PackageController {
                     Reply::Progress(message) => {
                         self.as_mut().set_status(message.as_str().into());
                     }
+                    Reply::ProgressEvent(event) => self.as_mut().update_progress(&event),
                     _ => {}
                 }
             }
@@ -2763,6 +2859,49 @@ impl ffi::PackageController {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn write_progress_tracks_real_steps_and_transfer_totals() {
+        let first = Operation::Refresh {
+            backend: "apt".into(),
+        };
+        let second = Operation::Refresh {
+            backend: "flatpak".into(),
+        };
+        let mut state = ProgressState::new(
+            &Job::UpgradeAll(vec![first.clone(), second.clone()], None),
+            Some(42),
+        );
+        state.apply(&Event::Started(first.clone()));
+        state.apply(&Event::Progress {
+            operation: first.clone(),
+            progress: Progress::Transfer {
+                completed: 50,
+                total: Some(100),
+            },
+        });
+        let snapshot: Value = serde_json::from_str(&state.snapshot().to_string()).unwrap();
+        assert_eq!(snapshot["activity_id"], 42);
+        assert_eq!(snapshot["done"], 0);
+        assert_eq!(snapshot["total"], 2);
+        assert_eq!(snapshot["transfer_total"], 100);
+        state.apply(&Event::Finished {
+            operation: first,
+            result: Ok(OperationOutcome::default()),
+        });
+        state.apply(&Event::Started(second));
+        let snapshot: Value = serde_json::from_str(&state.snapshot().to_string()).unwrap();
+        assert_eq!(snapshot["done"], 1);
+        assert_eq!(snapshot["transfer_total"], Value::Null);
+        assert_eq!(snapshot["label"], "Refresh metadata for flatpak");
+        let repository = RepositoryAction {
+            backend: "flatpak".into(),
+            name: "synthetic".into(),
+            scope: Scope::System,
+            change: repositories::Change::Remove,
+        };
+        let state = ProgressState::new(&Job::Repositories(Some(repository)), None);
+        assert_eq!(state.label, "Remove synthetic repository");
+    }
     #[test]
     fn file_urls_preserve_spaces_and_unicode_and_reject_remote_hosts() {
         assert_eq!(

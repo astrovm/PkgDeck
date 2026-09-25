@@ -871,7 +871,13 @@ impl Engine {
             }
         };
         if guard.is_none() {
-            events(Event::Progress { operation: operations[0].clone(), progress: Progress::Message("Trusted batch runner unavailable; using the existing authorization method for each system command.".into()) });
+            events(Event::Progress {
+                operation: operations[0].clone(),
+                progress: Progress::Message(
+                    "Batch runner missing. System changes may request separate authorization."
+                        .into(),
+                ),
+            });
         }
         let mut results = Vec::with_capacity(operations.len());
         let mut index = 0;

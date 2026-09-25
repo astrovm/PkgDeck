@@ -383,6 +383,7 @@ jobs:
           scripts/bundle.sh
           scripts/tests/media-cache.sh "$PWD/build/AppDir/usr"
           test -x build/AppDir/usr/lib/pkgdeck/appimageupdatetool.AppImage
+          test -x build/AppDir/usr/libexec/pkgdeck-host-runner
           desktop-file-validate assets/io.github.astrovm.PkgDeck.desktop
           unset LD_LIBRARY_PATH QML_IMPORT_PATH
           scripts/xtask.sh gui build/AppDir/AppRun
@@ -403,11 +404,19 @@ jobs:
           "$image" --appimage-extract 'usr/lib/pkgdeck/appimageupdatetool.AppImage' >/dev/null
           test -x 'squashfs-root/usr/lib/pkgdeck/appimageupdatetool.AppImage'
           rm -rf squashfs-root
+          "$image" --appimage-extract 'usr/libexec/pkgdeck-host-runner' >/dev/null
+          test -x 'squashfs-root/usr/libexec/pkgdeck-host-runner'
+          rm -rf squashfs-root
           unset LD_LIBRARY_PATH QML_IMPORT_PATH
           export APPIMAGE_EXTRACT_AND_RUN=1
           scripts/xtask.sh gui "$image"
           "$image" --cli </dev/null | grep -F 'Usage: pkd'
           "$image" --cli doctor
+          if runner_output=$("$image" --batch-runner 2>&1); then
+            echo 'AppImage runner unexpectedly started without authorization' >&2
+            exit 1
+          fi
+          [[ $runner_output == *'host runner requires root'* ]]
           appimage=$PWD/$image
           scripts/tests/host-package.sh direct "$appimage" --cli
           data=$PWD/build/appimage-backend-data
@@ -421,6 +430,7 @@ jobs:
           unsquashfs -d build/snap-check build/artifacts/*.snap
           test -x build/snap-check/usr/bin/pkgdeck
           test -x build/snap-check/usr/bin/pkd
+          test -x build/snap-check/usr/libexec/pkgdeck-host-runner
           unset LD_LIBRARY_PATH QML_IMPORT_PATH
           scripts/xtask.sh gui build/snap-check/AppRun
           build/snap-check/usr/bin/pkd </dev/null | grep -F 'Usage: pkd'
@@ -475,6 +485,7 @@ jobs:
           sudo flatpak install --system -y --noninteractive "$bundle"
           scripts/xtask.sh gui flatpak run --env=QT_QPA_PLATFORM=offscreen --env=QT_QUICK_BACKEND=software io.github.astrovm.PkgDeck
           flatpak run --command=pkd io.github.astrovm.PkgDeck </dev/null | grep -F 'Usage: pkd'
+          flatpak run --command=sh io.github.astrovm.PkgDeck -c 'test -x /app/libexec/pkgdeck-host-runner'
           scripts/tests/flatpak-package.sh
       - name: Upload Flatpak
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

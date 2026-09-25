@@ -6,6 +6,7 @@ ColumnLayout {
     id: pane
     objectName: "activityPane"
     property var entries: []
+    property var progress: ({})
     property color surface
     property color ink
     property color muted
@@ -99,6 +100,20 @@ ColumnLayout {
                         elide: Text.ElideRight
                         Layout.fillWidth: true
                     }
+                }
+                ActionProgress {
+                    objectName: "activityProgress"
+                    readonly property bool active: pane.progress.activity_id === modelData.id
+                    visible: modelData.state === "running" || modelData.state === "authorizing"
+                    Layout.fillWidth: true
+                    label: active ? pane.progress.label : pane.target((modelData.operations || [])[0])
+                    done: active ? pane.progress.done || 0 : 0
+                    total: active ? pane.progress.total || 1 : 1
+                    transferred: active ? pane.progress.transferred || 0 : 0
+                    transferTotal: active ? pane.progress.transfer_total || 0 : 0
+                    ink: pane.ink
+                    muted: pane.muted
+                    accent: pane.accent
                 }
             }
         }

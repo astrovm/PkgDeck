@@ -104,7 +104,7 @@ totals; adapters should not invent percentages when a manager supplies no total.
 
 `execute_batch` validates each operation and stored native plan before starting
 the confirmed batch. If any validation fails, every request receives a terminal
-error without a write. For native engines with a trusted host runner, it asks for
+error without a write. When the packaged batch runner is available, it asks for
 authorization once before any user or system write and binds protected commands
 to that batch. Consecutive exact APT selections with the same verb share one
 native transaction while retaining one result per selection. `execute_batch`

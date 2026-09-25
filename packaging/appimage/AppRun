@@ -2,6 +2,10 @@
 set -eu
 appdir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 export APPDIR="$appdir"
+if [ "${1:-}" = "--batch-runner" ]; then
+    export LD_LIBRARY_PATH="$appdir/usr/lib"
+    exec "$appdir/usr/libexec/pkgdeck-host-runner"
+fi
 if [ "${1:-}" = "--cli" ]; then
     shift
     exec "$appdir/usr/bin/pkd" "$@"
