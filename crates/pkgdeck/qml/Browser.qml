@@ -1205,9 +1205,13 @@ Controls.ApplicationWindow {
     function choose(index) {
         if (retainingResults || index < 0 || index >= viewItems.length)
             return;
+        const identity = rowIdentity(viewItems[index]);
+        // Arrowing into the row that is already open must not load it again.
+        const same = results.currentIndex === index && selectedIdentity === identity;
         results.currentIndex = index;
-        selectedIdentity = rowIdentity(viewItems[index]);
-        backend.select(originalIndex(index));
+        selectedIdentity = identity;
+        if (!same)
+            backend.select(originalIndex(index));
     }
     function restoreSelection() {
         if (!selectedIdentity || retainingResults)

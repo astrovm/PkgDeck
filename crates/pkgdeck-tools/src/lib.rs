@@ -55,6 +55,29 @@ pub fn run(c: &mut Command) -> String {
     );
     String::from_utf8(out.stdout).unwrap()
 }
+/// Read a fixture log once the in-flight queries have stopped appending.
+fn stable_bytes(path: &Path) -> Vec<u8> {
+    let mut last = fs::read(path).unwrap_or_default();
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let mut unchanged_since = Instant::now();
+    while Instant::now() < deadline {
+        sleep(Duration::from_millis(40));
+        let current = fs::read(path).unwrap_or_default();
+        if current == last {
+            if !last.is_empty() && unchanged_since.elapsed() >= Duration::from_millis(400) {
+                return current;
+            }
+        } else {
+            last = current;
+            unchanged_since = Instant::now();
+        }
+    }
+    panic!(
+        "package queries did not settle at {}: {}",
+        path.display(),
+        String::from_utf8_lossy(&last)
+    );
+}
 #[track_caller]
 fn until(mut predicate: impl FnMut() -> bool, seconds: u64) {
     let deadline = Instant::now() + Duration::from_secs(seconds);
@@ -303,7 +326,9 @@ pub fn gui_lifecycle(args: &[String]) {
     let mut gui = Desktop::new();
     gui.launch(&call);
     gui.search("fixture");
-    let queries = fs::read(dir.0.join("queries.log")).unwrap();
+    // Selection can still be fetching details. Wait until that query lands
+    // so the next arrow is what the assertion measures.
+    let queries = stable_bytes(&dir.0.join("queries.log"));
     gui.key("Up");
     assert_eq!(fs::read(dir.0.join("queries.log")).unwrap(), queries);
     for (op, installed) in [("install", json!("1.0")), ("update", json!("1.0"))] {
