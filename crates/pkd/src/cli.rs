@@ -1,4 +1,5 @@
 use crate::live::Live;
+use crate::session::Session;
 use clap::{Parser, Subcommand, ValueEnum};
 use pkgdeck_core::{
     activity::{History, Outcome, State},
@@ -10,7 +11,6 @@ use pkgdeck_core::{
     process::{Cancellation, ExecutionError},
 };
 use serde_json::{json, Value};
-use std::cell::{Cell, RefCell};
 use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 
@@ -641,13 +641,6 @@ fn emit(args: &Args, data: Value, code: u8, results_shown: bool) -> u8 {
     }
     code
 }
-fn ask(question: &str) -> bool {
-    eprint!("{question} [y/N] ");
-    let _ = io::stderr().flush();
-    let mut answer = String::new();
-    io::stdin().read_line(&mut answer).is_ok()
-        && matches!(answer.trim().to_lowercase().as_str(), "y" | "yes")
-}
 /// What the spinner says while a command reads from package managers.
 fn working_label(command: &Commands) -> Option<String> {
     Some(match command {
@@ -670,76 +663,6 @@ fn working_label(command: &Commands) -> Option<String> {
         Commands::Repos { .. } => "Reading repositories".into(),
         Commands::Doctor => return None,
     })
-}
-/// Package managers whose changes need administrator access in this batch.
-fn protected_sources(operations: &[Operation]) -> Vec<String> {
-    let Ok(commands) = pkgdeck_core::batch::batch_commands(operations) else {
-        return vec![];
-    };
-    let mut sources: Vec<String> = Vec::new();
-    for (operation, commands) in operations.iter().zip(commands) {
-        let backend = operation.backend().to_string();
-        if !commands.is_empty() && !sources.contains(&backend) {
-            sources.push(backend);
-        }
-    }
-    sources
-}
-/// `sudo -n` only works with a cached login, so ask sudo for the password in
-/// the terminal first. sudo reads it, not PkgDeck.
-fn sudo_login(
-    live: &Live,
-    operations: &[Operation],
-    cancel: &Cancellation,
-) -> Result<(), EngineError> {
-    use pkgdeck_core::host::Runtime;
-    let sources = protected_sources(operations);
-    if sources.is_empty()
-        || !io::stdin().is_terminal()
-        || !io::stderr().is_terminal()
-        || !matches!(Host::current().runtime, Runtime::Native | Runtime::AppImage)
-    {
-        return Ok(());
-    }
-    let sudo = std::path::Path::new("/usr/bin/sudo");
-    let quiet = |args: &[&str]| {
-        std::process::Command::new(sudo)
-            .args(args)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|status| status.success())
-    };
-    if quiet(&["-n", "-v"]) {
-        return Ok(());
-    }
-    live.clear();
-    let paint = |code: &str, text: &str| {
-        if live.color() {
-            format!("\x1b[{code}m{text}\x1b[0m")
-        } else {
-            text.into()
-        }
-    };
-    eprintln!(
-        "{}",
-        paint(
-            "2",
-            &format!("Administrator access is needed for {}.", sources.join(", "))
-        )
-    );
-    let granted = std::process::Command::new(sudo)
-        .args(["-v", "-p", "Password for %p: "])
-        .status()
-        .is_ok_and(|status| status.success());
-    if granted {
-        Ok(())
-    } else if cancel.requested() {
-        Err(ExecutionError::AuthorizationCancelled.into())
-    } else {
-        Err(ExecutionError::AuthorizationDenied.into())
-    }
 }
 fn repository_command(
     args: &Args,
@@ -765,7 +688,7 @@ fn repository_command(
         &mut |label| {
             live.clear();
             eprintln!("{}", crate::presentation::clean(label));
-            ask("Apply this repository change?")
+            crate::session::ask("Apply this repository change?", &mut io::stdin().lock())
         },
     )
 }
@@ -854,7 +777,12 @@ pub fn run(args: &Args) -> u8 {
         Err(e) => return emit(args, json!({"error":e.to_string()}), 1, false),
     };
     let command = args.command.as_ref().expect("CLI command");
-    let live = Live::new(!args.json && color_for(&io::stderr()));
+    // JSON output stays machine-only: no spinner or result lines on stderr.
+    let live = if args.json {
+        Live::off()
+    } else {
+        Live::new(color_for(&io::stderr()))
+    };
     if !args.json {
         if let Some(label) = working_label(command) {
             live.status(label);
@@ -893,106 +821,30 @@ pub fn run(args: &Args) -> u8 {
             return emit(args, data, code, false);
         }
     };
-    let color = live.color();
-    let paint = crate::presentation::Paint(color);
-    // Details a backend reports while planning, such as the APT transaction,
-    // belong in the review. Messages after that are live progress.
-    let notes = RefCell::new(Vec::<(Operation, String)>::new());
-    let reviewed = Cell::new(false);
-    let executing = Cell::new(false);
-    let position = Cell::new(0);
-    let total = Cell::new(0);
-    let shown = Cell::new(false);
-    let review = |operations: &[Operation]| {
-        live.clear();
-        eprintln!(
-            "{}\n",
-            crate::presentation::plan(operations, &notes.borrow(), color)
-        );
-        reviewed.set(true);
-    };
+    let session = Session::new(&live);
     let (data, code) = dispatch_with(
         &mut engine,
         args,
         &cancel,
+        &mut |operations| session.confirm(operations, &mut io::stdin().lock()),
         &mut |operations| {
-            review(operations);
-            let count = operations.len();
-            ask(&paint.bold(&format!(
-                "Apply {}?",
-                if count == 1 {
-                    "this change".to_string()
-                } else {
-                    format!("these {count} changes")
-                }
-            )))
-        },
-        &mut |operations| {
-            let refresh = matches!(command, Commands::Update);
-            if !reviewed.get() && !refresh && !args.json {
-                review(operations);
+            if args.json {
+                return Ok(());
             }
-            if matches!(args.auth, Auth::Sudo) && !args.json {
-                sudo_login(&live, operations, &cancel)?;
+            if matches!(args.auth, Auth::Sudo) {
+                crate::session::sudo_login(&live, operations, &cancel)?;
             }
-            total.set(operations.len());
-            executing.set(true);
+            // A refresh changes nothing to review, so it just starts.
+            session.start(operations, !matches!(command, Commands::Update));
             Ok(())
         },
-        &mut |event| match event {
-            Event::Started(operation) => {
-                position.set(position.get() + 1);
-                let counter = if total.get() > 1 {
-                    format!(" ({}/{})", position.get(), total.get())
-                } else {
-                    String::new()
-                };
-                live.status(format!(
-                    "{}{counter}",
-                    crate::presentation::operation_progress(&operation)
-                ));
-            }
-            Event::Progress {
-                operation,
-                progress: Progress::Message(message),
-            } => {
-                if executing.get() {
-                    live.detail(&message);
-                } else {
-                    notes.borrow_mut().push((operation, message));
-                }
-            }
-            Event::Progress {
-                progress: Progress::Transfer { completed, total },
-                ..
-            } => live.detail(&match total {
-                Some(total) if total > 0 => format!("{}%", completed * 100 / total),
-                _ => format!("{} KB", completed / 1024),
-            }),
-            Event::Finished { operation, result } => {
-                if !live.animated() {
-                    return;
-                }
-                let error = result
-                    .as_ref()
-                    .err()
-                    .map(crate::presentation::error_message);
-                let deferred = result
-                    .as_ref()
-                    .is_ok_and(|outcome| outcome.cancellation_deferred);
-                live.line(&crate::presentation::result_line(
-                    &operation,
-                    error.as_deref(),
-                    deferred,
-                    color,
-                ));
-                shown.set(true);
-            }
-        },
+        &mut |event| session.event(event),
     );
+    let shown = session.results_shown();
+    drop(session);
     signal_hook::low_level::unregister(signal);
     drop(live);
-    emit(args, data, code, shown.get())
+    emit(args, data, code, shown)
 }
 
 fn inspection_sources(requested: &[String]) -> Vec<String> {
@@ -1690,6 +1542,36 @@ mod tests {
         assert_eq!(call(&mut engine, &["upgrade"], true).1, 4);
     }
 
+    #[test]
+    fn every_reading_command_names_what_it_is_doing() {
+        for (words, label) in [
+            (vec!["search", "vim"], "Searching for vim"),
+            (vec!["info", "vim"], "Looking up vim"),
+            (vec!["inspect", "vim"], "Inspecting vim"),
+            (vec!["list"], "Reading installed packages"),
+            (
+                vec!["inventory", "preview", "saved.json"],
+                "Reading installed packages",
+            ),
+            (vec!["audit"], "Looking for duplicates and leftovers"),
+            (vec!["sources"], "Checking package managers"),
+            (vec!["update"], "Checking package managers"),
+            (vec!["upgrade"], "Checking for updates"),
+            (vec!["upgrade", "vim"], "Finding packages"),
+            (vec!["install", "vim"], "Finding packages"),
+            (vec!["remove", "vim"], "Finding packages"),
+            (vec!["clean"], "Looking for cleanup tasks"),
+            (vec!["repos"], "Reading repositories"),
+        ] {
+            let args = Args::try_parse_from(std::iter::once("pkd").chain(words)).unwrap();
+            assert_eq!(
+                working_label(args.command.as_ref().unwrap()).unwrap(),
+                label
+            );
+        }
+        let doctor = Args::try_parse_from(["pkd", "doctor"]).unwrap();
+        assert!(working_label(doctor.command.as_ref().unwrap()).is_none());
+    }
     struct NoRefresh(&'static str);
     impl Backend for NoRefresh {
         fn id(&self) -> &str {

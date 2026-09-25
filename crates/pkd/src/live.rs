@@ -33,6 +33,18 @@ impl Live {
     pub fn new(color: bool) -> Self {
         let animated =
             io::stderr().is_terminal() && std::env::var("TERM").is_ok_and(|term| term != "dumb");
+        Self::with_animation(color, animated)
+    }
+    /// No spinner and no result lines, for `--json`.
+    pub fn off() -> Self {
+        Self::with_animation(false, false)
+    }
+    /// A spinner that animates even when stderr is not a terminal.
+    #[cfg(test)]
+    pub fn forced(color: bool) -> Self {
+        Self::with_animation(color, true)
+    }
+    fn with_animation(color: bool, animated: bool) -> Self {
         let width = rustix::termios::tcgetwinsize(io::stderr())
             .map_or(80, |size| usize::from(size.ws_col))
             .clamp(24, 200);
@@ -195,6 +207,32 @@ fn fit(text: &str, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn spinner_draws_status_detail_and_timer_then_clears() {
+        for color in [false, true] {
+            let live = Live::forced(color);
+            assert!(live.animated() && live.color() == color);
+            live.status("Installing a package with a long name");
+            live.detail("line one\n\nUnpacking tool\n");
+            assert_eq!(live.state.lock().unwrap().detail, "Unpacking tool");
+            std::thread::sleep(Duration::from_millis(200));
+            live.line("✓ Install tool");
+            let mut state = live.state.lock().unwrap();
+            state.since = Some(Instant::now() - Duration::from_secs(3));
+            draw(&mut state, 1, 60, color);
+            assert!(state.drawn > 0);
+            // Too narrow for the detail: only the label is drawn.
+            draw(&mut state, 2, 24, color);
+            drop(state);
+            live.clear();
+            assert_eq!(live.state.lock().unwrap().drawn, 0);
+        }
+        let quiet = Live::off();
+        assert!(!quiet.animated());
+        quiet.status("ignored");
+        quiet.detail("ignored");
+        assert!(quiet.state.lock().unwrap().label.is_none());
+    }
     #[test]
     fn fit_truncates_by_display_width() {
         assert_eq!(fit("abc", 5), "abc");

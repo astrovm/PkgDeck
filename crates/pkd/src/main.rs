@@ -3,6 +3,7 @@ mod cli;
 mod live;
 use cli::{Args, Commands};
 mod presentation;
+mod session;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
