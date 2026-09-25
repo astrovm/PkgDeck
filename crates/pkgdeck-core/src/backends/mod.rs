@@ -2534,8 +2534,9 @@ impl<T: Transport> Backend for SystemManager<T> {
         cancel: &Cancellation,
     ) -> Result<PackageDetails, EngineError> {
         let name = self.target(id)?;
+        // Search merges the installed version into catalog rows.
         let mut package = self
-            .query(false, &name, cancel)?
+            .search(&name, cancel)?
             .into_iter()
             .find(|package| package.id == *id)
             .ok_or(EngineError::NotFound)?;

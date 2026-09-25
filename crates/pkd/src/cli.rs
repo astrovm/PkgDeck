@@ -519,7 +519,10 @@ pub fn dispatch(
         }
     }
     if !operations.is_empty() && !args.yes && !confirm(&operations) {
-        return (json!({"error": "confirmation_declined"}), 7);
+        return (
+            json!({"error": "confirmation_declined", "message": "Cancelled. Nothing was changed."}),
+            7,
+        );
     }
     let history = History::default_store();
     let activity_id = history
@@ -657,7 +660,10 @@ fn repository_dispatch(
         return failure(error);
     }
     if !args.yes && !confirm(&action.label()) {
-        return (json!({"error": "confirmation_declined"}), 7);
+        return (
+            json!({"error": "confirmation_declined", "message": "Cancelled. Nothing was changed."}),
+            7,
+        );
     }
     match repositories::apply(transport, &action, cancel) {
         Ok(()) => (json!({"message": "Repository operation completed"}), 0),

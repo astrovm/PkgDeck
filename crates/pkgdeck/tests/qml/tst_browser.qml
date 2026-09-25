@@ -1545,8 +1545,8 @@ TestCase {
         waitForRendering(browser.contentItem);
         const userRow = results.itemAtIndex(0);
         const systemRow = results.itemAtIndex(1);
-        compare(findChild(userRow, "packageSourceLine").text, "FLATPAK · flathub · User");
-        compare(findChild(systemRow, "packageSourceLine").text, "FLATPAK · flathub · System");
+        compare(findChild(userRow, "packageSourceLine").text, "Flatpak · flathub · User");
+        compare(findChild(systemRow, "packageSourceLine").text, "Flatpak · flathub · System");
         mouseClick(findChild(systemRow, "rowPackageAction"));
         compare(fake.selection, 1);
         const dialog = findChild(browser, "confirmationDialog");

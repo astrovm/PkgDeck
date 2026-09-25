@@ -134,7 +134,7 @@ fn container_images_keep_stable_ids_and_friendly_cli_names() {
         &docker,
         r#"#!/bin/sh
 case "$1" in
-  info) printf '%s\n' '{}' ;;
+  version) printf '%s\n' '{}' ;;
   image) printf '%s\n' '{"ID":"sha256:0123456789abcdef","Repository":"example/app","Tag":"latest","Digest":"sha256:aaaa","Size":"42MB","CreatedSince":"2 days ago"}' ;;
   *) exit 64 ;;
 esac
@@ -193,8 +193,8 @@ fn terminal_confirmation_defaults_to_no_and_accepts_explicit_approval() {
     assert!(output.contains("Install fixture"));
     assert!(output.contains("Source: homebrew"));
     assert!(output.contains("[y/N]"));
-    assert!(output.contains("confirmation_declined"));
-    assert!(output.contains("\x1b[1;34mPkgDeck"));
+    assert!(output.contains("Cancelled. Nothing was changed."));
+    assert!(output.contains("\x1b["));
     assert!(!fixture.0.join("state.json").exists());
 
     if !rustix_root() {

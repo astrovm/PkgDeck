@@ -37,13 +37,23 @@ RowLayout {
         implicitHeight: Math.max(44, pane.textFont.pointSize * 3.4)
         color: pane.ink
         placeholderTextColor: pane.muted
-        leftPadding: 14
+        leftPadding: 42
         rightPadding: 42
         background: Rectangle {
             color: pane.surface
-            radius: 8
+            radius: 10
             border.color: search.activeFocus ? pane.accent : pane.line
             border.width: search.activeFocus ? 2 : 1
+            Behavior on border.color { ColorAnimation { duration: 120 } }
+            DeckIcon {
+                name: "search"
+                ink: search.activeFocus ? pane.accent : pane.muted
+                anchors.left: parent.left
+                anchors.leftMargin: 14
+                anchors.verticalCenter: parent.verticalCenter
+                width: 18
+                height: 18
+            }
         }
         onAccepted: pane.submitted()
         Keys.onDownPressed: pane.downRequested()
@@ -73,16 +83,19 @@ RowLayout {
         horizontalPadding: 14
         onClicked: pane.submitted()
         background: Rectangle {
-            radius: 7
-            color: parent.enabled ? pane.accent : pane.surface
-            border.color: parent.activeFocus ? pane.accent : pane.line
-            border.width: parent.activeFocus ? 2 : 1
+            radius: 10
+            color: !searchButton.enabled ? pane.surface : searchButton.down ? Qt.darker(pane.accent, 1.08) : searchButton.hovered ? Qt.lighter(pane.accent, 1.08) : pane.accent
+            border.color: searchButton.activeFocus ? pane.accent : searchButton.enabled ? "transparent" : pane.line
+            border.width: searchButton.activeFocus ? 2 : 1
+            Behavior on color { ColorAnimation { duration: 120 } }
         }
+        scale: down ? 0.97 : 1
+        Behavior on scale { NumberAnimation { duration: 120; easing.type: Easing.OutCubic } }
         contentItem: RowLayout {
             id: buttonContents
             spacing: 8
             DeckIcon { name: "search"; ink: searchButton.enabled ? pane.onAccent : pane.muted; Layout.preferredWidth: 18; Layout.preferredHeight: 18 }
-            Text { objectName: "searchButtonLabel"; text: "Search"; color: searchButton.enabled ? pane.onAccent : pane.muted; font: pane.textFont }
+            Text { objectName: "searchButtonLabel"; text: "Search"; color: searchButton.enabled ? pane.onAccent : pane.muted; font.family: pane.textFont.family; font.pointSize: pane.textFont.pointSize; font.weight: Font.DemiBold }
         }
     }
 }

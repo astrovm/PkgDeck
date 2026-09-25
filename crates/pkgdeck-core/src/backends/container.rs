@@ -372,7 +372,9 @@ impl<T: Transport> Backend for Container<T> {
                     .into(),
             ));
         }
-        match self.call(&["info", "--format", "{{json .}}"], cancel, false) {
+        // `version` answers from the client and, for Docker, the daemon; `info`
+        // also computes storage statistics and takes seconds on large stores.
+        match self.call(&["version", "--format", "{{json .}}"], cancel, false) {
             Ok(_) => Ok(Availability::Available),
             Err(EngineError::Execution(ExecutionError::Disabled(reason))) => {
                 Ok(Availability::Unavailable(reason))
@@ -779,7 +781,7 @@ mod tests {
                 .unwrap()
                 .push((executable.into(), args.into(), write));
             Ok(completed(
-                if write || args.first().is_some_and(|arg| arg == "info") {
+                if write || args.first().is_some_and(|arg| arg == "version") {
                     &[]
                 } else if args.first().is_some_and(|arg| arg == "buildx") {
                     self.build_cache.as_deref().unwrap_or("").as_bytes()

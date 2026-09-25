@@ -329,18 +329,29 @@ impl Engine {
     }
 
     pub fn discover(&mut self, cancel: &Cancellation) -> Vec<Source> {
-        self.backends
-            .iter_mut()
-            .map(|(id, backend)| Source {
-                backend: id.clone(),
-                capabilities: backend.capabilities().to_vec(),
-                availability: if cancel.requested() {
-                    Err(EngineError::Cancelled)
-                } else {
-                    backend.detect(cancel)
-                },
-            })
-            .collect()
+        // Detection spawns native tools; probe every backend concurrently and
+        // keep the registration order in the result.
+        std::thread::scope(|s| {
+            let workers: Vec<_> = self
+                .backends
+                .iter_mut()
+                .map(|(id, backend)| {
+                    s.spawn(move || Source {
+                        backend: id.clone(),
+                        capabilities: backend.capabilities().to_vec(),
+                        availability: if cancel.requested() {
+                            Err(EngineError::Cancelled)
+                        } else {
+                            backend.detect(cancel)
+                        },
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .map(|worker| worker.join().expect("detection worker panicked"))
+                .collect()
+        })
     }
 
     fn ready(
@@ -356,6 +367,20 @@ impl Engine {
             .backends
             .get_mut(id)
             .ok_or_else(|| EngineError::UnknownBackend(id.into()))?;
+        Self::ready_backend(&mut **backend, id, capability, cancel)?;
+        Ok(backend)
+    }
+
+    /// Capability, availability, and cancellation checks for one backend.
+    fn ready_backend<'a>(
+        backend: &'a mut dyn Backend,
+        id: &str,
+        capability: Capability,
+        cancel: &Cancellation,
+    ) -> Result<&'a mut dyn Backend, EngineError> {
+        if cancel.requested() {
+            return Err(EngineError::Cancelled);
+        }
         if !backend.capabilities().contains(&capability) {
             return Err(backend.unsupported(capability));
         }
@@ -410,19 +435,29 @@ impl Engine {
     pub fn cleanup(&mut self, cancel: &Cancellation) -> CleanupReport {
         self.cleanup_plans.clear();
         let mut report = CleanupReport::default();
-        let ids: Vec<_> = self.backends.keys().cloned().collect();
-        for id in ids {
-            if !self
+        // Each backend previews its cleanup independently, so run them
+        // concurrently and merge the results in registration order.
+        let results: Vec<_> = std::thread::scope(|s| {
+            let workers: Vec<_> = self
                 .backends
-                .get(&id)
-                .is_some_and(|backend| backend.capabilities().contains(&Capability::Clean))
-            {
-                continue;
-            }
+                .iter_mut()
+                .filter(|(_, backend)| backend.capabilities().contains(&Capability::Clean))
+                .map(|(id, backend)| {
+                    s.spawn(move || {
+                        let result =
+                            Self::ready_backend(&mut **backend, id, Capability::Clean, cancel)
+                                .map(|backend| backend.cleanup_report(cancel));
+                        (id.clone(), result)
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .map(|worker| worker.join().expect("cleanup worker panicked"))
+                .collect()
+        });
+        for (id, result) in results {
             let mut seen = BTreeSet::new();
-            let result = self
-                .ready(&id, Capability::Clean, cancel)
-                .map(|backend| backend.cleanup_report(cancel));
             match result {
                 Ok(partial)
                     if partial.failures.iter().all(|failure| failure.backend == id)
@@ -459,21 +494,40 @@ impl Engine {
         self.cleanup_plans.insert(item.id.clone(), item);
     }
     fn query(&mut self, query: Option<&str>, cancel: &Cancellation) -> PackageReport {
+        let capability = if query.is_some() {
+            Capability::Search
+        } else {
+            Capability::Installed
+        };
+        let noted = &self.detected;
+        // Query backends concurrently; results merge in registration order so
+        // the report is identical to a sequential traversal.
+        let results: Vec<_> = std::thread::scope(|s| {
+            let workers: Vec<_> = self
+                .backends
+                .iter_mut()
+                .map(|(id, backend)| {
+                    let noted = noted.get(id).cloned();
+                    s.spawn(move || {
+                        let result = Self::query_backend(
+                            &mut **backend,
+                            id,
+                            noted,
+                            capability,
+                            query,
+                            cancel,
+                        );
+                        (id.clone(), result)
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .map(|worker| worker.join().expect("query worker panicked"))
+                .collect()
+        });
         let mut report = PackageReport::default();
-        let ids: Vec<_> = self.backends.keys().cloned().collect();
-        for id in ids {
-            let capability = if query.is_some() {
-                Capability::Search
-            } else {
-                Capability::Installed
-            };
-            let noted = self.detected.get(&id).cloned();
-            let result = match self.backends.get_mut(&id) {
-                None => Err(EngineError::UnknownBackend(id.clone())),
-                Some(backend) => {
-                    Self::query_backend(&mut **backend, &id, noted, capability, query, cancel)
-                }
-            };
+        for (id, result) in results {
             match result {
                 Ok(packages) => {
                     report.packages.extend(packages);
@@ -553,6 +607,9 @@ impl Engine {
                 }
                 accumulated.packages.sort_by(|a, b| a.id.cmp(&b.id));
                 accumulated.successful_sources.sort();
+                accumulated
+                    .failures
+                    .sort_by(|a, b| a.backend.cmp(&b.backend));
                 stash.push((id, backend));
                 emit(accumulated.clone());
             }

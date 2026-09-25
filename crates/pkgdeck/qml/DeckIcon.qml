@@ -1,13 +1,18 @@
 import QtQuick
+import QtQuick.Shapes
 
 // Original vector artwork, embedded with the QML module. No icon theme or font.
-Canvas {
+// Drawn with Qt Quick Shapes so icons render on the GPU and stay sharp at any
+// size; list rows can show many of them without software repaints.
+Item {
     id: icon
     property string name: "package"
     property color ink: "#ffffff"
+    readonly property bool available: true
     implicitWidth: 20
     implicitHeight: 20
     Accessible.ignored: true // The adjacent control label carries the meaning.
+    // Polylines in a 24×24 grid: [x0, y0, x1, y1, ...] per stroke.
     readonly property var drawings: ({
         "heart": [[12,21,3,12,2,8,3,4,7,3,12,7,17,3,21,4,22,8,21,12,12,21]],
         "package": [[3,7,12,2,21,7,21,17,12,22,3,17,3,7,12,12,21,7], [12,12,12,22], [7,4.8,16,9.8]],
@@ -25,6 +30,9 @@ Canvas {
         "remove": [[4,6,20,6], [9,6,9,3,15,3,15,6], [6,6,7,21,17,21,18,6], [10,10,10,17], [14,10,14,17]],
         "refresh": [[20,3,20,9,14,9], [4,21,4,15,10,15]],
         "cancel": [[5,5,19,19], [19,5,5,19]],
+        "activity": [[2,12,6,12,9,4,15,20,18,12,22,12]],
+        "bell": [[6,17,6,10,7,7,9,5,12,4,15,5,17,7,18,10,18,17,20,19,4,19,6,17], [10,22,14,22]],
+        "filter": [[3,5,21,5,14,13,14,20,10,22,10,13,3,5]],
         "apt": [[3,4,21,4,21,9,3,9,3,4], [5,9,5,21,19,21,19,9], [9,13,15,13]],
         "homebrew": [[4,6,16,6,16,21,4,21,4,6], [16,8,21,8,21,16,16,16], [7,2,7,3], [12,2,12,3]],
         "homebrew-cask": [[4,6,16,6,16,21,4,21,4,6], [16,8,21,8,21,16,16,16], [7,2,7,3], [12,2,12,3]],
@@ -41,39 +49,36 @@ Canvas {
         "gem": [[6,8,12,3,18,8,15,21,9,21,6,8], [6,8,18,8], [9,8,12,13,15,8]],
         "warning": [[12,2,23,21,1,21,12,2], [12,8,12,14], [12,17,12,18]]
     })
-    onNameChanged: requestPaint()
-    onInkChanged: requestPaint()
-    onWidthChanged: requestPaint()
-    onHeightChanged: requestPaint()
-    onPaint: {
-        const ctx = getContext("2d");
-        ctx.reset();
-        ctx.scale(width / 24, height / 24);
-        ctx.strokeStyle = ink;
-        ctx.lineWidth = 1.7;
-        ctx.lineCap = "round";
-        ctx.lineJoin = "round";
-        const paths = drawings[name] || drawings.package;
-        for (const points of paths) {
-            ctx.beginPath();
-            ctx.moveTo(points[0], points[1]);
+    // Circles and arcs that polylines cannot express, as SVG path data.
+    readonly property var arcs: ({
+        "search": "M 17 10 A 7 7 0 1 1 3 10 A 7 7 0 1 1 17 10",
+        "help": "M 22 12 A 10 10 0 1 1 2 12 A 10 10 0 1 1 22 12",
+        "refresh": "M 3.632 8.687 A 9 9 0 0 1 20.368 8.687 M 20.368 15.313 A 9 9 0 0 1 3.632 15.313"
+    })
+    readonly property string pathData: {
+        const strokes = drawings[name] || drawings["package"];
+        let data = strokes.map((points) => {
+            let segment = "M " + points[0] + " " + points[1];
             for (let i = 2; i < points.length; i += 2)
-                ctx.lineTo(points[i], points[i + 1]);
-            if (name === "heart") { ctx.fillStyle = ink; ctx.fill(); }
-            ctx.stroke();
-        }
-        if (name === "search" || name === "help" || name === "refresh") {
-            ctx.beginPath();
-            if (name === "search")
-                ctx.arc(10, 10, 7, 0, Math.PI * 2);
-            else if (name === "help")
-                ctx.arc(12, 12, 10, 0, Math.PI * 2);
-            else {
-                ctx.arc(12, 12, 9, Math.PI * 1.12, Math.PI * 1.88);
-                ctx.moveTo(20.37, 15.31);
-                ctx.arc(12, 12, 9, Math.PI * 0.12, Math.PI * 0.88);
-            }
-            ctx.stroke();
+                segment += " L " + points[i] + " " + points[i + 1];
+            return segment;
+        }).join(" ");
+        if (arcs[name])
+            data += " " + arcs[name];
+        return data;
+    }
+    Shape {
+        width: 24
+        height: 24
+        preferredRendererType: Shape.CurveRenderer
+        transform: Scale { xScale: icon.width / 24; yScale: icon.height / 24 }
+        ShapePath {
+            strokeColor: icon.ink
+            strokeWidth: 1.7
+            fillColor: icon.name === "heart" ? icon.ink : "transparent"
+            capStyle: ShapePath.RoundCap
+            joinStyle: ShapePath.RoundJoin
+            PathSvg { path: icon.pathData }
         }
     }
 }

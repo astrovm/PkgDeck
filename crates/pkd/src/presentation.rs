@@ -81,7 +81,42 @@ fn cell(text: &str, width: usize) -> String {
     let padding = width.saturating_sub(output.width());
     format!("{output}{}", " ".repeat(padding))
 }
-fn table(headers: &[&str], rows: &[Vec<String>], width: usize) -> String {
+/// ANSI styling that disappears entirely when color is off.
+#[derive(Clone, Copy)]
+struct Paint(bool);
+impl Paint {
+    fn wrap(self, code: &str, text: &str) -> String {
+        if self.0 && !text.is_empty() {
+            format!("\x1b[{code}m{text}\x1b[0m")
+        } else {
+            text.into()
+        }
+    }
+    fn bold(self, text: &str) -> String {
+        self.wrap("1", text)
+    }
+    fn dim(self, text: &str) -> String {
+        self.wrap("2", text)
+    }
+    fn green(self, text: &str) -> String {
+        self.wrap("32", text)
+    }
+    fn cyan(self, text: &str) -> String {
+        self.wrap("36", text)
+    }
+    fn yellow(self, text: &str) -> String {
+        self.wrap("33", text)
+    }
+    fn red(self, text: &str) -> String {
+        self.wrap("31", text)
+    }
+}
+/// Style applied to a padded table cell; padding stays outside the escape codes.
+type Style = fn(Paint, &str) -> String;
+fn plain(_: Paint, text: &str) -> String {
+    text.into()
+}
+fn table(headers: &[&str], rows: &[Vec<(String, Style)>], width: usize, paint: Paint) -> String {
     // Drop trailing columns on narrow terminals; full metadata remains in `info`/JSON.
     let columns = if width < 60 {
         2
@@ -91,106 +126,177 @@ fn table(headers: &[&str], rows: &[Vec<String>], width: usize) -> String {
         headers.len()
     }
     .min(headers.len());
-    let available = width.saturating_sub(2 * (columns - 1));
-    let shares = match columns {
-        2 => vec![65, 35],
-        3 => vec![34, 26, 40],
-        _ => vec![24, 14, 18, 44],
+    let gap = 2;
+    let available = width.saturating_sub(gap * (columns - 1));
+    // Size each column to its content, capped so the last column keeps room;
+    // the last column takes whatever is left.
+    let natural: Vec<usize> = (0..columns)
+        .map(|i| {
+            rows.iter()
+                .map(|row| clean(&row[i].0).width())
+                .chain([headers[i].width()])
+                .max()
+                .unwrap_or(0)
+        })
+        .collect();
+    let cap = |i: usize| match columns {
+        2 => available * 60 / 100,
+        _ if i == 0 => available * 36 / 100,
+        _ => available * 24 / 100,
     };
-    let mut widths: Vec<_> = shares.iter().map(|share| available * share / 100).collect();
-    widths[columns - 1] += available - widths.iter().sum::<usize>();
-    let line = |cells: &[String]| {
+    let mut widths: Vec<usize> = (0..columns)
+        .map(|i| natural[i].min(cap(i)).max(3))
+        .collect();
+    let fixed: usize = widths[..columns - 1].iter().sum();
+    widths[columns - 1] = available
+        .saturating_sub(fixed)
+        .min(natural[columns - 1])
+        .max(3);
+    let render = |cells: &[(String, Style)], header: bool| {
         cells
             .iter()
+            .take(columns)
             .zip(&widths)
-            .map(|(text, w)| cell(text, *w))
+            .enumerate()
+            .map(|(i, ((text, style), w))| {
+                let padded = cell(text, *w);
+                let content = padded.trim_end();
+                let styled = if header {
+                    paint.dim(content)
+                } else {
+                    style(paint, content)
+                };
+                if i + 1 == columns {
+                    styled
+                } else {
+                    format!("{styled}{}", " ".repeat(w - content.width()))
+                }
+            })
             .collect::<Vec<_>>()
-            .join("  ")
+            .join(&" ".repeat(gap))
             .trim_end()
             .to_string()
     };
-    let mut result = line(&headers.iter().map(|s| (*s).into()).collect::<Vec<_>>());
+    let header_cells: Vec<(String, Style)> = headers
+        .iter()
+        .map(|h| ((*h).to_string(), plain as Style))
+        .collect();
+    let rule = widths.iter().sum::<usize>() + gap * (columns - 1);
+    let mut result = render(&header_cells, true);
     result.push('\n');
-    result.push_str(&"─".repeat(width));
+    result.push_str(&paint.dim(&"─".repeat(rule.min(width))));
     for row in rows {
         result.push('\n');
-        result.push_str(&line(row));
+        result.push_str(&render(row, false));
     }
     result
 }
+fn failure_line(paint: Paint, label: &str, detail: &str) -> String {
+    format!("\n{} {detail}", paint.yellow(&format!("[!] {label}")))
+}
+fn scope_label(scope: &Value) -> Option<&'static str> {
+    match scope {
+        Value::String(s) if s == "system" => Some("system"),
+        Value::Object(fields) if fields.contains_key("user") => Some("user"),
+        _ => None,
+    }
+}
 pub fn human(data: &Value, width: usize, color: bool) -> String {
     let width = width.clamp(24, 160);
-    let heading = if color {
-        "\x1b[1;34mPkgDeck\x1b[0m"
-    } else {
-        "PkgDeck"
-    };
-    let mut output = format!("{heading}\n\n");
+    let paint = Paint(color);
+    let mut output = String::new();
     if let Some(items) = data["items"].as_array() {
         if items.is_empty() {
-            output.push_str("Nothing to clean.");
+            output.push_str(&paint.green("Nothing to clean."));
         } else {
             let rows = items
                 .iter()
                 .map(|item| {
                     vec![
-                        format!(
-                            "{}:{}",
-                            value(&item["id"]["backend"]),
-                            value(&item["id"]["key"])
+                        (
+                            format!(
+                                "{}:{}",
+                                value(&item["id"]["backend"]),
+                                value(&item["id"]["key"])
+                            ),
+                            Paint::bold as Style,
                         ),
-                        value(&item["title"]),
-                        value(&item["summary"]),
+                        (value(&item["title"]), plain as Style),
+                        (value(&item["summary"]), Paint::dim as Style),
                     ]
                 })
                 .collect::<Vec<_>>();
-            output.push_str(&table(&["KEY", "CLEANUP", "SUMMARY"], &rows, width));
-            output.push_str("\n\nReview a plan with --json. Run selected keys with `pkd clean <key>` or every plan with `pkd clean --all`.");
+            output.push_str(&table(&["KEY", "TASK", "SUMMARY"], &rows, width, paint));
+            output.push_str(&format!(
+                "\n\n{}",
+                paint.dim("Run one with `pkd clean <key>`, or all with `pkd clean --all`. Add --json to see each preview.")
+            ));
         }
         if let Some(failures) = data["failures"].as_array() {
             for failure in failures {
                 let unsupported = failure["error"].get("Unsupported").is_some()
                     || failure["error"].get("unsupported").is_some();
-                output.push_str(&format!(
-                    "\n{} {}",
-                    if unsupported {
-                        "[-] Unsupported:"
-                    } else {
-                        "[!] Failed:"
-                    },
-                    value(failure)
-                ));
+                output.push_str(&if unsupported {
+                    format!("\n{} {}", paint.dim("[-] Unsupported:"), value(failure))
+                } else {
+                    failure_line(paint, "Failed:", &value(failure))
+                });
             }
         }
     } else if let Some(packages) = data["packages"].as_array() {
         let rows = packages
             .iter()
             .map(|p| {
-                vec![
-                    format!(
-                        "{} {}",
-                        package_marker(
-                            !p["installed_version"].is_null(),
-                            p["update"] == "available"
-                        ),
-                        value(
-                            if matches!(
-                                p["id"]["backend"].as_str(),
-                                Some("fwupd" | "docker" | "podman")
-                            ) {
-                                &p["display_name"]
-                            } else {
-                                &p["id"]["name"]
-                            }
-                        )
-                    ),
-                    value(&p["id"]["backend"]),
-                    value(if p["installed_version"].is_null() {
-                        &p["candidate_version"]
+                let installed = !p["installed_version"].is_null();
+                let update = p["update"] == "available";
+                let marker = package_marker(installed, update);
+                let name = value(
+                    if matches!(
+                        p["id"]["backend"].as_str(),
+                        Some("fwupd" | "docker" | "podman")
+                    ) {
+                        &p["display_name"]
                     } else {
+                        &p["id"]["name"]
+                    },
+                );
+                // Flatpak can install the same app per user and system-wide.
+                let source = match (p["id"]["backend"].as_str(), scope_label(&p["id"]["scope"])) {
+                    (Some("flatpak"), Some(scope)) => format!("flatpak ({scope})"),
+                    _ => value(&p["id"]["backend"]),
+                };
+                let version = if update && installed && !p["candidate_version"].is_null() {
+                    format!(
+                        "{} → {}",
+                        value(&p["installed_version"]),
+                        value(&p["candidate_version"])
+                    )
+                } else {
+                    value(if installed {
                         &p["installed_version"]
-                    }),
-                    value(&p["summary"]),
+                    } else {
+                        &p["candidate_version"]
+                    })
+                };
+                let marker_style: Style = if update {
+                    Paint::cyan
+                } else if installed {
+                    Paint::green
+                } else {
+                    Paint::dim
+                };
+                vec![
+                    (format!("{marker} {name}"), marker_style),
+                    (source, Paint::dim as Style),
+                    (
+                        version,
+                        if update {
+                            Paint::cyan as Style
+                        } else {
+                            plain as Style
+                        },
+                    ),
+                    (value(&p["summary"]), Paint::dim as Style),
                 ]
             })
             .collect::<Vec<_>>();
@@ -208,23 +314,30 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
                 &["NAME", "SOURCE", "VERSION", "SUMMARY"],
                 &rows,
                 width,
+                paint,
             ));
+            let count = rows.len();
             output.push_str(&format!(
-                "\n\n{} packages · Use pkd info <name> for details.\n[ ] Not installed   [x] Installed   [^] Update available",
-                rows.len()
+                "\n\n{} {}\n{}",
+                paint.bold(&format!(
+                    "{count} package{}",
+                    if count == 1 { "" } else { "s" }
+                )),
+                paint.dim("· run `pkd info <name>` for details"),
+                paint.dim("[ ] Not installed   [x] Installed   [^] Update available")
             ));
         }
         if let Some(failures) = data["failures"].as_array() {
             for failure in failures {
-                output.push_str(&format!("\n[!] Source failed: {}", value(failure)));
+                output.push_str(&failure_line(paint, "Source failed:", &value(failure)));
             }
         }
     } else if let Some(export) = data.get("manifest_export") {
-        output.push_str(&format!(
+        output.push_str(&paint.green(&format!(
             "Exported {} packages to {}",
             value(&export["packages"]),
             value(&export["path"])
-        ));
+        )));
     } else if let Some(preview) = data.get("manifest_preview") {
         let rows = preview["packages"]
             .as_array()
@@ -232,10 +345,10 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
             .flatten()
             .map(|entry| {
                 vec![
-                    value(&entry["package"]["name"]),
-                    value(&entry["package"]["backend"]),
-                    value(&entry["status"]),
-                    value(&entry["reason"]),
+                    (value(&entry["package"]["name"]), Paint::bold as Style),
+                    (value(&entry["package"]["backend"]), Paint::dim as Style),
+                    (value(&entry["status"]), plain as Style),
+                    (value(&entry["reason"]), Paint::dim as Style),
                 ]
             })
             .collect::<Vec<_>>();
@@ -243,6 +356,7 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
             &["PACKAGE", "SOURCE", "STATUS", "DETAIL"],
             &rows,
             width,
+            paint,
         ));
         for entry in preview["packages"].as_array().into_iter().flatten() {
             for proposed in entry["proposed_changes"].as_array().into_iter().flatten() {
@@ -250,19 +364,24 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
             }
         }
     } else if let Some(report) = data.get("inspection") {
-        output.push_str(&format!(
-            "Command: {}\nEnvironment: {}\nPATH: {}\nResolved: {}\n",
-            value(&report["command"]),
-            value(&report["environment"]),
-            value(&report["path"]),
-            value(&report["resolved"])
-        ));
+        for (label, field) in [
+            ("Command", &report["command"]),
+            ("Resolved", &report["resolved"]),
+            ("Environment", &report["environment"]),
+            ("PATH", &report["path"]),
+        ] {
+            output.push_str(&format!(
+                "{}  {}\n",
+                paint.dim(&format!("{label:>11}")),
+                value(field)
+            ));
+        }
         if let Some(candidates) = report["candidates"].as_array() {
             for candidate in candidates {
                 output.push_str(&format!(
-                    "\n{} [{}]",
-                    value(&candidate["path"]),
-                    value(&candidate["state"])
+                    "\n{} {}",
+                    paint.bold(&value(&candidate["path"])),
+                    paint.dim(&format!("[{}]", value(&candidate["state"])))
                 ));
                 if !candidate["target"].is_null() {
                     output.push_str(&format!(" → {}", value(&candidate["target"])));
@@ -290,12 +409,15 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
                 }
             }
         }
-        output.push_str(&format!("\n\n{}", value(&report["ownership_note"])));
+        output.push_str(&format!(
+            "\n\n{}",
+            paint.dim(&value(&report["ownership_note"]))
+        ));
     } else if let Some(report) = data.get("audit") {
         if let Some(groups) = report["groups"].as_array() {
-            output.push_str(&format!("{} known duplicate groups\n", groups.len()));
+            output.push_str(&paint.bold(&format!("{} known duplicate groups\n", groups.len())));
             for group in groups {
-                output.push_str(&format!("\n{}\n", value(&group["key"])));
+                output.push_str(&format!("\n{}\n", paint.bold(&value(&group["key"]))));
                 if let Some(copies) = group["copies"].as_array() {
                     for copy in copies {
                         output.push_str(&format!(
@@ -310,10 +432,10 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
             }
         }
         if let Some(leftovers) = report["leftovers"].as_array() {
-            output.push_str(&format!(
+            output.push_str(&paint.bold(&format!(
                 "\n{} manager-reported residual files\n",
                 leftovers.len()
-            ));
+            )));
             for row in leftovers {
                 output.push_str(&format!(
                     "  {} · {} · {} · {} bytes\n",
@@ -324,50 +446,66 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
                 ));
             }
         }
-        output.push_str(&format!("\n{}", value(&report["data_note"])));
+        output.push_str(&format!("\n{}", paint.dim(&value(&report["data_note"]))));
     } else if data.get("package").is_some() {
         let p = &data["package"];
-        output.push_str(&format!(
-            "{}\n{}\n\n",
-            value(&p["id"]["name"]),
-            value(&data["description"])
-        ));
+        output.push_str(&paint.bold(&value(&p["id"]["name"])));
+        let description = value(&data["description"]);
+        if !data["description"].is_null() && !description.trim().is_empty() {
+            output.push_str(&format!("\n{description}"));
+        }
+        output.push_str("\n\n");
         for (label, field) in [
             ("Source", &p["id"]["backend"]),
             ("Reference", &p["id"]["reference"]),
             ("Architecture", &p["id"]["architecture"]),
             ("Scope", &p["id"]["scope"]),
             ("Installed", &p["installed_version"]),
-            ("Candidate", &p["candidate_version"]),
+            ("Available", &p["candidate_version"]),
             ("Update", &p["update"]),
             ("Homepage", &data["homepage"]),
             ("Dependencies", &data["dependencies"]),
         ] {
-            if label == "Reference" && field.is_null() {
-                continue;
-            }
-            // A missing installed version means not installed, matching the
-            // state legend; every other null stays a plain Unavailable.
+            // A missing installed version means not installed; other empty
+            // fields carry no information and are left out.
             let text = if label == "Installed" && field.is_null() {
                 "not installed".into()
+            } else if field.is_null()
+                || field.as_array().is_some_and(Vec::is_empty)
+                || (label == "Update" && field == "unknown")
+            {
+                continue;
             } else {
                 value(field)
             };
-            output.push_str(&format!("{label:>12}  {text}\n"));
+            let text = if label == "Update" && text == "available" {
+                paint.cyan(&text)
+            } else {
+                text
+            };
+            output.push_str(&format!("{}  {text}\n", paint.dim(&format!("{label:>12}"))));
         }
     } else if let Some(repositories) = data["repositories"].as_array() {
         let rows = repositories
             .iter()
             .map(|r| {
+                let enabled = r["enabled"] == true;
                 vec![
-                    format!(
-                        "{} {}",
-                        if r["enabled"] == true { "[x]" } else { "[ ]" },
-                        value(&r["title"])
+                    (
+                        format!(
+                            "{} {}",
+                            if enabled { "[x]" } else { "[ ]" },
+                            value(&r["title"])
+                        ),
+                        if enabled {
+                            plain as Style
+                        } else {
+                            Paint::dim as Style
+                        },
                     ),
-                    value(&r["backend"]),
-                    value(&r["scope"]),
-                    value(&r["url"]),
+                    (value(&r["backend"]), Paint::dim as Style),
+                    (value(&r["scope"]), Paint::dim as Style),
+                    (value(&r["url"]), Paint::dim as Style),
                 ]
             })
             .collect::<Vec<_>>();
@@ -375,27 +513,49 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
             &["REPOSITORY", "SOURCE", "SCOPE", "URL"],
             &rows,
             width,
+            paint,
         ));
         if let Some(errors) = data["errors"].as_array() {
             for error in errors {
-                output.push_str(&format!("\n[!] {}", value(error)));
+                output.push_str(&failure_line(paint, "", &value(error)));
             }
         }
     } else if let Some(sources) = data["sources"].as_array() {
         let rows = sources
             .iter()
             .map(|s| {
+                let availability = value(&s["availability"]);
+                let (status, detail) = match availability.split_once(": ") {
+                    Some((status, reason)) => (status.to_string(), reason.to_string()),
+                    None => (availability.clone(), value(&s["capabilities"])),
+                };
+                let available = status == "available";
                 vec![
-                    value(&s["backend"]),
-                    value(&s["availability"]),
-                    value(&s["capabilities"]),
+                    (
+                        value(&s["backend"]),
+                        if available {
+                            Paint::bold as Style
+                        } else {
+                            Paint::dim as Style
+                        },
+                    ),
+                    (
+                        status,
+                        if available {
+                            Paint::green as Style
+                        } else {
+                            Paint::dim as Style
+                        },
+                    ),
+                    (detail, Paint::dim as Style),
                 ]
             })
             .collect::<Vec<_>>();
         output.push_str(&table(
-            &["SOURCE", "AVAILABILITY", "CAPABILITIES"],
+            &["SOURCE", "STATUS", "DETAILS"],
             &rows,
             width,
+            paint,
         ));
     } else if let Some(operations) = data["operations"].as_array() {
         if operations.is_empty() {
@@ -406,18 +566,25 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
                 serde_json::from_value(item["operation"].clone()).expect("typed operation");
             output.push_str(&operation(&op));
             if let Some(error) = item["result"].get("Err") {
-                output.push_str(&format!("\n  [!] Failed: {}\n", value(error)));
+                output.push_str(&format!(
+                    "\n  {} {}\n",
+                    paint.red("[!] Failed:"),
+                    value(error)
+                ));
             } else {
-                output.push_str("\n  [OK] Completed");
+                output.push_str(&format!("\n  {}", paint.green("[OK] Completed")));
                 if item["result"]["Ok"]["cancellation_deferred"] == true {
                     output.push_str(" after cancellation was requested; changes were kept");
                 }
                 output.push('\n');
             }
         }
+    } else if data["error"] == "confirmation_declined" {
+        output.push_str(&paint.dim(&value(&data["message"])));
     } else {
         output.push_str(&format!(
-            "[!] Error: {}",
+            "{} {}",
+            paint.red("[!] Error:"),
             value(data.get("message").unwrap_or(&data["error"]))
         ));
         if let Some(matches) = data["error"]["Ambiguous"].as_array() {
@@ -435,7 +602,7 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
     if data.get("inspection").is_some() || data.get("audit").is_some() {
         if let Some(failures) = data["failures"].as_array() {
             for failure in failures {
-                output.push_str(&format!("\n[!] Source failed: {}", value(failure)));
+                output.push_str(&failure_line(paint, "Source failed:", &value(failure)));
             }
         }
     }
@@ -495,12 +662,14 @@ mod tests {
         for width in [24, 60, 100] {
             let output = human(&data, width, false);
             assert!(!output.contains('\u{001b}'));
-            for line in output.lines().skip(2).take(3) {
+            for line in output.lines().take(3) {
                 assert!(line.width() <= width);
             }
             assert!(output.contains("fixture"));
         }
-        assert!(human(&data, 100, true).starts_with("\x1b[1;34mPkgDeck\x1b[0m"));
+        let colored = human(&data, 100, true);
+        assert!(colored.contains("\x1b[2mNAME\x1b[0m"));
+        assert!(!colored.contains("PkgDeck"));
         assert_eq!(cell("a", 0), "");
     }
     #[test]
@@ -549,7 +718,7 @@ mod tests {
                     {"manager":"apt","native_name":"fixture:amd64","state":"known","packages":[
                         {"backend":"apt","name":"fixture","scope":"system"}]}]}]}});
         let output = human(&command, 100, false);
-        assert!(output.contains("Resolved: /first/tool"));
+        assert!(output.contains("Resolved  /first/tool"));
         assert!(output.contains("/target/tool"));
         assert!(output.contains("Exact copy: apt · fixture · system"));
         let audited = json!({"audit":{"groups":[{"key":"fixture","copies":[{"package":{"backend":"apt","name":"fixture","scope":"system"},"installed_version":"1"}]}],
@@ -589,7 +758,7 @@ mod tests {
         let output = human(&plans, 100, false);
         assert!(output.contains("apt:autoremove"));
         assert!(output.contains("Unused dependencies"));
-        assert!(output.contains("Review a plan with --json"));
+        assert!(output.contains("pkd clean --all"));
         assert!(output.contains("Unsupported:"));
         assert!(output.contains("Failed:"));
 

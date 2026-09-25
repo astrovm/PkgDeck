@@ -27,63 +27,71 @@ Flow {
     readonly property real preferredWidth: (upgradeButton.visible ? upgradeButton.implicitWidth + spacing : 0)
         + (selectNoneButton.visible ? selectNoneButton.implicitWidth + spacing : 0)
         + (selectAllButton.visible ? selectAllButton.implicitWidth + spacing : 0)
-    Controls.Button {
+
+    component Action: Controls.Button {
+        id: button
+        property bool primary: false
+        property string symbol: ""
+        Accessible.name: text
+        implicitWidth: contentItem.implicitWidth + leftPadding + rightPadding
+        implicitHeight: Math.max(36, Math.round(actions.textFont.pointSize * 2.9))
+        horizontalPadding: 14
+        scale: down ? 0.97 : 1
+        Behavior on scale { NumberAnimation { duration: 120; easing.type: Easing.OutCubic } }
+        background: Rectangle {
+            radius: 9
+            color: button.primary
+                ? (!button.enabled ? actions.surface : button.down ? Qt.darker(actions.accent, 1.08) : button.hovered ? Qt.lighter(actions.accent, 1.08) : actions.accent)
+                : (button.hovered ? actions.selection : actions.surface)
+            border.color: button.activeFocus ? actions.accent : (button.primary && button.enabled ? "transparent" : actions.line)
+            border.width: button.activeFocus ? 2 : 1
+            Behavior on color { ColorAnimation { duration: 120 } }
+        }
+        contentItem: RowLayout {
+            spacing: 9
+            DeckIcon {
+                name: button.symbol
+                ink: button.primary ? (button.enabled ? actions.onAccent : actions.muted) : actions.ink
+                Layout.preferredWidth: 18
+                Layout.preferredHeight: 18
+            }
+            Text {
+                text: button.text
+                color: button.primary ? (button.enabled ? actions.onAccent : actions.muted) : actions.ink
+                font.family: actions.textFont.family
+                font.pointSize: actions.textFont.pointSize
+                font.weight: button.primary ? Font.DemiBold : Font.Normal
+            }
+        }
+    }
+
+    Action {
         id: upgradeButton
         objectName: "upgradeAllButton"
+        primary: true
+        symbol: "updates"
         visible: actions.selectedCount > 0
         text: actions.uncheckedCount === 0 ? "Update all" : (actions.compact ? "Update" : "Update selected (" + actions.selectedCount + ")")
         Accessible.name: actions.uncheckedCount === 0 ? "Update all" : "Update selected (" + actions.selectedCount + ")"
         enabled: !actions.busy
-        implicitWidth: contentItem.implicitWidth + leftPadding + rightPadding
-        implicitHeight: Math.max(38, actions.textFont.pointSize * 3)
-        horizontalPadding: 12
         onClicked: actions.upgradeRequested()
-        background: Rectangle {
-            radius: 7
-            color: parent.enabled ? actions.accent : actions.surface
-            border.color: parent.activeFocus ? actions.accent : actions.line
-            border.width: parent.activeFocus ? 2 : 1
-        }
-        contentItem: RowLayout {
-            spacing: 8
-            DeckIcon { name: "updates"; ink: upgradeButton.enabled ? actions.onAccent : actions.muted; Layout.preferredWidth: 18; Layout.preferredHeight: 18 }
-            Text { text: upgradeButton.text; color: upgradeButton.enabled ? actions.onAccent : actions.muted; font: actions.textFont }
-        }
     }
-    Controls.Button {
+    Action {
         id: selectNoneButton
         objectName: "selectNoneButton"
+        symbol: "cancel"
         visible: actions.selectedCount > 0
         text: "Select none"
-        Accessible.name: text
         enabled: !actions.writing
-        implicitWidth: contentItem.implicitWidth + leftPadding + rightPadding
-        implicitHeight: Math.max(38, actions.textFont.pointSize * 3)
-        horizontalPadding: 12
         onClicked: actions.selectNoneRequested()
-        background: Rectangle { radius: 7; color: parent.hovered ? actions.selection : actions.surface; border.color: parent.activeFocus ? actions.accent : actions.line; border.width: parent.activeFocus ? 2 : 1 }
-        contentItem: RowLayout {
-            spacing: 8
-            DeckIcon { name: "cancel"; ink: actions.ink; Layout.preferredWidth: 18; Layout.preferredHeight: 18 }
-            Text { text: "Select none"; color: actions.ink; font: actions.textFont }
-        }
     }
-    Controls.Button {
+    Action {
         id: selectAllButton
         objectName: "selectAllButton"
+        symbol: "installed"
         visible: actions.uncheckedCount > 0
         text: "Select all"
-        Accessible.name: text
         enabled: !actions.writing
-        implicitWidth: contentItem.implicitWidth + leftPadding + rightPadding
-        implicitHeight: Math.max(38, actions.textFont.pointSize * 3)
-        horizontalPadding: 12
         onClicked: actions.selectAllRequested()
-        background: Rectangle { radius: 7; color: parent.hovered ? actions.selection : actions.surface; border.color: parent.activeFocus ? actions.accent : actions.line; border.width: parent.activeFocus ? 2 : 1 }
-        contentItem: RowLayout {
-            spacing: 8
-            DeckIcon { name: "installed"; ink: actions.ink; Layout.preferredWidth: 18; Layout.preferredHeight: 18 }
-            Text { text: "Select all"; color: actions.ink; font: actions.textFont }
-        }
     }
 }

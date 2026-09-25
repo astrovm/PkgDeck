@@ -12,7 +12,7 @@ ColumnLayout {
     property color ink
     property color muted
     property color accent
-    spacing: 4
+    spacing: 6
 
     RowLayout {
         Layout.fillWidth: true
@@ -29,6 +29,7 @@ ColumnLayout {
         }
     }
     Controls.ProgressBar {
+        id: bar
         objectName: "actionProgressBar"
         Layout.fillWidth: true
         from: 0
@@ -37,5 +38,39 @@ ColumnLayout {
         indeterminate: progress.transferTotal <= 0 && progress.total <= 1
         palette.highlight: progress.accent
         Accessible.name: progress.label
+        implicitHeight: 6
+        background: Rectangle {
+            implicitHeight: 6
+            radius: 3
+            color: Qt.rgba(progress.ink.r, progress.ink.g, progress.ink.b, 0.1)
+        }
+        contentItem: Item {
+            implicitHeight: 6
+            clip: true
+            Rectangle {
+                visible: !bar.indeterminate
+                width: bar.visualPosition * parent.width
+                height: parent.height
+                radius: 3
+                color: progress.accent
+                Behavior on width { NumberAnimation { duration: 240; easing.type: Easing.OutCubic } }
+            }
+            Rectangle {
+                id: stripe
+                visible: bar.indeterminate
+                width: parent.width * 0.3
+                height: parent.height
+                radius: 3
+                color: progress.accent
+                NumberAnimation on x {
+                    running: bar.indeterminate && bar.visible
+                    from: -stripe.width
+                    to: stripe.parent.width
+                    duration: 1300
+                    loops: Animation.Infinite
+                    easing.type: Easing.InOutQuad
+                }
+            }
+        }
     }
 }
