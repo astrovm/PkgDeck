@@ -33,6 +33,7 @@ TestCase {
         property string activity: "[]"
         property string background_state: "{}"
         property string notification_history: "{}"
+        property string lastRestoredHistory: ""
         property string lastRetry: ""
         property string version: "9.9.9-test"
         property bool simulateLoading: false
@@ -96,7 +97,7 @@ TestCase {
         function refreshActivity() {}
         function cancelQueued() {}
         function checkUpdates(sources, enabled, offline, metered, force) {}
-        function restoreNotificationHistory(history) { notification_history = history; }
+        function restoreNotificationHistory(history) { lastRestoredHistory = history; notification_history = history; }
         function acknowledgeNotification() {}
         function setAutostart(enabled) { return true; }
     }
@@ -126,6 +127,7 @@ TestCase {
         fake.activity = "[]";
         fake.background_state = "{}";
         fake.notification_history = "{}";
+        fake.lastRestoredHistory = "";
         fake.lastRetry = "";
         fake.manifest_preview = "{}";
         fake.lastInventorySelection = "";
@@ -1447,6 +1449,19 @@ TestCase {
         browser.testNotificationRequested.connect(() => requested++);
         button.clicked();
         compare(requested, 1);
+        const history = JSON.stringify({notified: {fixture: []}});
+        fake.notification_history = history;
+        browser.destroy();
+        wait(30);
+        fake.notification_history = "{}";
+        fake.background_state = "{}";
+        fake.lastRestoredHistory = "";
+        browser = createTemporaryObject(window, test);
+        verify(browser !== null);
+        tryCompare(fake, "lastRestoredHistory", history);
+        compare(browser.backgroundState.last_check, 1234567890);
+        compare(browser.backgroundState.available, 2);
+        compare(browser.backgroundState.notify, false);
     }
     function test_container_reference_uses_explicit_search_submission() {
         browser.openView("Search");

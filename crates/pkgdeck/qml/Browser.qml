@@ -1055,10 +1055,10 @@ Controls.ApplicationWindow {
     }
     Connections {
         target: backend
-        function onNotificationHistoryChanged() {
+        function onNotification_historyChanged() {
             preferences.notificationHistory = backend.notification_history;
         }
-        function onBackgroundStateChanged() {
+        function onBackground_stateChanged() {
             const state = JSON.parse(backend.background_state || "{}");
             if (state.last_check)
                 preferences.lastBackgroundState = JSON.stringify({last_check: state.last_check, available: state.available, failures: state.failures || [], notify: false});
