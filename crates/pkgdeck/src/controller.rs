@@ -2650,8 +2650,17 @@ impl ffi::PackageController {
             // user asked everything to stop, not to continue afterwards.
             self.as_mut().rust_mut().queued = None;
         }
-        if let Some(worker) = &self.rust().worker {
+        // The details lookup runs beside the list load. Drop it here so a
+        // reply already in its channel cannot refill the cache or replace
+        // the cancellation status.
+        let details = self.as_mut().rust_mut().details_worker.take();
+        if let Some(worker) = &details {
             worker.cancel.cancel();
+        }
+        if self.rust().worker.is_some() || details.is_some() {
+            if let Some(worker) = &self.rust().worker {
+                worker.cancel.cancel();
+            }
             self.as_mut()
                 .set_status("Cancelling… Waiting for the package manager to finish safely.".into());
         }
@@ -5758,6 +5767,46 @@ mod tests {
             c.rust().details_worker.is_none() && c.rust().worker.is_none()
         });
         assert_eq!(controller.rust().selected.as_ref(), Some(&package.id));
+    }
+    #[test]
+    fn cancel_stops_the_parallel_details_lookup() {
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        let package = synthetic_package("fixture", "Fixture");
+        controller.as_mut().rust_mut().packages = vec![package.clone()];
+        controller.as_mut().rust_mut().selected = Some(package.id.clone());
+        let (sender, receiver) = mpsc::channel();
+        let cancel = Cancellation::default();
+        sender
+            .send(Reply::DetailsPreview(Box::new(PackageDetails {
+                package: package.clone(),
+                description: "should not land".into(),
+                homepage: None,
+                dependencies: vec![],
+            })))
+            .unwrap();
+        controller.as_mut().rust_mut().details_worker = Some(DetailsWorker {
+            handle: thread::spawn(|| {}),
+            receiver,
+            cancel: cancel.clone(),
+            id: package.id.clone(),
+        });
+        controller.as_mut().cancel();
+        assert!(cancel.requested());
+        assert!(controller.rust().details_worker.is_none());
+        controller.as_mut().poll();
+        assert!(controller.rust().detail_cache.is_empty());
+        assert!(!controller.details().to_string().contains("should not land"));
+        assert!(controller.status().to_string().contains("Cancelling"));
+        // The channel was dropped with the worker, so nothing further can land.
+        assert!(sender
+            .send(Reply::Done(Ok(Payload::Details(Box::new(PackageDetails {
+                package,
+                description: "still should not land".into(),
+                homepage: None,
+                dependencies: vec![],
+            })))))
+            .is_err());
     }
     #[test]
     fn finished_preloads_fill_sections_and_the_source_catalog() {
