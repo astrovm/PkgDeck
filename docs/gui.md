@@ -32,8 +32,9 @@ AppImages are inspected as Type 2 ELF files without execution. The preview
 shows the managed destination, executable copy, desktop entry, and whether
 embedded update metadata is present. Import keeps the original file. Local
 Debian packages show APT's simulated package changes before system
-authorization. Flatpak references show the exact app, user scope, repository,
-signing key presence, and any runtime repository named in the reference.
+authorization. For Flatpak references, choose User or System in the confirmation.
+The preview shows the exact app, repository, signing key presence, and any runtime
+repository named in the reference.
 Flatpak may discover additional runtimes during installation.
 Native package managers inspect RPM, Arch, and Snap archives. Flatpak checks
 bundle contents during install. Repository files are checked again before

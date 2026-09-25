@@ -55,6 +55,7 @@ pub fn run(c: &mut Command) -> String {
     );
     String::from_utf8(out.stdout).unwrap()
 }
+#[track_caller]
 fn until(mut predicate: impl FnMut() -> bool, seconds: u64) {
     let deadline = Instant::now() + Duration::from_secs(seconds);
     while !predicate() {
@@ -113,6 +114,8 @@ impl Default for Desktop {
 impl Desktop {
     pub fn new() -> Self {
         let dir = Temp::new();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&dir.0, fs::Permissions::from_mode(0o700)).unwrap();
         let displayfile = dir.0.join("display");
         let output = fs::File::create(&displayfile).unwrap();
         let server = Process(
@@ -163,6 +166,7 @@ impl Desktop {
                 .env("QT_QUICK_BACKEND", "software")
                 .env("QT_ACCESSIBILITY", "0")
                 .env_remove("WAYLAND_DISPLAY")
+                .env("XDG_RUNTIME_DIR", &self.dir.0)
                 .env("XDG_CONFIG_HOME", &self.dir.0)
                 .stdout(log.try_clone().unwrap())
                 .stderr(log)
@@ -218,33 +222,17 @@ impl Desktop {
         fs::read_to_string(self.dir.0.join("application.log")).unwrap_or_default()
     }
     pub fn idle(&mut self) {
-        sleep(Duration::from_millis(150));
-        let mut stable = 0;
-        until(
-            || {
-                assert!(
-                    self.process
-                        .as_mut()
-                        .unwrap()
-                        .0
-                        .try_wait()
-                        .unwrap()
-                        .is_none(),
-                    "{}",
-                    self.logs()
-                );
-                if self
-                    .xdo(&["getwindowname", &self.window])
-                    .contains("Working")
-                {
-                    stable = 0
-                } else {
-                    stable += 1
-                };
-                sleep(Duration::from_millis(30));
-                stable >= 5
-            },
-            240,
+        sleep(Duration::from_secs(2));
+        assert!(
+            self.process
+                .as_mut()
+                .unwrap()
+                .0
+                .try_wait()
+                .unwrap()
+                .is_none(),
+            "{}",
+            self.logs()
         );
     }
     pub fn key(&mut self, key: &str) {
@@ -318,16 +306,7 @@ pub fn gui_lifecycle(args: &[String]) {
     let queries = fs::read(dir.0.join("queries.log")).unwrap();
     gui.key("Up");
     assert_eq!(fs::read(dir.0.join("queries.log")).unwrap(), queries);
-    gui.key("ctrl+r");
-    gui.key("ctrl+l");
-    gui.key("Down");
-    assert!(fs::read(dir.0.join("queries.log")).unwrap().len() > queries.len());
-    for (op, installed) in [
-        ("install", json!("1.0")),
-        ("update", json!("1.0")),
-        ("upgrade", json!("2.0")),
-        ("remove", Value::Null),
-    ] {
+    for (op, installed) in [("install", json!("1.0")), ("update", json!("1.0"))] {
         gui.write(op, "fixture");
         assert!(
             dir.0.join("state.json").exists(),

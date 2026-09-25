@@ -11,7 +11,6 @@ Flow {
     property bool upgradable: false
     property int selectedCount: 0
     property int uncheckedCount: 0
-    property bool failed: false
     property color surface
     property color ink
     property color muted
@@ -29,7 +28,6 @@ Flow {
     readonly property real preferredWidth: (upgradeButton.visible ? upgradeButton.implicitWidth + spacing : 0)
         + (selectNoneButton.visible ? selectNoneButton.implicitWidth + spacing : 0)
         + (selectAllButton.visible ? selectAllButton.implicitWidth + spacing : 0)
-        + (failureHint.visible ? failureHint.implicitWidth + spacing : 0)
     Controls.Button {
         id: upgradeButton
         objectName: "upgradeAllButton"
@@ -37,7 +35,9 @@ Flow {
         text: actions.uncheckedCount === 0 ? "Update all" : (actions.compact ? "Update" : "Update selected (" + actions.selectedCount + ")")
         Accessible.name: actions.uncheckedCount === 0 ? "Update all" : "Update selected (" + actions.selectedCount + ")"
         enabled: !actions.busy && (actions.uncheckedCount > 0 || actions.upgradable)
+        implicitWidth: contentItem.implicitWidth + leftPadding + rightPadding
         implicitHeight: Math.max(38, actions.textFont.pointSize * 3)
+        horizontalPadding: 12
         onClicked: actions.upgradeRequested()
         background: Rectangle {
             radius: 7
@@ -58,7 +58,9 @@ Flow {
         text: "Select none"
         Accessible.name: text
         enabled: !actions.writing
+        implicitWidth: contentItem.implicitWidth + leftPadding + rightPadding
         implicitHeight: Math.max(38, actions.textFont.pointSize * 3)
+        horizontalPadding: 12
         onClicked: actions.selectNoneRequested()
         background: Rectangle { radius: 7; color: parent.hovered ? actions.selection : actions.surface; border.color: parent.activeFocus ? actions.accent : actions.line; border.width: parent.activeFocus ? 2 : 1 }
         contentItem: RowLayout {
@@ -74,7 +76,9 @@ Flow {
         text: "Select all"
         Accessible.name: text
         enabled: !actions.writing
+        implicitWidth: contentItem.implicitWidth + leftPadding + rightPadding
         implicitHeight: Math.max(38, actions.textFont.pointSize * 3)
+        horizontalPadding: 12
         onClicked: actions.selectAllRequested()
         background: Rectangle { radius: 7; color: parent.hovered ? actions.selection : actions.surface; border.color: parent.activeFocus ? actions.accent : actions.line; border.width: parent.activeFocus ? 2 : 1 }
         contentItem: RowLayout {
@@ -82,14 +86,5 @@ Flow {
             DeckIcon { name: "installed"; ink: actions.ink; Layout.preferredWidth: 18; Layout.preferredHeight: 18 }
             Text { text: "Select all"; color: actions.ink; font: actions.textFont }
         }
-    }
-    Controls.Label {
-        id: failureHint
-        objectName: "upgradeAllHint"
-        visible: !actions.upgradable && !actions.busy && actions.failed
-        text: "Update all is unavailable while a source has failed."
-        color: actions.muted
-        font.pointSize: actions.textFont.pointSize * 0.9
-        wrapMode: Text.WordWrap
     }
 }

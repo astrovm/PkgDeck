@@ -1,6 +1,77 @@
 // Link the Qt dependency required by this package's generated QML initializer.
 use pkgdeck as _;
-use std::process::Command;
+use std::{
+    fs,
+    os::unix::fs::PermissionsExt,
+    process::{Child, Command, Stdio},
+    thread,
+    time::{Duration, Instant},
+};
+
+#[test]
+fn second_launch_activates_existing_instance() {
+    let runtime = std::env::temp_dir().join(format!("pkgdeck-instance-{}", std::process::id()));
+    fs::create_dir_all(&runtime).unwrap();
+    fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
+    struct Running {
+        child: Child,
+        runtime: std::path::PathBuf,
+    }
+    impl Drop for Running {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            let _ = fs::remove_dir_all(&self.runtime);
+        }
+    }
+    let launch = || {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_pkgdeck"));
+        command
+            .env("QT_QPA_PLATFORM", "offscreen")
+            .env("QT_QUICK_BACKEND", "software")
+            .env("XDG_RUNTIME_DIR", &runtime)
+            .env("XDG_CONFIG_HOME", &runtime)
+            .env("XDG_DATA_HOME", &runtime)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        command
+    };
+    let mut first = Running {
+        child: launch().spawn().unwrap(),
+        runtime: runtime.clone(),
+    };
+    let socket = runtime.join(format!(
+        "pkgdeck-open-{}",
+        rustix::process::geteuid().as_raw()
+    ));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !socket.exists() && Instant::now() < deadline {
+        assert!(
+            first.child.try_wait().unwrap().is_none(),
+            "first launch exited"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(socket.exists(), "first launch did not start its socket");
+    let mut second = launch().spawn().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while second.try_wait().unwrap().is_none() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(20));
+    }
+    let status = second.try_wait().unwrap();
+    if status.is_none() {
+        let _ = second.kill();
+        let _ = second.wait();
+    }
+    assert!(
+        status.is_some_and(|status| status.success()),
+        "second launch stayed open"
+    );
+    assert!(
+        first.child.try_wait().unwrap().is_none(),
+        "first launch exited"
+    );
+}
 
 #[test]
 fn packaged_desktop_entry_passes_supported_inputs_to_the_gui() {

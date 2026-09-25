@@ -799,6 +799,20 @@ fn flatpak_reference_install_revalidates_and_cleans_temporary_file() {
     let temporary = std::path::Path::new(args.last().unwrap());
     assert!(!temporary.exists());
     drop(calls);
+    let mut system = package.id.clone();
+    system.scope = Scope::System;
+    backend
+        .execute(&Operation::Install(system), &cancel, &mut |_| {})
+        .unwrap();
+    let calls = fixture.calls.lock().unwrap();
+    let (args, write, system) = calls
+        .iter()
+        .rfind(|(args, _, _)| args.contains(&"--from".into()))
+        .unwrap();
+    assert!(*write && *system);
+    assert_eq!(args[0], "--system");
+    assert!(!std::path::Path::new(args.last().unwrap()).exists());
+    drop(calls);
     std::fs::write(
         &source,
         "[Flatpak Ref]\nName=org.example.Other\nUrl=https://example.invalid/repo\n",
@@ -815,7 +829,7 @@ fn flatpak_reference_install_revalidates_and_cleans_temporary_file() {
             .iter()
             .filter(|(args, _, _)| args.contains(&"--from".into()))
             .count(),
-        1
+        2
     );
     std::fs::remove_dir_all(base).unwrap();
 }

@@ -191,7 +191,13 @@ pub fn verified_source(
         .split_once(':')
         .ok_or_else(|| invalid("invalid Flatpak reference identity"))?;
     let bytes = reference_bytes(source, cancel, &Host::current())?;
-    let current = inspect_bytes(source, &bytes)?;
+    let mut current = inspect_bytes(source, &bytes)?;
+    if !matches!(&id.scope, Scope::System)
+        && !matches!(&id.scope, Scope::User { uid } if *uid == rustix::process::getuid().as_raw())
+    {
+        return Err(invalid("invalid Flatpak installation scope"));
+    }
+    current.id.scope = id.scope.clone();
     if current.id != *id
         || current
             .id
@@ -288,6 +294,14 @@ mod tests {
         let package = inspect(path.to_str().unwrap(), &cancel).unwrap();
         assert_eq!(package.id.name, "org.example.App");
         assert!(verified_source(&package.id, &cancel).unwrap().is_some());
+        let mut system = package.id.clone();
+        system.scope = Scope::System;
+        assert!(verified_source(&system, &cancel).unwrap().is_some());
+        let mut other_user = package.id.clone();
+        other_user.scope = Scope::User {
+            uid: rustix::process::getuid().as_raw().saturating_add(1),
+        };
+        assert!(verified_source(&other_user, &cancel).is_err());
         fs::write(
             &path,
             "[Flatpak Ref]\nName=org.example.Other\nUrl=https://example.org/repo\n",

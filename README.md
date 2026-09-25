@@ -1,27 +1,24 @@
 # PkgDeck
 
-A desktop app and command-line tool for managing packages across multiple sources.
-Compare apps, manage repositories, and install updates from one place. Both
-frontends use the same Rust engine and your existing package managers.
+PkgDeck brings your package managers into one desktop app. Search for software, see what is installed, review updates, and clean up unused packages. A command-line tool, `pkd`, uses the same engine.
 
-![PkgDeck searching APT packages](docs/screenshots/search.png)
+![PkgDeck showing search results](docs/screenshots/search.png)
 
 ## Install
 
-On Linux, install the Flatpak from the [astrovm Flatpak repository](https://github.com/astrovm/flatpak) with [Install PkgDeck](https://flatpak.4st.li/io.github.astrovm.PkgDeck.flatpakref), or use the terminal:
+[Install PkgDeck](https://flatpak.4st.li/apps/io.github.astrovm.PkgDeck/install/), or use the terminal:
 
 ```sh
 flatpak install https://flatpak.4st.li/io.github.astrovm.PkgDeck.flatpakref
 ```
 
-Open PkgDeck from your application menu, or run `flatpak run io.github.astrovm.PkgDeck`. Updates arrive through your software manager or `flatpak update`.
+Open PkgDeck from your app menu or run:
 
-Other Linux packages are available from [GitHub Releases](https://github.com/astrovm/PkgDeck/releases/latest):
+```sh
+flatpak run io.github.astrovm.PkgDeck
+```
 
-| Package | How to run it |
-| --- | --- |
-| AppImage | Download `PkgDeck-v0.1.4-x86_64.AppImage` or `PkgDeck-v0.1.4-aarch64.AppImage`. For x86_64, run `chmod +x PkgDeck-v0.1.4-x86_64.AppImage` and then `./PkgDeck-v0.1.4-x86_64.AppImage`. |
-| Snap | Download `PkgDeck-v0.1.4-x86_64.snap` or `PkgDeck-v0.1.4-aarch64.snap`. For x86_64, run `sudo snap install --dangerous --classic ./PkgDeck-v0.1.4-x86_64.snap`. The Snap is hosted on GitHub, not the Snap Store. |
+Flatpak updates arrive through your software manager or `flatpak update`. [GitHub Releases](https://github.com/astrovm/PkgDeck/releases/latest) also provides AppImage and Snap packages for Linux.
 
 On macOS, install the GUI and CLI with Homebrew:
 
@@ -30,74 +27,51 @@ brew tap astrovm/pkgdeck https://github.com/astrovm/PkgDeck
 brew install astrovm/pkgdeck/pkgdeck
 ```
 
-Run `pkgdeck` from a terminal, or see [distribution](docs/distribution.md#homebrew) for the Applications shortcut. On Linux, the Homebrew formula installs only `pkd`; use a Linux package above for the GUI.
-The CLI is `pkd` on Homebrew, `pkgdeck.pkd` in Snap,
-`flatpak run --command=pkd io.github.astrovm.PkgDeck` in Flatpak, and
-`./PkgDeck-v0.1.4-x86_64.AppImage --cli` in AppImage (substitute your architecture).
+On Linux, the Homebrew formula installs the CLI only. Use Flatpak, AppImage, or Snap for the GUI.
 
-To build on Linux from source, install the [development prerequisites](docs/development.md#sdk-and-prerequisites), then:
+## Use
+
+- **Search:** compare software across available sources and choose the exact version or installation scope.
+- **Installed:** find packages and duplicate installs.
+- **Updates:** review and apply one update, a selection, or all available updates.
+- **Clean:** preview cleanup before confirming it.
+- **Sources:** enable package managers and manage repositories.
+
+PkgDeck uses the package managers already on your computer, including APT, Flatpak, Snap, Homebrew, developer tools, and container images. Available features depend on each manager. See [supported sources](docs/gui.md) for details.
+
+## Command line
+
+The Flatpak includes `pkd`:
+
+```sh
+flatpak run --command=pkd io.github.astrovm.PkgDeck
+```
+
+In native builds, run `pkd` directly. For example:
+
+```sh
+pkd sources
+pkd search vlc --from flatpak
+pkd list --from apt
+```
+
+`pkd update` refreshes package metadata; `pkd upgrade` installs available updates. Changes require confirmation, and system changes may ask for authorization. See the [CLI guide](docs/cli.md) for exact selectors and more commands.
+
+## Build from source
+
+Install the [development prerequisites](docs/development.md#sdk-and-prerequisites), then:
 
 ```sh
 source scripts/dev-env.sh
 cargo run --locked -p pkgdeck
 ```
 
-## Use
-
-- **Search:** compare the same app across sources and install a specific variant.
-- **Installed:** filter packages, inspect details, and find duplicate installations.
-- **Updates:** update individual packages or a selection, including firmware on Linux.
-- **Clean:** preview and confirm manager-native cleanup tasks.
-- **Sources:** choose managers and manage Flatpak repositories and firmware remotes.
-- **Container images:** inspect, pull, refresh, and remove Docker or rootless Podman images.
-
-The CLI works without Qt:
-
-```sh
-cargo run --locked -p pkd -- sources
-pkd search vlc --from flatpak
-pkd list --from apt
-pkd upgrade --from flatpak
-```
-
-`pkd update` refreshes metadata; `pkd upgrade` updates installed packages.
-Writes require confirmation. Native managers handle dependencies and authorization.
-For APT, Update all previews a full `dist-upgrade` transaction. The GUI shows
-planned installs and removals before confirmation. The CLI requires
-`--allow-removals` if APT plans to remove packages, even with `--yes`.
-
-## Package sources
-
-PkgDeck detects the managers available on the host. Supported adapters include
-APT, DNF, Pacman, Zypper, Flatpak, Snap, Homebrew formulae and macOS casks,
-AppImage, Docker, Podman, Cargo, npm, pnpm, Bun, pip, pipx, uv, Composer,
-RubyGems, and fwupd. Capabilities vary by
-manager; `pkd sources` reports availability and unsupported operations.
-Standalone Codex, Claude Code, Grok, and OpenCode installations also support
-updates through their upstream updaters; see the [CLI guide](docs/cli.md#standalone-cli-tools).
-Linux-specific managers and firmware support are not available on macOS.
-
-Native, AppImage, and classic Snap builds can manage host packages. The Flatpak
-build manages host packages through its explicit host bridge.
-
 ## Documentation
 
 - [GUI guide](docs/gui.md)
-- [CLI commands, selection, and JSON output](docs/cli.md)
-- [Development and verification](docs/development.md)
-- [Distribution and releases](docs/distribution.md)
-- [Shared engine](docs/shared-engine.md)
-- [Host execution and authorization](docs/host-execution.md)
+- [CLI guide](docs/cli.md)
+- [Development and tests](docs/development.md)
+- [Packages and releases](docs/distribution.md)
+- [Host access and authorization](docs/host-execution.md)
 
-## Development
-
-```sh
-scripts/verify.sh fast --engine podman
-scripts/verify.sh full --engine podman
-```
-
-Tests use synthetic packages; real package lifecycles run in disposable containers
-and virtual machines. See the development guide for focused checks and native setup.
-
-Licensed under [MIT](LICENSE). The optional APT reader and bundled dependencies
-retain their own licenses; package scripts include the relevant notices.
+Licensed under [MIT](LICENSE). The optional APT reader and bundled dependencies retain their own licenses; package scripts include their notices.
