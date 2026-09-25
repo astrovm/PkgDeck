@@ -1047,7 +1047,28 @@ fn write_notice(job: &Job, result: &Result<Payload, EngineError>, sudo: bool) ->
             "title": format!("{} of {} changes failed", outcomes.iter().filter(|o| **o == Outcome::Failed).count(), outcomes.len()),
             "detail": status.lines().skip(1).filter(|line| !line.ends_with(": Completed")).collect::<Vec<_>>().join("\n"),
         }),
-        Ok(_) => json!({"kind": "success", "title": format!("{title} finished")}),
+        Ok(payload) => {
+            // Keep what the user must still do or know, such as a firmware
+            // restart or a cancellation that came too late.
+            let detail = match payload {
+                Payload::Batch(status, _) => status
+                    .lines()
+                    .filter(|line| {
+                        !line.starts_with("Completed ") && !line.ends_with(": Completed")
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                Payload::Written(outcome) if outcome.cancellation_deferred => {
+                    "Finished before it could be cancelled. Changes were kept.".into()
+                }
+                _ => String::new(),
+            };
+            if detail.is_empty() {
+                json!({"kind": "success", "title": format!("{title} finished")})
+            } else {
+                json!({"kind": "success", "title": format!("{title} finished"), "detail": detail})
+            }
+        }
     }
 }
 fn failure_details(failure: &BackendFailure) -> QString {
@@ -3374,7 +3395,19 @@ impl ffi::PackageController {
                             }
                         }
                         if worker.job.writes() {
-                            let notice = write_notice(&worker.job, &result, self.rust().sudo);
+                            // A changed plan is not a failure: the new plan
+                            // opens for review right after this.
+                            let notice = if repreview_changed_plan(
+                                &worker.job,
+                                &result,
+                                &self.rust().packages,
+                            )
+                            .is_some()
+                            {
+                                json!({"kind": "info", "title": "The planned changes are different now. Review them again."})
+                            } else {
+                                write_notice(&worker.job, &result, self.rust().sudo)
+                            };
                             self.as_mut().set_notice(encoded(notice));
                             if let Some(id) = self.as_mut().rust_mut().active_activity_id.take() {
                                 if let Some(store) = self.rust().activity_store.clone() {
@@ -5198,6 +5231,13 @@ mod tests {
         assert!(
             matches!(&controller.rust().deferred_load, Some(Job::Load(view, query)) if view == "Search" && query == "query")
         );
+        // The banner asks for another review instead of reporting a failure.
+        let notice: Value = serde_json::from_str(&controller.notice().to_string()).unwrap();
+        assert_eq!(notice["kind"], "info");
+        assert!(notice["title"]
+            .as_str()
+            .unwrap()
+            .contains("Review them again"));
     }
 
     #[test]
@@ -5524,6 +5564,42 @@ mod tests {
             false,
         );
         assert_eq!(all["title"], "2 changes finished");
+        let firmware = write_notice(
+            &job,
+            &Ok(Payload::Batch(
+                "Firmware update finished. Restart or shut down the device if required.".into(),
+                vec![Outcome::Finished],
+            )),
+            false,
+        );
+        assert_eq!(firmware["kind"], "success");
+        assert!(firmware["detail"]
+            .as_str()
+            .unwrap()
+            .contains("Restart or shut down"));
+        let batch_done = write_notice(
+            &batch,
+            &Ok(Payload::Batch(
+                "Completed 2 of 2 updates.\nUpdate all packages from apt: Completed\nUpdate all packages from flatpak: Finished before it could be cancelled. Changes were kept.".into(),
+                vec![Outcome::Finished; 2],
+            )),
+            false,
+        );
+        assert_eq!(
+            batch_done["detail"],
+            "Update all packages from flatpak: Finished before it could be cancelled. Changes were kept."
+        );
+        let deferred = write_notice(
+            &job,
+            &Ok(Payload::Written(OperationOutcome {
+                cancellation_deferred: true,
+            })),
+            false,
+        );
+        assert!(deferred["detail"]
+            .as_str()
+            .unwrap()
+            .contains("before it could be cancelled"));
         let repository = write_notice(
             &Job::Repositories(None),
             &Ok(Payload::Written(OperationOutcome::default())),
