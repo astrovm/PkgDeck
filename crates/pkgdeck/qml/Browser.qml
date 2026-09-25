@@ -387,17 +387,14 @@ Controls.ApplicationWindow {
             return "Containers";
         return "Developer tools";
     }
-    // "Searches APT, Flatpak, and npm." for the empty Search page.
+    // The empty Search page's second line: how many sources a search covers.
     function searchHint() {
         const names = effectiveSources("Search")
             .filter((id) => sourceInfo(id).availability_kind === "available" && sourceInfo(id).capabilities.indexOf("search") >= 0)
             .map((id) => sourceDisplayName(id));
         if (names.length === 0)
             return sourceCatalog.length ? "No enabled source can search. Turn one on in Sources." : "";
-        const list = names.length === 1 ? names[0]
-            : names.length === 2 ? names[0] + " and " + names[1]
-            : names.slice(0, -1).join(", ") + ", and " + names[names.length - 1];
-        return "Searches " + list + ".";
+        return "Searches " + (names.length === 1 ? names[0] : names.length + " sources") + " as you type.";
     }
     function sourceSupportsView(id) {
         const capability = ({"Search":"search", "Installed":"installed", "Updates":"upgrade", "Clean":"clean"})[currentView];
@@ -1791,15 +1788,44 @@ Controls.ApplicationWindow {
                     }
                 }
             }
-            Controls.Label {
-                objectName: "searchHint"
+            // Empty Search: a quiet centered prompt, like the other empty states.
+            Item {
+                id: searchEmptyState
+                objectName: "searchEmptyState"
                 visible: root.currentView === "Search" && searchPane.text.trim().length === 0 && !root.openingInput
-                    && root.viewItems.length === 0 && text.length > 0
-                text: root.searchHint()
-                color: root.muted
-                wrapMode: Text.WordWrap
+                    && root.viewItems.length === 0 && searchHint.text.length > 0
                 Layout.fillWidth: true
-                Layout.leftMargin: 4
+                Layout.fillHeight: true
+                Column {
+                    anchors.centerIn: parent
+                    // Slightly above center reads as centered in the page.
+                    anchors.verticalCenterOffset: -parent.height * 0.1
+                    width: Math.min(parent.width - 32, 420)
+                    spacing: 8
+                    DeckIcon {
+                        name: "search"
+                        ink: root.muted
+                        width: 34
+                        height: 34
+                        anchors.horizontalCenter: parent.horizontalCenter
+                    }
+                    Controls.Label {
+                        text: "Find apps and packages"
+                        color: root.ink
+                        font.weight: Font.DemiBold
+                        width: parent.width
+                        horizontalAlignment: Text.AlignHCenter
+                    }
+                    Controls.Label {
+                        id: searchHint
+                        objectName: "searchHint"
+                        text: root.searchHint()
+                        color: root.muted
+                        width: parent.width
+                        wrapMode: Text.WordWrap
+                        horizontalAlignment: Text.AlignHCenter
+                    }
+                }
             }
             RowLayout {
                 objectName: "openingNotice"
@@ -2944,7 +2970,7 @@ Controls.ApplicationWindow {
             }
             Item {
                 visible: ["Search", "Installed", "Updates", "Clean", "Sources"].indexOf(root.currentView) >= 0 && !backend.busy &&
-                    root.viewItems.length <= root.shortListLimit
+                    root.viewItems.length <= root.shortListLimit && !searchEmptyState.visible
                 Layout.fillHeight: true
             }
         }

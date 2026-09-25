@@ -745,6 +745,14 @@ impl Controller {
     fn next_prefetch(&mut self) -> Option<String> {
         self.prefetch.pop()
     }
+    /// Forget cached details, and drop a details lookup still running so
+    /// its older reply can't refill the cache after a reload or a write.
+    fn invalidate_details(&mut self) {
+        self.detail_cache.clear();
+        if let Some(worker) = self.details_worker.take() {
+            worker.cancel.cancel();
+        }
+    }
     /// Forget preloaded sections and load them again from scratch.
     fn invalidate_prefetch(&mut self) {
         self.prefetched.clear();
@@ -980,6 +988,29 @@ fn write_error_text(error: &EngineError, sudo: bool) -> String {
         other => other.to_string(),
     }
 }
+/// What the banner says when a change can't be prepared, for example when
+/// APT's dry run fails before the confirmation opens.
+fn preflight_notice(job: &Job, error: &EngineError, sudo: bool) -> Option<Value> {
+    let title = match job {
+        Job::PlanOperation(operation) => operation_title(operation),
+        Job::PlanUpgrade(..) => "The update".to_owned(),
+        Job::PlanCleanAll(..) => "The cleanup".to_owned(),
+        _ => return None,
+    };
+    if matches!(
+        error,
+        EngineError::Cancelled
+            | EngineError::Execution(pkgdeck_core::process::ExecutionError::Cancelled)
+    ) {
+        return None;
+    }
+    Some(json!({
+        "kind": "error",
+        "title": format!("{title} couldn't be prepared"),
+        "detail": write_error_text(error, sudo),
+        "action": if matches!(error, EngineError::Execution(pkgdeck_core::process::ExecutionError::AuthorizationDenied)) { "settings" } else { "" },
+    }))
+}
 /// What the banner says once a change finishes.
 fn write_notice(job: &Job, result: &Result<Payload, EngineError>, sudo: bool) -> Value {
     let operations = job.operations();
@@ -1002,6 +1033,15 @@ fn write_notice(job: &Job, result: &Result<Payload, EngineError>, sudo: bool) ->
             // Only a denial is fixed by another permission option.
             "action": if matches!(error, EngineError::Execution(pkgdeck_core::process::ExecutionError::AuthorizationDenied)) { "settings" } else { "" },
         }),
+        Ok(Payload::Batch(_, outcomes))
+            if !outcomes.contains(&Outcome::Failed) && outcomes.contains(&Outcome::Cancelled) =>
+        {
+            let done = outcomes.iter().filter(|o| **o == Outcome::Finished).count();
+            json!({
+                "kind": "info",
+                "title": format!("{done} of {} changes finished. The rest were cancelled.", outcomes.len()),
+            })
+        }
         Ok(Payload::Batch(status, outcomes)) if outcomes.contains(&Outcome::Failed) => json!({
             "kind": "error",
             "title": format!("{} of {} changes failed", outcomes.iter().filter(|o| **o == Outcome::Failed).count(), outcomes.len()),
@@ -2135,7 +2175,7 @@ impl ffi::PackageController {
             self.as_mut().rust_mut().view_cache.clear();
             self.as_mut().rust_mut().invalidate_prefetch();
             self.as_mut().rust_mut().engine_scope = None;
-            self.as_mut().rust_mut().detail_cache.clear();
+            self.as_mut().rust_mut().invalidate_details();
         }
         self.as_mut().rust_mut().packages.clear();
         self.as_mut().rust_mut().cleanup.clear();
@@ -2866,7 +2906,7 @@ impl ffi::PackageController {
             Ok(Payload::Repositories(report)) => {
                 self.as_mut().rust_mut().view_cache.clear();
                 self.as_mut().rust_mut().invalidate_prefetch();
-                self.as_mut().rust_mut().detail_cache.clear();
+                self.as_mut().rust_mut().invalidate_details();
                 crate::metadata::invalidate();
                 self.as_mut().set_repositories(encoded(report));
                 self.set_status("Repositories loaded.".into());
@@ -2953,7 +2993,7 @@ impl ffi::PackageController {
                 self.as_mut().set_upgradable(false);
                 self.as_mut().rust_mut().invalidate_prefetch();
                 self.as_mut().rust_mut().engine_scope = None;
-                self.as_mut().rust_mut().detail_cache.clear();
+                self.as_mut().rust_mut().invalidate_details();
                 self.as_mut().set_phase("stale");
                 self.set_status(
                     if outcome.cancellation_deferred {
@@ -3325,6 +3365,13 @@ impl ffi::PackageController {
                             )
                         {
                             continue;
+                        }
+                        if let Err(error) = &result {
+                            if let Some(notice) =
+                                preflight_notice(&worker.job, error, self.rust().sudo)
+                            {
+                                self.as_mut().set_notice(encoded(notice));
+                            }
                         }
                         if worker.job.writes() {
                             let notice = write_notice(&worker.job, &result, self.rust().sudo);
@@ -5426,6 +5473,48 @@ mod tests {
         );
         assert_eq!(partial["title"], "1 of 2 changes failed");
         assert_eq!(partial["detail"], "Update all packages from flatpak: busy");
+        let cancelled_batch = write_notice(
+            &batch,
+            &Ok(Payload::Batch(
+                String::new(),
+                vec![Outcome::Finished, Outcome::Cancelled],
+            )),
+            false,
+        );
+        assert_eq!(cancelled_batch["kind"], "info");
+        assert_eq!(
+            cancelled_batch["title"],
+            "1 of 2 changes finished. The rest were cancelled."
+        );
+        let mixed = write_notice(
+            &batch,
+            &Ok(Payload::Batch(
+                "Completed 0 of 2 updates.\nx: busy".into(),
+                vec![Outcome::Failed, Outcome::Cancelled],
+            )),
+            false,
+        );
+        assert_eq!(mixed["kind"], "error");
+        // A failed preview says so; a superseded one stays quiet.
+        let plan = Job::PlanOperation(install.clone());
+        let prepared = preflight_notice(&plan, &E::LockBusy.into(), false).unwrap();
+        assert_eq!(prepared["title"], "Install htop (apt) couldn't be prepared");
+        assert_eq!(prepared["action"], "");
+        let denied_plan = preflight_notice(
+            &Job::PlanUpgrade(vec![], 0),
+            &E::AuthorizationDenied.into(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(denied_plan["title"], "The update couldn't be prepared");
+        assert_eq!(denied_plan["action"], "settings");
+        assert_eq!(
+            preflight_notice(&Job::PlanCleanAll(vec![]), &E::TimedOut.into(), false).unwrap()
+                ["title"],
+            "The cleanup couldn't be prepared"
+        );
+        assert!(preflight_notice(&plan, &EngineError::Cancelled, false).is_none());
+        assert!(preflight_notice(&job, &E::LockBusy.into(), false).is_none());
         let all = write_notice(
             &batch,
             &Ok(Payload::Batch(
@@ -5466,6 +5555,9 @@ mod tests {
         assert!(controller.details().to_string().contains("Grok"));
         assert!(controller.rust().details_worker.is_some());
         assert!(controller.rust().queued.is_none());
+        // A reload drops the lookup so its reply can't refill the cache.
+        controller.as_mut().rust_mut().invalidate_details();
+        assert!(controller.rust().details_worker.is_none());
         // Selecting again replaces the pending lookup.
         controller.as_mut().select(0);
         wait_until(&mut controller, |c| {

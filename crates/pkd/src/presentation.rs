@@ -164,7 +164,7 @@ pub fn error_text(error: &Value) -> String {
                         .map(failure_text)
                         .collect();
                     format!(
-                        "Some sources didn't answer, so PkgDeck won't guess which package you meant. {} Try again, or pick a source with --from.",
+                        "Some sources didn't answer, so nothing was changed. {} Try again, or leave them out with --from.",
                         failed.join(" ")
                     )
                 }
@@ -844,10 +844,32 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
             value(data.get("message").unwrap_or(&data["error"]))
         ));
         if let Some(matches) = data["error"]["Ambiguous"].as_array() {
-            // Each match with the flag that picks it.
+            // Each match with the flags that pick it: --from, plus --arch or
+            // --scope when the same source has more than one match.
             let flags: Vec<_> = matches
                 .iter()
-                .map(|id| format!("--from {}", value(&id["backend"])))
+                .map(|id| {
+                    let same: Vec<_> = matches
+                        .iter()
+                        .filter(|other| other["backend"] == id["backend"])
+                        .collect();
+                    let mut flags = vec![format!("--from {}", value(&id["backend"]))];
+                    if same
+                        .iter()
+                        .any(|other| other["architecture"] != id["architecture"])
+                    {
+                        flags.push(format!("--arch {}", value(&id["architecture"])));
+                    }
+                    let scope = scope_label(&id["scope"]);
+                    if scope.is_some()
+                        && same
+                            .iter()
+                            .any(|other| scope_label(&other["scope"]) != scope)
+                    {
+                        flags.push(format!("--scope {}", scope.unwrap_or_default()));
+                    }
+                    flags.join(" ")
+                })
                 .collect();
             let width = flags.iter().map(|flag| flag.width()).max().unwrap_or(0);
             for (id, flag) in matches.iter().zip(flags) {
@@ -984,8 +1006,24 @@ mod tests {
             80,
             false,
         );
-        assert!(ambiguous.contains("--from apt  fixture, amd64, system"));
-        assert!(ambiguous.contains("--from apt  fixture, i386, system"));
+        assert!(ambiguous.contains("--from apt --arch amd64  fixture, amd64, system"));
+        assert!(ambiguous.contains("--from apt --arch i386   fixture, i386, system"));
+        let scopes = human(
+            &json!({"error":{"Ambiguous":[
+                {"backend":"flatpak","name":"org.example.App","architecture":"x86_64","scope":"system"},
+                {"backend":"flatpak","name":"org.example.App","architecture":"x86_64","scope":{"user":{"uid":1000}}}
+            ]},"message":"2 packages match"}),
+            100,
+            false,
+        );
+        assert!(
+            scopes.contains("--from flatpak --scope system  org.example.App, system"),
+            "{scopes}"
+        );
+        assert!(
+            scopes.contains("--from flatpak --scope user    org.example.App, user"),
+            "{scopes}"
+        );
         let mixed = human(
             &json!({"error":{"Ambiguous":[
                 {"backend":"apt","name":"htop","architecture":"amd64","scope":"system"},
@@ -1189,7 +1227,7 @@ mod tests {
             ),
             (
                 json!({"Incomplete": [{"backend": "apt", "error": {"Execution": "TimedOut"}}]}),
-                "won't guess which package you meant. apt: The package manager took too long to answer. Try again, or pick a source with --from.",
+                "Some sources didn't answer, so nothing was changed. apt: The package manager took too long to answer. Try again, or leave them out with --from.",
             ),
             (json!({"Ambiguous": [{}, {}]}), "2 packages have this name"),
             (json!({"UnknownBackend": "x"}), "UnknownBackend: x"),

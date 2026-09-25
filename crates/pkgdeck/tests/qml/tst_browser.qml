@@ -1094,8 +1094,9 @@ TestCase {
         verify(!findChild(browser, "changeNoticeDetail").visible);
         tryCompare(fake, "noticeDismissals", 2, 6000);
     }
-    function test_empty_search_names_the_sources_it_searches() {
+    function test_empty_search_shows_a_centered_prompt() {
         browser.openView("Search");
+        const empty = findChild(browser, "searchEmptyState");
         const hint = findChild(browser, "searchHint");
         fake.source_catalog = JSON.stringify([
             {source: "apt", availability_kind: "available", capabilities: ["search"]},
@@ -1103,16 +1104,18 @@ TestCase {
             {source: "fwupd", availability_kind: "available", capabilities: ["upgrade"]},
             {source: "dnf", availability_kind: "unavailable", capabilities: ["search"]}
         ]);
-        verify(hint.visible);
-        compare(hint.text, "Searches APT and Flatpak.");
+        verify(empty.visible);
+        compare(hint.text, "Searches 2 sources as you type.");
         fake.source_catalog = JSON.stringify([{source: "apt", availability_kind: "available", capabilities: ["search"]}]);
-        compare(hint.text, "Searches APT.");
-        fake.source_catalog = JSON.stringify(["apt", "flatpak", "npm"].map((id) => ({source: id, availability_kind: "available", capabilities: ["search"]})));
-        compare(hint.text, "Searches APT, Flatpak, and npm.");
+        compare(hint.text, "Searches APT as you type.");
         fake.source_catalog = JSON.stringify([{source: "fwupd", availability_kind: "available", capabilities: ["upgrade"]}]);
         compare(hint.text, "No enabled source can search. Turn one on in Sources.");
-        findChild(browser, "searchField").text = "vim";
-        verify(!hint.visible);
+        // The prompt sits below the field, centered, and leaves with typing.
+        waitForRendering(browser.contentItem);
+        const field = findChild(browser, "searchField");
+        verify(hint.mapToItem(browser.contentItem, 0, 0).y > field.mapToItem(browser.contentItem, 0, 0).y + field.height + 40);
+        field.text = "vim";
+        verify(!empty.visible);
     }
     function test_activity_results_read_as_states() {
         const pane = findChild(browser, "activityPane");
