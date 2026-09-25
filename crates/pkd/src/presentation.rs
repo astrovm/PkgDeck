@@ -873,7 +873,20 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
                 .collect();
             let width = flags.iter().map(|flag| flag.width()).max().unwrap_or(0);
             for (id, flag) in matches.iter().zip(flags) {
-                let mut parts = vec![value(&id["name"])];
+                // Flags can't tell apart matches that differ only by
+                // reference, such as two Flatpak branches. The reference
+                // selects the exact one, so show it in place of the name.
+                let twin = matches.iter().any(|other| {
+                    other != id
+                        && other["backend"] == id["backend"]
+                        && other["architecture"] == id["architecture"]
+                        && scope_label(&other["scope"]) == scope_label(&id["scope"])
+                });
+                let name = match id["reference"].as_str() {
+                    Some(reference) if twin && !reference.is_empty() => clean(reference),
+                    _ => value(&id["name"]),
+                };
+                let mut parts = vec![name];
                 if matches!(
                     id["backend"].as_str(),
                     Some("apt" | "dnf" | "pacman" | "zypper")
@@ -1023,6 +1036,22 @@ mod tests {
         assert!(
             scopes.contains("--from flatpak --scope user    org.example.App, user"),
             "{scopes}"
+        );
+        let branches = human(
+            &json!({"error":{"Ambiguous":[
+                {"backend":"flatpak","name":"org.example.App","architecture":"x86_64","scope":"system","reference":"org.example.App/x86_64/stable"},
+                {"backend":"flatpak","name":"org.example.App","architecture":"x86_64","scope":"system","reference":"org.example.App/x86_64/beta"}
+            ]},"message":"2 packages match"}),
+            100,
+            false,
+        );
+        assert!(
+            branches.contains("--from flatpak  org.example.App/x86_64/stable, system"),
+            "{branches}"
+        );
+        assert!(
+            branches.contains("--from flatpak  org.example.App/x86_64/beta, system"),
+            "{branches}"
         );
         let mixed = human(
             &json!({"error":{"Ambiguous":[
