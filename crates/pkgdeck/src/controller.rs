@@ -1708,7 +1708,9 @@ impl ffi::PackageController {
             let mut send = |mut reply| {
                 match &mut reply {
                     Reply::Done(Ok(
-                        Payload::Packages(report) | Payload::RetryPackages(_, report),
+                        Payload::Packages(report)
+                        | Payload::RetryPackages(_, report)
+                        | Payload::RetryFailedUpdates(_, report),
                     )) => {
                         for package in &mut report.packages {
                             crate::metadata::enrich_cached(package);
