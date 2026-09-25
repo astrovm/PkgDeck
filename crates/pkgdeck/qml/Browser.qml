@@ -140,6 +140,8 @@ Controls.ApplicationWindow {
     property var retainedItems: []
     property bool retainingResults: false
     property string resultQuery: ""
+    // The query the retained rows were loaded for.
+    property string retainedQuery: ""
     property var items: currentView === resultView ? (retainingResults ? retainedItems : liveItems) : []
     property bool reduceMotion: preferences.reduceMotion
     readonly property bool motionEnabled: !reduceMotion && Kirigami.Units.shortDuration > 0
@@ -252,7 +254,7 @@ Controls.ApplicationWindow {
     function retryFailedSource(id) {
         if (currentView === "Search" && queryDirty)
             return;
-        const query = currentView === "Installed" ? "" : searchPane.text;
+        const query = currentView === "Search" ? searchPane.text : "";
         backend.retrySource(currentView, query, id);
         sourceFailuresDialog.close();
     }
@@ -299,8 +301,8 @@ Controls.ApplicationWindow {
         if (backend.writing)
             return "Applying changes…";
         if (backend.busy)
-            return retainingResults ? "Refreshing…" :
-                (currentView === "Search" ? "Searching…" : "Loading…");
+            return currentView === "Search" ? "Searching…" :
+                (retainingResults ? "Refreshing…" : "Loading…");
         const count = viewItems.length;
         const noun = currentView === "Sources" ? "source" : currentView === "Clean" ? "cleanup task" :
             currentView === "Updates" ? "update" : "package";
@@ -646,6 +648,10 @@ Controls.ApplicationWindow {
             rows.sort((a, b) => (Number(enabled.indexOf(b.source) >= 0) - Number(enabled.indexOf(a.source) >= 0)) || relevanceTiebreak(a, b));
         } else if (root.currentView === "Search") {
             const query = searchPane.text.trim().toLowerCase();
+            // Previous matches narrow instantly while the new query runs.
+            const shownFor = (root.retainingResults ? root.retainedQuery : root.resultQuery).toLowerCase();
+            if (query !== "" && shownFor !== query)
+                rows = rows.filter((row) => ((row.name || "") + " " + (row.display_name || "") + " " + (row.summary || "")).toLowerCase().indexOf(query) >= 0);
             if (query !== "")
                 rows.sort((a, b) => ((isFabricated(a) ? 1 : 0) - (isFabricated(b) ? 1 : 0)) || (relevanceScore(a, query) - relevanceScore(b, query)) || relevanceTiebreak(a, b));
         }
@@ -1167,8 +1173,12 @@ Controls.ApplicationWindow {
         // left by another page or by a previous, nonempty search.
         const emptySearch = currentView === "Search" && searchPane.text.trim().length === 0;
         const clearSearchResults = emptySearch && (resultView !== "Search" || resultQuery.length > 0);
-        retainedItems = currentView === resultView && sameQuery ? items.slice() : [];
+        // While typing, keep the previous matches on screen (narrowed below)
+        // until the new ones arrive, instead of flashing an empty list.
+        const refining = currentView === "Search" && !emptySearch;
+        retainedItems = currentView === resultView && (sameQuery || refining) ? items.slice() : [];
         retainingResults = retainedItems.length > 0;
+        retainedQuery = resultQuery;
         resultView = clearSearchResults ? "" : currentView;
         if (currentView === "Search")
             resultQuery = searchPane.text.trim();
@@ -1179,7 +1189,7 @@ Controls.ApplicationWindow {
         // Installed filtering is client-side over the loaded rows (see
         // viewItems), so the backend always returns the full installed set
         // and typing never triggers a native query.
-        backend.load(currentView, currentView === "Installed" ? "" : searchPane.text, currentView === "Sources" ? "" : checkedCsv(), useSudo, force === true);
+        backend.load(currentView, currentView === "Search" ? searchPane.text : "", currentView === "Sources" ? "" : checkedCsv(), useSudo, force === true);
         if (!backend.busy)
             retainingResults = false;
     }
@@ -1312,6 +1322,21 @@ Controls.ApplicationWindow {
         repeat: true
         running: preferences.backgroundMode
         onTriggered: root.checkUpdates(false)
+    }
+    // Search as you type. Short enough to feel live, long enough that each
+    // keystroke does not start a query in every package manager.
+    Timer {
+        id: searchDebounce
+        interval: 220
+        onTriggered: root.submitSearch()
+    }
+    function submitSearch() {
+        searchDebounce.stop();
+        if (currentView !== "Search")
+            return;
+        queryDirty = false;
+        sortColumn = "";
+        reload();
     }
     Timer {
         id: completionHold
@@ -1738,18 +1763,20 @@ Controls.ApplicationWindow {
                     accent: root.accent
                     onAccent: root.palette.highlightedText
                     textFont: root.font
-                    onSubmitted: {
-                        root.currentView = "Search";
-                        root.queryDirty = false;
-                        root.sortColumn = "";
-                        root.reload();
-                    }
+                    // Enter searches at once; typing searches after a short pause.
+                    onSubmitted: root.submitSearch()
                     onDownRequested: {
                         results.forceActiveFocus();
                         if (root.viewItems.length > 0)
                             root.choose(0);
                     }
-                    onQueryEdited: root.queryDirty = true
+                    onQueryEdited: {
+                        root.queryDirty = true;
+                        if (searchPane.text.trim().length === 0)
+                            root.submitSearch();
+                        else
+                            searchDebounce.restart();
+                    }
                 }
             }
             RowLayout {

@@ -71,31 +71,4 @@ RowLayout {
             onClicked: { search.clear(); search.forceActiveFocus(); }
         }
     }
-    Controls.Button {
-        id: searchButton
-        objectName: "searchButton"
-        text: "Search"
-        Accessible.name: text
-        enabled: !pane.writing && search.text.trim().length > 0
-        implicitWidth: Math.max(104, buttonContents.implicitWidth + leftPadding + rightPadding)
-        Layout.minimumWidth: implicitWidth
-        implicitHeight: search.implicitHeight
-        horizontalPadding: 14
-        onClicked: pane.submitted()
-        background: Rectangle {
-            radius: 10
-            color: !searchButton.enabled ? pane.surface : searchButton.down ? Qt.darker(pane.accent, 1.08) : searchButton.hovered ? Qt.lighter(pane.accent, 1.08) : pane.accent
-            border.color: searchButton.activeFocus ? pane.accent : searchButton.enabled ? "transparent" : pane.line
-            border.width: searchButton.activeFocus ? 2 : 1
-            Behavior on color { ColorAnimation { duration: 120 } }
-        }
-        scale: down ? 0.97 : 1
-        Behavior on scale { NumberAnimation { duration: 120; easing.type: Easing.OutCubic } }
-        contentItem: RowLayout {
-            id: buttonContents
-            spacing: 8
-            DeckIcon { name: "search"; ink: searchButton.enabled ? pane.onAccent : pane.muted; Layout.preferredWidth: 18; Layout.preferredHeight: 18 }
-            Text { objectName: "searchButtonLabel"; text: "Search"; color: searchButton.enabled ? pane.onAccent : pane.muted; font.family: pane.textFont.family; font.pointSize: pane.textFont.pointSize; font.weight: Font.DemiBold }
-        }
-    }
 }

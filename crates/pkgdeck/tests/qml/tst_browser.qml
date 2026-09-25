@@ -760,26 +760,32 @@ TestCase {
         verify(iconPosition.x >= 0);
         verify(iconPosition.x + icon.width <= link.contentItem.width);
     }
-    function test_search_button_fits_at_normal_and_compact_widths() {
+    function test_search_runs_while_typing_without_enter() {
         browser.openView("Search");
+        verify(!findChild(browser, "searchButton"));
         const search = findChild(browser, "searchField");
-        const button = findChild(browser, "searchButton");
-        const label = findChild(browser, "searchButtonLabel");
+        const before = fake.loadCount;
+        search.text = "Fire";
         search.text = "Firefox";
         compare(browser.queryDirty, true);
         compare(browser.emptyStateMessage(), "");
-        for (const width of [1100, 380, 360]) {
-            browser.width = width;
-            waitForRendering(browser.contentItem);
-            verify(button.width >= button.contentItem.implicitWidth + button.leftPadding + button.rightPadding - 1);
-            compare(button.height, search.height);
-            const labelPosition = label.mapToItem(button, 0, 0);
-            verify(labelPosition.x > 0);
-            verify(labelPosition.x + label.width < button.width);
-        }
-        mouseClick(button);
-        compare(fake.lastQuery, "Firefox");
+        // One query after the typing pause, not one per keystroke.
+        tryCompare(fake, "lastQuery", "Firefox");
+        compare(fake.loadCount, before + 1);
         compare(browser.queryDirty, false);
+        fake.rows = JSON.stringify([
+            {kind: "package", name: "firefox", source: "apt", candidate: "1", scope: "system", summary: "Web browser"},
+            {kind: "package", name: "firefox-esr", source: "apt", candidate: "1", scope: "system", summary: "Web browser"}
+        ]);
+        compare(browser.viewItems.length, 2);
+        // Refining narrows the rows on screen at once, before new results.
+        search.text = "Firefox-e";
+        compare(browser.viewItems.length, 1);
+        tryCompare(fake, "lastQuery", "Firefox-e");
+        // Clearing the field clears results without waiting.
+        search.text = "";
+        compare(browser.queryDirty, false);
+        compare(browser.viewItems.length, 0);
     }
     function test_dynamic_buttons_fit_at_wide_and_compact_widths() {
         browser.openView("Updates");
@@ -971,7 +977,7 @@ TestCase {
         browser.openView("Search");
         const search = findChild(browser, "searchField");
         search.text = "fixture";
-        mouseClick(findChild(browser, "searchButton"));
+        browser.submitSearch();
         fake.rows = JSON.stringify([{kind: "package", name: "fixture", source: "homebrew", architecture: "all", installed: null, candidate: "1.0", scope: "user", summary: "Synthetic package"}]);
         compare(browser.viewItems.length, 1);
         browser.openView("Installed");
@@ -1009,7 +1015,7 @@ TestCase {
 
         const search = findChild(browser, "searchField");
         search.text = "fixture";
-        mouseClick(findChild(browser, "searchButton"));
+        browser.submitSearch();
         fake.rows = JSON.stringify([{kind: "package", name: "fixture", source: "apt", candidate: "1.0", summary: "Synthetic package"}]);
         compare(browser.viewItems.length, 1);
     }
@@ -1023,7 +1029,7 @@ TestCase {
         const field = findChild(browser, "searchField");
         const top = field.mapToItem(browser.contentItem, 0, 0).y;
         field.text = "synthetic";
-        mouseClick(findChild(browser, "searchButton"));
+        browser.submitSearch();
         waitForRendering(browser.contentItem);
         compare(field.mapToItem(browser.contentItem, 0, 0).y, top);
         fake.rows = JSON.stringify(Array.from({length: 23}, (_, index) => ({
@@ -1155,7 +1161,7 @@ TestCase {
         fake.simulateLoading = true;
         search.forceActiveFocus();
         keyClick(Qt.Key_Return);
-        compare(browser.retainingResults, false);
+        // Earlier rows only stay while they still match the new query.
         compare(browser.viewItems.length, 0);
         compare(findChild(browser, "resultsHeading").text, "Searching…");
         verify(!findChild(browser, "emptyState").visible);
