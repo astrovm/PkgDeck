@@ -111,12 +111,25 @@ Controls.ApplicationWindow {
     property string currentView: "Search"
     readonly property var activityRows: JSON.parse(backend.activity || "[]")
     readonly property int queuedCount: activityRows.filter(row => row.state === "queued").length
-    readonly property var backgroundState: JSON.parse(backend.background_state || "{}")
+    readonly property var backgroundState: JSON.parse(backend.background_state && backend.background_state !== "{}" ? backend.background_state : preferences.lastBackgroundState)
+    property bool notificationAvailable: false
+    signal testNotificationRequested()
     property bool startHidden: Qt.application.arguments.indexOf("--background") >= 0
     property bool forceQuit: false
     property bool trayAvailable: false
     property alias backgroundMode: preferences.backgroundMode
     property alias autostartEnabled: preferences.autostart
+    function showFromTray() {
+        root.show();
+        root.raise();
+        root.requestActivate();
+    }
+    function toggleFromTray() {
+        if (root.visible)
+            root.hide();
+        else
+            root.showFromTray();
+    }
     function checkUpdates(force) {
         const offline = NetworkInformation.reachability === NetworkInformation.Reachability.Disconnected || NetworkInformation.isBehindCaptivePortal;
         backend.checkUpdates(root.checkedSources().join(","), preferences.backgroundMode, offline, NetworkInformation.isMetered, force === true);
@@ -1036,6 +1049,8 @@ Controls.ApplicationWindow {
         property bool sortAscending: true
         property bool backgroundMode: false
         property bool autostart: false
+        property string notificationHistory: "{}"
+        property string lastBackgroundState: "{}"
     }
     onClosing: function (close) {
         if (!forceQuit && preferences.backgroundMode && trayAvailable) {
@@ -1051,6 +1066,14 @@ Controls.ApplicationWindow {
     }
     Connections {
         target: backend
+        function onNotification_historyChanged() {
+            preferences.notificationHistory = backend.notification_history;
+        }
+        function onBackground_stateChanged() {
+            const state = JSON.parse(backend.background_state || "{}");
+            if (state.last_check)
+                preferences.lastBackgroundState = JSON.stringify({last_check: state.last_check, available: state.available, failures: state.failures || [], notify: false});
+        }
         function onDetailsChanged() {
             if (root.motionEnabled && root.selected !== null && backend.details !== "{}")
                 detailsReveal.restart();
@@ -1141,6 +1164,7 @@ Controls.ApplicationWindow {
         }
     }
     Component.onCompleted: {
+        backend.restoreNotificationHistory(preferences.notificationHistory);
         // Explicit --from flags seed the session checklist without
         // persisting; otherwise restore the stored list, migrating the
         // legacy single-source preference on first sight.
@@ -1645,6 +1669,40 @@ Controls.ApplicationWindow {
                         Accessible.name: text
                     }
                     Controls.Label {
+                        objectName: "backgroundCheckStatus"
+                        text: root.backgroundState.last_check
+                            ? "Last check: " + new Date(root.backgroundState.last_check * 1000).toLocaleString()
+                                + ", " + (root.backgroundState.available || 0) + " updates found"
+                            : "Last check: never"
+                        color: root.muted
+                        wrapMode: Text.WordWrap
+                        Layout.fillWidth: true
+                    }
+                    Controls.Label {
+                        objectName: "backgroundCheckFailures"
+                        visible: (root.backgroundState.failures || []).length > 0
+                        text: "Could not check: " + (root.backgroundState.failures || []).map((failure) => failure.source).join(", ")
+                        color: root.muted
+                        wrapMode: Text.WordWrap
+                        Layout.fillWidth: true
+                    }
+                    Controls.Label {
+                        objectName: "notificationAvailability"
+                        text: !root.trayAvailable ? "Desktop notifications unavailable: no system tray"
+                            : !root.notificationAvailable ? "Desktop notifications unavailable in this tray"
+                            : "Desktop notifications available"
+                        color: root.muted
+                        wrapMode: Text.WordWrap
+                        Layout.fillWidth: true
+                    }
+                    ActionButton {
+                        objectName: "testNotificationButton"
+                        text: "Test notification"
+                        symbol: "updates"
+                        enabled: preferences.backgroundMode && root.notificationAvailable
+                        onClicked: root.testNotificationRequested()
+                    }
+                    Controls.Label {
                         text: "Authentication"
                         visible: root.systemAuthorizationSupported
                         color: root.ink
@@ -1758,10 +1816,17 @@ Controls.ApplicationWindow {
                 DeckIcon { name: "warning"; ink: root.accent; Layout.preferredWidth: 20; Layout.preferredHeight: 20 }
                 Controls.Label {
                     objectName: "sourceFailureNotice"
-                    text: root.sourceFailureTitle() + (root.currentView === "Updates" ? ". Update all is unavailable." : "")
+                    text: root.sourceFailureTitle() + (root.currentView === "Updates" ? ". Update all will retry the check." : "")
                     color: root.muted
                     wrapMode: Text.WordWrap
                     Layout.fillWidth: true
+                }
+                ActionButton {
+                    objectName: "sourceFailureRetryNotice"
+                    text: "Retry"
+                    symbol: "refresh"
+                    enabled: !backend.busy && !(root.currentView === "Search" && root.queryDirty)
+                    onClicked: root.reload(true)
                 }
                 ActionButton {
                     objectName: "sourceFailureDetails"
@@ -2308,7 +2373,6 @@ Controls.ApplicationWindow {
                     compact: root.compact
                     busy: backend.busy && !backend.writing
                     writing: false
-                    upgradable: backend.upgradable
                     selectedCount: root.selectedCount()
                     uncheckedCount: root.uncheckedPackages.length
                     textFont: root.font
@@ -2869,7 +2933,7 @@ Controls.ApplicationWindow {
     }
     Shortcut {
         sequence: "Ctrl+Shift+U"
-        enabled: root.currentView === "Updates" && (!backend.busy || backend.writing) && root.selectedCount() > 0 && (root.uncheckedPackages.length > 0 || backend.upgradable)
+        enabled: root.currentView === "Updates" && (!backend.busy || backend.writing) && root.selectedCount() > 0
         onActivated: root.upgradeUpdates()
     }
     Shortcut {

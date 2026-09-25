@@ -6,23 +6,34 @@ Browser {
     id: browser
     backend: PackageController {}
     trayAvailable: tray.available
+    notificationAvailable: tray.available && tray.supportsMessages
+    onTestNotificationRequested: tray.showMessage("PkgDeck test", "Desktop notifications are working.", Platform.SystemTrayIcon.Information, 8000)
     Platform.SystemTrayIcon {
         id: tray
         visible: browser.backgroundMode && available
         icon.source: browser.logoIconSource
         tooltip: "PkgDeck"
+        onActivated: function(reason) {
+            if (reason === Platform.SystemTrayIcon.Trigger)
+                browser.toggleFromTray();
+        }
         menu: Platform.Menu {
-            Platform.MenuItem { text: "Open"; onTriggered: { browser.show(); browser.raise(); browser.requestActivate(); } }
+            Platform.MenuItem { text: "Open"; onTriggered: browser.showFromTray() }
             Platform.MenuItem { text: "Check now"; onTriggered: browser.checkUpdates(true) }
             Platform.MenuItem { text: "Quit"; onTriggered: { browser.forceQuit = true; Qt.quit(); } }
         }
-        onMessageClicked: { browser.show(); browser.raise(); browser.requestActivate(); browser.openView("Updates"); }
+        onMessageClicked: { browser.showFromTray(); browser.openView("Updates"); }
     }
     Connections {
         target: browser
         function onBackgroundStateChanged() {
-            if (browser.backgroundState.notify && tray.visible && tray.supportsMessages)
-                tray.showMessage("PkgDeck updates", browser.backgroundState.available + " updates available", Platform.SystemTrayIcon.Information, 8000);
+            if (browser.backgroundState.notify && tray.visible && tray.supportsMessages) {
+                const failures = browser.backgroundState.failures || [];
+                const message = browser.backgroundState.available + " updates available"
+                    + (failures.length ? ". Some sources could not be checked." : "");
+                tray.showMessage("PkgDeck updates", message, Platform.SystemTrayIcon.Information, 8000);
+                browser.backend.acknowledgeNotification();
+            }
         }
     }
     Timer {

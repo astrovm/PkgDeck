@@ -86,8 +86,10 @@ Review the target, source, scope, and available native plan before applying
 changes. The confirmation button names the action; Cancel has focus by default.
 APT provides a dry run for individual package changes and rechecks it before
 writing. Other managers may not provide a transaction preview. Firmware confirmations include
-power and restart requirements; PkgDeck does not reboot automatically. Failed
-sources are shown explicitly and block Update all until the result is complete.
+power and restart requirements; PkgDeck does not reboot automatically. If a
+source check fails, Update all retries that source before confirmation. Updates
+from sources that still fail are excluded, and the confirmation says so. Other
+available updates remain actionable. The failure notice also has a Retry button.
 For APT, Update all previews the `dist-upgrade` transaction. Planned installs
 and removals appear at the top of the confirmation, and a changed plan stops
 the update before authorization.
@@ -133,6 +135,24 @@ manager's normal signature verification and authorization.
 The Add file picker only lists formats for managers available on this computer.
 Linux AppImages, desktop login autostart, and system authorization settings are
 omitted on macOS.
+
+## Background update notifications
+
+Enable **Background checks** in Settings to check selected package sources while
+PkgDeck is running. The first check starts about 30 seconds after launch; later
+checks run no more often than every 30 minutes. Checks wait while the computer is
+offline, on a metered connection, or busy with another package operation. On
+Linux, **Start in background at login** keeps these checks running after login.
+Click the tray icon to hide or show the window. Its menu also offers Check now
+and Quit; clicking an update notification opens Updates.
+
+PkgDeck notifies you when a successful check finds updates it has not notified
+you about before, including on the first check. It remembers notified updates
+across restarts and does not alert when updates disappear. A failed source does
+not prevent alerts for sources that completed successfully. Settings shows the
+last check, the count from successful sources, any source errors, and whether
+the desktop tray supports notifications. **Test notification** sends a sample
+message when background checks and tray notifications are available.
 
 The source picker filters one package page; Sources controls which managers PkgDeck
 queries. Neither setting enables or disables repositories. Refresh sources

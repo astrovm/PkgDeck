@@ -32,6 +32,8 @@ TestCase {
         function previewInventory(url) {}
         property string activity: "[]"
         property string background_state: "{}"
+        property string notification_history: "{}"
+        property string lastRestoredHistory: ""
         property string lastRetry: ""
         property string version: "9.9.9-test"
         property bool simulateLoading: false
@@ -95,6 +97,8 @@ TestCase {
         function refreshActivity() {}
         function cancelQueued() {}
         function checkUpdates(sources, enabled, offline, metered, force) {}
+        function restoreNotificationHistory(history) { lastRestoredHistory = history; notification_history = history; }
+        function acknowledgeNotification() {}
         function setAutostart(enabled) { return true; }
     }
     Component {
@@ -122,6 +126,8 @@ TestCase {
         fake.report_state = "{}";
         fake.activity = "[]";
         fake.background_state = "{}";
+        fake.notification_history = "{}";
+        fake.lastRestoredHistory = "";
         fake.lastRetry = "";
         fake.manifest_preview = "{}";
         fake.lastInventorySelection = "";
@@ -493,7 +499,6 @@ TestCase {
         const button = findChild(browser, "upgradeAllButton");
         verify(!button.visible);
         populate();
-        fake.upgradable = true;
         waitForRendering(browser.contentItem);
         verify(button.enabled); // No individual selection required.
         mouseClick(button);
@@ -1421,6 +1426,52 @@ TestCase {
         browser.close();
         verify(!browser.visible);
     }
+    function test_tray_click_toggles_window_visibility() {
+        browser.startHidden = true;
+        browser.backgroundMode = true;
+        browser.trayAvailable = true;
+        verify(!browser.visible);
+        browser.toggleFromTray();
+        verify(browser.visible);
+        browser.toggleFromTray();
+        verify(!browser.visible);
+    }
+    function test_background_status_and_test_notification_control() {
+        browser.openView("Settings");
+        const status = findChild(browser, "backgroundCheckStatus");
+        const failures = findChild(browser, "backgroundCheckFailures");
+        const availability = findChild(browser, "notificationAvailability");
+        const button = findChild(browser, "testNotificationButton");
+        verify(status.text.indexOf("never") >= 0);
+        verify(!button.enabled);
+        browser.backgroundMode = true;
+        browser.trayAvailable = true;
+        browser.notificationAvailable = true;
+        fake.background_state = JSON.stringify({last_check: 1234567890, available: 2,
+            failures: [{source: "fixture", kind: "unavailable"}], notify: false});
+        verify(status.text.indexOf("2 updates found") >= 0);
+        verify(failures.visible);
+        verify(failures.text.indexOf("fixture") >= 0);
+        compare(availability.text, "Desktop notifications available");
+        verify(button.enabled);
+        let requested = 0;
+        browser.testNotificationRequested.connect(() => requested++);
+        button.clicked();
+        compare(requested, 1);
+        const history = JSON.stringify({notified: {fixture: []}});
+        fake.notification_history = history;
+        browser.destroy();
+        wait(30);
+        fake.notification_history = "{}";
+        fake.background_state = "{}";
+        fake.lastRestoredHistory = "";
+        browser = createTemporaryObject(window, test);
+        verify(browser !== null);
+        tryCompare(fake, "lastRestoredHistory", history);
+        compare(browser.backgroundState.last_check, 1234567890);
+        compare(browser.backgroundState.available, 2);
+        compare(browser.backgroundState.notify, false);
+    }
     function test_container_reference_uses_explicit_search_submission() {
         browser.openView("Search");
         const search = findChild(browser, "searchField");
@@ -2021,7 +2072,7 @@ TestCase {
         verify(!footer.visible);
         verify(findChild(browser, "compactSignature").visible);
     }
-    function test_update_failure_has_one_explanation() {
+    function test_update_failure_keeps_update_all_and_retry_available() {
         browser.openView("Updates");
         fake.rows = JSON.stringify([
             {kind: "package", name: "tool", source: "apt", architecture: "all", installed: "1", candidate: "2", update: "available", summary: "Updatable"},
@@ -2030,9 +2081,19 @@ TestCase {
         wait(30);
         const notice = findChild(browser, "sourceFailureNotice");
         verify(notice.visible);
-        compare(notice.text, "Couldn't check npm. Update all is unavailable.");
+        compare(notice.text, "Couldn't check npm. Update all will retry the check.");
         verify(findChild(browser, "upgradeAllHint") === null);
-        verify(!findChild(browser, "upgradeAllButton").enabled);
+        const updateAll = findChild(browser, "upgradeAllButton");
+        verify(updateAll.enabled);
+        mouseClick(updateAll);
+        verify(fake.confirmation.indexOf("upgrade-all") === 0);
+        const dialog = findChild(browser, "confirmationDialog");
+        dialog.reject();
+        tryCompare(dialog, "visible", false);
+        const previousLoads = fake.loadCount;
+        mouseClick(findChild(browser, "sourceFailureRetryNotice"));
+        compare(fake.loadCount, previousLoads + 1);
+        verify(fake.lastForce);
     }
     function test_update_failure_without_rows_has_retry_card() {
         browser.openView("Updates");
