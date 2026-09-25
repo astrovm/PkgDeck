@@ -617,7 +617,7 @@ TestCase {
         tryCompare(dialog, "opened", true);
         keyClick(Qt.Key_C, Qt.AltModifier);
         tryCompare(dialog, "visible", false);
-        compare(browser.versionText(runtime), "—");
+        compare(browser.versionText(runtime), "Unknown");
         runtime.installed = "1.0";
         runtime.candidate = "1.0";
         compare(browser.versionText(runtime), "1.0");
@@ -1072,10 +1072,10 @@ TestCase {
         browser.openView("Search");
         const banner = findChild(browser, "changeNotice");
         verify(!banner.visible);
-        fake.notice = JSON.stringify({kind: "error", title: "Install htop · apt failed",
+        fake.notice = JSON.stringify({kind: "error", title: "Install htop (apt) failed",
             detail: "PkgDeck couldn't get administrator access.", action: "settings"});
         verify(banner.visible);
-        compare(findChild(browser, "changeNoticeTitle").text, "Install htop · apt failed");
+        compare(findChild(browser, "changeNoticeTitle").text, "Install htop (apt) failed");
         compare(findChild(browser, "changeNoticeDetail").text, "PkgDeck couldn't get administrator access.");
         // Failures stay until dismissed and can open Settings.
         wait(50);
@@ -1088,7 +1088,7 @@ TestCase {
         compare(fake.noticeDismissals, 1);
         verify(!banner.visible);
         // Success needs no action and clears itself.
-        fake.notice = JSON.stringify({kind: "success", title: "Install htop · apt finished"});
+        fake.notice = JSON.stringify({kind: "success", title: "Install htop (apt) finished"});
         verify(banner.visible);
         verify(!findChild(browser, "changeNoticeSettings").visible);
         verify(!findChild(browser, "changeNoticeDetail").visible);
@@ -1120,7 +1120,7 @@ TestCase {
         compare(pane.result({outcomes: ["finished"]}), "Completed");
         compare(pane.result({outcomes: ["cancelled"]}), "Cancelled");
         compare(pane.result({outcomes: ["finished", "finished"]}), "All 2 completed");
-        compare(pane.result({outcomes: ["finished", "failed", "cancelled"]}), "1 completed · 1 failed · 1 cancelled");
+        compare(pane.result({outcomes: ["finished", "failed", "cancelled"]}), "1 completed, 1 failed, 1 cancelled");
         compare(pane.result({outcomes: ["failed", "failed"]}), "2 failed");
         compare(pane.target(undefined), "Change");
         // A running entry without operations must not throw.
@@ -1131,8 +1131,8 @@ TestCase {
     function test_activity_uses_short_readable_actions() {
         browser.openView("Activity");
         const activity = findChild(browser, "activityPane");
-        compare(activity.target({upgrade_all: {backend: "apt"}}), "Update all · apt");
-        compare(activity.target({install: {backend: "apt", name: "synthetic-tool", scope: "system"}}), "Install synthetic-tool · apt · System");
+        compare(activity.target({upgrade_all: {backend: "apt"}}), "Update all (apt)");
+        compare(activity.target({install: {backend: "apt", name: "synthetic-tool", scope: "system"}}), "Install synthetic-tool (apt, System)");
         compare(activity.result({state: "running", outcomes: []}), "In progress");
     }
     function test_action_progress_shows_batch_steps_and_single_transfer() {
@@ -1616,8 +1616,8 @@ TestCase {
         waitForRendering(browser.contentItem);
         const userRow = results.itemAtIndex(0);
         const systemRow = results.itemAtIndex(1);
-        compare(findChild(userRow, "packageSourceLine").text, "Flatpak · flathub · User");
-        compare(findChild(systemRow, "packageSourceLine").text, "Flatpak · flathub · System");
+        compare(findChild(userRow, "packageSourceLine").text, "Flatpak, flathub, User");
+        compare(findChild(systemRow, "packageSourceLine").text, "Flatpak, flathub, System");
         mouseClick(findChild(systemRow, "rowPackageAction"));
         compare(fake.selection, 1);
         const dialog = findChild(browser, "confirmationDialog");
@@ -1910,7 +1910,7 @@ TestCase {
     }
     function test_firmware_row_updates_instead_of_removing() {
         browser.openView("Installed");
-        fake.rows = JSON.stringify([{kind: "package", name: "synthetic-device", display_name: "Synthetic BIOS", source: "fwupd", architecture: "device", installed: "1", candidate: "2", update: "available", scope: "system", summary: "Firmware · AC power required"}]);
+        fake.rows = JSON.stringify([{kind: "package", name: "synthetic-device", display_name: "Synthetic BIOS", source: "fwupd", architecture: "device", installed: "1", candidate: "2", update: "available", scope: "system", summary: "Firmware, AC power required"}]);
         const list = findChild(browser, "packageResults");
         tryVerify(() => list.itemAtIndex(0) !== null);
         const action = findChild(list.itemAtIndex(0), "rowPackageAction");
@@ -1939,8 +1939,8 @@ TestCase {
     function test_container_rows_offer_separate_pull_and_cleanup_actions() {
         browser.openView("Installed");
         fake.rows = JSON.stringify([
-            {kind: "package", name: "sha256:0123456789abcdef", display_name: "example/app:latest", source: "docker", architecture: "x86_64", installed: "0123456789ab", candidate: null, update: "unknown", scope: "system", remote: "Docker daemon", reference: "example/app:latest", summary: "Tags: example/app:latest · 42MB"},
-            {kind: "package", name: "fedcba9876543210", display_name: "Untagged image fedcba987654", source: "podman", architecture: "x86_64", installed: "fedcba987654", candidate: null, update: "unknown", scope: {user: {uid: 1000}}, remote: "rootless Podman storage", reference: null, summary: "Dangling · 9MB"}
+            {kind: "package", name: "sha256:0123456789abcdef", display_name: "example/app:latest", source: "docker", architecture: "x86_64", installed: "0123456789ab", candidate: null, update: "unknown", scope: "system", remote: "Docker daemon", reference: "example/app:latest", summary: "Tags: example/app:latest. 42MB"},
+            {kind: "package", name: "fedcba9876543210", display_name: "Untagged image fedcba987654", source: "podman", architecture: "x86_64", installed: "fedcba987654", candidate: null, update: "unknown", scope: {user: {uid: 1000}}, remote: "rootless Podman storage", reference: null, summary: "Dangling. 9MB"}
         ]);
         const list = findChild(browser, "packageResults");
         tryVerify(() => list.itemAtIndex(1) !== null);
@@ -2118,7 +2118,7 @@ TestCase {
         }
         compare(findInDialog(dialog.contentItem, "sourceFailureReason").text, "Source failed");
         verify(dialog.height < 320);
-        compare(browser.copyableDiagnostics(), "View: Search\nState: unknown\nnpm: failed — Source failed");
+        compare(browser.copyableDiagnostics(), "View: Search\nState: unknown\nnpm (failed): Source failed");
         dialog.close();
         mouseClick(findChild(browser, "sourceFailureRetry"));
         compare(fake.lastRetry, "npm");
@@ -2255,7 +2255,7 @@ TestCase {
         fake.report_state = JSON.stringify({phase: "partial", failures: [{source: "npm", kind: "locked", detail: "Synthetic package lock"}]});
         compare(browser.emptyStateMessage(), "Couldn't check npm");
         verify(browser.emptyStateMessage() !== "You're up to date");
-        compare(browser.copyableDiagnostics(), "View: Updates\nState: partial\nnpm: locked — Synthetic package lock");
+        compare(browser.copyableDiagnostics(), "View: Updates\nState: partial\nnpm (locked): Synthetic package lock");
         fake.report_state = JSON.stringify({phase: "failed", failures: [{source: "apt", kind: "authorization"}]});
         compare(browser.emptyStateMessage(), "Couldn't check APT");
         fake.report_state = JSON.stringify({phase: "cached", failures: []});

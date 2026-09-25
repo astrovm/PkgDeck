@@ -64,7 +64,7 @@ pub fn operation_context(op: &Operation) -> String {
                 Scope::System if id.backend == "flatpak" => parts.push("system".into()),
                 _ => {}
             }
-            parts.join(" · ")
+            parts.join(", ")
         }
     }
 }
@@ -568,12 +568,12 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
             ));
             let count = rows.len();
             output.push_str(&format!(
-                "\n\n{} {}\n{}",
+                "\n\n{}{}\n{}",
                 paint.bold(&format!(
                     "{count} package{}",
                     if count == 1 { "" } else { "s" }
                 )),
-                paint.dim("· run `pkd info <name>` for details"),
+                paint.dim(". Run `pkd info <name>` for details."),
                 paint.dim("○ not installed   ● installed   ↑ update available")
             ));
         }
@@ -651,9 +651,9 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
                         if let Some(packages) = owner["packages"].as_array() {
                             for package in packages {
                                 output.push_str(&format!(
-                                    "\n    Exact copy: {} · {} · {}",
-                                    value(&package["backend"]),
+                                    "\n    Exact copy: {} from {}, {}",
                                     value(&package["name"]),
+                                    value(&package["backend"]),
                                     value(&package["scope"])
                                 ));
                             }
@@ -678,9 +678,9 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
                 if let Some(copies) = group["copies"].as_array() {
                     for copy in copies {
                         output.push_str(&format!(
-                            "  {} · {} · {} · {}\n",
-                            value(&copy["package"]["backend"]),
+                            "  {} from {}, {}, version {}\n",
                             value(&copy["package"]["name"]),
+                            value(&copy["package"]["backend"]),
                             value(&copy["package"]["scope"]),
                             value(&copy["installed_version"])
                         ));
@@ -696,11 +696,11 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
             }));
             for row in leftovers {
                 output.push_str(&format!(
-                    "  {} · {} · {} · {} bytes\n",
-                    value(&row["manager"]),
-                    value(&row["native_name"]),
+                    "  {} ({} bytes, from {} package {})\n",
                     value(&row["path"]),
-                    value(&row["size_bytes"])
+                    value(&row["size_bytes"]),
+                    value(&row["manager"]),
+                    value(&row["native_name"])
                 ));
             }
         }
@@ -863,7 +863,7 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
                     "\n  {}{}  {}",
                     paint.bold(&flag),
                     " ".repeat(width - flag.width()),
-                    parts.join(" · ")
+                    parts.join(", ")
                 ));
             }
         }
@@ -984,8 +984,8 @@ mod tests {
             80,
             false,
         );
-        assert!(ambiguous.contains("--from apt  fixture · amd64 · system"));
-        assert!(ambiguous.contains("--from apt  fixture · i386 · system"));
+        assert!(ambiguous.contains("--from apt  fixture, amd64, system"));
+        assert!(ambiguous.contains("--from apt  fixture, i386, system"));
         let mixed = human(
             &json!({"error":{"Ambiguous":[
                 {"backend":"apt","name":"htop","architecture":"amd64","scope":"system"},
@@ -995,7 +995,7 @@ mod tests {
             false,
         );
         assert!(
-            mixed.contains("--from apt   htop · amd64 · system"),
+            mixed.contains("--from apt   htop, amd64, system"),
             "{mixed}"
         );
         assert!(
@@ -1013,7 +1013,7 @@ mod tests {
         let output = human(&command, 100, false);
         assert!(output.contains("Resolved  /first/tool"));
         assert!(output.contains("/target/tool"));
-        assert!(output.contains("Exact copy: apt · fixture · system"));
+        assert!(output.contains("Exact copy: fixture from apt, system"));
         let audited = json!({"audit":{"groups":[{"key":"fixture","copies":[{"package":{"backend":"apt","name":"fixture","scope":"system"},"installed_version":"1"}]}],
             "leftovers":[{"manager":"apt","native_name":"old-fixture","path":"/etc/old.conf","size_bytes":4}],
             "data_note":"Unknown data remains unknown."}});
@@ -1095,19 +1095,19 @@ mod tests {
                 Operation::Install(id("apt", "i386", Scope::System)),
                 "Install tool",
                 "Installing tool",
-                "apt · i386",
+                "apt, i386",
             ),
             (
                 Operation::Remove(id("flatpak", "x86_64", Scope::System)),
                 "Remove tool",
                 "Removing tool",
-                "flatpak · system",
+                "flatpak, system",
             ),
             (
                 Operation::Upgrade(id("npm", "all", Scope::User { uid: 1 })),
                 "Update tool",
                 "Updating tool",
-                "npm · user",
+                "npm, user",
             ),
             (
                 Operation::Refresh {

@@ -249,7 +249,7 @@ Controls.ApplicationWindow {
     }
     function copyableDiagnostics() {
         return "View: " + currentView + "\nState: " + (reportState.phase || "unknown") + "\n" +
-            readFailures.map((failure) => failure.source + ": " + failure.kind + " — " + failureSummary(failure.source)).join("\n");
+            readFailures.map((failure) => failure.source + " (" + failure.kind + "): " + failureSummary(failure.source)).join("\n");
     }
     function retryFailedSource(id) {
         if (currentView === "Search" && queryDirty)
@@ -1117,11 +1117,11 @@ Controls.ApplicationWindow {
             return row.available ? "Available" : "Unavailable";
         if (row.update === "available") {
             if (!row.installed || !row.candidate || row.installed === row.candidate)
-                return row.installed || row.candidate || "—";
+                return row.installed || row.candidate || "Unknown";
             return row.installed + " → " + row.candidate;
         }
         if (isInstalled(row))
-            return row.installed || "—";
+            return row.installed || "Unknown";
         return row.candidate || "Unknown";
     }
     // Local icon files become file:// URLs. Paths come from the backend and
@@ -1554,7 +1554,7 @@ Controls.ApplicationWindow {
                 ActionButton {
                     objectName: "activityIndicator"
                     visible: !root.navigationCollapsed && root.currentView !== "Activity"
-                    text: root.queuedCount > 0 ? "Activity · " + root.queuedCount : backend.writing ? "Working" : "Activity"
+                    text: root.queuedCount > 0 ? "Activity (" + root.queuedCount + ")" : backend.writing ? "Working" : "Activity"
                     symbol: "activity"
                     glyphColor: backend.writing ? root.accent : root.ink
                     Accessible.name: root.queuedCount > 0 ? "Activity, " + root.queuedCount + " queued" : backend.writing ? "Activity, working" : "Activity"
@@ -1742,7 +1742,7 @@ Controls.ApplicationWindow {
                 spacing: 8
                 ActionButton {
                     objectName: "compactActivityIndicator"
-                    text: root.queuedCount > 0 ? "Activity · " + root.queuedCount : backend.writing ? "Working" : "Activity"
+                    text: root.queuedCount > 0 ? "Activity (" + root.queuedCount + ")" : backend.writing ? "Working" : "Activity"
                     symbol: "activity"
                     glyphColor: backend.writing ? root.accent : root.ink
                     Layout.fillWidth: true
@@ -2536,7 +2536,7 @@ Controls.ApplicationWindow {
                                         Layout.fillWidth: true
                                     }
                                     Controls.Label {
-                                        text: (modelData.groupCount || 0) + " packages · " + (modelData.groupSources || []).join(" + ")
+                                        text: (modelData.groupCount || 0) + " packages: " + (modelData.groupSources || []).join(", ")
                                         color: root.accent
                                         font.pointSize: root.font.pointSize * 0.9
                                     }
@@ -2620,7 +2620,7 @@ Controls.ApplicationWindow {
                                         }
                                         Controls.Label {
                                         objectName: "packageSourceLine"
-                                        text: root.sourceDisplayName(modelData.source) + (modelData.remote ? " · " + modelData.remote : "") + ((modelData.source === "flatpak" || root.containerSource(modelData.source)) ? " · " + (modelData.scope === "system" ? "System" : "User") : "")
+                                        text: root.sourceDisplayName(modelData.source) + (modelData.remote ? ", " + modelData.remote : "") + ((modelData.source === "flatpak" || root.containerSource(modelData.source)) ? ", " + (modelData.scope === "system" ? "System" : "User") : "")
                                         color: root.muted
                                         font.pointSize: root.font.pointSize * 0.9
                                         elide: Text.ElideRight
@@ -3039,7 +3039,7 @@ Controls.ApplicationWindow {
                                     Layout.fillWidth: true
                                 }
                                 Controls.Label {
-                                    text: modelData.backend.toUpperCase() + " · " + (modelData.scope === "system" ? "System" : "User")
+                                    text: modelData.backend.toUpperCase() + ", " + (modelData.scope === "system" ? "System" : "User")
                                     color: root.muted
                                     font.pointSize: root.font.pointSize * 0.9
                                 }

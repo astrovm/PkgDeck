@@ -5,7 +5,7 @@
   <summary>All your package managers in one app</summary>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>MIT</project_license>
-  <description><p>Search, install, update, and clean up software from every package manager on your computer, all in one place. PkgDeck works with APT, Flatpak, Snap, Homebrew, developer tools, container images, and firmware updates, and includes the pkd command-line tool.</p></description>
+  <description><p>Search, install, update, and clean up software from every package manager on your computer. PkgDeck works with APT, Flatpak, Snap, Homebrew, developer tools, container images, and firmware updates, and includes the pkd command-line tool.</p></description>
   <launchable type="desktop-id">io.github.astrovm.PkgDeck.desktop</launchable>
   <url type="homepage">https://github.com/astrovm/PkgDeck</url>
   <content_rating type="oars-1.1"/>

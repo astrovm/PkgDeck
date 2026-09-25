@@ -648,7 +648,7 @@ impl<T: Transport> Flatpak<T> {
                 },
                 display_name: fields[0].into(),
                 summary: if runtime {
-                    format!("Runtime · {} · {}", fields[2], fields[4])
+                    format!("Runtime {} ({})", fields[2], fields[4])
                 } else {
                     fields[4].into()
                 },

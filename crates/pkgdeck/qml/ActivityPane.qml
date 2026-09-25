@@ -28,7 +28,8 @@ ColumnLayout {
         const name = id.name || id.key || "";
         const backend = id.backend || "";
         const scope = id.scope === "system" ? "System" : id.scope && id.scope.user ? "User " + id.scope.user.uid : id.scope && id.scope.environment ? id.scope.environment.path : "";
-        return [action + (name ? " " + name : ""), backend, scope].filter(Boolean).join(" · ");
+        const where = [backend, scope].filter(Boolean).join(", ");
+        return action + (name ? " " + name : "") + (where ? " (" + where + ")" : "");
     }
     function result(entry) {
         const outcomes = entry.outcomes || [];
@@ -42,7 +43,7 @@ ColumnLayout {
             return failed ? "Failed" : cancelled ? "Cancelled" : "Completed";
         if (!failed && !cancelled)
             return "All " + done + " completed";
-        return [done ? done + " completed" : "", failed ? failed + " failed" : "", cancelled ? cancelled + " cancelled" : ""].filter(Boolean).join(" · ");
+        return [done ? done + " completed" : "", failed ? failed + " failed" : "", cancelled ? cancelled + " cancelled" : ""].filter(Boolean).join(", ");
     }
     // Timestamps from today show only the time; older ones add the date.
     function when(seconds) {

@@ -1165,7 +1165,7 @@ fn confirmation_label(operation: &Operation, packages: &[Package]) -> String {
     }
     label
 }
-/// One line for progress and results, such as "Install htop · apt".
+/// One line for progress and results, such as "Install htop (apt)".
 fn operation_title(operation: &Operation) -> String {
     let first = operation_label(operation)
         .lines()
@@ -1174,7 +1174,7 @@ fn operation_title(operation: &Operation) -> String {
         .to_owned();
     match operation {
         Operation::Install(id) | Operation::Remove(id) | Operation::Upgrade(id) => {
-            format!("{first} · {}", id.backend)
+            format!("{first} ({})", id.backend)
         }
         _ => first,
     }
@@ -1249,8 +1249,8 @@ fn confirmation_preview(
             }
         );
         let scope = match &package.id.scope {
-            Scope::System => " · System",
-            Scope::User { .. } => " · User",
+            Scope::System => ", System",
+            Scope::User { .. } => ", User",
             Scope::Environment { path } => {
                 lines.push(format!("Location: {}", path.display()));
                 ""
@@ -1386,7 +1386,7 @@ fn confirmation_preview(
             impact.push(format!("Disk: {bytes:+} bytes"));
         }
         if !impact.is_empty() {
-            lines.push(impact.join(" · "));
+            lines.push(impact.join(", "));
         }
     } else if matches!(
         operation,
@@ -2600,7 +2600,7 @@ impl ffi::PackageController {
                 } else {
                     "System"
                 };
-                let summary = format!("{action}\n{} · {scope}", import.backend);
+                let summary = format!("{action}\n{}, {scope}", import.backend);
                 let details = format!("{}\n{}", import.description, import.source);
                 self.as_mut().set_confirmation_data(encoded(json!({"action": action, "body": summary, "summary": summary, "details": details})));
                 self.as_mut().set_confirmation(summary.as_str().into());
@@ -3954,7 +3954,7 @@ mod tests {
         assert!(preview["summary"]
             .as_str()
             .unwrap()
-            .starts_with("Update Anonymous App\napt · System\n1 → 2"));
+            .starts_with("Update Anonymous App\napt, System\n1 → 2"));
         assert!(!preview["summary"]
             .as_str()
             .unwrap()
@@ -3991,7 +3991,7 @@ mod tests {
         let body = preview["body"].as_str().unwrap();
         assert!(body.contains("Selected: Update anonymous (1 → 2)"));
         assert!(body.contains("Remove anonymous (1)"));
-        assert!(body.contains("Download: 2048 bytes · Disk: -512 bytes"));
+        assert!(body.contains("Download: 2048 bytes, Disk: -512 bytes"));
         assert!(preview["summary"]
             .as_str()
             .unwrap()
@@ -5342,7 +5342,7 @@ mod tests {
         use pkgdeck_core::process::{Completion, ExecutionError as E};
         let install = Operation::Install(synthetic_package("htop", "htop").id);
         let job = Job::Write(install.clone(), None);
-        assert_eq!(operation_title(&install), "Install htop · apt");
+        assert_eq!(operation_title(&install), "Install htop (apt)");
         assert_eq!(
             operation_title(&Operation::Refresh {
                 backend: "apt".into()
@@ -5356,11 +5356,11 @@ mod tests {
         );
         assert_eq!(
             success,
-            json!({"kind": "success", "title": "Install htop · apt finished"})
+            json!({"kind": "success", "title": "Install htop (apt) finished"})
         );
         let denied = write_notice(&job, &Err(E::AuthorizationDenied.into()), false);
         assert_eq!(denied["kind"], "error");
-        assert_eq!(denied["title"], "Install htop · apt failed");
+        assert_eq!(denied["title"], "Install htop (apt) failed");
         assert_eq!(denied["action"], "settings");
         assert!(denied["detail"]
             .as_str()
@@ -5977,7 +5977,7 @@ mod tests {
                 reference: None,
             },
             display_name: "Synthetic BIOS".into(),
-            summary: "Firmware · AC power required · Restart required".into(),
+            summary: "Firmware, AC power required, Restart required".into(),
             installed_version: Some("1".into()),
             candidate_version: Some("2".into()),
             update: UpdateAvailability::Available,
@@ -6076,7 +6076,7 @@ mod tests {
                 reference: Some("example/app:latest".into()),
             },
             display_name: "example/app:latest".into(),
-            summary: "Tags: example/app:latest · 42MB".into(),
+            summary: "Tags: example/app:latest. 42MB".into(),
             installed_version: Some("0123456789ab".into()),
             candidate_version: None,
             update: UpdateAvailability::Unknown,
@@ -6975,7 +6975,7 @@ mod tests {
         let mut firmware = package.clone();
         firmware.id.backend = "fwupd".into();
         firmware.display_name = "Synthetic BIOS".into();
-        firmware.summary = "Firmware · AC power required · Restart required".into();
+        firmware.summary = "Firmware, AC power required, Restart required".into();
         for tool in pkgdeck_core::backends::StandaloneTool::ALL {
             let mut standalone = package.clone();
             standalone.id.backend = tool.id().into();

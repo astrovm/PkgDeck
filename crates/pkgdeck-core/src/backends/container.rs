@@ -295,7 +295,7 @@ impl<T: Transport> Container<T> {
                 let digest = if image.digests.is_empty() {
                     String::new()
                 } else {
-                    format!(" · Digests: {}", image.digests.join(", "))
+                    format!(". Digests: {}", image.digests.join(", "))
                 };
                 Package {
                     id: PackageId {
@@ -307,7 +307,10 @@ impl<T: Transport> Container<T> {
                         reference,
                     },
                     display_name,
-                    summary: format!("{status}{digest} · {} · {}", image.size, image.created),
+                    summary: format!(
+                        "{status}{digest}. {}, created {}",
+                        image.size, image.created
+                    ),
                     installed_version: Some(short_id(&image.id).into()),
                     // A registry digest is not queried during inventory: claiming
                     // an update from a mutable tag would be misleading. Pull stays
@@ -447,7 +450,7 @@ impl<T: Transport> Backend for Container<T> {
             id: CleanupId { backend: self.kind.id().into(), key: "dangling-images".into() },
             kind: CleanupKind::PackageCache,
             title: format!("Dangling {} images", self.kind.label()),
-            summary: format!("{} untagged images · {}", images.len(), self.kind.store()),
+            summary: format!("{} untagged images in {}", images.len(), self.kind.store()),
             preview: format!("Removes these untagged images. Images used by containers are kept. Shared layers may remain.\n{}", images.join("\n")),
         }]
         };
@@ -470,7 +473,7 @@ impl<T: Transport> Backend for Container<T> {
                             id: CleanupId { backend: self.kind.id().into(), key: "build-cache".into() },
                             kind: CleanupKind::PackageCache,
                             title: "Docker build cache".into(),
-                            summary: format!("{} unused immutable records · default builder", ids.len()),
+                            summary: format!("{} unused records in the default builder", ids.len()),
                             preview: format!("Removes unused build cache from the default builder. Later builds may take longer. Some shared storage may remain.\n{}", ids.join("\n")),
                         });
                     }

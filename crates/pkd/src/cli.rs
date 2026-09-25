@@ -140,7 +140,7 @@ pub enum RepoCommand {
     Enable { name: String },
     /// Disable a Flatpak or firmware repository.
     Disable { name: String },
-    /// Set a Flatpak repository priority (0–9999, higher wins).
+    /// Set a Flatpak repository priority (0 to 9999, higher wins).
     Priority { name: String, priority: i32 },
     /// Open the Software Sources editor for APT.
     Edit,

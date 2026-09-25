@@ -1,8 +1,6 @@
 # PkgDeck
 
-**All your package managers in one app.**
-
-PkgDeck lets you search, install, update, and clean up software from every package manager on your computer, all in one place. It also comes with a command-line tool, `pkd`, which runs on the same engine.
+PkgDeck is one app for every package manager on your computer. Use it to search, install, update, and clean up software. It also comes with a command-line tool, `pkd`, which runs on the same engine.
 
 ![PkgDeck showing search results](docs/screenshots/search.png)
 
@@ -30,7 +28,7 @@ flatpak install https://flatpak.4st.li/io.github.astrovm.PkgDeck.flatpakref
 
 Open PkgDeck from your app menu, or run `flatpak run io.github.astrovm.PkgDeck`. Updates arrive through your software manager or `flatpak update`.
 
-**Other options:** [GitHub Releases](https://github.com/astrovm/PkgDeck/releases/latest) also has AppImage and Snap packages.
+[GitHub Releases](https://github.com/astrovm/PkgDeck/releases/latest) also has AppImage and Snap packages.
 
 ### macOS (Homebrew)
 

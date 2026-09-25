@@ -66,7 +66,7 @@ count.
 4. GitHub squash-merges the formula PR once all checks pass. If a check fails,
    the PR stays open for review. After `brew update`, users get the new version.
 
-**Required secret:** `HOMEBREW_REPO_TOKEN`, a fine-grained token for
+Publishing needs the `HOMEBREW_REPO_TOKEN` secret, a fine-grained token for
 `astrovm/PkgDeck` with Contents and Pull requests write access. It lets the
 formula PR trigger CI and auto-merge. Publishing fails with a clear error if
 it's missing.
@@ -87,10 +87,10 @@ GitHub Releases also have AppImage and Snap packages:
 
 - Every file is named `PkgDeck-v<version>-…`, including checksums and Flatpak
   metadata. Linux packages end with `x86_64` or `aarch64` before the extension.
-- **AppImage:** if you have v0.1.1, download v0.1.2 by hand once. Its built-in
+- If you have the v0.1.1 AppImage, download v0.1.2 by hand once. Its built-in
   updater looks for an old file name. From v0.1.2 on, updates work
   automatically.
-- **Snap:** only published on GitHub, not the Snap Store.
+- The Snap is only published on GitHub, not the Snap Store.
 
 To build the packages, use the same environment as CI:
 
@@ -115,7 +115,7 @@ See [`scripts/package.sh`](../scripts/package.sh),
 - `Publish Flatpak repository` sends the release bundles to
   [`astrovm/flatpak`](https://github.com/astrovm/flatpak).
 
-**Required secret:** `FLATPAK_REPO_TOKEN`, a fine-grained token for
+Publishing needs the `FLATPAK_REPO_TOKEN` secret, a fine-grained token for
 `astrovm/flatpak` with Contents write access. Publishing fails with a clear
 error if it's missing. To republish an existing release, run `publish.yml` in
 `astrovm/flatpak` manually with `repository=astrovm/PkgDeck` and the release
