@@ -489,7 +489,9 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
                         operation_label(operation)
                     )));
                 }
-                send(Reply::ProgressEvent(event));
+                if !matches!(&event, Event::Progress { progress: Progress::Message(_), .. }) {
+                    send(Reply::ProgressEvent(event));
+                }
             });
             let completed = results.iter().filter(|r| r.is_ok()).count();
             let noun = if operations.iter().all(|op| matches!(op, Operation::Clean(_))) { "cleanup tasks" } else { "updates" };
@@ -526,7 +528,9 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
                         },
                     }));
                 }
-                send(Reply::ProgressEvent(event));
+                if !matches!(&event, Event::Progress { progress: Progress::Message(_), .. }) {
+                    send(Reply::ProgressEvent(event));
+                }
             })
             .map(|outcome| {
                 if matches!(&op, Operation::Upgrade(id) if id.backend == "fwupd") {
