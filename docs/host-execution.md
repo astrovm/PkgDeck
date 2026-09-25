@@ -1,133 +1,151 @@
-# Host execution and authorization
+# Host access and authorization
 
-`pkgdeck-core` provides the shared execution boundary. `pkd doctor` reports its
-runtime, executes a bounded unprivileged host architecture probe, and locates
-backend executables in the invoking user's PATH. Each adapter advertises its
-supported operations; detection alone does not imply every operation is supported.
+This page explains how PkgDeck runs your package managers and asks for
+permission. The shared code lives in `pkgdeck-core`.
 
-## Format capabilities
+Run `pkd doctor` to see how PkgDeck is running, your system's architecture,
+and which package managers it found on your `PATH`. Finding a package manager
+doesn't mean every action is supported. Each one declares what it can do.
 
-| Format | Host reads/detection | Host writes | Validation |
-| --- | --- | --- | --- |
-| Native | Enabled | Enabled through the core and CLI | Synthetic process tests; real sudo/polkit and APT on a disposable GitHub-hosted Ubuntu x86_64 runner |
-| AppImage | Enabled, outside the bundle | Enabled through the same native boundary | Extract-and-run AppImage doctor probe, GUI and terminal smoke tests; environment-isolation tests |
-| Flatpak | Host managers through `flatpak-spawn --host` | Same typed operations and authorization as native | Installed host APT query, synthetic Homebrew lifecycle, and Flatpak lifecycle |
-| Snap (classic) | Enabled, outside `$SNAP` | Enabled through the same native boundary | Runtime isolation tests and installed package smoke tests in CI |
+## Package formats
 
-The format gate is checked for reads, executable discovery, and authorized writes.
-Snap and Flatpak markers take precedence over AppImage markers. The Flatpak build
-bridges host-manager operations and reads host metadata through filesystem permissions.
-Classic Snap executes host tools after removing paths inside `$SNAP` from discovery.
+PkgDeck always manages the package managers installed on your system, even
+when PkgDeck itself is packaged.
 
-Flatpak uses `flatpak-spawn --host`, with access to `org.freedesktop.Flatpak` on
-the session bus. It reads the host environment once, applies the same allowlist
-as native execution, and clears the environment before invoking each host executable.
-Pinned privileged paths stay pinned; missing host access fails closed. Sandboxed APT
-metadata is read through the host's `dpkg-query` and `apt-cache`; native builds use
-the bundled libapt helper. Flatpak unused-runtime cleanup is not offered until an
-authoritative native preview can be implemented without a Python dependency. See the
+| Format | How it reaches the system | Tested by |
+| --- | --- | --- |
+| Native | Directly | Fake-process tests; real sudo/polkit and APT on a throwaway GitHub-hosted Ubuntu runner |
+| AppImage | Directly, ignoring tools inside the AppImage | `pkd doctor` in the extracted AppImage, GUI and terminal tests, environment tests |
+| Flatpak | Through `flatpak-spawn --host` | Real APT reads, a test Homebrew, and Flatpak install/remove |
+| Snap (classic) | Directly, ignoring tools inside `$SNAP` | Isolation tests and installed-package tests in CI |
+
+The same rules apply to reads, finding programs, and changes. If both Snap or
+Flatpak and AppImage markers are present, Snap or Flatpak wins.
+
+**Flatpak** runs host commands with `flatpak-spawn --host`, which needs access
+to `org.freedesktop.Flatpak` on the session bus. It reads your environment
+once, keeps only the allowed variables, and starts each command with a clean
+environment. If host access is missing, commands fail instead of falling back
+to something else. Inside the Flatpak, APT data comes from the host's
+`dpkg-query` and `apt-cache`. Native builds use the bundled APT reader. Unused
+runtime cleanup isn't offered yet. See the
 [Flatpak command reference](https://docs.flatpak.org/en/latest/flatpak-command-reference.html#flatpak-spawn).
 
-Snap uses classic confinement because its purpose requires discovering and invoking
-the package managers already installed on the host. The Snap Store requires manual
-approval for classic confinement. See [Snap confinement](https://snapcraft.io/docs/explanation/security/snap-confinement/).
+**Snap** uses classic confinement because PkgDeck needs to run the package
+managers already on your system. The Snap Store must manually approve classic
+confinement. See
+[Snap confinement](https://snapcraft.io/docs/explanation/security/snap-confinement/).
 
-## Environment and authorization
+## Environment
 
-Host processes use absolute executables and argument arrays, with `/` as their
-working directory. The executor clears inherited variables and supplies only
-selected user/session variables and the host PATH, with the C locale for diagnostics.
-It does not pass Qt library/plugin paths, loader injection variables, APT_CONFIG,
-Python paths, Node options, or shell startup configuration. Empty and relative
-PATH entries and executables resolving into APPDIR or `$SNAP` are excluded from discovery.
-AppRun sets APPDIR for both entry points, including extracted launches.
+Every command runs by full path, with a list of arguments (never through a
+shell), from `/`:
 
-User tools resolve from the invoking user's PATH and retain that user's HOME and
-XDG user directories. System operations use typed requests validated by the
-corresponding adapter.
-Native distro managers, Flatpak system operations, repository changes, and firmware
-updates retain their own authorization requirements. Homebrew and development tools
-run as the invoking user. Frontends must stay unprivileged.
+- PkgDeck clears the environment and passes only selected user and session
+  variables, your `PATH`, and the C locale.
+- It never passes Qt paths, library injection variables, `APT_CONFIG`, Python
+  paths, Node options, or shell startup files.
+- Empty or relative `PATH` entries are ignored, as are programs inside the
+  AppImage or `$SNAP`.
+- AppRun sets `APPDIR` for both the app and `pkd`, including extracted
+  AppImages.
 
-Authorized commands use a fixed system PATH, excluding user tool directories.
-For a confirmed batch, the engine validates every typed operation and its saved
-native preview before any write. PkgDeck starts the runner included with its
-package once through the selected authorization method. The runner independently
-derives its allowed commands from the typed operations. It accepts only ordered,
-one-time requests for those commands and exits with the batch. It never accepts
-a shell script or an arbitrary executable path. User-scoped commands stay in the
-unprivileged frontend.
+User tools like Homebrew and developer package managers run as you, with your
+`PATH`, home folder, and XDG folders. The app and CLI never run as root.
 
-Native, classic Snap, and Linux Homebrew installations locate their runner beside
-the packaged executables. An AppImage launches its bundled runner through AppRun
-so the elevated process mounts the AppImage itself. Both system and user Flatpak
-installations use the runner in their own deployment through `flatpak-spawn --host`.
-If a runner is missing, PkgDeck reports that it is using the existing per-command
-authorization path, which can require more than one prompt.
+## Asking for permission
 
-For example, a single APT write without a batch runner invokes the fixed
-`/usr/bin/apt-get` path via either:
+System package managers, Flatpak system installs, repository changes, and
+firmware updates need admin rights. Those commands use a fixed system `PATH`
+without your personal tool folders.
 
-- `/usr/bin/pkexec --disable-internal-agent`, using an existing polkit agent/policy;
-- `/usr/bin/sudo -n --`, requiring an existing grant and never prompting.
+**One prompt per batch.** When you confirm a batch of changes, PkgDeck:
 
-No passwords, policy files, or sudoers changes are installed by PkgDeck. The CI
-fixture grants privileges only on its disposable hosted runner to exercise success
-and denial. Interactive desktop authentication remains a release validation gate.
-The pkexec 126/127 outcomes are reported as cancellation/denial, respectively;
-see the [pkexec manual](https://polkit.pages.freedesktop.org/polkit/pkexec.1.html).
+1. Checks every change and its saved preview before changing anything.
+2. Starts its bundled helper once through your chosen method (sudo or
+   polkit), so you only authorize once.
+3. The helper works out which commands are allowed from the confirmed
+   changes. It only accepts those commands, in order, once each, and exits
+   when the batch ends. It never accepts a shell script or any other program.
 
-## Locks, cancellation, and failure
+User-level commands never go through the helper.
 
-APT owns its normal dpkg/frontend locks. Requests use `DPkg::Lock::Timeout=0` so
-contention is reported immediately. PkgDeck neither creates a competing lock
-scheme nor removes native lock files. Installs and targeted upgrades use
-`--no-remove`. APT Update all simulates `dist-upgrade` as an unprivileged host
-read, displays installs and removals for approval, and re-simulates immediately
-before the privileged write. A changed or incomplete plan stops the write.
-CLI confirmation is documented in the
-[CLI contract](cli.md).
+**Where the helper lives.**
 
-Read commands have a deadline and bounded stdout/stderr capture (128 KiB per
-stream by default). Excess output is drained and marked truncated. Cancellation
-or timeout terminates their process group and reaps the direct child. A descendant
-holding a pipe cannot indefinitely block completion.
+- Native, classic Snap, and Linux Homebrew: next to the PkgDeck executables.
+- AppImage: started through AppRun, so the elevated process can mount the
+  AppImage.
+- Flatpak (user or system): inside its own install, through
+  `flatpak-spawn --host`.
 
-Cancellation before authorization or a write starts prevents execution. A dismissed
-batch prompt leaves every operation untouched. Once a
-write starts, cancellation is **deferred** until the manager exits; the completion
-records that request. Read deadlines do not forcibly interrupt writes. A native
-manager can therefore keep a write pending until it finishes. Frontends must show
-that a transaction is finishing instead of promising an immediate stop.
+If the helper is missing, PkgDeck says so and authorizes each command
+separately, which may mean more than one prompt. For example, one APT change
+runs `/usr/bin/apt-get` through either:
 
-Authentication failure, lock contention, interruption, and other command failures
-have separate errors. Signals and APT's interrupted-dpkg diagnostic require
-inspection of native package state before retrying. A frontend crash or machine
-shutdown may leave a transaction running or incomplete. There is no automatic
-retry, rollback, lock deletion, or automatic `dpkg --configure -a` repair.
+- `/usr/bin/pkexec --disable-internal-agent`, using your desktop's polkit
+  prompt, or
+- `/usr/bin/sudo -n --`, which only works with an existing sudo login or
+  password-free rule, and never prompts.
 
-## Reproducing validation
+PkgDeck never installs passwords, polkit policies, or sudoers rules. The CI
+test only grants permissions on a throwaway runner. Desktop password prompts
+are checked by hand before each release. pkexec exit codes 126 and 127 are
+reported as "cancelled" and "denied". See the
+[pkexec manual](https://polkit.pages.freedesktop.org/polkit/pkexec.1.html).
 
-Normal tests use synthetic executables and environments and never invoke an
-APT write on the developer's host:
+## Locks, cancelling, and failures
+
+**APT locks.** APT uses its normal locks. PkgDeck sets
+`DPkg::Lock::Timeout=0`, so if APT is busy you're told right away. PkgDeck
+never creates its own locks or deletes APT's lock files.
+
+**APT safety.** Installs and single-package upgrades use `--no-remove`. For
+**Update all**, PkgDeck runs `dist-upgrade` as a dry run without admin rights
+and shows the installs and removals. It runs the dry run again right before
+the real upgrade. If the plan changed or is incomplete, it stops. See the
+[CLI guide](cli.md) for how the CLI confirms changes.
+
+**Reads** have a time limit and keep up to 128 KiB of output per stream. Extra
+output is discarded and marked as cut off. When a read is cancelled or times
+out, its whole process group is stopped, so a leftover child process can't
+hang PkgDeck.
+
+**Cancelling.**
+
+- Cancelling before authorization or before a change starts stops it
+  completely.
+- Closing the password prompt leaves everything untouched.
+- Once a package manager starts making changes, PkgDeck waits for it to
+  finish. The result notes that you asked to cancel. The app and CLI show that
+  the change is finishing, instead of claiming it stopped.
+
+**Failures.** Permission errors, locks, interruptions, and other failures are
+reported separately. If a package manager was interrupted, for example by
+a signal or an interrupted dpkg run, check your system before trying again. If
+PkgDeck crashes or the computer shuts down during a change, the change may be
+unfinished. PkgDeck never retries, undoes changes, deletes locks, or runs
+`dpkg --configure -a` for you.
+
+## Testing
+
+Regular tests use fake programs and never run APT changes on your computer:
 
 ```sh
 cargo test --locked -p pkgdeck-core -p pkd
 cargo run --locked -p pkd -- doctor
 ```
 
-Real authorization tests run in the x86_64 terminal CI job on a fresh GitHub-hosted
-Ubuntu 26.04 runner. The guarded script checks native backend detection, rejection
-of root frontends, denial for an unauthorized user, native lock contention, and
-installation/removal of a synthetic APT package through both sudo and polkit.
-`dpkg-query` and a fixture-owned file verify the resulting state. The script
-removes its fixtures afterward, and GitHub discards the runner. The `apt-probe`
-executable is never packaged.
+Real authorization tests run in CI on a fresh GitHub-hosted Ubuntu 26.04
+x86_64 runner. They check detection, that PkgDeck refuses to run as root,
+that unauthorized users are denied, lock handling, and installing and
+removing a test APT package through sudo and polkit. Results are verified
+with `dpkg-query`. The runner is discarded afterward. The `apt-probe` test tool
+is never packaged.
 
-Versioned APT and Homebrew lifecycles run in rootless Podman on both CI
-architectures, with a controlled package repository and Homebrew tap. See
-[local verification](development.md#local-verification-and-development-tools).
-Synthetic boundary tests also run on both native CI architectures. Real ARM
-authorization, an installed Flatpak host bridge, interactive auth-dialog
-dismissal, and FUSE-based AppImage launching remain explicit release gates;
-the hosted-runner test does not claim them.
+APT and Homebrew install/remove tests run in rootless Podman on both
+architectures, using a local test repository and Homebrew tap. See
+[development](development.md#podman-details).
+
+These are checked by hand before each release, not in CI: real ARM
+authorization, the installed Flatpak host bridge, closing the password
+prompt, and AppImages mounted with FUSE.

@@ -410,7 +410,7 @@ fn apt_groups_exact_targets_in_one_native_write_and_rejects_mixed_actions() {
         .iter()
         .all(|outcome| !outcome.cancellation_deferred));
     assert!(
-        matches!(progress.as_slice(), [Progress::Message(message)] if message.contains("2 exact APT targets"))
+        matches!(progress.as_slice(), [Progress::Message(message)] if message.contains("2 APT packages in one transaction"))
     );
     let writes = fixture.grouped_apt_writes.lock().unwrap();
     assert_eq!(writes.len(), 1);

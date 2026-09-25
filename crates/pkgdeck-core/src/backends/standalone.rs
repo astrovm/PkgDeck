@@ -216,7 +216,7 @@ impl Backend for Standalone {
             return Err(EngineError::Cancelled);
         }
         progress(Progress::Message(format!(
-            "Updating {} {} → {} using its standalone updater",
+            "Updating {} {} → {} with its own updater",
             self.tool.name(),
             installation.version,
             candidate

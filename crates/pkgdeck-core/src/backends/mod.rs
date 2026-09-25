@@ -130,7 +130,7 @@ pub trait Transport: Send {
     /// Read-only libflatpak inventory; never runs an uninstall as a preview.
     fn flatpak_unused(&self, _cancel: &Cancellation) -> Result<Completion, ExecutionError> {
         Err(ExecutionError::Disabled(
-            "An authoritative Flatpak unused-ref preview is unavailable".into(),
+            "Flatpak cannot show an exact preview of unused runtimes".into(),
         ))
     }
     /// True when the host `docker` executable is emulated by Podman.
@@ -434,7 +434,7 @@ impl Transport for NativeTransport {
     fn flatpak_unused(&self, cancel: &Cancellation) -> Result<Completion, ExecutionError> {
         let _ = cancel;
         Err(ExecutionError::Disabled(
-            "An authoritative Flatpak unused-ref preview is unavailable".into(),
+            "Flatpak cannot show an exact preview of unused runtimes".into(),
         ))
     }
     fn supports_flatpak_cleanup(&self) -> bool {
@@ -1655,7 +1655,7 @@ impl<T: Transport> Backend for Apt<T> {
             _ => return Err(invalid("apt", "foreign operation")),
         };
         progress(Progress::Message(
-            "Running apt-get; cancellation waits for the native transaction to finish.".into(),
+            "Running apt-get. If you cancel, PkgDeck waits for APT to finish.".into(),
         ));
         let result = self.transport.apt_write(action, cancel)?;
         Ok(OperationOutcome {
@@ -1683,7 +1683,7 @@ impl<T: Transport> Backend for Apt<T> {
                 .collect::<Result<Vec<_>, EngineError>>()?;
             AptAction::group_arguments(&actions)?;
             progress(Progress::Message(format!(
-                "Running {} exact APT targets in one native transaction.",
+                "Updating {} APT packages in one transaction.",
                 actions.len()
             )));
             let result = self.transport.apt_write_group(&actions, cancel)?;
@@ -1933,7 +1933,7 @@ impl<T: Transport> Backend for Homebrew<T> {
                 },
                 kind: CleanupKind::OrphanDependencies,
                 title: "Unused Homebrew dependencies".into(),
-                summary: "Formulae no installed package still requires".into(),
+                summary: "Formulae that no installed package needs anymore".into(),
                 preview,
             });
         }
@@ -1945,7 +1945,7 @@ impl<T: Transport> Backend for Homebrew<T> {
                 },
                 kind: CleanupKind::PackageCache,
                 title: "Old Homebrew downloads and versions".into(),
-                summary: "Stale files selected by brew cleanup".into(),
+                summary: "Old files that brew cleanup would remove".into(),
                 preview,
             });
         }
@@ -1976,7 +1976,7 @@ impl<T: Transport> Backend for Homebrew<T> {
             _ => return Err(invalid("homebrew", "foreign operation")),
         };
         progress(Progress::Message(
-            "Running brew as the invoking user; cancellation waits for completion.".into(),
+            "Running brew. If you cancel, PkgDeck waits for it to finish.".into(),
         ));
         let result = self.call(&args, cancel, true)?;
         Ok(OperationOutcome {
@@ -2159,7 +2159,7 @@ impl<T: Transport> Backend for HomebrewCask<T> {
             _ => return Err(invalid("homebrew-cask", "foreign operation")),
         };
         progress(Progress::Message(
-            "Running brew as the invoking user; cancellation waits for completion.".into(),
+            "Running brew. If you cancel, PkgDeck waits for it to finish.".into(),
         ));
         let result = self.call(&args, cancel, true)?;
         Ok(OperationOutcome {
@@ -2534,8 +2534,9 @@ impl<T: Transport> Backend for SystemManager<T> {
         cancel: &Cancellation,
     ) -> Result<PackageDetails, EngineError> {
         let name = self.target(id)?;
+        // Search merges the installed version into catalog rows.
         let mut package = self
-            .query(false, &name, cancel)?
+            .search(&name, cancel)?
             .into_iter()
             .find(|package| package.id == *id)
             .ok_or(EngineError::NotFound)?;
@@ -2632,7 +2633,7 @@ impl<T: Transport> Backend for SystemManager<T> {
             args.push(name.into());
         }
         progress(Progress::Message(format!(
-            "Running {} with non-interactive authorization; cancellation waits for completion.",
+            "Running {}. If you cancel, PkgDeck waits for it to finish.",
             self.kind.id()
         )));
         let result = self.call(args, cancel, true)?;
@@ -3777,9 +3778,7 @@ impl<T: Transport> DevTool<T> {
         // the reported candidate reflects. Composer re-requires the package
         // for the same reason; pip reinstalls with `--upgrade`.
         let name = self.target(target)?;
-        progress(Progress::Message(format!(
-            "Upgrading {name} as the invoking user."
-        )));
+        progress(Progress::Message(format!("Upgrading {name}.")));
         let home = self
             .home
             .clone()
@@ -3830,7 +3829,7 @@ impl<T: Transport> DevTool<T> {
         // installed tool in place as the single per-backend transaction.
         if self.kind == DevKind::Npm {
             progress(Progress::Message(format!(
-                "Updating {} packages as the invoking user.",
+                "Updating {} packages.",
                 self.kind.id()
             )));
             let result = self.call(&["update", "--global"], cancel, true)?;
@@ -3839,9 +3838,7 @@ impl<T: Transport> DevTool<T> {
             });
         }
         if self.kind == DevKind::Pipx {
-            progress(Progress::Message(
-                "Upgrading pipx packages as the invoking user.".into(),
-            ));
+            progress(Progress::Message("Upgrading pipx packages.".into()));
             let result = self.call(&["upgrade-all"], cancel, true)?;
             return Ok(OperationOutcome {
                 cancellation_deferred: result.cancellation_deferred,
@@ -3879,9 +3876,7 @@ impl<T: Transport> DevTool<T> {
             return Ok(OperationOutcome::default());
         }
         if self.kind == DevKind::Gem {
-            progress(Progress::Message(
-                "Updating RubyGems as the invoking user.".into(),
-            ));
+            progress(Progress::Message("Updating RubyGems.".into()));
             let result = self.call(&["update", "--user-install", "--no-document"], cancel, true)?;
             return Ok(OperationOutcome {
                 cancellation_deferred: result.cancellation_deferred,
@@ -4040,7 +4035,7 @@ impl<T: Transport> Backend for DevTool<T> {
                         .clone()
                         .ok_or_else(|| invalid(self.kind.id(), "manager home not detected"))?;
                     progress(Progress::Message(format!(
-                        "Running {id} as the invoking user; cancellation waits for completion."
+                        "Running {id}. If you cancel, PkgDeck waits for it to finish."
                     )));
                     let result = self.pip_call(&home, &["install", name], cancel, true)?;
                     return Ok(OperationOutcome {
@@ -4069,7 +4064,7 @@ impl<T: Transport> Backend for DevTool<T> {
                         .clone()
                         .ok_or_else(|| invalid(self.kind.id(), "manager home not detected"))?;
                     progress(Progress::Message(format!(
-                        "Running {id} as the invoking user; cancellation waits for completion."
+                        "Running {id}. If you cancel, PkgDeck waits for it to finish."
                     )));
                     let result = self.pip_call(&home, &["uninstall", "-y", name], cancel, true)?;
                     return Ok(OperationOutcome {
@@ -4086,7 +4081,7 @@ impl<T: Transport> Backend for DevTool<T> {
             Operation::Clean(target) => return self.clean_cache(target, cancel),
         };
         progress(Progress::Message(format!(
-            "Running {id} as the invoking user; cancellation waits for completion."
+            "Running {id}. If you cancel, PkgDeck waits for it to finish."
         )));
         let result = self.call(&args, cancel, true)?;
         Ok(OperationOutcome {

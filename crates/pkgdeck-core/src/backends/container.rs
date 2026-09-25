@@ -368,10 +368,13 @@ impl<T: Transport> Backend for Container<T> {
         // still surfaces this status instead of failing each query.
         if self.kind == ContainerKind::Docker && self.transport.docker_is_podman() {
             return Ok(Availability::Unavailable(
-                "Docker CLI is emulated by Podman on this host; use the Podman source".into(),
+                "The docker command on this system is Podman. Use the Podman source instead."
+                    .into(),
             ));
         }
-        match self.call(&["info", "--format", "{{json .}}"], cancel, false) {
+        // `version` answers from the client and, for Docker, the daemon; `info`
+        // also computes storage statistics and takes seconds on large stores.
+        match self.call(&["version", "--format", "{{json .}}"], cancel, false) {
             Ok(_) => Ok(Availability::Available),
             Err(EngineError::Execution(ExecutionError::Disabled(reason))) => {
                 Ok(Availability::Unavailable(reason))
@@ -445,7 +448,7 @@ impl<T: Transport> Backend for Container<T> {
             kind: CleanupKind::PackageCache,
             title: format!("Dangling {} images", self.kind.label()),
             summary: format!("{} untagged images · {}", images.len(), self.kind.store()),
-            preview: format!("Remove these untagged images without force. Images used by containers are protected by the engine. Shared layers may remain.\n{}", images.join("\n")),
+            preview: format!("Removes these untagged images. Images used by containers are kept. Shared layers may remain.\n{}", images.join("\n")),
         }]
         };
         self.cleanup_images = Some(images);
@@ -468,7 +471,7 @@ impl<T: Transport> Backend for Container<T> {
                             kind: CleanupKind::PackageCache,
                             title: "Docker build cache".into(),
                             summary: format!("{} unused immutable records · default builder", ids.len()),
-                            preview: format!("Remove these unused build-cache records from the default builder. Later builds may need to rebuild layers. Shared storage may remain.\n{}", ids.join("\n")),
+                            preview: format!("Removes unused build cache from the default builder. Later builds may take longer. Some shared storage may remain.\n{}", ids.join("\n")),
                         });
                     }
                     self.cleanup_build_cache = Some(ids);
@@ -499,7 +502,7 @@ impl<T: Transport> Backend for Container<T> {
                     homepages: vec![],
                 },
                 description: format!(
-                    "Pull {} into {}. The container engine resolves the registry and verifies its native content digest.",
+                    "Pull {} into {}. The container engine downloads it and verifies its digest.",
                     id.name,
                     self.kind.store()
                 ),
@@ -544,7 +547,7 @@ impl<T: Transport> Backend for Container<T> {
                 if planned.is_empty() || self.build_cache(cancel)? != planned {
                     return Err(EngineError::InvalidResponse {
                         backend: self.kind.id().into(),
-                        reason: "Build cache changed; reload and review the preview".into(),
+                        reason: "The build cache changed. Reload and review it again.".into(),
                     });
                 }
                 self.cleanup_build_cache = None;
@@ -585,7 +588,7 @@ impl<T: Transport> Backend for Container<T> {
             if current != planned || planned.is_empty() {
                 return Err(EngineError::InvalidResponse {
                     backend: self.kind.id().into(),
-                    reason: "Cleanup candidates changed; reload and review the preview".into(),
+                    reason: "The images to clean changed. Reload and review them again.".into(),
                 });
             }
             self.cleanup_images = None;
@@ -778,7 +781,7 @@ mod tests {
                 .unwrap()
                 .push((executable.into(), args.into(), write));
             Ok(completed(
-                if write || args.first().is_some_and(|arg| arg == "info") {
+                if write || args.first().is_some_and(|arg| arg == "version") {
                     &[]
                 } else if args.first().is_some_and(|arg| arg == "buildx") {
                     self.build_cache.as_deref().unwrap_or("").as_bytes()

@@ -1035,7 +1035,7 @@ TestCase {
     }
     function test_result_status_stays_short_during_native_writes() {
         browser.openView("Updates");
-        fake.status = "Update all packages from apt: Running apt-get; cancellation waits for the native transaction to finish.";
+        fake.status = "Update all packages from apt: Running apt-get. If you cancel, PkgDeck waits for APT to finish.";
         fake.busy = true;
         fake.writing = true;
         compare(browser.resultsHeading(), "Applying changes…");
@@ -1452,7 +1452,7 @@ TestCase {
         verify(status.text.indexOf("2 updates found") >= 0);
         verify(failures.visible);
         verify(failures.text.indexOf("fixture") >= 0);
-        compare(availability.text, "Desktop notifications available");
+        compare(availability.text, "Notifications available");
         verify(button.enabled);
         let requested = 0;
         browser.testNotificationRequested.connect(() => requested++);
@@ -1545,8 +1545,8 @@ TestCase {
         waitForRendering(browser.contentItem);
         const userRow = results.itemAtIndex(0);
         const systemRow = results.itemAtIndex(1);
-        compare(findChild(userRow, "packageSourceLine").text, "FLATPAK · flathub · User");
-        compare(findChild(systemRow, "packageSourceLine").text, "FLATPAK · flathub · System");
+        compare(findChild(userRow, "packageSourceLine").text, "Flatpak · flathub · User");
+        compare(findChild(systemRow, "packageSourceLine").text, "Flatpak · flathub · System");
         mouseClick(findChild(systemRow, "rowPackageAction"));
         compare(fake.selection, 1);
         const dialog = findChild(browser, "confirmationDialog");

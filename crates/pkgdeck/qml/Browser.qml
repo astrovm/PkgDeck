@@ -30,11 +30,12 @@ Controls.ApplicationWindow {
         title: "Add from file or link"
         modal: true
         standardButtons: Controls.Dialog.Cancel
-        onOpened: { packageLink.text = ""; packageLink.forceActiveFocus(); }
+        onAboutToShow: packageLink.text = ""
+        onOpened: packageLink.forceActiveFocus()
         onClosed: root.restoreDialogFocus()
         contentItem: ColumnLayout {
             spacing: 12
-            Controls.TextField {
+            ThemedTextField {
                 id: packageLink
                 objectName: "packageLink"
                 Layout.fillWidth: true
@@ -164,6 +165,7 @@ Controls.ApplicationWindow {
     onMotionEnabledChanged: {
         if (!motionEnabled) {
             detailsReveal.complete();
+            pageSwitch.complete();
             completedRows = [];
         }
     }
@@ -237,11 +239,11 @@ Controls.ApplicationWindow {
     function failureSummary(id) {
         const row = items.find((item) => item.kind === "failure" && item.source === id);
         const reportFailure = (reportState.failures || []).find((failure) => failure.source === id);
-        return (row && row.summary) || (reportFailure && reportFailure.detail) || (currentView === "Sources" ? sourceInfo(id).summary : "") || "Source check did not complete.";
+        return (row && row.summary) || (reportFailure && reportFailure.detail) || (currentView === "Sources" ? sourceInfo(id).summary : "") || "This source could not be checked.";
     }
     function lastSuccessfulCheck(id) {
         const seconds = (reportState.last_success || {})[id];
-        return seconds ? new Date(seconds * 1000).toLocaleString() : "Not checked successfully this session";
+        return seconds ? new Date(seconds * 1000).toLocaleString() : "No successful check yet";
     }
     function copyableDiagnostics() {
         return "View: " + currentView + "\nState: " + (reportState.phase || "unknown") + "\n" +
@@ -272,7 +274,7 @@ Controls.ApplicationWindow {
         if (readFailures.length > 0)
             return sourceFailureTitle();
         if (reportState.phase === "unsupported")
-            return "No enabled sources support this view.";
+            return "None of your enabled sources support this page.";
         if (currentView === "Search" && queryDirty)
             return "";
         if (currentView === "Search" && searchPane.text.trim().length === 0)
@@ -612,8 +614,10 @@ Controls.ApplicationWindow {
             rows = rows.filter(row => row.kind === "cleanup");
         if (root.currentView === "Sources" && !root.showUnavailableSources)
             rows = rows.filter(row => row.kind !== "source" || row.available);
-        if (root.currentView !== "Sources")
-            rows = rows.filter((row) => root.effectiveSources().indexOf(row.source) >= 0);
+        if (root.currentView !== "Sources") {
+            const shown = new Set(root.effectiveSources());
+            rows = rows.filter((row) => shown.has(row.source));
+        }
         // The Installed filter narrows the loaded rows as you type; the
         // backend is queried once with an empty query (see reload).
         if (root.currentView === "Installed") {
@@ -673,13 +677,25 @@ Controls.ApplicationWindow {
     }
     readonly property bool systemAppearance: preferences.appearance === 0
     readonly property bool dark: preferences.appearance === 1 || (systemAppearance && Qt.styleHints.colorScheme === Qt.Dark)
-    readonly property color canvas: systemAppearance ? systemPalette.window : (dark ? "#0c0e12" : "#f3f5f8")
-    readonly property color surface: systemAppearance ? systemPalette.base : (dark ? "#101014" : "#ffffff")
-    readonly property color ink: systemAppearance ? systemPalette.text : (dark ? "#ecf1f8" : "#1c2b3e")
-    readonly property color muted: systemAppearance ? systemPalette.placeholderText : (dark ? "#a2b1c4" : "#57677e")
-    readonly property color line: systemAppearance ? systemPalette.mid : (dark ? "#2a2e37" : "#dce3ec")
-    readonly property color accent: systemAppearance ? systemPalette.highlight : (dark ? "#80b6ff" : "#245fc6")
-    readonly property color selection: systemAppearance ? Qt.rgba(systemPalette.highlight.r, systemPalette.highlight.g, systemPalette.highlight.b, 0.24) : (dark ? "#1a2740" : "#e8f0ff")
+    readonly property color canvas: systemAppearance ? systemPalette.window : (dark ? "#0e1015" : "#f4f6f9")
+    readonly property color surface: systemAppearance ? systemPalette.base : (dark ? "#161a21" : "#ffffff")
+    readonly property color ink: systemAppearance ? systemPalette.text : (dark ? "#e9edf3" : "#18212d")
+    readonly property color muted: systemAppearance ? systemPalette.placeholderText : (dark ? "#98a3b3" : "#5a6676")
+    readonly property color accent: systemAppearance ? systemPalette.highlight : (dark ? "#7aa7ff" : "#2f68d8")
+    // Derived tokens stay legible on any palette: tints of the text and
+    // accent colors instead of palette roles that some themes leave flat.
+    function tint(base, alpha) { return Qt.rgba(base.r, base.g, base.b, alpha); }
+    readonly property color line: tint(ink, dark ? 0.12 : 0.13)
+    readonly property color strongLine: tint(ink, dark ? 0.3 : 0.32)
+    readonly property color hoverTint: tint(ink, dark ? 0.06 : 0.05)
+    readonly property color selection: tint(accent, dark ? 0.2 : 0.14)
+    readonly property color accentInk: systemAppearance ? systemPalette.highlightedText : "#ffffff"
+    readonly property color danger: dark ? "#f28b91" : "#c1343f"
+    readonly property color success: dark ? "#6fd39a" : "#1b7a45"
+    readonly property color warning: dark ? "#f2c56b" : "#9a6400"
+    readonly property int controlRadius: 9
+    readonly property int cardRadius: 12
+    readonly property int controlHeight: Math.max(36, Math.round(root.font.pointSize * 2.9))
     color: canvas
     palette.window: canvas
     palette.base: surface
@@ -688,32 +704,49 @@ Controls.ApplicationWindow {
     palette.buttonText: systemAppearance ? systemPalette.buttonText : ink
     palette.button: systemAppearance ? systemPalette.button : surface
     palette.highlight: accent
-    palette.highlightedText: systemAppearance ? systemPalette.highlightedText : (dark ? "#111820" : "#ffffff")
+    palette.highlightedText: accentInk
 
     component ActionButton: Controls.Button {
         id: control
         property color glyphColor: root.ink
         property bool primary: false
+        // Sidebar entry: borderless, with `current` marking the open page.
         property bool navigation: false
+        property bool current: false
+        // `flat` (from Button) marks borderless actions tinted by their glyph on hover.
         property string symbol: "package"
         property url iconSource: ""
         property string tooltipText: ""
+        readonly property bool systemDisabled: !enabled && root.systemAppearance && !flat && !navigation
         Accessible.name: text
         Controls.ToolTip.visible: hovered && tooltipText.length > 0
+        Controls.ToolTip.delay: 500
         Controls.ToolTip.text: tooltipText
-        implicitHeight: Math.max(38, root.font.pointSize * 3)
-        horizontalPadding: 16
+        implicitHeight: root.controlHeight
+        horizontalPadding: text.length > 0 ? 14 : 9
         verticalPadding: 4
-        opacity: enabled || root.systemAppearance ? 1 : 0.45
-        scale: down ? 0.98 : 1
+        opacity: enabled || root.systemAppearance ? 1 : 0.42
+        scale: down ? 0.97 : 1
         Behavior on opacity { NumberAnimation { duration: root.feedbackDuration } }
         Behavior on scale { NumberAnimation { duration: root.feedbackDuration; easing.type: Easing.OutCubic } }
         background: Rectangle {
-            radius: 7
+            radius: root.controlRadius
             Behavior on color { ColorAnimation { duration: root.feedbackDuration } }
-            color: !control.enabled && root.systemAppearance ? disabledPalette.button : control.primary && control.enabled ? root.accent : (control.enabled && control.hovered ? root.selection : root.surface)
-            border.color: control.activeFocus ? root.accent : !control.enabled && root.systemAppearance ? disabledPalette.mid : (control.navigation ? "transparent" : root.line)
+            color: control.systemDisabled ? disabledPalette.button
+                : control.primary && control.enabled ? (control.down ? Qt.darker(root.accent, 1.08) : control.hovered ? Qt.lighter(root.accent, 1.08) : root.accent)
+                : control.navigation ? (control.current ? root.selection : control.hovered ? root.hoverTint : "transparent")
+                : control.flat ? (control.enabled && control.hovered ? root.tint(control.glyphColor, 0.14) : "transparent")
+                : root.surface
+            border.color: control.activeFocus ? root.accent : control.systemDisabled ? disabledPalette.mid
+                : (control.navigation || control.flat || control.primary) ? "transparent" : root.line
             border.width: control.activeFocus ? 2 : 1
+            Rectangle {
+                anchors.fill: parent
+                radius: parent.radius
+                visible: !control.primary && !control.navigation && !control.flat
+                color: control.enabled && control.down ? root.tint(root.ink, 0.1) : control.enabled && control.hovered ? root.hoverTint : "transparent"
+                Behavior on color { ColorAnimation { duration: root.feedbackDuration } }
+            }
         }
         contentItem: Item {
             implicitWidth: buttonContents.implicitWidth
@@ -724,14 +757,16 @@ Controls.ApplicationWindow {
                 anchors.verticalCenter: parent.verticalCenter
                 width: Math.min(implicitWidth, parent.width)
                 height: implicitHeight
-                spacing: 8
+                spacing: 9
                 DeckIcon {
                     name: control.symbol
                     visible: control.symbol.length > 0
-                    ink: !control.enabled && root.systemAppearance ? disabledPalette.buttonText : control.primary && control.enabled ? root.palette.highlightedText : control.glyphColor
+                    ink: control.systemDisabled ? disabledPalette.buttonText : !control.enabled && control.flat ? root.muted : control.primary && control.enabled ? root.accentInk
+                        : control.navigation && control.current ? root.accent : control.glyphColor
                     Layout.preferredWidth: 18
                     Layout.preferredHeight: 18
                     Layout.alignment: Qt.AlignVCenter
+                    Behavior on ink { ColorAnimation { duration: root.feedbackDuration } }
                 }
                 Image {
                     objectName: control.iconSource.toString().length > 0 ? control.objectName + "Icon" : ""
@@ -748,8 +783,10 @@ Controls.ApplicationWindow {
                 Text {
                     text: control.text
                     visible: text.length > 0
-                    font: control.font
-                    color: !control.enabled && root.systemAppearance ? disabledPalette.buttonText : control.primary && control.enabled ? root.palette.highlightedText : root.ink
+                    font.family: control.font.family
+                    font.pointSize: control.font.pointSize
+                    font.weight: control.primary || (control.navigation && control.current) ? Font.DemiBold : Font.Normal
+                    color: control.systemDisabled ? disabledPalette.buttonText : !control.enabled && control.flat ? root.muted : control.primary && control.enabled ? root.accentInk : root.ink
                     Layout.fillWidth: true
                     Layout.minimumWidth: 0
                     Layout.alignment: Qt.AlignVCenter
@@ -760,23 +797,29 @@ Controls.ApplicationWindow {
         }
     }
 
-    // Shared checkbox indicator: transparent box with an accent check.
-    // Both the source checklist and the Updates multi-select use it so the
-    // two stay visually identical; positioning comes from the instance.
+    // Shared checkbox indicator: an outlined box that fills with the accent
+    // when checked. The source checklist, Updates multi-select, and filters
+    // all use it so they stay visually identical.
     component TickBox: Rectangle {
         required property bool ticked
-        implicitWidth: 20
-        implicitHeight: 20
-        color: "transparent"
-        border.color: root.line
-        radius: 4
+        implicitWidth: 18
+        implicitHeight: 18
+        radius: 5
+        color: ticked ? root.accent : "transparent"
+        border.color: ticked ? root.accent : root.strongLine
+        border.width: 1.5
+        Behavior on color { ColorAnimation { duration: root.feedbackDuration } }
+        Behavior on border.color { ColorAnimation { duration: root.feedbackDuration } }
         DeckIcon {
             name: "installed"
-            ink: root.accent
+            ink: root.accentInk
             anchors.centerIn: parent
-            width: 14
-            height: 14
-            visible: ticked
+            width: 13
+            height: 13
+            opacity: ticked ? 1 : 0
+            scale: ticked ? 1 : 0.6
+            Behavior on opacity { NumberAnimation { duration: root.feedbackDuration } }
+            Behavior on scale { NumberAnimation { duration: root.feedbackDuration; easing.type: Easing.OutBack } }
         }
     }
 
@@ -788,23 +831,40 @@ Controls.ApplicationWindow {
         palette.windowText: root.ink
         palette.button: root.surface
         palette.buttonText: root.ink
-        background: Rectangle { color: root.surface; radius: 12; border.color: root.line }
+        topPadding: 4
+        background: Rectangle { color: root.surface; radius: 14; border.color: root.line }
+        Controls.Overlay.modal: Rectangle {
+            color: Qt.rgba(0, 0, 0, root.dark ? 0.5 : 0.28)
+            Behavior on opacity { NumberAnimation { duration: root.revealDuration } }
+        }
+        enter: Transition {
+            ParallelAnimation {
+                NumberAnimation { property: "opacity"; from: 0; to: 1; duration: root.revealDuration; easing.type: Easing.OutCubic }
+                NumberAnimation { property: "scale"; from: root.motionEnabled ? 0.96 : 1; to: 1; duration: root.revealDuration; easing.type: Easing.OutCubic }
+            }
+        }
         header: Item {
-            implicitHeight: 54
+            implicitHeight: 58
             Controls.Label {
                 anchors.left: parent.left
-                anchors.leftMargin: 16
+                anchors.leftMargin: 20
+                anchors.right: dialogClose.left
+                anchors.rightMargin: 8
                 anchors.verticalCenter: parent.verticalCenter
                 text: dialog.title
                 color: root.ink
-                font.bold: true
+                font.pointSize: root.font.pointSize * 1.15
+                font.weight: Font.DemiBold
+                elide: Text.ElideRight
             }
             ActionButton {
+                id: dialogClose
                 anchors.right: parent.right
-                anchors.rightMargin: 8
+                anchors.rightMargin: 10
                 anchors.verticalCenter: parent.verticalCenter
                 text: ""
                 symbol: "cancel"
+                flat: true
                 tooltipText: "Close"
                 Accessible.name: "Close dialog"
                 onClicked: dialog.reject()
@@ -813,40 +873,86 @@ Controls.ApplicationWindow {
         footer: Controls.DialogButtonBox {
             standardButtons: dialog.standardButtons
             alignment: Qt.AlignRight
-            padding: 8
+            padding: 12
             spacing: 8
-            background: Rectangle { color: root.surface }
+            background: Item {}
             delegate: ActionButton { symbol: "" }
             onAccepted: dialog.accept()
             onRejected: dialog.reject()
         }
     }
 
-    component SettingCheckBox: Controls.CheckBox {
+    // Settings toggle: label on the left, switch on the right. Clicking
+    // anywhere on the row toggles it.
+    component SettingCheckBox: Controls.Switch {
         id: setting
-        implicitHeight: Math.max(32, root.font.pointSize * 2.5)
-        indicator: TickBox {
-            x: 0
+        Layout.fillWidth: true
+        implicitHeight: Math.max(root.controlHeight, contentItem.implicitHeight + 8)
+        leftPadding: 0
+        rightPadding: 0
+        indicator: Rectangle {
+            x: setting.width - width
             y: (setting.height - height) / 2
-            ticked: setting.checked
+            implicitWidth: 38
+            implicitHeight: 22
+            radius: height / 2
+            color: setting.checked ? root.accent : root.tint(root.ink, root.dark ? 0.18 : 0.16)
+            opacity: setting.enabled ? 1 : 0.45
+            Behavior on color { ColorAnimation { duration: root.feedbackDuration } }
+            Rectangle {
+                width: 16
+                height: 16
+                radius: 8
+                y: 3
+                x: setting.checked ? parent.width - width - 3 : 3
+                color: setting.checked ? root.accentInk : (root.dark ? "#e9edf3" : "#ffffff")
+                border.color: root.tint("#000000", 0.08)
+                Behavior on x { NumberAnimation { duration: root.revealDuration; easing.type: Easing.OutCubic } }
+            }
+            Rectangle {
+                anchors.fill: parent
+                anchors.margins: -3
+                radius: height / 2
+                color: "transparent"
+                border.color: root.accent
+                border.width: 2
+                visible: setting.visualFocus
+            }
         }
         contentItem: Text {
             text: setting.text
             color: setting.enabled ? root.ink : root.muted
             font: setting.font
+            wrapMode: Text.WordWrap
             verticalAlignment: Text.AlignVCenter
-            leftPadding: 28
+            rightPadding: 52
         }
     }
 
     component ThemedComboBox: Controls.ComboBox {
         id: combo
-        implicitHeight: 38
+        implicitHeight: root.controlHeight
+        indicator: DeckIcon {
+            x: combo.width - width - 12
+            y: (combo.height - height) / 2
+            width: 14
+            height: 14
+            name: "down"
+            ink: root.muted
+            rotation: combo.popup.visible ? 180 : 0
+            Behavior on rotation { NumberAnimation { duration: root.feedbackDuration; easing.type: Easing.OutCubic } }
+        }
         background: Rectangle {
             color: root.surface
-            radius: 8
+            radius: root.controlRadius
             border.color: combo.activeFocus ? root.accent : root.line
             border.width: combo.activeFocus ? 2 : 1
+            Rectangle {
+                anchors.fill: parent
+                radius: parent.radius
+                color: combo.hovered ? root.hoverTint : "transparent"
+                Behavior on color { ColorAnimation { duration: root.feedbackDuration } }
+            }
         }
         contentItem: Controls.TextField {
             text: combo.displayText
@@ -858,7 +964,7 @@ Controls.ApplicationWindow {
             clip: true
             verticalAlignment: Text.AlignVCenter
             leftPadding: 14
-            rightPadding: 8
+            rightPadding: 34
         }
         delegate: Controls.ItemDelegate {
             required property var modelData
@@ -868,21 +974,41 @@ Controls.ApplicationWindow {
             font: combo.font
             highlighted: combo.highlightedIndex === index
             background: Rectangle {
+                radius: root.controlRadius - 3
                 color: highlighted ? root.selection : "transparent"
+                Behavior on color { ColorAnimation { duration: root.feedbackDuration } }
             }
-            contentItem: Text {
-                text: modelData
-                color: root.ink
-                elide: Text.ElideRight
-                verticalAlignment: Text.AlignVCenter
-                leftPadding: 14
+            contentItem: RowLayout {
+                spacing: 8
+                Text {
+                    text: modelData
+                    color: root.ink
+                    font: combo.font
+                    elide: Text.ElideRight
+                    verticalAlignment: Text.AlignVCenter
+                    leftPadding: 6
+                    Layout.fillWidth: true
+                }
+                DeckIcon {
+                    name: "installed"
+                    ink: root.accent
+                    visible: combo.currentIndex === index
+                    Layout.preferredWidth: 14
+                    Layout.preferredHeight: 14
+                }
             }
         }
         popup: Controls.Popup {
-            y: combo.height
+            y: combo.height + 4
             width: combo.width
-            implicitHeight: Math.min(contentItem.implicitHeight, 320)
-            padding: 4
+            implicitHeight: Math.min(contentItem.implicitHeight + topPadding + bottomPadding, 320)
+            padding: 5
+            enter: Transition {
+                ParallelAnimation {
+                    NumberAnimation { property: "opacity"; from: 0; to: 1; duration: root.feedbackDuration; easing.type: Easing.OutCubic }
+                    NumberAnimation { property: "scale"; from: root.motionEnabled ? 0.97 : 1; to: 1; duration: root.feedbackDuration; easing.type: Easing.OutCubic }
+                }
+            }
             contentItem: ListView {
                 clip: true
                 implicitHeight: contentHeight
@@ -893,8 +1019,60 @@ Controls.ApplicationWindow {
             }
             background: Rectangle {
                 color: root.surface
-                radius: 8
+                radius: root.controlRadius + 2
                 border.color: root.line
+            }
+        }
+    }
+
+    component ThemedTextField: Controls.TextField {
+        id: field
+        implicitHeight: root.controlHeight + 2
+        color: root.ink
+        placeholderTextColor: root.muted
+        selectByMouse: true
+        leftPadding: 12
+        rightPadding: 12
+        background: Rectangle {
+            color: root.surface
+            radius: root.controlRadius
+            border.color: field.activeFocus ? root.accent : root.line
+            border.width: field.activeFocus ? 2 : 1
+            Behavior on border.color { ColorAnimation { duration: root.feedbackDuration } }
+        }
+    }
+
+    // Grouped settings section with a title.
+    component SettingsCard: Rectangle {
+        id: card
+        property string title: ""
+        default property alias content: cardBody.data
+        Layout.fillWidth: true
+        Layout.maximumWidth: 760
+        implicitHeight: cardColumn.implicitHeight + 32
+        color: root.surface
+        radius: root.cardRadius
+        border.color: root.line
+        ColumnLayout {
+            id: cardColumn
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
+            anchors.margins: 16
+            spacing: 10
+            Controls.Label {
+                text: card.title
+                visible: text.length > 0
+                color: root.muted
+                font.pointSize: root.font.pointSize * 0.85
+                font.weight: Font.DemiBold
+                font.capitalization: Font.AllUppercase
+                font.letterSpacing: 0.6
+            }
+            ColumnLayout {
+                id: cardBody
+                Layout.fillWidth: true
+                spacing: 8
             }
         }
     }
@@ -1140,6 +1318,20 @@ Controls.ApplicationWindow {
         interval: 1000
         onTriggered: root.completedRows = []
     }
+    // Page switches fade in; controls never move while a page appears.
+    NumberAnimation {
+        id: pageSwitch
+        target: pageContent
+        property: "opacity"
+        from: 0.35
+        to: 1
+        duration: root.revealDuration
+        easing.type: Easing.OutCubic
+    }
+    onCurrentViewChanged: {
+        if (motionEnabled)
+            pageSwitch.restart();
+    }
     NumberAnimation {
         id: detailsReveal
         target: detailsPanel.detailsContentItem
@@ -1199,48 +1391,86 @@ Controls.ApplicationWindow {
         spacing: 0
         Rectangle {
             Layout.fillHeight: true
-            Layout.preferredWidth: 196
+            Layout.preferredWidth: 212
             visible: !root.navigationCollapsed
             color: root.surface
+            Rectangle { anchors.right: parent.right; width: 1; height: parent.height; color: root.line }
             ColumnLayout {
                 anchors.fill: parent
-                anchors.margins: 16
+                anchors.margins: 14
                 spacing: 8
                 RowLayout {
                     spacing: 10
-                    Layout.topMargin: 12
+                    Layout.topMargin: 10
+                    Layout.leftMargin: 4
                     Image {
                         objectName: "appLogo"
                         source: root.logoIconSource
-                        sourceSize.width: 30
-                        sourceSize.height: 30
+                        sourceSize.width: 28
+                        sourceSize.height: 28
                         fillMode: Image.PreserveAspectFit
                         Accessible.ignored: true
                     }
                     Controls.Label {
                         text: "PkgDeck"
-                        font.pointSize: root.font.pointSize * 1.8
-                        font.bold: true
+                        font.pointSize: root.font.pointSize * 1.55
+                        font.weight: Font.Bold
                         color: root.ink
                     }
                 }
-                Item { Layout.preferredHeight: 24 }
-                Repeater {
-                    model: ["Search", "Installed", "Updates", "Clean", "Sources", "Settings"]
-                    delegate: ActionButton {
-                        required property string modelData
-                        Layout.fillWidth: true
-                        text: modelData
-                        symbol: ({"Search":"search", "Installed":"installed", "Updates":"updates", "Clean":"remove", "Sources":"sources", "Settings":"settings"})[modelData]
-                        navigation: true
-                        primary: root.currentView === modelData
-                        onClicked: root.openView(modelData)
+                Item { Layout.preferredHeight: 18 }
+                Item {
+                    id: navigationList
+                    Layout.fillWidth: true
+                    implicitHeight: navigationColumn.implicitHeight
+                    readonly property var pages: ["Search", "Installed", "Updates", "Clean", "Sources", "Settings"]
+                    readonly property int currentPage: pages.indexOf(root.currentView)
+                    // The selection pill slides between entries.
+                    Rectangle {
+                        objectName: "navigationHighlight"
+                        readonly property Item target: navigationRepeater.count > 0 && navigationList.currentPage >= 0 ? navigationRepeater.itemAt(navigationList.currentPage) : null
+                        visible: target !== null
+                        width: parent.width
+                        height: target ? target.height : 0
+                        y: target ? target.y : 0
+                        radius: root.controlRadius
+                        color: root.selection
+                        Behavior on y { NumberAnimation { duration: root.revealDuration; easing.type: Easing.OutCubic } }
+                        Rectangle {
+                            width: 3
+                            height: parent.height - 16
+                            radius: 1.5
+                            anchors.verticalCenter: parent.verticalCenter
+                            anchors.left: parent.left
+                            anchors.leftMargin: 3
+                            color: root.accent
+                        }
+                    }
+                    Column {
+                        id: navigationColumn
+                        width: parent.width
+                        spacing: 4
+                        Repeater {
+                            id: navigationRepeater
+                            model: navigationList.pages
+                            delegate: ActionButton {
+                                required property string modelData
+                                width: navigationColumn.width
+                                text: modelData
+                                symbol: ({"Search":"search", "Installed":"installed", "Updates":"updates", "Clean":"remove", "Sources":"sources", "Settings":"settings"})[modelData]
+                                navigation: true
+                                current: root.currentView === modelData
+                                // The sliding highlight draws the current entry.
+                                background.opacity: current ? 0 : 1
+                                onClicked: root.openView(modelData)
+                            }
+                        }
                     }
                 }
                 Item { Layout.fillHeight: true }
                 RowLayout {
                     objectName: "signatureFooter"
-                    Layout.fillWidth: true
+                    Layout.leftMargin: 4
                     spacing: 4
                     Controls.Label { objectName: "signaturePrefix"; text: "Made with"; color: root.muted; font.pointSize: root.font.pointSize * 0.9 }
                     DeckIcon { name: "heart"; ink: "#e34b5f"; Layout.preferredWidth: 14; Layout.preferredHeight: 14 }
@@ -1249,6 +1479,7 @@ Controls.ApplicationWindow {
             }
         }
         ColumnLayout {
+            id: pageContent
             Layout.fillWidth: true
             Layout.fillHeight: true
             Layout.alignment: Qt.AlignTop
@@ -1287,7 +1518,8 @@ Controls.ApplicationWindow {
                     objectName: "activityIndicator"
                     visible: !root.navigationCollapsed && root.currentView !== "Activity"
                     text: root.queuedCount > 0 ? "Activity · " + root.queuedCount : backend.writing ? "Working" : "Activity"
-                    symbol: "updates"
+                    symbol: "activity"
+                    glyphColor: backend.writing ? root.accent : root.ink
                     Accessible.name: root.queuedCount > 0 ? "Activity, " + root.queuedCount + " queued" : backend.writing ? "Activity, working" : "Activity"
                     onClicked: root.openView("Activity")
                 }
@@ -1296,7 +1528,8 @@ Controls.ApplicationWindow {
                     id: sourceFilterButton
                     visible: !root.navigationCollapsed && ["Search", "Installed", "Updates", "Clean"].indexOf(root.currentView) >= 0
                     text: root.viewSourceFilters[root.currentView] ? root.sourceSummary() : "Filter sources"
-                    symbol: "sources"
+                    symbol: "filter"
+                    glyphColor: root.viewSourceFilters[root.currentView] ? root.accent : root.ink
                     onClicked: root.toggleSourcePopup()
                     Accessible.name: "Filter this page by package source"
                     Layout.preferredWidth: Math.min(240, Math.max(160, implicitWidth))
@@ -1316,7 +1549,14 @@ Controls.ApplicationWindow {
                         modal: true
                         Controls.Overlay.modal: Rectangle { color: "transparent" }
                         closePolicy: Controls.Popup.CloseOnEscape | Controls.Popup.CloseOnPressOutside
-                        onOpened: {
+                        transformOrigin: Controls.Popup.TopRight
+                        enter: Transition {
+                            ParallelAnimation {
+                                NumberAnimation { property: "opacity"; from: 0; to: 1; duration: root.revealDuration; easing.type: Easing.OutCubic }
+                                NumberAnimation { property: "scale"; from: root.motionEnabled ? 0.95 : 1; to: 1; duration: root.revealDuration; easing.type: Easing.OutCubic }
+                            }
+                        }
+                        onAboutToShow: {
                             searchText = "";
                             pickerSearch.text = "";
                             draftSources = root.effectiveSources().filter((id) => root.sourceInfo(id).availability_kind === "available" && root.sourceSupportsView(id));
@@ -1330,7 +1570,7 @@ Controls.ApplicationWindow {
                                 text: "Checking sources…"
                                 color: root.muted
                             }
-                            Controls.TextField {
+                            ThemedTextField {
                                 id: pickerSearch
                                 objectName: "sourcePickerSearch"
                                 Layout.fillWidth: true
@@ -1376,7 +1616,11 @@ Controls.ApplicationWindow {
                                                 width: parent.width
                                                 topPadding: 8
                                                 text: parent.section
-                                                font.bold: true
+                                                font.weight: Font.DemiBold
+                                                font.pointSize: root.font.pointSize * 0.8
+                                                font.letterSpacing: 0.6
+                                                font.capitalization: Font.AllUppercase
+                                                leftPadding: 8
                                                 color: root.muted
                                                 visible: index === 0 || root.pickerItems()[index - 1] === undefined ||
                                                     (parent.usable ? root.sourceCategory(root.pickerItems()[index - 1]) : "Unavailable") !== parent.section
@@ -1395,7 +1639,11 @@ Controls.ApplicationWindow {
                                                     anchors.leftMargin: 8
                                                     ticked: checkRow.checked
                                                 }
-                                                background: Rectangle { color: checkRow.hovered ? root.selection : "transparent" }
+                                                background: Rectangle {
+                                                    radius: root.controlRadius - 2
+                                                    color: checkRow.hovered ? root.hoverTint : "transparent"
+                                                    Behavior on color { ColorAnimation { duration: root.feedbackDuration } }
+                                                }
                                                 contentItem: Text {
                                                     text: checkRow.text
                                                     color: checkRow.enabled ? root.ink : root.muted
@@ -1421,7 +1669,8 @@ Controls.ApplicationWindow {
                                 objectName: "unavailableSourceToggle"
                                 Layout.fillWidth: true
                                 text: sourcePopup.showUnavailable ? "Hide unavailable" : "Show unavailable"
-                                symbol: "help"
+                                symbol: sourcePopup.showUnavailable ? "up" : "down"
+                                flat: true
                                 onClicked: sourcePopup.showUnavailable = !sourcePopup.showUnavailable
                             }
                             RowLayout {
@@ -1435,6 +1684,7 @@ Controls.ApplicationWindow {
                                 ActionButton {
                                     objectName: "applySourceFilter"
                                     text: "Apply"
+                                    symbol: "installed"
                                     primary: true
                                     enabled: sourcePopup.draftSources.length > 0
                                     onClicked: root.applySourceDraft()
@@ -1443,7 +1693,7 @@ Controls.ApplicationWindow {
                         }
                         background: Rectangle {
                             color: root.surface
-                            radius: 8
+                            radius: root.cardRadius
                             border.color: root.line
                         }
                     }
@@ -1456,7 +1706,8 @@ Controls.ApplicationWindow {
                 ActionButton {
                     objectName: "compactActivityIndicator"
                     text: root.queuedCount > 0 ? "Activity · " + root.queuedCount : backend.writing ? "Working" : "Activity"
-                    symbol: "updates"
+                    symbol: "activity"
+                    glyphColor: backend.writing ? root.accent : root.ink
                     Layout.fillWidth: true
                     onClicked: root.openView("Activity")
                 }
@@ -1464,7 +1715,8 @@ Controls.ApplicationWindow {
                     objectName: "compactSourceFilter"
                     visible: ["Search", "Installed", "Updates", "Clean"].indexOf(root.currentView) >= 0
                     text: root.viewSourceFilters[root.currentView] ? root.sourceSummary() : "Filter sources"
-                    symbol: "sources"
+                    symbol: "filter"
+                    glyphColor: root.viewSourceFilters[root.currentView] ? root.accent : root.ink
                     Layout.fillWidth: true
                     onClicked: root.toggleSourcePopup()
                     Accessible.name: "Filter this page by package source"
@@ -1556,13 +1808,23 @@ Controls.ApplicationWindow {
                     implicitHeight: Math.max(44, root.font.pointSize * 3.4)
                     color: root.ink
                     placeholderTextColor: root.muted
-                    leftPadding: 14
+                    leftPadding: 42
                     rightPadding: 42
                     background: Rectangle {
                         color: root.surface
-                        radius: 8
+                        radius: root.controlRadius + 1
                         border.color: installedFilterField.activeFocus ? root.accent : root.line
                         border.width: installedFilterField.activeFocus ? 2 : 1
+                        Behavior on border.color { ColorAnimation { duration: root.feedbackDuration } }
+                        DeckIcon {
+                            name: "filter"
+                            ink: installedFilterField.activeFocus ? root.accent : root.muted
+                            anchors.left: parent.left
+                            anchors.leftMargin: 14
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: 17
+                            height: 17
+                        }
                     }
                     onTextChanged: root.installedFilter = text
                     onAccepted: {
@@ -1621,218 +1883,267 @@ Controls.ApplicationWindow {
                 clip: true
                 ColumnLayout {
                     width: settingsScroll.availableWidth
-                    spacing: 10
-                    Controls.Label { text: "Appearance"; color: root.ink; font.bold: true }
-                    ThemedComboBox {
-                        objectName: "appearanceSetting"
-                        model: ["System", "Dark", "Light"]
-                        currentIndex: preferences.appearance
-                        onActivated: preferences.appearance = currentIndex
-                        Accessible.name: "Appearance"
-                        Layout.fillWidth: true
-                        Layout.maximumWidth: 420
-                    }
-                    SettingCheckBox {
-                        objectName: "animationsSetting"
-                        text: "Animations"
-                        checked: !root.reduceMotion
-                        onToggled: root.reduceMotion = !checked
-                        Accessible.name: "Enable interface animations"
-                    }
-                    SettingCheckBox {
-                        objectName: "backgroundModeSetting"
-                        text: "Background checks"
-                        checked: preferences.backgroundMode
-                        onClicked: {
-                            if (!checked && preferences.autostart && !backend.setAutostart(false)) {
-                                checked = true;
-                                return;
+                    spacing: 14
+                    SettingsCard {
+                        title: "Appearance"
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 12
+                            Controls.Label { text: "Theme"; color: root.ink; Layout.fillWidth: true }
+                            ThemedComboBox {
+                                objectName: "appearanceSetting"
+                                model: ["System", "Dark", "Light"]
+                                currentIndex: preferences.appearance
+                                onActivated: preferences.appearance = currentIndex
+                                Accessible.name: "Appearance"
+                                Layout.preferredWidth: 220
                             }
-                            preferences.backgroundMode = checked;
-                            if (!checked)
-                                preferences.autostart = false;
                         }
-                        Accessible.name: text
-                    }
-                    SettingCheckBox {
-                        objectName: "autostartSetting"
-                        text: "Start in background at login"
-                        visible: root.desktopAutostartSupported
-                        checked: preferences.autostart
-                        enabled: preferences.backgroundMode && root.trayAvailable
-                        onClicked: {
-                            if (backend.setAutostart(checked))
-                                preferences.autostart = checked;
-                            else
-                                checked = preferences.autostart;
+                        SettingCheckBox {
+                            objectName: "animationsSetting"
+                            text: "Animations"
+                            checked: !root.reduceMotion
+                            onToggled: root.reduceMotion = !checked
+                            Accessible.name: "Enable interface animations"
                         }
-                        Accessible.name: text
                     }
-                    Controls.Label {
-                        objectName: "backgroundCheckStatus"
-                        text: root.backgroundState.last_check
-                            ? "Last check: " + new Date(root.backgroundState.last_check * 1000).toLocaleString()
-                                + ", " + (root.backgroundState.available || 0) + " updates found"
-                            : "Last check: never"
-                        color: root.muted
-                        wrapMode: Text.WordWrap
-                        Layout.fillWidth: true
+                    SettingsCard {
+                        title: "Update checks"
+                        SettingCheckBox {
+                            objectName: "backgroundModeSetting"
+                            text: "Background checks"
+                            checked: preferences.backgroundMode
+                            onClicked: {
+                                if (!checked && preferences.autostart && !backend.setAutostart(false)) {
+                                    checked = true;
+                                    return;
+                                }
+                                preferences.backgroundMode = checked;
+                                if (!checked)
+                                    preferences.autostart = false;
+                            }
+                            Accessible.name: text
+                        }
+                        SettingCheckBox {
+                            objectName: "autostartSetting"
+                            text: "Start in background at login"
+                            visible: root.desktopAutostartSupported
+                            checked: preferences.autostart
+                            enabled: preferences.backgroundMode && root.trayAvailable
+                            onClicked: {
+                                if (backend.setAutostart(checked))
+                                    preferences.autostart = checked;
+                                else
+                                    checked = preferences.autostart;
+                            }
+                            Accessible.name: text
+                        }
+                        Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: root.line }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 12
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                spacing: 3
+                                Controls.Label {
+                                    objectName: "backgroundCheckStatus"
+                                    text: root.backgroundState.last_check
+                                        ? "Last check: " + new Date(root.backgroundState.last_check * 1000).toLocaleString(Qt.locale(), Locale.ShortFormat)
+                                            + ", " + (root.backgroundState.available || 0) + " updates found"
+                                        : "Last check: never"
+                                    color: root.muted
+                                    wrapMode: Text.WordWrap
+                                    Layout.fillWidth: true
+                                }
+                                Controls.Label {
+                                    objectName: "backgroundCheckFailures"
+                                    visible: (root.backgroundState.failures || []).length > 0
+                                    text: "Could not check: " + (root.backgroundState.failures || []).map((failure) => failure.source).join(", ")
+                                    color: root.warning
+                                    wrapMode: Text.WordWrap
+                                    Layout.fillWidth: true
+                                }
+                                Controls.Label {
+                                    objectName: "notificationAvailability"
+                                    text: !root.trayAvailable ? "Notifications unavailable: no system tray found"
+                                        : !root.notificationAvailable ? "This system tray does not support notifications"
+                                        : "Notifications available"
+                                    color: root.muted
+                                    wrapMode: Text.WordWrap
+                                    Layout.fillWidth: true
+                                }
+                            }
+                            ActionButton {
+                                objectName: "testNotificationButton"
+                                text: "Test notification"
+                                symbol: "bell"
+                                enabled: preferences.backgroundMode && root.notificationAvailable
+                                onClicked: root.testNotificationRequested()
+                                Layout.alignment: Qt.AlignVCenter
+                            }
+                        }
                     }
-                    Controls.Label {
-                        objectName: "backgroundCheckFailures"
-                        visible: (root.backgroundState.failures || []).length > 0
-                        text: "Could not check: " + (root.backgroundState.failures || []).map((failure) => failure.source).join(", ")
-                        color: root.muted
-                        wrapMode: Text.WordWrap
-                        Layout.fillWidth: true
+                    SettingsCard {
+                        title: "Authentication"
+                        visible: root.systemAuthorizationSupported
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 12
+                            Controls.Label {
+                                text: "Ask for permission with"
+                                color: root.ink
+                                wrapMode: Text.WordWrap
+                                Layout.fillWidth: true
+                            }
+                            ThemedComboBox {
+                                objectName: "authorizationSetting"
+                                model: ["System prompt", "Existing sudo session"]
+                                currentIndex: root.useSudo ? 1 : 0
+                                onActivated: {
+                                    root.useSudo = currentIndex === 1;
+                                    preferences.authorization = root.useSudo ? "sudo" : "polkit";
+                                }
+                                Accessible.name: "Authentication"
+                                Layout.preferredWidth: 220
+                            }
+                        }
                     }
+                    SettingsCard {
+                        title: "About"
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 12
+                            Image {
+                                source: root.logoIconSource
+                                sourceSize.width: 36
+                                sourceSize.height: 36
+                                Accessible.ignored: true
+                            }
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                spacing: 2
+                                Controls.Label {
+                                    objectName: "aboutText"
+                                    text: "PkgDeck " + backend.version
+                                    color: root.ink
+                                    font.weight: Font.DemiBold
+                                    font.pointSize: root.font.pointSize * 1.15
+                                    Layout.fillWidth: true
+                                }
+                                RowLayout {
+                                    objectName: "compactSignature"
+                                    visible: root.navigationCollapsed
+                                    spacing: 4
+                                    Controls.Label { text: "Made with"; color: root.muted }
+                                    DeckIcon { name: "heart"; ink: "#e34b5f"; Layout.preferredWidth: 13; Layout.preferredHeight: 13 }
+                                    Controls.Label { text: "by astro"; color: root.muted }
+                                }
+                            }
+                            ActionButton {
+                                objectName: "repositoryLink"
+                                text: "GitHub"
+                                symbol: ""
+                                iconSource: root.repositoryIconSource
+                                Accessible.name: "Open PkgDeck on GitHub"
+                                onClicked: Qt.openUrlExternally(root.repositoryUrl)
+                            }
+                        }
+                    }
+                    SettingsCard {
+                        title: "Keyboard shortcuts"
+                        GridLayout {
+                            columns: root.compact ? 1 : 2
+                            columnSpacing: 28
+                            rowSpacing: 6
+                            Layout.fillWidth: true
+                            Repeater {
+                                objectName: "aboutShortcuts"
+                                model: [
+                                {action: "Search", keys: "Ctrl+1"},
+                                {action: "Installed", keys: "Ctrl+2"},
+                                {action: "Updates", keys: "Ctrl+3"},
+                                {action: "Clean", keys: "Ctrl+4"},
+                                {action: "Sources", keys: "Ctrl+5"},
+                                {action: "Search or filter", keys: "Ctrl+F"},
+                                {action: "Focus results", keys: "Ctrl+L"},
+                                {action: "Select result", keys: "↑ / ↓"},
+                                {action: "Install", keys: "Ctrl+I"},
+                                {action: "Remove", keys: "Ctrl+D"},
+                                {action: "Update", keys: "Ctrl+U"},
+                                {action: "Update selected", keys: "Ctrl+Shift+U"},
+                                {action: "Refresh source", keys: "Ctrl+M"},
+                                {action: "Reload", keys: "Ctrl+R"},
+                                {action: "Cancel work", keys: "Esc"}
+                                ]
+                                delegate: RowLayout {
+                                    required property var modelData
+                                    Layout.fillWidth: true
+                                    Layout.minimumWidth: root.compact ? 0 : 240
+                                    spacing: 12
+                                    Controls.Label {
+                                        text: modelData.action
+                                        color: root.muted
+                                        Layout.fillWidth: true
+                                    }
+                                    Controls.Label {
+                                        text: modelData.keys
+                                        color: root.ink
+                                        font.family: "monospace"
+                                        font.pointSize: root.font.pointSize * 0.88
+                                        leftPadding: 7
+                                        rightPadding: 7
+                                        topPadding: 2
+                                        bottomPadding: 2
+                                        background: Rectangle {
+                                            radius: 5
+                                            color: root.canvas
+                                            border.color: root.line
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Item { Layout.preferredHeight: 4 }
+                }
+            }
+            Rectangle {
+                visible: root.readFailures.length > 0 && root.viewItems.length > 0 &&
+                    ["Search", "Installed", "Updates", "Clean", "Sources"].indexOf(root.currentView) >= 0
+                Layout.fillWidth: true
+                implicitHeight: failureBanner.implicitHeight + 16
+                radius: root.controlRadius + 1
+                color: root.tint(root.warning, root.dark ? 0.12 : 0.1)
+                border.color: root.tint(root.warning, 0.35)
+                RowLayout {
+                    id: failureBanner
+                    anchors.fill: parent
+                    anchors.leftMargin: 12
+                    anchors.rightMargin: 8
+                    spacing: 10
+                    DeckIcon { name: "warning"; ink: root.warning; Layout.preferredWidth: 18; Layout.preferredHeight: 18 }
                     Controls.Label {
-                        objectName: "notificationAvailability"
-                        text: !root.trayAvailable ? "Desktop notifications unavailable: no system tray"
-                            : !root.notificationAvailable ? "Desktop notifications unavailable in this tray"
-                            : "Desktop notifications available"
-                        color: root.muted
+                        objectName: "sourceFailureNotice"
+                        text: root.sourceFailureTitle() + (root.currentView === "Updates" ? ". Update all will retry the check." : "")
+                        color: root.ink
                         wrapMode: Text.WordWrap
                         Layout.fillWidth: true
                     }
                     ActionButton {
-                        objectName: "testNotificationButton"
-                        text: "Test notification"
-                        symbol: "updates"
-                        enabled: preferences.backgroundMode && root.notificationAvailable
-                        onClicked: root.testNotificationRequested()
+                        objectName: "sourceFailureRetryNotice"
+                        text: "Retry"
+                        symbol: "refresh"
+                        flat: true
+                        enabled: !backend.busy && !(root.currentView === "Search" && root.queryDirty)
+                        onClicked: root.reload(true)
                     }
-                    Controls.Label {
-                        text: "Authentication"
-                        visible: root.systemAuthorizationSupported
-                        color: root.ink
-                        font.bold: true
+                    ActionButton {
+                        objectName: "sourceFailureDetails"
+                        text: "Details"
+                        symbol: "help"
+                        flat: true
+                        onClicked: { root.rememberDialogFocus(); sourceFailuresDialog.open(); }
                     }
-                    ThemedComboBox {
-                        objectName: "authorizationSetting"
-                        visible: root.systemAuthorizationSupported
-                        model: ["System prompt", "Existing sudo session"]
-                        currentIndex: root.useSudo ? 1 : 0
-                        onActivated: {
-                            root.useSudo = currentIndex === 1;
-                            preferences.authorization = root.useSudo ? "sudo" : "polkit";
-                        }
-                        Accessible.name: "Authentication"
-                        Layout.fillWidth: true
-                        Layout.maximumWidth: 420
-                    }
-                    Rectangle {
-                        Layout.fillWidth: true
-                        Layout.preferredHeight: 1
-                        Layout.topMargin: 16
-                        color: root.line
-                    }
-                    Controls.Label {
-                        text: "About"
-                        color: root.ink
-                        font.bold: true
-                    }
-                    RowLayout {
-                        Layout.fillWidth: true
-                        Controls.Label {
-                            objectName: "aboutText"
-                            text: "PkgDeck " + backend.version
-                            color: root.ink
-                            font.bold: true
-                            font.pointSize: root.font.pointSize * 1.3
-                            Layout.fillWidth: true
-                        }
-                        ActionButton {
-                            objectName: "repositoryLink"
-                            text: "GitHub"
-                            symbol: ""
-                            iconSource: root.repositoryIconSource
-                            Accessible.name: "Open PkgDeck on GitHub"
-                            onClicked: Qt.openUrlExternally(root.repositoryUrl)
-                        }
-                    }
-                    Controls.Label {
-                        text: "Keyboard shortcuts"
-                        color: root.ink
-                        font.bold: true
-                        Layout.topMargin: 12
-                    }
-                    GridLayout {
-                        columns: root.compact ? 1 : 2
-                        columnSpacing: 28
-                        rowSpacing: 8
-                        Layout.fillWidth: true
-                        Repeater {
-                            objectName: "aboutShortcuts"
-                            model: [
-                            {action: "Search", keys: "Ctrl+1"},
-                            {action: "Installed", keys: "Ctrl+2"},
-                            {action: "Updates", keys: "Ctrl+3"},
-                            {action: "Clean", keys: "Ctrl+4"},
-                            {action: "Sources", keys: "Ctrl+5"},
-                            {action: "Search or filter", keys: "Ctrl+F"},
-                            {action: "Focus results", keys: "Ctrl+L"},
-                            {action: "Select result", keys: "↑ / ↓"},
-                            {action: "Install", keys: "Ctrl+I"},
-                            {action: "Remove", keys: "Ctrl+D"},
-                            {action: "Update", keys: "Ctrl+U"},
-                            {action: "Update selected", keys: "Ctrl+Shift+U"},
-                            {action: "Refresh source", keys: "Ctrl+M"},
-                            {action: "Reload", keys: "Ctrl+R"},
-                            {action: "Cancel work", keys: "Esc"}
-                            ]
-                            delegate: RowLayout {
-                                required property var modelData
-                                Layout.fillWidth: true
-                                Layout.minimumWidth: root.compact ? 0 : 260
-                                spacing: 12
-                                Controls.Label {
-                                    text: modelData.action
-                                    color: root.muted
-                                    Layout.fillWidth: true
-                                }
-                                Controls.Label {
-                                    text: modelData.keys
-                                    color: root.ink
-                                }
-                            }
-                        }
-                    }
-                    RowLayout {
-                        objectName: "compactSignature"
-                        visible: root.navigationCollapsed
-                        Layout.topMargin: 12
-                        spacing: 4
-                        Controls.Label { text: "Made with"; color: root.muted }
-                        DeckIcon { name: "heart"; ink: "#e34b5f"; Layout.preferredWidth: 14; Layout.preferredHeight: 14 }
-                        Controls.Label { text: "by astro"; color: root.muted }
-                    }
-                }
-            }
-            RowLayout {
-                visible: root.readFailures.length > 0 && root.viewItems.length > 0 &&
-                    ["Search", "Installed", "Updates", "Clean", "Sources"].indexOf(root.currentView) >= 0
-                Layout.fillWidth: true
-                DeckIcon { name: "warning"; ink: root.accent; Layout.preferredWidth: 20; Layout.preferredHeight: 20 }
-                Controls.Label {
-                    objectName: "sourceFailureNotice"
-                    text: root.sourceFailureTitle() + (root.currentView === "Updates" ? ". Update all will retry the check." : "")
-                    color: root.muted
-                    wrapMode: Text.WordWrap
-                    Layout.fillWidth: true
-                }
-                ActionButton {
-                    objectName: "sourceFailureRetryNotice"
-                    text: "Retry"
-                    symbol: "refresh"
-                    enabled: !backend.busy && !(root.currentView === "Search" && root.queryDirty)
-                    onClicked: root.reload(true)
-                }
-                ActionButton {
-                    objectName: "sourceFailureDetails"
-                    text: "Details"
-                    symbol: "help"
-                    onClicked: { root.rememberDialogFocus(); sourceFailuresDialog.open(); }
                 }
             }
             ActivityPane {
@@ -1844,6 +2155,8 @@ Controls.ApplicationWindow {
                 muted: root.muted
                 line: root.line
                 accent: root.accent
+                danger: root.danger
+                success: root.success
                 textFont: root.font
                 onCancelQueued: backend.cancelQueued()
             }
@@ -1859,8 +2172,9 @@ Controls.ApplicationWindow {
                     (root.currentView !== "Search" || root.viewItems.length > 0 || root.readFailures.length > 0 ||
                         (backend.busy && !root.openingInput) || searchPane.text.trim().length > 0)
                 color: root.surface
-                radius: 10
+                radius: root.cardRadius
                 border.color: results.activeFocus ? root.accent : root.line
+                Behavior on border.color { ColorAnimation { duration: root.feedbackDuration } }
                 ColumnLayout {
                     anchors.fill: parent
                     anchors.margins: 1
@@ -1877,12 +2191,22 @@ Controls.ApplicationWindow {
                             elide: Text.ElideRight
                             Layout.fillWidth: true
                         }
-                        Controls.BusyIndicator {
+                        DeckIcon {
+                            id: resultsSpinner
                             objectName: "resultsBusy"
-                            running: backend.busy && root.motionEnabled
+                            readonly property bool running: backend.busy && root.motionEnabled
                             visible: running && results.count > 0
-                            Layout.preferredWidth: 18
-                            Layout.preferredHeight: 18
+                            name: "refresh"
+                            ink: root.accent
+                            Layout.preferredWidth: 16
+                            Layout.preferredHeight: 16
+                            RotationAnimation on rotation {
+                                running: resultsSpinner.visible
+                                from: 0
+                                to: 360
+                                duration: 1100
+                                loops: Animation.Infinite
+                            }
                         }
                         ActionButton {
                             objectName: "unavailableSourcesButton"
@@ -1922,7 +2246,9 @@ Controls.ApplicationWindow {
                             objectName: "columnHeader0"
                             text: (root.currentView === "Sources" ? "SOURCE" : "NAME / SOURCE") + root.sortArrow("name")
                             color: root.muted
-                            font.pointSize: root.font.pointSize * 0.9
+                            font.pointSize: root.font.pointSize * 0.8
+                            font.weight: Font.DemiBold
+                            font.letterSpacing: 0.6
                             font.underline: sortNameArea.activeFocus
                             elide: Text.ElideRight
                             Layout.preferredWidth: root.nameWidth
@@ -1956,7 +2282,9 @@ Controls.ApplicationWindow {
                             visible: root.currentView !== "Sources" || root.showUnavailableSources
                             text: (root.currentView === "Sources" ? "STATUS" : root.currentView === "Clean" ? "TYPE" : "VERSION") + root.sortArrow(root.currentView === "Sources" ? "status" : "version")
                             color: root.muted
-                            font.pointSize: root.font.pointSize * 0.9
+                            font.pointSize: root.font.pointSize * 0.8
+                            font.weight: Font.DemiBold
+                            font.letterSpacing: 0.6
                             font.underline: sortVersionArea.activeFocus
                             elide: Text.ElideRight
                             Layout.preferredWidth: root.versionWidth
@@ -1989,7 +2317,9 @@ Controls.ApplicationWindow {
                             visible: root.currentView !== "Sources"
                             text: (root.currentView === "Sources" ? "CAPABILITIES" : "SUMMARY") + root.sortArrow(root.currentView === "Sources" ? "capabilities" : "summary")
                             color: root.muted
-                            font.pointSize: root.font.pointSize * 0.9
+                            font.pointSize: root.font.pointSize * 0.8
+                            font.weight: Font.DemiBold
+                            font.letterSpacing: 0.6
                             font.underline: sortSummaryArea.activeFocus
                             elide: Text.ElideRight
                             Layout.fillWidth: true
@@ -2047,6 +2377,10 @@ Controls.ApplicationWindow {
                             topPadding: modelData.groupStart ? 38 : 0
                             leftPadding: 16
                             rightPadding: 16
+                            leftInset: 0
+                            rightInset: 0
+                            topInset: 0
+                            bottomInset: 0
                             highlighted: results.currentIndex === index
                             enabled: true
                             Accessible.name: (modelData.kind === "package" ? (modelData.update === "available" ? "Update available. " : (root.isInstalled(modelData) ? "Installed. " : "Not installed. ")) : "") + modelData.name + ", " + modelData.source + ", " + (modelData.summary || "")
@@ -2079,17 +2413,26 @@ Controls.ApplicationWindow {
                                     }
                                 }
                             }
-                            background: Rectangle {
-                                Behavior on color { ColorAnimation { duration: root.feedbackDuration } }
-                                color: packageRow.highlighted ? root.selection : (packageRow.hovered ? root.canvas : "transparent")
+                            background: Item {
+                                Rectangle { anchors.bottom: parent.bottom; anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 12; anchors.rightMargin: 12; height: 1; color: root.line; opacity: 0.6 }
                                 Rectangle {
                                     anchors.fill: parent
-                                    color: root.accent
-                                    opacity: root.completedRows.indexOf(root.rowIdentity(packageRow.modelData)) >= 0 ? 0.18 : 0
-                                    Behavior on opacity { NumberAnimation { duration: root.motionEnabled ? 240 : 0 } }
+                                    anchors.topMargin: packageRow.topPadding + 2
+                                    anchors.bottomMargin: 2
+                                    anchors.leftMargin: 6
+                                    radius: root.controlRadius
+                                    Behavior on color { ColorAnimation { duration: root.feedbackDuration } }
+                                    color: packageRow.highlighted ? root.selection : (packageRow.hovered ? root.hoverTint : "transparent")
+                                    border.width: 1
+                                    border.color: packageRow.activeFocus || (results.activeFocus && packageRow.highlighted) ? root.accent : "transparent"
+                                    Rectangle {
+                                        anchors.fill: parent
+                                        radius: parent.radius
+                                        color: root.success
+                                        opacity: root.completedRows.indexOf(root.rowIdentity(packageRow.modelData)) >= 0 ? 0.18 : 0
+                                        Behavior on opacity { NumberAnimation { duration: root.motionEnabled ? 240 : 0 } }
+                                    }
                                 }
-                                Rectangle { anchors.fill: parent; color: "transparent"; border.width: 1; border.color: root.accent; visible: packageRow.activeFocus || (results.activeFocus && packageRow.highlighted) }
-                                Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: root.line; opacity: 0.5 }
                             }
                             contentItem: RowLayout {
                                 spacing: 14
@@ -2148,7 +2491,7 @@ Controls.ApplicationWindow {
                                         }
                                         Controls.Label {
                                         objectName: "packageSourceLine"
-                                        text: modelData.source.toUpperCase() + (modelData.remote ? " · " + modelData.remote : "") + ((modelData.source === "flatpak" || root.containerSource(modelData.source)) ? " · " + (modelData.scope === "system" ? "System" : "User") : "")
+                                        text: root.sourceDisplayName(modelData.source) + (modelData.remote ? " · " + modelData.remote : "") + ((modelData.source === "flatpak" || root.containerSource(modelData.source)) ? " · " + (modelData.scope === "system" ? "System" : "User") : "")
                                         color: root.muted
                                         font.pointSize: root.font.pointSize * 0.9
                                         elide: Text.ElideRight
@@ -2161,7 +2504,7 @@ Controls.ApplicationWindow {
                                         text: root.versionText(modelData)
                                         font.family: "monospace"
                                         font.pointSize: root.font.pointSize * 0.9
-                                        color: modelData.kind === "failure" ? "#e87979" : (modelData.update === "available" ? root.accent : root.muted)
+                                        color: modelData.kind === "failure" ? root.danger : (modelData.update === "available" ? root.accent : root.muted)
                                         textFormat: Text.PlainText
                                         elide: Text.ElideRight
                                         Layout.fillWidth: true
@@ -2175,16 +2518,33 @@ Controls.ApplicationWindow {
                                         Layout.fillWidth: true
                                     }
                                 }
-                                Controls.Label {
-                                    objectName: "wideVersion"
+                                ColumnLayout {
                                     visible: !root.compact && (modelData.kind !== "source" || root.showUnavailableSources)
                                     Layout.preferredWidth: root.versionWidth
-                                    text: root.versionText(modelData)
-                                    font.family: "monospace"
-                                    color: modelData.kind === "failure" ? "#e87979" : (modelData.update === "available" ? root.accent : root.muted)
-                                    textFormat: Text.PlainText
-                                    elide: Text.ElideRight
-                                    font.pointSize: root.font.pointSize * 0.9
+                                    Layout.maximumWidth: root.versionWidth
+                                    spacing: 3
+                                    // Updates show the new version, with the installed one below.
+                                    readonly property bool upgrade: modelData.update === "available" && !!modelData.installed && !!modelData.candidate && modelData.installed !== modelData.candidate
+                                    Controls.Label {
+                                        objectName: "wideVersion"
+                                        text: parent.upgrade ? modelData.candidate : root.versionText(modelData)
+                                        font.family: "monospace"
+                                        color: modelData.kind === "failure" ? root.danger : (modelData.update === "available" ? root.accent : root.muted)
+                                        textFormat: Text.PlainText
+                                        elide: Text.ElideMiddle
+                                        font.pointSize: root.font.pointSize * 0.9
+                                        Layout.fillWidth: true
+                                    }
+                                    Controls.Label {
+                                        visible: parent.upgrade
+                                        text: "from " + (modelData.installed || "")
+                                        font.family: "monospace"
+                                        color: root.muted
+                                        textFormat: Text.PlainText
+                                        elide: Text.ElideMiddle
+                                        font.pointSize: root.font.pointSize * 0.8
+                                        Layout.fillWidth: true
+                                    }
                                 }
                                 Controls.Label {
                                     visible: !root.compact && modelData.kind !== "source"
@@ -2223,7 +2583,8 @@ Controls.ApplicationWindow {
                                     enabled: (!backend.busy || backend.writing) && !root.retainingResults
                                     text: ""
                                     symbol: "updates"
-                                    glyphColor: root.accent
+                                    flat: true
+                                    glyphColor: enabled ? root.accent : root.muted
                                     Accessible.name: "Pull " + (modelData.display_name || modelData.name) + " from " + modelData.source
                                     tooltipText: Accessible.name
                                     Layout.preferredWidth: 38
@@ -2237,7 +2598,8 @@ Controls.ApplicationWindow {
                                     enabled: (!backend.busy || backend.writing) && !root.retainingResults
                                     text: ""
                                     symbol: modelData.kind === "cleanup" ? "remove" : (root.currentView === "Updates" || root.updateOnly(modelData.source)) ? "updates" : (root.isInstalled(modelData) ? "remove" : "install")
-                                    glyphColor: (root.currentView === "Updates" || root.updateOnly(modelData.source)) ? root.accent : root.isInstalled(modelData) ? (root.dark ? "#f18b91" : "#b42332") : (root.dark ? "#77d6a0" : "#187442")
+                                    flat: true
+                                    glyphColor: !enabled ? root.muted : (root.currentView === "Updates" || root.updateOnly(modelData.source)) ? root.accent : (modelData.kind === "cleanup" || root.isInstalled(modelData)) ? root.danger : root.success
                                     Accessible.name: (modelData.kind === "cleanup" ? "Run cleanup " : ((root.currentView === "Updates" || root.updateOnly(modelData.source)) ? "Update " : (root.isInstalled(modelData) ? "Remove " : "Install "))) + (modelData.display_name || modelData.name) + " from " + modelData.source
                                     tooltipText: Accessible.name
                                     Layout.preferredWidth: 38
@@ -2247,25 +2609,57 @@ Controls.ApplicationWindow {
                                 }
                             }
                         }
+                        // Placeholder rows while the first results load, so the
+                        // list keeps its shape instead of flashing empty.
+                        Column {
+                            objectName: "loadingPlaceholder"
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            anchors.top: parent.top
+                            anchors.margins: 16
+                            spacing: 22
+                            visible: results.count === 0 && backend.busy && !backend.writing
+                            opacity: 0.55
+                            SequentialAnimation on opacity {
+                                running: results.count === 0 && backend.busy && root.motionEnabled
+                                loops: Animation.Infinite
+                                NumberAnimation { to: 1; duration: 700; easing.type: Easing.InOutSine }
+                                NumberAnimation { to: 0.55; duration: 700; easing.type: Easing.InOutSine }
+                            }
+                            Repeater {
+                                model: Math.max(1, Math.min(8, Math.floor((resultsBox.height - 60) / 58)))
+                                delegate: RowLayout {
+                                    required property int index
+                                    width: parent.width
+                                    spacing: 14
+                                    ColumnLayout {
+                                        spacing: 7
+                                        Layout.preferredWidth: root.compact ? parent.width * 0.6 : root.nameWidth
+                                        Rectangle { radius: 4; color: root.hoverTint; Layout.preferredHeight: 11; Layout.preferredWidth: parent.width * (0.55 + (index * 37 % 40) / 100) }
+                                        Rectangle { radius: 4; color: root.hoverTint; Layout.preferredHeight: 9; Layout.preferredWidth: parent.width * 0.35 }
+                                    }
+                                    Rectangle { visible: !root.compact; radius: 4; color: root.hoverTint; Layout.preferredHeight: 10; Layout.preferredWidth: root.versionWidth * 0.6 }
+                                    Rectangle { visible: !root.compact; radius: 4; color: root.hoverTint; Layout.preferredHeight: 10; Layout.fillWidth: true; Layout.rightMargin: 60 + (index * 53 % 120) }
+                                }
+                            }
+                        }
                         Column {
                             anchors.centerIn: parent
                             width: parent.width - 32
-                            spacing: 8
+                            spacing: 10
                             visible: results.count === 0
                             DeckIcon {
-                                name: "refresh"
-                                ink: root.accent
-                                visible: backend.busy
+                                objectName: "emptyStateIcon"
+                                readonly property string message: root.emptyStateMessage()
+                                name: root.readFailures.length > 0 ? "warning"
+                                    : message === "You're up to date" || message === "Nothing to clean" ? "installed"
+                                    : root.currentView === "Search" ? "search" : "package"
+                                ink: root.readFailures.length > 0 ? root.warning
+                                    : message === "You're up to date" || message === "Nothing to clean" ? root.success : root.muted
+                                visible: !backend.busy && message.length > 0
                                 anchors.horizontalCenter: parent.horizontalCenter
-                                width: 28
-                                height: 28
-                                RotationAnimation on rotation {
-                                    running: backend.busy && root.motionEnabled
-                                    from: 0
-                                    to: 360
-                                    duration: 1200
-                                    loops: Animation.Infinite
-                                }
+                                width: 34
+                                height: 34
                             }
                             Controls.Label {
                                 objectName: "emptyState"
@@ -2432,7 +2826,7 @@ Controls.ApplicationWindow {
         title: "Repositories"
         modal: true
         standardButtons: Controls.Dialog.Close
-        onOpened: backend.loadRepositories()
+        onAboutToShow: backend.loadRepositories()
         onClosed: root.restoreDialogFocus()
         contentItem: ColumnLayout {
             spacing: 12
@@ -2461,21 +2855,22 @@ Controls.ApplicationWindow {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 clip: true
-                spacing: 2
+                spacing: 8
                 model: root.repositoryReport.repositories || []
                 Controls.ScrollBar.vertical: Controls.ScrollBar {}
                 delegate: Rectangle {
                     required property var modelData
                     width: ListView.view.width - 14
-                    height: repositoryCard.implicitHeight + 12
-                    color: root.surface
-                    radius: 6
+                    height: repositoryCard.implicitHeight + 20
+                    color: root.canvas
+                    radius: root.controlRadius + 1
+                    border.color: root.line
                     GridLayout {
                         id: repositoryCard
                         anchors.left: parent.left
                         anchors.right: parent.right
                         anchors.top: parent.top
-                        anchors.margins: 6
+                        anchors.margins: 10
                         columns: repositoriesDialog.width < 620 ? 1 : 2
                         columnSpacing: 12
                         rowSpacing: 4
@@ -2581,30 +2976,30 @@ Controls.ApplicationWindow {
         title: "Add Flatpak repository"
         modal: true
         standardButtons: Controls.Dialog.Ok | Controls.Dialog.Cancel
-        onOpened: {
+        onAboutToShow: {
             repositoryName.text = "";
             repositoryUrl.text = "";
             standardButton(Controls.Dialog.Ok).enabled = Qt.binding(() => addRepositoryDialog.validName && addRepositoryDialog.validUrl);
-            repositoryName.forceActiveFocus();
         }
+        onOpened: repositoryName.forceActiveFocus()
         onClosed: root.restoreDialogFocus()
         onAccepted: root.repositoryChange({backend: "flatpak", name: repositoryName.text.trim(), scope: repositoryScope.currentText === "System" ? "system" : "user"}, "add", {url: repositoryUrl.text.trim()})
         contentItem: ColumnLayout {
-            Controls.TextField { id: repositoryName; objectName: "repositoryName"; placeholderText: "Name"; Accessible.name: "Repository name"; Layout.fillWidth: true }
+            ThemedTextField { id: repositoryName; objectName: "repositoryName"; placeholderText: "Name"; Accessible.name: "Repository name"; Layout.fillWidth: true }
             Controls.Label {
                 objectName: "repositoryNameError"
-                text: "Use letters, numbers, . _ - (no leading -)."
+                text: "Use letters, numbers, dots, dashes, or underscores. Do not start with a dash."
                 visible: repositoryName.text.length > 0 && !addRepositoryDialog.validName
-                color: root.dark ? "#f18b91" : "#b42332"
+                color: root.danger
                 wrapMode: Text.WordWrap
                 Layout.fillWidth: true
             }
-            Controls.TextField { id: repositoryUrl; objectName: "repositoryUrl"; placeholderText: "https://…/repository.flatpakrepo"; Accessible.name: "Repository URL"; Layout.fillWidth: true }
+            ThemedTextField { id: repositoryUrl; objectName: "repositoryUrl"; placeholderText: "https://…/repository.flatpakrepo"; Accessible.name: "Repository URL"; Layout.fillWidth: true }
             Controls.Label {
                 objectName: "repositoryUrlError"
                 text: "Enter an HTTPS .flatpakrepo URL."
                 visible: repositoryUrl.text.length > 0 && !addRepositoryDialog.validUrl
-                color: root.dark ? "#f18b91" : "#b42332"
+                color: root.danger
                 wrapMode: Text.WordWrap
                 Layout.fillWidth: true
             }
@@ -2693,7 +3088,6 @@ Controls.ApplicationWindow {
         title: root.screenshotCaption || "Screenshot"
         standardButtons: Controls.Dialog.Close
         onClosed: { root.screenshotUrl = ""; root.restoreDialogFocus(); }
-        background: Rectangle { color: root.surface; radius: 10; border.color: root.line }
         contentItem: Item {
             Image {
                 id: fullScreenshot
@@ -2724,29 +3118,17 @@ Controls.ApplicationWindow {
         parent: Controls.Overlay.overlay
         anchors.centerIn: parent
         width: Math.min(root.width - 32, 600)
-        height: Math.min(root.height - 32, Math.max(230, confirmationBody.implicitHeight + 130))
-        background: Rectangle { color: root.surface; radius: 12; border.color: root.line }
+        height: Math.min(root.height - 32, Math.max(230, confirmationBody.implicitHeight + 150))
         title: "Confirm changes"
         modal: true
-        enter: Transition {
-            ParallelAnimation {
-                NumberAnimation { property: "opacity"; from: 0; to: 1; duration: root.revealDuration; easing.type: Easing.OutCubic }
-                NumberAnimation { property: "scale"; from: root.motionEnabled ? 0.97 : 1; to: 1; duration: root.revealDuration; easing.type: Easing.OutCubic }
-            }
-        }
-        exit: Transition {
-            NumberAnimation { property: "opacity"; to: 0; duration: root.feedbackDuration; easing.type: Easing.OutCubic }
-        }
         readonly property var preview: JSON.parse(backend.confirmation_data || "{}")
         readonly property string summaryText: preview.summary || preview.body || backend.confirmation
         readonly property var summaryLines: summaryText.split("\n")
         property bool detailsExpanded: false
         standardButtons: Controls.Dialog.NoButton
         onClosed: root.restoreDialogFocus()
-        onOpened: {
-            detailsExpanded = false;
-            confirmationCancel.forceActiveFocus();
-        }
+        onAboutToShow: detailsExpanded = false
+        onOpened: confirmationCancel.forceActiveFocus()
         onAccepted: backend.confirm(true)
         onRejected: backend.confirm(false)
         Shortcut {
@@ -2812,7 +3194,7 @@ Controls.ApplicationWindow {
                     Layout.fillWidth: true
                     implicitHeight: summaryContent.implicitHeight + 28
                     color: root.selection
-                    radius: 8
+                    radius: root.controlRadius + 1
                     ColumnLayout {
                         id: summaryContent
                         anchors.fill: parent
@@ -2842,15 +3224,16 @@ Controls.ApplicationWindow {
                     objectName: "confirmationDetailsButton"
                     visible: !!confirmation.preview.details
                     text: confirmation.detailsExpanded ? "Hide details" : "Show details"
-                    symbol: ""
+                    symbol: confirmation.detailsExpanded ? "up" : "down"
+                    flat: true
                     onClicked: confirmation.detailsExpanded = !confirmation.detailsExpanded
                 }
                 Rectangle {
                     visible: confirmation.detailsExpanded && !!confirmation.preview.details
                     Layout.fillWidth: true
                     implicitHeight: confirmationDetails.implicitHeight + 28
-                    color: root.surface
-                    radius: 8
+                    color: root.canvas
+                    radius: root.controlRadius + 1
                     border.color: root.line
                     Controls.Label {
                         id: confirmationDetails

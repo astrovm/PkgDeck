@@ -13,25 +13,25 @@ use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(version = pkgdeck_core::VERSION, about = "PkgDeck package manager")]
+#[command(version = pkgdeck_core::VERSION, about = "Search, install, update, and clean up packages from every package manager")]
 pub struct Args {
-    /// Emit machine-readable JSON instead of a human-readable table.
+    /// Print machine-readable JSON instead of text.
     #[arg(long, global = true)]
     pub json: bool,
-    /// Restrict operations to the given sources. Repeatable; empty means
-    /// every available source.
+    /// Only use this source. Repeat to pick several; omit to use every
+    /// available source.
     #[arg(long, global = true, value_parser = ["fwupd", "apt", "dnf", "pacman", "zypper", "snap", "homebrew", "homebrew-cask", "appimage", "flatpak", "docker", "podman", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "composer", "gem", "codex", "claude", "grok", "opencode"])]
     pub from: Vec<String>,
-    /// Select the package architecture when a name is ambiguous.
+    /// Pick a package architecture when the same name exists for several.
     #[arg(long, global = true)]
     pub arch: Option<String>,
-    /// Select the package installation (user or system).
+    /// Pick the user or system installation.
     #[arg(long, global = true, value_enum)]
     pub scope: Option<InstallScope>,
-    /// Approve native package and dependency changes without prompting.
+    /// Approve changes without asking.
     #[arg(long, short = 'y', global = true)]
     pub yes: bool,
-    /// Authorize system changes using existing sudo credentials or host polkit.
+    /// How to get permission for system changes: an existing sudo login, or the desktop polkit prompt.
     #[arg(long, global = true, value_enum, default_value = "sudo")]
     pub auth: Auth,
     #[command(subcommand)]
@@ -67,31 +67,31 @@ impl From<Auth> for Authorization {
 }
 #[derive(Subcommand)]
 pub enum Commands {
-    /// List or manage package repositories.
+    /// List or manage repositories.
     Repos {
         #[command(subcommand)]
         command: Option<RepoCommand>,
     },
-    /// Check host readiness and backend availability.
+    /// Check that PkgDeck can find and run your package managers.
     Doctor,
-    /// List package sources with availability and capabilities.
+    /// List package managers, whether they are available, and what they support.
     Sources,
-    /// Search packages by name or description, best matches first.
+    /// Search packages by name or description. Best matches come first.
     Search { query: String },
-    /// Show details for one exact package identifier.
+    /// Show details for one package, by exact name.
     Info { name: String },
-    /// Resolve a command in PATH and show manager-reported ownership without running it.
+    /// Show which file runs for a command and which package installed it. Never runs the command.
     Inspect { command: String },
-    /// Show installed copies and manager-reported residual configuration.
+    /// Find apps installed more than once, and config files left behind by removed packages.
     Audit,
     /// List installed packages.
     List,
-    /// Export installed software or preview a portable inventory.
+    /// Save your installed software to a file, or check a saved list on this machine.
     Inventory {
         #[command(subcommand)]
         command: InventoryCommand,
     },
-    /// Install packages by exact identifier.
+    /// Install packages, by exact name.
     Install {
         #[arg(required = true)]
         names: Vec<String>,
@@ -101,46 +101,46 @@ pub enum Commands {
         #[arg(required = true)]
         names: Vec<String>,
     },
-    /// Refresh source metadata without upgrading packages.
+    /// Refresh package lists. Does not install updates.
     Update,
-    /// Upgrade named packages, or all available updates if no names are supplied.
+    /// Update the named packages, or everything if no names are given.
     Upgrade {
         names: Vec<String>,
-        /// Explicitly approve removals in an APT full upgrade.
+        /// Allow an APT full upgrade to remove packages.
         #[arg(long)]
         allow_removals: bool,
     },
-    /// Find safe manager-native cleanup plans, or run selected plan keys.
+    /// List cleanup tasks, or run the ones you name.
     Clean {
-        /// Cleanup keys shown by `pkd clean` (for example apt:autoremove).
+        /// Task keys shown by `pkd clean`, such as apt:autoremove.
         targets: Vec<String>,
-        /// Run every discovered cleanup plan.
+        /// Run every cleanup task.
         #[arg(long)]
         all: bool,
     },
 }
 #[derive(Subcommand)]
 pub enum InventoryCommand {
-    /// Export selected installed package names, or all when none are given.
+    /// Save the named installed packages, or all of them if no names are given.
     Export { path: PathBuf, names: Vec<String> },
-    /// Preview an inventory against this machine without making changes.
+    /// Check a saved list against this machine. Changes nothing.
     Preview { path: PathBuf },
 }
 #[derive(Subcommand)]
 pub enum RepoCommand {
-    /// List configured repositories and installation scopes.
+    /// List repositories.
     List,
     /// Add a Flatpak repository from an HTTPS .flatpakrepo URL.
     Add { name: String, url: String },
-    /// Remove a Flatpak remote without forcing removal of installed apps.
+    /// Remove a Flatpak repository. Apps installed from it are kept.
     Remove { name: String },
-    /// Enable a Flatpak or firmware remote.
+    /// Enable a Flatpak or firmware repository.
     Enable { name: String },
-    /// Disable a Flatpak or firmware remote.
+    /// Disable a Flatpak or firmware repository.
     Disable { name: String },
-    /// Set Flatpak remote priority (0–9999; higher is preferred).
+    /// Set a Flatpak repository priority (0–9999, higher wins).
     Priority { name: String, priority: i32 },
-    /// Open the native APT Software Sources editor.
+    /// Open the Software Sources editor for APT.
     Edit,
 }
 impl Commands {
@@ -301,7 +301,7 @@ pub fn dispatch(
                     Ok(preview) => {
                         let incomplete = preview.packages.iter().any(|entry| {
                             matches!(entry.status, PreviewStatus::Unavailable)
-                                && entry.reason.contains("query failed")
+                                && entry.reason.contains("could not be checked")
                         });
                         (
                             json!({"manifest_preview":preview}),
@@ -352,7 +352,7 @@ pub fn dispatch(
         }
         Commands::Doctor => {
             return (
-                json!({"error": "doctor is a text-only diagnostic; omit --json"}),
+                json!({"error": "doctor only prints text; run it without --json"}),
                 2,
             )
         }
@@ -497,7 +497,7 @@ pub fn dispatch(
             )
         {
             return (
-                json!({"error": "apt_removals_require_consent", "message": "APT would remove packages; review the plan and pass --allow-removals to approve them.", "plan": plan}),
+                json!({"error": "apt_removals_require_consent", "message": "This upgrade would remove packages. Review the plan, then add --allow-removals to approve.", "plan": plan}),
                 2,
             );
         }
@@ -519,7 +519,10 @@ pub fn dispatch(
         }
     }
     if !operations.is_empty() && !args.yes && !confirm(&operations) {
-        return (json!({"error": "confirmation_declined"}), 7);
+        return (
+            json!({"error": "confirmation_declined", "message": "Cancelled. Nothing was changed."}),
+            7,
+        );
     }
     let history = History::default_store();
     let activity_id = history
@@ -593,7 +596,7 @@ fn repository_command(
         cancel,
         &mut |label| {
             eprintln!("{}", crate::presentation::clean(label));
-            eprint!("Apply repository change? [y/N] ");
+            eprint!("Apply this repository change? [y/N] ");
             let _ = io::stderr().flush();
             let mut answer = String::new();
             io::stdin().read_line(&mut answer).is_ok() && matches!(answer.trim(), "y" | "Y" | "yes")
@@ -622,7 +625,7 @@ fn repository_dispatch(
     }
     let [backend] = args.from.as_slice() else {
         return (
-            json!({"error": "select one repository manager with --from"}),
+            json!({"error": "choose one package manager with --from"}),
             2,
         );
     };
@@ -657,7 +660,10 @@ fn repository_dispatch(
         return failure(error);
     }
     if !args.yes && !confirm(&action.label()) {
-        return (json!({"error": "confirmation_declined"}), 7);
+        return (
+            json!({"error": "confirmation_declined", "message": "Cancelled. Nothing was changed."}),
+            7,
+        );
     }
     match repositories::apply(transport, &action, cancel) {
         Ok(()) => (json!({"message": "Repository operation completed"}), 0),
@@ -671,7 +677,7 @@ pub fn run(args: &Args) -> u8 {
     {
         return emit(
             args,
-            json!({"error":"confirmation_required","message":"package changes require --yes in JSON or non-interactive mode"}),
+            json!({"error":"confirmation_required","message":"add --yes to approve changes in JSON or non-interactive mode"}),
             2,
         );
     }
@@ -719,7 +725,7 @@ pub fn run(args: &Args) -> u8 {
             for operation in operations {
                 eprintln!("{}", crate::presentation::operation(operation));
             }
-            eprint!("Approve these operations and native dependency changes? [y/N] ");
+            eprint!("Apply these changes, including any dependency changes? [y/N] ");
             let _ = io::stderr().flush();
             let mut answer = String::new();
             io::stdin().read_line(&mut answer).is_ok() && matches!(answer.trim(), "y" | "Y" | "yes")

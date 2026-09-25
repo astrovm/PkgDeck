@@ -34,7 +34,7 @@ Rectangle {
     signal screenshotFailed(string url, string identity)
 
     color: surface
-    radius: 10
+    radius: 12
     border.color: line
     ColumnLayout {
         id: detailsContent
@@ -72,8 +72,8 @@ Rectangle {
                 text: panel.selected ? (panel.selected.display_name || panel.selected.name) : ""
                 textFormat: Text.PlainText
                 color: panel.ink
-                font.pointSize: panel.textFont.pointSize * (panel.compact ? 1.3 : 1.6)
-                font.bold: true
+                font.pointSize: panel.textFont.pointSize * (panel.compact ? 1.25 : 1.45)
+                font.weight: Font.DemiBold
                 elide: Text.ElideRight
                 Layout.fillWidth: true
             }
@@ -86,10 +86,11 @@ Rectangle {
                 implicitHeight: 38
                 onClicked: panel.closeRequested()
                 background: Rectangle {
-                    color: parent.hovered ? panel.canvas : panel.surface
-                    radius: 7
-                    border.color: parent.activeFocus ? panel.accent : panel.line
-                    border.width: parent.activeFocus ? 2 : 1
+                    color: parent.hovered ? Qt.rgba(panel.ink.r, panel.ink.g, panel.ink.b, 0.08) : "transparent"
+                    radius: 9
+                    border.color: parent.activeFocus ? panel.accent : "transparent"
+                    border.width: 2
+                    Behavior on color { ColorAnimation { duration: 120 } }
                 }
                 contentItem: DeckIcon { name: "cancel"; ink: panel.ink; width: 18; height: 18 }
             }
@@ -125,7 +126,7 @@ Rectangle {
                         Controls.ToolTip.visible: hovered
                         Controls.ToolTip.text: Accessible.name
                         onClicked: panel.screenshotRequested(modelData.url, modelData.caption || "")
-                        background: Rectangle { color: panel.canvas; radius: 6; border.color: parent.activeFocus ? panel.accent : panel.line }
+                        background: Rectangle { color: panel.canvas; radius: 9; border.color: parent.activeFocus ? panel.accent : panel.line }
                         contentItem: Item {
                             Image {
                                 id: preview

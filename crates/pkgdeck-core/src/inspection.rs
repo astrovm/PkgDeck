@@ -111,7 +111,7 @@ pub fn inspect_with(
         resolved: None,
         candidates: Vec::new(),
         ownership_note:
-            "Ownership comes only from native package databases; unreported paths remain unknown."
+            "Owners come from package manager databases. Files no package manager claims are shown as unknown."
                 .into(),
     };
     for directory in std::env::split_paths(&path).take(256) {
@@ -408,7 +408,7 @@ pub fn audit(installed: &[Package], leftovers: Vec<LeftoverData>) -> AuditReport
         })
         .collect();
     AuditReport { groups, installed_copies: copies, leftovers,
-        data_note: "Only manager-reported residual files are listed. Other application data is unknown and has not been scanned.".into() }
+        data_note: "Only leftover files recorded by the package manager are listed. Other app data is not scanned.".into() }
 }
 
 /// Parse only dpkg's explicit residual-config state and Conffiles ownership.
