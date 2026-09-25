@@ -1,9 +1,9 @@
 class Pkgdeck < Formula
   desc "Browse and manage packages across native package managers"
   homepage "https://github.com/astrovm/PkgDeck"
-  url "https://github.com/astrovm/PkgDeck/archive/refs/tags/v0.1.5.tar.gz"
-  version "0.1.5"
-  sha256 "e7769bba09843a1b5708e37aad5728367b6fb48170ef6c00b585a67713872fa1"
+  url "https://github.com/astrovm/PkgDeck/archive/refs/tags/v0.1.6.tar.gz"
+  version "0.1.6"
+  sha256 "a1ef651423facd5cd9f5fa6f599a067745615131830d738110ddae51d302145a"
   license "MIT"
   head "https://github.com/astrovm/PkgDeck.git", branch: "main"
 
