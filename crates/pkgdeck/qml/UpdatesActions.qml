@@ -12,14 +12,14 @@ Flow {
     property bool writing: false
     property int selectedCount: 0
     property int uncheckedCount: 0
-    property color surface
-    property color ink
-    property color muted
-    property color line
-    property color accent
-    property color onAccent
-    property color selection
-    property font textFont
+    property color surface: Theme.surface
+    property color ink: Theme.ink
+    property color muted: Theme.muted
+    property color line: Theme.line
+    property color accent: Theme.accent
+    property color onAccent: Theme.accentInk
+    property color selection: Theme.selection
+    property font textFont: Theme.baseFont
     signal upgradeRequested()
     signal selectNoneRequested()
     signal selectAllRequested()
@@ -39,18 +39,20 @@ Flow {
         Controls.ToolTip.delay: 500
         Controls.ToolTip.text: Accessible.name
         implicitWidth: contentItem.implicitWidth + leftPadding + rightPadding
-        implicitHeight: Math.max(36, Math.round(actions.textFont.pointSize * 2.9))
+        implicitHeight: Theme.controlHeight
         horizontalPadding: 14
-        scale: down ? 0.97 : 1
-        Behavior on scale { NumberAnimation { duration: 120; easing.type: Easing.OutCubic } }
+        scale: down && Theme.motionEnabled ? 0.97 : 1
+        Behavior on scale { NumberAnimation { duration: Theme.feedbackDuration; easing.type: Easing.OutCubic } }
         background: Rectangle {
-            radius: 9
+            radius: Theme.controlRadius
             color: button.primary
                 ? (!button.enabled ? actions.surface : button.down ? Qt.darker(actions.accent, 1.08) : button.hovered ? Qt.lighter(actions.accent, 1.08) : actions.accent)
-                : (button.hovered ? actions.selection : actions.surface)
-            border.color: button.activeFocus ? actions.accent : (button.primary && button.enabled ? "transparent" : actions.line)
-            border.width: button.activeFocus ? 2 : 1
-            Behavior on color { ColorAnimation { duration: 120 } }
+                : (button.down ? Theme.tint(actions.accent, 0.24) : button.hovered ? actions.selection : actions.surface)
+            // The ring marks keyboard focus only; a click leaves none.
+            border.color: button.visualFocus ? (button.primary ? actions.ink : actions.accent)
+                : (button.primary && button.enabled ? "transparent" : actions.line)
+            border.width: button.visualFocus ? 2 : 1
+            Behavior on color { ColorAnimation { duration: Theme.feedbackDuration } }
         }
         contentItem: RowLayout {
             spacing: 9

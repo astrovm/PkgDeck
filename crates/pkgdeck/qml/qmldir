@@ -11,6 +11,7 @@ DeckScrollBar 1.0 DeckScrollBar.qml
 DeckScrollView 1.0 DeckScrollView.qml
 Main 1.0 Main.qml
 PackageDetails 1.0 PackageDetails.qml
+RowProgress 1.0 RowProgress.qml
 SearchPane 1.0 SearchPane.qml
 SettingCheckBox 1.0 SettingCheckBox.qml
 SettingsCard 1.0 SettingsCard.qml
@@ -19,4 +20,5 @@ ThemedComboBox 1.0 ThemedComboBox.qml
 ThemedDialog 1.0 ThemedDialog.qml
 ThemedTextField 1.0 ThemedTextField.qml
 TickBox 1.0 TickBox.qml
+Toast 1.0 Toast.qml
 UpdatesActions 1.0 UpdatesActions.qml
