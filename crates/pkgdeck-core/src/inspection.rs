@@ -111,7 +111,7 @@ pub fn inspect_with(
         resolved: None,
         candidates: Vec::new(),
         ownership_note:
-            "Owners come from package manager databases. Files no package manager claims are shown as unknown."
+            "Owners come from package manager databases. PkgDeck never guesses an owner for a file none of them claim."
                 .into(),
     };
     for directory in std::env::split_paths(&path).take(256) {
