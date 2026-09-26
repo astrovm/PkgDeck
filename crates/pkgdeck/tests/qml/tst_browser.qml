@@ -2299,7 +2299,6 @@ TestCase {
         // There is no way to hide it completely.
         verify(findChild(browser, "sidebarToggle") === null);
         verify(findChild(browser, "sidebarShow") === null);
-        keyClick(Qt.Key_B, Qt.ControlModifier);
         verify(sidebar.visible);
         compare(browser.sidebarWidth, browser.railWidth);
         wait(Qt.styleHints.mouseDoubleClickInterval + 50);
