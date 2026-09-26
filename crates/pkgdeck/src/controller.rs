@@ -3581,6 +3581,18 @@ impl ffi::PackageController {
                                     self.rust().sudo,
                                 ))
                             }
+                            // Update all retried failed sources; the merged
+                            // report is the current Updates section.
+                            Job::RetryFailedUpdates(_)
+                                if !matches!(self.rust().queued, Some(Job::Load(..))) =>
+                            {
+                                Some(cache_key(
+                                    "Updates",
+                                    "",
+                                    &self.rust().source_filter.clone(),
+                                    self.rust().sudo,
+                                ))
+                            }
                             _ => None,
                         };
                         let stashable = matches!(
@@ -3589,6 +3601,7 @@ impl ffi::PackageController {
                                 | Ok(Payload::Sources(_))
                                 | Ok(Payload::Cleanup(_))
                                 | Ok(Payload::RetryPackages(..))
+                                | Ok(Payload::RetryFailedUpdates(..))
                                 | Ok(Payload::RetryCleanup(..))
                                 | Ok(Payload::RetrySources(..))
                         );
@@ -4706,6 +4719,50 @@ mod tests {
             .as_mut()
             .load("Search".into(), "query".into(), "".into(), false, false);
         assert!(!controller.rust().hold_partials);
+    }
+
+    #[test]
+    fn update_all_retry_replaces_the_saved_updates_section() {
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        let key = cache_key("Updates", "", &[], false);
+        controller
+            .as_mut()
+            .rust_mut()
+            .view_cache
+            .insert(key.clone(), cached_view("before retry"));
+        controller.as_mut().rust_mut().view_cache.expire();
+        let package: Package = serde_json::from_value(json!({
+            "id": {"backend":"apt", "name":"retried-tool", "architecture":"all", "scope":"system"},
+            "display_name":"retried-tool", "summary":"Retried package", "installed_version":"1", "candidate_version":"2", "update":"available"
+        }))
+        .unwrap();
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(Reply::Done(Ok(Payload::RetryFailedUpdates(
+                vec!["apt".into()],
+                PackageReport {
+                    packages: vec![package],
+                    failures: vec![],
+                    successful_sources: vec!["apt".into()],
+                },
+            ))))
+            .unwrap();
+        let handle = thread::spawn(|| {});
+        while !handle.is_finished() {
+            thread::yield_now();
+        }
+        controller.as_mut().rust_mut().worker = Some(Worker {
+            handle,
+            receiver,
+            cancel: Cancellation::default(),
+            job: Job::RetryFailedUpdates(vec!["apt".into()]),
+        });
+        controller.as_mut().poll();
+        let saved = controller.rust().view_cache.get(&key).unwrap();
+        assert!(!saved.stale());
+        assert!(saved.rows.to_string().contains("retried-tool"));
+        assert!(!saved.rows.to_string().contains("before retry"));
     }
 
     #[test]
