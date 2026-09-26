@@ -9348,6 +9348,19 @@ mod tests {
         assert_eq!(refresh["source_name"], "Snap");
         assert!(refresh.get("target").is_none());
         assert_eq!(job_backend(&[]), None);
+        assert_eq!(
+            operation_kind(&Operation::UpgradeAll {
+                backend: "apt".into()
+            }),
+            "update_all"
+        );
+        assert_eq!(
+            operation_kind(&Operation::Clean(CleanupId {
+                backend: "apt".into(),
+                key: "autoremove".into()
+            })),
+            "clean"
+        );
     }
     #[test]
     fn confirmed_changes_remember_display_names_for_their_results() {
@@ -9355,6 +9368,15 @@ mod tests {
         let mut controller = controller.pin_mut();
         let package = synthetic_package("htop", "Process Viewer");
         controller.as_mut().rust_mut().packages = vec![package.clone()];
+        // The remembered names stay bounded.
+        for index in 0..300 {
+            let id = synthetic_package(&format!("old-{index}"), "Old").id;
+            controller
+                .as_mut()
+                .rust_mut()
+                .names
+                .insert(id, "Old".into());
+        }
         // A busy worker keeps the confirmed change queued.
         controller.as_mut().rust_mut().worker =
             Some(fake_worker(Job::Load("Sources".into(), "".into()), vec![]));
@@ -9362,6 +9384,7 @@ mod tests {
             .as_mut()
             .accept_confirmed(Job::Write(Operation::Remove(package.id.clone()), None));
         controller.as_mut().rust_mut().packages.clear();
+        assert_eq!(controller.rust().names.len(), 1);
         assert_eq!(
             controller.rust().names.get(&package.id).map(String::as_str),
             Some("Process Viewer")
