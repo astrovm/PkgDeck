@@ -14,6 +14,7 @@ PackageDetails 1.0 PackageDetails.qml
 SearchPane 1.0 SearchPane.qml
 SettingCheckBox 1.0 SettingCheckBox.qml
 SettingsCard 1.0 SettingsCard.qml
+SettingsPage 1.0 SettingsPage.qml
 ThemedComboBox 1.0 ThemedComboBox.qml
 ThemedDialog 1.0 ThemedDialog.qml
 ThemedTextField 1.0 ThemedTextField.qml

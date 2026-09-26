@@ -48,7 +48,7 @@ QtObject {
     readonly property int spacing: 10
     readonly property int spacingLarge: 16
     readonly property int gutter: 16
-    readonly property int scrollGutter: 14
+    readonly property int scrollGutter: 16
     readonly property int controlHeight: Math.max(36, Math.round(baseFont.pointSize * 2.9))
 
     // Type scale, as multipliers of the base point size.

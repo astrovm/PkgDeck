@@ -77,6 +77,8 @@ Controls.ApplicationWindow {
         }
     }
     SystemPalette { id: systemPalette }
+    // Stored preferences, for pages in their own files.
+    readonly property var store: preferences
     SystemPalette { id: disabledPalette; colorGroup: SystemPalette.Disabled }
     required property var backend
     readonly property var actionProgress: JSON.parse(backend.progress || "{}")
@@ -250,8 +252,12 @@ Controls.ApplicationWindow {
         const failures = reportState.failures && reportState.failures.length ? reportState.failures :
             items.filter((row) => row.kind === "failure" && row.failure_kind !== "unsupported")
                 .map((row) => ({source: row.source, kind: row.failure_kind || "failed"}));
-        return failures.filter((failure) => effectiveSources().indexOf(failure.source) >= 0);
+        // A stopped load is not a failure: see loadStopped.
+        return failures.filter((failure) => failure.kind !== "cancelled" && effectiveSources().indexOf(failure.source) >= 0);
     }
+    // The last load was cancelled (the Cancel button, or a new page).
+    readonly property bool loadStopped: currentView === resultView && !backend.busy
+        && (reportState.failures || []).some((failure) => failure.kind === "cancelled")
     function sourceFailureTitle() {
         return readFailures.length === 1
             ? "Couldn't check " + sourceDisplayName(readFailures[0].source)
@@ -294,6 +300,8 @@ Controls.ApplicationWindow {
             return "";
         if (readFailures.length > 0)
             return sourceFailureTitle();
+        if (loadStopped && items.length === 0)
+            return currentView === "Search" ? "Search stopped" : "Loading stopped";
         if (reportState.phase === "unsupported")
             return "None of your enabled sources support this page.";
         if (currentView === "Search" && queryDirty)
@@ -545,8 +553,10 @@ Controls.ApplicationWindow {
     function upgradeUpdates() {
         if (uncheckedPackages.length === 0)
             root.propose("upgrade-all");
-        else
+        else {
+            markActiveRows(checkedIdentities());
             backend.proposeChecked(JSON.stringify(checkedIdentities().map((id) => JSON.parse(id))));
+        }
     }
     // Column widths (drag the header gutter) and the active sort. Sorting
     // is QML-side over a copied array: the backend keeps its own order,
@@ -694,6 +704,112 @@ Controls.ApplicationWindow {
         }
         return root.currentView === "Installed" ? groupInstalledRows(rows) : rows;
     }
+    // The list shows viewItems through resultsModel, updated in place by
+    // row identity: rows that stay keep their delegates (and scroll
+    // position), and inserts, removals and moves can animate.
+    ListModel { id: resultsModel }
+    property var modelKeys: []
+    property var modelJson: []
+    // Few changes animate; bulk loads replace the rows at once.
+    property bool animateListChanges: false
+    function rowKeys(rows) {
+        const seen = new Map();
+        return rows.map((row) => {
+            const base = row.kind + "|" + rowIdentity(row);
+            const count = seen.get(base) || 0;
+            seen.set(base, count + 1);
+            return count ? base + "#" + count : base;
+        });
+    }
+    function syncResults() {
+        const rows = viewItems;
+        const keys = rowKeys(rows);
+        const json = rows.map((row) => JSON.stringify(row));
+        const wanted = new Set(keys);
+        const kept = modelKeys.filter((key) => wanted.has(key)).length;
+        // Mostly new rows (another page, a new search): replace them all.
+        if (modelKeys.length === 0 || kept < Math.min(modelKeys.length, keys.length) / 2) {
+            animateListChanges = false;
+            resultsModel.clear();
+            resultsModel.append(json.map((text) => ({rowJson: text})));
+            modelKeys = keys;
+            modelJson = json;
+            results.forceLayout();
+            return;
+        }
+        const currentKeys = modelKeys.slice();
+        const currentJson = modelJson.slice();
+        animateListChanges = Math.abs(currentKeys.length - keys.length) + (currentKeys.length - kept) < 12;
+        for (let i = currentKeys.length - 1; i >= 0; i--) {
+            if (!wanted.has(currentKeys[i])) {
+                resultsModel.remove(i);
+                currentKeys.splice(i, 1);
+                currentJson.splice(i, 1);
+            }
+        }
+        let moves = 0;
+        for (let i = 0; i < keys.length; i++) {
+            if (currentKeys[i] !== keys[i]) {
+                const from = currentKeys.indexOf(keys[i], i + 1);
+                if (from >= 0) {
+                    // A re-sort moves many rows: replace them all instead.
+                    if (++moves > 48) {
+                        animateListChanges = false;
+                        resultsModel.clear();
+                        resultsModel.append(json.map((text) => ({rowJson: text})));
+                        modelKeys = keys;
+                        modelJson = json;
+                        results.forceLayout();
+                        return;
+                    }
+                    resultsModel.move(from, i, 1);
+                    currentKeys.splice(i, 0, currentKeys.splice(from, 1)[0]);
+                    currentJson.splice(i, 0, currentJson.splice(from, 1)[0]);
+                } else {
+                    resultsModel.insert(i, {rowJson: json[i]});
+                    currentKeys.splice(i, 0, keys[i]);
+                    currentJson.splice(i, 0, json[i]);
+                    continue;
+                }
+            }
+            if (currentJson[i] !== json[i]) {
+                resultsModel.setProperty(i, "rowJson", json[i]);
+                currentJson[i] = json[i];
+            }
+        }
+        modelKeys = keys;
+        modelJson = json;
+        results.forceLayout();
+    }
+    // Rows the change being confirmed or run applies to, by identity.
+    property var activeRows: []
+    function markActiveRows(identities) {
+        activeRows = identities;
+    }
+    Connections {
+        target: backend
+        function onWritingChanged() {
+            if (!backend.writing)
+                root.activeRows = [];
+        }
+    }
+    // Share of the running change that is done, or -1 when unknown.
+    function actionFraction() {
+        const p = actionProgress;
+        if ((p.transfer_total || 0) > 0)
+            return Math.min(1, (p.transferred || 0) / p.transfer_total);
+        if ((p.total || 0) > 1)
+            return Math.min(1, (p.done || 0) / p.total);
+        return -1;
+    }
+    // Rows show a focus ring only while the keyboard moves through them.
+    property bool keyboardNavigation: false
+    readonly property int groupHeaderHeight: 38
+    readonly property int iconSlotSize: compact ? 40 : 32
+    function rowHeight(row) {
+        return (compact ? (row.kind === "source" ? Math.max(68, font.pointSize * 5.5) : Math.max(94, font.pointSize * 8.5))
+            : Math.max(56, font.pointSize * 5)) + (row.groupStart ? groupHeaderHeight : 0);
+    }
     // The visible index addresses viewItems; the backend addresses items.
     // Filtering, relevance ranking, and column sorts all reorder or narrow
     // the rows, so always resolve through the row identity. Duplicate rows
@@ -721,13 +837,17 @@ Controls.ApplicationWindow {
     // Widening the sidebar stops where the page would switch to its compact
     // layout, so dragging never shifts the page. The limit shrinks with the
     // window down to the minimum width and never jumps back up.
-    readonly property int sidebarMaximumWidth: Math.max(sidebarMinimumWidth, Math.min(360, width - compactWidth))
+    readonly property int sidebarMaximumWidth: Math.max(sidebarMinimumWidth, Math.min(360, width - mediumWidth))
     readonly property bool sidebarRail: width < 820 || preferences.sidebarWidth < railThreshold
     readonly property int sidebarWidth: sidebarRail ? railWidth
         : Math.max(sidebarMinimumWidth, Math.min(sidebarMaximumWidth, preferences.sidebarWidth))
     // Layout follows the space the page has, not the window.
     readonly property real pageWidth: width - sidebarWidth
-    readonly property int compactWidth: 748
+    // Three layout steps: a full table, a table without the summary
+    // column below mediumWidth, and stacked cards below compactWidth.
+    readonly property int mediumWidth: 748
+    readonly property int compactWidth: 560
+    readonly property bool medium: !compact && pageWidth < mediumWidth
     // Fixed while the full sidebar shows, so resizing the window does not
     // shift the page; only windows narrow enough for the icon rail use less.
     readonly property int pageMargin: width < 820 ? 12 : 28
@@ -735,11 +855,12 @@ Controls.ApplicationWindow {
     // Header actions keep only their icons when the page is this narrow.
     readonly property bool headerIconsOnly: pageWidth < 600
     readonly property int shortListLimit: compact ? 3 : 8
+    // Height of the list card's heading and column headers.
+    function listChromeHeight() {
+        return resultsHeadingRow.implicitHeight + 28 + 1 + (compact ? 0 : columnHeaderRow.implicitHeight + 20) + 8;
+    }
     function shortResultsHeight() {
-        const rowHeight = (row) => (compact
-            ? (row.kind === "source" ? Math.max(68, font.pointSize * 5.5) : Math.max(94, font.pointSize * 8.5))
-            : Math.max(56, font.pointSize * 5)) + (row.groupStart ? 38 : 0);
-        return Math.max(130, (compact ? 60 : 85) + viewItems.reduce((height, row) => height + rowHeight(row), 0));
+        return Math.max(130, listChromeHeight() + viewItems.reduce((height, row) => height + rowHeight(row), 0));
     }
     // With details open the list keeps this many rows; details scroll instead.
     // Height left for the results and details together: the page minus
@@ -750,18 +871,17 @@ Controls.ApplicationWindow {
         let used = 0;
         let shown = 0;
         for (const child of pageContent.children) {
-            if (!child.visible || child === resultsBox || child === detailsPanel)
+            // The filler takes no height of its own; its visibility follows
+            // this budget, so it always counts as one gap (below).
+            if (!child.visible || child === resultsBox || child === detailsPanel || child.objectName === "pageFiller")
                 continue;
-            // A visible filler takes no height of its own, but the layout
-            // still puts a gap before it.
-            if (child.objectName !== "pageFiller")
-                used += child.height;
+            used += child.height;
             shown++;
         }
         // The window's space, not pageContent.height: the page grows past the
         // window to fit its children's minimums, which would feed back here.
         const page = root.contentItem.height - 2 * pageContent.Layout.margins;
-        return Math.max(0, page - used - pageContent.spacing * (shown + 1));
+        return Math.max(0, page - used - pageContent.spacing * (shown + 2));
     }
     function detailsMinimumHeight() {
         return Math.min(120, detailsPanel.idealHeight, detailsBudget() * 0.4);
@@ -771,7 +891,7 @@ Controls.ApplicationWindow {
         const rowHeight = compact ? Math.max(94, font.pointSize * 8.5) : Math.max(56, font.pointSize * 5);
         const budget = detailsBudget();
         // Compact pages leave most of the space to the details' gallery.
-        return Math.min(shortResultsHeight(), (compact ? 60 : 85) + rows * rowHeight,
+        return Math.min(shortResultsHeight(), listChromeHeight() + rows * rowHeight,
             budget * (compact ? 0.3 : 0.55), budget - detailsMinimumHeight());
     }
     // Tokens live in the Theme singleton; these aliases keep bindings short.
@@ -934,6 +1054,30 @@ Controls.ApplicationWindow {
         if (!backend.busy)
             retainingResults = false;
     }
+    readonly property var listViews: ["Search", "Installed", "Updates", "Clean", "Sources"]
+    // The action a row's button runs: "install", "remove", "upgrade",
+    // "clean", or "" when the row has none.
+    function rowActionName(row) {
+        if (!row)
+            return "";
+        if (row.kind === "cleanup")
+            return "clean";
+        if (row.kind !== "package")
+            return "";
+        if (updateOnly(row.source))
+            return row.update === "available" ? "upgrade" : "";
+        if (currentView === "Updates")
+            return "upgrade";
+        return isInstalled(row) ? "remove" : "install";
+    }
+    function runRowAction(index) {
+        const row = viewItems[index];
+        const action = rowActionName(row);
+        if (!action || retainingResults || (backend.busy && !backend.writing))
+            return;
+        markActiveRows([rowIdentity(row)]);
+        backend.propose(action, originalIndex(index));
+    }
     function choose(index) {
         if (retainingResults || index < 0 || index >= viewItems.length)
             return;
@@ -958,9 +1102,16 @@ Controls.ApplicationWindow {
         if (currentView !== "Search" || !items.some((row) => rowIdentity(row) === selectedIdentity))
             selectedIdentity = null;
     }
-    onViewItemsChanged: Qt.callLater(() => root.restoreSelection())
+    onViewItemsChanged: {
+        syncResults();
+        Qt.callLater(() => root.restoreSelection());
+    }
     function propose(action) {
         if (!retainingResults) {
+            if (action === "upgrade-all")
+                markActiveRows(packageIdentities());
+            else if (selected)
+                markActiveRows([rowIdentity(selected)]);
             backend.propose(action, originalIndex(results.currentIndex));
         }
     }
@@ -1719,232 +1870,14 @@ Controls.ApplicationWindow {
                     }
                 }
             }
-            DeckScrollView {
-                ink: root.muted
+            SettingsPage {
                 id: settingsScroll
-                objectName: "settingsScroll"
+                app: root
                 visible: root.currentView === "Settings"
                 Layout.fillWidth: true
+                // The scrollbar sits beside the cards, not at the window edge.
+                Layout.maximumWidth: cardWidth + 24
                 Layout.fillHeight: true
-                contentWidth: availableWidth
-                clip: true
-                ColumnLayout {
-                    width: settingsScroll.availableWidth
-                    spacing: 14
-                    SettingsCard {
-                        title: "Appearance"
-                        RowLayout {
-                            Layout.fillWidth: true
-                            spacing: 12
-                            Controls.Label { text: "Theme"; color: root.ink; Layout.fillWidth: true }
-                            ThemedComboBox {
-                                objectName: "appearanceSetting"
-                                model: ["System", "Dark", "Light"]
-                                currentIndex: preferences.appearance
-                                onActivated: preferences.appearance = currentIndex
-                                Accessible.name: "Appearance"
-                                Layout.preferredWidth: 220
-                            }
-                        }
-                        SettingCheckBox {
-                            objectName: "animationsSetting"
-                            text: "Animations"
-                            checked: !root.reduceMotion
-                            onToggled: root.reduceMotion = !checked
-                            Accessible.name: "Enable interface animations"
-                        }
-                    }
-                    SettingsCard {
-                        title: "Update checks"
-                        SettingCheckBox {
-                            objectName: "backgroundModeSetting"
-                            text: "Background checks"
-                            checked: preferences.backgroundMode
-                            onClicked: {
-                                if (!checked && preferences.autostart && !backend.setAutostart(false)) {
-                                    checked = true;
-                                    return;
-                                }
-                                preferences.backgroundMode = checked;
-                                if (!checked)
-                                    preferences.autostart = false;
-                            }
-                            Accessible.name: text
-                        }
-                        SettingCheckBox {
-                            objectName: "autostartSetting"
-                            text: "Start in background at login"
-                            visible: root.desktopAutostartSupported
-                            checked: preferences.autostart
-                            enabled: preferences.backgroundMode && root.trayAvailable
-                            onClicked: {
-                                if (backend.setAutostart(checked))
-                                    preferences.autostart = checked;
-                                else
-                                    checked = preferences.autostart;
-                            }
-                            Accessible.name: text
-                        }
-                        Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: root.line }
-                        RowLayout {
-                            Layout.fillWidth: true
-                            spacing: 12
-                            ColumnLayout {
-                                Layout.fillWidth: true
-                                spacing: 3
-                                Controls.Label {
-                                    objectName: "backgroundCheckStatus"
-                                    text: root.backgroundState.last_check
-                                        ? "Last check: " + new Date(root.backgroundState.last_check * 1000).toLocaleString(Qt.locale(), Locale.ShortFormat)
-                                            + ", " + (root.backgroundState.available || 0) + " updates found"
-                                        : "Last check: never"
-                                    color: root.muted
-                                    wrapMode: Text.WordWrap
-                                    Layout.fillWidth: true
-                                }
-                                Controls.Label {
-                                    objectName: "notificationAvailability"
-                                    text: !root.trayAvailable ? "Notifications unavailable: no system tray found"
-                                        : !root.notificationAvailable ? "This system tray does not support notifications"
-                                        : "Notifications available"
-                                    color: root.muted
-                                    wrapMode: Text.WordWrap
-                                    Layout.fillWidth: true
-                                }
-                            }
-                            ActionButton {
-                                objectName: "testNotificationButton"
-                                text: "Test notification"
-                                symbol: "bell"
-                                enabled: preferences.backgroundMode && root.notificationAvailable
-                                onClicked: root.testNotificationRequested()
-                                Layout.alignment: Qt.AlignVCenter
-                            }
-                        }
-                    }
-                    SettingsCard {
-                        title: "Authentication"
-                        visible: root.systemAuthorizationSupported
-                        RowLayout {
-                            Layout.fillWidth: true
-                            spacing: 12
-                            Controls.Label {
-                                text: "Ask for permission with"
-                                color: root.ink
-                                wrapMode: Text.WordWrap
-                                Layout.fillWidth: true
-                            }
-                            ThemedComboBox {
-                                objectName: "authorizationSetting"
-                                model: ["System prompt", "Existing sudo session"]
-                                currentIndex: root.useSudo ? 1 : 0
-                                onActivated: {
-                                    root.useSudo = currentIndex === 1;
-                                    preferences.authorization = root.useSudo ? "sudo" : "polkit";
-                                }
-                                Accessible.name: "Authentication"
-                                Layout.preferredWidth: 220
-                            }
-                        }
-                    }
-                    SettingsCard {
-                        title: "About"
-                        RowLayout {
-                            Layout.fillWidth: true
-                            spacing: 12
-                            Image {
-                                source: root.logoIconSource
-                                sourceSize.width: 36
-                                sourceSize.height: 36
-                                Accessible.ignored: true
-                            }
-                            ColumnLayout {
-                                Layout.fillWidth: true
-                                spacing: 2
-                                Controls.Label {
-                                    objectName: "aboutText"
-                                    text: "PkgDeck " + backend.version
-                                    color: root.ink
-                                    font.weight: Font.DemiBold
-                                    font.pointSize: root.font.pointSize * 1.15
-                                    Layout.fillWidth: true
-                                }
-                                RowLayout {
-                                    objectName: "compactSignature"
-                                    visible: root.sidebarRail
-                                    spacing: 4
-                                    Controls.Label { text: "Made with"; color: root.muted }
-                                    DeckIcon { name: "heart"; ink: "#e34b5f"; Layout.preferredWidth: 13; Layout.preferredHeight: 13 }
-                                    Controls.Label { text: "by astro"; color: root.muted }
-                                }
-                            }
-                            ActionButton {
-                                objectName: "repositoryLink"
-                                text: "GitHub"
-                                symbol: ""
-                                iconSource: root.repositoryIconSource
-                                Accessible.name: "Open PkgDeck on GitHub"
-                                onClicked: Qt.openUrlExternally(root.repositoryUrl)
-                            }
-                        }
-                    }
-                    SettingsCard {
-                        title: "Keyboard shortcuts"
-                        GridLayout {
-                            columns: root.compact ? 1 : 2
-                            columnSpacing: 28
-                            rowSpacing: 6
-                            Layout.fillWidth: true
-                            Repeater {
-                                objectName: "aboutShortcuts"
-                                model: [
-                                {action: "Search", keys: "Ctrl+1"},
-                                {action: "Installed", keys: "Ctrl+2"},
-                                {action: "Updates", keys: "Ctrl+3"},
-                                {action: "Clean", keys: "Ctrl+4"},
-                                {action: "Sources", keys: "Ctrl+5"},
-                                {action: "Search or filter", keys: "Ctrl+F"},
-                                {action: "Focus results", keys: "Ctrl+L"},
-                                {action: "Select result", keys: "↑ / ↓"},
-                                {action: "Install", keys: "Ctrl+I"},
-                                {action: "Remove", keys: "Ctrl+D"},
-                                {action: "Update", keys: "Ctrl+U"},
-                                {action: "Update selected", keys: "Ctrl+Shift+U"},
-                                {action: "Refresh source", keys: "Ctrl+M"},
-                                {action: "Reload", keys: "Ctrl+R"},
-                                {action: "Cancel work", keys: "Esc"}
-                                ]
-                                delegate: RowLayout {
-                                    required property var modelData
-                                    Layout.fillWidth: true
-                                    Layout.minimumWidth: root.compact ? 0 : 240
-                                    spacing: 12
-                                    Controls.Label {
-                                        text: modelData.action
-                                        color: root.muted
-                                        Layout.fillWidth: true
-                                    }
-                                    Controls.Label {
-                                        text: modelData.keys
-                                        color: root.ink
-                                        font.family: "monospace"
-                                        font.pointSize: root.font.pointSize * 0.88
-                                        leftPadding: 7
-                                        rightPadding: 7
-                                        topPadding: 2
-                                        bottomPadding: 2
-                                        background: Rectangle {
-                                            radius: 5
-                                            color: root.canvas
-                                            border.color: root.line
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Item { Layout.preferredHeight: 4 }
-                }
             }
             // The outcome of the last change. Failures stay until dismissed;
             // success fades on its own.
@@ -2083,11 +2016,16 @@ Controls.ApplicationWindow {
                 id: resultsBox
                 objectName: "resultsBox"
                 Layout.fillWidth: true
-                Layout.fillHeight: (backend.busy && !root.openingInput) || root.viewItems.length > root.shortListLimit
+                // Lists take their content's height up to the space the page
+                // has, then scroll. The first load fills the page for its
+                // placeholder rows; a running change never resizes the list.
+                readonly property bool loadingEmpty: backend.busy && !backend.writing && !root.openingInput && root.viewItems.length === 0
+                readonly property bool overflowing: root.shortResultsHeight() > root.detailsBudget()
+                Layout.fillHeight: loadingEmpty || overflowing
                 Layout.preferredHeight: root.viewItems.length === 0 && !backend.busy ? 150
                     : detailsPanel.visible ? Math.min(root.shortResultsHeight(), root.height * (root.compact ? 0.24 : 0.42),
                         root.detailsBudget() - detailsPanel.Layout.preferredHeight)
-                    : Math.min(root.shortResultsHeight(), root.height * 0.7)
+                    : Math.min(root.shortResultsHeight(), root.detailsBudget())
                 Layout.minimumHeight: detailsPanel.visible ? root.detailsListHeight() : 130
                 visible: root.currentView === root.resultView && root.currentView !== "Settings" && root.currentView !== "Activity" &&
                     (root.currentView !== "Search" || root.viewItems.length > 0 || root.readFailures.length > 0 ||
@@ -2101,6 +2039,7 @@ Controls.ApplicationWindow {
                     anchors.margins: 1
                     spacing: 0
                     RowLayout {
+                        id: resultsHeadingRow
                         visible: results.count > 0 || backend.busy || backend.writing || (root.currentView === "Sources" && root.items.some(row => row.kind === "source" && !row.available))
                         Layout.fillWidth: true
                         Layout.margins: 14
@@ -2115,7 +2054,7 @@ Controls.ApplicationWindow {
                         DeckIcon {
                             id: resultsSpinner
                             objectName: "resultsBusy"
-                            readonly property bool running: backend.busy && root.motionEnabled
+                            readonly property bool running: ((backend.busy && !backend.writing) || !!backend.refreshing) && root.motionEnabled
                             visible: running && results.count > 0
                             name: "refresh"
                             ink: root.accent
@@ -2138,42 +2077,52 @@ Controls.ApplicationWindow {
                             horizontalPadding: 10
                             onClicked: root.showUnavailableSources = !root.showUnavailableSources
                         }
-                        Controls.Label {
-                            text: "Working…"
-                            visible: backend.busy && !root.motionEnabled
-                            color: root.muted
-                            font.pointSize: root.font.pointSize * 0.9
-                        }
                         ActionButton {
                             objectName: "resultsCancel"
                             text: "Cancel"
                             symbol: "cancel"
-                            visible: backend.busy
-                            implicitHeight: 28
+                            // A running change cancels from its progress line or row.
+                            visible: backend.busy && !backend.writing
+                            implicitHeight: 30
                             onClicked: backend.cancel()
+                        }
+                        ActionButton {
+                            objectName: "reloadButton"
+                            visible: !backend.busy || backend.writing
+                            text: ""
+                            symbol: "refresh"
+                            flat: true
+                            glyphColor: root.muted
+                            implicitHeight: 30
+                            Accessible.name: "Reload"
+                            tooltipText: "Reload (Ctrl+R)"
+                            enabled: !backend.busy || backend.writing
+                            onClicked: root.reload(true)
                         }
                     }
                     Rectangle { Layout.fillWidth: true; height: 1; color: root.line; visible: results.count > 0 }
                     RowLayout {
+                        id: columnHeaderRow
                         visible: !root.compact && results.count > 0
-                        spacing: 14
+                        spacing: 12
                         Layout.fillWidth: true
                         Layout.leftMargin: 16
                         Layout.rightMargin: 16
                         Layout.topMargin: 10
                         Layout.bottomMargin: 10
                         Item { visible: root.currentView === "Updates"; Layout.preferredWidth: 28 }
+                        Item { Layout.preferredWidth: root.iconSlotSize }
                         Controls.Label {
                             objectName: "columnHeader0"
                             text: (root.currentView === "Sources" ? "SOURCE" : "NAME / SOURCE") + root.sortArrow("name")
                             color: root.muted
-                            font.pointSize: root.font.pointSize * 0.8
+                            font.pointSize: Theme.pointSize(Theme.captionScale)
                             font.weight: Font.DemiBold
                             font.letterSpacing: 0.6
                             font.underline: sortNameArea.activeFocus
                             elide: Text.ElideRight
                             Layout.preferredWidth: root.nameWidth
-                            Layout.fillWidth: root.currentView === "Sources"
+                            Layout.fillWidth: root.currentView === "Sources" || root.medium
                             MouseArea {
                                 id: sortNameArea
                                 anchors.fill: parent
@@ -2184,6 +2133,13 @@ Controls.ApplicationWindow {
                                 onClicked: root.cycleSort("name")
                                 Keys.onSpacePressed: root.cycleSort("name")
                                 Keys.onReturnPressed: root.cycleSort("name")
+                                // Shift+Left/Right resizes the column from the keyboard.
+                                Keys.onPressed: (event) => {
+                                    if (!(event.modifiers & Qt.ShiftModifier) || (event.key !== Qt.Key_Left && event.key !== Qt.Key_Right))
+                                        return;
+                                    root.nameWidth = Math.max(80, Math.min(600, root.nameWidth + (event.key === Qt.Key_Right ? 16 : -16)));
+                                    event.accepted = true;
+                                }
                                 MouseArea {
                                     objectName: "columnResize0"
                                     anchors.right: parent.right
@@ -2203,7 +2159,7 @@ Controls.ApplicationWindow {
                             visible: root.currentView !== "Sources" || root.showUnavailableSources
                             text: (root.currentView === "Sources" ? "STATUS" : root.currentView === "Clean" ? "TYPE" : "VERSION") + root.sortArrow(root.currentView === "Sources" ? "status" : "version")
                             color: root.muted
-                            font.pointSize: root.font.pointSize * 0.8
+                            font.pointSize: Theme.pointSize(Theme.captionScale)
                             font.weight: Font.DemiBold
                             font.letterSpacing: 0.6
                             font.underline: sortVersionArea.activeFocus
@@ -2219,6 +2175,13 @@ Controls.ApplicationWindow {
                                 onClicked: root.cycleSort(root.currentView === "Sources" ? "status" : "version")
                                 Keys.onSpacePressed: root.cycleSort(root.currentView === "Sources" ? "status" : "version")
                                 Keys.onReturnPressed: root.cycleSort(root.currentView === "Sources" ? "status" : "version")
+                                // Shift+Left/Right resizes the column from the keyboard.
+                                Keys.onPressed: (event) => {
+                                    if (!(event.modifiers & Qt.ShiftModifier) || (event.key !== Qt.Key_Left && event.key !== Qt.Key_Right))
+                                        return;
+                                    root.versionWidth = Math.max(80, Math.min(600, root.versionWidth + (event.key === Qt.Key_Right ? 16 : -16)));
+                                    event.accepted = true;
+                                }
                                 MouseArea {
                                     objectName: "columnResize1"
                                     anchors.right: parent.right
@@ -2235,10 +2198,10 @@ Controls.ApplicationWindow {
                         }
                         Controls.Label {
                             objectName: "columnHeader2"
-                            visible: root.currentView !== "Sources"
+                            visible: root.currentView !== "Sources" && !root.medium
                             text: (root.currentView === "Sources" ? "CAPABILITIES" : "SUMMARY") + root.sortArrow(root.currentView === "Sources" ? "capabilities" : "summary")
                             color: root.muted
-                            font.pointSize: root.font.pointSize * 0.8
+                            font.pointSize: Theme.pointSize(Theme.captionScale)
                             font.weight: Font.DemiBold
                             font.letterSpacing: 0.6
                             font.underline: sortSummaryArea.activeFocus
@@ -2262,9 +2225,25 @@ Controls.ApplicationWindow {
                         objectName: "packageResults"
                         Layout.fillWidth: true
                         Layout.fillHeight: true
-                        model: root.viewItems
+                        model: resultsModel
                         clip: true
                         reuseItems: true
+                        add: Transition {
+                            enabled: root.motionEnabled && root.animateListChanges
+                            NumberAnimation { property: "opacity"; from: 0; to: 1; duration: Theme.revealDuration; easing.type: Easing.OutCubic }
+                        }
+                        remove: Transition {
+                            enabled: root.motionEnabled && root.animateListChanges
+                            NumberAnimation { property: "opacity"; to: 0; duration: Theme.feedbackDuration; easing.type: Easing.InCubic }
+                        }
+                        displaced: Transition {
+                            enabled: root.motionEnabled && root.animateListChanges
+                            NumberAnimation { properties: "x,y"; duration: Theme.revealDuration; easing.type: Easing.OutCubic }
+                        }
+                        move: Transition {
+                            enabled: root.motionEnabled && root.animateListChanges
+                            NumberAnimation { properties: "x,y"; duration: Theme.revealDuration; easing.type: Easing.OutCubic }
+                        }
                         enabled: !root.retainingResults
                         currentIndex: -1
                         onCountChanged: {
@@ -2276,9 +2255,10 @@ Controls.ApplicationWindow {
                         keyNavigationEnabled: false
                         activeFocusOnTab: true
                         Controls.ScrollBar.vertical: DeckScrollBar { ink: root.muted }
-                        Keys.onDownPressed: root.choose(Math.min(count - 1, currentIndex + 1))
-                        Keys.onUpPressed: root.choose(Math.max(0, currentIndex - 1))
+                        Keys.onDownPressed: { root.keyboardNavigation = true; root.choose(Math.min(count - 1, currentIndex + 1)); }
+                        Keys.onUpPressed: { root.keyboardNavigation = true; root.choose(Math.max(0, currentIndex - 1)); }
                         Keys.onPressed: (event) => {
+                            root.keyboardNavigation = true;
                             if (event.key === Qt.Key_PageDown)
                                 root.choose(Math.min(count - 1, (currentIndex < 0 ? 0 : currentIndex) + 10));
                             else if (event.key === Qt.Key_PageUp)
@@ -2287,33 +2267,43 @@ Controls.ApplicationWindow {
                                 root.choose(0);
                             else if (event.key === Qt.Key_End)
                                 root.choose(count - 1);
+                            else if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter) && currentIndex >= 0)
+                                root.runRowAction(currentIndex);
                             else
                                 return;
                             event.accepted = true;
                         }
                         delegate: Controls.ItemDelegate {
                             id: packageRow
-                            required property var modelData
+                            required property string rowJson
                             required property int index
-                            width: Math.max(0, ListView.view.width - 16)
-                            height: (root.compact ? (modelData.kind === "source" ? Math.max(68, root.font.pointSize * 5.5) : Math.max(94, root.font.pointSize * 8.5)) : Math.max(56, root.font.pointSize * 5)) + (modelData.groupStart ? 38 : 0)
-                            topPadding: modelData.groupStart ? 38 : 0
+                            readonly property var modelData: JSON.parse(rowJson)
+                            readonly property string identity: root.rowIdentity(modelData)
+                            // This row is being changed right now.
+                            readonly property bool active: backend.writing && root.activeRows.indexOf(identity) >= 0
+                            readonly property string rowAction: root.rowActionName(modelData)
+                            readonly property bool packageKind: modelData.kind === "package"
+                            width: Math.max(0, ListView.view.width - Theme.scrollGutter)
+                            height: root.rowHeight(modelData)
+                            topPadding: modelData.groupStart ? root.groupHeaderHeight : 0
                             leftPadding: 16
-                            rightPadding: 16
+                            rightPadding: 12
                             leftInset: 0
                             rightInset: 0
                             topInset: 0
                             bottomInset: 0
                             highlighted: results.currentIndex === index
                             enabled: true
-                            Accessible.name: (modelData.kind === "package" ? (modelData.update === "available" ? "Update available. " : (root.isInstalled(modelData) ? "Installed. " : "Not installed. ")) : "") + modelData.name + ", " + modelData.source + ", " + (modelData.summary || "")
-                            onClicked: { results.forceActiveFocus(); root.choose(index); }
+                            Accessible.name: (packageKind ? (modelData.update === "available" ? "Update available. " : (root.isInstalled(modelData) ? "Installed. " : "Not installed. ")) : "")
+                                + (modelData.kind === "source" ? root.sourceDisplayName(modelData.source) : (modelData.display_name || modelData.name) + ", " + root.sourceLine(modelData))
+                                + (modelData.summary ? ", " + modelData.summary : "")
+                            onClicked: { root.keyboardNavigation = false; results.forceActiveFocus(); root.choose(index); }
                             Rectangle {
-                                visible: !!modelData.groupStart
+                                visible: !!packageRow.modelData.groupStart
                                 anchors.top: parent.top
                                 anchors.left: parent.left
                                 anchors.right: parent.right
-                                height: 38
+                                height: root.groupHeaderHeight
                                 color: root.selection
                                 z: 2
                                 Rectangle { width: 3; height: parent.height; color: root.accent }
@@ -2322,17 +2312,19 @@ Controls.ApplicationWindow {
                                     anchors.leftMargin: 16
                                     anchors.rightMargin: 16
                                     Controls.Label {
-                                        objectName: modelData.groupStart ? "packageGroupTitle" : ""
-                                        text: modelData.groupTitle || ""
+                                        objectName: packageRow.modelData.groupStart ? "packageGroupTitle" : ""
+                                        text: packageRow.modelData.groupTitle || ""
                                         color: root.ink
                                         font.bold: true
                                         elide: Text.ElideRight
                                         Layout.fillWidth: true
                                     }
                                     Controls.Label {
-                                        text: (modelData.groupCount || 0) + " packages: " + (modelData.groupSources || []).join(", ")
+                                        text: (packageRow.modelData.groupSources || []).join(" · ")
                                         color: root.accent
-                                        font.pointSize: root.font.pointSize * 0.9
+                                        font.pointSize: Theme.pointSize(Theme.smallScale)
+                                        elide: Text.ElideRight
+                                        Layout.maximumWidth: packageRow.width * 0.5
                                     }
                                 }
                             }
@@ -2347,25 +2339,60 @@ Controls.ApplicationWindow {
                                     Behavior on color { ColorAnimation { duration: root.feedbackDuration } }
                                     color: packageRow.highlighted ? root.selection : (packageRow.hovered ? root.hoverTint : "transparent")
                                     border.width: 1
-                                    border.color: packageRow.activeFocus || (results.activeFocus && packageRow.highlighted) ? root.accent : "transparent"
+                                    border.color: packageRow.visualFocus || (results.activeFocus && packageRow.highlighted && root.keyboardNavigation) ? root.accent : "transparent"
                                     Rectangle {
                                         anchors.fill: parent
                                         radius: parent.radius
                                         color: root.success
-                                        opacity: root.completedRows.indexOf(root.rowIdentity(packageRow.modelData)) >= 0 ? 0.18 : 0
+                                        opacity: root.completedRows.indexOf(packageRow.identity) >= 0 ? 0.18 : 0
                                         Behavior on opacity { NumberAnimation { duration: root.motionEnabled ? 240 : 0 } }
+                                    }
+                                    // Progress of the change running on this row.
+                                    Item {
+                                        objectName: "rowProgress"
+                                        visible: packageRow.active
+                                        anchors.left: parent.left
+                                        anchors.right: parent.right
+                                        anchors.bottom: parent.bottom
+                                        anchors.leftMargin: 10
+                                        anchors.rightMargin: 10
+                                        anchors.bottomMargin: 3
+                                        height: 3
+                                        clip: true
+                                        readonly property real fraction: root.actionFraction()
+                                        Rectangle { anchors.fill: parent; radius: 1.5; color: root.tint(root.accent, 0.18) }
+                                        Rectangle {
+                                            id: rowBar
+                                            height: parent.height
+                                            radius: 1.5
+                                            color: root.accent
+                                            width: parent.fraction >= 0 ? parent.width * parent.fraction : parent.width * 0.3
+                                            x: parent.fraction >= 0 ? 0 : sweep.position * (parent.width * 1.3) - width
+                                            Behavior on width { enabled: root.motionEnabled; NumberAnimation { duration: Theme.revealDuration } }
+                                        }
+                                        NumberAnimation {
+                                            id: sweep
+                                            property real position: 0
+                                            target: sweep
+                                            property: "position"
+                                            from: 0
+                                            to: 1
+                                            duration: 1200
+                                            loops: Animation.Infinite
+                                            running: packageRow.active && root.motionEnabled && parent.fraction < 0
+                                        }
                                     }
                                 }
                             }
                             contentItem: RowLayout {
-                                spacing: 14
+                                spacing: 12
                                 Controls.CheckBox {
                                     id: packageCheck
-                                    visible: root.currentView === "Updates" && modelData.kind === "package"
-                                    checked: root.packageChecked(modelData)
+                                    visible: root.currentView === "Updates" && packageRow.packageKind
+                                    checked: root.packageChecked(packageRow.modelData)
                                     enabled: true
-                                    onToggled: root.togglePackage(modelData)
-                                    Accessible.name: "Select " + (modelData.name || "")
+                                    onToggled: root.togglePackage(packageRow.modelData)
+                                    Accessible.name: "Select " + (packageRow.modelData.display_name || packageRow.modelData.name || "")
                                     Layout.preferredWidth: 28
                                     Layout.alignment: Qt.AlignVCenter
                                     indicator: TickBox {
@@ -2374,67 +2401,118 @@ Controls.ApplicationWindow {
                                     }
                                     contentItem: Item {}
                                 }
-                                ColumnLayout {
-                                    spacing: 4
-                                    Layout.preferredWidth: root.compact ? -1 : root.nameWidth
-                                    Layout.fillWidth: root.compact || modelData.kind === "source"
-                                    Controls.Label {
-                                        objectName: "packageName"
-                                        text: modelData.kind === "source" ? root.sourceDisplayName(modelData.source) : (modelData.display_name || modelData.name)
-                                        color: root.ink
-                                        font.bold: true
-                                        textFormat: Text.PlainText
-                                        elide: Text.ElideRight
-                                        Layout.fillWidth: true
+                                // The app's own icon when it has one, with its
+                                // source as a small badge; otherwise the source icon.
+                                Item {
+                                    objectName: "rowIconSlot"
+                                    Layout.preferredWidth: root.iconSlotSize
+                                    Layout.preferredHeight: root.iconSlotSize
+                                    Layout.alignment: root.compact ? Qt.AlignTop : Qt.AlignVCenter
+                                    Layout.topMargin: root.compact ? 12 : 0
+                                    Rectangle {
+                                        anchors.fill: parent
+                                        radius: Theme.controlRadius
+                                        color: root.hoverTint
+                                        visible: rowIcon.status !== Image.Ready
                                     }
-                                    RowLayout {
-                                        visible: modelData.kind !== "source"
-                                        Layout.fillWidth: true
-                                        spacing: 6
+                                    DeckIcon {
+                                        objectName: "packageIconFallback"
+                                        visible: rowIcon.status !== Image.Ready
+                                        anchors.centerIn: parent
+                                        width: Math.round(parent.width * 0.55)
+                                        height: width
+                                        name: packageRow.modelData.kind === "cleanup" ? "remove" : packageRow.modelData.source
+                                        ink: root.muted
+                                    }
+                                    Image {
+                                        id: rowIcon
+                                        objectName: "packageIcon"
+                                        anchors.fill: parent
+                                        visible: status === Image.Ready
+                                        asynchronous: true
+                                        source: root.iconUrl(packageRow.modelData.icon || "")
+                                        sourceSize.width: Math.ceil(width * Screen.devicePixelRatio)
+                                        sourceSize.height: Math.ceil(height * Screen.devicePixelRatio)
+                                        fillMode: Image.PreserveAspectFit
+                                        opacity: status === Image.Ready ? 1 : 0
+                                        Behavior on opacity { NumberAnimation { duration: Theme.revealDuration } }
+                                        Accessible.ignored: true
+                                    }
+                                    Rectangle {
+                                        objectName: "sourceBadge"
+                                        visible: rowIcon.status === Image.Ready
+                                        width: 16
+                                        height: 16
+                                        radius: 8
+                                        x: parent.width - width + 4
+                                        y: parent.height - height + 4
+                                        color: root.surface
+                                        border.color: root.line
                                         DeckIcon {
-                                            objectName: "packageIconFallback"
-                                            visible: rowIcon.status !== Image.Ready
-                                            name: modelData.source
+                                            anchors.centerIn: parent
+                                            width: 11
+                                            height: 11
+                                            name: packageRow.modelData.source
                                             ink: root.muted
-                                            Layout.preferredWidth: 14
-                                            Layout.preferredHeight: 14
                                         }
-                                        Image {
-                                            id: rowIcon
-                                            objectName: "packageIcon"
-                                            visible: status === Image.Ready
-                                            asynchronous: true
-                                            source: root.iconUrl(modelData.icon || "")
-                                            sourceSize.width: 14
-                                            sourceSize.height: 14
-                                            fillMode: Image.PreserveAspectFit
-                                            Layout.preferredWidth: 14
-                                            Layout.preferredHeight: 14
-                                            Accessible.ignored: true
+                                    }
+                                }
+                                ColumnLayout {
+                                    spacing: 3
+                                    Layout.preferredWidth: root.compact || root.medium ? -1 : root.nameWidth
+                                    Layout.fillWidth: root.compact || root.medium || packageRow.modelData.kind === "source"
+                                    Layout.alignment: Qt.AlignVCenter
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 8
+                                        Controls.Label {
+                                            objectName: "packageName"
+                                            text: packageRow.modelData.kind === "source" ? root.sourceDisplayName(packageRow.modelData.source) : (packageRow.modelData.display_name || packageRow.modelData.name)
+                                            color: root.ink
+                                            font.bold: true
+                                            textFormat: Text.PlainText
+                                            elide: Text.ElideRight
+                                            Layout.fillWidth: true
+                                            Layout.maximumWidth: implicitWidth
                                         }
                                         Controls.Label {
+                                            objectName: "installedChip"
+                                            visible: packageRow.packageKind && root.currentView === "Search" && root.isInstalled(packageRow.modelData)
+                                            text: "Installed"
+                                            color: root.success
+                                            font.pointSize: Theme.pointSize(Theme.captionScale)
+                                            font.weight: Font.DemiBold
+                                            leftPadding: 7
+                                            rightPadding: 7
+                                            topPadding: 1
+                                            bottomPadding: 1
+                                            background: Rectangle { radius: height / 2; color: root.tint(root.success, 0.12) }
+                                        }
+                                        Item { Layout.fillWidth: true }
+                                    }
+                                    Controls.Label {
                                         objectName: "packageSourceLine"
-                                        text: root.sourceLine(modelData)
+                                        visible: packageRow.modelData.kind !== "source"
+                                        text: root.sourceLine(packageRow.modelData)
                                         color: root.muted
-                                        font.pointSize: root.font.pointSize * 0.9
+                                        font.pointSize: Theme.pointSize(Theme.smallScale)
                                         elide: Text.ElideRight
                                         Layout.fillWidth: true
-                                        }
                                     }
                                     Controls.Label {
                                         objectName: "compactVersion"
-                                        visible: root.compact && (modelData.kind !== "source" || root.showUnavailableSources)
-                                        text: root.versionText(modelData)
+                                        visible: root.compact && (packageRow.modelData.kind !== "source" || root.showUnavailableSources)
+                                        text: root.versionText(packageRow.modelData)
                                         font.family: "monospace"
-                                        font.pointSize: root.font.pointSize * 0.9
-                                        color: modelData.kind === "failure" ? root.danger : (modelData.update === "available" ? root.accent : root.muted)
+                                        font.pointSize: Theme.pointSize(Theme.smallScale)
+                                        color: packageRow.modelData.kind === "failure" ? root.danger : (packageRow.modelData.update === "available" ? root.accent : root.muted)
                                         textFormat: Text.PlainText
                                         elide: Text.ElideRight
                                         Layout.fillWidth: true
                                     }
                                     Controls.Label {
-                                        visible: root.compact && modelData.kind !== "source"
-                                        text: modelData.summary || ""
+                                        visible: root.compact && packageRow.modelData.kind !== "source"
+                                        text: packageRow.modelData.summary || ""
                                         color: root.muted
                                         textFormat: Text.PlainText
                                         elide: Text.ElideRight
@@ -2442,41 +2520,42 @@ Controls.ApplicationWindow {
                                     }
                                 }
                                 ColumnLayout {
-                                    visible: !root.compact && (modelData.kind !== "source" || root.showUnavailableSources)
+                                    visible: !root.compact && (packageRow.modelData.kind !== "source" || root.showUnavailableSources)
                                     // Fixed width keeps every summary aligned, elided or not.
                                     Layout.preferredWidth: root.versionWidth
                                     Layout.minimumWidth: root.versionWidth
                                     Layout.maximumWidth: root.versionWidth
                                     spacing: 3
                                     // Updates show the new version, with the installed one below.
-                                    readonly property bool upgrade: modelData.update === "available" && !!modelData.installed && !!modelData.candidate && modelData.installed !== modelData.candidate
+                                    readonly property bool upgrade: packageRow.modelData.update === "available" && !!packageRow.modelData.installed && !!packageRow.modelData.candidate && packageRow.modelData.installed !== packageRow.modelData.candidate
                                     Controls.Label {
                                         objectName: "wideVersion"
-                                        text: parent.upgrade ? modelData.candidate : root.versionText(modelData)
+                                        text: parent.upgrade ? packageRow.modelData.candidate : root.versionText(packageRow.modelData)
                                         font.family: "monospace"
-                                        color: modelData.kind === "failure" ? root.danger : (modelData.update === "available" ? root.accent : root.muted)
+                                        color: packageRow.modelData.kind === "failure" ? root.danger : (packageRow.modelData.update === "available" ? root.accent : root.muted)
                                         textFormat: Text.PlainText
                                         elide: Text.ElideMiddle
-                                        font.pointSize: root.font.pointSize * 0.9
+                                        font.pointSize: Theme.pointSize(Theme.smallScale)
                                         Layout.fillWidth: true
                                     }
                                     Controls.Label {
                                         visible: parent.upgrade
-                                        text: "from " + (modelData.installed || "")
+                                        text: "from " + (packageRow.modelData.installed || "")
                                         font.family: "monospace"
                                         color: root.muted
                                         textFormat: Text.PlainText
                                         elide: Text.ElideMiddle
-                                        font.pointSize: root.font.pointSize * 0.8
+                                        font.pointSize: Theme.pointSize(Theme.captionScale)
                                         Layout.fillWidth: true
                                     }
                                 }
                                 Controls.Label {
-                                    visible: !root.compact && modelData.kind !== "source"
+                                    objectName: "rowSummary"
+                                    visible: !root.compact && !root.medium && packageRow.modelData.kind !== "source"
                                     Layout.fillWidth: true
                                     // Long text must not squeeze the fixed columns.
                                     Layout.preferredWidth: 0
-                                    text: modelData.summary || ""
+                                    text: packageRow.modelData.summary || ""
                                     color: root.muted
                                     textFormat: Text.PlainText
                                     elide: Text.ElideRight
@@ -2484,14 +2563,14 @@ Controls.ApplicationWindow {
                                 Controls.CheckBox {
                                     id: managerEnabled
                                     objectName: "managerEnabled"
-                                    visible: root.currentView === "Sources" && modelData.kind === "source" && modelData.available
+                                    visible: root.currentView === "Sources" && packageRow.modelData.kind === "source" && packageRow.modelData.available
                                     text: checked ? "Enabled" : "Disabled"
-                                    checked: root.checkedSources().indexOf(modelData.source) >= 0
+                                    checked: root.checkedSources().indexOf(packageRow.modelData.source) >= 0
                                     enabled: !backend.writing && (!checked || root.checkedSources().length > 1)
-                                    Accessible.name: (checked ? "Disable " : "Enable ") + root.sourceDisplayName(modelData.source)
+                                    Accessible.name: (checked ? "Disable " : "Enable ") + root.sourceDisplayName(packageRow.modelData.source)
                                     Controls.ToolTip.visible: hovered && root.compact
                                     Controls.ToolTip.text: Accessible.name
-                                    onClicked: root.setManagerEnabled(modelData.source, checked)
+                                    onClicked: root.setManagerEnabled(packageRow.modelData.source, checked)
                                     indicator: TickBox {
                                         x: 0
                                         y: (managerEnabled.height - height) / 2
@@ -2506,33 +2585,35 @@ Controls.ApplicationWindow {
                                 }
                                 ActionButton {
                                     objectName: "rowContainerPull"
-                                    visible: modelData.kind === "package" && root.containerSource(modelData.source) && root.isInstalled(modelData) && !!modelData.reference
+                                    visible: packageRow.packageKind && root.containerSource(packageRow.modelData.source) && root.isInstalled(packageRow.modelData) && !!packageRow.modelData.reference && !packageRow.active
                                     enabled: (!backend.busy || backend.writing) && !root.retainingResults
                                     text: ""
                                     symbol: "updates"
                                     flat: true
                                     glyphColor: enabled ? root.accent : root.muted
-                                    Accessible.name: "Pull " + (modelData.display_name || modelData.name) + " from " + modelData.source
+                                    Accessible.name: "Pull " + (packageRow.modelData.display_name || packageRow.modelData.name) + " from " + root.sourceLine(packageRow.modelData)
                                     tooltipText: Accessible.name
                                     Layout.preferredWidth: 38
                                     horizontalPadding: 8
                                     opacity: 1
-                                    onClicked: backend.propose("upgrade", root.originalIndex(index))
+                                    onClicked: { root.markActiveRows([packageRow.identity]); backend.propose("upgrade", root.originalIndex(packageRow.index)); }
                                 }
                                 ActionButton {
                                     objectName: "rowPackageAction"
-                                    visible: (modelData.kind === "package" && (!root.updateOnly(modelData.source) || modelData.update === "available")) || modelData.kind === "cleanup"
-                                    enabled: (!backend.busy || backend.writing) && !root.retainingResults
+                                    visible: packageRow.rowAction.length > 0
+                                    enabled: packageRow.active || ((!backend.busy || backend.writing) && !root.retainingResults)
+                                    readonly property string verb: ({install: "Install ", remove: "Remove ", upgrade: "Update ", clean: "Run cleanup "})[packageRow.rowAction] || ""
                                     text: ""
-                                    symbol: modelData.kind === "cleanup" ? "remove" : (root.currentView === "Updates" || root.updateOnly(modelData.source)) ? "updates" : (root.isInstalled(modelData) ? "remove" : "install")
+                                    symbol: packageRow.active ? "cancel" : packageRow.rowAction === "upgrade" ? "updates" : packageRow.rowAction === "install" ? "install" : "remove"
                                     flat: true
-                                    glyphColor: !enabled ? root.muted : (root.currentView === "Updates" || root.updateOnly(modelData.source)) ? root.accent : (modelData.kind === "cleanup" || root.isInstalled(modelData)) ? root.danger : root.success
-                                    Accessible.name: (modelData.kind === "cleanup" ? "Run cleanup " : ((root.currentView === "Updates" || root.updateOnly(modelData.source)) ? "Update " : (root.isInstalled(modelData) ? "Remove " : "Install "))) + (modelData.display_name || modelData.name) + " from " + modelData.source
+                                    glyphColor: !enabled ? root.muted : packageRow.active ? root.muted : packageRow.rowAction === "upgrade" ? root.accent : packageRow.rowAction === "install" ? root.success : root.danger
+                                    Accessible.name: packageRow.active ? "Cancel " + (backend.status || "the change")
+                                        : verb + (packageRow.modelData.display_name || packageRow.modelData.name) + (packageRow.modelData.kind === "cleanup" ? "" : " from " + root.sourceLine(packageRow.modelData))
                                     tooltipText: Accessible.name
                                     Layout.preferredWidth: 38
                                     horizontalPadding: 8
                                     opacity: 1
-                                    onClicked: backend.propose(modelData.kind === "cleanup" ? "clean" : ((root.currentView === "Updates" || root.updateOnly(modelData.source)) ? "upgrade" : (root.isInstalled(modelData) ? "remove" : "install")), root.originalIndex(index))
+                                    onClicked: packageRow.active ? backend.cancel() : root.runRowAction(packageRow.index)
                                 }
                             }
                         }
@@ -2625,6 +2706,14 @@ Controls.ApplicationWindow {
                                 }
                             }
                             ActionButton {
+                                objectName: "loadAgainButton"
+                                anchors.horizontalCenter: parent.horizontalCenter
+                                visible: root.loadStopped && results.count === 0
+                                text: root.currentView === "Search" ? "Search again" : "Load again"
+                                symbol: "refresh"
+                                onClicked: root.reload(true)
+                            }
+                            ActionButton {
                                 objectName: "clearResultFilters"
                                 anchors.horizontalCenter: parent.horizontalCenter
                                 visible: !backend.busy && root.readFailures.length === 0 &&
@@ -2640,9 +2729,9 @@ Controls.ApplicationWindow {
             }
             PackageDetails {
                 id: detailsPanel
-                visible: root.selected !== null && ["Search", "Installed", "Updates", "Clean", "Sources"].indexOf(root.currentView) >= 0
-                    && (root.selected.kind !== "package" || (root.detailMatchesSelection
-                        && (root.detailText().length > 0 || root.visibleScreenshots.length > 0 || detailsPanel.metadataText.length > 0)))
+                // Opens with the selection and stays open while the next row's
+                // details load (the panel shows a placeholder meanwhile).
+                visible: root.selected !== null && root.listViews.indexOf(root.currentView) >= 0
                 Layout.fillWidth: true
                 // Never taller than the page leaves after the list's minimum, so
                 // short windows keep the actions below on screen; the panel
@@ -2732,21 +2821,10 @@ Controls.ApplicationWindow {
                     enabled: (!backend.busy || backend.writing) && root.selected !== null && root.selected.kind === "source" && root.selected.available
                     onClicked: root.propose("refresh")
                 }
-                ActionButton {
-                    objectName: "reloadButton"
-                    visible: root.currentView !== "Search" || searchPane.text.trim().length > 0 || root.viewItems.length > 0
-                    text: root.compact ? "" : "Reload"
-                    symbol: "refresh"
-                    Accessible.name: "Reload"
-                    tooltipText: root.compact ? "Reload" : ""
-                    enabled: !backend.busy || backend.writing
-                    onClicked: root.reload(true)
-                }
             }
             Item {
                 objectName: "pageFiller"
-                visible: ["Search", "Installed", "Updates", "Clean", "Sources"].indexOf(root.currentView) >= 0 && !backend.busy &&
-                    root.viewItems.length <= root.shortListLimit && !searchEmptyState.visible
+                visible: root.listViews.indexOf(root.currentView) >= 0 && !resultsBox.Layout.fillHeight && !searchEmptyState.visible
                 Layout.fillHeight: true
             }
         }
@@ -3067,9 +3145,25 @@ Controls.ApplicationWindow {
         onAboutToShow: detailsExpanded = false
         onOpened: confirmationCancel.forceActiveFocus()
         onAccepted: backend.confirm(true)
-        onRejected: backend.confirm(false)
+        onRejected: { root.activeRows = []; backend.confirm(false); }
+        // The apply key is Alt plus the first letter of the action that
+        // Cancel's Alt+C does not take ("Clean" applies with Alt+L).
+        // Ctrl+Enter always applies and Escape always cancels.
+        readonly property string applyWord: (preview.action || "Apply").trim().split(/\s+/)[0]
+        readonly property int applyMnemonic: {
+            for (let i = 0; i < applyWord.length; i++) {
+                if (/[a-bd-z]/i.test(applyWord.charAt(i)))
+                    return i;
+            }
+            return -1;
+        }
         Shortcut {
-            sequence: "Alt+" + (confirmation.preview.action || "Apply").trim().charAt(0).toUpperCase()
+            sequence: "Alt+" + confirmation.applyWord.charAt(confirmation.applyMnemonic).toUpperCase()
+            enabled: confirmation.visible && confirmation.applyMnemonic >= 0
+            onActivated: confirmation.accept()
+        }
+        Shortcut {
+            sequences: ["Ctrl+Return", "Ctrl+Enter"]
             enabled: confirmation.visible
             onActivated: confirmation.accept()
         }
@@ -3087,7 +3181,9 @@ Controls.ApplicationWindow {
                 Item { Layout.fillWidth: true }
                 ActionButton {
                     objectName: "confirmationApply"
-                    text: (confirmation.preview.action || "Apply").trim().split(/\s+/)[0]
+                    text: confirmation.applyWord
+                    mnemonicIndex: confirmation.applyMnemonic
+                    tooltipText: confirmation.applyMnemonic >= 0 ? "Alt+" + text.charAt(mnemonicIndex).toUpperCase() + " or Ctrl+Enter" : "Ctrl+Enter"
                     symbol: ""
                     primary: true
                     Layout.minimumWidth: 80
@@ -3097,6 +3193,8 @@ Controls.ApplicationWindow {
                     id: confirmationCancel
                     objectName: "confirmationCancel"
                     text: "Cancel"
+                    mnemonicIndex: 0
+                    tooltipText: "Alt+C or Esc"
                     symbol: ""
                     Layout.minimumWidth: 80
                     onClicked: confirmation.reject()
@@ -3235,7 +3333,12 @@ Controls.ApplicationWindow {
     }
     Shortcut {
         sequence: "Ctrl+R"
+        enabled: root.listViews.indexOf(root.currentView) >= 0
         onActivated: root.reload(true)
+    }
+    Shortcut {
+        sequences: ["Ctrl+,", "Ctrl+6"]
+        onActivated: root.openView("Settings")
     }
     Shortcut {
         sequence: "Ctrl+I"
@@ -3262,9 +3365,17 @@ Controls.ApplicationWindow {
         enabled: !backend.busy || backend.writing
         onActivated: root.propose("refresh")
     }
+    // Escape never cancels running work (the visible Cancel button does).
+    // In the search field it clears the query; in the list it closes details.
     Shortcut {
         sequence: "Escape"
-        enabled: backend.busy
-        onActivated: backend.cancel()
+        enabled: !!root.activeFocusItem && ((root.activeFocusItem.objectName === "searchField" && searchPane.text.length > 0)
+            || (root.activeFocusItem === results && root.selected !== null))
+        onActivated: {
+            if (root.activeFocusItem === results)
+                detailsPanel.closeRequested();
+            else
+                searchPane.text = "";
+        }
     }
 }

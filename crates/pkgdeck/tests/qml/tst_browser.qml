@@ -319,7 +319,7 @@ TestCase {
         compare(firstAction.text, "");
         compare(firstAction.width, 38);
         verify(firstAction.tooltipText.indexOf("Install") >= 0);
-        verify(firstAction.tooltipText.indexOf("apt") >= 0);
+        verify(firstAction.tooltipText.indexOf("APT") >= 0);
         waitForRendering(browser.contentItem);
         mouseClick(findChild(list.itemAtIndex(0), "rowPackageAction"));
         const dialog = findChild(browser, "confirmationDialog");
@@ -872,7 +872,9 @@ TestCase {
             // The full sidebar only narrows toward its minimum as the window does.
             compare(browser.sidebarWidth, width < 820 ? browser.railWidth
                 : Math.max(browser.sidebarMinimumWidth, Math.min(212, width - 748)));
-            compare(browser.compact, width - browser.sidebarWidth < 748);
+            // Cards below 560 px of page, a table without summaries below 748.
+            compare(browser.compact, width - browser.sidebarWidth < 560);
+            compare(browser.medium, !browser.compact && width - browser.sidebarWidth < 748);
             verify(!add.visible);
             for (const button of [activity, sources]) {
                 verify(button.visible);
@@ -2361,7 +2363,7 @@ TestCase {
         const wide = at(1300);
         verify(!browser.compact);
         const narrow = at(900);
-        verify(browser.compact);
+        verify(browser.medium);
         compare(narrow.x, wide.x);
         compare(narrow.y, wide.y);
         // A wide saved sidebar narrows smoothly with the window, never jumping.

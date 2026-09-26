@@ -16,6 +16,7 @@ fn main() {
             .qml_file("qml/SearchPane.qml")
             .qml_file("qml/SettingCheckBox.qml")
             .qml_file("qml/SettingsCard.qml")
+            .qml_file("qml/SettingsPage.qml")
             .qml_file("qml/ThemedComboBox.qml")
             .qml_file("qml/ThemedDialog.qml")
             .qml_file("qml/ThemedTextField.qml")

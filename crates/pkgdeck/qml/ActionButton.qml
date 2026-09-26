@@ -16,6 +16,8 @@ Controls.Button {
     property string symbol: "package"
     property url iconSource: ""
     property string tooltipText: ""
+    // Underlines this character of the label as its Alt shortcut.
+    property int mnemonicIndex: -1
     readonly property bool systemDisabled: !enabled && Theme.systemAppearance && !flat && !navigation
     Accessible.name: text
     Controls.ToolTip.visible: hovered && tooltipText.length > 0
@@ -80,7 +82,10 @@ Controls.Button {
                 Accessible.ignored: true
             }
             Text {
-                text: control.text
+                text: control.mnemonicIndex >= 0 && control.mnemonicIndex < control.text.length
+                    ? control.text.slice(0, control.mnemonicIndex) + "<u>" + control.text.charAt(control.mnemonicIndex) + "</u>" + control.text.slice(control.mnemonicIndex + 1)
+                    : control.text
+                textFormat: control.mnemonicIndex >= 0 ? Text.StyledText : Text.PlainText
                 visible: text.length > 0
                 font.family: control.font.family
                 font.pointSize: control.font.pointSize
