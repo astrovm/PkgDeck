@@ -879,6 +879,26 @@ fn flatpak_rejects_malformed_metadata_and_foreign_operations() {
 
 #[test]
 fn explicit_optional_sources_remain_discoverable_when_unavailable() {
+    // Change PATH only in an isolated process: other tests run concurrently,
+    // and a locally installed manager must never turn this into an integration test.
+    if std::env::var_os("PKGDECK_UNAVAILABLE_SOURCES_CHILD").is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "explicit_optional_sources_remain_discoverable_when_unavailable",
+                "--nocapture",
+            ])
+            .env("PKGDECK_UNAVAILABLE_SOURCES_CHILD", "1")
+            .env("PATH", "/nonexistent-pkgdeck-fixture")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
     let cancel = Cancellation::default();
     for source in [
         "appimage", "flatpak", "dnf", "pacman", "zypper", "snap", "docker", "podman", "cargo",

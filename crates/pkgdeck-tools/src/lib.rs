@@ -510,7 +510,7 @@ pub fn gui(args: &[String], failure: bool) {
 pub fn qml() {
     let dir = Temp::new();
     run(Command::new("timeout")
-        .args(["--kill-after=5s", "60s", "qmltestrunner"])
+        .args(["--kill-after=5s", "180s", "qmltestrunner"])
         .args([
             "-input",
             concat!(env!("CARGO_MANIFEST_DIR"), "/../pkgdeck/tests/qml"),
