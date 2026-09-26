@@ -3334,6 +3334,7 @@ impl ffi::PackageController {
                 self.rust()
                     .packages
                     .get(i)
+                    .filter(|p| !pkgdeck_core::backends::read_only(&p.id.backend))
                     .and_then(|p| match action.as_str() {
                         "install"
                             if !pkgdeck_core::backends::update_only(&p.id.backend)
@@ -7450,6 +7451,20 @@ mod tests {
             .view_cache
             .get("old")
             .is_some_and(CachedView::stale));
+    }
+    #[test]
+    fn macos_inventory_never_proposes_a_write() {
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        let mut package = synthetic_package("/Applications/Obsidian.app", "Obsidian");
+        package.id.backend = "macos-apps".into();
+        package.installed_version = Some("1.2.3".into());
+        controller.as_mut().rust_mut().packages = vec![package];
+        for action in ["install", "remove", "upgrade"] {
+            controller.as_mut().propose(action.into(), 0);
+            assert!(controller.rust().pending.is_none());
+            assert!(controller.confirmation().is_empty());
+        }
     }
     #[test]
     fn firmware_actions_require_confirmation_and_never_offer_removal() {

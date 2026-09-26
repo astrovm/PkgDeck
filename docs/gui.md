@@ -156,6 +156,26 @@ If a Flatpak system installation is read-only, it's shown without edit
 controls. Controls that can't work on this computer are hidden. Repository
 changes use the package manager's normal signature checks and password prompt.
 
+### macOS application inventory
+
+On macOS, the **macOS Applications** source lists bundles in `/Applications`
+and `~/Applications`, including folders such as Utilities. It shows the observed
+version, location, and whether the active Homebrew installation has an app
+artifact pointing to that exact copy. An unavailable Homebrew check is shown
+as unknown; a missing record does not prove the app is unmanaged.
+
+VS Code, Firefox, and Obsidian bundle identifiers have curated cask suggestions.
+**Available through Homebrew (candidate)** means an install route exists for
+that product. Open details to see the matching evidence. Publisher, channel,
+architecture, and artifact equality are not verified, so this is not an adoption
+offer. App Store receipt-bearing copies get no suggestion.
+
+This source is read-only: no install, remove, update, or adoption buttons. Copies
+already listed under Homebrew also appear in this inventory with their ownership
+label. Helper apps inside bundles are excluded; aliases to the same bundle are
+listed once. Discovery covers up to four levels of subfolders and does not follow
+directory symlinks. Unknown versions remain explicitly unknown.
+
 ### Standalone CLI tools
 
 Codex, Claude Code, Grok, and OpenCode installed with their official
