@@ -1856,7 +1856,7 @@ Controls.ApplicationWindow {
                                         }
                                     }
                                 }
-                                Controls.ScrollBar.vertical: Controls.ScrollBar { }
+                                Controls.ScrollBar.vertical: DeckScrollBar { ink: root.muted }
                             }
                             ActionButton {
                                 objectName: "unavailableSourceToggle"
@@ -2638,7 +2638,7 @@ Controls.ApplicationWindow {
                         onHeightChanged: if (currentIndex >= 0) Qt.callLater(() => { if (results.currentIndex >= 0) results.positionViewAtIndex(results.currentIndex, ListView.Contain); })
                         keyNavigationEnabled: false
                         activeFocusOnTab: true
-                        Controls.ScrollBar.vertical: Controls.ScrollBar {}
+                        Controls.ScrollBar.vertical: DeckScrollBar { ink: root.muted }
                         Keys.onDownPressed: root.choose(Math.min(count - 1, currentIndex + 1))
                         Keys.onUpPressed: root.choose(Math.max(0, currentIndex - 1))
                         Keys.onPressed: (event) => {
@@ -3155,7 +3155,7 @@ Controls.ApplicationWindow {
                 clip: true
                 spacing: 8
                 model: root.repositoryReport.repositories || []
-                Controls.ScrollBar.vertical: Controls.ScrollBar {}
+                Controls.ScrollBar.vertical: DeckScrollBar { ink: root.muted }
                 delegate: Rectangle {
                     required property var modelData
                     width: ListView.view.width - 14

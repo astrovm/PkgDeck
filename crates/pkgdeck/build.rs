@@ -11,6 +11,7 @@ fn main() {
             .qml_file("qml/ActivityPane.qml")
             .qml_file("qml/ActionProgress.qml")
             .qml_file("qml/DeckIcon.qml")
+            .qml_file("qml/DeckScrollBar.qml")
             .qml_file("qml/ClearFieldButton.qml"),
     )
     .qrc("resources.qrc")

@@ -188,7 +188,7 @@ ColumnLayout {
                 }
             }
         }
-        Controls.ScrollBar.vertical: Controls.ScrollBar { }
+        Controls.ScrollBar.vertical: DeckScrollBar { ink: pane.muted }
         Column {
             anchors.centerIn: parent
             spacing: 10

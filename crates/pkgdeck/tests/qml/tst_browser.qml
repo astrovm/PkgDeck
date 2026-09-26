@@ -2304,6 +2304,13 @@ TestCase {
         tryCompare(browser, "sidebarWidth", 212);
         verify(!browser.sidebarRail);
     }
+    function test_scrollbar_draws_no_line_beside_the_list() {
+        const bar = findChild(browser, "packageResults").Controls.ScrollBar.vertical;
+        verify(bar !== null);
+        // No style groove or separator, only the handle.
+        compare(bar.background.children.length, 0);
+        compare(bar.contentItem.color.toString(), browser.muted.toString());
+    }
     function test_sidebar_title_and_footer_fit_at_the_narrowest_width() {
         const sidebar = findChild(browser, "sidebar");
         const title = findChild(browser, "sidebarTitle");
