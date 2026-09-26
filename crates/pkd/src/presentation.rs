@@ -1626,6 +1626,34 @@ mod tests {
         assert_eq!(cell(&both, 20).trim_end(), "flatpak (system)");
         assert_eq!(cell(&both, 12).trim_end(), "flatpak·sys");
         assert_eq!(long_text(&both), "flatpak (system)");
+        // Failures name the source once, with how the command ended.
+        let failed = |code: Value, signal: Value, stderr: &str| {
+            json!({"backend": "apt", "error": {"Execution": {"Failed": {"code": code,
+                "signal": signal, "stderr": stderr}}}})
+        };
+        assert_eq!(
+            failure_text(&failed(
+                json!(100),
+                Value::Null,
+                "E: Unable to locate package x\n"
+            )),
+            "APT exited with code 100: E: Unable to locate package x"
+        );
+        assert_eq!(
+            failure_text(&failed(Value::Null, json!(9), "")),
+            "APT was stopped by signal 9."
+        );
+        // Named rows keep their color on the name and dim the id.
+        assert_eq!(with_dim_id(Paint(false), "plain", Paint::bold), "plain");
+        let updates = json!({"packages": [{"id": {"name": "org.example.App", "backend": "flatpak"},
+            "display_name": "Example", "installed_version": "1", "candidate_version": "2",
+            "update": "available"}]});
+        let colored = human(&updates, 120, true);
+        assert!(
+            colored.contains("\x1b[36m↑ Example\x1b[0m\x1b[2m (org.example.App)"),
+            "{colored:?}"
+        );
+        assert_eq!(scope_text(&json!("other")), "other");
         // Removing everything from a source names it plainly.
         assert_eq!(everything_from("apt"), "all APT packages");
         assert_eq!(everything_from("docker"), "all Docker images");

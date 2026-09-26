@@ -1786,6 +1786,31 @@ mod tests {
             "{notes:?}"
         );
         assert_eq!(call(&mut engine, &["info", "fixture"], false).1, 0);
+        let mut one = self::engine();
+        one.register(guess("npm")).unwrap();
+        let mut notes = vec![];
+        let (_, code) = dispatch(
+            &mut one,
+            &args,
+            &Cancellation::default(),
+            &mut |_| true,
+            &mut |event| {
+                if let Event::Progress {
+                    progress: Progress::Message(message),
+                    ..
+                } = event
+                {
+                    notes.push(message);
+                }
+            },
+        );
+        assert_eq!(code, 0);
+        assert!(
+            notes.contains(
+                &"npm may also have this name. To use it instead, add --from npm.".to_string()
+            ),
+            "{notes:?}"
+        );
 
         let mut guesses = Engine::default();
         for backend in ["cargo", "npm", "pipx"] {
