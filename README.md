@@ -53,7 +53,7 @@ With other installs, run `pkd` directly:
 pkd sources                      # list available package managers
 pkd search vlc --from flatpak    # search one source
 pkd list --from apt              # list installed packages
-pkd update                       # refresh package metadata
+pkd refresh                      # refresh package lists
 pkd upgrade                      # install available updates
 ```
 

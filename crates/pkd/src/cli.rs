@@ -15,14 +15,19 @@ use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(version = pkgdeck_core::VERSION, about = "Search, install, update, and clean up packages from every package manager")]
+#[command(
+    version = pkgdeck_core::VERSION,
+    about = "Search, install, update, and clean up packages from every package manager",
+    after_help = EXAMPLES
+)]
 pub struct Args {
     /// Print machine-readable JSON instead of text.
     #[arg(long, global = true)]
     pub json: bool,
-    /// Only use this source. Repeat to pick several; omit to use every
-    /// available source.
-    #[arg(long, global = true, value_parser = ["fwupd", "apt", "dnf", "pacman", "zypper", "snap", "homebrew", "homebrew-cask", "appimage", "flatpak", "docker", "podman", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "composer", "gem", "codex", "claude", "grok", "opencode"])]
+    /// Only use this source, such as apt or flatpak. Repeat to pick
+    /// several; omit to use every available source. `pkd sources` lists
+    /// them.
+    #[arg(long, global = true, value_name = "SOURCE", hide_possible_values = true, value_parser = ["fwupd", "apt", "dnf", "pacman", "zypper", "snap", "homebrew", "homebrew-cask", "appimage", "flatpak", "docker", "podman", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "composer", "gem", "codex", "claude", "grok", "opencode"])]
     pub from: Vec<String>,
     /// Pick a package architecture when the same name exists for several.
     #[arg(long, global = true)]
@@ -67,32 +72,21 @@ impl From<Auth> for Authorization {
         }
     }
 }
+const EXAMPLES: &str = "\
+Examples:
+  pkd search vlc                  Find packages in every source
+  pkd info cowsay                 Show one package
+  pkd install cowsay              Install by exact name
+  pkd install --from flatpak org.videolan.VLC
+  pkd refresh && pkd upgrade      Refresh package lists, then update
+  pkd list --from npm             List what one source installed
+  pkd completions bash > ~/.local/share/bash-completion/completions/pkd";
 #[derive(Subcommand)]
 pub enum Commands {
-    /// List or manage repositories.
-    Repos {
-        #[command(subcommand)]
-        command: Option<RepoCommand>,
-    },
-    /// Check that PkgDeck can find and run your package managers.
-    Doctor,
-    /// List package managers, whether they are available, and what they support.
-    Sources,
     /// Search packages by name or description. Best matches come first.
     Search { query: String },
     /// Show details for one package, by exact name.
     Info { name: String },
-    /// Show which file runs for a command and which package installed it. Never runs the command.
-    Inspect { command: String },
-    /// Find apps installed more than once, and config files left behind by removed packages.
-    Audit,
-    /// List installed packages.
-    List,
-    /// Save your installed software to a file, or check a saved list on this machine.
-    Inventory {
-        #[command(subcommand)]
-        command: InventoryCommand,
-    },
     /// Install packages, by exact name.
     Install {
         #[arg(required = true)]
@@ -103,8 +97,6 @@ pub enum Commands {
         #[arg(required = true)]
         names: Vec<String>,
     },
-    /// Refresh package lists. Does not install updates.
-    Update,
     /// Update the named packages, or everything if no names are given.
     Upgrade {
         names: Vec<String>,
@@ -112,6 +104,11 @@ pub enum Commands {
         #[arg(long)]
         allow_removals: bool,
     },
+    /// Refresh package lists. Does not install updates; run `pkd upgrade` next.
+    #[command(visible_alias = "update")]
+    Refresh,
+    /// List installed packages.
+    List,
     /// List cleanup tasks, or run the ones you name.
     Clean {
         /// Task keys shown by `pkd clean`, such as apt:autoremove.
@@ -120,6 +117,55 @@ pub enum Commands {
         #[arg(long)]
         all: bool,
     },
+    /// List package managers, whether they are available, and what they support.
+    Sources,
+    /// Check that PkgDeck can find and run your package managers.
+    Doctor,
+    /// List or manage repositories.
+    Repos {
+        #[command(subcommand)]
+        command: Option<RepoCommand>,
+    },
+    /// Show which file runs for a command and which package installed it. Never runs the command.
+    Inspect { command: String },
+    /// Find apps installed more than once, and config files left behind by removed packages.
+    Audit,
+    /// Save your installed software to a file, or check a saved list on this machine.
+    Inventory {
+        #[command(subcommand)]
+        command: InventoryCommand,
+    },
+    /// Print a shell completion script, for bash, zsh, or fish.
+    Completions {
+        #[arg(value_enum)]
+        shell: Shell,
+    },
+}
+/// Shells `pkd completions` can write a script for.
+#[derive(Clone, Copy, ValueEnum)]
+pub enum Shell {
+    Bash,
+    Zsh,
+    Fish,
+}
+impl From<Shell> for clap_complete::Shell {
+    fn from(shell: Shell) -> Self {
+        match shell {
+            Shell::Bash => Self::Bash,
+            Shell::Zsh => Self::Zsh,
+            Shell::Fish => Self::Fish,
+        }
+    }
+}
+/// Writes the completion script for `shell` to `out`.
+fn completions(shell: Shell, out: &mut dyn Write) {
+    use clap::CommandFactory;
+    clap_complete::generate(
+        clap_complete::Shell::from(shell),
+        &mut Args::command(),
+        "pkd",
+        out,
+    );
 }
 #[derive(Subcommand)]
 pub enum InventoryCommand {
@@ -278,7 +324,7 @@ pub fn dispatch_with(
     if args.scope.is_some()
         && matches!(
             command,
-            Commands::Update
+            Commands::Refresh
                 | Commands::Sources
                 | Commands::Doctor
                 | Commands::Clean { .. }
@@ -452,7 +498,7 @@ pub fn dispatch_with(
         match command {
             // Only sources that keep package lists can refresh them. Missing
             // managers are skipped unless they were asked for by name.
-            Commands::Update => {
+            Commands::Refresh => {
                 let mut operations = Vec::new();
                 for source in engine.discover(cancel) {
                     match source.availability {
@@ -662,7 +708,7 @@ pub fn dispatch_with(
     }
     if !operations.is_empty()
         && !args.yes
-        && !matches!(command, Commands::Update)
+        && !matches!(command, Commands::Refresh)
         && !confirm(&operations)
     {
         return (
@@ -759,14 +805,14 @@ fn working_label(command: &Commands) -> Option<String> {
         Commands::List | Commands::Inventory { .. } => "Reading installed packages".into(),
         Commands::Audit => "Looking for duplicates and leftovers".into(),
         Commands::Sources => "Checking package managers".into(),
-        Commands::Update => "Checking package managers".into(),
+        Commands::Refresh => "Checking package managers".into(),
         Commands::Upgrade { names, .. } if names.is_empty() => "Checking for updates".into(),
         Commands::Install { .. } | Commands::Remove { .. } | Commands::Upgrade { .. } => {
             "Finding packages".into()
         }
         Commands::Clean { .. } => "Looking for cleanup tasks".into(),
         Commands::Repos { .. } => "Reading repositories".into(),
-        Commands::Doctor => return None,
+        Commands::Doctor | Commands::Completions { .. } => return None,
     })
 }
 fn repository_command(
@@ -865,6 +911,10 @@ fn repository_dispatch(
     }
 }
 pub fn run(args: &Args) -> u8 {
+    if let Some(Commands::Completions { shell }) = args.command {
+        completions(shell, &mut io::stdout().lock());
+        return 0;
+    }
     if args.command.as_ref().is_some_and(Commands::writes)
         && !args.yes
         && (args.json || !io::stdin().is_terminal() || !io::stdout().is_terminal())
@@ -940,7 +990,7 @@ pub fn run(args: &Args) -> u8 {
                 crate::session::sudo_login(&live, operations, &cancel)?;
             }
             // A refresh changes nothing to review, so it just starts.
-            session.start(operations, !matches!(command, Commands::Update));
+            session.start(operations, !matches!(command, Commands::Refresh));
             Ok(())
         },
         &mut |event| session.event(event),
@@ -1419,6 +1469,48 @@ mod tests {
         )
     }
     #[test]
+    fn help_completions_and_the_refresh_alias() {
+        use clap::CommandFactory;
+        // `update` stays as a visible alias of `refresh`.
+        for name in ["refresh", "update"] {
+            let args = Args::try_parse_from(["pkd", name]).unwrap();
+            assert!(matches!(args.command, Some(Commands::Refresh)));
+        }
+        let mut command = Args::command();
+        let help = command.render_long_help().to_string();
+        assert!(
+            help.contains("Examples:") && help.contains("pkd refresh"),
+            "{help}"
+        );
+        assert!(help.contains("[alias: update]"), "{help}");
+        assert!(!help.contains("homebrew-cask"), "{help}");
+        // Everyday commands come first.
+        let order: Vec<_> = command
+            .get_subcommands()
+            .map(|c| c.get_name().to_string())
+            .collect();
+        assert_eq!(&order[..4], ["search", "info", "install", "remove"]);
+        for (shell, marker) in [
+            (Shell::Bash, "complete -F"),
+            (Shell::Zsh, "#compdef pkd"),
+            (Shell::Fish, "complete -c pkd"),
+        ] {
+            let mut script = Vec::new();
+            completions(shell, &mut script);
+            let script = String::from_utf8(script).unwrap();
+            assert!(
+                script.contains(marker) && script.contains("refresh"),
+                "{script}"
+            );
+        }
+        assert!(Args::try_parse_from(["pkd", "completions", "powershell"]).is_err());
+        assert_eq!(
+            run(&Args::try_parse_from(["pkd", "completions", "bash"]).unwrap()),
+            0
+        );
+        assert!(working_label(&Commands::Completions { shell: Shell::Fish }).is_none());
+    }
+    #[test]
     fn commands_and_confirmation() {
         assert!(Args::try_parse_from(["pkd", "clean", "--authenticate"]).is_err());
         let mut engine = engine();
@@ -1431,6 +1523,7 @@ mod tests {
             vec!["upgrade", "fixture"],
             vec!["upgrade"],
             vec!["update"],
+            vec!["refresh"],
             vec!["remove", "fixture"],
             vec!["clean"],
             vec!["clean", "apt:orphans"],

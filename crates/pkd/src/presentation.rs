@@ -298,7 +298,11 @@ pub fn operations_summary(data: &Value, color: bool) -> String {
             .iter()
             .all(|item| item["operation"].get("refresh").is_some())
     {
-        paint.green("Package lists are up to date.")
+        format!(
+            "{} {}",
+            paint.green("Package lists refreshed."),
+            paint.dim("Run `pkd upgrade` to install updates.")
+        )
     } else if failed == 0 {
         paint.green(&format!(
             "Done. {total} change{} applied.",
@@ -1658,7 +1662,11 @@ mod tests {
         let install = |result: Value| json!({"operation": {"install": {"name": "tool", "backend": "apt", "architecture": "all", "scope": "system"}}, "result": result});
         for (operations, expected) in [
             (vec![], "Nothing to do"),
-            (vec![op(json!({"Ok": {}}))], "Package lists are up to date."),
+            (vec![op(json!({"Ok": {}}))], "Package lists refreshed."),
+            (
+                vec![op(json!({"Ok": {}}))],
+                "Run `pkd upgrade` to install updates.",
+            ),
             (
                 vec![install(json!({"Ok": {}})), install(json!({"Ok": {}}))],
                 "Done. 2 changes applied.",
