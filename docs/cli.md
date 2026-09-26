@@ -9,7 +9,7 @@ In the Flatpak build, run it with:
 flatpak run --command=pkd io.github.astrovm.PkgDeck
 ```
 
-![Package details in the CLI](screenshots/cli.png)
+![pkd search showing ripgrep from APT, Homebrew, Snap, and Flatpak](screenshots/cli-search.png)
 
 ## Quick reference
 
@@ -49,12 +49,18 @@ Without `--from`, PkgDeck uses every package manager it finds. Package managers
 that aren't installed are skipped. Sources that fail are reported, not
 hidden. `pkd sources` lists every source, including unavailable ones and why.
 
+![pkd sources listing available and unavailable package managers](screenshots/cli-sources.png)
+
 ## Searching
 
 Search is case-insensitive and matches part of the name or description.
 Results are ranked: exact name, then names that start with the query, then
 names that contain it, then description matches. Homebrew searches formula and
 cask names only.
+
+`pkd info` shows one package's details:
+
+![pkd info showing ripgrep from APT](screenshots/cli-info.png)
 
 ## Choosing packages
 

@@ -10,6 +10,8 @@ sidebar's bottom corner hides it, and the button left of the page title brings
 it back; Ctrl+B does both. In narrow windows the
 sidebar shows only icons.
 
+![PkgDeck in a narrow window, with the sidebar as an icon rail](screenshots/narrow.png)
+
 ## Search
 
 Type an app or package name. Exact matches come first, and the same app from
@@ -23,6 +25,8 @@ package. For Flatpak, pick the User or System row to choose where it installs.
   with **×**.
 - App names, icons, and screenshots come from the source. Packages without
   app metadata show their package name.
+
+![Firefox from APT, Snap, and Flatpak, with the Flatpak details open](screenshots/details.png)
 
 ## Open a package file or link
 
@@ -75,6 +79,8 @@ only Docker or Podman and search for the full image name with its tag.
 ## Updates
 
 Updates lists package updates and, if `fwupdmgr` is installed, firmware updates.
+
+![Updates from Homebrew and a standalone CLI, all checked](screenshots/updates.png)
 
 - Click a row's arrow to update just that item.
 - Check several rows and click **Update selected**. When every row is checked,
