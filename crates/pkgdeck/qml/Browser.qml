@@ -729,6 +729,9 @@ Controls.ApplicationWindow {
     // Layout follows the space the page has, not the window.
     readonly property real pageWidth: width - sidebarWidth
     readonly property int compactWidth: 748
+    // Fixed while the full sidebar shows, so resizing the window does not
+    // shift the page; only windows narrow enough for the icon rail use less.
+    readonly property int pageMargin: width < 820 ? 12 : 28
     readonly property bool compact: pageWidth < compactWidth
     // Header actions keep only their icons when the page is this narrow.
     readonly property bool headerIconsOnly: pageWidth < 600
@@ -1678,8 +1681,8 @@ Controls.ApplicationWindow {
             Layout.fillWidth: true
             Layout.fillHeight: true
             Layout.alignment: Qt.AlignTop
-            Layout.margins: root.compact ? 12 : 28
-            spacing: root.compact ? 10 : 14
+            Layout.margins: root.pageMargin
+            spacing: 14
             RowLayout {
                 Layout.fillWidth: true
                 Kirigami.Heading {
@@ -1732,7 +1735,7 @@ Controls.ApplicationWindow {
                         property var draftSources: []
                         property string searchText: ""
                         property bool showUnavailable: false
-                        x: root.width - width - (root.compact ? 12 : 28)
+                        x: root.width - width - root.pageMargin
                         y: 76
                         width: Math.min(340, root.width - 32)
                         height: Math.min(460, root.height - 100, implicitHeight)
@@ -2088,7 +2091,8 @@ Controls.ApplicationWindow {
                     }
                 }
             }
-            Controls.ScrollView {
+            DeckScrollView {
+                ink: root.muted
                 id: settingsScroll
                 objectName: "settingsScroll"
                 visible: root.currentView === "Settings"
@@ -2096,8 +2100,6 @@ Controls.ApplicationWindow {
                 Layout.fillHeight: true
                 contentWidth: availableWidth
                 clip: true
-                Controls.ScrollBar.vertical: DeckScrollBar { ink: root.muted }
-                Controls.ScrollBar.horizontal: DeckScrollBar { ink: root.muted }
                 ColumnLayout {
                     width: settingsScroll.availableWidth
                     spacing: 14
@@ -3329,13 +3331,12 @@ Controls.ApplicationWindow {
         contentItem: ColumnLayout {
             spacing: 10
             // Sized to its reasons, scrolling only when they outgrow the window.
-            Controls.ScrollView {
+            DeckScrollView {
+                ink: root.muted
                 Layout.fillWidth: true
                 Layout.preferredHeight: Math.min(failureList.implicitHeight, Math.max(120, root.height - 260))
                 contentWidth: availableWidth
                 clip: true
-                Controls.ScrollBar.vertical: DeckScrollBar { ink: root.muted }
-                Controls.ScrollBar.horizontal: DeckScrollBar { ink: root.muted }
                 Column {
                     id: failureList
                     width: parent.width
@@ -3474,13 +3475,12 @@ Controls.ApplicationWindow {
                 }
             }
         }
-        contentItem: Controls.ScrollView {
+        contentItem: DeckScrollView {
+            ink: root.muted
             id: confirmationScroll
             contentWidth: availableWidth
             contentHeight: confirmationBody.implicitHeight + 32
             clip: true
-            Controls.ScrollBar.vertical: DeckScrollBar { ink: root.muted }
-            Controls.ScrollBar.horizontal: DeckScrollBar { ink: root.muted }
             ColumnLayout {
                 id: confirmationBody
                 x: 20

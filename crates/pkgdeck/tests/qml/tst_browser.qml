@@ -2334,9 +2334,32 @@ TestCase {
         visit(browser);
         verify(bars.length >= 6, "found " + bars.length + " scrollbars");
         compare(styled, []);
-        const bar = findChild(browser, "settingsScroll").Controls.ScrollBar.vertical;
+        // A ScrollView's own bar sits along its right edge, beside the content.
+        const settings = findChild(browser, "settingsScroll");
+        const bar = settings.Controls.ScrollBar.vertical;
         compare(bar.background.children.length, 0);
         compare(bar.contentItem.color.toString(), browser.muted.toString());
+        browser.height = 500;
+        waitForRendering(browser.contentItem);
+        verify(bar.size < 1);
+        verify(bar.visible && bar.height > 100);
+        compare(bar.x, settings.width - bar.width);
+        verify(settings.availableWidth + bar.width <= settings.width);
+    }
+    function test_resizing_the_window_keeps_the_page_in_place() {
+        const heading = findChild(browser, "pageHeading");
+        const at = (width) => {
+            browser.width = width;
+            waitForRendering(browser.contentItem);
+            const point = heading.mapToItem(browser.contentItem, 0, 0);
+            return {x: point.x - browser.sidebarWidth, y: point.y};
+        };
+        const wide = at(1300);
+        verify(!browser.compact);
+        const narrow = at(900);
+        verify(browser.compact);
+        compare(narrow.x, wide.x);
+        compare(narrow.y, wide.y);
     }
     function test_sidebar_title_and_footer_fit_at_the_narrowest_width() {
         const sidebar = findChild(browser, "sidebar");

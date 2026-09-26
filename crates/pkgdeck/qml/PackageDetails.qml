@@ -98,14 +98,13 @@ Rectangle {
                 }
             }
         }
-        Controls.ScrollView {
+        DeckScrollView {
+            ink: panel.muted
             id: detailScroll
             Layout.fillWidth: true
             Layout.fillHeight: true
             contentWidth: availableWidth
             clip: true
-            Controls.ScrollBar.vertical: DeckScrollBar { ink: panel.muted }
-            Controls.ScrollBar.horizontal: DeckScrollBar { ink: panel.muted }
             ColumnLayout {
                 id: detailBody
                 width: detailScroll.availableWidth
