@@ -69,6 +69,53 @@ jobs:
             RUNNER_ARCH="$RUNNER_ARCH" \
             scripts/tests/host-authorization.sh
 
+  test-macos:
+    name: Test / macOS native (${{ matrix.arch }})
+    if: github.event_name != 'push' && !inputs.homebrew_only
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-26
+            arch: aarch64
+          - runner: macos-26-intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+      HOMEBREW_NO_INSTALL_CLEANUP: '1'
+      HOMEBREW_NO_ANALYTICS: '1'
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Rust and JSON assertions
+        run: |
+          rustup show
+          brew install jq
+      - name: Cache Rust build outputs
+        uses: ./.github/actions/rust-cache
+        with:
+          arch: ${{ matrix.arch }}
+          scope: macos-native
+      - name: Test native plist reads, discovery and cold details
+        run: cargo test --locked -p pkgdeck-core --lib backends::mac_apps
+      - name: Test orchestration and CLI planning
+        run: |
+          cargo test --locked -p pkgdeck-core --test engine
+          cargo test --locked -p pkd --bin pkd
+          cargo test --locked -p pkd --test entrypoint read_only_source
+      - name: Build CLI
+        run: cargo build --locked -p pkd
+      - name: Test real bundles and Homebrew cask lifecycle
+        run: bash scripts/tests/macos-inventory.sh
+      - name: Upload native inventory evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: macos-native-${{ matrix.arch }}
+          path: build/macos-native
+
   test-podman:
     name: Test / Podman (${{ matrix.arch }})
     if: github.event_name != 'push' && !inputs.homebrew_only

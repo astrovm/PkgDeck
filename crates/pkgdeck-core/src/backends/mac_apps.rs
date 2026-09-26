@@ -975,6 +975,22 @@ mod tests {
             native.plist(&path, &cancel).unwrap()["CFBundleIdentifier"],
             "md.obsidian"
         );
+        let mut cold = f.backend(Ok(BTreeMap::new()));
+        cold.io = Box::new(NativeApps(Host::current()));
+        let id = PackageId {
+            backend: ID.into(),
+            name: app.to_string_lossy().into(),
+            architecture: "unknown".into(),
+            scope: Scope::System,
+            remote: None,
+            reference: Some(app.to_string_lossy().into()),
+        };
+        let details = cold.details(&id, &cancel).unwrap();
+        assert!(cold.snapshot.is_none());
+        assert!(details
+            .description
+            .contains("Bundle identifier: md.obsidian"));
+        assert_eq!(cold.installed(&cancel).unwrap(), vec![details.package]);
         let result = native
             .0
             .read(

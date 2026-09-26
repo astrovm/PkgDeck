@@ -93,6 +93,7 @@ The workflow is called `CI`. Check names follow `Category / Scope (architecture)
 | Check | What it does |
 | --- | --- |
 | `Test / Terminal (x86_64, aarch64)` | Fast checks and Qt-free CLI builds; x86_64 also tests real sudo/polkit and APT locks |
+| `Test / macOS native (x86_64, aarch64)` | Native plist/discovery tests, engine and CLI planning tests, real Homebrew cask install/remove and CLI inventory checks |
 | `Lint / Workspace (x86_64, aarch64)` | Clippy for the whole workspace |
 | `Coverage / Workspace (x86_64)` | Workspace tests with the 95% coverage gate |
 | `Test / Workspace (aarch64)` | Workspace tests without coverage |
@@ -101,6 +102,17 @@ The workflow is called `CI`. Check names follow `Category / Scope (architecture)
 | `Package / AppImage + Snap (x86_64, aarch64)` | Release build, packages, and GUI tests on the packaged app |
 | `Package / Flatpak (x86_64, aarch64)` | Flatpak build, installed GUI, and host bridge tests |
 | `Package / Homebrew (Linux, macOS)` | Formula build and installed commands |
+
+The macOS native job uses real `plutil` with XML and binary bundles, system and
+user application directories, a locally built cask installed by Homebrew, and
+actual permission-denied folders. It checks exact-copy ownership, duplicate
+copies, App Store receipts, malformed metadata, nested/helper apps, symlinks,
+partial results, details, search, and rejection of writes. Fixtures have an
+executable launch marker that must remain absent. JSON reports and lifecycle
+logs are uploaded as `macos-native-<architecture>` artifacts. The script is
+restricted to disposable GitHub-hosted runners because it creates bundles in
+`/Applications` and installs a temporary cask. It does not validate signed vendor
+apps, adoption, or migration; those writes remain unsupported.
 
 Naming rules:
 

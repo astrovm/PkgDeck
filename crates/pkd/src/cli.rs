@@ -222,6 +222,21 @@ fn failure(error: EngineError) -> (Value, u8) {
     let message = crate::presentation::error_message(&error);
     (json!({"error": error, "message": message}), code)
 }
+fn read_only_mutation(args: &Args) -> Option<EngineError> {
+    let capability = match args.command.as_ref()? {
+        Commands::Install { .. } => Capability::Install,
+        Commands::Remove { .. } => Capability::Remove,
+        Commands::Upgrade { .. } => Capability::Upgrade,
+        _ => return None,
+    };
+    args.from
+        .iter()
+        .find(|id| pkgdeck_core::backends::read_only(id))
+        .map(|id| EngineError::Unsupported {
+            backend: id.clone(),
+            capability,
+        })
+}
 /// What a typed package name is looked up for.
 #[derive(Clone, Copy, PartialEq)]
 enum Lookup {
@@ -248,7 +263,9 @@ fn select(
     cancel: &Cancellation,
 ) -> Selection {
     let report = if lookup == Lookup::Installed {
-        engine.installed(cancel)
+        engine.installed_for_mutation(cancel)
+    } else if lookup == Lookup::Install {
+        engine.lookup_for_mutation(name, cancel)
     } else {
         engine.lookup(name, cancel)
     };
@@ -490,6 +507,9 @@ pub fn dispatch_with(
         }
         _ => (),
     }
+    if let Some(error) = read_only_mutation(args) {
+        return failure(error);
+    }
     // A typed name no source confirmed, with the registries that could try it.
     let mut missing: Option<(String, Vec<String>)> = None;
     // Registry sources that could also try a name a catalog source matched.
@@ -528,7 +548,7 @@ pub fn dispatch_with(
                 Ok(operations)
             }
             Commands::Upgrade { names, .. } if names.is_empty() => {
-                let report = engine.installed(cancel);
+                let report = engine.installed_for_mutation(cancel);
                 if !report.failures.is_empty() {
                     return Err(EngineError::Incomplete(report.failures));
                 }
@@ -926,6 +946,10 @@ pub fn run(args: &Args) -> u8 {
     if let Some(Commands::Completions { shell }) = args.command {
         completions(shell, &mut io::stdout().lock());
         return 0;
+    }
+    if let Some(error) = read_only_mutation(args) {
+        let (data, code) = failure(error);
+        return emit(args, data, code, false);
     }
     if args.command.as_ref().is_some_and(Commands::writes)
         && !args.yes
@@ -1479,6 +1503,61 @@ mod tests {
             &mut |_| approve,
             &mut |_| {},
         )
+    }
+    #[test]
+    fn read_only_inventory_cannot_block_or_ambiguate_mutation_planning() {
+        struct Inventory;
+        impl Backend for Inventory {
+            fn id(&self) -> &str {
+                "macos-apps"
+            }
+            fn capabilities(&self) -> &[Capability] {
+                &[Capability::Search, Capability::Installed]
+            }
+            fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
+                panic!("mutations must not detect inventory-only sources")
+            }
+            fn installed(&mut self, _: &Cancellation) -> Result<Vec<Package>, EngineError> {
+                panic!("mutations must not scan inventory-only sources")
+            }
+            fn search(&mut self, _: &str, _: &Cancellation) -> Result<Vec<Package>, EngineError> {
+                panic!("mutations must not search inventory-only sources")
+            }
+        }
+        for words in [
+            vec!["install", "fixture"],
+            vec!["remove", "fixture"],
+            vec!["upgrade", "fixture"],
+            vec!["upgrade"],
+        ] {
+            let mut engine = Engine::default();
+            engine.register(Inventory).unwrap();
+            engine
+                .register(Fixture {
+                    backend: "homebrew".into(),
+                    installed: true,
+                    fail: None,
+                    read_failure: None,
+                    verified: true,
+                })
+                .unwrap();
+            let args = Args::try_parse_from(std::iter::once("pkd").chain(words)).unwrap();
+            let mut confirmed = false;
+            let (data, code) = dispatch(
+                &mut engine,
+                &args,
+                &Cancellation::default(),
+                &mut |ops| {
+                    assert_eq!(ops.len(), 1);
+                    assert_eq!(ops[0].backend(), "homebrew");
+                    confirmed = true;
+                    false
+                },
+                &mut |_| {},
+            );
+            assert!(confirmed, "{data}");
+            assert_eq!(code, 7, "{data}");
+        }
     }
     #[test]
     fn read_only_mutations_fail_before_confirmation_or_activity_events() {

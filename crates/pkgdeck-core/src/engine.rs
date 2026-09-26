@@ -493,6 +493,18 @@ impl Engine {
     pub fn installed(&mut self, cancel: &Cancellation) -> PackageReport {
         self.query(None, cancel)
     }
+    /// Mutation planning excludes inventory-only sources, including their
+    /// errors: they cannot contribute an operation or an ambiguous target.
+    pub fn installed_for_mutation(&mut self, cancel: &Cancellation) -> PackageReport {
+        self.query_where(None, cancel, &|backend| {
+            !crate::backends::read_only(backend.id())
+        })
+    }
+    pub fn lookup_for_mutation(&mut self, name: &str, cancel: &Cancellation) -> PackageReport {
+        self.query_where(Some(name), cancel, &|backend| {
+            !crate::backends::read_only(backend.id()) && backend.may_have(name)
+        })
+    }
     /// Discover cleanup plans independently per backend. Sources without a
     /// cleanup capability are omitted; they have nothing to show on this view.
     pub fn cleanup(&mut self, cancel: &Cancellation) -> CleanupReport {
