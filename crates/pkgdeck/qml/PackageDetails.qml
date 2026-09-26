@@ -104,6 +104,8 @@ Rectangle {
             Layout.fillHeight: true
             contentWidth: availableWidth
             clip: true
+            Controls.ScrollBar.vertical: DeckScrollBar { ink: panel.muted }
+            Controls.ScrollBar.horizontal: DeckScrollBar { ink: panel.muted }
             ColumnLayout {
                 id: detailBody
                 width: detailScroll.availableWidth

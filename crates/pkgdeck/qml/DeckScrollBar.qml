@@ -6,6 +6,8 @@ import QtQuick.Controls as Controls
 Controls.ScrollBar {
     id: bar
     property color ink
+    // Lets tests tell this apart from a style-drawn scrollbar.
+    readonly property bool plainHandle: true
 
     implicitWidth: 10
     implicitHeight: 10

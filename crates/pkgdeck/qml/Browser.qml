@@ -1114,7 +1114,7 @@ Controls.ApplicationWindow {
                 model: combo.popup.visible ? combo.delegateModel : null
                 currentIndex: combo.highlightedIndex
                 delegate: combo.delegate
-                Controls.ScrollIndicator.vertical: Controls.ScrollIndicator { }
+                Controls.ScrollBar.vertical: DeckScrollBar { ink: root.muted }
             }
             background: Rectangle {
                 color: root.surface
@@ -2096,6 +2096,8 @@ Controls.ApplicationWindow {
                 Layout.fillHeight: true
                 contentWidth: availableWidth
                 clip: true
+                Controls.ScrollBar.vertical: DeckScrollBar { ink: root.muted }
+                Controls.ScrollBar.horizontal: DeckScrollBar { ink: root.muted }
                 ColumnLayout {
                     width: settingsScroll.availableWidth
                     spacing: 14
@@ -3332,6 +3334,8 @@ Controls.ApplicationWindow {
                 Layout.preferredHeight: Math.min(failureList.implicitHeight, Math.max(120, root.height - 260))
                 contentWidth: availableWidth
                 clip: true
+                Controls.ScrollBar.vertical: DeckScrollBar { ink: root.muted }
+                Controls.ScrollBar.horizontal: DeckScrollBar { ink: root.muted }
                 Column {
                     id: failureList
                     width: parent.width
@@ -3475,6 +3479,8 @@ Controls.ApplicationWindow {
             contentWidth: availableWidth
             contentHeight: confirmationBody.implicitHeight + 32
             clip: true
+            Controls.ScrollBar.vertical: DeckScrollBar { ink: root.muted }
+            Controls.ScrollBar.horizontal: DeckScrollBar { ink: root.muted }
             ColumnLayout {
                 id: confirmationBody
                 x: 20

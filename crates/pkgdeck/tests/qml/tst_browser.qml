@@ -2307,10 +2307,34 @@ TestCase {
         tryCompare(browser, "sidebarWidth", 212);
         verify(!browser.sidebarRail);
     }
-    function test_scrollbar_draws_no_line_beside_the_list() {
-        const bar = findChild(browser, "packageResults").Controls.ScrollBar.vertical;
-        verify(bar !== null);
-        // No style groove or separator, only the handle.
+    function test_every_scrollbar_is_the_plain_handle() {
+        // Style-drawn scrollbars add a groove with a hard line beside the
+        // content; every scrolling area uses DeckScrollBar instead.
+        browser.openView("Settings");
+        waitForRendering(browser.contentItem);
+        const seen = new Set();
+        const bars = [];
+        const styled = [];
+        const visit = (item) => {
+            if (!item || typeof item !== "object" || seen.has(item))
+                return;
+            seen.add(item);
+            if (item.orientation !== undefined && item.position !== undefined && item.size !== undefined
+                    && item.stepSize !== undefined || String(item).indexOf("ScrollIndicator") >= 0)
+                (item.plainHandle === true ? bars : styled).push(String(item));
+            for (const key of ["data", "contentItem", "popup", "background"]) {
+                const value = item[key];
+                if (value && value.length !== undefined && typeof value !== "string")
+                    for (let i = 0; i < value.length; ++i)
+                        visit(value[i]);
+                else
+                    visit(value);
+            }
+        };
+        visit(browser);
+        verify(bars.length >= 6, "found " + bars.length + " scrollbars");
+        compare(styled, []);
+        const bar = findChild(browser, "settingsScroll").Controls.ScrollBar.vertical;
         compare(bar.background.children.length, 0);
         compare(bar.contentItem.color.toString(), browser.muted.toString());
     }
