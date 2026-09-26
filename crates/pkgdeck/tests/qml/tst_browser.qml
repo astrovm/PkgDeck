@@ -320,7 +320,7 @@ TestCase {
         compare(browser.completedRows[0], browser.rowIdentity(rows[0]));
         tryCompare(browser, "completedRows", [], 2000);
     }
-    function test_search_navigation_and_confirmation() {
+    function test_row_actions_confirm_before_writing_from_search_and_keyboard() {
         browser.openView("Search");
         const search = findChild(browser, "searchField");
         verify(search !== null);
@@ -362,7 +362,7 @@ TestCase {
         compare(action.symbol, "remove");
         verify(findChild(browser, "packageDetails").text.indexOf("<b>literal metadata</b>") >= 0);
     }
-    function test_views_loading_errors_and_resize() {
+    function test_reads_never_lock_navigation_and_results_fit_small_windows() {
         for (const view of ["Search", "Installed", "Updates", "Clean", "Sources", "Settings"]) {
             browser.openView(view);
             compare(browser.currentView, view);
@@ -402,7 +402,7 @@ TestCase {
         browser.width = 1100;
         browser.height = 760;
     }
-    function test_clean_view_actions() {
+    function test_cleanup_actions_and_clean_all_ask_for_confirmation() {
         browser.openView("Clean");
         compare(fake.lastView, "Clean");
         fake.rows = JSON.stringify([{
@@ -456,7 +456,7 @@ TestCase {
         verify(!findChild(browser, "sourceFailureNotice").visible);
         verify(!findChild(browser, "cleanAllButton").visible);
     }
-    function test_appearance_and_search_does_not_relabel_old_results() {
+    function test_search_clears_old_results_and_appearance_setting_applies() {
         browser.openView("Installed");
         populate();
         compare(browser.items.length, 2);
@@ -724,7 +724,7 @@ TestCase {
         compare(JSON.stringify(JSON.parse(fake.lastChecked)),
             JSON.stringify([["flatpak", "io.github.astrovm.AdventureMods", "x86_64", "astrovm", "system", reference]]));
     }
-    function test_columns_sort_resize_and_index_mapping() {
+    function test_sorted_columns_resize_and_map_rows_to_backend_order() {
         browser.openView("Search");
         fake.rows = JSON.stringify([
             {kind: "package", name: "bravo", source: "apt", architecture: "all", installed: null, candidate: "1", scope: "system", summary: "B"},
@@ -1324,7 +1324,7 @@ TestCase {
         }
         verify(!findChild(browser, "sourceFilter").visible);
     }
-    function test_view_status_and_source_columns() {
+    function test_each_view_shows_its_own_columns() {
         browser.openView("Settings");
         verify(findChild(browser, "appearanceSetting") !== null);
         verify(findChild(browser, "authorizationSetting") !== null);
@@ -1352,7 +1352,7 @@ TestCase {
         compare(findChild(browser, "columnHeader2").text, "SUMMARY");
         compare(browser.items.length, 0);
     }
-    function test_search_focus_and_list_keys() {
+    function test_search_keeps_typing_focus_and_list_keys_follow_visible_order() {
         browser.openView("Search");
         populate();
         const search = findChild(browser, "searchField");
@@ -1414,7 +1414,7 @@ TestCase {
         wait(30);
         verify(filter.activeFocus);
     }
-    function test_search_and_filter_clear_buttons() {
+    function test_clear_buttons_empty_their_field_and_keep_focus() {
         browser.openView("Search");
         const search = findChild(browser, "searchField");
         const clearSearch = findChild(browser, "clearSearchButton");
@@ -1799,7 +1799,7 @@ TestCase {
         verify(metadata.text.indexOf("Identity:") < 0);
         verify(metadata.text.indexOf("Scope:") < 0);
     }
-    function test_repository_scopes_and_actions() {
+    function test_repository_actions_keep_their_scope() {
         browser.openView("Sources");
         const rows = [
             {backend: "flatpak", name: "fixture", title: "Fixture", url: "https://example.invalid", scope: {user: {uid: 1000}}, enabled: true, priority: 1},
@@ -2113,7 +2113,7 @@ TestCase {
         compare(list.width - row.width, 16);
         verify(action.mapToItem(list, action.width, 0).x <= row.width);
     }
-    function test_header_source_checklist_and_installed_filter() {
+    function test_source_checklist_filters_only_after_it_is_applied() {
         browser.openView("Installed");
         const filter = findChild(browser, "sourceFilter");
         verify(filter !== null);

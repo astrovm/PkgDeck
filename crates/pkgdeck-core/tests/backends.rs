@@ -551,7 +551,7 @@ fn dnf_lifecycle() {
 }
 
 #[test]
-fn wave_three_parsers_preserve_system_identities() {
+fn pacman_zypper_and_snap_parsers_preserve_system_identities() {
     let cancel = Cancellation::default();
     let fixture = Fixture::new();
     let mut pacman = Pacman::pacman(fixture.clone());
@@ -2915,7 +2915,7 @@ fn gem_lifecycle() {
 }
 
 #[test]
-fn wave_five_name_policies_reject_options_paths_and_urls() {
+fn python_php_and_ruby_name_policies_reject_options_paths_and_urls() {
     for (make, valid, invalid) in [
         ("pip", "cowsay", "--evil"),
         ("pipx", "cowsay", "https://example.invalid/tool.tar.gz"),
@@ -2989,7 +2989,7 @@ fn wave_five_name_policies_reject_options_paths_and_urls() {
 }
 
 #[test]
-fn wave_five_malformed_metadata_is_never_treated_as_an_empty_success() {
+fn python_php_and_ruby_malformed_metadata_is_never_treated_as_an_empty_success() {
     let cancel = Cancellation::default();
     // pip: invalid JSON and invalid entries.
     for (list, outdated) in [
@@ -3110,7 +3110,7 @@ fn wave_five_malformed_metadata_is_never_treated_as_an_empty_success() {
 }
 
 #[test]
-fn wave_five_transports_report_unavailable_and_failed_writes() {
+fn python_php_and_ruby_transports_report_unavailable_and_failed_writes() {
     let cancel = Cancellation::default();
     let mut missing_pipx = DevTool::pipx(DevFixture {
         home: Some("/home/test".into()),
@@ -3166,7 +3166,7 @@ fn wave_five_transports_report_unavailable_and_failed_writes() {
 }
 
 #[test]
-fn wave_five_relative_homes_fail_closed() {
+fn python_php_and_ruby_relative_homes_fail_closed() {
     let cancel = Cancellation::default();
     for (make, variable) in [
         ("pipx", "PIPX_HOME"),
@@ -3193,7 +3193,7 @@ fn wave_five_relative_homes_fail_closed() {
 }
 
 #[test]
-fn wave_five_unreachable_registries_keep_installed_state_current() {
+fn python_php_and_ruby_unreachable_registries_keep_installed_state_current() {
     let cancel = Cancellation::default();
     let mut pip = DevTool::pip(DevFixture {
         venv: Some("/home/test/venv".into()),
@@ -3248,7 +3248,7 @@ fn wave_five_unreachable_registries_keep_installed_state_current() {
 }
 
 #[test]
-fn wave_five_managers_skip_malformed_rows_and_reject_foreign_names() {
+fn python_php_and_ruby_managers_skip_malformed_rows_and_reject_foreign_names() {
     let cancel = Cancellation::default();
     // uv skips executable continuations and garbage rows but rejects
     // option-like tool names instead of running them.

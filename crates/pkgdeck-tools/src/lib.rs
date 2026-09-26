@@ -122,6 +122,32 @@ fn state(dir: &Path) -> Value {
     serde_json::from_slice(&raw).unwrap()
 }
 
+/// CPU ticks used by `pid`, or `None` while one of its child processes is
+/// still running. Linux-only, like the rest of the desktop driver.
+fn settled_cpu(pid: u32) -> Option<u64> {
+    let stat = |pid: &str| fs::read_to_string(format!("/proc/{pid}/stat")).ok();
+    // Fields after the parenthesised command name: state, ppid, ..., utime, stime.
+    let fields = |stat: &str| -> Vec<String> {
+        stat.rsplit_once(')')
+            .map(|(_, rest)| rest.split_whitespace().map(String::from).collect())
+            .unwrap_or_default()
+    };
+    let own = fields(&stat(&pid.to_string())?);
+    let ticks = own.get(11)?.parse::<u64>().ok()? + own.get(12)?.parse::<u64>().ok()?;
+    let parent = pid.to_string();
+    for entry in fs::read_dir("/proc").ok()?.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        let Some(child) = stat(&name) else { continue };
+        let child = fields(&child);
+        if child.get(1) == Some(&parent) && child.first().map(String::as_str) != Some("Z") {
+            return None;
+        }
+    }
+    Some(ticks)
+}
 pub struct Desktop {
     server: Process,
     process: Option<Process>,
@@ -244,8 +270,26 @@ impl Desktop {
     fn logs(&self) -> String {
         fs::read_to_string(self.dir.0.join("application.log")).unwrap_or_default()
     }
+    /// Wait until the app has settled: no helper process is running and the
+    /// app has used no CPU for a short quiet period. Anything still busy
+    /// after two seconds (an animation, a slow helper) waits the full time.
     pub fn idle(&mut self) {
-        sleep(Duration::from_secs(2));
+        let pid = self.process.as_ref().unwrap().0.id();
+        let start = Instant::now();
+        let quiet_for = Duration::from_millis(300);
+        sleep(Duration::from_millis(150));
+        let mut last = settled_cpu(pid);
+        let mut quiet_since = Instant::now();
+        while start.elapsed() < Duration::from_secs(2) {
+            sleep(Duration::from_millis(50));
+            let now = settled_cpu(pid);
+            if now.is_none() || now != last {
+                last = now;
+                quiet_since = Instant::now();
+            } else if quiet_since.elapsed() >= quiet_for {
+                break;
+            }
+        }
         assert!(
             self.process
                 .as_mut()

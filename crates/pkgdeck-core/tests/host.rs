@@ -636,7 +636,7 @@ fn venv_pip_rejects_malformed_and_packaged_environments() {
 }
 
 #[test]
-fn flatpak_remote_queries_allow_slow_and_large_catalogs() {
+fn flatpak_remote_queries_allow_large_catalogs() {
     let fixture = Fixture::new();
     link_executable(&fixture.0, "flatpak", "/bin/sh");
     let h = Host::new(
@@ -645,7 +645,7 @@ fn flatpak_remote_queries_allow_slow_and_large_catalogs() {
     );
     let output = h
         .flatpak(
-            &shell("/bin/sleep 11; /usr/bin/head -c 262144 /dev/zero"),
+            &shell("/usr/bin/head -c 262144 /dev/zero"),
             &Cancellation::default(),
             false,
             false,

@@ -774,22 +774,31 @@ impl Host {
             return self.privileged(&path, args, authorization, cancel);
         }
         let command = self.command(&path, args)?;
-        // Remote catalog queries can download metadata on their first call.
-        // Keep these cancellable, but allow more time and output than local reads.
-        let result = process::run(
-            command,
-            Limits {
-                timeout: std::time::Duration::from_secs(120),
-                output_bytes: 32 * 1024 * 1024,
-            },
-            cancel,
-            write,
-        )?;
+        let result = process::run(command, FLATPAK_QUERY_LIMITS, cancel, write)?;
         if result.code == Some(0) {
             Ok(result)
         } else {
             Err(ExecutionError::Failed(result))
         }
+    }
+}
+
+// Remote catalog queries can download metadata on their first call. Keep
+// them cancellable, but allow more time and output than local reads.
+const FLATPAK_QUERY_LIMITS: Limits = Limits {
+    timeout: std::time::Duration::from_secs(120),
+    output_bytes: 32 * 1024 * 1024,
+};
+
+#[cfg(test)]
+mod flatpak_limit_tests {
+    use super::*;
+
+    #[test]
+    fn flatpak_queries_allow_more_time_and_output_than_plain_reads() {
+        let plain = Limits::default();
+        assert!(FLATPAK_QUERY_LIMITS.timeout > plain.timeout);
+        assert!(FLATPAK_QUERY_LIMITS.output_bytes > plain.output_bytes);
     }
 }
 

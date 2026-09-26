@@ -1511,7 +1511,7 @@ mod tests {
         assert!(working_label(&Commands::Completions { shell: Shell::Fish }).is_none());
     }
     #[test]
-    fn commands_and_confirmation() {
+    fn every_command_succeeds_and_writes_need_confirmation() {
         assert!(Args::try_parse_from(["pkd", "clean", "--authenticate"]).is_err());
         let mut engine = engine();
         for args in [

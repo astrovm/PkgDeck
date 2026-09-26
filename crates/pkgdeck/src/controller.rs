@@ -7382,7 +7382,7 @@ mod tests {
         assert!(controller.confirmation().is_empty());
     }
     #[test]
-    fn qt_repository_confirmation_and_refresh_invalidate_cached_state() {
+    fn repository_confirmation_and_refresh_invalidate_cached_state() {
         let mut controller = ffi::create_controller();
         let mut controller = controller.pin_mut();
         controller.as_mut().change_repository("broken".into());
@@ -7452,7 +7452,7 @@ mod tests {
             .is_some_and(CachedView::stale));
     }
     #[test]
-    fn qt_firmware_actions_require_confirmation_and_never_offer_removal() {
+    fn firmware_actions_require_confirmation_and_never_offer_removal() {
         let mut controller = ffi::create_controller();
         let mut controller = controller.pin_mut();
         let package = Package {
@@ -7551,7 +7551,7 @@ mod tests {
         assert!(!*controller.upgradable());
     }
     #[test]
-    fn qt_container_pull_is_explicit_and_requires_a_stored_tag() {
+    fn container_pull_is_explicit_and_requires_a_stored_tag() {
         let mut controller = ffi::create_controller();
         let mut controller = controller.pin_mut();
         let package = Package {
@@ -7588,7 +7588,7 @@ mod tests {
         assert!(controller.rust().pending.is_none());
     }
     #[test]
-    fn qt_source_failures_and_busy_requests_preserve_the_active_operation() {
+    fn source_failures_and_busy_requests_preserve_the_active_operation() {
         let mut controller = ffi::create_controller();
         let mut controller = controller.pin_mut();
         controller
@@ -7662,7 +7662,7 @@ mod tests {
         assert!(!*controller.busy());
     }
     #[test]
-    fn qt_streamed_details_preserve_progress_and_finish_cleanly() {
+    fn streamed_details_preserve_progress_and_finish_cleanly() {
         let mut object = ffi::create_controller();
         let mut controller = object.pin_mut();
         let package = Package {
@@ -7739,7 +7739,7 @@ mod tests {
             .contains("Finished before it could be cancelled"));
     }
     #[test]
-    fn qt_new_view_discards_superseded_reports_and_cancellation_errors() {
+    fn new_view_discards_superseded_reports_and_cancellation_errors() {
         let mut object = ffi::create_controller();
         let mut controller = object.pin_mut();
         let (_sender, receiver) = mpsc::channel();
