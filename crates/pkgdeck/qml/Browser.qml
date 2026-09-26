@@ -696,10 +696,15 @@ Controls.ApplicationWindow {
     // The sidebar is resizable and can be hidden. Narrow windows, or a
     // sidebar dragged narrow, show it as an icon rail instead.
     readonly property int railWidth: 64
-    readonly property int sidebarMinimumWidth: 180
+    // Wide enough for the title and the footer at any font size.
+    readonly property int sidebarMinimumWidth: Math.ceil(Math.max(180,
+        28 + 10 + sidebarTitle.implicitWidth + 4 + 28,
+        sidebarSignature.implicitWidth + 8 + sidebarToggle.implicitWidth + 4 + 28))
+    // A sidebar dragged narrower than this becomes the icon rail.
+    readonly property int railThreshold: 150
     readonly property int sidebarMaximumWidth: 360
     readonly property bool sidebarVisible: !preferences.sidebarHidden
-    readonly property bool sidebarRail: width < 820 || preferences.sidebarWidth < sidebarMinimumWidth
+    readonly property bool sidebarRail: width < 820 || preferences.sidebarWidth < railThreshold
     readonly property int sidebarWidth: !sidebarVisible ? 0 : sidebarRail ? railWidth
         : Math.max(sidebarMinimumWidth, Math.min(sidebarMaximumWidth, preferences.sidebarWidth))
     function toggleSidebar() { sidebarHidden = !sidebarHidden; }
@@ -1471,14 +1476,11 @@ Controls.ApplicationWindow {
                 anchors.fill: parent
                 anchors.margins: root.sidebarRail ? 10 : 14
                 spacing: 8
-                // The rail stacks the logo above the hide button.
-                GridLayout {
-                    columns: root.sidebarRail ? 1 : 3
-                    columnSpacing: 10
-                    rowSpacing: 10
-                    Layout.fillWidth: true
+                RowLayout {
+                    spacing: 10
                     Layout.topMargin: 10
                     Layout.leftMargin: root.sidebarRail ? 0 : 4
+                    Layout.alignment: root.sidebarRail ? Qt.AlignHCenter : Qt.AlignLeft
                     Image {
                         objectName: "appLogo"
                         source: root.logoIconSource
@@ -1486,30 +1488,18 @@ Controls.ApplicationWindow {
                         sourceSize.height: 28
                         fillMode: Image.PreserveAspectFit
                         Accessible.ignored: true
-                        Layout.alignment: root.sidebarRail ? Qt.AlignHCenter : Qt.AlignVCenter
                     }
                     Controls.Label {
+                        id: sidebarTitle
+                        objectName: "sidebarTitle"
                         visible: !root.sidebarRail
                         text: "PkgDeck"
                         font.pointSize: root.font.pointSize * 1.55
                         font.weight: Font.Bold
                         color: root.ink
-                        elide: Text.ElideRight
-                        Layout.fillWidth: true
-                    }
-                    ActionButton {
-                        objectName: "sidebarToggle"
-                        text: ""
-                        symbol: "sidebar"
-                        flat: true
-                        glyphColor: root.muted
-                        tooltipText: "Hide sidebar (Ctrl+B)"
-                        Accessible.name: "Hide sidebar"
-                        Layout.alignment: root.sidebarRail ? Qt.AlignHCenter : Qt.AlignRight | Qt.AlignVCenter
-                        onClicked: root.toggleSidebar()
                     }
                 }
-                Item { Layout.preferredHeight: root.sidebarRail ? 8 : 18 }
+                Item { Layout.preferredHeight: 18 }
                 Item {
                     id: navigationList
                     Layout.fillWidth: true
@@ -1565,14 +1555,34 @@ Controls.ApplicationWindow {
                     }
                 }
                 Item { Layout.fillHeight: true }
+                // The hide button stays in the bottom corner, in the rail too.
                 RowLayout {
-                    objectName: "signatureFooter"
-                    visible: !root.sidebarRail
-                    Layout.leftMargin: 4
-                    spacing: 4
-                    Controls.Label { objectName: "signaturePrefix"; text: "Made with"; color: root.muted; font.pointSize: root.font.pointSize * 0.9 }
-                    DeckIcon { name: "heart"; ink: "#e34b5f"; Layout.preferredWidth: 14; Layout.preferredHeight: 14 }
-                    Controls.Label { objectName: "signatureAuthor"; text: "by astro"; color: root.muted; font.pointSize: root.font.pointSize * 0.9 }
+                    Layout.fillWidth: true
+                    spacing: 8
+                    RowLayout {
+                        id: sidebarSignature
+                        objectName: "signatureFooter"
+                        visible: !root.sidebarRail
+                        Layout.leftMargin: 4
+                        spacing: 4
+                        Controls.Label { objectName: "signaturePrefix"; text: "Made with"; color: root.muted; font.pointSize: root.font.pointSize * 0.9 }
+                        DeckIcon { name: "heart"; ink: "#e34b5f"; Layout.preferredWidth: 14; Layout.preferredHeight: 14 }
+                        Controls.Label { objectName: "signatureAuthor"; text: "by astro"; color: root.muted; font.pointSize: root.font.pointSize * 0.9 }
+                    }
+                    Item { visible: !root.sidebarRail; Layout.fillWidth: true }
+                    ActionButton {
+                        id: sidebarToggle
+                        objectName: "sidebarToggle"
+                        text: ""
+                        symbol: "sidebar"
+                        flat: true
+                        glyphColor: root.muted
+                        tooltipText: "Hide sidebar (Ctrl+B)"
+                        Accessible.name: "Hide sidebar"
+                        Layout.alignment: root.sidebarRail ? Qt.AlignHCenter : Qt.AlignRight | Qt.AlignVCenter
+                        Layout.fillWidth: root.sidebarRail
+                        onClicked: root.toggleSidebar()
+                    }
                 }
             }
             // Drag the edge to resize. Dragging it narrow leaves only the
@@ -1597,7 +1607,7 @@ Controls.ApplicationWindow {
                     if (!pressed)
                         return;
                     const dragged = Math.round(startWidth + mapToItem(root.contentItem, mouse.x, 0).x - pressX);
-                    preferences.sidebarWidth = dragged < (root.railWidth + root.sidebarMinimumWidth) / 2 ? root.railWidth
+                    preferences.sidebarWidth = dragged < root.railThreshold ? root.railWidth
                         : Math.max(root.sidebarMinimumWidth, Math.min(root.sidebarMaximumWidth, dragged));
                 }
                 onDoubleClicked: preferences.sidebarWidth = 212

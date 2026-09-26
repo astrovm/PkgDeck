@@ -2152,7 +2152,7 @@ TestCase {
         const footer = findChild(browser, "signatureFooter");
         verify(footer.visible);
         verify(footer.width <= 164);
-        verify(footer.y > browser.height / 2);
+        verify(footer.mapToItem(browser.contentItem, 0, 0).y > browser.height / 2);
         verify(findChild(browser, "sidebarRepositoryLink") === null);
         verify(findChild(browser, "signaturePrefix").width >= findChild(browser, "signaturePrefix").implicitWidth);
         verify(findChild(browser, "signatureAuthor").width >= findChild(browser, "signatureAuthor").implicitWidth);
@@ -2201,6 +2201,7 @@ TestCase {
         const show = findChild(browser, "sidebarShow");
         verify(!show.visible);
         verify(hide.mapToItem(sidebar, 0, 0).x + hide.width <= sidebar.width);
+        verify(hide.mapToItem(sidebar, 0, 0).y > sidebar.height / 2);
         wait(Qt.styleHints.mouseDoubleClickInterval + 50);
         clickDelegate(hide);
         verify(!sidebar.visible);
@@ -2219,6 +2220,26 @@ TestCase {
         mouseDoubleClickSequence(browser, edge, y);
         tryCompare(browser, "sidebarWidth", 212);
         verify(!browser.sidebarRail);
+    }
+    function test_sidebar_title_and_footer_fit_at_the_narrowest_width() {
+        const sidebar = findChild(browser, "sidebar");
+        const title = findChild(browser, "sidebarTitle");
+        const footer = findChild(browser, "signatureFooter");
+        const hide = findChild(browser, "sidebarToggle");
+        const font = browser.font.pointSize;
+        for (const size of [font, font * 1.5]) {
+            browser.font.pointSize = size;
+            browser.preferredSidebarWidth = browser.railThreshold;
+            waitForRendering(browser.contentItem);
+            verify(!browser.sidebarRail);
+            compare(browser.sidebarWidth, browser.sidebarMinimumWidth);
+            // Nothing is elided or pushed outside the sidebar.
+            verify(title.width >= title.implicitWidth - 1);
+            verify(title.mapToItem(sidebar, 0, 0).x + title.width <= sidebar.width);
+            verify(footer.mapToItem(sidebar, 0, 0).x + footer.width <= hide.mapToItem(sidebar, 0, 0).x);
+            verify(hide.mapToItem(sidebar, 0, 0).x + hide.width <= sidebar.width);
+        }
+        browser.font.pointSize = font;
     }
     function test_update_failure_keeps_update_all_and_retry_available() {
         browser.openView("Updates");
