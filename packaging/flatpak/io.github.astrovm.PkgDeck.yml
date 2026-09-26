@@ -13,6 +13,8 @@ finish-args:
   - --device=dri
   - --talk-name=org.freedesktop.Flatpak
   - --talk-name=org.kde.StatusNotifierWatcher
+  # Tray notifications (update alerts and the Settings test) use this service.
+  - --talk-name=org.freedesktop.Notifications
   # PkgDeck manages host installations; reserved OS paths are exposed under /run/host.
   - --filesystem=host
   - --filesystem=host-os:ro

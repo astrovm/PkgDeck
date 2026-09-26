@@ -659,6 +659,9 @@ pub struct Controller {
     details_worker: Option<DetailsWorker>,
     /// The visible section is waiting for the prefetch already loading it.
     awaiting_prefetch: bool,
+    /// Rows already on screen stay until the refresh finishes instead of
+    /// being replaced by each streamed partial.
+    hold_partials: bool,
     last_rewarm: Instant,
     /// Scope, elevation, and detection time of `engine`, so searches can
     /// reuse detected managers instead of rediscovering on every query.
@@ -729,6 +732,7 @@ impl Default for Controller {
             prefetch_worker: None,
             details_worker: None,
             awaiting_prefetch: false,
+            hold_partials: false,
             last_rewarm: Instant::now(),
             engine_scope: None,
             reused_engine_born: None,
@@ -753,6 +757,18 @@ impl Controller {
         if let Some(worker) = self.details_worker.take() {
             worker.cancel.cancel();
         }
+    }
+    /// A preload already loading this section, so a visible load can wait
+    /// for it instead of querying every manager a second time.
+    fn awaits_prefetch(&self, key: &str, view: &str) -> bool {
+        self.prefetch_worker.as_ref().is_some_and(|worker| {
+            // One inventory read fills both Installed and Updates.
+            !worker.stale
+                && (worker.key == key
+                    || worker.view == "Installed"
+                        && view == "Updates"
+                        && worker.key == cache_key("Installed", "", &self.source_filter, self.sudo))
+        })
     }
     /// Forget preloaded sections and load them again from scratch.
     fn invalidate_prefetch(&mut self) {
@@ -1205,6 +1221,9 @@ struct ViewCache {
 #[derive(Clone)]
 struct CachedView {
     loaded: Instant,
+    /// A reload or write made this snapshot out of date. It still shows at
+    /// once, marked stale, while the section loads again.
+    expired: bool,
     cleanup: Vec<CleanupItem>,
     packages: Vec<Package>,
     failures: Vec<BackendFailure>,
@@ -1237,8 +1256,17 @@ impl ViewCache {
         }
         self.entries.push((key, view));
     }
-    fn clear(&mut self) {
-        self.entries.clear();
+    /// Mark every snapshot out of date without dropping it, so switching
+    /// sections keeps showing the last rows while they load again.
+    fn expire(&mut self) {
+        for (_, view) in &mut self.entries {
+            view.expired = true;
+        }
+    }
+}
+impl CachedView {
+    fn stale(&self) -> bool {
+        self.expired || self.loaded.elapsed() >= VIEW_TTL
     }
 }
 fn confirmation_label(operation: &Operation, packages: &[Package]) -> String {
@@ -2120,8 +2148,17 @@ impl ffi::PackageController {
         } else {
             sources
         };
+        // Reloading the section on screen keeps its rows until the new ones
+        // are complete (see hold_partials). Reloading again while that
+        // refresh runs finds no rows here, yet the page still shows them.
+        let refreshing = force
+            && view != "Search"
+            && self.rust().active_view == view
+            && (self.rust().rows.to_string() != "[]"
+                || self.rust().hold_partials && self.rust().worker.is_some());
         self.as_mut().rust_mut().active_view = view.clone();
         self.as_mut().rust_mut().awaiting_prefetch = false;
+        self.as_mut().rust_mut().hold_partials = refreshing;
         if view == "Search" && query.trim().is_empty() {
             // Seed the selected sources before the first query starts.
             if self.rust().worker.is_none() {
@@ -2180,6 +2217,7 @@ impl ffi::PackageController {
                 self.as_mut().stash_current_at(key.clone(), loaded);
             }
             if let Some(cached) = self.rust().view_cache.get(&key).cloned() {
+                let stale = cached.stale();
                 self.as_mut().set_upgradable(cached.upgradable);
                 self.as_mut().rust_mut().updates_view = cached.updates_view;
                 self.as_mut().rust_mut().source_filter = sources;
@@ -2197,19 +2235,23 @@ impl ffi::PackageController {
                 self.as_mut().set_status(cached.status);
                 self.as_mut().set_report_state(cached.report_state);
                 self.as_mut()
-                    .set_phase(if cached.loaded.elapsed() >= VIEW_TTL {
-                        "stale"
-                    } else {
-                        "cached"
-                    });
+                    .set_phase(if stale { "stale" } else { "cached" });
                 self.as_mut().set_busy(false);
                 if let Some(worker) = &self.rust().worker {
                     worker.cancel.cancel();
                     // Suppress every reply from the previous section.
                     self.as_mut().rust_mut().background = true;
                 }
-                if cached.loaded.elapsed() >= VIEW_TTL {
-                    self.as_mut().start(Job::Load(view, query));
+                if stale {
+                    // Keep the snapshot on screen until the whole section
+                    // arrives; streamed partials would blank most of it.
+                    self.as_mut().rust_mut().hold_partials = true;
+                    if self.as_mut().rust_mut().awaits_prefetch(&key, &view) {
+                        self.as_mut().rust_mut().awaiting_prefetch = true;
+                        self.as_mut().set_busy(true);
+                    } else {
+                        self.as_mut().start(Job::Load(view, query));
+                    }
                 }
                 return;
             }
@@ -2222,7 +2264,7 @@ impl ffi::PackageController {
         // instant; only an explicit reload or a write may invalidate them.
         if force {
             crate::metadata::invalidate();
-            self.as_mut().rust_mut().view_cache.clear();
+            self.as_mut().rust_mut().view_cache.expire();
             self.as_mut().rust_mut().invalidate_prefetch();
             self.as_mut().rust_mut().engine_scope = None;
             self.as_mut().rust_mut().invalidate_details();
@@ -2240,17 +2282,7 @@ impl ffi::PackageController {
         self.as_mut().set_phase("loading");
         // The section is already preloading: wait for that result instead
         // of querying every manager a second time.
-        if !force
-            && self.rust().prefetch_worker.as_ref().is_some_and(|worker| {
-                // One inventory read fills both Installed and Updates.
-                !worker.stale
-                    && (worker.key == key
-                        || worker.view == "Installed"
-                            && view == "Updates"
-                            && worker.key
-                                == cache_key("Installed", "", &self.rust().source_filter, sudo))
-            })
-        {
+        if !force && self.rust().awaits_prefetch(&key, &view) {
             self.as_mut().rust_mut().awaiting_prefetch = true;
             if let Some(worker) = &self.rust().worker {
                 worker.cancel.cancel();
@@ -2299,6 +2331,7 @@ impl ffi::PackageController {
     fn stash_current_at(self: Pin<&mut Self>, key: String, loaded: Instant) {
         let view = CachedView {
             loaded,
+            expired: false,
             cleanup: self.rust().cleanup.clone(),
             packages: self.rust().packages.clone(),
             failures: self.rust().failures.clone(),
@@ -2845,7 +2878,7 @@ impl ffi::PackageController {
                 }
             }
             Ok(Payload::RetryPackages(source, retry)) => {
-                self.as_mut().rust_mut().view_cache.clear();
+                self.as_mut().rust_mut().view_cache.expire();
                 self.as_mut().rust_mut().invalidate_prefetch();
                 let report = merge_retried_packages(
                     &self.rust().packages,
@@ -2859,7 +2892,7 @@ impl ffi::PackageController {
                 self.as_mut().rust_mut().retrying_sources = None;
             }
             Ok(Payload::RetryFailedUpdates(sources, retry)) => {
-                self.as_mut().rust_mut().view_cache.clear();
+                self.as_mut().rust_mut().view_cache.expire();
                 self.as_mut().rust_mut().invalidate_prefetch();
                 let report = merge_retried_packages(
                     &self.rust().packages,
@@ -2873,7 +2906,7 @@ impl ffi::PackageController {
                 self.as_mut().rust_mut().retrying_sources = None;
             }
             Ok(Payload::RetryCleanup(source, retry)) => {
-                self.as_mut().rust_mut().view_cache.clear();
+                self.as_mut().rust_mut().view_cache.expire();
                 self.as_mut().rust_mut().invalidate_prefetch();
                 let mut items = self.rust().cleanup.clone();
                 items.retain(|item| item.id.backend != source);
@@ -2886,7 +2919,7 @@ impl ffi::PackageController {
                     .apply(Ok(Payload::Cleanup(CleanupReport { items, failures })));
             }
             Ok(Payload::RetrySources(source, retry)) => {
-                self.as_mut().rust_mut().view_cache.clear();
+                self.as_mut().rust_mut().view_cache.expire();
                 self.as_mut().rust_mut().invalidate_prefetch();
                 let mut sources = self.rust().sources.clone();
                 sources.retain(|row| row.backend != source);
@@ -2981,7 +3014,7 @@ impl ffi::PackageController {
                 );
             }
             Ok(Payload::Repositories(report)) => {
-                self.as_mut().rust_mut().view_cache.clear();
+                self.as_mut().rust_mut().view_cache.expire();
                 self.as_mut().rust_mut().invalidate_prefetch();
                 self.as_mut().rust_mut().invalidate_details();
                 crate::metadata::invalidate();
@@ -3352,11 +3385,7 @@ impl ffi::PackageController {
         }
         while let Some(view) = self.as_mut().rust_mut().next_prefetch() {
             let key = cache_key(&view, "", &self.rust().source_filter, self.rust().sudo);
-            let fresh = self
-                .rust()
-                .view_cache
-                .get(&key)
-                .is_some_and(|v| v.loaded.elapsed() < VIEW_TTL)
+            let fresh = self.rust().view_cache.get(&key).is_some_and(|v| !v.stale())
                 || self
                     .rust()
                     .prefetched
@@ -3464,7 +3493,11 @@ impl ffi::PackageController {
                         self.as_mut().rust_mut().engine_scope = scope;
                         self.as_mut().rust_mut().engine = Some(*engine);
                     }
-                    Reply::Partial(report) => self.as_mut().apply(Ok(Payload::Packages(report))),
+                    Reply::Partial(report) => {
+                        if !self.rust().hold_partials {
+                            self.as_mut().apply(Ok(Payload::Packages(report)));
+                        }
+                    }
                     Reply::DetailsPreview(details) => {
                         self.as_mut().apply(Ok(Payload::Details(details)))
                     }
@@ -3550,6 +3583,18 @@ impl ffi::PackageController {
                                     self.rust().sudo,
                                 ))
                             }
+                            // Update all retried failed sources; the merged
+                            // report is the current Updates section.
+                            Job::RetryFailedUpdates(_)
+                                if !matches!(self.rust().queued, Some(Job::Load(..))) =>
+                            {
+                                Some(cache_key(
+                                    "Updates",
+                                    "",
+                                    &self.rust().source_filter.clone(),
+                                    self.rust().sudo,
+                                ))
+                            }
                             _ => None,
                         };
                         let stashable = matches!(
@@ -3558,6 +3603,7 @@ impl ffi::PackageController {
                                 | Ok(Payload::Sources(_))
                                 | Ok(Payload::Cleanup(_))
                                 | Ok(Payload::RetryPackages(..))
+                                | Ok(Payload::RetryFailedUpdates(..))
                                 | Ok(Payload::RetryCleanup(..))
                                 | Ok(Payload::RetrySources(..))
                         );
@@ -3629,7 +3675,11 @@ impl ffi::PackageController {
         } else if !self.rust().background {
             for reply in replies {
                 match reply {
-                    Reply::Partial(report) => self.as_mut().apply(Ok(Payload::Packages(report))),
+                    Reply::Partial(report) => {
+                        if !self.rust().hold_partials {
+                            self.as_mut().apply(Ok(Payload::Packages(report)));
+                        }
+                    }
                     Reply::DetailsPreview(details) => {
                         self.as_mut().apply(Ok(Payload::Details(details)))
                     }
@@ -4624,6 +4674,127 @@ mod tests {
         assert!(controller.rows().to_string().contains("cached cleanup"));
         assert!(cancel.requested());
         assert!(matches!(&controller.rust().queued, Some(Job::Load(view, _)) if view == "Clean"));
+    }
+
+    #[test]
+    fn stale_snapshot_stays_whole_while_its_refresh_streams() {
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        let key = cache_key("Installed", "", &[], false);
+        let mut cached = cached_view("cached package");
+        cached.expired = true;
+        controller
+            .as_mut()
+            .rust_mut()
+            .view_cache
+            .insert(key, cached);
+        let (_sender, receiver) = mpsc::channel();
+        controller.as_mut().rust_mut().background = true;
+        controller.as_mut().rust_mut().worker = Some(Worker {
+            handle: thread::spawn(|| {}),
+            receiver,
+            cancel: Cancellation::default(),
+            job: Job::Load("Sources".into(), "".into()),
+        });
+        controller
+            .as_mut()
+            .load("Installed".into(), "".into(), "".into(), false, false);
+        assert!(controller.rows().to_string().contains("cached package"));
+        assert!(controller.rust().hold_partials);
+        // The refresh streams one backend's rows before the rest.
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(Reply::Partial(PackageReport::default()))
+            .unwrap();
+        controller.as_mut().rust_mut().background = false;
+        controller.as_mut().rust_mut().queued = None;
+        controller.as_mut().rust_mut().worker = Some(Worker {
+            handle: thread::spawn(|| thread::sleep(Duration::from_millis(200))),
+            receiver,
+            cancel: Cancellation::default(),
+            job: Job::Load("Installed".into(), "".into()),
+        });
+        controller.as_mut().poll();
+        assert!(controller.rows().to_string().contains("cached package"));
+        // A fresh visit streams partials as usual.
+        controller
+            .as_mut()
+            .load("Search".into(), "query".into(), "".into(), false, false);
+        assert!(!controller.rust().hold_partials);
+    }
+
+    #[test]
+    fn update_all_retry_replaces_the_saved_updates_section() {
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        let key = cache_key("Updates", "", &[], false);
+        controller
+            .as_mut()
+            .rust_mut()
+            .view_cache
+            .insert(key.clone(), cached_view("before retry"));
+        controller.as_mut().rust_mut().view_cache.expire();
+        let package: Package = serde_json::from_value(json!({
+            "id": {"backend":"apt", "name":"retried-tool", "architecture":"all", "scope":"system"},
+            "display_name":"retried-tool", "summary":"Retried package", "installed_version":"1", "candidate_version":"2", "update":"available"
+        }))
+        .unwrap();
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(Reply::Done(Ok(Payload::RetryFailedUpdates(
+                vec!["apt".into()],
+                PackageReport {
+                    packages: vec![package],
+                    failures: vec![],
+                    successful_sources: vec!["apt".into()],
+                },
+            ))))
+            .unwrap();
+        let handle = thread::spawn(|| {});
+        while !handle.is_finished() {
+            thread::yield_now();
+        }
+        controller.as_mut().rust_mut().worker = Some(Worker {
+            handle,
+            receiver,
+            cancel: Cancellation::default(),
+            job: Job::RetryFailedUpdates(vec!["apt".into()]),
+        });
+        controller.as_mut().poll();
+        let saved = controller.rust().view_cache.get(&key).unwrap();
+        assert!(!saved.stale());
+        assert!(saved.rows.to_string().contains("retried-tool"));
+        assert!(!saved.rows.to_string().contains("before retry"));
+    }
+
+    #[test]
+    fn forced_reload_of_the_open_section_keeps_its_rows_until_complete() {
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().rust_mut().active_view = "Updates".into();
+        controller.as_mut().set_rows(r#"[{"name":"shown"}]"#.into());
+        let (_sender, receiver) = mpsc::channel();
+        controller.as_mut().rust_mut().worker = Some(Worker {
+            handle: thread::spawn(|| {}),
+            receiver,
+            cancel: Cancellation::default(),
+            job: Job::Load("Updates".into(), "".into()),
+        });
+        controller
+            .as_mut()
+            .load("Updates".into(), "".into(), "".into(), false, true);
+        assert!(controller.rust().hold_partials);
+        // Reloading again before the refresh finishes still keeps them.
+        assert_eq!(controller.rows().to_string(), "[]");
+        controller
+            .as_mut()
+            .load("Updates".into(), "".into(), "".into(), false, true);
+        assert!(controller.rust().hold_partials);
+        controller.as_mut().rust_mut().active_view = "Installed".into();
+        controller
+            .as_mut()
+            .load("Updates".into(), "".into(), "".into(), false, true);
+        assert!(!controller.rust().hold_partials);
     }
 
     #[test]
@@ -6382,7 +6553,11 @@ mod tests {
         let report: Value = serde_json::from_str(&controller.repositories().to_string()).unwrap();
         assert_eq!(report["repositories"][0]["scope"], "system");
         assert_eq!(report["errors"][0], "Synthetic partial failure");
-        assert!(controller.rust().view_cache.get("old").is_none());
+        assert!(controller
+            .rust()
+            .view_cache
+            .get("old")
+            .is_some_and(CachedView::stale));
     }
     #[test]
     fn qt_firmware_actions_require_confirmation_and_never_offer_removal() {
@@ -6894,6 +7069,7 @@ mod tests {
     fn cached_view(name: &str) -> CachedView {
         CachedView {
             loaded: Instant::now(),
+            expired: false,
             cleanup: vec![],
             packages: vec![],
             failures: vec![],
@@ -6931,7 +7107,7 @@ mod tests {
         );
     }
     #[test]
-    fn view_cache_replaces_evicts_oldest_and_clears() {
+    fn view_cache_replaces_evicts_oldest_and_expires() {
         let mut cache = ViewCache { entries: vec![] };
         assert!(cache.get("missing").is_none());
         cache.insert("a".into(), cached_view("a"));
@@ -6948,8 +7124,9 @@ mod tests {
         // Oldest ("b", then "a") evicted first.
         assert!(cache.get("b").is_none());
         assert!(cache.get("a").is_none());
-        cache.clear();
-        assert!(cache.entries.is_empty());
+        cache.expire();
+        assert!(cache.entries.iter().all(|(_, view)| view.stale()));
+        assert_eq!(cache.entries.len(), ViewCache::CAPACITY);
     }
     #[test]
     fn friendly_detail_names_preserve_exact_identity_and_inventory_state() {

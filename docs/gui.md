@@ -4,6 +4,12 @@ Open PkgDeck from your app menu or run `pkgdeck`. The sidebar has six pages:
 **Search**, **Installed**, **Updates**, **Clean**, **Sources**, and **Settings**.
 The **Activity** button in the header shows running and finished work.
 
+Drag the sidebar's edge to resize it; drag it narrow to keep only its icons,
+or double-click the edge to restore the default width. The button in the
+sidebar's bottom corner hides it, and the button left of the page title brings
+it back; Ctrl+B does both. In narrow windows the
+sidebar shows only icons.
+
 ## Search
 
 Type an app or package name. Exact matches come first, and the same app from
@@ -167,22 +173,24 @@ check. PkgDeck remembers what it already told you about, even after a restart.
 If one source fails, updates from the other sources still trigger a
 notification.
 
-Settings shows when the last check ran, how many updates it found, any sources
-that failed, and whether your desktop supports notifications. **Test
+Settings shows when the last check ran, how many updates it found, and
+whether your desktop supports notifications. **Test
 notification** sends a sample message.
 
 ## Performance
 
 PkgDeck shows saved results right away, for up to 60 seconds, and marks them
-as saved. Older results stay on screen while fresh ones load. Installed,
-Updates, and Clean load in the background after you leave Search. Installing,
-removing, or changing repositories clears saved results.
+as saved. Older results stay on screen, whole, until fresh ones finish
+loading. Installed, Updates, and Clean load in the background after you leave
+Search. Installing, removing, or changing repositories marks saved results as
+out of date, and each page refreshes when you open it.
 
 ## Keyboard shortcuts
 
 | Shortcut | Action |
 | --- | --- |
 | Ctrl+1 to Ctrl+5 | Go to Search, Installed, Updates, Clean, or Sources |
+| Ctrl+B | Show or hide the sidebar |
 | Ctrl+F | Focus the search field, package filter, or source picker |
 | Ctrl+R | Reload |
 | Ctrl+Shift+U | Update checked packages |
