@@ -999,7 +999,15 @@ Controls.ApplicationWindow {
         }
         return found;
     }
+    // Activity slides in over the current page instead of replacing it.
+    property bool activityOpen: false
     function openView(view) {
+        if (view === "Activity") {
+            activityOpen = true;
+            backend.refreshActivity();
+            return;
+        }
+        activityOpen = false;
         const changed = currentView !== view;
         queryDirty = false;
         selectedIdentity = null;
@@ -1015,9 +1023,7 @@ Controls.ApplicationWindow {
             if (changed)
                 reload();
             searchPane.focusSearch(false);
-        } else if (view === "Activity")
-            backend.refreshActivity();
-        else if (["Search", "Installed", "Updates", "Clean", "Sources"].indexOf(view) >= 0)
+        } else if (["Search", "Installed", "Updates", "Clean", "Sources"].indexOf(view) >= 0)
             reload();
     }
     // Reload the current view. Without force, a cached snapshot serves
@@ -1486,14 +1492,36 @@ Controls.ApplicationWindow {
                 }
                 ActionButton {
                     objectName: "activityIndicator"
-                    visible: root.currentView !== "Activity"
-                    readonly property string label: root.queuedCount > 0 ? "Activity (" + root.queuedCount + ")" : backend.writing ? "Working" : "Activity"
-                    text: root.headerIconsOnly ? (root.queuedCount > 0 ? String(root.queuedCount) : "") : label
+                    readonly property int pending: root.queuedCount + (backend.writing ? 1 : 0)
+                    readonly property string label: backend.writing ? "Working" : "Activity"
+                    text: root.headerIconsOnly ? "" : label
                     tooltipText: root.headerIconsOnly ? label : ""
                     symbol: "activity"
                     glyphColor: backend.writing ? root.accent : root.ink
                     Accessible.name: root.queuedCount > 0 ? "Activity, " + root.queuedCount + " queued" : backend.writing ? "Activity, working" : "Activity"
-                    onClicked: root.openView("Activity")
+                    onClicked: root.activityOpen ? (root.activityOpen = false) : root.openView("Activity")
+                    // Running and queued changes, as a badge on the button.
+                    Rectangle {
+                        objectName: "activityBadge"
+                        visible: parent.pending > 0
+                        anchors.right: parent.right
+                        anchors.top: parent.top
+                        anchors.margins: -5
+                        width: Math.max(height, badgeText.implicitWidth + 10)
+                        height: 18
+                        radius: 9
+                        color: root.accent
+                        scale: visible ? 1 : 0.5
+                        Behavior on scale { NumberAnimation { duration: Theme.feedbackDuration; easing.type: Easing.OutBack } }
+                        Text {
+                            id: badgeText
+                            anchors.centerIn: parent
+                            text: String(parent.parent.pending)
+                            color: root.accentInk
+                            font.pointSize: Theme.pointSize(Theme.captionScale)
+                            font.bold: true
+                        }
+                    }
                 }
                 ActionButton {
                     objectName: "sourceFilter"
@@ -1774,7 +1802,9 @@ Controls.ApplicationWindow {
             }
             ActionProgress {
                 objectName: "operationProgress"
-                visible: backend.writing && !!root.actionProgress.label && (root.currentView !== "Activity" ||
+                cancelable: true
+                onCancelRequested: backend.cancel()
+                visible: backend.writing && !!root.actionProgress.label && (!root.activityOpen ||
                     !root.activityRows.some(entry => entry.id === root.actionProgress.activity_id && (entry.state === "running" || entry.state === "authorizing")))
                 Layout.fillWidth: true
                 label: root.actionProgress.label || ""
@@ -1886,24 +1916,19 @@ Controls.ApplicationWindow {
                 objectName: "changeNotice"
                 readonly property var notice: JSON.parse(backend.notice || "{}")
                 readonly property color toneColor: notice.kind === "error" ? root.danger : notice.kind === "success" ? root.success : root.muted
-                visible: notice.title !== undefined && root.currentView !== "Settings"
+                // Successes show as a toast; the banner is for problems.
+                readonly property bool shown: notice.title !== undefined && notice.kind !== "success" && notice.kind !== "info" && root.currentView !== "Settings"
+                visible: shown || opacity > 0
                 Layout.fillWidth: true
                 implicitHeight: noticeRow.implicitHeight + 18
                 radius: root.controlRadius + 1
                 color: root.tint(toneColor, root.dark ? 0.12 : 0.08)
                 border.color: root.tint(toneColor, 0.35)
-                opacity: visible ? 1 : 0
+                opacity: shown ? 1 : 0
                 Behavior on opacity { NumberAnimation { duration: root.revealDuration } }
                 onNoticeChanged: {
-                    if (notice.kind === "success" || notice.kind === "info")
-                        noticeTimer.restart();
-                    else
-                        noticeTimer.stop();
-                }
-                Timer {
-                    id: noticeTimer
-                    interval: 4000
-                    onTriggered: backend.dismissNotice()
+                    if (notice.title !== undefined && (notice.kind === "success" || notice.kind === "info"))
+                        changeToast.show(notice.title, root.undoAction(notice) ? "Undo" : "", notice.kind);
                 }
                 RowLayout {
                     id: noticeRow
@@ -1998,20 +2023,6 @@ Controls.ApplicationWindow {
                     }
                 }
             }
-            ActivityPane {
-                visible: root.currentView === "Activity"
-                entries: root.activityRows
-                progress: root.actionProgress
-                surface: root.surface
-                ink: root.ink
-                muted: root.muted
-                line: root.line
-                accent: root.accent
-                danger: root.danger
-                success: root.success
-                textFont: root.font
-                onCancelQueued: backend.cancelQueued()
-            }
             Rectangle {
                 id: resultsBox
                 objectName: "resultsBox"
@@ -2027,7 +2038,7 @@ Controls.ApplicationWindow {
                         root.detailsBudget() - detailsPanel.Layout.preferredHeight)
                     : Math.min(root.shortResultsHeight(), root.detailsBudget())
                 Layout.minimumHeight: detailsPanel.visible ? root.detailsListHeight() : 130
-                visible: root.currentView === root.resultView && root.currentView !== "Settings" && root.currentView !== "Activity" &&
+                visible: root.currentView === root.resultView && root.currentView !== "Settings" &&
                     (root.currentView !== "Search" || root.viewItems.length > 0 || root.readFailures.length > 0 ||
                         (backend.busy && !root.openingInput) || searchPane.text.trim().length > 0)
                 color: root.surface
@@ -2348,39 +2359,16 @@ Controls.ApplicationWindow {
                                         Behavior on opacity { NumberAnimation { duration: root.motionEnabled ? 240 : 0 } }
                                     }
                                     // Progress of the change running on this row.
-                                    Item {
+                                    RowProgress {
                                         objectName: "rowProgress"
-                                        visible: packageRow.active
                                         anchors.left: parent.left
                                         anchors.right: parent.right
                                         anchors.bottom: parent.bottom
                                         anchors.leftMargin: 10
                                         anchors.rightMargin: 10
                                         anchors.bottomMargin: 3
-                                        height: 3
-                                        clip: true
-                                        readonly property real fraction: root.actionFraction()
-                                        Rectangle { anchors.fill: parent; radius: 1.5; color: root.tint(root.accent, 0.18) }
-                                        Rectangle {
-                                            id: rowBar
-                                            height: parent.height
-                                            radius: 1.5
-                                            color: root.accent
-                                            width: parent.fraction >= 0 ? parent.width * parent.fraction : parent.width * 0.3
-                                            x: parent.fraction >= 0 ? 0 : sweep.position * (parent.width * 1.3) - width
-                                            Behavior on width { enabled: root.motionEnabled; NumberAnimation { duration: Theme.revealDuration } }
-                                        }
-                                        NumberAnimation {
-                                            id: sweep
-                                            property real position: 0
-                                            target: sweep
-                                            property: "position"
-                                            from: 0
-                                            to: 1
-                                            duration: 1200
-                                            loops: Animation.Infinite
-                                            running: packageRow.active && root.motionEnabled && parent.fraction < 0
-                                        }
+                                        running: packageRow.active
+                                        value: packageRow.active ? root.actionFraction() : -1
                                     }
                                 }
                             }
@@ -2742,6 +2730,18 @@ Controls.ApplicationWindow {
                 Layout.minimumHeight: root.detailsMinimumHeight()
                 selected: root.selected
                 selectionIdentity: root.rowIdentity(root.selected)
+                sourceName: root.sourceDisplayName
+                installed: root.selected !== null && root.selected.kind === "package" && root.isInstalled(root.selected)
+                readonly property string rowAction: root.rowActionName(root.selected)
+                actionText: ({install: "Install", remove: "Remove", upgrade: "Update", clean: "Clean"})[rowAction] || ""
+                actionSymbol: rowAction === "upgrade" ? "updates" : rowAction === "install" ? "install" : "remove"
+                actionTone: rowAction === "upgrade" ? "accent" : rowAction === "install" ? "success" : "danger"
+                actionEnabled: (!backend.busy || backend.writing) && !root.retainingResults
+                onActionRequested: root.runRowAction(results.currentIndex)
+                Behavior on Layout.preferredHeight {
+                    enabled: detailsPanel.visible
+                    NumberAnimation { duration: Theme.layoutDuration; easing.type: Easing.OutCubic }
+                }
                 screenshots: root.visibleScreenshots
                 description: root.detailText()
                 detailsData: root.detailMatchesSelection ? root.detail : ({})
@@ -3110,8 +3110,9 @@ Controls.ApplicationWindow {
                 source: screenshotDialog.visible ? root.screenshotUrl : ""
                 asynchronous: true
                 cache: true
-                sourceSize.width: 960
-                sourceSize.height: 540
+                // Decoded at the size shown, sharp on HiDPI screens.
+                sourceSize.width: Math.ceil(screenshotDialog.width * Screen.devicePixelRatio)
+                sourceSize.height: Math.ceil(screenshotDialog.height * Screen.devicePixelRatio)
                 fillMode: Image.PreserveAspectFit
             }
             Controls.BusyIndicator {
@@ -3285,6 +3286,107 @@ Controls.ApplicationWindow {
             }
         }
     }
+    // Short-lived confirmation of a finished change, with Undo when the
+    // change has a safe inverse (install and remove).
+    function undoAction(notice) {
+        const undo = notice && notice.undo;
+        return undo && (undo.action === "install" || undo.action === "remove") && undo.package ? undo : null;
+    }
+    function undoLastChange() {
+        const undo = undoAction(JSON.parse(backend.notice || "{}"));
+        if (!undo)
+            return;
+        const identity = rowIdentity(undo.package);
+        const index = items.findIndex((row) => rowIdentity(row) === identity);
+        if (index < 0)
+            return;
+        markActiveRows([identity]);
+        backend.propose(undo.action, index);
+    }
+    Toast {
+        id: changeToast
+        objectName: "changeToast"
+        parent: root.contentItem
+        z: 30
+        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.bottom: parent.bottom
+        anchors.bottomMargin: 24
+        width: Math.min(460, parent.width - 32)
+        onActionTriggered: root.undoLastChange()
+        onDismissed: if (backend.notice && backend.notice !== "{}") backend.dismissNotice()
+    }
+    // The Activity drawer, over any page.
+    Rectangle {
+        objectName: "activityScrim"
+        parent: root.contentItem
+        anchors.fill: parent
+        z: 20
+        color: Qt.rgba(0, 0, 0, root.dark ? 0.45 : 0.22)
+        opacity: root.activityOpen ? 1 : 0
+        visible: opacity > 0
+        Behavior on opacity { NumberAnimation { duration: Theme.revealDuration } }
+        MouseArea { anchors.fill: parent; onClicked: root.activityOpen = false }
+    }
+    Rectangle {
+        id: activityDrawer
+        objectName: "activityDrawer"
+        parent: root.contentItem
+        z: 21
+        width: Math.min(480, parent.width - (root.width < 520 ? 0 : 48))
+        height: parent.height
+        x: root.activityOpen ? parent.width - width : parent.width
+        visible: x < parent.width
+        color: root.surface
+        border.color: root.line
+        Behavior on x { NumberAnimation { duration: Theme.revealDuration; easing.type: Easing.OutCubic } }
+        ColumnLayout {
+            anchors.fill: parent
+            anchors.margins: 20
+            spacing: 14
+            RowLayout {
+                Layout.fillWidth: true
+                Kirigami.Heading {
+                    objectName: "activityHeading"
+                    text: "Activity"
+                    color: root.ink
+                    level: 1
+                    font.pointSize: Theme.pointSize(Theme.titleScale)
+                    font.bold: true
+                    Layout.fillWidth: true
+                }
+                ActionButton {
+                    objectName: "closeActivity"
+                    text: ""
+                    symbol: "cancel"
+                    flat: true
+                    tooltipText: "Close (Esc)"
+                    Accessible.name: "Close activity"
+                    onClicked: root.activityOpen = false
+                }
+            }
+            ActivityPane {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                showHeader: false
+                entries: root.activityRows
+                progress: root.actionProgress
+                sourceName: root.sourceDisplayName
+                canCancelRunning: backend.writing
+                textFont: root.font
+                onCancelQueued: backend.cancelQueued()
+                onCancelRunning: backend.cancel()
+            }
+        }
+    }
+    Shortcut {
+        sequence: "Ctrl+J"
+        onActivated: root.activityOpen ? (root.activityOpen = false) : root.openView("Activity")
+    }
+    Shortcut {
+        sequence: "Escape"
+        enabled: root.activityOpen
+        onActivated: root.activityOpen = false
+    }
     Shortcut {
         sequence: "Ctrl+Q"
         onActivated: root.close()
@@ -3307,7 +3409,7 @@ Controls.ApplicationWindow {
             } else {
                 if (root.currentView !== "Search")
                     root.openView("Search");
-                searchPane.focusSearch(true);
+                searchPane.focusSearch(true, Qt.ShortcutFocusReason);
             }
         }
     }
@@ -3369,7 +3471,7 @@ Controls.ApplicationWindow {
     // In the search field it clears the query; in the list it closes details.
     Shortcut {
         sequence: "Escape"
-        enabled: !!root.activeFocusItem && ((root.activeFocusItem.objectName === "searchField" && searchPane.text.length > 0)
+        enabled: !root.activityOpen && !!root.activeFocusItem && ((root.activeFocusItem.objectName === "searchField" && searchPane.text.length > 0)
             || (root.activeFocusItem === results && root.selected !== null))
         onActivated: {
             if (root.activeFocusItem === results)
