@@ -92,7 +92,10 @@ Rectangle {
                     border.width: 2
                     Behavior on color { ColorAnimation { duration: 120 } }
                 }
-                contentItem: DeckIcon { name: "cancel"; ink: panel.ink; width: 18; height: 18 }
+                // A content item fills the button; keep the icon at its size.
+                contentItem: Item {
+                    DeckIcon { objectName: "closeDetailsIcon"; anchors.centerIn: parent; name: "cancel"; ink: panel.muted; width: 16; height: 16 }
+                }
             }
         }
         Controls.ScrollView {

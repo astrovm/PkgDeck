@@ -2381,19 +2381,11 @@ impl ffi::PackageController {
                     return;
                 }
                 if matches!(worker.job, Job::Load(..)) {
-                    let background = self.rust().background;
-                    if background {
-                        // A preload or stale read: stop it and load next.
-                        worker.cancel.cancel();
-                    }
+                    // Rows are still streaming or refreshing: load details
+                    // alongside instead of stopping that read.
                     let same = same_app_sources(&self.rust().packages, &package.id);
                     self.as_mut().set_details(encoded(json!({"package": package_row(&package, &same, None), "description": package.summary})));
-                    if background {
-                        self.as_mut().rust_mut().queued = Some(Job::Details(package.id));
-                    } else {
-                        // Rows are still streaming: load details alongside.
-                        self.start_details(package.id);
-                    }
+                    self.start_details(package.id);
                     return;
                 }
                 let same = same_app_sources(&self.rust().packages, &package.id);
@@ -2404,7 +2396,9 @@ impl ffi::PackageController {
             self.as_mut().set_details(encoded(
                 json!({"package": package_row(&package, &same, None), "description": package.summary}),
             ));
-            self.start(Job::Details(package.id));
+            // Details load on their own worker, so opening a package never
+            // makes the page busy or disables its actions.
+            self.start_details(package.id);
         } else if let Some(item) = usize::try_from(index)
             .ok()
             .and_then(|i| self.rust().cleanup.get(i))
@@ -5903,6 +5897,22 @@ mod tests {
         controller.as_mut().set_notice(encoded(denied));
         controller.as_mut().dismiss_notice();
         assert_eq!(controller.notice().to_string(), "{}");
+    }
+    #[test]
+    fn opening_a_package_never_makes_the_page_busy() {
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().rust_mut().prefetch.clear();
+        controller.as_mut().rust_mut().source_filter = vec!["grok".into()];
+        let mut package = synthetic_package("grok", "Grok");
+        package.id.backend = "grok".into();
+        controller.as_mut().rust_mut().packages = vec![package];
+        controller.as_mut().select(0);
+        // Details load beside the page: actions stay enabled meanwhile.
+        assert!(controller.details().to_string().contains("Grok"));
+        assert!(controller.rust().details_worker.is_some());
+        assert!(controller.rust().worker.is_none());
+        assert!(!*controller.busy());
     }
     #[test]
     fn selecting_during_a_search_loads_details_alongside_it() {
