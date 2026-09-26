@@ -10,7 +10,7 @@ sidebar's bottom corner hides it, and the button left of the page title brings
 it back; Ctrl+B does both. In narrow windows the
 sidebar shows only icons.
 
-![PkgDeck in a narrow window, with the sidebar as an icon rail](screenshots/narrow.png)
+<img src="screenshots/narrow.png" width="280" alt="PkgDeck in a narrow window, with the sidebar as an icon rail">
 
 ## Search
 
