@@ -270,6 +270,11 @@ impl Host {
             "PIPX_HOME",
             "PIPX_BIN_DIR",
             "UV_TOOL_DIR",
+            // pnpm refuses global commands when PNPM_HOME is set in the
+            // session but missing here; Cargo and Bun read theirs too.
+            "PNPM_HOME",
+            "CARGO_HOME",
+            "BUN_INSTALL",
             "COMPOSER_HOME",
             "GEM_HOME",
             "CODEX_HOME",

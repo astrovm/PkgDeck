@@ -1636,6 +1636,9 @@ TestCase {
         const userRow = results.itemAtIndex(0);
         const systemRow = results.itemAtIndex(1);
         compare(findChild(userRow, "packageSourceLine").text, "Flatpak, flathub, User");
+        compare(browser.sourceLine({source: "flatpak", remote: "flathub", scope: "user", reference: "runtime/org.freedesktop.Sdk.Extension.typescript/x86_64/24.08"}), "Flatpak, flathub, User, 24.08");
+        compare(browser.sourceLine({source: "flatpak", remote: "flathub", scope: "system", reference: "app/org.mozilla.firefox/x86_64/stable"}), "Flatpak, flathub, System");
+        compare(browser.sourceLine({source: "apt"}), "APT");
         compare(findChild(systemRow, "packageSourceLine").text, "Flatpak, flathub, System");
         mouseClick(findChild(systemRow, "rowPackageAction"));
         compare(fake.selection, 1);
@@ -1723,6 +1726,10 @@ TestCase {
         fake.details = JSON.stringify({package: JSON.parse(fake.rows)[1], description: "Additional details"});
         const close = findChild(browser, "closeDetailsButton");
         compare(close.text, "");
+        // The icon keeps its size instead of stretching to the button.
+        const closeIcon = findChild(close, "closeDetailsIcon");
+        compare(closeIcon.width, 16);
+        verify(close.width > closeIcon.width);
         mouseClick(close);
         verify(browser.selected === null);
         verify(!findChild(browser, "detailsPanel").visible);
@@ -2078,7 +2085,14 @@ TestCase {
         popup.open();
         tryCompare(popup, "visible", true);
         const npm = browser.sourceIds.indexOf("npm");
-        verify(browser.sourceCheckAt(npm).checked);
+        const npmCheck = browser.sourceCheckAt(npm);
+        verify(npmCheck.checked);
+        // The label sits just past its box, not a column away.
+        waitForRendering(browser.contentItem);
+        const box = npmCheck.indicator;
+        const labelText = npmCheck.contentItem;
+        const gap = labelText.mapToItem(npmCheck, labelText.leftPadding, 0).x - box.mapToItem(npmCheck, box.width, 0).x;
+        verify(gap >= 6 && gap <= 14, "checkbox label gap " + gap);
         clickSourceCheck(npm);
         verify(popup.draftSources.indexOf("npm") < 0);
         compare(browser.sourceSelection, "");
@@ -2135,12 +2149,42 @@ TestCase {
             }
             return item.contentItem && item.contentItem !== item ? findInDialog(item.contentItem, name) : null;
         }
-        compare(findInDialog(dialog.contentItem, "sourceFailureReason").text, "Source failed");
+        const reason = findInDialog(dialog.contentItem, "sourceFailureReason");
+        compare(reason.text, "Source failed");
         verify(dialog.height < 320);
+        // The reason is on screen, not clipped below the source name.
+        waitForRendering(browser.contentItem);
+        const reasonBottom = reason.mapToItem(dialog.contentItem, 0, reason.height).y;
+        verify(reasonBottom > 0 && reasonBottom <= dialog.contentItem.height, "reason ends at " + reasonBottom);
         compare(browser.copyableDiagnostics(), "View: Search\nState: unknown\nnpm (failed): Source failed");
         dialog.close();
         mouseClick(findChild(browser, "sourceFailureRetry"));
         compare(fake.lastRetry, "npm");
+    }
+    function test_large_sections_reuse_parsed_rows() {
+        const rows = Array.from({length: 800}, (_, i) => ({kind: "package", name: "synthetic-" + i, source: "apt",
+            installed: "1", candidate: "1", scope: "system", summary: "A synthetic package with a long enough summary"}));
+        const large = JSON.stringify(rows);
+        verify(large.length >= 65536);
+        const first = browser.parseRows(large);
+        compare(first.length, 800);
+        // Revisiting the same section reuses its parsed rows.
+        verify(browser.parseRows(large) === first);
+        verify(browser.parseRows(JSON.stringify(rows.slice(1))) !== first);
+        // Small replies always parse fresh.
+        const small = JSON.stringify(rows.slice(0, 2));
+        verify(browser.parseRows(small) !== browser.parseRows(small));
+    }
+    function test_sidebar_title_lines_up_with_the_page_title() {
+        for (const width of [1100, 900, 700]) {
+            browser.width = width;
+            waitForRendering(browser.contentItem);
+            const logo = findChild(browser, "appLogo");
+            const heading = findChild(browser, "pageHeading");
+            const logoCenter = logo.mapToItem(browser.contentItem, 0, logo.height / 2).y;
+            const headingCenter = heading.mapToItem(browser.contentItem, 0, heading.height / 2).y;
+            verify(Math.abs(logoCenter - headingCenter) <= 2, "logo " + logoCenter + " vs heading " + headingCenter + " at " + width);
+        }
     }
     function test_sidebar_shows_app_logo() {
         const logo = findChild(browser, "appLogo");

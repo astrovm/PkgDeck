@@ -138,7 +138,23 @@ Controls.ApplicationWindow {
         backend.checkUpdates(root.checkedSources().join(","), preferences.backgroundMode, offline, NetworkInformation.isMetered, force === true);
     }
     property string resultView: "Search"
-    property var liveItems: JSON.parse(backend.rows || "[]")
+    // Large sections come back as the same text when revisited; reuse
+    // their parsed rows instead of parsing megabytes again on every switch.
+    // A plain holder, so caching never notifies bindings.
+    readonly property var parsedRowsCache: ({entries: []})
+    function parseRows(text) {
+        if (!text || text.length < 65536)
+            return JSON.parse(text || "[]");
+        const entries = parsedRowsCache.entries;
+        for (const entry of entries) {
+            if (entry.text === text)
+                return entry.rows;
+        }
+        const rows = JSON.parse(text);
+        parsedRowsCache.entries = [{text: text, rows: rows}].concat(entries).slice(0, 4);
+        return rows;
+    }
+    property var liveItems: parseRows(backend.rows)
     property var retainedItems: []
     property bool retainingResults: false
     property string resultQuery: ""
@@ -493,10 +509,11 @@ Controls.ApplicationWindow {
             unchecked.push(id);
         uncheckedPackages = unchecked;
     }
+    // Only the Updates checkboxes use identities; other pages skip the work.
     readonly property var allPackageIdentities: {
         const all = [];
         const seen = new Set();
-        const rows = root.items;
+        const rows = root.currentView === "Updates" ? root.items : [];
         for (let i = 0; i < rows.length; i++) {
             if (rows[i].kind === "package") {
                 const id = rowIdentity(rows[i]);
@@ -1130,6 +1147,18 @@ Controls.ApplicationWindow {
         const at = knownSourceIds.indexOf(id);
         return at >= 0 ? sourceNames[at] : id;
     }
+    // Flatpak branches other than "stable" (SDK extensions, runtimes) are
+    // shown, or several rows with one name and version look identical.
+    function flatpakBranch(row) {
+        const parts = row.source === "flatpak" && row.reference ? row.reference.split("/") : [];
+        const branch = parts.length >= 3 ? parts[parts.length - 1] : "";
+        return branch && branch !== "stable" ? branch : "";
+    }
+    function sourceLine(row) {
+        const scoped = row.source === "flatpak" || containerSource(row.source);
+        return [sourceDisplayName(row.source), row.remote || "", scoped ? (row.scope === "system" ? "System" : "User") : "", flatpakBranch(row)]
+            .filter(Boolean).join(", ");
+    }
     function sameAppNames(row) {
         return ((row && row.same_app_from) || []).map((id) => root.sourceDisplayName(id));
     }
@@ -1220,7 +1249,11 @@ Controls.ApplicationWindow {
         retainedItems = currentView === resultView && (sameQuery || refining) ? items.slice() : [];
         retainingResults = retainedItems.length > 0;
         retainedQuery = resultQuery;
-        resultView = clearSearchResults ? "" : currentView;
+        // A new page shows its rows once they are loaded (below), so the
+        // previous page's rows are never filtered and laid out as its own.
+        const nextResultView = clearSearchResults ? "" : currentView;
+        if (resultView !== currentView)
+            resultView = nextResultView === currentView ? "" : nextResultView;
         if (currentView === "Search")
             resultQuery = searchPane.text.trim();
         results.currentIndex = -1;
@@ -1231,6 +1264,7 @@ Controls.ApplicationWindow {
         // viewItems), so the backend always returns the full installed set
         // and typing never triggers a native query.
         backend.load(currentView, currentView === "Search" ? searchPane.text : "", currentView === "Sources" ? "" : checkedCsv(), useSudo, force === true);
+        resultView = nextResultView;
         if (!backend.busy)
             retainingResults = false;
     }
@@ -1473,12 +1507,16 @@ Controls.ApplicationWindow {
             clip: true
             Rectangle { anchors.right: parent.right; width: 1; height: parent.height; color: root.line }
             ColumnLayout {
+                id: sidebarColumn
                 anchors.fill: parent
                 anchors.margins: root.sidebarRail ? 10 : 14
                 spacing: 8
                 RowLayout {
+                    id: brandRow
                     spacing: 10
-                    Layout.topMargin: 10
+                    // Centered on the page title row beside it.
+                    Layout.topMargin: Math.max(0, Math.round(pageContent.Layout.margins + root.controlHeight / 2
+                        - sidebarColumn.anchors.margins - implicitHeight / 2))
                     Layout.leftMargin: root.sidebarRail ? 0 : 4
                     Layout.alignment: root.sidebarRail ? Qt.AlignHCenter : Qt.AlignLeft
                     Image {
@@ -1787,6 +1825,8 @@ Controls.ApplicationWindow {
                                                 checked: sourcePopup.draftSources.indexOf(modelData) >= 0
                                                 enabled: parent.usable && root.checkedSources().indexOf(modelData) >= 0 && (!checked || sourcePopup.draftSources.length > 1)
                                                 onToggled: root.toggleDraftSource(modelData)
+                                                // The label pads itself past the box; the row adds nothing.
+                                                leftPadding: 0
                                                 indicator: TickBox {
                                                     anchors.verticalCenter: parent.verticalCenter
                                                     anchors.left: parent.left
@@ -1799,11 +1839,12 @@ Controls.ApplicationWindow {
                                                     Behavior on color { ColorAnimation { duration: root.feedbackDuration } }
                                                 }
                                                 contentItem: Text {
+                                                    objectName: "sourceCheckLabel"
                                                     text: checkRow.text
                                                     color: checkRow.enabled ? root.ink : root.muted
                                                     elide: Text.ElideRight
                                                     verticalAlignment: Text.AlignVCenter
-                                                    leftPadding: 34
+                                                    leftPadding: 36
                                                 }
                                             }
                                             Controls.Label {
@@ -2735,7 +2776,7 @@ Controls.ApplicationWindow {
                                         }
                                         Controls.Label {
                                         objectName: "packageSourceLine"
-                                        text: root.sourceDisplayName(modelData.source) + (modelData.remote ? ", " + modelData.remote : "") + ((modelData.source === "flatpak" || root.containerSource(modelData.source)) ? ", " + (modelData.scope === "system" ? "System" : "User") : "")
+                                        text: root.sourceLine(modelData)
                                         color: root.muted
                                         font.pointSize: root.font.pointSize * 0.9
                                         elide: Text.ElideRight
@@ -3266,19 +3307,20 @@ Controls.ApplicationWindow {
         objectName: "sourceFailuresDialog"
         anchors.centerIn: parent
         width: Math.min(root.width - 32, 620)
-        height: Math.min(root.height - 32, 440, Math.max(230, 120 + Math.min(root.readFailures.length, 4) * 90))
         modal: true
         title: "Source checks"
         standardButtons: Controls.Dialog.Close
         onClosed: root.restoreDialogFocus()
         contentItem: ColumnLayout {
             spacing: 10
+            // Sized to its reasons, scrolling only when they outgrow the window.
             Controls.ScrollView {
                 Layout.fillWidth: true
-                Layout.fillHeight: true
+                Layout.preferredHeight: Math.min(failureList.implicitHeight, Math.max(120, root.height - 260))
                 contentWidth: availableWidth
                 clip: true
                 Column {
+                    id: failureList
                     width: parent.width
                     spacing: 10
                     Repeater {
