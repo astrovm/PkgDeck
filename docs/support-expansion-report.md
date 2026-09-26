@@ -6,15 +6,24 @@ implementation assessment, not a test of these integrations on a Mac.
 Priorities and effort ratings below are engineering judgments, not usage
 statistics. External capabilities were checked against the linked primary sources.
 
+Review update: checked against implementation commit `5dc077f` in
+[PR #114](https://github.com/astrovm/PkgDeck/pull/114) and Homebrew **7.0.6**.
+The coverage table below describes the original `67b85b4` baseline. PR #114 adds
+a 26th source, `macos-apps`: read-only bundle discovery, exact-path ownership
+evidence from the active Homebrew prefix, and bundle-ID cask candidates. It does
+not verify publisher signatures, channels, architecture, or artifact equality;
+support for user-selected directories and adoption is still proposed. Native
+macOS execution has not been validated locally.
+
 **Recommendation:** prioritize unmanaged-app discovery and an explicit
 “Manage with Homebrew” workflow, improve AI-tool discovery through existing
 managers, and add mise as the first substantial new developer-tool backend.
 Investigate Linux Homebrew casks immediately: upstream now supports them,
 but PkgDeck registers its cask backend only on macOS.
 
-## Current coverage and actual gaps
+## Baseline coverage and remaining gaps
 
-The source registry contains **25 adapters**:
+The baseline source registry contains **25 adapters**:
 
 | Area | Existing sources |
 | --- | --- |
@@ -34,7 +43,7 @@ The reusable foundations are good: exact package identities, environment scopes,
 capability checks, confirmation plans, host execution, partial results, command
 inspection, and duplicate-copy auditing. However:
 
-- There is no general macOS `.app` inventory or adoption operation.
+- PR #114 adds a limited macOS `.app` inventory; there is no adoption operation.
 - Homebrew casks are gated by `cfg!(target_os = "macos")`.
 - Cask metadata currently retains a small subset: token, name, homepage,
   version, installed version, and outdated state. Adoption needs artifact and
@@ -62,10 +71,10 @@ or a dedicated design.
 
 | Priority | Opportunity | User benefit | Effort | Recommended first scope |
 | --- | --- | --- | --- | --- |
-| P0 | Unmanaged macOS app inventory and Brew matching | Makes software outside package databases visible | M | Read-only inventory and reviewed matches |
+| P0 | macOS app inventory and Brew matching | Makes software outside package databases visible | M | Basic discovery in PR #114; validate on macOS and strengthen identity evidence |
 | P0 | AI application catalog using current managers | Easier discovery without duplicate backends | S–M | Gemini, Copilot, Aider; source and channel labels |
 | P0 | Linux Homebrew cask compatibility | Expands an existing integration | M | Capability probe and compatible-artifact tests |
-| P1 | Manage existing Mac apps with Homebrew | Converts manual installs into tracked installations | L | Identical-artifact adoption for an allowlist |
+| P1 | Manage existing Mac apps with Homebrew | Converts manual installs into tracked installations | L | Independently verified adoption and recovery for an allowlist |
 | P1 | Cursor CLI standalone updates | Covers an official installer outside current sources | M | Verified inventory; updates after updater validation |
 | P1 | mise | Runtime and developer-tool coverage across Linux/macOS | M–L | Inventory, then explicit global-tool operations |
 | P1 | Mac App Store via mas | Covers apps that should retain App Store ownership | M | Inventory and selected updates |
@@ -87,6 +96,13 @@ distinct. A tool installed through mise's npm backend must not also be claimed
 as a global npm installation. Preserve the controlling manager and configuration
 path. [Inventory](https://mise.jdx.dev/cli/ls.html),
 [upgrades](https://mise.jdx.dev/cli/upgrade.html).
+
+For the initial mise adapter, make the configuration context explicit, keep
+version constraints, and avoid `--bump` unless configuration edits are separately
+reviewed. Preview with `--dry-run`; preserve old installations with `--no-prune`
+until removal has its own reviewed plan. Tool updates must not silently become
+configuration rewrites or removal of versions used elsewhere.
+[mise upgrade options](https://mise.jdx.dev/cli/upgrade.html).
 
 **Conda is valuable but requires environment transactions.** Its update command
 supports JSON and dry-run output. An update can change several packages, so show
@@ -213,10 +229,30 @@ that every bundled application offers a uniform external update command.
 ## Moving standalone Mac apps to Homebrew
 
 **Yes, support this, as an explicit ownership-transfer feature.** Cask
-availability alone is insufficient. Homebrew documents `--adopt` for existing
-artifacts identical to the artifacts being installed, and it cannot be combined
-with `--force`. It is not a general registration command for an arbitrary
-existing version. [Homebrew manual](https://docs.brew.sh/Manpage).
+availability alone is insufficient. The manual describes `--adopt` as adopting
+identical artifacts and disallows combining it with `--force`.
+[Homebrew manual](https://docs.brew.sh/Manpage).
+
+**Do not treat that description as an equality guarantee.** In Homebrew 7.0.6,
+the app-artifact implementation skips its equality comparison for
+`auto_updates` casks. Otherwise, when both bundles provide version metadata,
+it compares the short and build versions; recursive file comparison is a
+fallback. Successful adoption therefore does not prove equal contents or
+publisher identity. The proposed VS Code, Firefox, and Obsidian casks are
+self-updating. PkgDeck must enforce its own documented identity/content policy
+before invoking Homebrew; the first MVP can deliberately require stricter
+artifact equality. [Versioned adoption implementation](https://github.com/Homebrew/brew/blob/7.0.6/Library/Homebrew/cask/artifact/moved.rb),
+[VS Code cask](https://formulae.brew.sh/cask/visual-studio-code),
+[Firefox cask](https://formulae.brew.sh/cask/firefox),
+[Obsidian cask](https://formulae.brew.sh/cask/obsidian).
+
+Adoption is also a real installation transaction. App installation adjusts
+permissions/group ownership, and a later artifact failure runs uninstall phases
+for earlier artifacts before purging versioned files. That creates a recovery
+risk even after the app itself was successfully adopted; a nonzero exit alone
+does not prove the original bundle is untouched.
+[App installation](https://github.com/Homebrew/brew/blob/7.0.6/Library/Homebrew/cask/artifact/app.rb),
+[Installer failure handling](https://github.com/Homebrew/brew/blob/7.0.6/Library/Homebrew/cask/installer.rb).
 
 Proposed flow:
 
@@ -229,14 +265,21 @@ Proposed flow:
 3. **Revalidate.** Check the selected Brew executable/prefix, target metadata,
    bundle fingerprint, current owner, and running-app state again. An upstream
    self-update between preview and execution invalidates the plan.
-4. **Adopt identical artifacts.** Run a narrowly authorized
+4. **Prepare recovery before adoption.** Preserve the original bundle outside
+   Homebrew's staging/cleanup directories, including permissions and extended
+   attributes. Record the cask recipe, all artifact destinations, and recovery
+   steps. Check launcher conflicts and reject unreviewed install hooks. Recovery
+   is required for adoption as well as replacement.
+5. **Adopt only after PkgDeck's checks pass.** Run a narrowly authorized
    `brew install --cask --adopt TOKEN` operation and verify the resulting Brew
-   record and artifact path. If Homebrew rejects the match, stop and explain.
-5. **Handle a different version separately.** Offer a reviewed replacement
+   record and artifact path. On failure, inspect actual state, restore when
+   necessary, and explain the outcome. Do not assume Homebrew rejected the
+   transaction before making any changes.
+6. **Handle a different version separately.** Offer a reviewed replacement
    workflow only for supported simple app bundles: stage the old bundle in a
    recovery location, install through Brew, verify, and retain recovery until
    accepted. Do not fall back automatically from failed adoption to replacement.
-6. **Verify ownership.** Refresh both inventories, check launcher resolution,
+7. **Verify ownership.** Refresh both inventories, check launcher resolution,
    remove duplicate presentation of the same physical installation, and record
    the migration outcome and any recovery steps.
 
@@ -266,7 +309,9 @@ necessarily disable the vendor's updater.
 Current Homebrew documentation explicitly permits Linux casks, with Linux
 `app_image` artifacts and portable binaries. Obsidian's cask currently includes
 Linux AppImages. PkgDeck's macOS-only registration therefore excludes a real
-upstream capability. [Cask cookbook](https://docs.brew.sh/Cask-Cookbook),
+upstream capability. Linux artifacts are also documented in the **7.0.6 release
+source**, so this is not only an unreleased-main observation.
+[Versioned cask cookbook](https://github.com/Homebrew/brew/blob/7.0.6/docs/Cask-Cookbook.md),
 [acceptable casks](https://docs.brew.sh/Acceptable-Casks),
 [Obsidian cask](https://formulae.brew.sh/cask/obsidian).
 
@@ -275,18 +320,23 @@ filter incompatible artifacts, retain its installation scope, and test search,
 install, update, and removal on both Linux architectures. In particular, ensure
 PkgDeck's external-AppImage discovery does not offer to import or remove a
 Homebrew-owned AppImage as though it were unmanaged. The minimum supported Brew
-version and complete artifact compatibility still need validation.
+version and complete artifact compatibility still need validation. Use 7.0.6 as
+the first explicit test target; this review does not establish the earliest
+compatible release or prove PkgDeck's existing adapter works with it.
 
 ## Suggested implementation sequence and acceptance criteria
 
-1. **Foundation:** add authoritative Homebrew ownership and read-only macOS app
-   inventory. Ship candidate matching with evidence and no automatic mutations.
-   Introduce the AI catalog using existing package routes. Prototype Linux casks.
+1. **Validate the foundation:** exercise PR #114 on an actual Mac, including
+   two copies of one app, active-prefix ownership, missing/broken Caskroom links,
+   unreadable bundles, and cold/warm scan timing. Missing ownership evidence must
+   stay unknown. Add publisher/channel/architecture verification before migration.
+   Introduce the AI catalog using existing package routes; prototype Linux casks
+   separately. These are separate work items, not one P0 delivery commitment.
 2. **Bounded additions:** mise inventory and global-tool management, Cursor CLI
    discovery/update validation, and mas inventory/selected updates.
 3. **Mac adoption MVP:** three curated app families (VS Code, Firefox stable,
-   Obsidian), identical-artifact adoption, exact preconditions, and postchecks.
-   Release replacement/recovery only after interruption testing.
+   Obsidian), PkgDeck-enforced artifact checks, exact preconditions, and postchecks.
+   Require tested recovery before enabling either adoption or replacement.
 4. **Broader ecosystems:** Conda environment plans, then MacPorts/Rustup; pursue
    Nix, immutable systems, AUR, apk, and XBPS according to user demand.
 
@@ -304,7 +354,9 @@ Required behavioral checks:
 - A changed bundle or changed target after preview blocks execution.
 - Missing metadata remains unknown; it never becomes “up to date.”
 - Self-updated apps newer than the cask are not silently downgraded.
-- Adoption rejection leaves the original app intact.
+- Inject an adoption failure after the app step (for example, a launcher
+  conflict) and verify the original bundle can be restored independently of
+  Homebrew's cleanup. Verify permissions and extended attributes too.
 - Replacement interruption has a recorded, tested recovery path; app data stays
   unchanged in success and failure cases.
 - Intel and Apple Silicon Brew prefixes, custom app directories, launcher
@@ -314,6 +366,7 @@ Required behavioral checks:
 - Absent sources remain cheap to detect. Benchmark startup and background
   checks so new adapters do not undo the recent performance work.
 
-No application code or installed software was changed for this assessment.
-The next concrete deliverable should be the inventory/matching foundation and
-a Linux-cask compatibility spike, followed by the narrowly scoped adoption MVP.
+This report review changes documentation only. The next delivery gate is native
+macOS validation of the inventory already implemented in PR #114. Adoption
+remains blocked on independent identity/content checks and tested recovery;
+the Linux-cask compatibility spike can proceed as a separate work item.
