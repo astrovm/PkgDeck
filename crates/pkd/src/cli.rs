@@ -15,14 +15,19 @@ use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(version = pkgdeck_core::VERSION, about = "Search, install, update, and clean up packages from every package manager")]
+#[command(
+    version = pkgdeck_core::VERSION,
+    about = "Search, install, update, and clean up packages from every package manager",
+    after_help = EXAMPLES
+)]
 pub struct Args {
     /// Print machine-readable JSON instead of text.
     #[arg(long, global = true)]
     pub json: bool,
-    /// Only use this source. Repeat to pick several; omit to use every
-    /// available source.
-    #[arg(long, global = true, value_parser = ["fwupd", "apt", "dnf", "pacman", "zypper", "snap", "homebrew", "homebrew-cask", "appimage", "flatpak", "docker", "podman", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "composer", "gem", "codex", "claude", "grok", "opencode"])]
+    /// Only use this source, such as apt or flatpak. Repeat to pick
+    /// several; omit to use every available source. `pkd sources` lists
+    /// them.
+    #[arg(long, global = true, value_name = "SOURCE", hide_possible_values = true, value_parser = ["fwupd", "apt", "dnf", "pacman", "zypper", "snap", "homebrew", "homebrew-cask", "appimage", "flatpak", "docker", "podman", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "composer", "gem", "codex", "claude", "grok", "opencode"])]
     pub from: Vec<String>,
     /// Pick a package architecture when the same name exists for several.
     #[arg(long, global = true)]
@@ -67,32 +72,21 @@ impl From<Auth> for Authorization {
         }
     }
 }
+const EXAMPLES: &str = "\
+Examples:
+  pkd search vlc                  Find packages in every source
+  pkd info cowsay                 Show one package
+  pkd install cowsay              Install by exact name
+  pkd install --from flatpak org.videolan.VLC
+  pkd refresh && pkd upgrade      Refresh package lists, then update
+  pkd list --from npm             List what one source installed
+  pkd completions bash > ~/.local/share/bash-completion/completions/pkd";
 #[derive(Subcommand)]
 pub enum Commands {
-    /// List or manage repositories.
-    Repos {
-        #[command(subcommand)]
-        command: Option<RepoCommand>,
-    },
-    /// Check that PkgDeck can find and run your package managers.
-    Doctor,
-    /// List package managers, whether they are available, and what they support.
-    Sources,
     /// Search packages by name or description. Best matches come first.
     Search { query: String },
     /// Show details for one package, by exact name.
     Info { name: String },
-    /// Show which file runs for a command and which package installed it. Never runs the command.
-    Inspect { command: String },
-    /// Find apps installed more than once, and config files left behind by removed packages.
-    Audit,
-    /// List installed packages.
-    List,
-    /// Save your installed software to a file, or check a saved list on this machine.
-    Inventory {
-        #[command(subcommand)]
-        command: InventoryCommand,
-    },
     /// Install packages, by exact name.
     Install {
         #[arg(required = true)]
@@ -103,8 +97,6 @@ pub enum Commands {
         #[arg(required = true)]
         names: Vec<String>,
     },
-    /// Refresh package lists. Does not install updates.
-    Update,
     /// Update the named packages, or everything if no names are given.
     Upgrade {
         names: Vec<String>,
@@ -112,6 +104,11 @@ pub enum Commands {
         #[arg(long)]
         allow_removals: bool,
     },
+    /// Refresh package lists. Does not install updates; run `pkd upgrade` next.
+    #[command(visible_alias = "update")]
+    Refresh,
+    /// List installed packages.
+    List,
     /// List cleanup tasks, or run the ones you name.
     Clean {
         /// Task keys shown by `pkd clean`, such as apt:autoremove.
@@ -120,6 +117,55 @@ pub enum Commands {
         #[arg(long)]
         all: bool,
     },
+    /// List package managers, whether they are available, and what they support.
+    Sources,
+    /// Check that PkgDeck can find and run your package managers.
+    Doctor,
+    /// List or manage repositories.
+    Repos {
+        #[command(subcommand)]
+        command: Option<RepoCommand>,
+    },
+    /// Show which file runs for a command and which package installed it. Never runs the command.
+    Inspect { command: String },
+    /// Find apps installed more than once, and config files left behind by removed packages.
+    Audit,
+    /// Save your installed software to a file, or check a saved list on this machine.
+    Inventory {
+        #[command(subcommand)]
+        command: InventoryCommand,
+    },
+    /// Print a shell completion script, for bash, zsh, or fish.
+    Completions {
+        #[arg(value_enum)]
+        shell: Shell,
+    },
+}
+/// Shells `pkd completions` can write a script for.
+#[derive(Clone, Copy, ValueEnum)]
+pub enum Shell {
+    Bash,
+    Zsh,
+    Fish,
+}
+impl From<Shell> for clap_complete::Shell {
+    fn from(shell: Shell) -> Self {
+        match shell {
+            Shell::Bash => Self::Bash,
+            Shell::Zsh => Self::Zsh,
+            Shell::Fish => Self::Fish,
+        }
+    }
+}
+/// Writes the completion script for `shell` to `out`.
+fn completions(shell: Shell, out: &mut dyn Write) {
+    use clap::CommandFactory;
+    clap_complete::generate(
+        clap_complete::Shell::from(shell),
+        &mut Args::command(),
+        "pkd",
+        out,
+    );
 }
 #[derive(Subcommand)]
 pub enum InventoryCommand {
@@ -176,19 +222,37 @@ fn failure(error: EngineError) -> (Value, u8) {
     let message = crate::presentation::error_message(&error);
     (json!({"error": error, "message": message}), code)
 }
+/// What a typed package name is looked up for.
+#[derive(Clone, Copy, PartialEq)]
+enum Lookup {
+    /// `info`: only packages a source confirmed have details.
+    Details,
+    /// `install`: an unverified registry offer counts when it is the only one.
+    Install,
+    /// `remove` and `upgrade NAME`: installed packages only.
+    Installed,
+}
+/// The package a typed name picks. `offers` are registry sources that
+/// could also try the name but did not confirm it exists; they never make
+/// a confirmed match ambiguous. On `NotFound`, `offers` says where the user
+/// could still try.
+struct Selection {
+    result: Result<PackageId, EngineError>,
+    offers: Vec<String>,
+}
 fn select(
     engine: &mut Engine,
     args: &Args,
     name: &str,
-    installed: bool,
+    lookup: Lookup,
     cancel: &Cancellation,
-) -> Result<PackageId, EngineError> {
-    let report = if installed {
+) -> Selection {
+    let report = if lookup == Lookup::Installed {
         engine.installed(cancel)
     } else {
-        engine.search(name, cancel)
+        engine.lookup(name, cancel)
     };
-    report.select(&Selector {
+    let selector = Selector {
         name: name.into(),
         // A single --from pins the backend; several restrict the engine to
         // that set and leave ambiguity resolution to the selector.
@@ -198,7 +262,42 @@ fn select(
         },
         architecture: args.arch.clone(),
         scope: args.scope.map(InstallScope::native),
-    })
+    };
+    let result = report.select_confirmed(&selector, lookup == Lookup::Install);
+    let offers = if lookup == Lookup::Install && selector.backend.is_none() {
+        let chosen = result.as_ref().ok().map(|id| id.backend.as_str());
+        report
+            .offer_sources(&selector)
+            .into_iter()
+            .filter(|backend| Some(backend.as_str()) != chosen)
+            .collect()
+    } else {
+        vec![]
+    };
+    Selection { result, offers }
+}
+/// "npm, pipx" → "--from npm or --from pipx".
+fn from_flags(sources: &[String]) -> String {
+    let flags: Vec<_> = sources.iter().map(|s| format!("--from {s}")).collect();
+    match flags.as_slice() {
+        [] => String::new(),
+        [one] => one.clone(),
+        [a, b] => format!("{a} or {b}"),
+        [rest @ .., last] => format!("{}, or {last}", rest.join(", ")),
+    }
+}
+/// "npm, Cargo, and pipx", by display name.
+fn source_list(sources: &[String]) -> String {
+    let names: Vec<_> = sources
+        .iter()
+        .map(|s| pkgdeck_core::backends::display_name(s).to_string())
+        .collect();
+    match names.as_slice() {
+        [] => String::new(),
+        [one] => one.clone(),
+        [a, b] => format!("{a} and {b}"),
+        [rest @ .., last] => format!("{}, and {last}", rest.join(", ")),
+    }
 }
 
 #[cfg(test)]
@@ -225,7 +324,7 @@ pub fn dispatch_with(
     if args.scope.is_some()
         && matches!(
             command,
-            Commands::Update
+            Commands::Refresh
                 | Commands::Sources
                 | Commands::Doctor
                 | Commands::Clean { .. }
@@ -332,7 +431,8 @@ pub fn dispatch_with(
             };
         }
         Commands::Info { name } => {
-            return match select(engine, args, name, false, cancel)
+            return match select(engine, args, name, Lookup::Details, cancel)
+                .result
                 .and_then(|id| engine.details(&id, cancel))
             {
                 Ok(details) => (json!(details), 0),
@@ -390,11 +490,15 @@ pub fn dispatch_with(
         }
         _ => (),
     }
+    // A typed name no source confirmed, with the registries that could try it.
+    let mut missing: Option<(String, Vec<String>)> = None;
+    // Registry sources that could also try a name a catalog source matched.
+    let mut alternatives: Vec<(Operation, Vec<String>)> = Vec::new();
     let planned = (|| -> Result<Vec<Operation>, EngineError> {
         match command {
             // Only sources that keep package lists can refresh them. Missing
             // managers are skipped unless they were asked for by name.
-            Commands::Update => {
+            Commands::Refresh => {
                 let mut operations = Vec::new();
                 for source in engine.discover(cancel) {
                     match source.availability {
@@ -463,19 +567,32 @@ pub fn dispatch_with(
             | Commands::Remove { names }
             | Commands::Upgrade { names, .. } => {
                 let mut operations = Vec::new();
+                let lookup = if matches!(command, Commands::Install { .. }) {
+                    Lookup::Install
+                } else {
+                    Lookup::Installed
+                };
                 for name in names {
-                    let id = select(
-                        engine,
-                        args,
-                        name,
-                        !matches!(command, Commands::Install { .. }),
-                        cancel,
-                    )?;
+                    let selection = select(engine, args, name, lookup, cancel);
+                    let id = match selection.result {
+                        Ok(id) => id,
+                        Err(error) => {
+                            if matches!(error, EngineError::NotFound)
+                                && !selection.offers.is_empty()
+                            {
+                                missing = Some((name.clone(), selection.offers));
+                            }
+                            return Err(error);
+                        }
+                    };
                     let operation = match command {
                         Commands::Install { .. } => Operation::Install(id),
                         Commands::Remove { .. } => Operation::Remove(id),
                         _ => Operation::Upgrade(id),
                     };
+                    if !selection.offers.is_empty() {
+                        alternatives.push((operation.clone(), selection.offers));
+                    }
                     if !operations.contains(&operation) {
                         operations.push(operation);
                     }
@@ -511,8 +628,35 @@ pub fn dispatch_with(
     })();
     let operations = match planned {
         Ok(ops) => ops,
-        Err(e) => return failure(e),
+        Err(e) => {
+            let (mut data, code) = failure(e);
+            if let Some((name, offers)) = missing {
+                data["message"] = json!(format!(
+                    "No package named {name} was found. PkgDeck can't search {sources}, but they can try to install it by name: add {flags}.",
+                    name = crate::presentation::clean(&name),
+                    sources = source_list(&offers),
+                    flags = from_flags(&offers)
+                ));
+                data["offers"] = json!(offers);
+            }
+            return (data, code);
+        }
     };
+    for (operation, offers) in alternatives {
+        events(Event::Progress {
+            operation,
+            progress: Progress::Message(format!(
+                "{} may also have this name. To use {} instead, add {}.",
+                source_list(&offers),
+                if offers.len() == 1 {
+                    "it"
+                } else {
+                    "one of them"
+                },
+                from_flags(&offers)
+            )),
+        });
+    }
     if let Some(operation) = operations.iter().find(
         |operation| matches!(operation, Operation::UpgradeAll { backend } if backend == "apt"),
     ) {
@@ -564,7 +708,7 @@ pub fn dispatch_with(
     }
     if !operations.is_empty()
         && !args.yes
-        && !matches!(command, Commands::Update)
+        && !matches!(command, Commands::Refresh)
         && !confirm(&operations)
     {
         return (
@@ -661,14 +805,14 @@ fn working_label(command: &Commands) -> Option<String> {
         Commands::List | Commands::Inventory { .. } => "Reading installed packages".into(),
         Commands::Audit => "Looking for duplicates and leftovers".into(),
         Commands::Sources => "Checking package managers".into(),
-        Commands::Update => "Checking package managers".into(),
+        Commands::Refresh => "Checking package managers".into(),
         Commands::Upgrade { names, .. } if names.is_empty() => "Checking for updates".into(),
         Commands::Install { .. } | Commands::Remove { .. } | Commands::Upgrade { .. } => {
             "Finding packages".into()
         }
         Commands::Clean { .. } => "Looking for cleanup tasks".into(),
         Commands::Repos { .. } => "Reading repositories".into(),
-        Commands::Doctor => return None,
+        Commands::Doctor | Commands::Completions { .. } => return None,
     })
 }
 fn repository_command(
@@ -767,6 +911,10 @@ fn repository_dispatch(
     }
 }
 pub fn run(args: &Args) -> u8 {
+    if let Some(Commands::Completions { shell }) = args.command {
+        completions(shell, &mut io::stdout().lock());
+        return 0;
+    }
     if args.command.as_ref().is_some_and(Commands::writes)
         && !args.yes
         && (args.json || !io::stdin().is_terminal() || !io::stdout().is_terminal())
@@ -842,7 +990,7 @@ pub fn run(args: &Args) -> u8 {
                 crate::session::sudo_login(&live, operations, &cancel)?;
             }
             // A refresh changes nothing to review, so it just starts.
-            session.start(operations, !matches!(command, Commands::Update));
+            session.start(operations, !matches!(command, Commands::Refresh));
             Ok(())
         },
         &mut |event| session.event(event),
@@ -1056,13 +1204,18 @@ mod tests {
         let mut engine = engine();
         let system = Args::try_parse_from(["pkd", "--scope", "system", "info", "fixture"]).unwrap();
         assert_eq!(
-            select(&mut engine, &system, "fixture", false, &cancel)
+            select(&mut engine, &system, "fixture", Lookup::Details, &cancel)
+                .result
                 .unwrap()
                 .scope,
             Scope::System
         );
         let user = Args::try_parse_from(["pkd", "--scope", "user", "info", "fixture"]).unwrap();
-        assert!(select(&mut engine, &user, "fixture", false, &cancel).is_err());
+        assert!(
+            select(&mut engine, &user, "fixture", Lookup::Details, &cancel)
+                .result
+                .is_err()
+        );
         assert!(Args::try_parse_from(["pkd", "--scope", "invalid", "info", "fixture"]).is_err());
         assert_eq!(
             call(&mut engine, &["--scope", "user", "upgrade"], true).0["operations"],
@@ -1316,6 +1469,48 @@ mod tests {
         )
     }
     #[test]
+    fn help_completions_and_the_refresh_alias() {
+        use clap::CommandFactory;
+        // `update` stays as a visible alias of `refresh`.
+        for name in ["refresh", "update"] {
+            let args = Args::try_parse_from(["pkd", name]).unwrap();
+            assert!(matches!(args.command, Some(Commands::Refresh)));
+        }
+        let mut command = Args::command();
+        let help = command.render_long_help().to_string();
+        assert!(
+            help.contains("Examples:") && help.contains("pkd refresh"),
+            "{help}"
+        );
+        assert!(help.contains("[alias: update]"), "{help}");
+        assert!(!help.contains("homebrew-cask"), "{help}");
+        // Everyday commands come first.
+        let order: Vec<_> = command
+            .get_subcommands()
+            .map(|c| c.get_name().to_string())
+            .collect();
+        assert_eq!(&order[..4], ["search", "info", "install", "remove"]);
+        for (shell, marker) in [
+            (Shell::Bash, "complete -F"),
+            (Shell::Zsh, "#compdef pkd"),
+            (Shell::Fish, "complete -c pkd"),
+        ] {
+            let mut script = Vec::new();
+            completions(shell, &mut script);
+            let script = String::from_utf8(script).unwrap();
+            assert!(
+                script.contains(marker) && script.contains("refresh"),
+                "{script}"
+            );
+        }
+        assert!(Args::try_parse_from(["pkd", "completions", "powershell"]).is_err());
+        assert_eq!(
+            run(&Args::try_parse_from(["pkd", "completions", "bash"]).unwrap()),
+            0
+        );
+        assert!(working_label(&Commands::Completions { shell: Shell::Fish }).is_none());
+    }
+    #[test]
     fn commands_and_confirmation() {
         assert!(Args::try_parse_from(["pkd", "clean", "--authenticate"]).is_err());
         let mut engine = engine();
@@ -1328,6 +1523,7 @@ mod tests {
             vec!["upgrade", "fixture"],
             vec!["upgrade"],
             vec!["update"],
+            vec!["refresh"],
             vec!["remove", "fixture"],
             vec!["clean"],
             vec!["clean", "apt:orphans"],
@@ -1547,6 +1743,107 @@ mod tests {
         assert_eq!(report["failures"].as_array().unwrap().len(), 1);
         assert_eq!(report["failures"][0]["backend"], "flatpak");
         assert_eq!(call(&mut engine, &["upgrade"], true).1, 4);
+    }
+
+    #[test]
+    fn registry_guesses_never_make_a_typed_name_ambiguous() {
+        let guess = |backend: &str| Fixture {
+            backend: backend.into(),
+            installed: false,
+            fail: None,
+            read_failure: None,
+            verified: false,
+        };
+        let mut engine = engine();
+        engine.register(guess("cargo")).unwrap();
+        engine.register(guess("npm")).unwrap();
+        let args = Args::try_parse_from(["pkd", "install", "fixture"]).unwrap();
+        let mut notes = vec![];
+        let (data, code) = dispatch(
+            &mut engine,
+            &args,
+            &Cancellation::default(),
+            &mut |operations| {
+                assert!(matches!(operations, [Operation::Install(id)] if id.backend == "apt"));
+                true
+            },
+            &mut |event| {
+                if let Event::Progress {
+                    progress: Progress::Message(message),
+                    ..
+                } = event
+                {
+                    notes.push(message);
+                }
+            },
+        );
+        assert_eq!(code, 0, "{data}");
+        assert!(
+            notes.contains(
+                &"Cargo and npm may also have this name. To use one of them instead, add --from cargo or --from npm."
+                    .to_string()
+            ),
+            "{notes:?}"
+        );
+        assert_eq!(call(&mut engine, &["info", "fixture"], false).1, 0);
+        let mut one = self::engine();
+        one.register(guess("npm")).unwrap();
+        let mut notes = vec![];
+        let (_, code) = dispatch(
+            &mut one,
+            &args,
+            &Cancellation::default(),
+            &mut |_| true,
+            &mut |event| {
+                if let Event::Progress {
+                    progress: Progress::Message(message),
+                    ..
+                } = event
+                {
+                    notes.push(message);
+                }
+            },
+        );
+        assert_eq!(code, 0);
+        assert!(
+            notes.contains(
+                &"npm may also have this name. To use it instead, add --from npm.".to_string()
+            ),
+            "{notes:?}"
+        );
+
+        let mut guesses = Engine::default();
+        for backend in ["cargo", "npm", "pipx"] {
+            guesses.register(guess(backend)).unwrap();
+        }
+        let (data, code) = call(&mut guesses, &["install", "fixture"], true);
+        assert_eq!(code, 3);
+        assert_eq!(data["offers"], json!(["cargo", "npm", "pipx"]));
+        assert_eq!(
+            data["message"],
+            "No package named fixture was found. PkgDeck can't search Cargo, npm, and pipx, but they can try to install it by name: add --from cargo, --from npm, or --from pipx."
+        );
+        let (data, code) = call(&mut guesses, &["info", "fixture"], false);
+        assert_eq!(code, 3);
+        assert!(data.get("offers").is_none());
+        // A single guess is still a usable install target, and --from pins it.
+        let mut single = Engine::default();
+        single.register(guess("npm")).unwrap();
+        let (data, code) = call(&mut single, &["install", "fixture"], true);
+        assert_eq!(code, 0, "{data}");
+        assert_eq!(
+            call(
+                &mut guesses,
+                &["--from", "pipx", "install", "fixture"],
+                true
+            )
+            .1,
+            0
+        );
+        assert_eq!(from_flags(&["npm".into()]), "--from npm");
+        assert_eq!(source_list(&["pipx".into()]), "pipx");
+        assert_eq!(source_list(&[]), "");
+        assert_eq!(from_flags(&[]), "");
     }
 
     #[test]

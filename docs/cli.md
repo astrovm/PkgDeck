@@ -1,7 +1,8 @@
 # Command line (`pkd`)
 
 `pkd` is PkgDeck's command-line tool. It uses the same engine as the app.
-Running `pkd` with no command prints help. Use `pkgdeck` to open the app.
+Running `pkd` with no command prints help, with the everyday commands first
+and a few examples. Use `pkgdeck` to open the app.
 
 In the Flatpak build, run it with:
 
@@ -20,20 +21,23 @@ pkd info neovim --from homebrew          # show package details
 pkd list --json                          # list installed packages as JSON
 pkd install neovim --from apt --yes      # install
 pkd remove neovim --from apt --yes       # remove
-pkd update                               # refresh package lists (installs nothing)
+pkd refresh                              # refresh package lists (installs nothing)
 pkd upgrade neovim --from apt --yes      # update one package
 pkd upgrade                              # update everything
 pkd clean                                # list cleanup tasks
 pkd inspect git                          # find which package provides a command
 pkd audit                                # find apps installed more than once
 pkd doctor                               # check that PkgDeck can reach your package managers
+pkd completions bash                     # print a shell completion script
 ```
+
+`pkd update` still works. It's another name for `pkd refresh`.
 
 ## Global options
 
 | Option | Meaning |
 | --- | --- |
-| `--from SOURCE` | Only use this source. Repeat it to pick several. |
+| `--from SOURCE` | Only use this source. Repeat it to pick several. `pkd sources` lists them. |
 | `--arch ARCH` | Pick a package architecture, such as `amd64` or `i386` for APT. |
 | `--scope user\|system` | Pick the user or system installation. |
 | `--yes`, `-y` | Approve changes without asking. |
@@ -68,6 +72,14 @@ cask names only.
 fuzzy matching or aliases.
 
 - If the same name exists in more than one source, pick one with `--from`.
+- npm, Cargo, and pipx can't be searched by exact name, so PkgDeck can't
+  check that a name exists there. They never make a name ambiguous: if
+  another source has the package, PkgDeck uses it and says which of them
+  may also have it, for example "npm may also have this name. To use it
+  instead, add --from npm." If only they could have it, `install` tries
+  the one that can. If nothing matches, the error names them: "No package
+  named X was found. PkgDeck can't search npm and pipx, but they can try to
+  install it by name: add --from npm or --from pipx."
 - Use `--arch` to choose between APT architectures.
 - If a Flatpak is installed for both User and System, add `--scope`:
   `pkd --from flatpak --scope system install org.example.App`
@@ -81,8 +93,9 @@ changing anything, then runs each change in order. If one fails, earlier
 changes are kept.
 
 `pkd upgrade` without names updates every installed package that has an
-update. `--from` and `--arch` narrow it down. `pkd update` only refreshes
-package lists. It never installs updates.
+update. `--from` and `--arch` narrow it down. `pkd refresh` (or
+`pkd update`) only refreshes package lists. It never installs updates, and
+when it finishes it reminds you to run `pkd upgrade`.
 
 ## Confirmation and passwords
 
@@ -92,7 +105,7 @@ While it works, a spinner shows the current step, and each change gets a
 to install, remove, upgrade, or clean. Otherwise the command stops with exit
 code 2 before doing anything.
 
-`pkd update` only refreshes package lists, so it never asks. It skips package
+`pkd refresh` only refreshes package lists, so it never asks. It skips package
 managers that don't keep package lists, such as npm or Cargo.
 
 Approving a change doesn't give PkgDeck admin rights, and PkgDeck never reads
@@ -122,7 +135,7 @@ runs `brew uninstall --force --formula`, which removes every installed version
 of that formula, following
 [Homebrew's documented behavior](https://docs.brew.sh/FAQ#how-do-i-uninstall-a-formula).
 It never skips dependency checks. Homebrew's automatic update and cleanup are
-turned off during package changes. `pkd update` still refreshes Homebrew.
+turned off during package changes. `pkd refresh` still refreshes Homebrew.
 
 ### Docker and Podman
 
@@ -183,9 +196,13 @@ package installed it. It searches your `PATH` in order, shows other matches
 and symlink targets, and asks your package managers who owns each file.
 It never runs the command.
 
-- "unknown" means no package manager claims the file.
-- "unmatched" means a package manager claims the file, but PkgDeck can't match
-  it to an installed package.
+Each file says who installed it, such as "Installed by cowsay (APT)", then
+the matching package, such as "Package: cowsay from APT, system".
+
+- "No package manager claims PATH" means no package manager owns the file.
+- "APT lists PATH under NAME, but NAME isn't in the installed list" means a
+  package manager claims the file, but PkgDeck can't match it to an
+  installed package.
 - `--json` includes the full package ID.
 
 `pkd audit` shows apps installed more than once. Copies are grouped only when
@@ -210,6 +227,11 @@ overwrites an existing file.
 installed, installable, unavailable, unsupported, or ambiguous, without
 changing anything. Recorded versions are for reference only. Installing from
 an inventory isn't supported yet.
+
+An inventory file can be up to 8 MB and list up to 20,000 packages. Problems
+are reported in one sentence, such as "Can't open software.json: no such
+file." or "software.json already exists. PkgDeck never overwrites a file;
+choose a new name."
 
 ## Repositories
 
@@ -286,6 +308,45 @@ Official docs: [Codex](https://learn.chatgpt.com/docs/codex/cli),
 [Grok](https://docs.x.ai/build/enterprise),
 [OpenCode](https://opencode.ai/docs/cli/#upgrade).
 
+## Output
+
+- Sources are named the way their projects name them ("APT", "Flatpak",
+  "Homebrew"), except in `--from` values and the SOURCE column, which keep
+  the ids you type.
+- Flatpak apps show their app name, with the app ID after it:
+  "VLC (org.videolan.VLC)".
+- `info` says "Installed  no", "Update  up to date", or
+  "Update  available (2.0)".
+- On narrow terminals, `flatpak (system)` shortens to `flatpak·sys`, and
+  `pkd sources` moves DETAILS onto an indented line below each source.
+- The legend under a package list only explains the markers it uses.
+- APT repositories are named by host and suites, such as
+  "deb.debian.org · bookworm, bookworm-updates".
+- When a package manager fails, the error is one sentence with its most
+  useful line, such as "APT exited with code 100: E: Unable to locate
+  package x". `pkd sources` shows such sources as "failed", with the reason.
+- PkgDeck refuses to make changes as root: "PkgDeck can't make changes when
+  it runs as root. Run it as your normal user; it asks for permission when
+  needed."
+
+## Shell completion
+
+```sh
+pkd completions bash > ~/.local/share/bash-completion/completions/pkd
+pkd completions zsh > ~/.zfunc/_pkd     # a folder in your fpath
+pkd completions fish > ~/.config/fish/completions/pkd.fish
+```
+
+## Cache
+
+To answer faster, PkgDeck keeps APT search and list results, and Flatpak
+search results, in `$XDG_CACHE_HOME/pkgdeck` (or `~/.cache/pkgdeck`). The
+app and `pkd` share it. An entry is used only while the package lists,
+the package database, the helper, and your locale are exactly as they were
+when it was saved. Any change there, and any change PkgDeck makes, discards
+it. Only successful, complete answers are saved, readable only by you. Set
+`PKGDECK_NO_CACHE=1` to turn it off. It's never used when running as root.
+
 ## JSON output
 
 With `--json`, `pkd` prints exactly one JSON document to stdout. Progress goes
@@ -303,6 +364,7 @@ to stderr.
 | `clean` | Cleanup `items` and `failures` |
 | Changes | `operations`, each with a `result` of `{"Ok":...}` or `{"Err":...}` |
 | Errors | `error`, and a readable `message` when available |
+| No match | Also `offers`: sources that could try the name, such as `["npm", "pipx"]` |
 
 - Package IDs have `backend`, `name`, `architecture`, and `scope`, plus remote
   and ref fields when the source needs them.

@@ -191,7 +191,7 @@ fn terminal_confirmation_defaults_to_no_and_accepts_explicit_approval() {
     let output = String::from_utf8_lossy(&declined.stdout);
     assert_eq!(declined.status.code(), Some(7), "{output}");
     assert!(output.contains("Install fixture"));
-    assert!(output.contains("homebrew"));
+    assert!(output.contains("Homebrew"), "{output}");
     assert!(output.contains("[y/N]"));
     assert!(output.contains("Cancelled. Nothing was changed."));
     assert!(output.contains("\x1b["));

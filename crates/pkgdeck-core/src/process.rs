@@ -51,6 +51,57 @@ pub struct Completion {
     pub cancellation_deferred: bool,
 }
 
+impl Completion {
+    /// How the command ended, as the end of a plain sentence: "exited with
+    /// code 1: error: …" or "was stopped by signal 9". The reason is the
+    /// first meaningful stderr line; the full output stays in the value.
+    pub fn outcome(&self) -> String {
+        let ended = match (self.code, self.signal) {
+            (Some(code), _) => format!("exited with code {code}"),
+            (None, Some(signal)) => format!("was stopped by signal {signal}"),
+            (None, None) => "was stopped".into(),
+        };
+        match failure_summary(&self.stderr) {
+            Some(reason) => format!("{ended}: {reason}"),
+            None => ended,
+        }
+    }
+}
+
+/// The stderr line that best explains a failed command: the first line
+/// marked as an error (`E:`, `error:`, `fatal:` …), else the first line that
+/// is not a warning or hint, else the first non-empty line. Long lines are
+/// shortened and control characters never pass through.
+pub fn failure_summary(stderr: &[u8]) -> Option<String> {
+    const ERRORS: [&str; 4] = ["e:", "error", "fatal", "npm err"];
+    const NOISE: [&str; 6] = ["w:", "warn", "npm warn", "n:", "note:", "hint:"];
+    let text = String::from_utf8_lossy(stderr);
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    let starts = |line: &str, markers: &[&str]| {
+        let line = line.to_ascii_lowercase();
+        markers.iter().any(|marker| line.starts_with(marker))
+    };
+    let line = lines
+        .iter()
+        .find(|line| starts(line, &ERRORS))
+        .or_else(|| lines.iter().find(|line| !starts(line, &NOISE)))
+        .or_else(|| lines.first())?;
+    let clean: String = line
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    const LIMIT: usize = 300;
+    Some(if clean.chars().count() > LIMIT {
+        format!("{}…", clean.chars().take(LIMIT).collect::<String>())
+    } else {
+        clean
+    })
+}
+
 fn serialize_output<S: serde::Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
     serializer.serialize_str(&String::from_utf8_lossy(bytes))
 }
@@ -82,12 +133,7 @@ impl std::fmt::Display for ExecutionError {
             Self::Interrupted => {
                 f.write_str("APT was interrupted; inspect native package state before retrying")
             }
-            Self::Failed(result) => write!(
-                f,
-                "host command failed ({:?}): {}",
-                result.code,
-                String::from_utf8_lossy(&result.stderr)
-            ),
+            Self::Failed(result) => write!(f, "the package manager {}", result.outcome()),
         }
     }
 }
@@ -217,6 +263,50 @@ pub(crate) fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn failed(code: Option<i32>, signal: Option<i32>, stderr: &str) -> Completion {
+        Completion {
+            code,
+            signal,
+            stdout: vec![],
+            stderr: stderr.as_bytes().to_vec(),
+            truncated: false,
+            cancellation_deferred: false,
+        }
+    }
+    #[test]
+    fn failures_read_as_one_plain_sentence() {
+        let rustup = "error: rustup could not choose a version of cargo to run\nhelp: run 'rustup default stable'\n";
+        assert_eq!(
+            ExecutionError::Failed(failed(Some(1), None, rustup)).to_string(),
+            "the package manager exited with code 1: error: rustup could not choose a version of cargo to run"
+        );
+        let apt = "WARNING: apt does not have a stable CLI interface.\n\nE: Unable to locate package x\nE: second\n";
+        assert_eq!(
+            failure_summary(apt.as_bytes()).unwrap(),
+            "E: Unable to locate package x"
+        );
+        assert_eq!(
+            failure_summary(b"warning: odd\nsomething broke\n").unwrap(),
+            "something broke"
+        );
+        assert_eq!(
+            failure_summary(b"warning: only\n").unwrap(),
+            "warning: only"
+        );
+        assert_eq!(failure_summary(b"\n  \n"), None);
+        assert_eq!(failure_summary(b"bad\x1b[31m").unwrap(), "bad [31m");
+        let long = "x".repeat(400);
+        assert_eq!(
+            failure_summary(long.as_bytes()).unwrap().chars().count(),
+            301
+        );
+        assert_eq!(failed(Some(2), None, "").outcome(), "exited with code 2");
+        assert_eq!(
+            failed(None, Some(9), "").outcome(),
+            "was stopped by signal 9"
+        );
+        assert_eq!(failed(None, None, "").outcome(), "was stopped");
+    }
     #[test]
     fn writes_defer_cancellation_and_timeout_until_native_completion() {
         let cancel = Cancellation::default();
