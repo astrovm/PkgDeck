@@ -120,7 +120,6 @@ Controls.ApplicationWindow {
     property bool trayAvailable: false
     property alias backgroundMode: preferences.backgroundMode
     property alias autostartEnabled: preferences.autostart
-    property alias sidebarHidden: preferences.sidebarHidden
     property alias preferredSidebarWidth: preferences.sidebarWidth
     function showFromTray() {
         root.show();
@@ -710,24 +709,29 @@ Controls.ApplicationWindow {
         }
         return -1;
     }
-    // The sidebar is resizable and can be hidden. Narrow windows, or a
-    // sidebar dragged narrow, show it as an icon rail instead.
+    // The sidebar is resizable. Narrow windows, or a sidebar dragged
+    // narrow, show it as an icon rail instead.
     readonly property int railWidth: 64
     // Wide enough for the title and the footer at any font size.
     readonly property int sidebarMinimumWidth: Math.ceil(Math.max(180,
         28 + 10 + sidebarTitle.implicitWidth + 4 + 28,
-        sidebarSignature.implicitWidth + 8 + sidebarToggle.implicitWidth + 4 + 28))
+        sidebarSignature.implicitWidth + 4 + 28))
     // A sidebar dragged narrower than this becomes the icon rail.
     readonly property int railThreshold: 150
-    readonly property int sidebarMaximumWidth: 360
-    readonly property bool sidebarVisible: !preferences.sidebarHidden
+    // Widening the sidebar stops where the page would switch to its compact
+    // layout, so dragging never shifts the page. The limit shrinks with the
+    // window down to the minimum width and never jumps back up.
+    readonly property int sidebarMaximumWidth: Math.max(sidebarMinimumWidth, Math.min(360, width - compactWidth))
     readonly property bool sidebarRail: width < 820 || preferences.sidebarWidth < railThreshold
-    readonly property int sidebarWidth: !sidebarVisible ? 0 : sidebarRail ? railWidth
+    readonly property int sidebarWidth: sidebarRail ? railWidth
         : Math.max(sidebarMinimumWidth, Math.min(sidebarMaximumWidth, preferences.sidebarWidth))
-    function toggleSidebar() { sidebarHidden = !sidebarHidden; }
     // Layout follows the space the page has, not the window.
     readonly property real pageWidth: width - sidebarWidth
-    readonly property bool compact: pageWidth < 748
+    readonly property int compactWidth: 748
+    // Fixed while the full sidebar shows, so resizing the window does not
+    // shift the page; only windows narrow enough for the icon rail use less.
+    readonly property int pageMargin: width < 820 ? 12 : 28
+    readonly property bool compact: pageWidth < compactWidth
     // Header actions keep only their icons when the page is this narrow.
     readonly property bool headerIconsOnly: pageWidth < 600
     readonly property int shortListLimit: compact ? 3 : 8
@@ -1112,7 +1116,7 @@ Controls.ApplicationWindow {
                 model: combo.popup.visible ? combo.delegateModel : null
                 currentIndex: combo.highlightedIndex
                 delegate: combo.delegate
-                Controls.ScrollIndicator.vertical: Controls.ScrollIndicator { }
+                Controls.ScrollBar.vertical: DeckScrollBar { ink: root.muted }
             }
             background: Rectangle {
                 color: root.surface
@@ -1352,7 +1356,6 @@ Controls.ApplicationWindow {
         property string notificationHistory: "{}"
         property string lastBackgroundState: "{}"
         property int sidebarWidth: 212
-        property bool sidebarHidden: false
         // Shown on the empty Search page until sources are checked again.
         property string searchHint: ""
     }
@@ -1535,7 +1538,6 @@ Controls.ApplicationWindow {
             objectName: "sidebar"
             Layout.fillHeight: true
             Layout.preferredWidth: root.sidebarWidth
-            visible: root.sidebarVisible
             color: root.surface
             clip: true
             Rectangle { anchors.right: parent.right; width: 1; height: parent.height; color: root.line }
@@ -1626,34 +1628,15 @@ Controls.ApplicationWindow {
                     }
                 }
                 Item { Layout.fillHeight: true }
-                // The hide button stays in the bottom corner, in the rail too.
                 RowLayout {
-                    Layout.fillWidth: true
-                    spacing: 8
-                    RowLayout {
-                        id: sidebarSignature
-                        objectName: "signatureFooter"
-                        visible: !root.sidebarRail
-                        Layout.leftMargin: 4
-                        spacing: 4
-                        Controls.Label { objectName: "signaturePrefix"; text: "Made with"; color: root.muted; font.pointSize: root.font.pointSize * 0.9 }
-                        DeckIcon { name: "heart"; ink: "#e34b5f"; Layout.preferredWidth: 14; Layout.preferredHeight: 14 }
-                        Controls.Label { objectName: "signatureAuthor"; text: "by astro"; color: root.muted; font.pointSize: root.font.pointSize * 0.9 }
-                    }
-                    Item { visible: !root.sidebarRail; Layout.fillWidth: true }
-                    ActionButton {
-                        id: sidebarToggle
-                        objectName: "sidebarToggle"
-                        text: ""
-                        symbol: "sidebar"
-                        flat: true
-                        glyphColor: root.muted
-                        tooltipText: "Hide sidebar (Ctrl+B)"
-                        Accessible.name: "Hide sidebar"
-                        Layout.alignment: root.sidebarRail ? Qt.AlignHCenter : Qt.AlignRight | Qt.AlignVCenter
-                        Layout.fillWidth: root.sidebarRail
-                        onClicked: root.toggleSidebar()
-                    }
+                    id: sidebarSignature
+                    objectName: "signatureFooter"
+                    visible: !root.sidebarRail
+                    Layout.leftMargin: 4
+                    spacing: 4
+                    Controls.Label { objectName: "signaturePrefix"; text: "Made with"; color: root.muted; font.pointSize: root.font.pointSize * 0.9 }
+                    DeckIcon { name: "heart"; ink: "#e34b5f"; Layout.preferredWidth: 14; Layout.preferredHeight: 14 }
+                    Controls.Label { objectName: "signatureAuthor"; text: "by astro"; color: root.muted; font.pointSize: root.font.pointSize * 0.9 }
                 }
             }
             // Drag the edge to resize. Dragging it narrow leaves only the
@@ -1697,21 +1680,10 @@ Controls.ApplicationWindow {
             Layout.fillWidth: true
             Layout.fillHeight: true
             Layout.alignment: Qt.AlignTop
-            Layout.margins: root.compact ? 12 : 28
-            spacing: root.compact ? 10 : 14
+            Layout.margins: root.pageMargin
+            spacing: 14
             RowLayout {
                 Layout.fillWidth: true
-                // While the sidebar is hidden, this brings it back.
-                ActionButton {
-                    objectName: "sidebarShow"
-                    visible: !root.sidebarVisible
-                    text: ""
-                    symbol: "sidebar"
-                    flat: true
-                    tooltipText: "Show sidebar (Ctrl+B)"
-                    Accessible.name: "Show sidebar"
-                    onClicked: root.toggleSidebar()
-                }
                 Kirigami.Heading {
                     objectName: "pageHeading"
                     text: root.currentView
@@ -1762,7 +1734,7 @@ Controls.ApplicationWindow {
                         property var draftSources: []
                         property string searchText: ""
                         property bool showUnavailable: false
-                        x: root.width - width - (root.compact ? 12 : 28)
+                        x: root.width - width - root.pageMargin
                         y: 76
                         width: Math.min(340, root.width - 32)
                         height: Math.min(460, root.height - 100, implicitHeight)
@@ -1891,7 +1863,7 @@ Controls.ApplicationWindow {
                                         }
                                     }
                                 }
-                                Controls.ScrollBar.vertical: Controls.ScrollBar { }
+                                Controls.ScrollBar.vertical: DeckScrollBar { ink: root.muted }
                             }
                             ActionButton {
                                 objectName: "unavailableSourceToggle"
@@ -2118,7 +2090,8 @@ Controls.ApplicationWindow {
                     }
                 }
             }
-            Controls.ScrollView {
+            DeckScrollView {
+                ink: root.muted
                 id: settingsScroll
                 objectName: "settingsScroll"
                 visible: root.currentView === "Settings"
@@ -2269,7 +2242,7 @@ Controls.ApplicationWindow {
                                 }
                                 RowLayout {
                                     objectName: "compactSignature"
-                                    visible: root.sidebarRail || !root.sidebarVisible
+                                    visible: root.sidebarRail
                                     spacing: 4
                                     Controls.Label { text: "Made with"; color: root.muted }
                                     DeckIcon { name: "heart"; ink: "#e34b5f"; Layout.preferredWidth: 13; Layout.preferredHeight: 13 }
@@ -2301,7 +2274,6 @@ Controls.ApplicationWindow {
                                 {action: "Updates", keys: "Ctrl+3"},
                                 {action: "Clean", keys: "Ctrl+4"},
                                 {action: "Sources", keys: "Ctrl+5"},
-                                {action: "Show or hide sidebar", keys: "Ctrl+B"},
                                 {action: "Search or filter", keys: "Ctrl+F"},
                                 {action: "Focus results", keys: "Ctrl+L"},
                                 {action: "Select result", keys: "↑ / ↓"},
@@ -2674,7 +2646,7 @@ Controls.ApplicationWindow {
                         onHeightChanged: if (currentIndex >= 0) Qt.callLater(() => { if (results.currentIndex >= 0) results.positionViewAtIndex(results.currentIndex, ListView.Contain); })
                         keyNavigationEnabled: false
                         activeFocusOnTab: true
-                        Controls.ScrollBar.vertical: Controls.ScrollBar {}
+                        Controls.ScrollBar.vertical: DeckScrollBar { ink: root.muted }
                         Keys.onDownPressed: root.choose(Math.min(count - 1, currentIndex + 1))
                         Keys.onUpPressed: root.choose(Math.max(0, currentIndex - 1))
                         Keys.onPressed: (event) => {
@@ -3191,7 +3163,7 @@ Controls.ApplicationWindow {
                 clip: true
                 spacing: 8
                 model: root.repositoryReport.repositories || []
-                Controls.ScrollBar.vertical: Controls.ScrollBar {}
+                Controls.ScrollBar.vertical: DeckScrollBar { ink: root.muted }
                 delegate: Rectangle {
                     required property var modelData
                     width: ListView.view.width - 14
@@ -3358,7 +3330,8 @@ Controls.ApplicationWindow {
         contentItem: ColumnLayout {
             spacing: 10
             // Sized to its reasons, scrolling only when they outgrow the window.
-            Controls.ScrollView {
+            DeckScrollView {
+                ink: root.muted
                 Layout.fillWidth: true
                 Layout.preferredHeight: Math.min(failureList.implicitHeight, Math.max(120, root.height - 260))
                 contentWidth: availableWidth
@@ -3501,7 +3474,8 @@ Controls.ApplicationWindow {
                 }
             }
         }
-        contentItem: Controls.ScrollView {
+        contentItem: DeckScrollView {
+            ink: root.muted
             id: confirmationScroll
             contentWidth: availableWidth
             contentHeight: confirmationBody.implicitHeight + 32
@@ -3583,10 +3557,6 @@ Controls.ApplicationWindow {
                 }
             }
         }
-    }
-    Shortcut {
-        sequence: "Ctrl+B"
-        onActivated: root.toggleSidebar()
     }
     Shortcut {
         sequence: "Ctrl+Q"

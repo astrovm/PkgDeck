@@ -5,9 +5,7 @@ Open PkgDeck from your app menu or run `pkgdeck`. The sidebar has six pages:
 The **Activity** button in the header shows running and finished work.
 
 Drag the sidebar's edge to resize it; drag it narrow to keep only its icons,
-or double-click the edge to restore the default width. The button in the
-sidebar's bottom corner hides it, and the button left of the page title brings
-it back; Ctrl+B does both. In narrow windows the
+or double-click the edge to restore the default width. In narrow windows the
 sidebar shows only icons.
 
 <img src="screenshots/narrow.png" width="280" alt="PkgDeck in a narrow window, with the sidebar as an icon rail">
@@ -196,7 +194,6 @@ out of date, and each page refreshes when you open it.
 | Shortcut | Action |
 | --- | --- |
 | Ctrl+1 to Ctrl+5 | Go to Search, Installed, Updates, Clean, or Sources |
-| Ctrl+B | Show or hide the sidebar |
 | Ctrl+F | Focus the search field, package filter, or source picker |
 | Ctrl+R | Reload |
 | Ctrl+Shift+U | Update checked packages |

@@ -98,7 +98,8 @@ Rectangle {
                 }
             }
         }
-        Controls.ScrollView {
+        DeckScrollView {
+            ink: panel.muted
             id: detailScroll
             Layout.fillWidth: true
             Layout.fillHeight: true

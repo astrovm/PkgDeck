@@ -163,7 +163,6 @@ TestCase {
         browser.sortAscending = true;
         browser.nameWidth = 202;
         browser.versionWidth = 150;
-        browser.sidebarHidden = false;
         browser.preferredSidebarWidth = 212;
         wait(30);
     }
@@ -870,7 +869,9 @@ TestCase {
             // Narrow windows keep the sidebar as an icon rail.
             compare(browser.sidebarRail, width < 820);
             verify(sidebar.visible);
-            compare(browser.sidebarWidth, width < 820 ? browser.railWidth : 212);
+            // The full sidebar only narrows toward its minimum as the window does.
+            compare(browser.sidebarWidth, width < 820 ? browser.railWidth
+                : Math.max(browser.sidebarMinimumWidth, Math.min(212, width - 748)));
             compare(browser.compact, width - browser.sidebarWidth < 748);
             verify(!add.visible);
             for (const button of [activity, sources]) {
@@ -1266,12 +1267,12 @@ TestCase {
         verify(about.text.indexOf("9.9.9-test") >= 0);
         const shortcuts = findChild(browser, "aboutShortcuts");
         verify(shortcuts !== null);
-        compare(shortcuts.count, 16);
+        compare(shortcuts.count, 15);
         verify(findChild(browser, "shortcutsToggle") === null);
         waitForRendering(browser.contentItem);
         compare(shortcuts.itemAt(0).children[1].text, "Ctrl+1");
-        compare(shortcuts.itemAt(5).children[1].text, "Ctrl+B");
-        compare(shortcuts.itemAt(12).children[1].text, "Ctrl+Shift+U");
+        compare(shortcuts.itemAt(5).children[1].text, "Ctrl+F");
+        compare(shortcuts.itemAt(11).children[1].text, "Ctrl+Shift+U");
         for (const name of ["animationsSetting", "backgroundModeSetting"]) {
             const setting = findChild(browser, name);
             compare(setting.contentItem.color.toString(), browser.ink.toString());
@@ -2259,7 +2260,7 @@ TestCase {
         verify(!footer.visible);
         verify(findChild(browser, "compactSignature").visible);
     }
-    function test_sidebar_resizes_collapses_to_icons_and_hides() {
+    function test_sidebar_resizes_and_collapses_to_icons() {
         const sidebar = findChild(browser, "sidebar");
         const handle = findChild(browser, "sidebarResize");
         // Repeater delegates are not QObject children; reach them through the column.
@@ -2282,6 +2283,9 @@ TestCase {
         wait(Qt.styleHints.mouseDoubleClickInterval + 50);
         mouseDrag(browser, x + 60, y, 400, 0);
         tryCompare(browser, "sidebarWidth", browser.sidebarMaximumWidth);
+        // The widest sidebar still leaves the page its regular layout.
+        compare(browser.sidebarMaximumWidth, browser.width - 748);
+        verify(!browser.compact);
         // Dragging it narrow leaves an icon rail with named tooltips.
         wait(Qt.styleHints.mouseDoubleClickInterval + 50);
         mouseDrag(browser, browser.sidebarMaximumWidth - 4, y, -300, 0);
@@ -2292,37 +2296,85 @@ TestCase {
         compare(search.Accessible.name, "Search");
         clickDelegate(navigationButton("Installed"));
         compare(browser.currentView, "Installed");
-        // The sidebar's own button hides it; the header button, only
-        // shown while it is hidden, and Ctrl+B bring it back.
-        const hide = findChild(browser, "sidebarToggle");
-        const show = findChild(browser, "sidebarShow");
-        verify(!show.visible);
-        verify(hide.mapToItem(sidebar, 0, 0).x + hide.width <= sidebar.width);
-        verify(hide.mapToItem(sidebar, 0, 0).y > sidebar.height / 2);
-        wait(Qt.styleHints.mouseDoubleClickInterval + 50);
-        clickDelegate(hide);
-        verify(!sidebar.visible);
-        compare(browser.sidebarWidth, 0);
-        verify(show.visible);
-        wait(Qt.styleHints.mouseDoubleClickInterval + 50);
-        clickDelegate(show);
-        verify(sidebar.visible);
-        verify(!show.visible);
-        keyClick(Qt.Key_B, Qt.ControlModifier);
-        verify(!sidebar.visible);
+        // There is no way to hide it completely.
+        verify(findChild(browser, "sidebarToggle") === null);
+        verify(findChild(browser, "sidebarShow") === null);
         keyClick(Qt.Key_B, Qt.ControlModifier);
         verify(sidebar.visible);
+        compare(browser.sidebarWidth, browser.railWidth);
+        wait(Qt.styleHints.mouseDoubleClickInterval + 50);
         // Double-clicking the edge restores the default width.
         const edge = handle.mapToItem(browser.contentItem, handle.width / 2, 0).x;
         mouseDoubleClickSequence(browser, edge, y);
         tryCompare(browser, "sidebarWidth", 212);
         verify(!browser.sidebarRail);
     }
+    function test_every_scrollbar_is_the_plain_handle() {
+        // Style-drawn scrollbars add a groove with a hard line beside the
+        // content; every scrolling area uses DeckScrollBar instead.
+        browser.openView("Settings");
+        waitForRendering(browser.contentItem);
+        const seen = new Set();
+        const bars = [];
+        const styled = [];
+        const visit = (item) => {
+            if (!item || typeof item !== "object" || seen.has(item))
+                return;
+            seen.add(item);
+            if (item.orientation !== undefined && item.position !== undefined && item.size !== undefined
+                    && item.stepSize !== undefined || String(item).indexOf("ScrollIndicator") >= 0)
+                (item.plainHandle === true ? bars : styled).push(String(item));
+            for (const key of ["data", "contentItem", "popup", "background"]) {
+                const value = item[key];
+                if (value && value.length !== undefined && typeof value !== "string")
+                    for (let i = 0; i < value.length; ++i)
+                        visit(value[i]);
+                else
+                    visit(value);
+            }
+        };
+        visit(browser);
+        verify(bars.length >= 6, "found " + bars.length + " scrollbars");
+        compare(styled, []);
+        // A ScrollView's own bar sits along its right edge, beside the content.
+        const settings = findChild(browser, "settingsScroll");
+        const bar = settings.Controls.ScrollBar.vertical;
+        compare(bar.background.children.length, 0);
+        compare(bar.contentItem.color.toString(), browser.muted.toString());
+        browser.height = 500;
+        waitForRendering(browser.contentItem);
+        verify(bar.size < 1);
+        verify(bar.visible && bar.height > 100);
+        compare(bar.x, settings.width - bar.width);
+        verify(settings.availableWidth + bar.width <= settings.width);
+    }
+    function test_resizing_the_window_keeps_the_page_in_place() {
+        const heading = findChild(browser, "pageHeading");
+        const at = (width) => {
+            browser.width = width;
+            waitForRendering(browser.contentItem);
+            const point = heading.mapToItem(browser.contentItem, 0, 0);
+            return {x: point.x - browser.sidebarWidth, y: point.y};
+        };
+        const wide = at(1300);
+        verify(!browser.compact);
+        const narrow = at(900);
+        verify(browser.compact);
+        compare(narrow.x, wide.x);
+        compare(narrow.y, wide.y);
+        // A wide saved sidebar narrows smoothly with the window, never jumping.
+        browser.preferredSidebarWidth = 360;
+        let last = Infinity;
+        for (let width = 1200; width >= 820; width -= 4) {
+            browser.width = width;
+            verify(browser.sidebarWidth <= last, "sidebar grew at " + width);
+            last = browser.sidebarWidth;
+        }
+    }
     function test_sidebar_title_and_footer_fit_at_the_narrowest_width() {
         const sidebar = findChild(browser, "sidebar");
         const title = findChild(browser, "sidebarTitle");
         const footer = findChild(browser, "signatureFooter");
-        const hide = findChild(browser, "sidebarToggle");
         const font = browser.font.pointSize;
         for (const size of [font, font * 1.5]) {
             browser.font.pointSize = size;
@@ -2333,8 +2385,7 @@ TestCase {
             // Nothing is elided or pushed outside the sidebar.
             verify(title.width >= title.implicitWidth - 1);
             verify(title.mapToItem(sidebar, 0, 0).x + title.width <= sidebar.width);
-            verify(footer.mapToItem(sidebar, 0, 0).x + footer.width <= hide.mapToItem(sidebar, 0, 0).x);
-            verify(hide.mapToItem(sidebar, 0, 0).x + hide.width <= sidebar.width);
+            verify(footer.mapToItem(sidebar, 0, 0).x + footer.width <= sidebar.width);
         }
         browser.font.pointSize = font;
     }
