@@ -737,6 +737,13 @@ Controls.ApplicationWindow {
             : Math.max(56, font.pointSize * 5)) + (row.groupStart ? 38 : 0);
         return Math.max(130, (compact ? 60 : 85) + viewItems.reduce((height, row) => height + rowHeight(row), 0));
     }
+    // With details open the list keeps this many rows; details scroll instead.
+    function detailsListHeight() {
+        const rows = compact ? 2 : 3;
+        const rowHeight = compact ? Math.max(94, font.pointSize * 8.5) : Math.max(56, font.pointSize * 5);
+        // Short windows still leave room for the details and actions below.
+        return Math.min(shortResultsHeight(), (compact ? 60 : 85) + rows * rowHeight, Math.max(100, height * (compact ? 0.2 : 0.4)));
+    }
     readonly property bool systemAppearance: preferences.appearance === 0
     readonly property bool dark: preferences.appearance === 1 || (systemAppearance && Qt.styleHints.colorScheme === Qt.Dark)
     readonly property color canvas: systemAppearance ? systemPalette.window : (dark ? "#0e1015" : "#f4f6f9")
@@ -2452,7 +2459,7 @@ Controls.ApplicationWindow {
                 Layout.fillHeight: (backend.busy && !root.openingInput) || root.viewItems.length > root.shortListLimit
                 Layout.preferredHeight: root.viewItems.length === 0 && !backend.busy ? 150
                     : Math.min(root.shortResultsHeight(), detailsPanel.visible ? root.height * (root.compact ? 0.24 : 0.42) : root.height * 0.7)
-                Layout.minimumHeight: root.compact && detailsPanel.visible ? 100 : 130
+                Layout.minimumHeight: detailsPanel.visible ? root.detailsListHeight() : 130
                 visible: root.currentView === root.resultView && root.currentView !== "Settings" && root.currentView !== "Activity" &&
                     (root.currentView !== "Search" || root.viewItems.length > 0 || root.readFailures.length > 0 ||
                         (backend.busy && !root.openingInput) || searchPane.text.trim().length > 0)
@@ -2635,6 +2642,8 @@ Controls.ApplicationWindow {
                             if (!root.selectedIdentity)
                                 currentIndex = -1;
                         }
+                        // Opening details shrinks the list; keep the open row in view.
+                        onHeightChanged: if (currentIndex >= 0) Qt.callLater(() => { if (results.currentIndex >= 0) results.positionViewAtIndex(results.currentIndex, ListView.Contain); })
                         keyNavigationEnabled: false
                         activeFocusOnTab: true
                         Controls.ScrollBar.vertical: Controls.ScrollBar {}
@@ -3007,6 +3016,8 @@ Controls.ApplicationWindow {
                         && (root.detailText().length > 0 || root.visibleScreenshots.length > 0 || detailsPanel.metadataText.length > 0)))
                 Layout.fillWidth: true
                 Layout.preferredHeight: Math.min(root.height * (root.compact ? 0.32 : 0.48), detailsPanel.idealHeight)
+                // Gives way to the list's minimum and scrolls its own content.
+                Layout.minimumHeight: Math.min(120, detailsPanel.idealHeight)
                 selected: root.selected
                 selectionIdentity: root.rowIdentity(root.selected)
                 screenshots: root.visibleScreenshots

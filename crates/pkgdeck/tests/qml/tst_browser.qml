@@ -2161,6 +2161,31 @@ TestCase {
         mouseClick(findChild(browser, "sourceFailureRetry"));
         compare(fake.lastRetry, "npm");
     }
+    function test_open_details_keep_the_selected_row_in_view() {
+        browser.width = 1100;
+        browser.height = 760;
+        browser.openView("Installed");
+        fake.rows = JSON.stringify(Array.from({length: 20}, (_, i) => ({kind: "package", name: "synthetic-" + i, source: "apt",
+            architecture: "all", installed: "1", candidate: "1", scope: "system", summary: "Synthetic package " + i})));
+        const list = findChild(browser, "packageResults");
+        tryVerify(() => list.count === 20);
+        list.positionViewAtIndex(6, ListView.Beginning);
+        browser.choose(6);
+        fake.details = JSON.stringify({package: JSON.parse(fake.rows)[6],
+            description: Array(40).fill("A long synthetic description line.").join("\n"),
+            screenshots: [{url: "https://example.invalid/one.png"}, {url: "https://example.invalid/two.png"}]});
+        const panel = findChild(browser, "detailsPanel");
+        tryVerify(() => panel.visible);
+        waitForRendering(browser.contentItem);
+        wait(50);
+        // The list keeps three rows and the open row stays on screen.
+        verify(findChild(browser, "resultsBox").height >= browser.detailsListHeight() - 1);
+        const row = list.itemAtIndex(6);
+        verify(row !== null);
+        const top = row.mapToItem(list, 0, 0).y;
+        verify(top >= -1 && top + row.height <= list.height + 1, "selected row at " + top + " in " + list.height);
+        verify(panel.height < panel.idealHeight);
+    }
     function test_large_sections_reuse_parsed_rows() {
         const rows = Array.from({length: 800}, (_, i) => ({kind: "package", name: "synthetic-" + i, source: "apt",
             installed: "1", candidate: "1", scope: "system", summary: "A synthetic package with a long enough summary"}));

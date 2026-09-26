@@ -340,6 +340,15 @@ fn plain(node: roxmltree::Node<'_, '_>) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// AppStream application components. Catalogs such as Flathub still use
+/// the legacy `desktop` type for some apps (Firefox among them); add-ons,
+/// runtimes, and fonts are not apps and never rename packages.
+fn app_component(kind: &str) -> bool {
+    matches!(
+        kind,
+        "desktop-application" | "desktop" | "console-application"
+    )
+}
 fn child<'a, 'input>(
     node: roxmltree::Node<'a, 'input>,
     tag: &str,
@@ -458,7 +467,7 @@ impl Catalog {
         };
         let media_base = doc.root_element().attribute("media_baseurl");
         for component in doc.descendants().filter(|n| {
-            n.has_tag_name("component") && n.attribute("type") == Some("desktop-application")
+            n.has_tag_name("component") && n.attribute("type").is_some_and(app_component)
         }) {
             let Some(id) = child(component, "id").and_then(|n| n.text()) else {
                 continue;
@@ -544,7 +553,7 @@ impl Catalog {
                 media_base = value["MediaBaseUrl"].as_str().and_then(web_url);
                 continue;
             }
-            if value["Type"].as_str() != Some("desktop-application") {
+            if !value["Type"].as_str().is_some_and(app_component) {
                 continue;
             }
             let Some(id) = value["ID"].as_str() else {
@@ -904,8 +913,26 @@ mod tests {
     fn optional_xml_metadata_is_resilient_and_screenshots_are_bounded() {
         let mut catalog = Catalog::default();
         catalog.xml("not xml");
-        catalog.xml(r#"<components><component type="addon"><id>addon</id></component><component type="desktop-application"><name>No ID</name></component></components>"#);
+        catalog.xml(r#"<components><component type="addon"><id>addon</id></component><component type="runtime"><id>runtime</id></component><component type="desktop-application"><name>No ID</name></component></components>"#);
         assert!(catalog.apps.is_empty());
+        // Legacy "desktop" and console apps are applications too.
+        catalog.xml(r#"<components><component type="desktop"><id>org.example.Legacy</id><name>Legacy Browser</name></component><component type="console-application"><id>org.example.Tool</id><name>Terminal Tool</name></component></components>"#);
+        assert_eq!(
+            catalog
+                .find(&package("flatpak", "org.example.Legacy"))
+                .unwrap()
+                .name,
+            "Legacy Browser"
+        );
+        assert_eq!(
+            catalog
+                .find(&package("flatpak", "org.example.Tool"))
+                .unwrap()
+                .name,
+            "Terminal Tool"
+        );
+        catalog.apps.clear();
+        catalog.aliases.clear();
         catalog.xml(APP);
         catalog.xml(r#"<component type="desktop-application"><id>org.example.Player</id><name xml:lang="en">Updated name</name></component>"#);
         let info = catalog
