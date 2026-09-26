@@ -23,7 +23,7 @@ fn main() {
             .qml_file("qml/ThemedTextField.qml")
             .qml_file("qml/TickBox.qml")
             .qml_file("qml/Toast.qml")
-            .qml_file("qml/UpdatesActions.qml")
+            .qml_file("qml/UpdatesActions.qml"),
     )
     .qrc("resources.qrc")
     .file("src/controller.rs")

@@ -1242,6 +1242,16 @@ fn plain_text(raw: &str, backend: Option<&str>) -> String {
             (None, None) => "The package manager reported an error without details.".into(),
         };
     }
+    // Core's own wording: "the package manager exited with code N: reason".
+    if let Some(rest) = raw.trim_start().strip_prefix("the package manager ") {
+        let reason = rest.split_once(": ").map_or("", |(_, reason)| reason);
+        return match (meaningful_line(reason), tool) {
+            (Some(line), Some(tool)) => format!("{tool} couldn't run: {}", sentence_tail(&line)),
+            (Some(line), None) => sentence(&line),
+            (None, Some(tool)) => format!("{tool} reported an error without details."),
+            (None, None) => "The package manager reported an error without details.".into(),
+        };
+    }
     let cleaned = strip_debug(raw);
     let line = meaningful_line(&cleaned).unwrap_or_default();
     if line.is_empty() {
@@ -5102,7 +5112,7 @@ mod tests {
         assert!(controller
             .confirmation()
             .to_string()
-            .contains("Updates from them are not included"));
+            .contains("Updates from it are not included"));
         controller.as_mut().confirm(false);
 
         controller.as_mut().apply(Ok(Payload::RetryFailedUpdates(

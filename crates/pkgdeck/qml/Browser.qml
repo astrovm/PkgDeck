@@ -27,7 +27,7 @@ Controls.ApplicationWindow {
         parent: Controls.Overlay.overlay
         anchors.centerIn: parent
         width: Math.min(root.width - 32, 480)
-        title: "Add from file or link"
+        title: "Install from a file or link"
         modal: true
         standardButtons: Controls.Dialog.Cancel
         onAboutToShow: packageLink.text = ""
@@ -399,6 +399,10 @@ Controls.ApplicationWindow {
         const checked = sourceSelection.split(",").filter((id) => sourceIds.indexOf(id) >= 0);
         return checked.length > 0 ? checked : sourceIds.slice();
     }
+    // A failing source can be turned off while another one stays on.
+    function canTurnOff(id) {
+        return checkedSources().indexOf(id) >= 0 && checkedSources().length > 1;
+    }
     function setManagerEnabled(id, enabled) {
         let selected = checkedSources().filter((source) => source !== id);
         if (enabled)
@@ -497,6 +501,17 @@ Controls.ApplicationWindow {
         if (sourcePopup.showUnavailable)
             ordered.push(...unavailable);
         return ordered;
+    }
+    // Picker rows with their section, and whether each starts one.
+    function pickerSections() {
+        let previous = "";
+        return pickerItems().map((id) => {
+            const usable = sourceInfo(id).availability_kind === "available" && sourceSupportsView(id);
+            const section = usable ? sourceCategory(id) : "Unavailable";
+            const row = {id: id, section: section, showHeader: section !== previous};
+            previous = section;
+            return row;
+        });
     }
     function toggleDraftSource(id) {
         let checked = sourcePopup.draftSources.slice();
@@ -691,12 +706,24 @@ Controls.ApplicationWindow {
             if (emitted.has(key))
                 continue;
             emitted.add(key);
-            const title = group.reduce((best, member) => member.name.length < best.length ? member.name : best, group[0].name);
+            const named = group.find((member) => !!member.display_name);
+            const title = named ? named.display_name
+                : group.reduce((best, member) => member.name.length < best.length ? member.name : best, group[0].name);
             const sources = [...new Set(group.map((member) => root.sourceDisplayName(member.source)))];
             for (let i = 0; i < group.length; i++)
                 grouped.push(Object.assign({}, group[i], {groupStart: i === 0, groupTitle: title, groupCount: group.length, groupSources: sources}));
         }
         return grouped;
+    }
+    // Lower-cased filter text per parsed row, computed once per load.
+    readonly property var searchKeys: new WeakMap()
+    function searchKey(row) {
+        let key = searchKeys.get(row);
+        if (key === undefined) {
+            key = ((row.name || "") + " " + (row.display_name || "") + " " + (row.summary || "") + " " + (row.source || "")).toLowerCase();
+            searchKeys.set(row, key);
+        }
+        return key;
     }
     readonly property var cleanupFailures: currentView === "Clean" ? items.filter(row => row.kind === "failure") : []
     property var viewItems: {
@@ -714,8 +741,9 @@ Controls.ApplicationWindow {
         if (root.currentView === "Installed") {
             const filter = root.installedFilter.trim().toLowerCase();
             if (filter !== "") {
-                const matchingGroups = new Set(rows.filter((row) => row.kind === "package" && ((row.name || "") + " " + (row.summary || "") + " " + (row.source || "")).toLowerCase().indexOf(filter) >= 0).map((row) => row.same_app_group).filter(Boolean));
-                rows = rows.filter((row) => row.kind !== "package" || matchingGroups.has(row.same_app_group) || ((row.name || "") + " " + (row.summary || "") + " " + (row.source || "")).toLowerCase().indexOf(filter) >= 0);
+                const matches = (row) => root.searchKey(row).indexOf(filter) >= 0;
+                const matchingGroups = new Set(rows.filter((row) => row.kind === "package" && matches(row)).map((row) => row.same_app_group).filter(Boolean));
+                rows = rows.filter((row) => row.kind !== "package" || matchingGroups.has(row.same_app_group) || matches(row));
             }
             if (root.multiSourceOnly)
                 rows = rows.filter((row) => row.kind !== "package" || ((row.same_app_from || []).length > 0));
@@ -744,7 +772,9 @@ Controls.ApplicationWindow {
             if (query !== "")
                 rows.sort((a, b) => ((isFabricated(a) ? 1 : 0) - (isFabricated(b) ? 1 : 0)) || (relevanceScore(a, query) - relevanceScore(b, query)) || relevanceTiebreak(a, b));
         }
-        return root.currentView === "Installed" ? groupInstalledRows(rows) : rows;
+        // One app offered by several sources reads as one group, app first.
+        const appFirst = root.currentView === "Search" && sortColumn === "" && searchPane.text.trim() !== "";
+        return root.currentView === "Installed" || appFirst ? groupInstalledRows(rows) : rows;
     }
     // The list shows viewItems through resultsModel, updated in place by
     // row identity: rows that stay keep their delegates (and scroll
@@ -877,6 +907,11 @@ Controls.ApplicationWindow {
     // The sidebar is resizable. Narrow windows, or a sidebar dragged
     // narrow, show it as an icon rail instead.
     readonly property int railWidth: 64
+    readonly property int defaultSidebarWidth: 212
+    // Dragging or keying the sidebar into the rail slides; a window
+    // resize switches at once so the page never lags behind the window.
+    onSidebarRailChanged: if (width >= 820) railSwitch.restart()
+    Timer { id: railSwitch; interval: Theme.revealDuration + 40 }
     // Wide enough for the title and the footer at any font size.
     readonly property int sidebarMinimumWidth: Math.ceil(Math.max(180,
         28 + 10 + sidebarTitle.implicitWidth + 4 + 28,
@@ -1202,7 +1237,7 @@ Controls.ApplicationWindow {
         property bool autostart: false
         property string notificationHistory: "{}"
         property string lastBackgroundState: "{}"
-        property int sidebarWidth: 212
+        property int sidebarWidth: root.defaultSidebarWidth
         // Shown on the empty Search page until sources are checked again.
         property string searchHint: ""
     }
@@ -1387,6 +1422,11 @@ Controls.ApplicationWindow {
             objectName: "sidebar"
             Layout.fillHeight: true
             Layout.preferredWidth: root.sidebarWidth
+            // Switching between the rail and the full sidebar slides.
+            Behavior on Layout.preferredWidth {
+                enabled: railSwitch.running
+                NumberAnimation { duration: Theme.revealDuration; easing.type: Easing.OutCubic }
+            }
             color: root.surface
             clip: true
             Rectangle { anchors.right: parent.right; width: 1; height: parent.height; color: root.line }
@@ -1489,7 +1529,8 @@ Controls.ApplicationWindow {
                 }
             }
             // Drag the edge to resize. Dragging it narrow leaves only the
-            // icons; double-click restores the default width.
+            // icons; double-click restores the default width. With keyboard
+            // focus, Left and Right resize and Home restores it.
             MouseArea {
                 id: sidebarResize
                 objectName: "sidebarResize"
@@ -1497,7 +1538,22 @@ Controls.ApplicationWindow {
                 anchors.right: parent.right
                 anchors.top: parent.top
                 anchors.bottom: parent.bottom
-                width: 8
+                width: 12
+                activeFocusOnTab: true
+                Accessible.role: Accessible.Separator
+                Accessible.name: "Resize sidebar"
+                Keys.onPressed: (event) => {
+                    const step = event.key === Qt.Key_Right ? 16 : event.key === Qt.Key_Left ? -16 : 0;
+                    if (event.key === Qt.Key_Home)
+                        preferences.sidebarWidth = root.defaultSidebarWidth;
+                    else if (step !== 0) {
+                        const next = root.sidebarWidth + step;
+                        preferences.sidebarWidth = next < root.railThreshold ? root.railWidth
+                            : Math.max(root.sidebarMinimumWidth, Math.min(root.sidebarMaximumWidth, next));
+                    } else
+                        return;
+                    event.accepted = true;
+                }
                 hoverEnabled: true
                 cursorShape: Qt.SplitHCursor
                 property real pressX: 0
@@ -1513,13 +1569,13 @@ Controls.ApplicationWindow {
                     preferences.sidebarWidth = dragged < root.railThreshold ? root.railWidth
                         : Math.max(root.sidebarMinimumWidth, Math.min(root.sidebarMaximumWidth, dragged));
                 }
-                onDoubleClicked: preferences.sidebarWidth = 212
+                onDoubleClicked: preferences.sidebarWidth = root.defaultSidebarWidth
                 Rectangle {
                     anchors.right: parent.right
                     width: 2
                     height: parent.height
                     color: root.accent
-                    opacity: sidebarResize.containsMouse || sidebarResize.pressed ? 0.6 : 0
+                    opacity: sidebarResize.containsMouse || sidebarResize.pressed || sidebarResize.activeFocus ? 0.6 : 0
                     Behavior on opacity { NumberAnimation { duration: root.feedbackDuration } }
                 }
             }
@@ -1546,13 +1602,14 @@ Controls.ApplicationWindow {
                 }
                 ActionButton {
                     objectName: "addPackageButton"
-                    text: root.headerIconsOnly ? "" : "Add…"
-                    tooltipText: root.headerIconsOnly ? "Add from file or link" : ""
+                    // Installs a package from a file or link; it never adds a source.
+                    text: root.headerIconsOnly ? "" : "Install from file…"
+                    tooltipText: root.headerIconsOnly ? "Install from a file or link" : ""
                     symbol: "package"
                     visible: (root.currentView === "Search" || root.currentView === "Sources") && root.supportedFilePatterns().length > 0
                     enabled: !backend.writing
                     onClicked: { backend.checkSources(); root.rememberDialogFocus(); addPackageDialog.open(); }
-                    Accessible.name: "Add from file or link"
+                    Accessible.name: "Install from a file or link"
                 }
                 ActionButton {
                     objectName: "activityIndicator"
@@ -1609,7 +1666,7 @@ Controls.ApplicationWindow {
                         x: root.width - width - root.pageMargin
                         y: 76
                         width: Math.min(340, root.width - 32)
-                        height: Math.min(460, root.height - 100, implicitHeight)
+                        height: Math.min(root.height * 0.85, root.height - 100, implicitHeight)
                         padding: 10
                         modal: true
                         Controls.Overlay.modal: Rectangle { color: "transparent" }
@@ -1672,36 +1729,35 @@ Controls.ApplicationWindow {
                                     width: sourceList.width
                                     Repeater {
                                         id: checklistRepeater
-                                        model: root.pickerItems()
+                                        model: root.pickerSections()
                                         delegate: Column {
-                                            required property string modelData
+                                            required property var modelData
                                             required property int index
-                                            readonly property string sourceId: modelData
+                                            readonly property string sourceId: modelData.id
                                             property alias checkBox: checkRow
                                             width: checklist.width
                                             readonly property bool usable: root.sourceInfo(sourceId).availability_kind === "available" && root.sourceSupportsView(sourceId)
-                                            readonly property string section: usable ? root.sourceCategory(sourceId) : "Unavailable"
+                                            readonly property string section: modelData.section
                                             Controls.Label {
                                                 width: parent.width
                                                 topPadding: 8
                                                 text: parent.section
                                                 font.weight: Font.DemiBold
-                                                font.pointSize: root.font.pointSize * 0.8
+                                                font.pointSize: Theme.pointSize(Theme.captionScale)
                                                 font.letterSpacing: 0.6
                                                 font.capitalization: Font.AllUppercase
                                                 leftPadding: 8
                                                 color: root.muted
-                                                visible: index === 0 || root.pickerItems()[index - 1] === undefined ||
-                                                    (parent.usable ? root.sourceCategory(root.pickerItems()[index - 1]) : "Unavailable") !== parent.section
+                                                visible: parent.modelData.showHeader
                                             }
                                             Controls.CheckDelegate {
                                                 id: checkRow
-                                                objectName: "sourceCheck-" + modelData
+                                                objectName: "sourceCheck-" + parent.sourceId
                                                 width: parent.width
-                                                text: root.sourceDisplayName(modelData)
-                                                checked: sourcePopup.draftSources.indexOf(modelData) >= 0
-                                                enabled: parent.usable && root.checkedSources().indexOf(modelData) >= 0 && (!checked || sourcePopup.draftSources.length > 1)
-                                                onToggled: root.toggleDraftSource(modelData)
+                                                text: root.sourceDisplayName(parent.sourceId)
+                                                checked: sourcePopup.draftSources.indexOf(parent.sourceId) >= 0
+                                                enabled: parent.usable && root.checkedSources().indexOf(parent.sourceId) >= 0 && (!checked || sourcePopup.draftSources.length > 1)
+                                                onToggled: root.toggleDraftSource(parent.sourceId)
                                                 // The label pads itself past the box; the row adds nothing.
                                                 leftPadding: 0
                                                 indicator: TickBox {
@@ -1727,9 +1783,10 @@ Controls.ApplicationWindow {
                                             Controls.Label {
                                                 width: parent.width - 34
                                                 x: 34
-                                                text: !root.sourceSupportsView(modelData) ? "Not supported in this view" : (root.sourceInfo(modelData).summary || "Unavailable")
+                                                text: !root.sourceSupportsView(parent.sourceId) ? "Not supported in this view" : (root.sourceInfo(parent.sourceId).summary || "Unavailable")
                                                 color: root.muted
-                                                elide: Text.ElideRight
+                                                wrapMode: Text.WordWrap
+                                                font.pointSize: Theme.pointSize(Theme.smallScale)
                                                 visible: !parent.usable
                                             }
                                         }
@@ -1917,7 +1974,18 @@ Controls.ApplicationWindow {
                             height: 17
                         }
                     }
-                    onTextChanged: root.installedFilter = text
+                    // Large lists filter once typing pauses.
+                    onTextChanged: {
+                        if (root.items.length > 400)
+                            installedFilterDebounce.restart();
+                        else
+                            root.installedFilter = text;
+                    }
+                    Timer {
+                        id: installedFilterDebounce
+                        interval: 150
+                        onTriggered: root.installedFilter = installedFilterField.text
+                    }
                     onAccepted: {
                         results.forceActiveFocus();
                         if (root.viewItems.length > 0)
@@ -2077,6 +2145,14 @@ Controls.ApplicationWindow {
                         flat: true
                         enabled: !backend.busy && !(root.currentView === "Search" && root.queryDirty)
                         onClicked: root.reload(true)
+                    }
+                    ActionButton {
+                        objectName: "turnOffFailedSource"
+                        visible: root.readFailures.length === 1 && root.canTurnOff(root.readFailures[0].source)
+                        text: root.readFailures.length === 1 ? "Turn off " + root.sourceDisplayName(root.readFailures[0].source) : ""
+                        symbol: "cancel"
+                        flat: true
+                        onClicked: root.setManagerEnabled(root.readFailures[0].source, false)
                     }
                     ActionButton {
                         objectName: "sourceFailureDetails"
@@ -2906,7 +2982,8 @@ Controls.ApplicationWindow {
         parent: Controls.Overlay.overlay
         anchors.centerIn: parent
         width: Math.min(root.width - 32, 850)
-        height: Math.min(root.height - 40, 640, Math.max(260, 160 + Math.min((root.repositoryReport.repositories || []).length, 5) * (width < 620 ? 110 : 76)))
+        // Sized to its repositories, scrolling only past most of the window.
+        height: Math.min(root.height * 0.85, Math.max(260, 200 + repositoryList.contentHeight + repositoryExtras.implicitHeight))
         title: "Repositories"
         modal: true
         standardButtons: Controls.Dialog.Close
@@ -2935,6 +3012,7 @@ Controls.ApplicationWindow {
             }
             Controls.BusyIndicator { visible: backend.busy; running: visible; Layout.alignment: Qt.AlignHCenter }
             ListView {
+                id: repositoryList
                 objectName: "repositoryList"
                 Layout.fillWidth: true
                 Layout.fillHeight: true
@@ -2990,7 +3068,7 @@ Controls.ApplicationWindow {
                                     Layout.fillWidth: true
                                 }
                                 Controls.Label {
-                                    text: modelData.backend.toUpperCase() + ", " + (modelData.scope === "system" ? "System" : "User")
+                                    text: root.sourceDisplayName(modelData.backend) + " · " + (modelData.scope === "system" ? "System" : "User")
                                     color: root.muted
                                     font.pointSize: root.font.pointSize * 0.9
                                 }
@@ -3037,7 +3115,7 @@ Controls.ApplicationWindow {
                     }
                 }
             }
-            Controls.Label { Layout.fillWidth: true; color: root.muted; textFormat: Text.PlainText; wrapMode: Text.WordWrap; text: (root.repositoryReport.errors || []).join("\n"); visible: text.length > 0 }
+            Controls.Label { id: repositoryExtras; Layout.fillWidth: true; color: root.muted; textFormat: Text.PlainText; wrapMode: Text.WordWrap; text: (root.repositoryReport.errors || []).join("\n"); visible: text.length > 0 }
             Controls.Label {
                 objectName: "repositoryStatus"
                 Layout.fillWidth: true
@@ -3131,6 +3209,15 @@ Controls.ApplicationWindow {
                                     color: root.ink
                                     font.bold: true
                                     Layout.fillWidth: true
+                                }
+                                ActionButton {
+                                    // A source that keeps failing can be switched off here.
+                                    visible: root.canTurnOff(modelData.source)
+                                    text: "Turn off"
+                                    symbol: "cancel"
+                                    flat: true
+                                    Accessible.name: "Turn off " + root.sourceDisplayName(modelData.source)
+                                    onClicked: { root.setManagerEnabled(modelData.source, false); sourceFailuresDialog.close(); }
                                 }
                                 ActionButton {
                                     text: "Retry"

@@ -2201,8 +2201,11 @@ TestCase {
         verify(findChild(browser, "resultsBox").height >= browser.detailsListHeight() - 1);
         const row = list.itemAtIndex(6);
         verify(row !== null);
-        const top = row.mapToItem(list, 0, 0).y;
-        verify(top >= -1 && top + row.height <= list.height + 1, "selected row at " + top + " in " + list.height);
+        // The details panel animates open; the row settles in view with it.
+        tryVerify(() => {
+            const top = row.mapToItem(list, 0, 0).y;
+            return top >= -1 && top + row.height <= list.height + 1;
+        }, 2000, "selected row stays in view");
         verify(panel.height < panel.idealHeight);
     }
     function test_open_details_fit_the_shortest_wide_window_data() {
