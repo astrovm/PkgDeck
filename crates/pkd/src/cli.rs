@@ -642,6 +642,18 @@ pub fn dispatch_with(
             return (data, code);
         }
     };
+    // Inventory-only sources cannot produce a mutation, even when an exact
+    // installed lookup succeeds. Reject before confirmation, progress events,
+    // and activity history rather than relying on execute's capability check.
+    if let Some(operation) = operations
+        .iter()
+        .find(|operation| pkgdeck_core::backends::read_only(operation.backend()))
+    {
+        return failure(EngineError::Unsupported {
+            backend: operation.backend().into(),
+            capability: operation.capability(),
+        });
+    }
     for (operation, offers) in alternatives {
         events(Event::Progress {
             operation,
@@ -1467,6 +1479,41 @@ mod tests {
             &mut |_| approve,
             &mut |_| {},
         )
+    }
+    #[test]
+    fn read_only_mutations_fail_before_confirmation_or_activity_events() {
+        for command in ["install", "remove", "upgrade"] {
+            for yes in [false, true] {
+                let mut engine = Engine::default();
+                engine
+                    .register(Fixture {
+                        backend: "macos-apps".into(),
+                        installed: true,
+                        fail: None,
+                        read_failure: None,
+                        verified: true,
+                    })
+                    .unwrap();
+                let mut argv = vec!["pkd", command, "--from", "macos-apps", "fixture"];
+                if yes {
+                    argv.push("--yes");
+                }
+                let args = Args::try_parse_from(argv).unwrap();
+                let (data, code) = dispatch(
+                    &mut engine,
+                    &args,
+                    &Cancellation::default(),
+                    &mut |_| panic!("read-only mutation requested confirmation"),
+                    &mut |_| panic!("read-only mutation emitted activity"),
+                );
+                assert_ne!(code, 0);
+                assert_eq!(
+                    data["error"]["Unsupported"]["backend"], "macos-apps",
+                    "{data}"
+                );
+                assert!(data.get("operations").is_none(), "{data}");
+            }
+        }
     }
     #[test]
     fn help_completions_and_the_refresh_alias() {

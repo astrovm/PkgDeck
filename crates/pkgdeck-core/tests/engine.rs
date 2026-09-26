@@ -887,6 +887,59 @@ fn details_reuse_skips_detection_for_warm_engines() {
 }
 
 #[test]
+fn partial_backend_inventory_keeps_rows_and_errors_in_sync_and_streaming_queries() {
+    struct Partial;
+    impl Backend for Partial {
+        fn id(&self) -> &str {
+            "partial"
+        }
+        fn capabilities(&self) -> &[Capability] {
+            ALL
+        }
+        fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
+            Ok(Availability::Available)
+        }
+        fn installed(&mut self, _: &Cancellation) -> Result<Vec<Package>, EngineError> {
+            let mut p = package(id(self.id()));
+            p.installed_version = Some("1.0".into());
+            Ok(vec![p])
+        }
+        fn search(&mut self, _: &str, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
+            self.installed(cancel)
+        }
+        fn query_errors(&self) -> Vec<EngineError> {
+            vec![EngineError::InvalidResponse {
+                backend: self.id().into(),
+                reason: "skipped folder /Applications/Restricted: permission denied".into(),
+            }]
+        }
+    }
+    let mut engine = Engine::default();
+    engine.register(Partial).unwrap();
+    let cancel = Cancellation::default();
+    let report = engine.installed(&cancel);
+    assert_eq!(report.packages.len(), 1);
+    assert_eq!(report.failures.len(), 1);
+    assert_eq!(report.failures[0].backend, "partial");
+    assert!(report.successful_sources.is_empty());
+    assert!(matches!(
+        report.select(&selector()),
+        Err(EngineError::Incomplete(_))
+    ));
+    let mut emitted = Vec::new();
+    assert_eq!(
+        engine.installed_stream(&cancel, &mut |p| emitted.push(p)),
+        report
+    );
+    assert_eq!(emitted, vec![report.clone()]);
+    assert_eq!(engine.search("fixture", &cancel), report);
+    assert_eq!(
+        engine.search_stream("fixture", &cancel, &mut |_| {}),
+        report
+    );
+}
+
+#[test]
 fn streaming_reports_cumulative_partials_equal_to_the_sync_query() {
     let cancel = Cancellation::default();
     let mut live = Engine::default();

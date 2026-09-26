@@ -98,6 +98,12 @@ pub trait Backend: Send {
     fn installed(&mut self, _cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
         Err(self.unsupported(Capability::Installed))
     }
+    /// Failures from skipped portions of the most recent successful search or
+    /// installed query. These accompany usable rows, but prevent the source
+    /// from being treated as complete. Cached queries must retain their errors.
+    fn query_errors(&self) -> Vec<EngineError> {
+        vec![]
+    }
     /// Cheap, local check used by exact-name lookups: `false` only when no
     /// package or reference of this backend can ever be called `name` (for
     /// example a Flatpak app id always contains a dot). Never runs commands.
@@ -604,9 +610,17 @@ impl Engine {
         let mut report = PackageReport::default();
         for (id, result) in results {
             match result {
-                Ok(packages) => {
+                Ok((packages, errors)) => {
                     report.packages.extend(packages);
-                    report.successful_sources.push(id);
+                    if errors.is_empty() {
+                        report.successful_sources.push(id.clone());
+                    }
+                    report
+                        .failures
+                        .extend(errors.into_iter().map(|error| BackendFailure {
+                            backend: id.clone(),
+                            error,
+                        }));
                 }
                 Err(error) => report.failures.push(BackendFailure { backend: id, error }),
             }
@@ -671,9 +685,17 @@ impl Engine {
             let mut stash = Vec::new();
             for (id, backend, result) in rx {
                 match result {
-                    Ok(packages) => {
+                    Ok((packages, errors)) => {
                         accumulated.packages.extend(packages);
-                        accumulated.successful_sources.push(id.clone());
+                        if errors.is_empty() {
+                            accumulated.successful_sources.push(id.clone());
+                        }
+                        accumulated.failures.extend(errors.into_iter().map(|error| {
+                            BackendFailure {
+                                backend: id.clone(),
+                                error,
+                            }
+                        }));
                     }
                     Err(error) => accumulated.failures.push(BackendFailure {
                         backend: id.clone(),
@@ -706,7 +728,7 @@ impl Engine {
         capability: Capability,
         query: Option<&str>,
         cancel: &Cancellation,
-    ) -> Result<Vec<Package>, EngineError> {
+    ) -> Result<(Vec<Package>, Vec<EngineError>), EngineError> {
         if cancel.requested() {
             return Err(EngineError::Cancelled);
         }
@@ -750,7 +772,7 @@ impl Engine {
                 reason: "foreign/duplicate identity or missing installed state".into(),
             });
         }
-        Ok(packages)
+        Ok((packages, backend.query_errors()))
     }
 
     pub fn details(

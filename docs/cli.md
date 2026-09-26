@@ -288,6 +288,8 @@ remain visible, with an unknown version. Architecture and update status are
 unknown in this first inventory implementation. Install, remove, update, and
 adoption are unsupported. On other platforms the source reports that macOS is
 required. See the [GUI guide](gui.md#macos-application-inventory) for scan limits.
+Unreadable subfolders produce a partial inventory: readable apps remain listed,
+and source errors identify the skipped folders (also in JSON `failures`).
 
 ## Standalone CLI tools
 

@@ -175,6 +175,8 @@ already listed under Homebrew also appear in this inventory with their ownership
 label. Helper apps inside bundles are excluded; aliases to the same bundle are
 listed once. Discovery covers up to four levels of subfolders and does not follow
 directory symlinks. Unknown versions remain explicitly unknown.
+Unreadable subfolders are skipped and reported as source errors; readable sibling
+apps remain visible in the partial inventory.
 
 ### Standalone CLI tools
 

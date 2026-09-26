@@ -2587,7 +2587,7 @@ impl ffi::PackageController {
             "unsupported"
         } else if failures.is_empty() {
             "complete"
-        } else if report.successful_sources.is_empty() {
+        } else if report.successful_sources.is_empty() && report.packages.is_empty() {
             "failed"
         } else {
             "partial"
@@ -5081,6 +5081,37 @@ mod tests {
             serde_json::from_str::<Value>(&controller.report_state().to_string()).unwrap()["phase"],
             "complete"
         );
+    }
+    #[test]
+    fn partial_inventory_from_one_source_keeps_rows_and_reports_partial_state() {
+        let package: Package = serde_json::from_value(json!({
+            "id": {"backend":"macos-apps", "name":"/Applications/Visible.app", "architecture":"unknown", "scope":"system"},
+            "display_name":"Visible", "summary":"Application", "installed_version":"1", "update":"unknown"
+        })).unwrap();
+        let failure = BackendFailure {
+            backend: "macos-apps".into(),
+            error: EngineError::InvalidResponse {
+                backend: "macos-apps".into(),
+                reason: "skipped folder /Applications/Restricted: permission denied".into(),
+            },
+        };
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller
+            .as_mut()
+            .apply(Ok(Payload::Packages(PackageReport {
+                packages: vec![package.clone()],
+                failures: vec![failure],
+                successful_sources: vec![],
+            })));
+        assert_eq!(controller.rust().packages, vec![package]);
+        let state: Value = serde_json::from_str(&controller.report_state().to_string()).unwrap();
+        assert_eq!(state["phase"], "partial");
+        assert!(state["failures"][0]["detail"]
+            .as_str()
+            .unwrap()
+            .contains("/Applications/Restricted"));
+        assert!(!controller.rust().last_success.contains_key("macos-apps"));
     }
     #[test]
     fn failed_update_check_keeps_known_updates_and_retry_merges_new_ones() {

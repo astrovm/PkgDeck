@@ -11,6 +11,9 @@ const ID: &str = "macos-apps";
 const MAX_ENTRIES: usize = 4096;
 
 trait AppIo: Send {
+    fn read_dir(&self, path: &Path) -> std::io::Result<fs::ReadDir> {
+        fs::read_dir(path)
+    }
     fn plist(&self, path: &Path, cancel: &Cancellation) -> Result<Value, EngineError>;
     fn ownership(
         &self,
@@ -163,6 +166,7 @@ pub struct MacApps {
     roots: Vec<(PathBuf, Scope)>,
     io: Box<dyn AppIo>,
     snapshot: Option<Vec<PackageDetails>>,
+    scan_errors: Vec<EngineError>,
 }
 
 impl MacApps {
@@ -185,6 +189,7 @@ impl MacApps {
             roots,
             io: Box::new(NativeApps(host)),
             snapshot: None,
+            scan_errors: vec![],
         }
     }
 
@@ -200,6 +205,7 @@ impl MacApps {
             let mut apps = Vec::new();
             let mut seen = BTreeSet::new();
             let mut budget = MAX_ENTRIES;
+            let mut errors = Vec::new();
             for (root, scope) in &self.roots {
                 self.scan(
                     root,
@@ -208,14 +214,59 @@ impl MacApps {
                     &mut budget,
                     &mut seen,
                     &mut apps,
+                    &mut errors,
                     &ownership,
                     cancel,
                 )?;
             }
             apps.sort_by(|a, b| a.package.id.cmp(&b.package.id));
             self.snapshot = Some(apps);
+            self.scan_errors = errors;
         }
         Ok(self.snapshot.as_deref().unwrap_or_default())
+    }
+
+    /// Validate an exact details target using the same traversal boundaries as
+    /// discovery, without enumerating siblings or reading their metadata.
+    fn details_path(&self, id: &PackageId) -> Result<PathBuf, EngineError> {
+        let path = Path::new(&id.name);
+        if id.backend != ID
+            || id.architecture != "unknown"
+            || id.remote.is_some()
+            || id.reference.as_deref() != Some(id.name.as_str())
+            || !path.is_absolute()
+            || path.extension().is_none_or(|ext| ext != "app")
+            || !path.is_dir()
+        {
+            return Err(EngineError::NotFound);
+        }
+        for (root, scope) in &self.roots {
+            if &id.scope != scope {
+                continue;
+            }
+            let Ok(relative) = path.strip_prefix(root) else {
+                continue;
+            };
+            if !relative_artifact(relative) {
+                continue;
+            }
+            let parts: Vec<_> = relative.components().collect();
+            if !(1..=5).contains(&parts.len()) {
+                continue;
+            }
+            let mut parent = root.clone();
+            let valid = parts[..parts.len() - 1].iter().all(|part| {
+                let name = part.as_os_str();
+                parent.push(name);
+                !name.as_encoded_bytes().starts_with(b".")
+                    && parent.extension().is_none_or(|ext| ext != "app")
+                    && fs::symlink_metadata(&parent).is_ok_and(|m| m.is_dir())
+            });
+            if valid {
+                return fs::canonicalize(path).map_err(|e| ExecutionError::from(e).into());
+            }
+        }
+        Err(EngineError::NotFound)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -227,15 +278,23 @@ impl MacApps {
         budget: &mut usize,
         seen: &mut BTreeSet<PathBuf>,
         apps: &mut Vec<PackageDetails>,
+        errors: &mut Vec<EngineError>,
         ownership: &Result<BTreeMap<PathBuf, Vec<String>>, EngineError>,
         cancel: &Cancellation,
     ) -> Result<(), EngineError> {
         if cancel.requested() {
             return Err(EngineError::Cancelled);
         }
-        let entries = match fs::read_dir(root) {
+        let entries = match self.io.read_dir(root) {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) if depth > 0 => {
+                errors.push(invalid(
+                    ID,
+                    format!("skipped folder {}: {error}", root.display()),
+                ));
+                return Ok(());
+            }
             Err(error) => return Err(ExecutionError::from(error).into()),
         };
         // Sorting makes the chosen path deterministic when aliases exist.
@@ -274,6 +333,7 @@ impl MacApps {
                     budget,
                     seen,
                     apps,
+                    errors,
                     ownership,
                     cancel,
                 )?;
@@ -408,6 +468,9 @@ impl Backend for MacApps {
             .map(|d| d.package.clone())
             .collect())
     }
+    fn query_errors(&self) -> Vec<EngineError> {
+        self.scan_errors.clone()
+    }
     fn search(&mut self, query: &str, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
         let query = query.to_lowercase();
         Ok(self
@@ -424,11 +487,28 @@ impl Backend for MacApps {
         id: &PackageId,
         cancel: &Cancellation,
     ) -> Result<PackageDetails, EngineError> {
-        self.inventory(cancel)?
-            .iter()
-            .find(|d| d.package.id == *id)
-            .cloned()
-            .ok_or(EngineError::NotFound)
+        if cancel.requested() {
+            return Err(EngineError::Cancelled);
+        }
+        if let Some(snapshot) = &self.snapshot {
+            return snapshot
+                .iter()
+                .find(|d| d.package.id == *id)
+                .cloned()
+                .ok_or(EngineError::NotFound);
+        }
+        let canonical = self.details_path(id)?;
+        let ownership = self.io.ownership(cancel);
+        if cancel.requested() || matches!(&ownership, Err(EngineError::Cancelled)) {
+            return Err(EngineError::Cancelled);
+        }
+        self.describe(
+            Path::new(&id.name),
+            &canonical,
+            &id.scope,
+            &ownership,
+            cancel,
+        )
     }
 }
 
@@ -473,6 +553,7 @@ mod tests {
                 roots: vec![(self.0.clone(), Scope::System)],
                 io: Box::new(FakeIo(ownership)),
                 snapshot: None,
+                scan_errors: vec![],
             }
         }
     }
@@ -502,6 +583,165 @@ mod tests {
         casks: Vec<Value>,
     ) -> Result<BTreeMap<PathBuf, Vec<String>>, EngineError> {
         cask_owners(root, &serde_json::to_vec(&json!({"casks": casks})).unwrap())
+    }
+
+    #[test]
+    fn unreadable_nested_folders_preserve_siblings_and_report_the_skipped_path() {
+        struct UnreadableFolder(PathBuf);
+        impl AppIo for UnreadableFolder {
+            fn read_dir(&self, path: &Path) -> std::io::Result<fs::ReadDir> {
+                if path == self.0 {
+                    return Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+                }
+                fs::read_dir(path)
+            }
+            fn plist(&self, path: &Path, cancel: &Cancellation) -> Result<Value, EngineError> {
+                FakeIo(Ok(BTreeMap::new())).plist(path, cancel)
+            }
+            fn ownership(
+                &self,
+                _: &Cancellation,
+            ) -> Result<BTreeMap<PathBuf, Vec<String>>, EngineError> {
+                Ok(BTreeMap::new())
+            }
+        }
+        let f = Fixture::new();
+        f.bundle("A.app", "md.obsidian");
+        f.bundle("Restricted/Hidden.app", "md.obsidian");
+        f.bundle("Z.app", "md.obsidian");
+        let skipped = f.0.join("Restricted");
+        let mut backend = f.backend(Ok(BTreeMap::new()));
+        backend.io = Box::new(UnreadableFolder(skipped.clone()));
+        let cancel = Cancellation::default();
+        let packages = backend.installed(&cancel).unwrap();
+        assert_eq!(packages.len(), 2);
+        assert!(packages.iter().all(|p| !p.id.name.contains("Restricted")));
+        let errors = backend.query_errors();
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].to_string().contains(skipped.to_str().unwrap()));
+        assert!(errors[0].to_string().contains("skipped folder"));
+        // Filtering a cached snapshot must not erase its incompleteness.
+        assert!(backend.search("no matches", &cancel).unwrap().is_empty());
+        assert_eq!(backend.query_errors(), errors);
+
+        // An unreadable root still fails, rather than becoming empty success.
+        let mut backend = f.backend(Ok(BTreeMap::new()));
+        backend.io = Box::new(UnreadableFolder(f.0.clone()));
+        assert!(backend.installed(&cancel).is_err());
+        assert!(backend.snapshot.is_none());
+    }
+
+    #[test]
+    fn fresh_details_read_only_the_selected_bundle_and_validate_discovery_boundaries() {
+        use std::sync::Arc;
+        struct CountedIo {
+            reads: Arc<AtomicU64>,
+            owners: Arc<AtomicU64>,
+        }
+        impl AppIo for CountedIo {
+            fn plist(&self, path: &Path, cancel: &Cancellation) -> Result<Value, EngineError> {
+                self.reads.fetch_add(1, Ordering::Relaxed);
+                FakeIo(Ok(BTreeMap::new())).plist(path, cancel)
+            }
+            fn ownership(
+                &self,
+                _: &Cancellation,
+            ) -> Result<BTreeMap<PathBuf, Vec<String>>, EngineError> {
+                self.owners.fetch_add(1, Ordering::Relaxed);
+                Ok(BTreeMap::new())
+            }
+        }
+        let f = Fixture::new();
+        let target = f.bundle("Applications/Utilities/Editor.app", "com.microsoft.VSCode");
+        // A full rescan would read these unrelated bundles, too.
+        for n in 0..20 {
+            f.bundle(&format!("Applications/Other{n}.app"), "md.obsidian");
+        }
+        let cancel = Cancellation::default();
+        let mut inventory = f.backend(Ok(BTreeMap::new()));
+        inventory.roots = vec![(f.0.join("Applications"), Scope::System)];
+        let package = inventory
+            .installed(&cancel)
+            .unwrap()
+            .into_iter()
+            .find(|p| p.id.name == target.to_string_lossy())
+            .unwrap();
+        let reads = Arc::new(AtomicU64::new(0));
+        let owners = Arc::new(AtomicU64::new(0));
+        let mut fresh = f.backend(Ok(BTreeMap::new()));
+        fresh.roots = inventory.roots.clone();
+        fresh.io = Box::new(CountedIo {
+            reads: reads.clone(),
+            owners: owners.clone(),
+        });
+        assert_eq!(
+            fresh.details(&package.id, &cancel).unwrap(),
+            inventory.details(&package.id, &cancel).unwrap()
+        );
+        assert_eq!(reads.load(Ordering::Relaxed), 1);
+        assert_eq!(owners.load(Ordering::Relaxed), 1);
+        assert!(fresh.snapshot.is_none());
+
+        let mut variants = Vec::new();
+        let mut id = package.id.clone();
+        id.backend = "homebrew-cask".into();
+        variants.push(id);
+        let mut id = package.id.clone();
+        id.scope = Scope::User { uid: 999 };
+        variants.push(id);
+        let mut id = package.id.clone();
+        id.architecture = "arm64".into();
+        variants.push(id);
+        let mut id = package.id.clone();
+        id.reference = None;
+        variants.push(id);
+        let mut id = package.id.clone();
+        id.remote = Some("remote".into());
+        variants.push(id);
+        let hidden = f.bundle("Applications/.hidden/App.app", "md.obsidian");
+        let nested = f.bundle("Applications/Parent.app/Contents/Helper.app", "md.obsidian");
+        let deep = f.bundle("Applications/a/b/c/d/e/App.app", "md.obsidian");
+        let outside = f.bundle("Outside/App.app", "md.obsidian");
+        symlink(f.0.join("Outside"), f.0.join("Applications/Linked")).unwrap();
+        for path in [
+            hidden,
+            nested,
+            deep,
+            outside,
+            f.0.join("Applications/Linked/App.app"),
+            f.0.join("Applications/../Outside/App.app"),
+            f.0.join("Applications/Missing.app"),
+        ] {
+            let mut id = package.id.clone();
+            id.name = path.to_string_lossy().into();
+            id.reference = Some(id.name.clone());
+            variants.push(id);
+        }
+        for id in variants {
+            assert!(
+                matches!(fresh.details(&id, &cancel), Err(EngineError::NotFound)),
+                "{id:?}"
+            );
+        }
+        assert_eq!(
+            reads.load(Ordering::Relaxed),
+            1,
+            "invalid identities must not read metadata"
+        );
+        assert_eq!(
+            owners.load(Ordering::Relaxed),
+            1,
+            "invalid identities must not query Homebrew"
+        );
+        cancel.cancel();
+        assert!(matches!(
+            fresh.details(&package.id, &cancel),
+            Err(EngineError::Cancelled)
+        ));
+        assert!(matches!(
+            inventory.details(&package.id, &cancel),
+            Err(EngineError::Cancelled)
+        ));
     }
 
     #[test]
