@@ -6,6 +6,8 @@ Flow {
     id: actions
     property bool active: false
     property bool compact: false
+    // Very narrow pages keep only the selection buttons' icons.
+    property bool narrow: false
     property bool busy: false
     property bool writing: false
     property int selectedCount: 0
@@ -33,6 +35,9 @@ Flow {
         property bool primary: false
         property string symbol: ""
         Accessible.name: text
+        Controls.ToolTip.visible: hovered && text.length === 0
+        Controls.ToolTip.delay: 500
+        Controls.ToolTip.text: Accessible.name
         implicitWidth: contentItem.implicitWidth + leftPadding + rightPadding
         implicitHeight: Math.max(36, Math.round(actions.textFont.pointSize * 2.9))
         horizontalPadding: 14
@@ -56,6 +61,7 @@ Flow {
                 Layout.preferredHeight: 18
             }
             Text {
+                visible: text.length > 0
                 text: button.text
                 color: button.primary ? (button.enabled ? actions.onAccent : actions.muted) : actions.ink
                 font.family: actions.textFont.family
@@ -81,7 +87,8 @@ Flow {
         objectName: "selectNoneButton"
         symbol: "cancel"
         visible: actions.selectedCount > 0
-        text: "Select none"
+        text: actions.narrow ? "" : "Select none"
+        Accessible.name: "Select none"
         enabled: !actions.writing
         onClicked: actions.selectNoneRequested()
     }
@@ -90,7 +97,8 @@ Flow {
         objectName: "selectAllButton"
         symbol: "installed"
         visible: actions.uncheckedCount > 0
-        text: "Select all"
+        text: actions.narrow ? "" : "Select all"
+        Accessible.name: "Select all"
         enabled: !actions.writing
         onClicked: actions.selectAllRequested()
     }

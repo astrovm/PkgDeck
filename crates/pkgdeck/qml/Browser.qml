@@ -120,6 +120,8 @@ Controls.ApplicationWindow {
     property bool trayAvailable: false
     property alias backgroundMode: preferences.backgroundMode
     property alias autostartEnabled: preferences.autostart
+    property alias sidebarHidden: preferences.sidebarHidden
+    property alias preferredSidebarWidth: preferences.sidebarWidth
     function showFromTray() {
         root.show();
         root.raise();
@@ -221,6 +223,8 @@ Controls.ApplicationWindow {
     property var viewSourceFilters: ({})
     readonly property var sourceCatalog: JSON.parse(backend.source_catalog || "[]")
     onSourceCatalogChanged: {
+        // Later: the catalog can change while the window is still being built.
+        Qt.callLater(root.rememberSearchHint);
         if (sourcePopup.visible && sourcePopup.draftSources.length === 0)
             sourcePopup.draftSources = root.effectiveSources().filter((id) => root.sourceInfo(id).availability_kind === "available" && root.sourceSupportsView(id));
     }
@@ -302,7 +306,7 @@ Controls.ApplicationWindow {
             return "Applying changes…";
         if (backend.busy)
             return currentView === "Search" ? "Searching…" :
-                (retainingResults ? "Refreshing…" : "Loading…");
+                (retainingResults || viewItems.length > 0 ? "Refreshing…" : "Loading…");
         const count = viewItems.length;
         const noun = currentView === "Sources" ? "source" : currentView === "Clean" ? "cleanup task" :
             currentView === "Updates" ? "update" : "package";
@@ -388,12 +392,20 @@ Controls.ApplicationWindow {
         return "Developer tools";
     }
     // The empty Search page's second line: how many sources a search covers.
+    function rememberSearchHint() {
+        if (sourceCatalog.length > 0)
+            preferences.searchHint = root.searchHint();
+    }
+    // Until sources are checked, repeat the last known hint so the prompt
+    // appears with the window instead of after the check.
     function searchHint() {
+        if (sourceCatalog.length === 0)
+            return preferences.searchHint || "Searches your sources as you type.";
         const names = effectiveSources("Search")
             .filter((id) => sourceInfo(id).availability_kind === "available" && sourceInfo(id).capabilities.indexOf("search") >= 0)
             .map((id) => sourceDisplayName(id));
         if (names.length === 0)
-            return sourceCatalog.length ? "No enabled source can search. Turn one on in Sources." : "";
+            return "No enabled source can search. Turn one on in Sources.";
         return "Searches " + (names.length === 1 ? names[0] : names.length + " sources") + " as you type.";
     }
     function sourceSupportsView(id) {
@@ -681,8 +693,21 @@ Controls.ApplicationWindow {
         }
         return -1;
     }
-    readonly property bool compact: width < 960
-    readonly property bool navigationCollapsed: width < 820
+    // The sidebar is resizable and can be hidden. Narrow windows, or a
+    // sidebar dragged narrow, show it as an icon rail instead.
+    readonly property int railWidth: 64
+    readonly property int sidebarMinimumWidth: 180
+    readonly property int sidebarMaximumWidth: 360
+    readonly property bool sidebarVisible: !preferences.sidebarHidden
+    readonly property bool sidebarRail: width < 820 || preferences.sidebarWidth < sidebarMinimumWidth
+    readonly property int sidebarWidth: !sidebarVisible ? 0 : sidebarRail ? railWidth
+        : Math.max(sidebarMinimumWidth, Math.min(sidebarMaximumWidth, preferences.sidebarWidth))
+    function toggleSidebar() { sidebarHidden = !sidebarHidden; }
+    // Layout follows the space the page has, not the window.
+    readonly property real pageWidth: width - sidebarWidth
+    readonly property bool compact: pageWidth < 748
+    // Header actions keep only their icons when the page is this narrow.
+    readonly property bool headerIconsOnly: pageWidth < 600
     readonly property int shortListLimit: compact ? 3 : 8
     function shortResultsHeight() {
         const rowHeight = (row) => (compact
@@ -728,6 +753,8 @@ Controls.ApplicationWindow {
         // Sidebar entry: borderless, with `current` marking the open page.
         property bool navigation: false
         property bool current: false
+        // Sidebar entries left-align their label; `centered` centers an icon-only entry.
+        property bool centered: false
         // `flat` (from Button) marks borderless actions tinted by their glyph on hover.
         property string symbol: "package"
         property url iconSource: ""
@@ -768,7 +795,7 @@ Controls.ApplicationWindow {
             implicitHeight: buttonContents.implicitHeight
             RowLayout {
                 id: buttonContents
-                x: control.navigation ? 0 : (parent.width - width) / 2
+                x: control.navigation && !control.centered ? 0 : (parent.width - width) / 2
                 anchors.verticalCenter: parent.verticalCenter
                 width: Math.min(implicitWidth, parent.width)
                 height: implicitHeight
@@ -1252,6 +1279,10 @@ Controls.ApplicationWindow {
         property bool autostart: false
         property string notificationHistory: "{}"
         property string lastBackgroundState: "{}"
+        property int sidebarWidth: 212
+        property bool sidebarHidden: false
+        // Shown on the empty Search page until sources are checked again.
+        property string searchHint: ""
     }
     onClosing: function (close) {
         if (!forceQuit && preferences.backgroundMode && trayAvailable) {
@@ -1428,19 +1459,23 @@ Controls.ApplicationWindow {
         anchors.fill: parent
         spacing: 0
         Rectangle {
+            id: sidebar
+            objectName: "sidebar"
             Layout.fillHeight: true
-            Layout.preferredWidth: 212
-            visible: !root.navigationCollapsed
+            Layout.preferredWidth: root.sidebarWidth
+            visible: root.sidebarVisible
             color: root.surface
+            clip: true
             Rectangle { anchors.right: parent.right; width: 1; height: parent.height; color: root.line }
             ColumnLayout {
                 anchors.fill: parent
-                anchors.margins: 14
+                anchors.margins: root.sidebarRail ? 10 : 14
                 spacing: 8
                 RowLayout {
                     spacing: 10
                     Layout.topMargin: 10
-                    Layout.leftMargin: 4
+                    Layout.leftMargin: root.sidebarRail ? 0 : 4
+                    Layout.alignment: root.sidebarRail ? Qt.AlignHCenter : Qt.AlignLeft
                     Image {
                         objectName: "appLogo"
                         source: root.logoIconSource
@@ -1450,6 +1485,7 @@ Controls.ApplicationWindow {
                         Accessible.ignored: true
                     }
                     Controls.Label {
+                        visible: !root.sidebarRail
                         text: "PkgDeck"
                         font.pointSize: root.font.pointSize * 1.55
                         font.weight: Font.Bold
@@ -1475,6 +1511,7 @@ Controls.ApplicationWindow {
                         color: root.selection
                         Behavior on y { NumberAnimation { duration: root.revealDuration; easing.type: Easing.OutCubic } }
                         Rectangle {
+                            visible: !root.sidebarRail
                             width: 3
                             height: parent.height - 16
                             radius: 1.5
@@ -1493,10 +1530,15 @@ Controls.ApplicationWindow {
                             model: navigationList.pages
                             delegate: ActionButton {
                                 required property string modelData
+                                objectName: "navigation" + modelData
                                 width: navigationColumn.width
-                                text: modelData
+                                // The rail shows icons only; the name moves to a tooltip.
+                                text: root.sidebarRail ? "" : modelData
+                                tooltipText: root.sidebarRail ? modelData : ""
+                                Accessible.name: modelData
                                 symbol: ({"Search":"search", "Installed":"installed", "Updates":"updates", "Clean":"remove", "Sources":"sources", "Settings":"settings"})[modelData]
                                 navigation: true
+                                centered: root.sidebarRail
                                 current: root.currentView === modelData
                                 // The sliding highlight draws the current entry.
                                 background.opacity: current ? 0 : 1
@@ -1508,11 +1550,47 @@ Controls.ApplicationWindow {
                 Item { Layout.fillHeight: true }
                 RowLayout {
                     objectName: "signatureFooter"
+                    visible: !root.sidebarRail
                     Layout.leftMargin: 4
                     spacing: 4
                     Controls.Label { objectName: "signaturePrefix"; text: "Made with"; color: root.muted; font.pointSize: root.font.pointSize * 0.9 }
                     DeckIcon { name: "heart"; ink: "#e34b5f"; Layout.preferredWidth: 14; Layout.preferredHeight: 14 }
                     Controls.Label { objectName: "signatureAuthor"; text: "by astro"; color: root.muted; font.pointSize: root.font.pointSize * 0.9 }
+                }
+            }
+            // Drag the edge to resize. Dragging it narrow leaves only the
+            // icons; double-click restores the default width.
+            MouseArea {
+                id: sidebarResize
+                objectName: "sidebarResize"
+                visible: root.width >= 820
+                anchors.right: parent.right
+                anchors.top: parent.top
+                anchors.bottom: parent.bottom
+                width: 8
+                hoverEnabled: true
+                cursorShape: Qt.SplitHCursor
+                property real pressX: 0
+                property int startWidth: 0
+                onPressed: (mouse) => {
+                    pressX = mapToItem(root.contentItem, mouse.x, 0).x;
+                    startWidth = root.sidebarWidth;
+                }
+                onPositionChanged: (mouse) => {
+                    if (!pressed)
+                        return;
+                    const dragged = Math.round(startWidth + mapToItem(root.contentItem, mouse.x, 0).x - pressX);
+                    preferences.sidebarWidth = dragged < (root.railWidth + root.sidebarMinimumWidth) / 2 ? root.railWidth
+                        : Math.max(root.sidebarMinimumWidth, Math.min(root.sidebarMaximumWidth, dragged));
+                }
+                onDoubleClicked: preferences.sidebarWidth = 212
+                Rectangle {
+                    anchors.right: parent.right
+                    width: 2
+                    height: parent.height
+                    color: root.accent
+                    opacity: sidebarResize.containsMouse || sidebarResize.pressed ? 0.6 : 0
+                    Behavior on opacity { NumberAnimation { duration: root.feedbackDuration } }
                 }
             }
         }
@@ -1525,18 +1603,19 @@ Controls.ApplicationWindow {
             spacing: root.compact ? 10 : 14
             RowLayout {
                 Layout.fillWidth: true
-                ThemedComboBox {
-                    objectName: "navigationView"
-                    visible: root.navigationCollapsed
-                    model: ["Search", "Installed", "Updates", "Clean", "Sources", "Activity", "Settings"]
-                    currentIndex: model.indexOf(root.currentView)
-                    onActivated: root.openView(currentText)
-                    Accessible.name: "Navigation"
-                    Layout.fillWidth: true
+                ActionButton {
+                    objectName: "sidebarToggle"
+                    text: ""
+                    symbol: "sidebar"
+                    flat: true
+                    tooltipText: (root.sidebarVisible ? "Hide sidebar" : "Show sidebar") + " (Ctrl+B)"
+                    Accessible.name: root.sidebarVisible ? "Hide sidebar" : "Show sidebar"
+                    onClicked: root.toggleSidebar()
                 }
                 Kirigami.Heading {
-                    visible: !root.navigationCollapsed
+                    objectName: "pageHeading"
                     text: root.currentView
+                    elide: Text.ElideRight
                     color: root.ink
                     level: 1
                     font.pointSize: root.font.pointSize * 1.6
@@ -1545,7 +1624,8 @@ Controls.ApplicationWindow {
                 }
                 ActionButton {
                     objectName: "addPackageButton"
-                    text: "Add…"
+                    text: root.headerIconsOnly ? "" : "Add…"
+                    tooltipText: root.headerIconsOnly ? "Add from file or link" : ""
                     symbol: "package"
                     visible: (root.currentView === "Search" || root.currentView === "Sources") && root.supportedFilePatterns().length > 0
                     enabled: !backend.writing
@@ -1554,8 +1634,10 @@ Controls.ApplicationWindow {
                 }
                 ActionButton {
                     objectName: "activityIndicator"
-                    visible: !root.navigationCollapsed && root.currentView !== "Activity"
-                    text: root.queuedCount > 0 ? "Activity (" + root.queuedCount + ")" : backend.writing ? "Working" : "Activity"
+                    visible: root.currentView !== "Activity"
+                    readonly property string label: root.queuedCount > 0 ? "Activity (" + root.queuedCount + ")" : backend.writing ? "Working" : "Activity"
+                    text: root.headerIconsOnly ? (root.queuedCount > 0 ? String(root.queuedCount) : "") : label
+                    tooltipText: root.headerIconsOnly ? label : ""
                     symbol: "activity"
                     glyphColor: backend.writing ? root.accent : root.ink
                     Accessible.name: root.queuedCount > 0 ? "Activity, " + root.queuedCount + " queued" : backend.writing ? "Activity, working" : "Activity"
@@ -1564,14 +1646,15 @@ Controls.ApplicationWindow {
                 ActionButton {
                     objectName: "sourceFilter"
                     id: sourceFilterButton
-                    visible: !root.navigationCollapsed && ["Search", "Installed", "Updates", "Clean"].indexOf(root.currentView) >= 0
-                    text: root.viewSourceFilters[root.currentView] ? root.sourceSummary() : "Filter sources"
+                    visible: ["Search", "Installed", "Updates", "Clean"].indexOf(root.currentView) >= 0
+                    readonly property string label: root.viewSourceFilters[root.currentView] ? root.sourceSummary() : "Filter sources"
+                    text: root.headerIconsOnly ? "" : label
                     symbol: "filter"
                     glyphColor: root.viewSourceFilters[root.currentView] ? root.accent : root.ink
                     onClicked: root.toggleSourcePopup()
                     Accessible.name: "Filter this page by package source"
-                    Layout.preferredWidth: Math.min(240, Math.max(160, implicitWidth))
-                    tooltipText: root.viewSourceFilters[root.currentView] ? root.sourceSummary() : ""
+                    Layout.preferredWidth: root.headerIconsOnly ? implicitWidth : Math.min(240, Math.max(160, implicitWidth))
+                    tooltipText: root.headerIconsOnly || root.viewSourceFilters[root.currentView] ? label : ""
                     Controls.Popup {
                         id: sourcePopup
                         objectName: "sourcePopup"
@@ -1579,8 +1662,8 @@ Controls.ApplicationWindow {
                         property var draftSources: []
                         property string searchText: ""
                         property bool showUnavailable: false
-                        x: root.width - width - (root.navigationCollapsed ? 12 : 28)
-                        y: root.navigationCollapsed ? 106 : 76
+                        x: root.width - width - (root.compact ? 12 : 28)
+                        y: 76
                         width: Math.min(340, root.width - 32)
                         height: Math.min(460, root.height - 100, implicitHeight)
                         padding: 10
@@ -1595,6 +1678,10 @@ Controls.ApplicationWindow {
                             }
                         }
                         onAboutToShow: {
+                            // Open just below the filter button, right-aligned with it.
+                            const corner = sourceFilterButton.mapToItem(null, sourceFilterButton.width, sourceFilterButton.height);
+                            x = Math.max(12, Math.min(root.width - width - 12, corner.x - width));
+                            y = corner.y + 6;
                             searchText = "";
                             pickerSearch.text = "";
                             draftSources = root.effectiveSources().filter((id) => root.sourceInfo(id).availability_kind === "available" && root.sourceSupportsView(id));
@@ -1738,30 +1825,6 @@ Controls.ApplicationWindow {
                 }
             }
             RowLayout {
-                visible: root.navigationCollapsed && root.currentView !== "Activity"
-                Layout.fillWidth: true
-                spacing: 8
-                ActionButton {
-                    objectName: "compactActivityIndicator"
-                    text: root.queuedCount > 0 ? "Activity (" + root.queuedCount + ")" : backend.writing ? "Working" : "Activity"
-                    symbol: "activity"
-                    glyphColor: backend.writing ? root.accent : root.ink
-                    Layout.fillWidth: true
-                    onClicked: root.openView("Activity")
-                }
-                ActionButton {
-                    objectName: "compactSourceFilter"
-                    visible: ["Search", "Installed", "Updates", "Clean"].indexOf(root.currentView) >= 0
-                    text: root.viewSourceFilters[root.currentView] ? root.sourceSummary() : "Filter sources"
-                    symbol: "filter"
-                    glyphColor: root.viewSourceFilters[root.currentView] ? root.accent : root.ink
-                    Layout.fillWidth: true
-                    onClicked: root.toggleSourcePopup()
-                    Accessible.name: "Filter this page by package source"
-                    tooltipText: root.viewSourceFilters[root.currentView] ? root.sourceSummary() : ""
-                }
-            }
-            RowLayout {
                 visible: root.currentView === "Search"
                 Layout.fillWidth: true
                 spacing: 8
@@ -1797,7 +1860,7 @@ Controls.ApplicationWindow {
                 id: searchEmptyState
                 objectName: "searchEmptyState"
                 visible: root.currentView === "Search" && searchPane.text.trim().length === 0 && !root.openingInput
-                    && root.viewItems.length === 0 && searchHint.text.length > 0
+                    && root.viewItems.length === 0
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 Column {
@@ -2035,14 +2098,6 @@ Controls.ApplicationWindow {
                                     Layout.fillWidth: true
                                 }
                                 Controls.Label {
-                                    objectName: "backgroundCheckFailures"
-                                    visible: (root.backgroundState.failures || []).length > 0
-                                    text: "Could not check: " + (root.backgroundState.failures || []).map((failure) => failure.source).join(", ")
-                                    color: root.warning
-                                    wrapMode: Text.WordWrap
-                                    Layout.fillWidth: true
-                                }
-                                Controls.Label {
                                     objectName: "notificationAvailability"
                                     text: !root.trayAvailable ? "Notifications unavailable: no system tray found"
                                         : !root.notificationAvailable ? "This system tray does not support notifications"
@@ -2111,7 +2166,7 @@ Controls.ApplicationWindow {
                                 }
                                 RowLayout {
                                     objectName: "compactSignature"
-                                    visible: root.navigationCollapsed
+                                    visible: root.sidebarRail || !root.sidebarVisible
                                     spacing: 4
                                     Controls.Label { text: "Made with"; color: root.muted }
                                     DeckIcon { name: "heart"; ink: "#e34b5f"; Layout.preferredWidth: 13; Layout.preferredHeight: 13 }
@@ -2143,6 +2198,7 @@ Controls.ApplicationWindow {
                                 {action: "Updates", keys: "Ctrl+3"},
                                 {action: "Clean", keys: "Ctrl+4"},
                                 {action: "Sources", keys: "Ctrl+5"},
+                                {action: "Show or hide sidebar", keys: "Ctrl+B"},
                                 {action: "Search or filter", keys: "Ctrl+F"},
                                 {action: "Focus results", keys: "Ctrl+L"},
                                 {action: "Select result", keys: "↑ / ↓"},
@@ -2928,6 +2984,7 @@ Controls.ApplicationWindow {
                     active: root.currentView === "Updates"
                     width: Math.min(parent.width, preferredWidth)
                     compact: root.compact
+                    narrow: root.pageWidth < 360
                     busy: backend.busy && !backend.writing
                     writing: false
                     selectedCount: root.selectedCount()
@@ -3411,6 +3468,10 @@ Controls.ApplicationWindow {
                 }
             }
         }
+    }
+    Shortcut {
+        sequence: "Ctrl+B"
+        onActivated: root.toggleSidebar()
     }
     Shortcut {
         sequence: "Ctrl+Q"

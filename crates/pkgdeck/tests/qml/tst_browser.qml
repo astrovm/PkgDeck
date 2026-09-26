@@ -163,6 +163,8 @@ TestCase {
         browser.sortAscending = true;
         browser.nameWidth = 202;
         browser.versionWidth = 150;
+        browser.sidebarHidden = false;
+        browser.preferredSidebarWidth = 212;
         wait(30);
     }
     function cleanup() {
@@ -800,7 +802,6 @@ TestCase {
             {kind: "package", name: "synthetic-player", source: "flatpak", architecture: "x86_64", installed: "1", candidate: "2", update: "available", scope: "user"}
         ]);
         const filter = findChild(browser, "sourceFilter");
-        const compactFilter = findChild(browser, "compactSourceFilter");
         const list = findChild(browser, "packageResults");
         const fits = (button) => {
             const contents = button.contentItem.children[0];
@@ -809,6 +810,8 @@ TestCase {
             verify(at.x + contents.width <= button.contentItem.width + 1,
                 button.objectName + " overflows its content area");
             const label = contents.children.find((item) => item.text !== undefined);
+            if (!label.visible)
+                return;
             const labelAt = label.mapToItem(button.contentItem, 0, 0);
             verify(labelAt.x + label.width <= button.contentItem.width + 1,
                 button.objectName + " label overflows its content area");
@@ -820,6 +823,8 @@ TestCase {
             verify(button.width >= button.contentItem.implicitWidth + button.leftPadding + button.rightPadding - 1,
                 name + " is too narrow");
             const label = button.contentItem.children.find((item) => item.text !== undefined);
+            if (!label.visible)
+                return;
             const at = label.mapToItem(button, 0, 0);
             verify(at.x >= button.leftPadding - 1, name + " has no left padding");
             verify(at.x + label.width <= button.width - button.rightPadding + 1,
@@ -848,7 +853,7 @@ TestCase {
         browser.width = 360;
         browser.viewSourceFilters = ({Updates: ["claude"]});
         waitForRendering(browser.contentItem);
-        fits(compactFilter);
+        fits(filter);
         actionFits("upgradeAllButton");
         actionFits("selectNoneButton");
         actionFits("selectAllButton");
@@ -858,20 +863,19 @@ TestCase {
         const add = findChild(browser, "addPackageButton");
         const activity = findChild(browser, "activityIndicator");
         const sources = findChild(browser, "sourceFilter");
-        const compactActivity = findChild(browser, "compactActivityIndicator");
-        const compactSources = findChild(browser, "compactSourceFilter");
-        const navigation = findChild(browser, "navigationView");
+        const sidebar = findChild(browser, "sidebar");
         for (const width of [360, 760, 800, 820, 850, 920, 960]) {
             browser.width = width;
             waitForRendering(browser.contentItem);
-            compare(browser.compact, width < 960);
-            compare(browser.navigationCollapsed, width < 820);
-            compare(navigation.visible, width < 820);
+            // Narrow windows keep the sidebar as an icon rail.
+            compare(browser.sidebarRail, width < 820);
+            verify(sidebar.visible);
+            compare(browser.sidebarWidth, width < 820 ? browser.railWidth : 212);
+            compare(browser.compact, width - browser.sidebarWidth < 748);
             verify(!add.visible);
-            const buttons = width < 820 ? [compactActivity, compactSources] : [activity, sources];
-            for (const button of buttons) {
+            for (const button of [activity, sources]) {
                 verify(button.visible);
-                verify(button.text.length > 0);
+                verify(button.text.length > 0 || button.tooltipText.length > 0);
                 const left = button.mapToItem(browser.contentItem, 0, 0).x;
                 const right = button.mapToItem(browser.contentItem, button.width, 0).x;
                 verify(left >= 0 && right <= width, button.objectName + " clips at " + width);
@@ -919,15 +923,13 @@ TestCase {
         const add = findChild(browser, "addPackageButton");
         const activity = findChild(browser, "activityIndicator");
         const filter = findChild(browser, "sourceFilter");
-        const compactActivity = findChild(browser, "compactActivityIndicator");
-        const compactFilter = findChild(browser, "compactSourceFilter");
         browser.openView("Search");
         verify(add.visible);
         for (const width of [1100, 360]) {
             browser.width = width;
             waitForRendering(browser.contentItem);
-            verify((width < 820 ? compactActivity : activity).visible);
-            verify((width < 820 ? compactFilter : filter).visible);
+            verify(activity.visible);
+            verify(filter.visible);
             verify(add.visible);
             const right = add.mapToItem(browser.contentItem, add.width, 0).x;
             verify(right <= browser.width);
@@ -956,7 +958,7 @@ TestCase {
         browser.openView("Settings");
         verify(!add.visible);
         verify(!filter.visible);
-        verify(compactActivity.visible);
+        verify(activity.visible);
     }
     function test_source_filter_button_toggles_its_popup() {
         const popup = findChild(browser, "sourcePopup");
@@ -964,7 +966,7 @@ TestCase {
             browser.width = width;
             browser.openView("Search");
             waitForRendering(browser.contentItem);
-            const button = findChild(browser, width < 820 ? "compactSourceFilter" : "sourceFilter");
+            const button = findChild(browser, "sourceFilter");
             const checks = fake.sourceChecks;
             clickDelegate(button);
             tryCompare(popup, "visible", true);
@@ -1098,6 +1100,10 @@ TestCase {
         browser.openView("Search");
         const empty = findChild(browser, "searchEmptyState");
         const hint = findChild(browser, "searchHint");
+        // Before sources are checked, the prompt shows the last known hint.
+        fake.source_catalog = "[]";
+        verify(empty.visible);
+        compare(hint.text, "Searches " + browser.sourceIds.length + " sources as you type.");
         fake.source_catalog = JSON.stringify([
             {source: "apt", availability_kind: "available", capabilities: ["search"]},
             {source: "flatpak", availability_kind: "available", capabilities: ["search"]},
@@ -1116,6 +1122,16 @@ TestCase {
         verify(hint.mapToItem(browser.contentItem, 0, 0).y > field.mapToItem(browser.contentItem, 0, 0).y + field.height + 40);
         field.text = "vim";
         verify(!empty.visible);
+    }
+    function test_refreshing_a_section_keeps_its_rows_labelled() {
+        browser.openView("Installed");
+        fake.rows = JSON.stringify([{kind: "package", name: "synthetic-one", source: "apt", installed: "1", candidate: "1", scope: "system"}]);
+        fake.busy = true;
+        compare(findChild(browser, "resultsHeading").text, "Refreshing…");
+        compare(browser.viewItems.length, 1);
+        fake.rows = "[]";
+        compare(findChild(browser, "resultsHeading").text, "Loading…");
+        fake.busy = false;
     }
     function test_activity_results_read_as_states() {
         const pane = findChild(browser, "activityPane");
@@ -1240,7 +1256,8 @@ TestCase {
         browser.openView("Installed");
         waitForRendering(browser.contentItem);
         const field = findChild(browser, "installedFilterField");
-        verify(field.width >= 300);
+        // The filter spans the page beside the icon rail.
+        verify(field.width >= browser.pageWidth - 2 * 12 - 1);
     }
     function test_settings_shows_shortcuts_and_scrolls() {
         browser.openView("Settings");
@@ -1249,11 +1266,12 @@ TestCase {
         verify(about.text.indexOf("9.9.9-test") >= 0);
         const shortcuts = findChild(browser, "aboutShortcuts");
         verify(shortcuts !== null);
-        compare(shortcuts.count, 15);
+        compare(shortcuts.count, 16);
         verify(findChild(browser, "shortcutsToggle") === null);
         waitForRendering(browser.contentItem);
         compare(shortcuts.itemAt(0).children[1].text, "Ctrl+1");
-        compare(shortcuts.itemAt(11).children[1].text, "Ctrl+Shift+U");
+        compare(shortcuts.itemAt(5).children[1].text, "Ctrl+B");
+        compare(shortcuts.itemAt(12).children[1].text, "Ctrl+Shift+U");
         for (const name of ["animationsSetting", "backgroundModeSetting"]) {
             const setting = findChild(browser, name);
             compare(setting.contentItem.color.toString(), browser.ink.toString());
@@ -1479,8 +1497,7 @@ TestCase {
         browser.width = 380;
         browser.openView("Activity");
         waitForRendering(browser.contentItem);
-        const navigation = findChild(browser, "navigationView");
-        compare(navigation.currentText, "Activity");
+        compare(findChild(browser, "pageHeading").text, "Activity");
         verify(!findChild(browser, "activityIndicator").visible);
         browser.width = 1100;
         waitForRendering(browser.contentItem);
@@ -1513,7 +1530,6 @@ TestCase {
     function test_background_status_and_test_notification_control() {
         browser.openView("Settings");
         const status = findChild(browser, "backgroundCheckStatus");
-        const failures = findChild(browser, "backgroundCheckFailures");
         const availability = findChild(browser, "notificationAvailability");
         const button = findChild(browser, "testNotificationButton");
         verify(status.text.indexOf("never") >= 0);
@@ -1524,8 +1540,8 @@ TestCase {
         fake.background_state = JSON.stringify({last_check: 1234567890, available: 2,
             failures: [{source: "fixture", kind: "unavailable"}], notify: false});
         verify(status.text.indexOf("2 updates found") >= 0);
-        verify(failures.visible);
-        verify(failures.text.indexOf("fixture") >= 0);
+        // Sources that could not be checked are not listed as a warning.
+        verify(findChild(browser, "backgroundCheckFailures") === null);
         compare(availability.text, "Notifications available");
         verify(button.enabled);
         let requested = 0;
@@ -2022,7 +2038,7 @@ TestCase {
         tryVerify(() => list.itemAtIndex(0) !== null);
         waitForRendering(browser.contentItem);
         const row = list.itemAtIndex(0);
-        verify(findChild(row, "packageName").width >= 140);
+        verify(findChild(row, "packageName").width >= 120);
         verify(findChild(row, "compactVersion").visible);
         verify(!findChild(row, "wideVersion").visible);
         const update = findChild(browser, "upgradeAllButton");
@@ -2145,6 +2161,52 @@ TestCase {
         wait(30);
         verify(!footer.visible);
         verify(findChild(browser, "compactSignature").visible);
+    }
+    function test_sidebar_resizes_collapses_to_icons_and_hides() {
+        const sidebar = findChild(browser, "sidebar");
+        const handle = findChild(browser, "sidebarResize");
+        // Repeater delegates are not QObject children; reach them through the column.
+        const navigationButton = (page) => {
+            for (const child of findChild(browser, "navigationHighlight").parent.children)
+                for (const item of child.children)
+                    if (item.objectName === "navigation" + page)
+                        return item;
+            return null;
+        };
+        const search = navigationButton("Search");
+        compare(sidebar.width, 212);
+        compare(search.text, "Search");
+        // Dragging the edge resizes within limits.
+        const x = handle.mapToItem(browser.contentItem, handle.width / 2, 0).x;
+        const y = browser.height / 2;
+        mouseDrag(browser, x, y, 60, 0);
+        tryCompare(browser, "sidebarWidth", 272);
+        // Space the drags out so the next press is not a double-click.
+        wait(Qt.styleHints.mouseDoubleClickInterval + 50);
+        mouseDrag(browser, x + 60, y, 400, 0);
+        tryCompare(browser, "sidebarWidth", browser.sidebarMaximumWidth);
+        // Dragging it narrow leaves an icon rail with named tooltips.
+        wait(Qt.styleHints.mouseDoubleClickInterval + 50);
+        mouseDrag(browser, browser.sidebarMaximumWidth - 4, y, -300, 0);
+        tryCompare(browser, "sidebarWidth", browser.railWidth);
+        verify(browser.sidebarRail);
+        compare(search.text, "");
+        compare(search.tooltipText, "Search");
+        compare(search.Accessible.name, "Search");
+        clickDelegate(navigationButton("Installed"));
+        compare(browser.currentView, "Installed");
+        // The header button and Ctrl+B hide and show it.
+        wait(Qt.styleHints.mouseDoubleClickInterval + 50);
+        clickDelegate(findChild(browser, "sidebarToggle"));
+        verify(!sidebar.visible);
+        compare(browser.sidebarWidth, 0);
+        keyClick(Qt.Key_B, Qt.ControlModifier);
+        verify(sidebar.visible);
+        // Double-clicking the edge restores the default width.
+        const edge = handle.mapToItem(browser.contentItem, handle.width / 2, 0).x;
+        mouseDoubleClickSequence(browser, edge, y);
+        tryCompare(browser, "sidebarWidth", 212);
+        verify(!browser.sidebarRail);
     }
     function test_update_failure_keeps_update_all_and_retry_available() {
         browser.openView("Updates");

@@ -28,10 +28,8 @@ Browser {
         target: browser
         function onBackgroundStateChanged() {
             if (browser.backgroundState.notify && tray.visible && tray.supportsMessages) {
-                const failures = browser.backgroundState.failures || [];
-                const message = browser.backgroundState.available + " updates available"
-                    + (failures.length ? ". Some sources could not be checked." : "");
-                tray.showMessage("PkgDeck updates", message, Platform.SystemTrayIcon.Information, 8000);
+                const count = browser.backgroundState.available;
+                tray.showMessage("PkgDeck updates", count + (count === 1 ? " update" : " updates") + " available", Platform.SystemTrayIcon.Information, 8000);
                 browser.backend.acknowledgeNotification();
             }
         }

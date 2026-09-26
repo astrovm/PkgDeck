@@ -76,6 +76,7 @@ if grep -q 'cargo-sources' "$work/release.yml"; then
 fi
 grep -Fq -- '--share=network' "$work/release.yml"
 grep -Fq -- '--talk-name=org.kde.StatusNotifierWatcher' "$work/release.yml"
+grep -Fq -- '--talk-name=org.freedesktop.Notifications' "$work/release.yml"
 grep -Fq 'cargo build --release --locked' "$work/release.yml"
 grep -Fq "$(printf 'synthetic archive\n' | sha256sum | cut -d' ' -f1)" "$work/release.yml"
 
