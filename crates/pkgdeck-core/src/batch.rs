@@ -607,7 +607,20 @@ fn begin_session(
                 }
             }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                std::thread::sleep(Duration::from_millis(20))
+                // Wake as soon as a partial ready frame has more bytes, while
+                // bounding the wait so cancellation and child exit stay responsive.
+                let mut fds = [rustix::event::PollFd::new(
+                    &session.output,
+                    rustix::event::PollFlags::IN,
+                )];
+                let timeout = rustix::event::Timespec {
+                    tv_sec: 0,
+                    tv_nsec: 20_000_000,
+                };
+                match rustix::event::poll(&mut fds, Some(&timeout)) {
+                    Ok(_) | Err(rustix::io::Errno::INTR) => {}
+                    Err(error) => return Err(ExecutionError::Io(error.to_string())),
+                }
             }
             Err(error) => return Err(error.into()),
         }
