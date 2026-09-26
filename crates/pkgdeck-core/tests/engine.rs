@@ -456,6 +456,111 @@ fn matching_names_require_explicit_source_architecture_and_environment_selection
 }
 
 #[test]
+fn unverified_registry_offers_never_make_a_confirmed_match_ambiguous() {
+    let offer = |backend: &str| {
+        let mut offer = package(id(backend));
+        offer.candidate_version = None;
+        offer
+    };
+    let report = |packages: Vec<Package>| PackageReport {
+        packages,
+        failures: vec![],
+        successful_sources: vec![],
+    };
+    // A catalog package wins over registry guesses, which stay suggestions.
+    let mixed = report(vec![package(id("apt")), offer("npm"), offer("cargo")]);
+    assert!(matches!(
+        mixed.select(&selector()),
+        Err(EngineError::Ambiguous(ids)) if ids.len() == 3
+    ));
+    assert_eq!(
+        mixed.select_confirmed(&selector(), true).unwrap(),
+        id("apt")
+    );
+    assert_eq!(
+        mixed.select_confirmed(&selector(), false).unwrap(),
+        id("apt")
+    );
+    assert_eq!(mixed.offer_sources(&selector()), ["cargo", "npm"]);
+    // Genuine ambiguity between confirmed packages stays ambiguous.
+    let mut i386 = package(id("apt"));
+    i386.id.architecture = "i386".into();
+    let twins = report(vec![package(id("apt")), i386, offer("npm")]);
+    assert!(matches!(
+        twins.select_confirmed(&selector(), true),
+        Err(EngineError::Ambiguous(ids)) if ids.len() == 2
+    ));
+    // Only guesses: one is a usable install target, several are not found.
+    let single = report(vec![offer("npm")]);
+    assert_eq!(
+        single.select_confirmed(&selector(), true).unwrap(),
+        id("npm")
+    );
+    assert_eq!(
+        single.select_confirmed(&selector(), false),
+        Err(EngineError::NotFound)
+    );
+    let guesses = report(vec![offer("npm"), offer("pipx"), offer("cargo")]);
+    assert_eq!(
+        guesses.select_confirmed(&selector(), true),
+        Err(EngineError::NotFound)
+    );
+    assert_eq!(guesses.offer_sources(&selector()), ["cargo", "npm", "pipx"]);
+    // A pinned source behaves exactly like select.
+    let mut pinned = selector();
+    pinned.backend = Some("npm".into());
+    assert_eq!(guesses.select_confirmed(&pinned, false).unwrap(), id("npm"));
+    // Failures still block a guess across an unseen source.
+    let mut failed = report(vec![package(id("apt"))]);
+    failed.failures.push(BackendFailure {
+        backend: "flatpak".into(),
+        error: EngineError::Cancelled,
+    });
+    assert!(matches!(
+        failed.select_confirmed(&selector(), true),
+        Err(EngineError::Incomplete(_))
+    ));
+}
+
+#[test]
+fn exact_lookups_only_ask_sources_that_can_have_the_name() {
+    struct Picky(Synthetic);
+    impl Backend for Picky {
+        fn id(&self) -> &str {
+            self.0.id()
+        }
+        fn capabilities(&self) -> &[Capability] {
+            self.0.capabilities()
+        }
+        fn detect(&mut self, cancel: &Cancellation) -> Result<Availability, EngineError> {
+            self.0.detect(cancel)
+        }
+        fn search(
+            &mut self,
+            query: &str,
+            cancel: &Cancellation,
+        ) -> Result<Vec<Package>, EngineError> {
+            self.0.search(query, cancel)
+        }
+        fn may_have(&self, name: &str) -> bool {
+            name.contains('.')
+        }
+    }
+    let mut engine = engine(Fault::None);
+    let picky = Synthetic::new("picky", Fault::None);
+    let calls = picky.calls.clone();
+    engine.register(Picky(picky)).unwrap();
+    let cancel = Cancellation::default();
+    let report = engine.lookup("fixture-tool", &cancel);
+    assert_eq!(report.successful_sources, ["synthetic"]);
+    assert!(report.failures.is_empty());
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+    let report = engine.lookup("fixture.tool", &cancel);
+    assert_eq!(report.successful_sources, ["picky", "synthetic"]);
+    assert!(calls.load(Ordering::Relaxed) > 0);
+}
+
+#[test]
 fn partial_queries_preserve_successes_but_cannot_resolve_unseen_ambiguity() {
     let mut engine = engine(Fault::Query);
     engine

@@ -98,6 +98,12 @@ pub trait Backend: Send {
     fn installed(&mut self, _cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
         Err(self.unsupported(Capability::Installed))
     }
+    /// Cheap, local check used by exact-name lookups: `false` only when no
+    /// package or reference of this backend can ever be called `name` (for
+    /// example a Flatpak app id always contains a dot). Never runs commands.
+    fn may_have(&self, _name: &str) -> bool {
+        true
+    }
     fn details(
         &mut self,
         _id: &PackageId,
@@ -197,6 +203,73 @@ pub struct PackageReport {
 impl PackageReport {
     /// Never selects across an unqueried/failed source or collapses same-name packages.
     pub fn select(&self, selector: &Selector) -> Result<PackageId, EngineError> {
+        self.check_failures(selector)?;
+        Self::decide(self.matches(selector).map(|p| &p.id).cloned().collect())
+    }
+
+    /// Selection for a name typed without `--from`. Registry sources (npm,
+    /// Cargo, pipx, …) answer every valid name with an unverified install
+    /// offer, so they must not make a catalog match ambiguous: packages a
+    /// source confirmed (installed, or listed with a version) win, and an
+    /// offer is chosen only when it is the single possibility. With
+    /// `offers` false, offers never count, which suits reads such as
+    /// details. Several offers and nothing confirmed is `NotFound`; see
+    /// [`offer_sources`](Self::offer_sources) for what could still be tried.
+    /// A pinned backend behaves exactly like [`select`](Self::select).
+    pub fn select_confirmed(
+        &self,
+        selector: &Selector,
+        offers: bool,
+    ) -> Result<PackageId, EngineError> {
+        if selector.backend.is_some() {
+            return self.select(selector);
+        }
+        self.check_failures(selector)?;
+        let (unverified, confirmed): (Vec<&Package>, Vec<&Package>) = self
+            .matches(selector)
+            .partition(|package| unverified_search_offer(package));
+        if !confirmed.is_empty() {
+            return Self::decide(confirmed.iter().map(|p| p.id.clone()).collect());
+        }
+        match unverified.as_slice() {
+            [one] if offers => Ok(one.id.clone()),
+            _ => Err(EngineError::NotFound),
+        }
+    }
+
+    /// Sorted, distinct backends that only offered to try installing this
+    /// exact name, without confirming that it exists.
+    pub fn offer_sources(&self, selector: &Selector) -> Vec<String> {
+        self.matches(selector)
+            .filter(|package| unverified_search_offer(package))
+            .map(|package| package.id.backend.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    fn matches<'a>(&'a self, selector: &'a Selector) -> impl Iterator<Item = &'a Package> + 'a {
+        self.packages.iter().filter(move |p| {
+            let id = &p.id;
+            (id.name == selector.name || id.reference.as_deref() == Some(selector.name.as_str()))
+                && selector.backend.as_ref().is_none_or(|b| b == &id.backend)
+                && selector
+                    .architecture
+                    .as_ref()
+                    .is_none_or(|a| a == &id.architecture)
+                && selector.scope.as_ref().is_none_or(|s| s == &id.scope)
+        })
+    }
+
+    fn decide(matches: BTreeSet<PackageId>) -> Result<PackageId, EngineError> {
+        match matches.len() {
+            0 => Err(EngineError::NotFound),
+            1 => Ok(matches.into_iter().next().expect("one match")),
+            _ => Err(EngineError::Ambiguous(matches.into_iter().collect())),
+        }
+    }
+
+    fn check_failures(&self, selector: &Selector) -> Result<(), EngineError> {
         let failures: Vec<_> = self
             .failures
             .iter()
@@ -208,29 +281,10 @@ impl PackageReport {
             })
             .cloned()
             .collect();
-        if !failures.is_empty() {
-            return Err(EngineError::Incomplete(failures));
-        }
-        let matches: BTreeSet<_> = self
-            .packages
-            .iter()
-            .map(|p| &p.id)
-            .filter(|id| {
-                (id.name == selector.name
-                    || id.reference.as_deref() == Some(selector.name.as_str()))
-                    && selector.backend.as_ref().is_none_or(|b| b == &id.backend)
-                    && selector
-                        .architecture
-                        .as_ref()
-                        .is_none_or(|a| a == &id.architecture)
-                    && selector.scope.as_ref().is_none_or(|s| s == &id.scope)
-            })
-            .cloned()
-            .collect();
-        match matches.len() {
-            0 => Err(EngineError::NotFound),
-            1 => Ok(matches.into_iter().next().expect("one match")),
-            _ => Err(EngineError::Ambiguous(matches.into_iter().collect())),
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(EngineError::Incomplete(failures))
         }
     }
 }
@@ -311,11 +365,14 @@ impl Engine {
         self.operation_plan = Some(plan);
     }
     pub fn register(&mut self, backend: impl Backend + 'static) -> Result<(), EngineError> {
+        self.register_boxed(Box::new(backend))
+    }
+    pub fn register_boxed(&mut self, backend: Box<dyn Backend>) -> Result<(), EngineError> {
         let id = backend.id().to_owned();
         if self.backends.contains_key(&id) {
             return Err(EngineError::DuplicateBackend(id));
         }
-        self.backends.insert(id, Box::new(backend));
+        self.backends.insert(id, backend);
         Ok(())
     }
 
@@ -494,6 +551,23 @@ impl Engine {
         self.cleanup_plans.insert(item.id.clone(), item);
     }
     fn query(&mut self, query: Option<&str>, cancel: &Cancellation) -> PackageReport {
+        self.query_where(query, cancel, &|_: &dyn Backend| true)
+    }
+    /// Search for one exact package name. Backends whose package names can
+    /// never be `name` (see [`Backend::may_have`]) are not asked at all, so
+    /// they appear neither as failures nor as successful sources. Selection
+    /// on the result behaves as on a full [`search`](Self::search).
+    pub fn lookup(&mut self, name: &str, cancel: &Cancellation) -> PackageReport {
+        self.query_where(Some(name), cancel, &|backend: &dyn Backend| {
+            backend.may_have(name)
+        })
+    }
+    fn query_where(
+        &mut self,
+        query: Option<&str>,
+        cancel: &Cancellation,
+        ask: &(dyn Fn(&dyn Backend) -> bool + Sync),
+    ) -> PackageReport {
         let capability = if query.is_some() {
             Capability::Search
         } else {
@@ -506,6 +580,7 @@ impl Engine {
             let workers: Vec<_> = self
                 .backends
                 .iter_mut()
+                .filter(|(_, backend)| ask(&***backend))
                 .map(|(id, backend)| {
                     let noted = noted.get(id).cloned();
                     s.spawn(move || {
@@ -804,6 +879,8 @@ impl Engine {
                     })
                 })
             });
+        // Even a failed write may have changed something.
+        crate::cache::invalidate(operation.backend());
         events(Event::Finished {
             operation: operation.clone(),
             result: result.clone(),
@@ -988,6 +1065,7 @@ impl Engine {
                                 })
                         })
                 };
+                crate::cache::invalidate("apt");
                 for member in &operations[index..end] {
                     let result = match &grouped {
                         Ok(outcomes) => Ok(outcomes[0].clone()),

@@ -176,19 +176,37 @@ fn failure(error: EngineError) -> (Value, u8) {
     let message = crate::presentation::error_message(&error);
     (json!({"error": error, "message": message}), code)
 }
+/// What a typed package name is looked up for.
+#[derive(Clone, Copy, PartialEq)]
+enum Lookup {
+    /// `info`: only packages a source confirmed have details.
+    Details,
+    /// `install`: an unverified registry offer counts when it is the only one.
+    Install,
+    /// `remove` and `upgrade NAME`: installed packages only.
+    Installed,
+}
+/// The package a typed name picks. `offers` are registry sources that
+/// could also try the name but did not confirm it exists; they never make
+/// a confirmed match ambiguous. On `NotFound`, `offers` says where the user
+/// could still try.
+struct Selection {
+    result: Result<PackageId, EngineError>,
+    offers: Vec<String>,
+}
 fn select(
     engine: &mut Engine,
     args: &Args,
     name: &str,
-    installed: bool,
+    lookup: Lookup,
     cancel: &Cancellation,
-) -> Result<PackageId, EngineError> {
-    let report = if installed {
+) -> Selection {
+    let report = if lookup == Lookup::Installed {
         engine.installed(cancel)
     } else {
-        engine.search(name, cancel)
+        engine.lookup(name, cancel)
     };
-    report.select(&Selector {
+    let selector = Selector {
         name: name.into(),
         // A single --from pins the backend; several restrict the engine to
         // that set and leave ambiguity resolution to the selector.
@@ -198,7 +216,42 @@ fn select(
         },
         architecture: args.arch.clone(),
         scope: args.scope.map(InstallScope::native),
-    })
+    };
+    let result = report.select_confirmed(&selector, lookup == Lookup::Install);
+    let offers = if lookup == Lookup::Install && selector.backend.is_none() {
+        let chosen = result.as_ref().ok().map(|id| id.backend.as_str());
+        report
+            .offer_sources(&selector)
+            .into_iter()
+            .filter(|backend| Some(backend.as_str()) != chosen)
+            .collect()
+    } else {
+        vec![]
+    };
+    Selection { result, offers }
+}
+/// "npm, pipx" → "--from npm or --from pipx".
+fn from_flags(sources: &[String]) -> String {
+    let flags: Vec<_> = sources.iter().map(|s| format!("--from {s}")).collect();
+    match flags.as_slice() {
+        [] => String::new(),
+        [one] => one.clone(),
+        [a, b] => format!("{a} or {b}"),
+        [rest @ .., last] => format!("{}, or {last}", rest.join(", ")),
+    }
+}
+/// "npm, Cargo, and pipx", by display name.
+fn source_list(sources: &[String]) -> String {
+    let names: Vec<_> = sources
+        .iter()
+        .map(|s| pkgdeck_core::backends::display_name(s).to_string())
+        .collect();
+    match names.as_slice() {
+        [] => String::new(),
+        [one] => one.clone(),
+        [a, b] => format!("{a} and {b}"),
+        [rest @ .., last] => format!("{}, and {last}", rest.join(", ")),
+    }
 }
 
 #[cfg(test)]
@@ -332,7 +385,8 @@ pub fn dispatch_with(
             };
         }
         Commands::Info { name } => {
-            return match select(engine, args, name, false, cancel)
+            return match select(engine, args, name, Lookup::Details, cancel)
+                .result
                 .and_then(|id| engine.details(&id, cancel))
             {
                 Ok(details) => (json!(details), 0),
@@ -390,6 +444,10 @@ pub fn dispatch_with(
         }
         _ => (),
     }
+    // A typed name no source confirmed, with the registries that could try it.
+    let mut missing: Option<(String, Vec<String>)> = None;
+    // Registry sources that could also try a name a catalog source matched.
+    let mut alternatives: Vec<(Operation, Vec<String>)> = Vec::new();
     let planned = (|| -> Result<Vec<Operation>, EngineError> {
         match command {
             // Only sources that keep package lists can refresh them. Missing
@@ -463,19 +521,32 @@ pub fn dispatch_with(
             | Commands::Remove { names }
             | Commands::Upgrade { names, .. } => {
                 let mut operations = Vec::new();
+                let lookup = if matches!(command, Commands::Install { .. }) {
+                    Lookup::Install
+                } else {
+                    Lookup::Installed
+                };
                 for name in names {
-                    let id = select(
-                        engine,
-                        args,
-                        name,
-                        !matches!(command, Commands::Install { .. }),
-                        cancel,
-                    )?;
+                    let selection = select(engine, args, name, lookup, cancel);
+                    let id = match selection.result {
+                        Ok(id) => id,
+                        Err(error) => {
+                            if matches!(error, EngineError::NotFound)
+                                && !selection.offers.is_empty()
+                            {
+                                missing = Some((name.clone(), selection.offers));
+                            }
+                            return Err(error);
+                        }
+                    };
                     let operation = match command {
                         Commands::Install { .. } => Operation::Install(id),
                         Commands::Remove { .. } => Operation::Remove(id),
                         _ => Operation::Upgrade(id),
                     };
+                    if !selection.offers.is_empty() {
+                        alternatives.push((operation.clone(), selection.offers));
+                    }
                     if !operations.contains(&operation) {
                         operations.push(operation);
                     }
@@ -511,8 +582,35 @@ pub fn dispatch_with(
     })();
     let operations = match planned {
         Ok(ops) => ops,
-        Err(e) => return failure(e),
+        Err(e) => {
+            let (mut data, code) = failure(e);
+            if let Some((name, offers)) = missing {
+                data["message"] = json!(format!(
+                    "No package named {name} was found. PkgDeck can't search {sources}, but they can try to install it by name: add {flags}.",
+                    name = crate::presentation::clean(&name),
+                    sources = source_list(&offers),
+                    flags = from_flags(&offers)
+                ));
+                data["offers"] = json!(offers);
+            }
+            return (data, code);
+        }
     };
+    for (operation, offers) in alternatives {
+        events(Event::Progress {
+            operation,
+            progress: Progress::Message(format!(
+                "{} may also have this name. To use {} instead, add {}.",
+                source_list(&offers),
+                if offers.len() == 1 {
+                    "it"
+                } else {
+                    "one of them"
+                },
+                from_flags(&offers)
+            )),
+        });
+    }
     if let Some(operation) = operations.iter().find(
         |operation| matches!(operation, Operation::UpgradeAll { backend } if backend == "apt"),
     ) {
@@ -1056,13 +1154,18 @@ mod tests {
         let mut engine = engine();
         let system = Args::try_parse_from(["pkd", "--scope", "system", "info", "fixture"]).unwrap();
         assert_eq!(
-            select(&mut engine, &system, "fixture", false, &cancel)
+            select(&mut engine, &system, "fixture", Lookup::Details, &cancel)
+                .result
                 .unwrap()
                 .scope,
             Scope::System
         );
         let user = Args::try_parse_from(["pkd", "--scope", "user", "info", "fixture"]).unwrap();
-        assert!(select(&mut engine, &user, "fixture", false, &cancel).is_err());
+        assert!(
+            select(&mut engine, &user, "fixture", Lookup::Details, &cancel)
+                .result
+                .is_err()
+        );
         assert!(Args::try_parse_from(["pkd", "--scope", "invalid", "info", "fixture"]).is_err());
         assert_eq!(
             call(&mut engine, &["--scope", "user", "upgrade"], true).0["operations"],
@@ -1547,6 +1650,82 @@ mod tests {
         assert_eq!(report["failures"].as_array().unwrap().len(), 1);
         assert_eq!(report["failures"][0]["backend"], "flatpak");
         assert_eq!(call(&mut engine, &["upgrade"], true).1, 4);
+    }
+
+    #[test]
+    fn registry_guesses_never_make_a_typed_name_ambiguous() {
+        let guess = |backend: &str| Fixture {
+            backend: backend.into(),
+            installed: false,
+            fail: None,
+            read_failure: None,
+            verified: false,
+        };
+        let mut engine = engine();
+        engine.register(guess("cargo")).unwrap();
+        engine.register(guess("npm")).unwrap();
+        let args = Args::try_parse_from(["pkd", "install", "fixture"]).unwrap();
+        let mut notes = vec![];
+        let (data, code) = dispatch(
+            &mut engine,
+            &args,
+            &Cancellation::default(),
+            &mut |operations| {
+                assert!(matches!(&operations[..], [Operation::Install(id)] if id.backend == "apt"));
+                true
+            },
+            &mut |event| {
+                if let Event::Progress {
+                    progress: Progress::Message(message),
+                    ..
+                } = event
+                {
+                    notes.push(message);
+                }
+            },
+        );
+        assert_eq!(code, 0, "{data}");
+        assert!(
+            notes.contains(
+                &"Cargo and npm may also have this name. To use one of them instead, add --from cargo or --from npm."
+                    .to_string()
+            ),
+            "{notes:?}"
+        );
+        assert_eq!(call(&mut engine, &["info", "fixture"], false).1, 0);
+
+        let mut guesses = Engine::default();
+        for backend in ["cargo", "npm", "pipx"] {
+            guesses.register(guess(backend)).unwrap();
+        }
+        let (data, code) = call(&mut guesses, &["install", "fixture"], true);
+        assert_eq!(code, 3);
+        assert_eq!(data["offers"], json!(["cargo", "npm", "pipx"]));
+        assert_eq!(
+            data["message"],
+            "No package named fixture was found. PkgDeck can't search Cargo, npm, and pipx, but they can try to install it by name: add --from cargo, --from npm, or --from pipx."
+        );
+        let (data, code) = call(&mut guesses, &["info", "fixture"], false);
+        assert_eq!(code, 3);
+        assert!(data.get("offers").is_none());
+        // A single guess is still a usable install target, and --from pins it.
+        let mut single = Engine::default();
+        single.register(guess("npm")).unwrap();
+        let (data, code) = call(&mut single, &["install", "fixture"], true);
+        assert_eq!(code, 0, "{data}");
+        assert_eq!(
+            call(
+                &mut guesses,
+                &["--from", "pipx", "install", "fixture"],
+                true
+            )
+            .1,
+            0
+        );
+        assert_eq!(from_flags(&["npm".into()]), "--from npm");
+        assert_eq!(source_list(&["pipx".into()]), "pipx");
+        assert_eq!(source_list(&[]), "");
+        assert_eq!(from_flags(&[]), "");
     }
 
     #[test]
