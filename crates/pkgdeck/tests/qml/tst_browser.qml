@@ -2195,11 +2195,23 @@ TestCase {
         compare(search.Accessible.name, "Search");
         clickDelegate(navigationButton("Installed"));
         compare(browser.currentView, "Installed");
-        // The header button and Ctrl+B hide and show it.
+        // The sidebar's own button hides it; the header button, only
+        // shown while it is hidden, and Ctrl+B bring it back.
+        const hide = findChild(browser, "sidebarToggle");
+        const show = findChild(browser, "sidebarShow");
+        verify(!show.visible);
+        verify(hide.mapToItem(sidebar, 0, 0).x + hide.width <= sidebar.width);
         wait(Qt.styleHints.mouseDoubleClickInterval + 50);
-        clickDelegate(findChild(browser, "sidebarToggle"));
+        clickDelegate(hide);
         verify(!sidebar.visible);
         compare(browser.sidebarWidth, 0);
+        verify(show.visible);
+        wait(Qt.styleHints.mouseDoubleClickInterval + 50);
+        clickDelegate(show);
+        verify(sidebar.visible);
+        verify(!show.visible);
+        keyClick(Qt.Key_B, Qt.ControlModifier);
+        verify(!sidebar.visible);
         keyClick(Qt.Key_B, Qt.ControlModifier);
         verify(sidebar.visible);
         // Double-clicking the edge restores the default width.

@@ -1471,11 +1471,14 @@ Controls.ApplicationWindow {
                 anchors.fill: parent
                 anchors.margins: root.sidebarRail ? 10 : 14
                 spacing: 8
-                RowLayout {
-                    spacing: 10
+                // The rail stacks the logo above the hide button.
+                GridLayout {
+                    columns: root.sidebarRail ? 1 : 3
+                    columnSpacing: 10
+                    rowSpacing: 10
+                    Layout.fillWidth: true
                     Layout.topMargin: 10
                     Layout.leftMargin: root.sidebarRail ? 0 : 4
-                    Layout.alignment: root.sidebarRail ? Qt.AlignHCenter : Qt.AlignLeft
                     Image {
                         objectName: "appLogo"
                         source: root.logoIconSource
@@ -1483,6 +1486,7 @@ Controls.ApplicationWindow {
                         sourceSize.height: 28
                         fillMode: Image.PreserveAspectFit
                         Accessible.ignored: true
+                        Layout.alignment: root.sidebarRail ? Qt.AlignHCenter : Qt.AlignVCenter
                     }
                     Controls.Label {
                         visible: !root.sidebarRail
@@ -1490,9 +1494,22 @@ Controls.ApplicationWindow {
                         font.pointSize: root.font.pointSize * 1.55
                         font.weight: Font.Bold
                         color: root.ink
+                        elide: Text.ElideRight
+                        Layout.fillWidth: true
+                    }
+                    ActionButton {
+                        objectName: "sidebarToggle"
+                        text: ""
+                        symbol: "sidebar"
+                        flat: true
+                        glyphColor: root.muted
+                        tooltipText: "Hide sidebar (Ctrl+B)"
+                        Accessible.name: "Hide sidebar"
+                        Layout.alignment: root.sidebarRail ? Qt.AlignHCenter : Qt.AlignRight | Qt.AlignVCenter
+                        onClicked: root.toggleSidebar()
                     }
                 }
-                Item { Layout.preferredHeight: 18 }
+                Item { Layout.preferredHeight: root.sidebarRail ? 8 : 18 }
                 Item {
                     id: navigationList
                     Layout.fillWidth: true
@@ -1603,13 +1620,15 @@ Controls.ApplicationWindow {
             spacing: root.compact ? 10 : 14
             RowLayout {
                 Layout.fillWidth: true
+                // While the sidebar is hidden, this brings it back.
                 ActionButton {
-                    objectName: "sidebarToggle"
+                    objectName: "sidebarShow"
+                    visible: !root.sidebarVisible
                     text: ""
                     symbol: "sidebar"
                     flat: true
-                    tooltipText: (root.sidebarVisible ? "Hide sidebar" : "Show sidebar") + " (Ctrl+B)"
-                    Accessible.name: root.sidebarVisible ? "Hide sidebar" : "Show sidebar"
+                    tooltipText: "Show sidebar (Ctrl+B)"
+                    Accessible.name: "Show sidebar"
                     onClicked: root.toggleSidebar()
                 }
                 Kirigami.Heading {

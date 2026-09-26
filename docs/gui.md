@@ -5,8 +5,9 @@ Open PkgDeck from your app menu or run `pkgdeck`. The sidebar has six pages:
 The **Activity** button in the header shows running and finished work.
 
 Drag the sidebar's edge to resize it; drag it narrow to keep only its icons,
-or double-click the edge to restore the default width. The button left of the
-page title (or Ctrl+B) hides and shows the sidebar. In narrow windows the
+or double-click the edge to restore the default width. The button next to the
+PkgDeck title hides the sidebar, and the button left of the page title brings
+it back; Ctrl+B does both. In narrow windows the
 sidebar shows only icons.
 
 ## Search
