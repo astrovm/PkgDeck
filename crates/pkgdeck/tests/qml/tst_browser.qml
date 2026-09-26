@@ -2186,6 +2186,29 @@ TestCase {
         verify(top >= -1 && top + row.height <= list.height + 1, "selected row at " + top + " in " + list.height);
         verify(panel.height < panel.idealHeight);
     }
+    function test_open_details_fit_the_shortest_wide_window() {
+        browser.width = 1100;
+        browser.height = 400;
+        browser.openView("Installed");
+        fake.rows = JSON.stringify(Array.from({length: 20}, (_, i) => ({kind: "package", name: "synthetic-" + i, source: "apt",
+            architecture: "all", installed: "1", candidate: "1", scope: "system", summary: "Synthetic package " + i})));
+        const list = findChild(browser, "packageResults");
+        tryVerify(() => list.count === 20);
+        browser.choose(2);
+        fake.details = JSON.stringify({package: JSON.parse(fake.rows)[2],
+            description: Array(40).fill("A long synthetic description line.").join("\n")});
+        const panel = findChild(browser, "detailsPanel");
+        tryVerify(() => panel.visible);
+        waitForRendering(browser.contentItem);
+        // The details and the actions below them stay inside the window.
+        const window = browser.contentItem.height;
+        const panelBottom = panel.mapToItem(browser.contentItem, 0, panel.height).y;
+        verify(panelBottom <= window, "details end at " + panelBottom + " of " + window);
+        const actions = findChild(browser, "updatesActions");
+        const actionsBottom = actions.mapToItem(browser.contentItem, 0, actions.height).y;
+        verify(actionsBottom <= window, "actions end at " + actionsBottom + " of " + window);
+        verify(findChild(browser, "resultsBox").height + panel.height <= browser.detailsBudget() + 1);
+    }
     function test_large_sections_reuse_parsed_rows() {
         const rows = Array.from({length: 800}, (_, i) => ({kind: "package", name: "synthetic-" + i, source: "apt",
             installed: "1", candidate: "1", scope: "system", summary: "A synthetic package with a long enough summary"}));
