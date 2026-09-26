@@ -74,6 +74,36 @@ pub fn update_only(id: &str) -> bool {
     matches!(id, "fwupd" | "codex" | "claude" | "grok" | "opencode")
 }
 
+/// The name people know a source by, for sentences and titles: "APT",
+/// "Flatpak", "Homebrew Casks". Ids stay the machine vocabulary (`--from`,
+/// JSON); unknown ids are returned unchanged.
+pub fn display_name(id: &str) -> &str {
+    match id {
+        "fwupd" => "Firmware",
+        "apt" => "APT",
+        "dnf" => "DNF",
+        "pacman" => "Pacman",
+        "zypper" => "Zypper",
+        "snap" => "Snap",
+        "homebrew" => "Homebrew",
+        "homebrew-cask" => "Homebrew Casks",
+        "appimage" => "AppImage",
+        "flatpak" => "Flatpak",
+        "docker" => "Docker images",
+        "podman" => "Podman images",
+        "cargo" => "Cargo",
+        "bun" => "Bun",
+        "composer" => "Composer",
+        "gem" => "RubyGems",
+        "codex" => "Codex",
+        "claude" => "Claude Code",
+        "grok" => "Grok",
+        "opencode" => "OpenCode",
+        // npm, pnpm, pip, pipx, and uv are written in lower case.
+        other => other,
+    }
+}
+
 /// A narrow transport seam lets adapter tests supply synthetic native responses.
 pub trait Transport: Send {
     fn system_flatpak_writable(&self) -> bool {
@@ -219,6 +249,63 @@ fn apt_query_executable(
     ))
 }
 
+/// Everything the APT helper's answers depend on: installed state (dpkg
+/// status and its pending journal), package lists, APT configuration,
+/// sources, pins, and the machine id that phased updates use.
+fn apt_watches() -> Vec<crate::cache::Watch> {
+    use crate::cache::Watch;
+    vec![
+        Watch::file("/var/lib/dpkg/status"),
+        Watch::tree("/var/lib/dpkg/updates", 1),
+        Watch::file("/var/lib/dpkg/arch"),
+        Watch::tree("/var/lib/apt/lists", 1),
+        Watch::file("/var/lib/apt/extended_states"),
+        Watch::tree("/etc/apt", 2),
+        Watch::file("/etc/machine-id"),
+    ]
+}
+
+/// What `flatpak search` answers from: the installation's AppStream data
+/// (`appstream/<remote>/<arch>/active` flips on each refresh) and its
+/// remote configuration.
+fn flatpak_search_watches(installation: &std::path::Path) -> Vec<crate::cache::Watch> {
+    use crate::cache::Watch;
+    vec![
+        Watch::tree(installation.join("appstream"), 3),
+        Watch::file(installation.join("repo/config")),
+        Watch::tree("/etc/flatpak", 2),
+        Watch::file("/usr/bin/flatpak"),
+    ]
+}
+
+/// The installation folder whose data `flatpak search` reads, or `None`
+/// when it can't be known for certain (a relocated installation).
+fn flatpak_installation(system: bool, var: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
+    if var("FLATPAK_USER_DIR").is_some() || var("FLATPAK_SYSTEM_DIR").is_some() {
+        return None;
+    }
+    if system {
+        return Some(PathBuf::from("/var/lib/flatpak"));
+    }
+    let data = var("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(|| var("HOME").map(|home| PathBuf::from(home).join(".local/share")))?;
+    Some(data.join("flatpak"))
+}
+
+/// Locale settings that change translated names and descriptions.
+fn locale_key(var: impl Fn(&str) -> Option<OsString>) -> Vec<String> {
+    ["LANGUAGE", "LC_ALL", "LC_MESSAGES", "LANG"]
+        .iter()
+        .map(|name| {
+            var(name)
+                .map(|value| value.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
 impl Transport for NativeTransport {
     fn system_flatpak_writable(&self) -> bool {
         self.host.system_flatpak_available()
@@ -253,14 +340,29 @@ impl Transport for NativeTransport {
             &std::env::current_exe().map_err(|e| ExecutionError::Io(e.to_string()))?,
             option_env!("PKGDECK_BUILT_APT_QUERY"),
         )?;
-        let result = self.host.read(
-            &executable,
-            &[mode.into(), query.into(), arch.into()],
-            Limits {
-                timeout: Duration::from_secs(120),
-                output_bytes: 32 * 1024 * 1024,
+        // The helper rebuilds APT's cache in memory on every run (about a
+        // second). Its answer only depends on the APT and dpkg databases.
+        let cacheable = mode != "detect" && self.host.var("APT_CONFIG").is_none();
+        let store = cacheable.then(crate::cache::Store::user).flatten();
+        let helper = crate::cache::fingerprint(&[crate::cache::Watch::file(&executable)], &[]);
+        let result = crate::cache::completion(
+            store.as_ref(),
+            "apt",
+            mode,
+            &[query, arch],
+            &apt_watches(),
+            &[helper.as_deref().unwrap_or_default()],
+            || {
+                self.host.read(
+                    &executable,
+                    &[mode.into(), query.into(), arch.into()],
+                    Limits {
+                        timeout: Duration::from_secs(120),
+                        output_bytes: 32 * 1024 * 1024,
+                    },
+                    cancel,
+                )
             },
-            cancel,
         )?;
         if result.code == Some(0) {
             Ok(result)
@@ -428,8 +530,38 @@ impl Transport for NativeTransport {
         write: bool,
         system: bool,
     ) -> Result<Completion, ExecutionError> {
-        self.host
-            .flatpak(args, cancel, write, system, self.authorization)
+        let run = || {
+            self.host
+                .flatpak(args, cancel, write, system, self.authorization)
+        };
+        // Remote search reads the local AppStream copy and takes about a
+        // second per installation. Other reads are fast or remote.
+        let search = !write
+            && self.host.runtime == crate::host::Runtime::Native
+            && args.get(1).is_some_and(|arg| arg == "search");
+        let Some(installation) = search
+            .then(|| flatpak_installation(system, |name| self.host.var(name)))
+            .flatten()
+        else {
+            return run();
+        };
+        let args_text: Vec<String> = args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        let args_text: Vec<&str> = args_text.iter().map(String::as_str).collect();
+        // Names and descriptions come translated.
+        let locale = locale_key(|name| self.host.var(name));
+        let locale: Vec<&str> = locale.iter().map(String::as_str).collect();
+        crate::cache::completion(
+            crate::cache::Store::user().as_ref(),
+            "flatpak",
+            "search",
+            &args_text,
+            &flatpak_search_watches(&installation),
+            &locale,
+            run,
+        )
     }
     fn flatpak_unused(&self, cancel: &Cancellation) -> Result<Completion, ExecutionError> {
         let _ = cancel;
@@ -611,7 +743,7 @@ impl<T: Transport> Flatpak<T> {
                 &[
                     prefix,
                     "list",
-                    "--columns=application,arch,branch,version,description,origin,options",
+                    "--columns=application,arch,branch,version,description,origin,options,name",
                 ],
                 cancel,
                 false,
@@ -623,7 +755,7 @@ impl<T: Transport> Flatpak<T> {
         let mut origins = Vec::new();
         for line in text.lines().filter(|line| !line.trim().is_empty()) {
             let fields: Vec<_> = line.split('\t').collect();
-            if !(6..=7).contains(&fields.len())
+            if !(6..=8).contains(&fields.len())
                 || !flatpak_id(fields[0])
                 || !flatpak_id(fields[1])
                 || !flatpak_id(fields[2])
@@ -646,7 +778,12 @@ impl<T: Transport> Flatpak<T> {
                     remote: None,
                     reference: Some(reference),
                 },
-                display_name: fields[0].into(),
+                display_name: fields
+                    .get(7)
+                    .filter(|name| !name.trim().is_empty())
+                    .unwrap_or(&fields[0])
+                    .trim()
+                    .into(),
                 summary: if runtime {
                     format!("Runtime {} ({})", fields[2], fields[4])
                 } else {
@@ -800,6 +937,14 @@ impl<T: Transport> Flatpak<T> {
 impl<T: Transport> Backend for Flatpak<T> {
     fn id(&self) -> &str {
         "flatpak"
+    }
+    /// Flatpak ids are reverse-DNS names with at least one dot, and refs
+    /// contain slashes, so a plain name such as `cowsay` never matches.
+    fn may_have(&self, name: &str) -> bool {
+        (name.contains('.') || name.contains('/'))
+            && name
+                .split('/')
+                .all(|part| part.is_empty() || flatpak_id(part))
     }
     fn capabilities(&self) -> &[Capability] {
         if self.transport.supports_flatpak_cleanup() {
@@ -2495,6 +2640,9 @@ impl<T: Transport> Backend for SystemManager<T> {
     fn capabilities(&self) -> &[Capability] {
         CAPABILITIES
     }
+    fn may_have(&self, name: &str) -> bool {
+        self.valid_name(name)
+    }
     fn detect(&mut self, cancel: &Cancellation) -> Result<Availability, EngineError> {
         match self.query(true, "", cancel) {
             Ok(_) => Ok(Availability::Available),
@@ -3913,6 +4061,10 @@ impl<T: Transport> Backend for DevTool<T> {
     fn id(&self) -> &str {
         self.kind.id()
     }
+    /// Installed tools and install offers both use valid registry names.
+    fn may_have(&self, name: &str) -> bool {
+        self.kind.valid_name(name)
+    }
     fn capabilities(&self) -> &[Capability] {
         if matches!(self.kind, DevKind::Npm | DevKind::Pip | DevKind::Uv) {
             cleanup::DEV_CLEAN_CAPABILITIES
@@ -3929,6 +4081,11 @@ impl<T: Transport> Backend for DevTool<T> {
             Err(error) => return Err(error.into()),
         };
         self.home = Some(home.clone());
+        if matches!(self.kind, DevKind::Npm | DevKind::Pnpm) {
+            // `root --global` above already ran the manager; a second Node
+            // start-up for `--version` would prove nothing more.
+            return Ok(Availability::Available);
+        }
         if self.kind == DevKind::Pip {
             availability(self.transport.venv_pip(
                 &home,
@@ -4120,110 +4277,62 @@ pub fn native_engine(
             return Err(ExecutionError::Disabled(reason.into()).into());
         }
     }
-    let mut apt = Apt::new(NativeTransport {
-        host: host.clone(),
+    let transport = || NativeTransport {
+        host: Host::current(),
         authorization,
-    });
-    let mut brew = Homebrew::new(NativeTransport {
-        host: host.clone(),
-        authorization,
-    });
-    let mut cask = HomebrewCask::new(NativeTransport {
-        host,
-        authorization,
-    });
+    };
+    // Every candidate in registration order, with whether it is probed now.
+    // Detection spawns native tools (a Node or Python start-up each), so the
+    // probes run concurrently instead of one after another.
+    let mut candidates: Vec<(Box<dyn Backend>, bool)> = Vec::new();
+    // Listed or explicitly selected sources register without a probe when
+    // their query runs detection anyway.
+    let probe_unless_listed = !(discover || explicit);
     if allowed("apt") {
-        let status = apt.detect(cancel);
-        if discover || explicit || !matches!(status, Ok(Availability::Unavailable(_))) {
-            engine.note_detected("apt".into(), status);
-            engine.register(apt)?;
-        }
+        candidates.push((Box::new(Apt::new(transport())), true));
     }
     if allowed("homebrew") {
-        let status = brew.detect(cancel);
-        if discover || explicit || !matches!(status, Ok(Availability::Unavailable(_))) {
-            engine.note_detected("homebrew".into(), status);
-            engine.register(brew)?;
-        }
+        candidates.push((Box::new(Homebrew::new(transport())), true));
     }
     if cfg!(target_os = "macos") && allowed("homebrew-cask") {
-        let status = cask.detect(cancel);
-        if discover || explicit || !matches!(status, Ok(Availability::Unavailable(_))) {
-            engine.note_detected("homebrew-cask".into(), status);
-            engine.register(cask)?;
-        }
+        candidates.push((Box::new(HomebrewCask::new(transport())), true));
     }
-    for backend in ["dnf", "pacman", "zypper", "snap"] {
+    for (backend, make) in [
+        (
+            "dnf",
+            SystemManager::dnf as fn(NativeTransport) -> SystemManager,
+        ),
+        ("pacman", SystemManager::pacman),
+        ("zypper", SystemManager::zypper),
+        ("snap", SystemManager::snap),
+    ] {
         if allowed(backend) {
-            let transport = NativeTransport {
-                host: Host::current(),
-                authorization,
-            };
-            let mut manager = match backend {
-                "dnf" => SystemManager::dnf(transport),
-                "pacman" => SystemManager::pacman(transport),
-                "zypper" => SystemManager::zypper(transport),
-                "snap" => SystemManager::snap(transport),
-                _ => unreachable!(),
-            };
-            if discover || explicit {
-                engine.register(manager)?;
-                continue;
-            }
-            let status = manager.detect(cancel);
-            if !matches!(status, Ok(Availability::Unavailable(_))) {
-                engine.note_detected(backend.into(), status);
-                engine.register(manager)?;
-            }
+            candidates.push((Box::new(make(transport())), probe_unless_listed));
         }
     }
     if allowed("fwupd") {
-        let mut firmware = Firmware::new(NativeTransport {
-            host: Host::current(),
-            authorization,
-        });
-        let status = firmware.detect(cancel);
-        if discover || explicit || !matches!(status, Ok(Availability::Unavailable(_))) {
-            engine.note_detected("fwupd".into(), status);
-            engine.register(firmware)?;
-        }
+        candidates.push((Box::new(Firmware::new(transport())), true));
     }
     if allowed("appimage") {
-        engine.register(AppImage::native())?;
+        candidates.push((Box::new(AppImage::native()), false));
     }
     for tool in StandaloneTool::ALL {
         if allowed(tool.id()) {
-            let mut backend = Standalone::native(tool);
-            let status = backend.detect(cancel);
-            if discover || explicit || !matches!(status, Ok(Availability::Unavailable(_))) {
-                engine.note_detected(tool.id().into(), status);
-                engine.register(backend)?;
-            }
+            candidates.push((Box::new(Standalone::native(tool)), true));
         }
     }
     if allowed("flatpak") {
-        let mut flatpak = Flatpak::new(NativeTransport {
-            host: Host::current(),
-            authorization,
-        });
         // Like every other optional manager, an absent Flatpak stays out of
         // automatic queries instead of failing each one; explicit selections
         // and discovery still report its status.
-        let status = flatpak.detect(cancel);
-        if discover || explicit || !matches!(status, Ok(Availability::Unavailable(_))) {
-            engine.note_detected("flatpak".into(), status);
-            engine.register(flatpak)?;
-        }
+        candidates.push((Box::new(Flatpak::new(transport())), true));
     }
     for (id, make) in [
         (
             "docker",
             Container::docker as fn(NativeTransport) -> Container<NativeTransport>,
         ),
-        (
-            "podman",
-            Container::podman as fn(NativeTransport) -> Container<NativeTransport>,
-        ),
+        ("podman", Container::podman),
     ] {
         if allowed(id) {
             // A Podman compatibility wrapper does not represent a second
@@ -4236,68 +4345,54 @@ pub fn native_engine(
             {
                 continue;
             }
-            let mut backend = make(NativeTransport {
-                host: Host::current(),
-                authorization,
-            })
-            .with_remote_offers(explicit && sources.len() == 1);
-            let status = backend.detect(cancel);
-            if discover || explicit || !matches!(status, Ok(Availability::Unavailable(_))) {
-                engine.note_detected(id.into(), status);
-                engine.register(backend)?;
-            }
+            candidates.push((
+                Box::new(make(transport()).with_remote_offers(explicit && sources.len() == 1)),
+                true,
+            ));
         }
     }
     for (id, make) in [
-        (
-            "cargo",
-            DevTool::cargo as fn(NativeTransport) -> DevTool<NativeTransport>,
-        ),
-        (
-            "npm",
-            DevTool::npm as fn(NativeTransport) -> DevTool<NativeTransport>,
-        ),
-        (
-            "pnpm",
-            DevTool::pnpm as fn(NativeTransport) -> DevTool<NativeTransport>,
-        ),
-        (
-            "bun",
-            DevTool::bun as fn(NativeTransport) -> DevTool<NativeTransport>,
-        ),
-        (
-            "pip",
-            DevTool::pip as fn(NativeTransport) -> DevTool<NativeTransport>,
-        ),
-        (
-            "pipx",
-            DevTool::pipx as fn(NativeTransport) -> DevTool<NativeTransport>,
-        ),
-        (
-            "uv",
-            DevTool::uv as fn(NativeTransport) -> DevTool<NativeTransport>,
-        ),
-        (
-            "composer",
-            DevTool::composer as fn(NativeTransport) -> DevTool<NativeTransport>,
-        ),
-        (
-            "gem",
-            DevTool::gem as fn(NativeTransport) -> DevTool<NativeTransport>,
-        ),
+        ("cargo", DevTool::cargo as fn(NativeTransport) -> DevTool),
+        ("npm", DevTool::npm),
+        ("pnpm", DevTool::pnpm),
+        ("bun", DevTool::bun),
+        ("pip", DevTool::pip),
+        ("pipx", DevTool::pipx),
+        ("uv", DevTool::uv),
+        ("composer", DevTool::composer),
+        ("gem", DevTool::gem),
     ] {
         if allowed(id) {
-            let mut tool = make(NativeTransport {
-                host: Host::current(),
-                authorization,
-            });
-            if discover
-                || explicit
-                || !matches!(tool.detect(cancel), Ok(Availability::Unavailable(_)))
-            {
-                engine.register(tool)?;
-            }
+            candidates.push((Box::new(make(transport())), probe_unless_listed));
         }
+    }
+    type Probed = (Box<dyn Backend>, Option<Result<Availability, EngineError>>);
+    let probed: Vec<Probed> = std::thread::scope(|scope| {
+        let workers: Vec<_> = candidates
+            .into_iter()
+            .map(|(mut backend, probe)| {
+                scope.spawn(move || {
+                    let status = probe.then(|| backend.detect(cancel));
+                    (backend, status)
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .map(|worker| worker.join().expect("detection worker panicked"))
+            .collect()
+    });
+    for (backend, status) in probed {
+        let id = backend.id().to_string();
+        match status {
+            // Missing optional managers are left out of automatic queries.
+            Some(Ok(Availability::Unavailable(_))) if !(discover || explicit) => continue,
+            // A detected backend keeps what detection learned (such as a
+            // manager's home), so the following query skips its own probe.
+            Some(status) => engine.note_detected(id, status),
+            None => {}
+        }
+        engine.register_boxed(backend)?;
     }
     Ok(engine)
 }
@@ -4305,6 +4400,97 @@ pub fn native_engine(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_source_has_a_display_name() {
+        for id in BACKEND_IDS {
+            assert!(!display_name(id).is_empty());
+        }
+        assert_eq!(display_name("apt"), "APT");
+        assert_eq!(display_name("homebrew-cask"), "Homebrew Casks");
+        assert_eq!(display_name("npm"), "npm");
+        assert_eq!(display_name("unknown-source"), "unknown-source");
+        let renamed = BACKEND_IDS
+            .iter()
+            .filter(|id| display_name(id) != **id)
+            .count();
+        assert_eq!(renamed, BACKEND_IDS.len() - 5);
+    }
+
+    #[test]
+    fn exact_lookups_skip_sources_that_cannot_have_the_name() {
+        let transport = || NativeTransport {
+            host: Host::current(),
+            authorization: Authorization::Polkit,
+        };
+        let flatpak = Flatpak::new(transport());
+        assert!(!flatpak.may_have("cowsay"));
+        assert!(flatpak.may_have("org.videolan.VLC"));
+        assert!(flatpak.may_have("app/org.videolan.VLC/x86_64/stable"));
+        assert!(!flatpak.may_have("bad name.x"));
+        let npm = DevTool::npm(transport());
+        assert!(npm.may_have("@scope/tool"));
+        assert!(!npm.may_have("org.example/App/x86_64"));
+        let snap = SystemManager::snap(transport());
+        assert!(snap.may_have("cowsay"));
+        assert!(!snap.may_have("app/org.example.App"));
+        assert!(AppImage::native().may_have("anything at all"));
+    }
+
+    #[test]
+    fn cache_keys_cover_relocations_and_locale() {
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| OsString::from(value))
+            }
+        };
+        assert_eq!(
+            flatpak_installation(true, env(&[])),
+            Some(PathBuf::from("/var/lib/flatpak"))
+        );
+        assert_eq!(
+            flatpak_installation(false, env(&[("HOME", "/home/me")])),
+            Some(PathBuf::from("/home/me/.local/share/flatpak"))
+        );
+        assert_eq!(
+            flatpak_installation(
+                false,
+                env(&[("HOME", "/home/me"), ("XDG_DATA_HOME", "/data")])
+            ),
+            Some(PathBuf::from("/data/flatpak"))
+        );
+        assert_eq!(
+            flatpak_installation(
+                false,
+                env(&[("HOME", "/home/me"), ("XDG_DATA_HOME", "relative")])
+            ),
+            Some(PathBuf::from("/home/me/.local/share/flatpak"))
+        );
+        assert_eq!(flatpak_installation(false, env(&[])), None);
+        assert_eq!(
+            flatpak_installation(true, env(&[("FLATPAK_SYSTEM_DIR", "/srv/flatpak")])),
+            None
+        );
+        assert_eq!(
+            flatpak_installation(false, env(&[("FLATPAK_USER_DIR", "/srv/mine")])),
+            None
+        );
+        assert_eq!(
+            locale_key(env(&[("LANG", "de_DE.UTF-8")])),
+            ["", "", "", "de_DE.UTF-8"]
+        );
+        assert!(
+            flatpak_search_watches(std::path::Path::new("/var/lib/flatpak"))
+                .iter()
+                .any(|watch| watch.path.ends_with("appstream"))
+        );
+        assert!(apt_watches()
+            .iter()
+            .any(|watch| watch.path == std::path::Path::new("/var/lib/dpkg/status")));
+    }
 
     #[test]
     fn apt_dist_upgrade_preview_classifies_actions() {

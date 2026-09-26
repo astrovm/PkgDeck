@@ -279,6 +279,53 @@ fn firmware(
         })
         .collect()
 }
+/// The host part of an APT URI, without scheme, credentials, or path:
+/// `http://user:secret@archive.ubuntu.com/ubuntu/` → `archive.ubuntu.com`.
+/// URIs without a host (`file:/srv/repo`, `cdrom:[…]/`) are kept whole.
+fn apt_host(uri: &str) -> &str {
+    let Some((_, rest)) = uri.split_once("://") else {
+        return uri;
+    };
+    let authority = rest.split('/').next().unwrap_or(rest);
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    if host.is_empty() {
+        uri
+    } else {
+        host
+    }
+}
+/// A readable APT repository name: its hosts and suites, such as
+/// `archive.ubuntu.com · resolute, resolute-updates`. The URL stays in its
+/// own field.
+pub fn apt_title<'a>(uris: impl IntoIterator<Item = &'a str>, suites: &[&str]) -> String {
+    let mut hosts: Vec<&str> = Vec::new();
+    for host in uris.into_iter().map(apt_host) {
+        if !hosts.contains(&host) {
+            hosts.push(host);
+        }
+    }
+    let hosts = hosts.join(", ");
+    if suites.is_empty() {
+        hosts
+    } else {
+        format!("{hosts} · {}", suites.join(", "))
+    }
+}
+/// `deb [arch=amd64] https://host/path suite comp…` → (URI, suite).
+fn apt_line(value: &str) -> Option<(&str, Option<&str>)> {
+    let mut tokens = value.split_whitespace().skip(1).peekable();
+    if tokens.peek().is_some_and(|token| token.starts_with('[')) {
+        for token in tokens.by_ref() {
+            if token.ends_with(']') {
+                break;
+            }
+        }
+    }
+    let uri = tokens.next()?;
+    Some((uri, tokens.next()))
+}
 pub fn list(transport: &impl Transport, root: &Path, cancel: &Cancellation) -> Report {
     list_selected(transport, root, cancel, &[], None)
 }
@@ -459,10 +506,11 @@ pub fn list_selected(
                 if field("URIs:").is_empty() {
                     continue;
                 }
+                let suites: Vec<&str> = field("Suites:").split_whitespace().collect();
                 report.repositories.push(Repository {
                     backend: "apt".into(),
                     name: format!("{}:{index}", file.display()),
-                    title: format!("{} {}", field("URIs:"), field("Suites:")),
+                    title: apt_title(field("URIs:").split_whitespace(), &suites),
                     url: field("URIs:").into(),
                     scope: Scope::System,
                     enabled: field("Enabled:") != "no",
@@ -477,11 +525,15 @@ pub fn list_selected(
                 if !value.starts_with("deb ") && !value.starts_with("deb-src ") {
                     continue;
                 }
+                let (title, url) = match apt_line(value) {
+                    Some((uri, suite)) => (apt_title([uri], suite.as_slice()), uri.to_string()),
+                    None => (value.to_string(), value.to_string()),
+                };
                 report.repositories.push(Repository {
                     backend: "apt".into(),
                     name: format!("{}:{index}", file.display()),
-                    title: value.into(),
-                    url: value.into(),
+                    title,
+                    url,
                     scope: Scope::System,
                     enabled,
                     priority: None,
@@ -568,6 +620,84 @@ mod repository_file_tests {
         )
         .repositories
         .is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn apt_repositories_are_named_by_host_and_suites() {
+        assert_eq!(
+            apt_title(
+                ["http://archive.ubuntu.com/ubuntu/"],
+                &["resolute", "resolute-updates", "resolute-backports"]
+            ),
+            "archive.ubuntu.com · resolute, resolute-updates, resolute-backports"
+        );
+        assert_eq!(
+            apt_title(
+                [
+                    "https://user:secret@mirror.example/debian",
+                    "https://mirror.example/debian-extra",
+                    "file:/srv/repo"
+                ],
+                &[]
+            ),
+            "mirror.example, file:/srv/repo"
+        );
+        assert_eq!(
+            apt_title(["https:///broken"], &["x"]),
+            "https:///broken · x"
+        );
+        assert_eq!(
+            apt_line("deb [arch=amd64 signed-by=/k.gpg] https://host/repo stable main"),
+            Some(("https://host/repo", Some("stable")))
+        );
+        assert_eq!(
+            apt_line("deb https://host/repo"),
+            Some(("https://host/repo", None))
+        );
+        assert_eq!(apt_line("deb [arch=amd64]"), None);
+        let root = std::env::temp_dir().join(format!("pkgdeck-apt-titles-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("etc/apt/sources.list.d")).unwrap();
+        std::fs::write(
+            root.join("etc/apt/sources.list"),
+            "deb [arch=amd64] http://archive.ubuntu.com/ubuntu/ resolute main\ndeb [broken\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("etc/apt/sources.list.d/ubuntu.sources"),
+            "Types: deb\nURIs: http://archive.ubuntu.com/ubuntu/\nSuites: resolute resolute-updates\nComponents: main\n",
+        )
+        .unwrap();
+        let transport = NativeTransport {
+            host: Host::current(),
+            authorization: Authorization::Polkit,
+        };
+        let report = list_selected(
+            &transport,
+            &root,
+            &Cancellation::default(),
+            &["apt".into()],
+            None,
+        );
+        let rows: Vec<_> = report
+            .repositories
+            .iter()
+            .map(|r| (r.title.as_str(), r.url.as_str()))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                (
+                    "archive.ubuntu.com · resolute",
+                    "http://archive.ubuntu.com/ubuntu/"
+                ),
+                ("deb [broken", "deb [broken"),
+                (
+                    "archive.ubuntu.com · resolute, resolute-updates",
+                    "http://archive.ubuntu.com/ubuntu/"
+                ),
+            ]
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]

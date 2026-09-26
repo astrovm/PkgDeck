@@ -89,7 +89,7 @@ probe() {
     fi
     echo "PASS $user $auth $action ${expected:-success}"
 }
-probe root sudo install 'unprivileged user'
+probe root sudo install 'runs as root'
 probe pkgdeck-denied sudo install 'authorization denied'
 probe pkgdeck-denied polkit install 'authorization denied'
 # POSIX record locks, as used by dpkg (not flock locks).

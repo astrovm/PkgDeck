@@ -103,6 +103,16 @@ pub mod ffi {
         #[qproperty(bool, busy)]
         #[qproperty(bool, writing)]
         #[qproperty(bool, upgradable)]
+        /// True while anything can still arrive from a background thread
+        /// (a load, details, a preload, an Activity read, a change, a
+        /// background check) or queued work waits to start: call poll()
+        /// while this or busy is true. It turns true before any method
+        /// that starts work returns.
+        #[qproperty(bool, needs_poll)]
+        /// True while the rows on screen are a snapshot from an earlier
+        /// visit and a newer copy loads quietly behind them; busy stays
+        /// false, so show a small spinner rather than a skeleton.
+        #[qproperty(bool, refreshing)]
         type PackageController = super::Controller;
         #[qinvokable]
         fn load(
@@ -259,7 +269,8 @@ enum Reply {
     Done(Result<Payload, EngineError>),
     Engine(Box<Engine>),
 }
-#[derive(serde::Serialize)]
+/// Progress of the running change, for the progress bar and for marking
+/// the rows it changes. See `snapshot` for the fields the frontend reads.
 struct ProgressState {
     activity_id: Option<u64>,
     label: String,
@@ -267,13 +278,18 @@ struct ProgressState {
     total: usize,
     transferred: u64,
     transfer_total: Option<u64>,
+    operations: Vec<Operation>,
+    /// The operation running now; before the first one starts, the job's
+    /// only operation, if it has just one.
+    current: Option<Operation>,
+    names: Names,
 }
 impl ProgressState {
-    fn new(job: &Job, activity_id: Option<u64>) -> Self {
+    fn new(job: &Job, activity_id: Option<u64>, names: &Names) -> Self {
         let operations = job.operations();
         let label = operations
             .first()
-            .map(operation_title)
+            .map(|operation| operation_title_named(operation, names))
             .unwrap_or_else(|| match job {
                 Job::ImportRepository(import) => format!("Add {} repository", import.name),
                 Job::Repositories(Some(action)) => match &action.change {
@@ -292,6 +308,10 @@ impl ProgressState {
                 },
                 _ => "Working".into(),
             });
+        let current = match operations.as_slice() {
+            [one] => Some(one.clone()),
+            _ => None,
+        };
         Self {
             activity_id,
             label,
@@ -299,12 +319,16 @@ impl ProgressState {
             total: operations.len().max(1),
             transferred: 0,
             transfer_total: None,
+            operations,
+            current,
+            names: names.clone(),
         }
     }
     fn apply(&mut self, event: &Event) {
         match event {
             Event::Started(operation) => {
-                self.label = operation_title(operation);
+                self.label = operation_title_named(operation, &self.names);
+                self.current = Some(operation.clone());
                 self.transferred = 0;
                 self.transfer_total = None;
             }
@@ -323,8 +347,51 @@ impl ProgressState {
             Event::Progress { .. } => {}
         }
     }
+    /// How far the whole change is, from 0 to 1, when that is known: from
+    /// finished steps of a batch plus the running step's transfer. A single
+    /// step without a transfer size has no known fraction.
+    fn fraction(&self) -> Option<f64> {
+        let step = self
+            .transfer_total
+            .map(|total| (self.transferred as f64 / total as f64).min(1.0));
+        if self.done >= self.total {
+            Some(1.0)
+        } else if self.total > 1 {
+            Some((self.done as f64 + step.unwrap_or(0.0)) / self.total as f64)
+        } else {
+            step
+        }
+    }
     fn snapshot(&self) -> QString {
-        encoded(self)
+        let targets: Vec<_> = self
+            .operations
+            .iter()
+            .filter_map(package_target)
+            .map(target_row)
+            .collect();
+        let sources: Vec<_> = self
+            .operations
+            .iter()
+            .filter_map(|operation| match operation {
+                Operation::UpgradeAll { backend } => Some(backend.clone()),
+                _ => None,
+            })
+            .collect();
+        let current = self.current.as_ref();
+        encoded(json!({
+            "activity_id": self.activity_id,
+            "label": self.label,
+            "done": self.done,
+            "total": self.total,
+            "transferred": self.transferred,
+            "transfer_total": self.transfer_total,
+            "fraction": self.fraction(),
+            "targets": targets,
+            "sources": sources,
+            "action": current.map_or("", operation_kind),
+            "current": current.and_then(package_target).map(target_row),
+            "current_source": current.map(Operation::backend),
+        }))
     }
 }
 fn inspect_open_input(input: &str, cancel: &Cancellation) -> Result<Payload, EngineError> {
@@ -509,7 +576,7 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
                 {
                     send(Reply::Progress(format!(
                         "{}: {message}",
-                        operation_label(operation)
+                        operation_title(operation)
                     )));
                 }
                 if !matches!(&event, Event::Progress { progress: Progress::Message(_), .. }) {
@@ -531,9 +598,12 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
                         "Finished before it could be cancelled. Changes were kept.".into()
                     }
                     Ok(_) => "Completed".into(),
-                    Err(error) => error.to_string(),
+                    // A denial keeps the engine's words; the frontend
+                    // explains it for the chosen permission option.
+                    Err(error) if is_denied(&error) => error.to_string(),
+                    Err(error) => plain_error(&error, Some(operation.backend()), false),
                 };
-                status.push_str(&format!("\n{}: {outcome}", operation_label(operation)));
+                status.push_str(&format!("\n{}: {outcome}", operation_title(operation)));
             }
             if operations.iter().any(|op| matches!(op, Operation::Upgrade(id) if id.backend == "fwupd")) {
                 status.push_str("\nFirmware: Restart or shut down the device if the update asked for it.");
@@ -598,8 +668,93 @@ struct CatalogWorker {
     receiver: mpsc::Receiver<Vec<Source>>,
     cancel: Cancellation,
 }
+/// The operation history and where it lives, so the GUI can read it with a
+/// shared lock on its own thread while changes still use `History`.
+#[derive(Clone)]
+struct ActivityStore {
+    history: History,
+    path: PathBuf,
+}
+impl ActivityStore {
+    fn at(path: PathBuf) -> Self {
+        Self {
+            history: History::new(path.clone()),
+            path,
+        }
+    }
+    fn default_store() -> Option<Self> {
+        pkgdeck_core::activity::default_path().map(Self::at)
+    }
+    /// Read the history without writing it: a shared lock lets `pkd` and
+    /// other readers go on, and nothing is synced to disk. Only when an
+    /// entry's owner has died is the history rewritten to mark it
+    /// interrupted, and then read again.
+    fn load(&self) -> std::io::Result<Vec<pkgdeck_core::activity::Entry>> {
+        let entries = read_activity(&self.path)?;
+        if entries.iter().any(|entry| {
+            !matches!(
+                entry.state,
+                State::Finished | State::Failed | State::Cancelled | State::Interrupted
+            ) && !std::path::Path::new(&format!("/proc/{}", entry.owner_pid)).exists()
+        }) {
+            self.history.recover_dead()?;
+            return read_activity(&self.path);
+        }
+        Ok(entries)
+    }
+}
+impl std::ops::Deref for ActivityStore {
+    type Target = History;
+    fn deref(&self) -> &History {
+        &self.history
+    }
+}
+/// Read the activity file under a shared lock. A missing file or lock
+/// means no history yet.
+fn read_activity(path: &std::path::Path) -> std::io::Result<Vec<pkgdeck_core::activity::Entry>> {
+    use rustix::fs::{flock, FlockOperation};
+    use std::io::ErrorKind;
+    let lock = match std::fs::File::open(path.with_extension("lock")) {
+        Ok(lock) => Some(lock),
+        Err(error) if error.kind() == ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
+    };
+    if let Some(lock) = &lock {
+        flock(lock, FlockOperation::LockShared)?;
+    }
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(serde_json::from_slice(&bytes).unwrap_or_default()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(vec![]),
+        Err(error) => Err(error),
+    }
+}
+/// Activity entries as stored, plus "labels": one line per operation in
+/// people's words ("Install Firefox (Flatpak)"), in operation order.
+fn activity_rows(entries: &[pkgdeck_core::activity::Entry], names: &Names) -> QString {
+    let rows: Vec<Value> = entries
+        .iter()
+        .map(|entry| {
+            let mut row = serde_json::to_value(entry).unwrap_or_else(|_| json!({}));
+            row["labels"] = json!(entry
+                .operations
+                .iter()
+                .map(|operation| operation_title_named(operation, names))
+                .collect::<Vec<_>>());
+            row
+        })
+        .collect();
+    encoded(rows)
+}
+/// Reads the Activity history off the GUI thread.
+struct ActivityWorker {
+    handle: thread::JoinHandle<()>,
+    receiver: mpsc::Receiver<std::io::Result<Vec<pkgdeck_core::activity::Entry>>>,
+}
 impl Drop for Controller {
     fn drop(&mut self) {
+        if let Some(worker) = self.activity_worker.take() {
+            let _ = worker.handle.join();
+        }
         if let Some(worker) = self.worker.take() {
             worker.cancel.cancel();
             let _ = worker.handle.join();
@@ -629,6 +784,8 @@ pub struct Controller {
     busy: bool,
     writing: bool,
     upgradable: bool,
+    needs_poll: bool,
+    refreshing: bool,
     updates_view: bool,
     packages: Vec<Package>,
     cleanup: Vec<CleanupItem>,
@@ -646,7 +803,10 @@ pub struct Controller {
     discard_revalidation: bool,
     validated_confirmed: Option<Confirmed>,
     deferred_load: Option<Job>,
-    activity_store: Option<History>,
+    activity_store: Option<ActivityStore>,
+    activity_worker: Option<ActivityWorker>,
+    /// Activity changed while it was being read; read it once more after.
+    activity_again: bool,
     autostart_path: Option<PathBuf>,
     background_schedule: Schedule,
     selected: Option<PackageId>,
@@ -673,6 +833,8 @@ pub struct Controller {
     source_filter: Vec<String>,
     sudo: bool,
     worker: Option<Worker>,
+    /// Display names of confirmed changes' packages (see `Names`).
+    names: Names,
 }
 impl Default for Controller {
     fn default() -> Self {
@@ -695,6 +857,9 @@ impl Default for Controller {
             busy: false,
             writing: false,
             upgradable: false,
+            // Sections preload from startup, which poll() starts.
+            needs_poll: true,
+            refreshing: false,
             updates_view: false,
             packages: vec![],
             cleanup: vec![],
@@ -715,8 +880,10 @@ impl Default for Controller {
             activity_store: if cfg!(test) {
                 None
             } else {
-                History::default_store()
+                ActivityStore::default_store()
             },
+            activity_worker: None,
+            activity_again: false,
             autostart_path: if cfg!(test) {
                 None
             } else {
@@ -742,6 +909,7 @@ impl Default for Controller {
             source_filter: Vec::new(),
             sudo: false,
             worker: None,
+            names: Names::new(),
         }
     }
 }
@@ -769,6 +937,45 @@ impl Controller {
                         && view == "Updates"
                         && worker.key == cache_key("Installed", "", &self.source_filter, self.sudo))
         })
+    }
+    /// Whether poll() may still deliver something or start queued work:
+    /// any worker thread, a section waiting for its preload, or preloads
+    /// that are due and not held back by a change awaiting confirmation.
+    fn outstanding(&self) -> bool {
+        let held = self.pending.is_some() || !self.confirmed_queue.is_empty();
+        self.worker.is_some()
+            || self.prefetch_worker.is_some()
+            || self.details_worker.is_some()
+            || self.catalog_worker.is_some()
+            || self.activity_worker.is_some()
+            || self.awaiting_prefetch
+            || !self.prefetch.is_empty() && !held
+    }
+    /// A read the user is waiting for owns the worker. A quiet refresh
+    /// behind cached rows, or background work, gives way to a new request.
+    fn foreground_worker(&self) -> bool {
+        self.worker.is_some() && !self.background && !self.refreshing
+    }
+    /// Display names for the packages these operations change: remembered
+    /// from confirmation, else from the rows on screen.
+    fn names_for(&self, operations: &[Operation]) -> Names {
+        operations
+            .iter()
+            .filter_map(package_target)
+            .filter_map(|id| {
+                self.names
+                    .get(id)
+                    .cloned()
+                    .or_else(|| {
+                        self.packages
+                            .iter()
+                            .find(|package| package.id == *id)
+                            .map(|package| package.display_name.clone())
+                    })
+                    .filter(|name| !name.trim().is_empty())
+                    .map(|name| (id.clone(), name))
+            })
+            .collect()
     }
     /// Forget preloaded sections and load them again from scratch.
     fn invalidate_prefetch(&mut self) {
@@ -801,6 +1008,16 @@ fn upgrade_plan(packages: &[Package]) -> Vec<Operation> {
                 .map(|p| Operation::Upgrade(p.id.clone())),
         )
         .collect()
+}
+fn epoch_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+/// Wall-clock seconds at a monotonic instant in the past.
+fn epoch_seconds_at(instant: Instant) -> u64 {
+    epoch_seconds().saturating_sub(instant.elapsed().as_secs())
 }
 fn encoded(value: impl serde::Serialize) -> QString {
     serde_json::to_string(&value)
@@ -902,6 +1119,287 @@ fn repreview_changed_plan(
 fn details_fresh(selected: Option<&PackageId>, details: &PackageDetails) -> bool {
     selected.is_some_and(|id| *id == details.package.id)
 }
+/// The name people know a package source by, matching the GUI's source list.
+// TODO(merge): use pkgdeck_core display_name
+fn source_display_name(id: &str) -> String {
+    match id {
+        "apt" => "APT",
+        "dnf" => "DNF",
+        "pacman" => "Pacman",
+        "zypper" => "Zypper",
+        "snap" => "Snap",
+        "homebrew" => "Homebrew",
+        "homebrew-cask" => "Homebrew Casks",
+        "appimage" => "AppImage",
+        "flatpak" => "Flatpak",
+        "docker" => "Docker images",
+        "podman" => "Podman images",
+        "cargo" => "Cargo",
+        "npm" => "npm",
+        "pnpm" => "pnpm",
+        "bun" => "Bun",
+        "pip" => "pip",
+        "pipx" => "pipx",
+        "uv" => "uv",
+        "composer" => "Composer",
+        "gem" => "RubyGems",
+        "fwupd" => "Firmware",
+        "codex" => "Codex (standalone)",
+        "claude" => "Claude Code (standalone)",
+        "grok" => "Grok (standalone)",
+        "opencode" => "OpenCode (standalone)",
+        other => other,
+    }
+    .to_owned()
+}
+/// "System" or "User" for people; an environment shows its location.
+fn scope_word(scope: &Scope) -> String {
+    match scope {
+        Scope::System => "System".into(),
+        Scope::User { .. } => "User".into(),
+        Scope::Environment { path } => path.display().to_string(),
+    }
+}
+/// "APT · System": where a change happens, in people's words.
+fn source_and_scope(backend: &str, scope: &Scope) -> String {
+    format!("{} · {}", source_display_name(backend), scope_word(scope))
+}
+/// Capitalize and end with a period, so every message reads as a sentence.
+fn sentence(text: &str) -> String {
+    let text = text.trim().trim_end_matches([':', ';', ',']).trim_end();
+    let mut chars = text.chars();
+    let Some(first) = chars.next() else {
+        return String::new();
+    };
+    let mut out: String = first.to_uppercase().chain(chars).collect();
+    if !out.ends_with(['.', '!', '?']) {
+        out.push('.');
+    }
+    out
+}
+/// Drop Rust debug formatting that leaks from lower layers, such as
+/// "(Some(1))" or "Some(\"x\")", keeping the meaningful value.
+fn strip_debug(text: &str) -> String {
+    let mut out = text.replace("(None)", "").replace(" None:", ":");
+    while let Some(start) = out.find("Some(") {
+        let inner = start + "Some(".len();
+        let Some(end) = out[inner..].find(')').map(|at| inner + at) else {
+            out.replace_range(start..inner, "");
+            break;
+        };
+        let value = out[inner..end].trim_matches('"').to_owned();
+        out.replace_range(start..=end, &value);
+    }
+    out
+}
+/// The first line of tool output worth showing: an error line if there is
+/// one, else the first non-empty line. Prefixes such as "error:" and "E:"
+/// are removed because the sentence around it already says it failed.
+fn meaningful_line(output: &str) -> Option<String> {
+    const PREFIXES: &[&str] = &["error:", "Error:", "ERROR:", "E:", "fatal:", "FATAL:"];
+    let lines: Vec<&str> = output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .filter(|line| !line.starts_with("WARNING: apt does not have a stable CLI"))
+        .collect();
+    let line = lines
+        .iter()
+        .find(|line| PREFIXES.iter().any(|prefix| line.starts_with(prefix)))
+        .or_else(|| lines.first())?;
+    let mut line = *line;
+    for prefix in PREFIXES {
+        if let Some(rest) = line.strip_prefix(prefix) {
+            line = rest.trim_start();
+        }
+    }
+    // Well-known messages people hit often, said plainly.
+    if line.contains("rustup could not choose a version")
+        || line.contains("no default toolchain")
+        || line.contains("no default is configured")
+    {
+        return Some("rustup has no default toolchain".into());
+    }
+    Some(line.trim_end_matches(['.', ':', ';']).to_owned())
+}
+const ROOT_MESSAGE: &str =
+    "PkgDeck can't make changes while running as root. Start it as your normal user.";
+/// Whether engine text is the refusal to make changes as root, in the
+/// core's current wording or an older one.
+fn refuses_root(text: &str) -> bool {
+    text.contains("unprivileged user")
+        || text.contains("running as root")
+        || text.contains("runs as root")
+}
+/// One plain sentence for text that came from the engine, whatever its
+/// wording: internal prefixes and debug formatting are removed, and the
+/// tool's first meaningful output line is kept.
+fn plain_text(raw: &str, backend: Option<&str>) -> String {
+    if refuses_root(raw) {
+        return ROOT_MESSAGE.into();
+    }
+    let tool = backend.map(source_display_name);
+    if let Some(at) = raw.find("host command failed") {
+        let rest = &raw[at..];
+        let output = rest.find("):").map_or("", |end| &rest[end + 2..]);
+        return match (meaningful_line(output), tool) {
+            (Some(line), Some(tool)) => format!("{tool} couldn't run: {}", sentence_tail(&line)),
+            (Some(line), None) => sentence(&line),
+            (None, Some(tool)) => format!("{tool} reported an error without details."),
+            (None, None) => "The package manager reported an error without details.".into(),
+        };
+    }
+    // Core's own wording: "the package manager exited with code N: reason".
+    if let Some(rest) = raw.trim_start().strip_prefix("the package manager ") {
+        let reason = rest.split_once(": ").map_or("", |(_, reason)| reason);
+        return match (meaningful_line(reason), tool) {
+            (Some(line), Some(tool)) => format!("{tool} couldn't run: {}", sentence_tail(&line)),
+            (Some(line), None) => sentence(&line),
+            (None, Some(tool)) => format!("{tool} reported an error without details."),
+            (None, None) => "The package manager reported an error without details.".into(),
+        };
+    }
+    let cleaned = strip_debug(raw);
+    let line = meaningful_line(&cleaned).unwrap_or_default();
+    if line.is_empty() {
+        return "Something went wrong.".into();
+    }
+    sentence(&line)
+}
+/// The part after "X couldn't run:" keeps its own case (tool names such as
+/// rustup are lowercase) and ends with a period.
+fn sentence_tail(line: &str) -> String {
+    let mut line = line.trim().to_owned();
+    if !line.ends_with(['.', '!', '?']) {
+        line.push('.');
+    }
+    line
+}
+/// Lowercase a sentence's first letter to continue another sentence,
+/// unless it starts an acronym or a name such as "APT".
+fn lower_first(text: &str) -> String {
+    let mut chars = text.chars();
+    match (chars.next(), chars.next()) {
+        (Some(first), Some(second)) if first.is_uppercase() && second.is_lowercase() => {
+            first.to_lowercase().chain(text.chars().skip(1)).collect()
+        }
+        _ => text.to_owned(),
+    }
+}
+/// A plain explanation of an engine error, naming the tool when known.
+fn plain_error(error: &EngineError, backend: Option<&str>, sudo: bool) -> String {
+    use pkgdeck_core::process::ExecutionError as E;
+    match error {
+        EngineError::Execution(E::AuthorizationDenied) if sudo => "PkgDeck couldn't get administrator access. \"Existing sudo session\" needs a recent sudo login in a terminal, or pick the system prompt in Settings.".into(),
+        EngineError::Execution(E::AuthorizationDenied) => "PkgDeck couldn't get administrator access. Make sure your desktop's password prompt is running, or pick another option in Settings.".into(),
+        EngineError::Execution(E::AuthorizationCancelled) => "The password prompt was closed. Nothing was changed.".into(),
+        EngineError::Execution(E::LockBusy) => "Another package manager is running. Wait for it to finish, then try again.".into(),
+        EngineError::Execution(E::Interrupted) => "The package manager was interrupted. Check its state before trying again.".into(),
+        EngineError::Execution(E::TimedOut) => "The package manager took too long to answer. Try again.".into(),
+        EngineError::Cancelled | EngineError::Execution(E::Cancelled) => "Cancelled.".into(),
+        EngineError::Execution(E::Failed(result)) => {
+            let output = String::from_utf8_lossy(&result.stderr);
+            let output = if output.trim().is_empty() {
+                String::from_utf8_lossy(&result.stdout).into_owned()
+            } else {
+                output.into_owned()
+            };
+            match (meaningful_line(&output), backend.map(source_display_name)) {
+                (Some(line), Some(tool)) => format!("{tool} couldn't run: {}", sentence_tail(&line)),
+                (Some(line), None) => sentence(&line),
+                (None, Some(tool)) => format!("{tool} reported an error without details."),
+                (None, None) => "The package manager reported an error.".into(),
+            }
+        }
+        EngineError::Unavailable { backend, reason } => {
+            if refuses_root(reason) {
+                return ROOT_MESSAGE.into();
+            }
+            format!(
+                "{} isn't available: {}",
+                source_display_name(backend),
+                lower_first(&plain_text(reason, None))
+            )
+        }
+        EngineError::InvalidResponse { backend: source, reason }
+            if matches!(source.as_str(), "open" | "check") || reason.contains("host command failed") =>
+        {
+            plain_text(reason, Some(source.as_str()).filter(|s| !matches!(*s, "open" | "check")))
+        }
+        EngineError::InvalidResponse { backend: source, reason } => {
+            if refuses_root(reason) {
+                return ROOT_MESSAGE.into();
+            }
+            match meaningful_line(&strip_debug(reason)) {
+                Some(line) => format!(
+                    "{} reported a problem: {}",
+                    source_display_name(source),
+                    sentence_tail(&line)
+                ),
+                None => format!("{} reported a problem.", source_display_name(source)),
+            }
+        }
+        EngineError::Unsupported { backend, .. } => format!(
+            "{} can't do this.",
+            source_display_name(backend)
+        ),
+        EngineError::NotFound => "No package matches the selection.".into(),
+        other => plain_text(&other.to_string(), backend),
+    }
+}
+/// A repository change in people's words, such as
+/// "Remove repository\nflathub · Flatpak · System".
+fn repository_label(action: &RepositoryAction) -> String {
+    let change = match &action.change {
+        repositories::Change::Add { url } => format!("Add repository from {url}"),
+        repositories::Change::Remove => "Remove repository".into(),
+        repositories::Change::SetEnabled { enabled: true } => "Enable repository".into(),
+        repositories::Change::SetEnabled { enabled: false } => "Disable repository".into(),
+        repositories::Change::SetPriority { priority } => {
+            format!("Set repository priority to {priority}")
+        }
+        repositories::Change::OpenEditor => "Open Software Sources".into(),
+    };
+    format!(
+        "{change}\n{} · {}",
+        action.name,
+        source_and_scope(&action.backend, &action.scope)
+    )
+}
+/// A repository listing error such as "flatpak: host command failed…",
+/// with the source named as people know it.
+fn repository_error(error: &str) -> String {
+    match error.split_once(": ") {
+        Some((source, rest)) if pkgdeck_core::backends::BACKEND_IDS.contains(&source) => {
+            let text = plain_text(rest, Some(source));
+            let name = source_display_name(source);
+            if text.starts_with(&name) {
+                text
+            } else {
+                format!("{name}: {text}")
+            }
+        }
+        _ => plain_text(error, None),
+    }
+}
+/// The repositories report, with each repository's source and scope in
+/// people's words ("where": "Flatpak · System") and errors as sentences.
+/// Every original field stays for the frontend's own logic.
+fn repositories_json(report: &repositories::Report) -> QString {
+    let mut value = serde_json::to_value(report).unwrap_or_else(|_| json!({}));
+    if let Some(rows) = value["repositories"].as_array_mut() {
+        for (row, repository) in rows.iter_mut().zip(&report.repositories) {
+            row["source_name"] = json!(source_display_name(&repository.backend));
+            row["where"] = json!(source_and_scope(&repository.backend, &repository.scope));
+        }
+    }
+    value["errors"] = json!(report
+        .errors
+        .iter()
+        .map(|error| repository_error(error))
+        .collect::<Vec<_>>());
+    encoded(value)
+}
 fn scope_label(scope: &Scope) -> String {
     match scope {
         Scope::System => "System".into(),
@@ -913,7 +1411,7 @@ fn source_status(source: &Source) -> String {
     match &source.availability {
         Ok(Availability::Available) => "Available".into(),
         Ok(Availability::Unavailable(reason)) => format!("Unavailable: {reason}"),
-        Err(error) => error.to_string(),
+        Err(error) => plain_error(error, Some(&source.backend), false),
     }
 }
 fn source_row(source: &Source) -> Value {
@@ -984,34 +1482,36 @@ fn merge_retried_packages(
 /// Details for a failed source row. Served from the stored report without a
 /// backend roundtrip: the query already failed, re-querying cannot help.
 /// A plain-language reason a change failed, with what to do next.
-fn write_error_text(error: &EngineError, sudo: bool) -> String {
-    use pkgdeck_core::process::ExecutionError as E;
-    match error {
-        EngineError::Execution(E::AuthorizationDenied) if sudo => "PkgDeck couldn't get administrator access. \"Existing sudo session\" needs a recent sudo login in a terminal, or pick the system prompt in Settings.".into(),
-        EngineError::Execution(E::AuthorizationDenied) => "PkgDeck couldn't get administrator access. Make sure your desktop's password prompt is running, or pick another option in Settings.".into(),
-        EngineError::Execution(E::AuthorizationCancelled) => "The password prompt was closed. Nothing was changed.".into(),
-        EngineError::Execution(E::LockBusy) => "Another package manager is running. Wait for it to finish, then try again.".into(),
-        EngineError::Execution(E::Interrupted) => "The package manager was interrupted. Check its state before trying again.".into(),
-        EngineError::Execution(E::Failed(result)) => {
-            let stderr = String::from_utf8_lossy(&result.stderr);
-            let lines: Vec<_> = stderr.lines().map(str::trim).filter(|line| !line.is_empty()).collect();
-            let tail = lines[lines.len().saturating_sub(3)..].join(" ");
-            if tail.is_empty() {
-                "The package manager reported an error.".into()
-            } else {
-                tail
-            }
-        }
-        other => other.to_string(),
-    }
+fn write_error_text(error: &EngineError, backend: Option<&str>, sudo: bool) -> String {
+    plain_error(error, backend, sudo)
+}
+/// Display names of the packages a change targets, remembered when the
+/// change is confirmed so its progress and result can name them.
+type Names = BTreeMap<PackageId, String>;
+fn is_denied(error: &EngineError) -> bool {
+    matches!(
+        error,
+        EngineError::Execution(pkgdeck_core::process::ExecutionError::AuthorizationDenied)
+    )
+}
+/// The one source a job changes, when it changes only one.
+fn job_backend(operations: &[Operation]) -> Option<&str> {
+    let first = operations.first()?.backend();
+    operations
+        .iter()
+        .all(|operation| operation.backend() == first)
+        .then_some(first)
 }
 /// What the banner says when a change can't be prepared, for example when
 /// APT's dry run fails before the confirmation opens.
-fn preflight_notice(job: &Job, error: &EngineError, sudo: bool) -> Option<Value> {
-    let title = match job {
-        Job::PlanOperation(operation) => operation_title(operation),
-        Job::PlanUpgrade(..) => "The update".to_owned(),
-        Job::PlanCleanAll(..) => "The cleanup".to_owned(),
+fn preflight_notice(job: &Job, error: &EngineError, sudo: bool, names: &Names) -> Option<Value> {
+    let (title, operations) = match job {
+        Job::PlanOperation(operation) => (
+            operation_title_named(operation, names),
+            vec![operation.clone()],
+        ),
+        Job::PlanUpgrade(operations, _) => ("The update".to_owned(), operations.clone()),
+        Job::PlanCleanAll(operations) => ("The cleanup".to_owned(), operations.clone()),
         _ => return None,
     };
     if matches!(
@@ -1024,19 +1524,129 @@ fn preflight_notice(job: &Job, error: &EngineError, sudo: bool) -> Option<Value>
     Some(json!({
         "kind": "error",
         "title": format!("{title} couldn't be prepared"),
-        "detail": write_error_text(error, sudo),
-        "action": if matches!(error, EngineError::Execution(pkgdeck_core::process::ExecutionError::AuthorizationDenied)) { "settings" } else { "" },
+        "detail": write_error_text(error, job_backend(&operations), sudo),
+        "action": if is_denied(error) { "settings" } else { "" },
     }))
 }
+/// A batch reports each error as text on its own line. A denial keeps the
+/// engine's words so the right advice for the chosen permission option can
+/// be given here; every other line is already plain.
+const DENIED: &str = ": authorization denied or unavailable";
+fn batch_status_text(status: &str, sudo: bool) -> String {
+    status
+        .lines()
+        .map(|line| {
+            line.strip_suffix(DENIED).map_or_else(
+                || line.to_owned(),
+                |label| {
+                    format!(
+                        "{label}: {}",
+                        plain_error(
+                            &EngineError::Execution(
+                                pkgdeck_core::process::ExecutionError::AuthorizationDenied,
+                            ),
+                            None,
+                            sudo,
+                        )
+                    )
+                },
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+/// The inverse change a toast may offer as Undo. Only an install and a
+/// removal undo each other; updates and cleanups cannot be reversed, and
+/// a package removed from a local file or a direct download can't be
+/// installed again without that file.
+fn undo_action(operation: &Operation) -> Option<&'static str> {
+    match operation {
+        Operation::Install(id) if !pkgdeck_core::backends::update_only(&id.backend) => {
+            Some("remove")
+        }
+        Operation::Remove(id)
+            if !pkgdeck_core::backends::update_only(&id.backend)
+                && id.backend != "appimage"
+                && !id.reference.as_deref().is_some_and(|reference| {
+                    ["local-deb:", "artifact:", "flatpakref:"]
+                        .iter()
+                        .any(|prefix| reference.starts_with(prefix))
+                }) =>
+        {
+            Some("install")
+        }
+        _ => None,
+    }
+}
+/// A machine-readable name for what a change does, for the frontend.
+fn operation_kind(operation: &Operation) -> &'static str {
+    match operation {
+        Operation::Install(_) => "install",
+        Operation::Remove(_) => "remove",
+        Operation::Upgrade(_) => "update",
+        Operation::UpgradeAll { .. } => "update_all",
+        Operation::Refresh { .. } => "refresh",
+        Operation::Clean(_) => "clean",
+    }
+}
+/// The row a package change targets, with the same fields as a package
+/// row so the frontend can compute its row identity from it.
+fn target_row(id: &PackageId) -> Value {
+    json!({"source": id.backend, "name": id.name, "architecture": id.architecture,
+        "remote": id.remote, "scope": id.scope, "reference": id.reference})
+}
+fn package_target(operation: &Operation) -> Option<&PackageId> {
+    match operation {
+        Operation::Install(id) | Operation::Remove(id) | Operation::Upgrade(id) => Some(id),
+        _ => None,
+    }
+}
+/// What a notice says about the change itself, for a toast: the action,
+/// the package and source in people's words, and whether Undo is safe.
+fn notice_subject(operations: &[Operation], names: &Names, succeeded: bool) -> Value {
+    let [operation] = operations else {
+        return json!({"operation": if operations.is_empty() { "" } else { "batch" }, "undo": false, "undo_action": ""});
+    };
+    let undo = undo_action(operation).filter(|_| succeeded);
+    let mut subject = json!({
+        "operation": operation_kind(operation),
+        "source": operation.backend(),
+        "source_name": source_display_name(operation.backend()),
+        "undo": undo.is_some(),
+        "undo_action": undo.unwrap_or_default(),
+    });
+    if let Some(id) = package_target(operation) {
+        subject["package"] = json!(display_name_for(id, names));
+        subject["target"] = target_row(id);
+    }
+    subject
+}
+fn with_subject(mut notice: Value, subject: Value) -> Value {
+    if let (Some(notice), Value::Object(subject)) = (notice.as_object_mut(), subject) {
+        notice.extend(subject);
+    }
+    notice
+}
 /// What the banner says once a change finishes.
-fn write_notice(job: &Job, result: &Result<Payload, EngineError>, sudo: bool) -> Value {
+fn write_notice(
+    job: &Job,
+    result: &Result<Payload, EngineError>,
+    sudo: bool,
+    names: &Names,
+) -> Value {
     let operations = job.operations();
     let title = match operations.as_slice() {
-        [one] => operation_title(one),
+        [one] => operation_title_named(one, names),
         [] => "The change".to_owned(),
         many => format!("{} changes", many.len()),
     };
-    match result {
+    let succeeded = match result {
+        Ok(Payload::Batch(_, outcomes)) => outcomes.iter().all(|o| *o == Outcome::Finished),
+        Ok(_) => true,
+        Err(_) => false,
+    };
+    let subject = notice_subject(&operations, names, succeeded);
+    let notice = match result {
         Err(
             EngineError::Cancelled
             | EngineError::Execution(pkgdeck_core::process::ExecutionError::Cancelled),
@@ -1046,9 +1656,9 @@ fn write_notice(job: &Job, result: &Result<Payload, EngineError>, sudo: bool) ->
         Err(error) => json!({
             "kind": "error",
             "title": format!("{title} failed"),
-            "detail": write_error_text(error, sudo),
+            "detail": write_error_text(error, job_backend(&operations), sudo),
             // Only a denial is fixed by another permission option.
-            "action": if matches!(error, EngineError::Execution(pkgdeck_core::process::ExecutionError::AuthorizationDenied)) { "settings" } else { "" },
+            "action": if is_denied(error) { "settings" } else { "" },
         }),
         Ok(Payload::Batch(_, outcomes))
             if !outcomes.contains(&Outcome::Failed) && outcomes.contains(&Outcome::Cancelled) =>
@@ -1060,31 +1670,17 @@ fn write_notice(job: &Job, result: &Result<Payload, EngineError>, sudo: bool) ->
             })
         }
         Ok(Payload::Batch(status, outcomes)) if outcomes.contains(&Outcome::Failed) => {
-            // A batch reports each error as text, so a denial is recovered
-            // from that line and given the same Settings action as one change.
-            const DENIED: &str = ": authorization denied or unavailable";
+            // A denial gets the same Settings action as one change.
             let denied = status.lines().any(|line| line.ends_with(DENIED));
-            let detail = status
-                .lines()
-                .skip(1)
-                .filter(|line| !line.ends_with(": Completed"))
-                .map(|line| {
-                    line.strip_suffix(DENIED)
-                        .map(|label| {
-                            format!(
-                                "{label}: {}",
-                                write_error_text(
-                                    &EngineError::Execution(
-                                        pkgdeck_core::process::ExecutionError::AuthorizationDenied,
-                                    ),
-                                    sudo,
-                                )
-                            )
-                        })
-                        .unwrap_or_else(|| line.to_owned())
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
+            let detail = batch_status_text(
+                &status
+                    .lines()
+                    .skip(1)
+                    .filter(|line| !line.ends_with(": Completed"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                sudo,
+            );
             json!({
                 "kind": "error",
                 "title": format!("{} of {} changes failed", outcomes.iter().filter(|o| **o == Outcome::Failed).count(), outcomes.len()),
@@ -1114,12 +1710,13 @@ fn write_notice(job: &Job, result: &Result<Payload, EngineError>, sudo: bool) ->
                 json!({"kind": "success", "title": format!("{title} finished"), "detail": detail})
             }
         }
-    }
+    };
+    with_subject(notice, subject)
 }
-fn failure_details(failure: &BackendFailure) -> QString {
+fn failure_details(failure: &BackendFailure, sudo: bool) -> QString {
     encoded(json!({
-        "failure": {"backend": failure.backend, "error": failure.error.to_string()},
-        "hint": format!("Check the {} source in the Sources view, or run the manager directly in a terminal for complete output.", failure.backend),
+        "failure": {"backend": failure.backend, "error": plain_error(&failure.error, Some(&failure.backend), sudo)},
+        "hint": format!("Check {} in the Sources view, or run it directly in a terminal for complete output.", source_display_name(&failure.backend)),
     }))
 }
 /// Upgrade operations for checked identities that still resolve to an
@@ -1283,18 +1880,49 @@ fn confirmation_label(operation: &Operation, packages: &[Package]) -> String {
     }
     label
 }
-/// One line for progress and results, such as "Install htop (apt)".
+/// One line for progress and results, such as "Install htop (APT)".
 fn operation_title(operation: &Operation) -> String {
-    let first = operation_label(operation)
-        .lines()
-        .next()
-        .unwrap_or_default()
-        .to_owned();
+    operation_title_named(operation, &Names::new())
+}
+/// The name people know a package by: its display name when the change
+/// was confirmed from a row, otherwise the name in its identity.
+fn display_name_for(id: &PackageId, names: &Names) -> String {
+    names
+        .get(id)
+        .filter(|name| !name.trim().is_empty())
+        .cloned()
+        .unwrap_or_else(|| package_name(id).to_owned())
+}
+/// Like `operation_title`, with the package's display name when known.
+fn operation_title_named(operation: &Operation, names: &Names) -> String {
     match operation {
-        Operation::Install(id) | Operation::Remove(id) | Operation::Upgrade(id) => {
-            format!("{first} ({})", id.backend)
-        }
-        _ => first,
+        Operation::Install(id) | Operation::Remove(id) | Operation::Upgrade(id) => format!(
+            "{} {} ({})",
+            action_name(operation),
+            display_name_for(id, names),
+            source_display_name(&id.backend)
+        ),
+        _ => operation_label(operation)
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_owned(),
+    }
+}
+/// The package name shown for an identity. A downloaded AppImage shows its
+/// file name, and a reference such as a Flatpak ref wins over the name.
+fn package_name(id: &PackageId) -> &str {
+    match id.reference.as_deref() {
+        Some(reference) if !reference.starts_with("artifact:") => reference,
+        Some(_) if id.backend == "appimage" => id
+            .name
+            .split(['?', '#'])
+            .next()
+            .unwrap_or(&id.name)
+            .rsplit('/')
+            .next()
+            .unwrap_or(&id.name),
+        _ => &id.name,
     }
 }
 fn operation_label(operation: &Operation) -> String {
@@ -1302,35 +1930,22 @@ fn operation_label(operation: &Operation) -> String {
         Operation::Install(id) => ("Install", id),
         Operation::Remove(id) => ("Remove", id),
         Operation::Upgrade(id) => ("Update", id),
-        Operation::Refresh { backend } => return format!("Refresh metadata for {backend}"),
-        Operation::UpgradeAll { backend } => return format!("Update all packages from {backend}"),
-        Operation::Clean(id) => return format!("Clean {} with {}", id.key, id.backend),
-    };
-    let name = if id.backend == "appimage"
-        && id
-            .reference
-            .as_deref()
-            .is_some_and(|reference| reference.starts_with("artifact:"))
-    {
-        id.name
-            .split(['?', '#'])
-            .next()
-            .unwrap_or(&id.name)
-            .rsplit('/')
-            .next()
-            .unwrap_or(&id.name)
-    } else {
-        &id.name
+        Operation::Refresh { backend } => {
+            return format!("Refresh {} package lists", source_display_name(backend))
+        }
+        Operation::UpgradeAll { backend } => {
+            return format!("Update all {} packages", source_display_name(backend))
+        }
+        Operation::Clean(id) => {
+            return format!("Clean {} ({})", id.key, source_display_name(&id.backend))
+        }
     };
     format!(
         "{action} {}\nSource: {}\nArchitecture: {}\nScope: {}",
-        id.reference
-            .as_deref()
-            .filter(|reference| !reference.starts_with("artifact:"))
-            .unwrap_or(name),
-        id.backend,
+        package_name(id),
+        source_display_name(&id.backend),
         id.architecture,
-        scope_label(&id.scope)
+        scope_word(&id.scope)
     )
 }
 fn action_name(operation: &Operation) -> &'static str {
@@ -1366,15 +1981,17 @@ fn confirmation_preview(
                 &package.display_name
             }
         );
-        let scope = match &package.id.scope {
-            Scope::System => ", System",
-            Scope::User { .. } => ", User",
+        let source = source_display_name(&package.id.backend);
+        let place = match &package.id.scope {
+            Scope::System | Scope::User { .. } => {
+                source_and_scope(&package.id.backend, &package.id.scope)
+            }
             Scope::Environment { path } => {
                 lines.push(format!("Location: {}", path.display()));
-                ""
+                source
             }
         };
-        summary[0] = format!("{title}\n{}{scope}", package.id.backend);
+        summary[0] = format!("{title}\n{place}");
         if !package.display_name.is_empty() && package.display_name != package.id.name {
             lines.insert(1, package.display_name.clone());
         }
@@ -1384,8 +2001,18 @@ fn confirmation_preview(
         if let Some(version) = &package.candidate_version {
             lines.push(format!("Available: {version}"));
         }
-        if let (Some(old), Some(new)) = (&package.installed_version, &package.candidate_version) {
-            summary.push(format!("{old} → {new}"));
+        // The version line says what changes: old → new for an update, the
+        // version that goes for a removal, the one that arrives for an install.
+        match (
+            operation,
+            &package.installed_version,
+            &package.candidate_version,
+        ) {
+            (Operation::Remove(_), Some(old), _) => summary.push(old.clone()),
+            (Operation::Install(_), _, Some(new)) => summary.push(new.clone()),
+            (_, Some(old), Some(new)) if old != new => summary.push(format!("{old} → {new}")),
+            (_, Some(version), _) | (_, None, Some(version)) => summary.push(version.clone()),
+            _ => {}
         }
         if package.id.backend == "fwupd" {
             lines.push(package.summary.clone());
@@ -1410,7 +2037,7 @@ fn confirmation_preview(
         }
     }
     if let Operation::Refresh { backend } = operation {
-        title = format!("Refresh {backend}");
+        title = format!("Refresh {}", source_display_name(backend));
     }
     if !matches!(
         operation,
@@ -1438,6 +2065,9 @@ fn confirmation_preview(
                 PlannedAction::Upgrade => "Update",
             };
             let version = match (&change.installed_version, &change.candidate_version) {
+                (Some(old), Some(new)) if old == new || change.action == PlannedAction::Remove => {
+                    format!(" ({old})")
+                }
                 (Some(old), Some(new)) => format!(" ({old} → {new})"),
                 (Some(old), None) => format!(" ({old})"),
                 (None, Some(new)) => format!(" ({new})"),
@@ -1570,7 +2200,7 @@ impl ffi::PackageController {
                 .set_status("Choose an installation file.".into());
             return;
         }
-        if self.rust().worker.is_some() && !self.rust().background {
+        if self.rust().foreground_worker() {
             self.as_mut().rust_mut().queued = Some(Job::OpenInput(input.to_string()));
             self.as_mut()
                 .set_status("The file will open when the current operation finishes.".into());
@@ -1635,9 +2265,12 @@ impl ffi::PackageController {
             Ok(()) => true,
             Err(error) => {
                 self.as_mut().set_status(
-                    format!("Autostart could not be changed: {error}")
-                        .as_str()
-                        .into(),
+                    format!(
+                        "Autostart couldn't be changed: {}",
+                        sentence_tail(&plain_text(&error.to_string(), None))
+                    )
+                    .as_str()
+                    .into(),
                 );
                 false
             }
@@ -1742,13 +2375,45 @@ impl ffi::PackageController {
     pub fn dismiss_notice(self: Pin<&mut Self>) {
         self.set_notice("{}".into());
     }
+    /// Read the Activity history on a worker; poll() publishes it. A read
+    /// requested while one runs starts again after it, so the newest state
+    /// always lands last.
     pub fn refresh_activity(mut self: Pin<&mut Self>) {
-        if let Some(store) = self.rust().activity_store.clone() {
-            let _ = store.recover_dead();
-            if let Ok(entries) = store.entries() {
-                self.as_mut().set_activity(encoded(entries));
-            }
+        let Some(store) = self.rust().activity_store.clone() else {
+            return;
+        };
+        if self.rust().activity_worker.is_some() {
+            self.as_mut().rust_mut().activity_again = true;
+            return;
         }
+        let (sender, receiver) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            let _ = sender.send(store.load());
+        });
+        self.as_mut().rust_mut().activity_worker = Some(ActivityWorker { handle, receiver });
+        self.sync_needs_poll();
+    }
+    fn poll_activity(mut self: Pin<&mut Self>) {
+        let Some(worker) = &self.rust().activity_worker else {
+            return;
+        };
+        if !worker.handle.is_finished() {
+            return;
+        }
+        let worker = self.as_mut().rust_mut().activity_worker.take().unwrap();
+        let _ = worker.handle.join();
+        if let Ok(Ok(entries)) = worker.receiver.try_recv() {
+            let rows = activity_rows(&entries, &self.rust().names);
+            self.as_mut().set_activity(rows);
+        }
+        if std::mem::take(&mut self.as_mut().rust_mut().activity_again) {
+            self.refresh_activity();
+        }
+    }
+    /// Keep `needs_poll` true exactly while poll() has something to do.
+    fn sync_needs_poll(mut self: Pin<&mut Self>) {
+        let outstanding = self.rust().outstanding();
+        self.as_mut().set_needs_poll(outstanding);
     }
     fn start_confirmed(mut self: Pin<&mut Self>, entry: Confirmed) {
         if let (Some(store), Some(id)) = (self.rust().activity_store.clone(), entry.activity_id) {
@@ -1771,6 +2436,11 @@ impl ffi::PackageController {
             return;
         }
         let operations = job.operations();
+        let names = self.rust().names_for(&operations);
+        if self.rust().names.len() > 256 {
+            self.as_mut().rust_mut().names.clear();
+        }
+        self.as_mut().rust_mut().names.extend(names);
         let activity_id = self
             .rust()
             .activity_store
@@ -1860,11 +2530,19 @@ impl ffi::PackageController {
             }
         }
         self.as_mut().refresh_activity();
+        self.sync_needs_poll();
     }
     fn successful_sources(&self) -> Vec<String> {
         let state: Value =
             serde_json::from_str(&self.report_state().to_string()).unwrap_or_default();
         serde_json::from_value(state["successful_sources"].clone()).unwrap_or_default()
+    }
+    /// When the rows on screen were read, as `report_state.checked_at`.
+    fn set_checked_at(mut self: Pin<&mut Self>, epoch: u64) {
+        let mut state: Value =
+            serde_json::from_str(&self.report_state().to_string()).unwrap_or_else(|_| json!({}));
+        state["checked_at"] = json!(epoch);
+        self.as_mut().set_report_state(encoded(state));
     }
     fn set_phase(mut self: Pin<&mut Self>, phase: &str) {
         let mut state: Value =
@@ -1873,6 +2551,7 @@ impl ffi::PackageController {
         self.as_mut().set_report_state(encoded(state));
     }
     fn set_package_report_state(mut self: Pin<&mut Self>, report: &PackageReport, loading: bool) {
+        let sudo = self.rust().sudo;
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -1895,7 +2574,7 @@ impl ffi::PackageController {
             .map(|failure| {
                 json!({
                     "source": failure.backend, "kind": failure_kind(&failure.error),
-                    "detail": failure.error.to_string()
+                    "detail": plain_error(&failure.error, Some(&failure.backend), sudo)
                 })
             })
             .collect();
@@ -1914,22 +2593,43 @@ impl ffi::PackageController {
             "partial"
         };
         let last_success = self.rust().last_success.clone();
-        self.as_mut().set_report_state(encoded(json!({
+        let mut state = json!({
             "phase": phase, "failures": failures,
             "successful_sources": report.successful_sources,
             "last_success": last_success
-        })));
+        });
+        // Only a finished read says when the section was checked.
+        if !loading {
+            state["checked_at"] = json!(now);
+        }
+        self.as_mut().set_report_state(encoded(state));
     }
     fn start(mut self: Pin<&mut Self>, job: Job) {
+        self.as_mut().start_job(job);
+        self.sync_needs_poll();
+    }
+    fn start_job(mut self: Pin<&mut Self>, job: Job) {
+        // The quiet reload of the section on screen, behind its cached rows.
+        let quiet = self.rust().refreshing
+            && matches!(&job, Job::Load(view, _) if *view == self.rust().active_view);
         if let Some(worker) = &self.rust().worker {
-            if self.rust().background {
+            if self.rust().background || self.rust().refreshing {
                 worker.cancel.cancel();
+                // The cancelled read's replies are dropped. A request of
+                // the user's replaces a quiet reload; the cached rows
+                // stay on screen, marked stale.
+                self.as_mut().rust_mut().background = true;
+                if !quiet {
+                    self.as_mut().set_refreshing(false);
+                }
                 self.as_mut().rust_mut().queued = Some(job);
                 // A confirmed foreground request preempts background
                 // loading: report busy at once so the UI waits for the
                 // queued job instead of reading idle state while the
                 // background worker winds down.
-                self.as_mut().set_busy(true);
+                if !quiet {
+                    self.as_mut().set_busy(true);
+                }
             }
             return;
         }
@@ -2085,8 +2785,13 @@ impl ffi::PackageController {
             }
         });
         let writing = worker_job.writes();
-        let progress =
-            writing.then(|| ProgressState::new(&worker_job, self.rust().active_activity_id));
+        let progress = writing.then(|| {
+            ProgressState::new(
+                &worker_job,
+                self.rust().active_activity_id,
+                &self.rust().names_for(&worker_job.operations()),
+            )
+        });
         self.as_mut().rust_mut().worker = Some(Worker {
             handle,
             receiver,
@@ -2097,7 +2802,7 @@ impl ffi::PackageController {
             self.as_mut().set_progress(progress.snapshot());
             self.as_mut().rust_mut().progress_state = Some(progress);
         }
-        let foreground = !self.rust().background;
+        let foreground = !self.rust().background && !quiet;
         self.as_mut().set_busy(foreground);
         self.set_writing(writing);
     }
@@ -2108,7 +2813,23 @@ impl ffi::PackageController {
             self.as_mut().set_progress(snapshot);
         }
     }
+    /// Show a view. Without force, rows loaded in the last minute publish
+    /// before this returns and nothing reloads. Older rows also publish at
+    /// once, and a quiet reload runs behind them with `refreshing` true and
+    /// `busy` false.
     pub fn load(
+        mut self: Pin<&mut Self>,
+        view: QString,
+        query: QString,
+        sources: QString,
+        sudo: bool,
+        force: bool,
+    ) {
+        self.as_mut().load_view(view, query, sources, sudo, force);
+        self.as_mut().rewarm_if_due();
+        self.sync_needs_poll();
+    }
+    fn load_view(
         mut self: Pin<&mut Self>,
         view: QString,
         query: QString,
@@ -2156,6 +2877,8 @@ impl ffi::PackageController {
             && self.rust().active_view == view
             && (self.rust().rows.to_string() != "[]"
                 || self.rust().hold_partials && self.rust().worker.is_some());
+        let was_refreshing = self.rust().refreshing;
+        self.as_mut().set_refreshing(false);
         self.as_mut().rust_mut().active_view = view.clone();
         self.as_mut().rust_mut().awaiting_prefetch = false;
         self.as_mut().rust_mut().hold_partials = refreshing;
@@ -2214,6 +2937,8 @@ impl ffi::PackageController {
                 let upgradable =
                     view == "Updates" && !upgrade_plan(&self.rust().packages).is_empty();
                 self.as_mut().set_upgradable(upgradable);
+                // The rows were read when the preload finished, not now.
+                self.as_mut().set_checked_at(epoch_seconds_at(loaded));
                 self.as_mut().stash_current_at(key.clone(), loaded);
             }
             if let Some(cached) = self.rust().view_cache.get(&key).cloned() {
@@ -2237,7 +2962,15 @@ impl ffi::PackageController {
                 self.as_mut()
                     .set_phase(if stale { "stale" } else { "cached" });
                 self.as_mut().set_busy(false);
-                if let Some(worker) = &self.rust().worker {
+                // Asking again for the section already reloading behind
+                // its snapshot keeps that reload.
+                let same_reload = was_refreshing
+                    && stale
+                    && !self.rust().background
+                    && self.rust().worker.as_ref().is_some_and(|worker| {
+                        matches!(&worker.job, Job::Load(v, q) if *v == view && *q == query)
+                    });
+                if let Some(worker) = self.rust().worker.as_ref().filter(|_| !same_reload) {
                     worker.cancel.cancel();
                     // Suppress every reply from the previous section.
                     self.as_mut().rust_mut().background = true;
@@ -2245,10 +2978,13 @@ impl ffi::PackageController {
                 if stale {
                     // Keep the snapshot on screen until the whole section
                     // arrives; streamed partials would blank most of it.
+                    // The reload is quiet: busy stays false and refreshing
+                    // tells the page to show a small spinner.
                     self.as_mut().rust_mut().hold_partials = true;
-                    if self.as_mut().rust_mut().awaits_prefetch(&key, &view) {
+                    self.as_mut().set_refreshing(true);
+                    if same_reload {
+                    } else if self.as_mut().rust_mut().awaits_prefetch(&key, &view) {
                         self.as_mut().rust_mut().awaiting_prefetch = true;
-                        self.as_mut().set_busy(true);
                     } else {
                         self.as_mut().start(Job::Load(view, query));
                     }
@@ -2304,8 +3040,7 @@ impl ffi::PackageController {
         self.start(Job::Load(view, query));
     }
     pub fn retry_source(mut self: Pin<&mut Self>, view: QString, query: QString, source: QString) {
-        if self.rust().worker.is_some() && !self.rust().background || self.rust().pending.is_some()
-        {
+        if self.rust().foreground_worker() || self.rust().pending.is_some() {
             return;
         }
         let (view, source) = (view.to_string(), source.to_string());
@@ -2414,7 +3149,8 @@ impl ffi::PackageController {
             })
             .cloned()
         {
-            self.as_mut().set_details(failure_details(&failure));
+            let sudo = self.rust().sudo;
+            self.as_mut().set_details(failure_details(&failure, sudo));
             self.set_status("Source failure details.".into());
         } else if let Some(source) = usize::try_from(index)
             .ok()
@@ -2425,12 +3161,12 @@ impl ffi::PackageController {
         }
     }
     pub fn load_repositories(self: Pin<&mut Self>) {
-        if self.rust().worker.is_none() || self.rust().background {
+        if !self.rust().foreground_worker() {
             self.start(Job::Repositories(None));
         }
     }
     pub fn export_inventory(self: Pin<&mut Self>, url: QUrl, identities: QString) {
-        if self.rust().worker.is_some() && !self.rust().background {
+        if self.rust().foreground_worker() {
             return;
         }
         let Some(path) = url
@@ -2450,7 +3186,7 @@ impl ffi::PackageController {
         self.start(Job::ManifestExport(path, selected));
     }
     pub fn preview_inventory(mut self: Pin<&mut Self>, url: QUrl) {
-        if self.rust().worker.is_some() && !self.rust().background {
+        if self.rust().foreground_worker() {
             return;
         }
         let Some(path) = url
@@ -2468,27 +3204,35 @@ impl ffi::PackageController {
             Ok(action) => action,
             Err(error) => {
                 self.set_status(
-                    format!("Invalid repository request: {error}")
-                        .as_str()
-                        .into(),
+                    format!(
+                        "This repository change isn't valid: {}",
+                        sentence_tail(&plain_text(&error.to_string(), None))
+                    )
+                    .as_str()
+                    .into(),
                 );
                 return;
             }
         };
         if let Err(error) = action.validate() {
-            self.set_status(error.to_string().as_str().into());
+            let sudo = self.rust().sudo;
+            self.set_status(plain_error(&error, None, sudo).as_str().into());
             return;
         }
         if matches!(action.change, repositories::Change::OpenEditor) {
             self.start(Job::Repositories(Some(action)));
             return;
         }
-        self.as_mut()
-            .set_confirmation_data(encoded(json!({"action":"Apply", "body": action.label()})));
+        self.as_mut().set_confirmation_data(encoded(
+            json!({"action":"Apply", "body": repository_label(&action)}),
+        ));
         self.as_mut().set_confirmation(
-            format!("{}\n\nApply this repository change?", action.label())
-                .as_str()
-                .into(),
+            format!(
+                "{}\n\nApply this repository change?",
+                repository_label(&action)
+            )
+            .as_str()
+            .into(),
         );
         self.rust_mut().pending = Some(Job::Repositories(Some(action)));
     }
@@ -2552,7 +3296,14 @@ impl ffi::PackageController {
                 .rust()
                 .cleanup
                 .iter()
-                .map(|item| format!("{} ({})\n{}", item.title, item.id.backend, item.preview))
+                .map(|item| {
+                    format!(
+                        "{} ({})\n{}",
+                        item.title,
+                        source_display_name(&item.id.backend),
+                        item.preview
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join("\n\n");
             let count = operations.len();
@@ -2664,9 +3415,11 @@ impl ffi::PackageController {
         self.as_mut().set_confirmation_data("{}".into());
         if approved {
             if let Some(op) = pending {
-                self.accept_confirmed(op);
+                self.as_mut().accept_confirmed(op);
             }
         }
+        // Declining lets held-back preloads run.
+        self.sync_needs_poll();
     }
     pub fn cancel(mut self: Pin<&mut Self>) {
         self.as_mut().rust_mut().prefetch.clear();
@@ -2691,6 +3444,7 @@ impl ffi::PackageController {
             self.as_mut()
                 .set_status("Cancelling… Waiting for the package manager to finish safely.".into());
         }
+        self.sync_needs_poll();
     }
     fn apply(mut self: Pin<&mut Self>, result: Result<Payload, EngineError>) {
         // A newer view or query owns the next visible report. A cancelled
@@ -2715,7 +3469,8 @@ impl ffi::PackageController {
                 let superseded =
                     matches!(e, EngineError::Cancelled) && self.rust().queued.is_some();
                 if !superseded {
-                    self.set_status(e.to_string().as_str().into());
+                    let sudo = self.rust().sudo;
+                    self.set_status(plain_error(&e, None, sudo).as_str().into());
                 }
             }
             Ok(Payload::OpenPackage(package)) => {
@@ -2744,7 +3499,10 @@ impl ffi::PackageController {
                 } else {
                     "System"
                 };
-                let summary = format!("{action}\n{}, {scope}", import.backend);
+                let summary = format!(
+                    "{action}\n{} · {scope}",
+                    source_display_name(&import.backend)
+                );
                 let details = format!("{}\n{}", import.description, import.source);
                 self.as_mut().set_confirmation_data(encoded(json!({"action": action, "body": summary, "summary": summary, "details": details})));
                 self.as_mut().set_confirmation(summary.as_str().into());
@@ -2789,12 +3547,12 @@ impl ffi::PackageController {
                 let incomplete = if failed_sources == 0 {
                     String::new()
                 } else {
-                    let noun = if failed_sources == 1 {
-                        "source"
+                    let (noun, them) = if failed_sources == 1 {
+                        ("source", "it")
                     } else {
-                        "sources"
+                        ("sources", "them")
                     };
-                    format!("\n{failed_sources} {noun} could not be checked. Updates from them are not included.")
+                    format!("\n{failed_sources} {noun} could not be checked. Updates from {them} are not included.")
                 };
                 self.as_mut().set_confirmation_data(encoded(json!({"action":"Update", "body": format!("{count} listed {noun}{incomplete}{apt}\n\n{labels}"), "summary": format!("Update {count} {noun}{removals}{warning}{incomplete}"), "details": format!("{incomplete}{apt}\n\n{labels}")})));
                 self.as_mut().set_confirmation(
@@ -2857,7 +3615,12 @@ impl ffi::PackageController {
                     let body = selected
                         .iter()
                         .map(|item| {
-                            format!("{} ({})\n{}", item.title, item.id.backend, item.preview)
+                            format!(
+                                "{} ({})\n{}",
+                                item.title,
+                                source_display_name(&item.id.backend),
+                                item.preview
+                            )
                         })
                         .collect::<Vec<_>>()
                         .join("\n\n");
@@ -2922,6 +3685,7 @@ impl ffi::PackageController {
                 self.as_mut().apply(Ok(Payload::Sources(sources)));
             }
             Ok(Payload::Packages(report)) => {
+                let sudo = self.rust().sudo;
                 if matches!(self.rust().queued, Some(Job::Load(..))) {
                     return;
                 }
@@ -2944,7 +3708,8 @@ impl ffi::PackageController {
                     .collect();
                 rows.extend(report.failures.iter().map(|failure| {
                     json!({"kind": "failure", "name": failure.backend, "source": failure.backend,
-                        "summary": failure.error.to_string(), "failure_kind": failure_kind(&failure.error), "available": false})
+                        "display_name": source_display_name(&failure.backend),
+                        "summary": plain_error(&failure.error, Some(&failure.backend), sudo), "failure_kind": failure_kind(&failure.error), "available": false})
                 }));
                 let failed: Vec<_> = report
                     .failures
@@ -2959,7 +3724,11 @@ impl ffi::PackageController {
                         report.packages.len(),
                         failed
                             .iter()
-                            .map(|f| format!("{}: {}", f.backend, f.error))
+                            .map(|f| format!(
+                                "{}: {}",
+                                source_display_name(&f.backend),
+                                plain_error(&f.error, Some(&f.backend), sudo)
+                            ))
                             .collect::<Vec<_>>()
                             .join("\n")
                     )
@@ -2970,6 +3739,7 @@ impl ffi::PackageController {
                 self.set_status(status.as_str().into());
             }
             Ok(Payload::Cleanup(report)) => {
+                let sudo = self.rust().sudo;
                 let empty = report.items.is_empty();
                 let mut rows: Vec<_> = report
                     .items
@@ -2986,13 +3756,15 @@ impl ffi::PackageController {
                 rows.extend(report.failures.iter().map(|failure| {
                     json!({
                         "kind": "failure", "name": failure.backend, "source": failure.backend,
-                        "summary": failure.error.to_string(), "available": false
+                        "display_name": source_display_name(&failure.backend),
+                        "summary": plain_error(&failure.error, Some(&failure.backend), sudo),
+                        "available": false
                     })
                 }));
                 let incomplete = !report.failures.is_empty();
-                let failures: Vec<_> = report.failures.iter().map(|failure| json!({"source": failure.backend, "kind": failure_kind(&failure.error), "detail": failure.error.to_string()})).collect();
+                let failures: Vec<_> = report.failures.iter().map(|failure| json!({"source": failure.backend, "kind": failure_kind(&failure.error), "detail": plain_error(&failure.error, Some(&failure.backend), sudo)})).collect();
                 let last_success = self.rust().last_success.clone();
-                self.as_mut().set_report_state(encoded(json!({"phase": if incomplete { if empty { "failed" } else { "partial" } } else { "complete" }, "failures": failures, "last_success": last_success})));
+                self.as_mut().set_report_state(encoded(json!({"phase": if incomplete { if empty { "failed" } else { "partial" } } else { "complete" }, "failures": failures, "last_success": last_success, "checked_at": epoch_seconds()})));
                 self.as_mut().rust_mut().cleanup = report.items;
                 self.as_mut().rust_mut().failures = report.failures;
                 self.as_mut().set_rows(encoded(rows));
@@ -3012,7 +3784,7 @@ impl ffi::PackageController {
                 self.as_mut().rust_mut().invalidate_prefetch();
                 self.as_mut().rust_mut().invalidate_details();
                 crate::metadata::invalidate();
-                self.as_mut().set_repositories(encoded(report));
+                self.as_mut().set_repositories(repositories_json(&report));
                 self.set_status("Repositories loaded.".into());
             }
             Ok(Payload::Sources(sources)) => {
@@ -3034,9 +3806,10 @@ impl ffi::PackageController {
                 } else {
                     "partial"
                 };
-                self.as_mut().set_report_state(encoded(
-                    json!({"phase": phase, "failures": failures, "last_success": last_success}),
-                ));
+                self.as_mut().set_report_state(encoded(json!({
+                    "phase": phase, "failures": failures, "last_success": last_success,
+                    "checked_at": epoch_seconds()
+                })));
                 self.as_mut().set_source_catalog(encoded(&rows));
                 self.as_mut().rust_mut().sources = sources;
                 self.as_mut().set_rows(encoded(rows));
@@ -3156,6 +3929,7 @@ impl ffi::PackageController {
             receiver,
             cancel,
         });
+        self.sync_needs_poll();
     }
     fn start_details(mut self: Pin<&mut Self>, id: PackageId) {
         if let Some(worker) = self.as_mut().rust_mut().details_worker.take() {
@@ -3194,6 +3968,7 @@ impl ffi::PackageController {
             cancel,
             id,
         });
+        self.sync_needs_poll();
     }
     fn poll_details(mut self: Pin<&mut Self>) {
         let Some(worker) = &self.rust().details_worker else {
@@ -3242,7 +4017,7 @@ impl ffi::PackageController {
         else {
             return;
         };
-        let message = write_error_text(error, self.rust().sudo);
+        let message = write_error_text(error, Some(&id.backend), self.rust().sudo);
         let same = same_app_sources(&self.rust().packages, id);
         self.as_mut().set_details(encoded(json!({
             "package": package_row(&package, &same, None),
@@ -3289,6 +4064,7 @@ impl ffi::PackageController {
             key,
             stale: false,
         });
+        self.sync_needs_poll();
     }
     fn poll_prefetch(mut self: Pin<&mut Self>) {
         if let Some(worker) = &self.rust().prefetch_worker {
@@ -3350,27 +4126,7 @@ impl ffi::PackageController {
                 return;
             }
         }
-        // Keep sections warm while the app stays open.
-        if self.rust().prefetch.is_empty()
-            && self.rust().last_rewarm.elapsed() >= Duration::from_secs(30)
-        {
-            self.as_mut().rust_mut().last_rewarm = Instant::now();
-            let (sources, sudo) = (self.rust().source_filter.clone(), self.rust().sudo);
-            // prefetch_views() is in pop order, so Installed (which also
-            // fills Updates) still loads first.
-            let old: Vec<String> = prefetch_views()
-                .into_iter()
-                .filter(|view| {
-                    let key = cache_key(view, "", &sources, sudo);
-                    let cached = self.rust().view_cache.get(&key).map(|v| v.loaded);
-                    let preloaded = self.rust().prefetched.get(&key).map(|(loaded, _)| *loaded);
-                    cached
-                        .max(preloaded)
-                        .is_none_or(|loaded| loaded.elapsed() >= REWARM_AFTER)
-                })
-                .collect();
-            self.as_mut().rust_mut().prefetch = old;
-        }
+        self.as_mut().rewarm_if_due();
         let writing = self.rust().worker.as_ref().is_some_and(|w| w.job.writes())
             || !self.rust().confirmed_queue.is_empty()
             || self.rust().pending.is_some();
@@ -3391,7 +4147,39 @@ impl ffi::PackageController {
             }
         }
     }
+    /// Keep sections warm while the app stays open: queue preloads of
+    /// sections read long ago. poll() runs them. When nothing else is
+    /// outstanding the page stops polling, so opening a section checks too.
+    fn rewarm_if_due(mut self: Pin<&mut Self>) {
+        if self.rust().prefetch.is_empty()
+            && self.rust().last_rewarm.elapsed() >= Duration::from_secs(30)
+        {
+            self.as_mut().rust_mut().last_rewarm = Instant::now();
+            let (sources, sudo) = (self.rust().source_filter.clone(), self.rust().sudo);
+            // prefetch_views() is in pop order, so Installed (which also
+            // fills Updates) still loads first.
+            let old: Vec<String> = prefetch_views()
+                .into_iter()
+                .filter(|view| {
+                    let key = cache_key(view, "", &sources, sudo);
+                    let cached = self.rust().view_cache.get(&key).map(|v| v.loaded);
+                    let preloaded = self.rust().prefetched.get(&key).map(|(loaded, _)| *loaded);
+                    cached
+                        .max(preloaded)
+                        .is_none_or(|loaded| loaded.elapsed() >= REWARM_AFTER)
+                })
+                .collect();
+            self.as_mut().rust_mut().prefetch = old;
+        }
+    }
+    /// Publish what background threads delivered and start queued work.
+    /// Afterwards `needs_poll` says whether anything is still outstanding.
     pub fn poll(mut self: Pin<&mut Self>) {
+        self.as_mut().poll_work();
+        self.as_mut().poll_activity();
+        self.sync_needs_poll();
+    }
+    fn poll_work(mut self: Pin<&mut Self>) {
         if let Some(worker) = &self.rust().catalog_worker {
             if let Ok(sources) = worker.receiver.try_recv() {
                 let worker = self.as_mut().rust_mut().catalog_worker.take().unwrap();
@@ -3507,9 +4295,12 @@ impl ffi::PackageController {
                             continue;
                         }
                         if let Err(error) = &result {
-                            if let Some(notice) =
-                                preflight_notice(&worker.job, error, self.rust().sudo)
-                            {
+                            if let Some(notice) = preflight_notice(
+                                &worker.job,
+                                error,
+                                self.rust().sudo,
+                                &self.rust().names_for(&worker.job.operations()),
+                            ) {
                                 self.as_mut().set_notice(encoded(notice));
                             }
                         }
@@ -3525,7 +4316,12 @@ impl ffi::PackageController {
                             {
                                 json!({"kind": "info", "title": "The planned changes are different now. Review them again."})
                             } else {
-                                write_notice(&worker.job, &result, self.rust().sudo)
+                                write_notice(
+                                    &worker.job,
+                                    &result,
+                                    self.rust().sudo,
+                                    &self.rust().names_for(&worker.job.operations()),
+                                )
                             };
                             self.as_mut().set_notice(encoded(notice));
                             if let Some(id) = self.as_mut().rust_mut().active_activity_id.take() {
@@ -3645,13 +4441,19 @@ impl ffi::PackageController {
                         reason: "Backend worker failed".into(),
                     });
             }
+            // The quiet reload of the section on screen has landed.
+            if !self.rust().background
+                && matches!(&worker.job, Job::Load(view, _) if *view == self.rust().active_view)
+            {
+                self.as_mut().set_refreshing(false);
+            }
             self.as_mut().rust_mut().background = false;
             self.as_mut().rust_mut().discard_revalidation = false;
             let queued = self.as_mut().rust_mut().queued.take();
             self.as_mut().rust_mut().progress_state = None;
             self.as_mut().set_progress("{}".into());
             self.as_mut().set_writing(false);
-            let awaiting = self.rust().awaiting_prefetch;
+            let awaiting = self.rust().awaiting_prefetch && !self.rust().refreshing;
             self.as_mut().set_busy(awaiting);
             if let Some(entry) = self.as_mut().rust_mut().validated_confirmed.take() {
                 self.as_mut().rust_mut().queued = queued;
@@ -3702,6 +4504,7 @@ mod tests {
         let mut state = ProgressState::new(
             &Job::UpgradeAll(vec![first.clone(), second.clone()], None),
             Some(42),
+            &Names::new(),
         );
         state.apply(&Event::Started(first.clone()));
         state.apply(&Event::Progress {
@@ -3724,14 +4527,14 @@ mod tests {
         let snapshot: Value = serde_json::from_str(&state.snapshot().to_string()).unwrap();
         assert_eq!(snapshot["done"], 1);
         assert_eq!(snapshot["transfer_total"], Value::Null);
-        assert_eq!(snapshot["label"], "Refresh metadata for flatpak");
+        assert_eq!(snapshot["label"], "Refresh Flatpak package lists");
         let repository = RepositoryAction {
             backend: "flatpak".into(),
             name: "synthetic".into(),
             scope: Scope::System,
             change: repositories::Change::Remove,
         };
-        let state = ProgressState::new(&Job::Repositories(Some(repository)), None);
+        let state = ProgressState::new(&Job::Repositories(Some(repository)), None, &Names::new());
         assert_eq!(state.label, "Remove synthetic repository");
     }
     #[test]
@@ -4114,6 +4917,7 @@ mod tests {
         assert!(controller
             .status()
             .to_string()
+            .to_lowercase()
             .contains("unsupported package format"));
         assert!(controller.confirmation().is_empty());
         controller
@@ -4170,7 +4974,7 @@ mod tests {
         assert!(preview["summary"]
             .as_str()
             .unwrap()
-            .starts_with("Update Anonymous App\napt, System\n1 → 2"));
+            .starts_with("Update Anonymous App\nAPT · System\n1 → 2"));
         assert!(!preview["summary"]
             .as_str()
             .unwrap()
@@ -4188,7 +4992,7 @@ mod tests {
             .unwrap()
             .contains("Remove old-library (1)"));
         let body = preview["body"].as_str().unwrap();
-        assert!(body.contains("Source: apt"));
+        assert!(body.contains("Source: APT"));
         assert!(body.contains("Scope: System"));
         assert!(body.contains("Remove old-library (1)"));
         assert!(!body.contains("Install anonymous"));
@@ -4328,7 +5132,7 @@ mod tests {
         assert!(controller
             .confirmation()
             .to_string()
-            .contains("Updates from them are not included"));
+            .contains("Updates from it are not included"));
         controller.as_mut().confirm(false);
 
         controller.as_mut().apply(Ok(Payload::RetryFailedUpdates(
@@ -4579,8 +5383,7 @@ mod tests {
             .unwrap()
             .contains("Remove (1): retired"));
         assert!(
-            confirmation.find("Remove (1): retired")
-                < confirmation.find("Update all packages from apt")
+            confirmation.find("Remove (1): retired") < confirmation.find("Update all APT packages")
         );
         assert!(
             matches!(&controller.rust().pending, Some(Job::UpgradeAll(_, Some(saved))) if *saved == plan)
@@ -5290,7 +6093,7 @@ mod tests {
         assert!(controller
             .status()
             .to_string()
-            .contains("Autostart could not"));
+            .contains("Autostart couldn't be changed"));
         controller.as_mut().rust_mut().autostart_path = None;
         assert!(!controller.as_mut().set_autostart(true));
         assert!(controller
@@ -5309,7 +6112,8 @@ mod tests {
         let store = History::new(path.join("activity.json"));
         let mut controller = ffi::create_controller();
         let mut controller = controller.pin_mut();
-        controller.as_mut().rust_mut().activity_store = Some(store.clone());
+        controller.as_mut().rust_mut().activity_store =
+            Some(ActivityStore::at(path.join("activity.json")));
         let first = Operation::Upgrade(PackageId {
             backend: "fixture".into(),
             name: "first".into(),
@@ -5341,7 +6145,18 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].operations, operations);
         assert_eq!(entries[0].state, State::Queued);
+        // Activity is read on its own thread and published by poll().
+        assert!(*controller.needs_poll());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline && !controller.activity().to_string().contains("queued") {
+            controller.as_mut().poll_activity();
+            thread::sleep(Duration::from_millis(2));
+        }
         assert!(controller.activity().to_string().contains("queued"));
+        assert!(controller
+            .activity()
+            .to_string()
+            .contains("Update first (fixture)"));
         controller.as_mut().cancel_queued();
         assert_eq!(store.entries().unwrap()[0].state, State::Cancelled);
         controller.as_mut().rust_mut().worker = None;
@@ -5391,7 +6206,8 @@ mod tests {
             .unwrap();
         let mut controller = ffi::create_controller();
         let mut controller = controller.pin_mut();
-        controller.as_mut().rust_mut().activity_store = Some(store.clone());
+        controller.as_mut().rust_mut().activity_store =
+            Some(ActivityStore::at(path.join("activity.json")));
         controller.as_mut().rust_mut().revalidating = Some(Confirmed {
             job: Job::Write(operation, None),
             activity_id: Some(id),
@@ -5421,7 +6237,8 @@ mod tests {
             .unwrap();
         let mut controller = ffi::create_controller();
         let mut controller = controller.pin_mut();
-        controller.as_mut().rust_mut().activity_store = Some(store.clone());
+        controller.as_mut().rust_mut().activity_store =
+            Some(ActivityStore::at(path.join("activity.json")));
         controller.as_mut().start_confirmed(Confirmed {
             job: Job::Write(operation, None),
             activity_id: Some(id),
@@ -5555,13 +6372,13 @@ mod tests {
             capabilities: vec![],
             availability: Err(EngineError::Cancelled),
         };
-        assert_eq!(source_status(&failed), "operation cancelled");
+        assert_eq!(source_status(&failed), "Cancelled.");
         let clean = Operation::Clean(CleanupId {
             backend: "apt".into(),
             key: "autoremove".into(),
         });
-        assert_eq!(operation_label(&clean), "Clean autoremove with apt");
-        assert!(confirmation_label(&clean, &[]).contains("Clean autoremove with apt"));
+        assert_eq!(operation_label(&clean), "Clean autoremove (APT)");
+        assert!(confirmation_label(&clean, &[]).contains("Clean autoremove (APT)"));
         let firmware = |name: &str| Package {
             id: PackageId {
                 backend: "fwupd".into(),
@@ -5686,31 +6503,83 @@ mod tests {
         use pkgdeck_core::process::{Completion, ExecutionError as E};
         let install = Operation::Install(synthetic_package("htop", "htop").id);
         let job = Job::Write(install.clone(), None);
-        assert_eq!(operation_title(&install), "Install htop (apt)");
+        assert_eq!(operation_title(&install), "Install htop (APT)");
         assert_eq!(
             operation_title(&Operation::Refresh {
                 backend: "apt".into()
             }),
-            "Refresh metadata for apt"
+            "Refresh APT package lists"
         );
         let success = write_notice(
             &job,
             &Ok(Payload::Written(OperationOutcome::default())),
             false,
+            &Names::new(),
         );
         assert_eq!(
             success,
-            json!({"kind": "success", "title": "Install htop (apt) finished"})
+            json!({"kind": "success", "title": "Install htop (APT) finished",
+                "operation": "install", "package": "htop", "source": "apt", "source_name": "APT",
+                "undo": true, "undo_action": "remove",
+                "target": {"source": "apt", "name": "htop", "architecture": "all",
+                    "remote": null, "scope": "system", "reference": null}})
         );
-        let denied = write_notice(&job, &Err(E::AuthorizationDenied.into()), false);
+        // A remembered display name is what people see.
+        let names = Names::from([(
+            synthetic_package("htop", "htop").id,
+            "Process Viewer".to_owned(),
+        )]);
+        let named = write_notice(
+            &job,
+            &Ok(Payload::Written(OperationOutcome::default())),
+            false,
+            &names,
+        );
+        assert_eq!(named["title"], "Install Process Viewer (APT) finished");
+        assert_eq!(named["package"], "Process Viewer");
+        // Undo is offered only for a finished install or removal.
+        let failed = write_notice(&job, &Err(EngineError::NotFound), false, &names);
+        assert_eq!(failed["undo"], false);
+        let removal = write_notice(
+            &Job::Write(
+                Operation::Remove(synthetic_package("htop", "htop").id),
+                None,
+            ),
+            &Ok(Payload::Written(OperationOutcome::default())),
+            false,
+            &names,
+        );
+        assert_eq!(removal["undo_action"], "install");
+        let update = write_notice(
+            &Job::Write(
+                Operation::Upgrade(synthetic_package("htop", "htop").id),
+                None,
+            ),
+            &Ok(Payload::Written(OperationOutcome::default())),
+            false,
+            &names,
+        );
+        assert_eq!(update["operation"], "update");
+        assert_eq!(update["undo"], false);
+        let denied = write_notice(
+            &job,
+            &Err(E::AuthorizationDenied.into()),
+            false,
+            &Names::new(),
+        );
         assert_eq!(denied["kind"], "error");
-        assert_eq!(denied["title"], "Install htop (apt) failed");
+        assert_eq!(denied["title"], "Install htop (APT) failed");
         assert_eq!(denied["action"], "settings");
         assert!(denied["detail"]
             .as_str()
             .unwrap()
             .contains("password prompt"));
-        let sudo = write_notice(&job, &Err(E::AuthorizationDenied.into()), true);
+        let sudo = write_notice(
+            &job,
+            &Err(E::AuthorizationDenied.into()),
+            true,
+            &Names::new(),
+        );
         assert!(sudo["detail"].as_str().unwrap().contains("sudo login"));
         for (error, expected) in [
             (E::AuthorizationCancelled, "prompt was closed"),
@@ -5725,7 +6594,7 @@ mod tests {
                     truncated: false,
                     cancellation_deferred: false,
                 }),
-                "E: one E: two",
+                "APT couldn't run: one.",
             ),
             (
                 E::Failed(Completion {
@@ -5736,18 +6605,18 @@ mod tests {
                     truncated: false,
                     cancellation_deferred: false,
                 }),
-                "reported an error",
+                "APT reported an error without details.",
             ),
-            (E::TimedOut, "timed out"),
+            (E::TimedOut, "took too long"),
         ] {
-            let notice = write_notice(&job, &Err(error.into()), false);
+            let notice = write_notice(&job, &Err(error.into()), false, &Names::new());
             assert!(
                 notice["detail"].as_str().unwrap().contains(expected),
                 "{notice}"
             );
             assert_eq!(notice["action"], "");
         }
-        let cancelled = write_notice(&job, &Err(EngineError::Cancelled), false);
+        let cancelled = write_notice(&job, &Err(EngineError::Cancelled), false, &Names::new());
         assert_eq!(cancelled["kind"], "info");
         let batch = Job::UpgradeAll(
             vec![
@@ -5766,7 +6635,7 @@ mod tests {
                 "Completed 1 of 2 updates.\nUpdate all packages from apt: Completed\nUpdate all packages from flatpak: busy".into(),
                 vec![Outcome::Finished, Outcome::Failed],
             )),
-            false,
+            false, &Names::new(),
         );
         assert_eq!(partial["title"], "1 of 2 changes failed");
         assert_eq!(partial["detail"], "Update all packages from flatpak: busy");
@@ -5777,6 +6646,7 @@ mod tests {
                 vec![Outcome::Finished, Outcome::Cancelled],
             )),
             false,
+            &Names::new(),
         );
         assert_eq!(cancelled_batch["kind"], "info");
         assert_eq!(
@@ -5790,6 +6660,7 @@ mod tests {
                 vec![Outcome::Failed, Outcome::Cancelled],
             )),
             false,
+            &Names::new(),
         );
         assert_eq!(mixed["kind"], "error");
         assert_eq!(partial["action"], "");
@@ -5799,7 +6670,7 @@ mod tests {
                 "Completed 0 of 2 updates.\nUpdate all packages from apt: authorization denied or unavailable\nUpdate all packages from flatpak: Completed".into(),
                 vec![Outcome::Failed, Outcome::Finished],
             )),
-            false,
+            false, &Names::new(),
         );
         assert_eq!(denied_batch["kind"], "error");
         assert_eq!(denied_batch["action"], "settings");
@@ -5813,7 +6684,7 @@ mod tests {
                 "Completed 0 of 1 updates.\nUpdate all packages from apt: authorization denied or unavailable".into(),
                 vec![Outcome::Failed],
             )),
-            true,
+            true, &Names::new(),
         );
         assert_eq!(denied_sudo["action"], "settings");
         assert!(denied_sudo["detail"]
@@ -5822,24 +6693,30 @@ mod tests {
             .contains("sudo login"));
         // A failed preview says so; a superseded one stays quiet.
         let plan = Job::PlanOperation(install.clone());
-        let prepared = preflight_notice(&plan, &E::LockBusy.into(), false).unwrap();
-        assert_eq!(prepared["title"], "Install htop (apt) couldn't be prepared");
+        let prepared = preflight_notice(&plan, &E::LockBusy.into(), false, &Names::new()).unwrap();
+        assert_eq!(prepared["title"], "Install htop (APT) couldn't be prepared");
         assert_eq!(prepared["action"], "");
         let denied_plan = preflight_notice(
             &Job::PlanUpgrade(vec![], 0),
             &E::AuthorizationDenied.into(),
             false,
+            &Names::new(),
         )
         .unwrap();
         assert_eq!(denied_plan["title"], "The update couldn't be prepared");
         assert_eq!(denied_plan["action"], "settings");
         assert_eq!(
-            preflight_notice(&Job::PlanCleanAll(vec![]), &E::TimedOut.into(), false).unwrap()
-                ["title"],
+            preflight_notice(
+                &Job::PlanCleanAll(vec![]),
+                &E::TimedOut.into(),
+                false,
+                &Names::new()
+            )
+            .unwrap()["title"],
             "The cleanup couldn't be prepared"
         );
-        assert!(preflight_notice(&plan, &EngineError::Cancelled, false).is_none());
-        assert!(preflight_notice(&job, &E::LockBusy.into(), false).is_none());
+        assert!(preflight_notice(&plan, &EngineError::Cancelled, false, &Names::new()).is_none());
+        assert!(preflight_notice(&job, &E::LockBusy.into(), false, &Names::new()).is_none());
         let all = write_notice(
             &batch,
             &Ok(Payload::Batch(
@@ -5847,6 +6724,7 @@ mod tests {
                 vec![Outcome::Finished; 2],
             )),
             false,
+            &Names::new(),
         );
         assert_eq!(all["title"], "2 changes finished");
         let firmware = write_notice(
@@ -5856,6 +6734,7 @@ mod tests {
                 vec![Outcome::Finished],
             )),
             false,
+            &Names::new(),
         );
         assert_eq!(firmware["kind"], "success");
         assert!(firmware["detail"]
@@ -5868,7 +6747,7 @@ mod tests {
                 "Completed 2 of 2 updates.\nUpdate all packages from apt: Completed\nUpdate all packages from flatpak: Finished before it could be cancelled. Changes were kept.".into(),
                 vec![Outcome::Finished; 2],
             )),
-            false,
+            false, &Names::new(),
         );
         assert_eq!(
             batch_done["detail"],
@@ -5880,6 +6759,7 @@ mod tests {
                 cancellation_deferred: true,
             })),
             false,
+            &Names::new(),
         );
         assert!(deferred["detail"]
             .as_str()
@@ -5889,6 +6769,7 @@ mod tests {
             &Job::Repositories(None),
             &Ok(Payload::Written(OperationOutcome::default())),
             false,
+            &Names::new(),
         );
         assert_eq!(repository["title"], "The change finished");
         // The banner clears on request.
@@ -6508,7 +7389,7 @@ mod tests {
         assert!(controller
             .status()
             .to_string()
-            .contains("Invalid repository request"));
+            .contains("This repository change isn't valid"));
         controller.as_mut().change_repository(
             r#"{"backend":"flatpak","name":"--all","scope":"system","action":"remove"}"#.into(),
         );
@@ -6562,7 +7443,8 @@ mod tests {
             })));
         let report: Value = serde_json::from_str(&controller.repositories().to_string()).unwrap();
         assert_eq!(report["repositories"][0]["scope"], "system");
-        assert_eq!(report["errors"][0], "Synthetic partial failure");
+        assert_eq!(report["errors"][0], "Synthetic partial failure.");
+        assert_eq!(report["repositories"][0]["where"], "Flatpak · System");
         assert!(controller
             .rust()
             .view_cache
@@ -6729,7 +7611,7 @@ mod tests {
         assert!(controller
             .details()
             .to_string()
-            .contains("Synthetic daemon offline"));
+            .contains("Firmware isn't available: synthetic daemon offline."));
         controller.as_mut().rust_mut().failures.clear();
         controller.as_mut().rust_mut().sources.push(Source {
             backend: "fwupd".into(),
@@ -6900,7 +7782,7 @@ mod tests {
         assert!(controller
             .status()
             .to_string()
-            .contains("no package matches"));
+            .contains("No package matches"));
     }
     struct Fixture {
         package: Package,
@@ -7388,7 +8270,7 @@ mod tests {
                 reason: "npm ls failed: boom".into(),
             },
         };
-        let text = failure_details(&failure).to_string();
+        let text = failure_details(&failure, false).to_string();
         assert!(text.contains("npm ls failed: boom"));
         assert!(text.contains("Sources view"));
     }
@@ -7700,7 +8582,7 @@ mod tests {
                         } else {
                             "Completed 1 of 1"
                         }));
-                        assert!(status.contains("Update all packages from fixture"));
+                        assert!(status.contains("Update all fixture packages"));
                         assert!(status.contains(if fail { "authorization" } else { "cancel" }));
                     }
                     Reply::Done(Ok(Payload::Written(outcome))) => {
@@ -7718,5 +8600,864 @@ mod tests {
                 }
             }
         }
+    }
+    fn fake_worker(job: Job, replies: Vec<Reply>) -> Worker {
+        let (sender, receiver) = mpsc::channel();
+        for reply in replies {
+            sender.send(reply).unwrap();
+        }
+        Worker {
+            handle: thread::spawn(move || drop(sender)),
+            receiver,
+            cancel: Cancellation::default(),
+            job,
+        }
+    }
+    fn idle_controller() -> cxx::UniquePtr<ffi::PackageController> {
+        let mut controller = ffi::create_controller();
+        controller.pin_mut().rust_mut().prefetch.clear();
+        controller
+    }
+    #[test]
+    fn source_and_scope_names_read_as_people_know_them() {
+        for (id, name) in [
+            ("apt", "APT"),
+            ("dnf", "DNF"),
+            ("pacman", "Pacman"),
+            ("zypper", "Zypper"),
+            ("snap", "Snap"),
+            ("homebrew", "Homebrew"),
+            ("homebrew-cask", "Homebrew Casks"),
+            ("appimage", "AppImage"),
+            ("flatpak", "Flatpak"),
+            ("docker", "Docker images"),
+            ("podman", "Podman images"),
+            ("cargo", "Cargo"),
+            ("npm", "npm"),
+            ("pnpm", "pnpm"),
+            ("bun", "Bun"),
+            ("pip", "pip"),
+            ("pipx", "pipx"),
+            ("uv", "uv"),
+            ("composer", "Composer"),
+            ("gem", "RubyGems"),
+            ("fwupd", "Firmware"),
+            ("codex", "Codex (standalone)"),
+            ("claude", "Claude Code (standalone)"),
+            ("grok", "Grok (standalone)"),
+            ("opencode", "OpenCode (standalone)"),
+            ("fixture", "fixture"),
+        ] {
+            assert_eq!(source_display_name(id), name);
+        }
+        // Every source the engine knows has a name of its own.
+        for id in pkgdeck_core::backends::BACKEND_IDS {
+            assert!(source_display_name(id) != *id || id.chars().all(|c| c.is_lowercase()));
+        }
+        assert_eq!(
+            source_and_scope("flatpak", &Scope::User { uid: 1000 }),
+            "Flatpak · User"
+        );
+        assert_eq!(source_and_scope("apt", &Scope::System), "APT · System");
+        assert_eq!(
+            scope_word(&Scope::Environment {
+                path: PathBuf::from("/tmp/env")
+            }),
+            "/tmp/env"
+        );
+        let upgrade_all = Operation::UpgradeAll {
+            backend: "flatpak".into(),
+        };
+        assert_eq!(operation_title(&upgrade_all), "Update all Flatpak packages");
+        let mut id = synthetic_package("tool", "Tool").id;
+        id.scope = Scope::User { uid: 1000 };
+        let label = operation_label(&Operation::Remove(id.clone()));
+        assert!(label.contains("Source: APT"));
+        assert!(label.contains("Scope: User"));
+        assert!(!label.contains("1000"));
+        // A downloaded AppImage shows its file name, a Flatpak ref its ref.
+        id.backend = "appimage".into();
+        id.name = "https://example.invalid/dl/Tool.AppImage?x=1".into();
+        id.reference = Some("artifact:sha".into());
+        assert_eq!(package_name(&id), "Tool.AppImage");
+        id.reference = Some("app/org.example.Tool/x86_64/stable".into());
+        assert_eq!(package_name(&id), "app/org.example.Tool/x86_64/stable");
+    }
+    #[test]
+    fn repository_text_names_sources_and_scopes() {
+        let action = RepositoryAction {
+            backend: "flatpak".into(),
+            name: "flathub".into(),
+            scope: Scope::System,
+            change: repositories::Change::Remove,
+        };
+        assert_eq!(
+            repository_label(&action),
+            "Remove repository\nflathub · Flatpak · System"
+        );
+        for (change, text) in [
+            (
+                repositories::Change::Add {
+                    url: "https://example.invalid".into(),
+                },
+                "Add repository from https://example.invalid",
+            ),
+            (
+                repositories::Change::SetEnabled { enabled: true },
+                "Enable repository",
+            ),
+            (
+                repositories::Change::SetEnabled { enabled: false },
+                "Disable repository",
+            ),
+            (
+                repositories::Change::SetPriority { priority: 5 },
+                "Set repository priority to 5",
+            ),
+            (repositories::Change::OpenEditor, "Open Software Sources"),
+        ] {
+            let action = RepositoryAction {
+                change,
+                ..action.clone()
+            };
+            assert!(repository_label(&action).starts_with(text));
+        }
+        assert_eq!(
+            repository_error("flatpak: host command failed (Some(1)): error: No remote refs\n"),
+            "Flatpak couldn't run: No remote refs."
+        );
+        assert_eq!(
+            repository_error("apt: listing failed"),
+            "APT: Listing failed."
+        );
+        assert_eq!(
+            repository_error("/etc/apt/sources.list: unreadable"),
+            "/etc/apt/sources.list: unreadable."
+        );
+    }
+    #[test]
+    fn engine_errors_become_one_plain_sentence() {
+        use pkgdeck_core::process::{Completion, ExecutionError as E};
+        let failed = |stderr: &str| {
+            EngineError::Execution(E::Failed(Completion {
+                code: Some(1),
+                signal: None,
+                stdout: vec![],
+                stderr: stderr.as_bytes().to_vec(),
+                truncated: false,
+                cancellation_deferred: false,
+            }))
+        };
+        let rustup = failed("error: rustup could not choose a version of cargo to run, because one wasn't specified explicitly, and no default is configured.\nhelp: run 'rustup default stable'\n");
+        assert_eq!(
+            plain_error(&rustup, Some("cargo"), false),
+            "Cargo couldn't run: rustup has no default toolchain."
+        );
+        // The same text reached through Display, with the debug exit code.
+        assert_eq!(
+            plain_text(&rustup.to_string(), Some("cargo")),
+            "Cargo couldn't run: rustup has no default toolchain."
+        );
+        assert_eq!(
+            plain_text(
+                "host command failed (Some(100)): \nE: Unable to locate package x\n",
+                None
+            ),
+            "Unable to locate package x."
+        );
+        assert_eq!(
+            plain_text("host command failed (None): ", Some("apt")),
+            "APT reported an error without details."
+        );
+        assert_eq!(
+            plain_text("host command failed (None): ", None),
+            "The package manager reported an error without details."
+        );
+        // Stdout is used when a tool reports only there.
+        let quiet = EngineError::Execution(E::Failed(Completion {
+            code: Some(1),
+            signal: None,
+            stdout: b"npm ERR! 404 Not Found\n".to_vec(),
+            stderr: vec![],
+            truncated: false,
+            cancellation_deferred: false,
+        }));
+        assert_eq!(
+            plain_error(&quiet, Some("npm"), false),
+            "npm couldn't run: npm ERR! 404 Not Found."
+        );
+        assert_eq!(
+            plain_error(&failed("   \n"), None, false),
+            "The package manager reported an error."
+        );
+        assert_eq!(plain_error(&failed("boom"), None, false), "Boom.");
+        // Running as root is explained, whatever layer said it.
+        assert_eq!(
+            plain_error(
+                &E::Disabled("run the frontend as an unprivileged user".into()).into(),
+                Some("apt"),
+                false
+            ),
+            ROOT_MESSAGE
+        );
+        assert_eq!(
+            plain_error(
+                &EngineError::Unavailable {
+                    backend: "apt".into(),
+                    reason: "run the frontend as an unprivileged user".into()
+                },
+                None,
+                false
+            ),
+            ROOT_MESSAGE
+        );
+        assert_eq!(
+            plain_error(
+                &EngineError::InvalidResponse {
+                    backend: "snap".into(),
+                    reason: "run the frontend as an unprivileged user".into()
+                },
+                None,
+                false
+            ),
+            ROOT_MESSAGE
+        );
+        assert_eq!(
+            plain_error(
+                &EngineError::InvalidResponse {
+                    backend: "snap".into(),
+                    reason: "unexpected output Some(\"x\")".into()
+                },
+                None,
+                false
+            ),
+            "Snap reported a problem: unexpected output x."
+        );
+        assert_eq!(
+            plain_error(
+                &EngineError::InvalidResponse {
+                    backend: "snap".into(),
+                    reason: " ".into()
+                },
+                None,
+                false
+            ),
+            "Snap reported a problem."
+        );
+        assert_eq!(
+            plain_error(
+                &EngineError::InvalidResponse {
+                    backend: "open".into(),
+                    reason: "Only local file URLs are supported.".into()
+                },
+                None,
+                false
+            ),
+            "Only local file URLs are supported."
+        );
+        assert_eq!(
+            plain_error(
+                &EngineError::Unavailable {
+                    backend: "apt".into(),
+                    reason: "APT lists are missing".into()
+                },
+                None,
+                false
+            ),
+            "APT isn't available: APT lists are missing."
+        );
+        assert_eq!(
+            plain_error(
+                &EngineError::Unsupported {
+                    backend: "fwupd".into(),
+                    capability: Capability::Install
+                },
+                None,
+                false
+            ),
+            "Firmware can't do this."
+        );
+        assert_eq!(
+            plain_error(&EngineError::UnknownBackend("x".into()), None, false),
+            "Unknown backend: x."
+        );
+        assert_eq!(plain_error(&E::Cancelled.into(), None, false), "Cancelled.");
+        assert_eq!(plain_text("", None), "Something went wrong.");
+        assert_eq!(sentence("  "), "");
+        assert_eq!(sentence("done!"), "Done!");
+        assert_eq!(strip_debug("code Some(3 and more"), "code 3 and more");
+        assert_eq!(strip_debug("exit (None) now"), "exit  now");
+        assert_eq!(lower_first("APT lists"), "APT lists");
+        assert_eq!(lower_first("Broken"), "broken");
+        assert_eq!(meaningful_line("\n\n"), None);
+        assert_eq!(
+            meaningful_line(
+                "WARNING: apt does not have a stable CLI interface.\nReading\nE: Held packages"
+            ),
+            Some("Held packages".into())
+        );
+        // Batch lines keep the engine's denial until it is explained here.
+        assert_eq!(
+            batch_status_text(
+                "Update x (APT): authorization denied or unavailable\nok",
+                true
+            ),
+            format!(
+                "Update x (APT): {}\nok",
+                plain_error(&E::AuthorizationDenied.into(), None, true)
+            )
+        );
+    }
+    #[test]
+    fn errors_shown_by_the_controller_are_plain() {
+        let mut controller = idle_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().apply(Err(EngineError::Execution(
+            pkgdeck_core::process::ExecutionError::Disabled(
+                "run the frontend as an unprivileged user".into(),
+            ),
+        )));
+        assert_eq!(controller.status().to_string(), ROOT_MESSAGE);
+        let failure = BackendFailure {
+            backend: "cargo".into(),
+            error: EngineError::InvalidResponse {
+                backend: "cargo".into(),
+                reason: "host command failed (Some(1)): error: rustup could not choose a version of cargo to run".into(),
+            },
+        };
+        controller
+            .as_mut()
+            .apply(Ok(Payload::Packages(PackageReport {
+                packages: vec![synthetic_package("htop", "htop")],
+                failures: vec![failure.clone()],
+                successful_sources: vec!["apt".into()],
+            })));
+        let expected = "Cargo couldn't run: rustup has no default toolchain.";
+        assert!(controller
+            .status()
+            .to_string()
+            .contains(&format!("Cargo: {expected}")));
+        let rows: Value = serde_json::from_str(&controller.rows().to_string()).unwrap();
+        assert_eq!(rows[1]["summary"], expected);
+        assert_eq!(rows[1]["display_name"], "Cargo");
+        assert_eq!(rows[1]["source"], "cargo");
+        let state: Value = serde_json::from_str(&controller.report_state().to_string()).unwrap();
+        assert_eq!(state["failures"][0]["detail"], expected);
+        controller
+            .as_mut()
+            .apply(Ok(Payload::Cleanup(CleanupReport {
+                items: vec![],
+                failures: vec![failure],
+            })));
+        let rows: Value = serde_json::from_str(&controller.rows().to_string()).unwrap();
+        assert_eq!(rows[0]["summary"], expected);
+        let state: Value = serde_json::from_str(&controller.report_state().to_string()).unwrap();
+        assert_eq!(state["failures"][0]["detail"], expected);
+        assert!(state["checked_at"].as_u64().unwrap() > 0);
+    }
+    #[test]
+    fn activity_reads_share_the_lock_and_never_write() {
+        use rustix::fs::{flock, FlockOperation};
+        let path =
+            std::env::temp_dir().join(format!("pkgdeck-activity-read-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        let store = ActivityStore::at(path.join("activity.json"));
+        // No history yet reads as empty, without creating anything.
+        assert!(store.load().unwrap().is_empty());
+        assert!(!path.exists());
+        let operation = Operation::Refresh {
+            backend: "apt".into(),
+        };
+        let id = store
+            .begin("gui", vec![operation.clone()], State::Finished)
+            .unwrap();
+        // Another reader holding the lock shared does not block this read.
+        let lock = std::fs::File::open(path.join("activity.lock")).unwrap();
+        flock(&lock, FlockOperation::LockShared).unwrap();
+        let modified = std::fs::metadata(path.join("activity.json"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        let entries = store.load().unwrap();
+        assert_eq!(entries[0].id, id);
+        assert_eq!(
+            std::fs::metadata(path.join("activity.json"))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            modified
+        );
+        drop(lock);
+        // An entry whose owner died is marked interrupted once.
+        store.begin("gui", vec![operation], State::Running).unwrap();
+        let mut raw: Vec<Value> =
+            serde_json::from_slice(&std::fs::read(path.join("activity.json")).unwrap()).unwrap();
+        raw[1]["owner_pid"] = json!(u32::MAX - 1);
+        std::fs::write(
+            path.join("activity.json"),
+            serde_json::to_vec(&raw).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(store.load().unwrap()[1].state, State::Interrupted);
+        // A broken file reads as no history rather than failing.
+        std::fs::write(path.join("activity.json"), b"not json").unwrap();
+        assert!(read_activity(&path.join("activity.json"))
+            .unwrap()
+            .is_empty());
+        // A directory where the file should be is an error.
+        std::fs::remove_file(path.join("activity.json")).unwrap();
+        std::fs::create_dir(path.join("activity.json")).unwrap();
+        assert!(read_activity(&path.join("activity.json")).is_err());
+        std::fs::remove_dir(path.join("activity.json")).unwrap();
+        std::fs::remove_file(path.join("activity.lock")).unwrap();
+        std::fs::create_dir(path.join("activity.lock")).unwrap();
+        assert!(read_activity(&path.join("activity.json")).is_ok());
+        std::fs::remove_dir_all(path).unwrap();
+        let _ = Some(&store).map(|store| store.history.clone());
+        assert!(ActivityStore::default_store().is_some() || std::env::var_os("HOME").is_none());
+    }
+    #[test]
+    fn activity_refreshes_off_the_gui_thread_and_repeats_when_asked_again() {
+        let path =
+            std::env::temp_dir().join(format!("pkgdeck-activity-worker-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        let store = ActivityStore::at(path.join("activity.json"));
+        let mut controller = idle_controller();
+        let mut controller = controller.pin_mut();
+        // Without a store nothing starts.
+        controller.as_mut().refresh_activity();
+        assert!(controller.rust().activity_worker.is_none());
+        controller.as_mut().poll();
+        assert!(!*controller.needs_poll());
+        controller.as_mut().rust_mut().activity_store = Some(store.clone());
+        controller.as_mut().refresh_activity();
+        assert!(*controller.needs_poll());
+        // A second request while reading reads again afterwards.
+        store
+            .begin(
+                "gui",
+                vec![Operation::Refresh {
+                    backend: "flatpak".into(),
+                }],
+                State::Queued,
+            )
+            .unwrap();
+        controller.as_mut().refresh_activity();
+        assert!(controller.rust().activity_again);
+        wait_until(&mut controller, |controller| {
+            controller
+                .activity()
+                .to_string()
+                .contains("Refresh Flatpak package lists")
+                && controller.rust().activity_worker.is_none()
+        });
+        assert!(!controller.rust().activity_again);
+        assert!(!*controller.needs_poll());
+        std::fs::remove_dir_all(path).unwrap();
+    }
+    #[test]
+    fn needs_poll_is_true_exactly_while_work_is_outstanding() {
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        // Startup preloads wait for poll().
+        assert!(*controller.needs_poll());
+        controller.as_mut().rust_mut().prefetch.clear();
+        controller.as_mut().poll();
+        assert!(!*controller.needs_poll());
+        // A confirmation holds preloads back; declining lets them run.
+        controller.as_mut().rust_mut().prefetch = vec!["Clean".into()];
+        controller.as_mut().rust_mut().pending = Some(Job::CleanAll(vec![]));
+        controller.as_mut().sync_needs_poll();
+        assert!(!*controller.needs_poll());
+        controller.as_mut().confirm(false);
+        assert!(*controller.needs_poll());
+        controller.as_mut().rust_mut().prefetch.clear();
+        // Details start synchronously and flip it at once.
+        controller.as_mut().rust_mut().source_filter = vec!["grok".into()];
+        let mut package = synthetic_package("grok", "Grok");
+        package.id.backend = "grok".into();
+        controller.as_mut().rust_mut().packages = vec![package];
+        controller.as_mut().poll();
+        assert!(!*controller.needs_poll());
+        controller.as_mut().select(0);
+        assert!(*controller.needs_poll());
+        wait_until(&mut controller, |controller| {
+            controller.rust().details_worker.is_none()
+        });
+        controller.as_mut().poll();
+        assert!(!*controller.needs_poll());
+        // Cancelling with nothing running keeps it false.
+        controller.as_mut().cancel();
+        assert!(!*controller.needs_poll());
+        // Each worker kind counts.
+        let mut rust = Controller::default();
+        rust.prefetch.clear();
+        assert!(!rust.outstanding());
+        rust.awaiting_prefetch = true;
+        assert!(rust.outstanding());
+        rust.awaiting_prefetch = false;
+        rust.catalog_worker = Some(CatalogWorker {
+            handle: thread::spawn(|| {}),
+            receiver: mpsc::channel().1,
+            cancel: Cancellation::default(),
+        });
+        assert!(rust.outstanding());
+        let worker = rust.catalog_worker.take().unwrap();
+        worker.handle.join().unwrap();
+        rust.worker = Some(fake_worker(Job::Load("Clean".into(), "".into()), vec![]));
+        assert!(rust.outstanding());
+        assert!(rust.foreground_worker());
+        rust.refreshing = true;
+        assert!(!rust.foreground_worker());
+        rust.worker.take().unwrap().handle.join().unwrap();
+    }
+    #[test]
+    fn returning_to_a_recent_section_publishes_it_at_once() {
+        let mut controller = idle_controller();
+        let mut controller = controller.pin_mut();
+        let key = cache_key("Updates", "", &[], false);
+        let mut cached = cached_view("recent update");
+        cached.report_state = r#"{"phase":"complete","checked_at":1234}"#.into();
+        controller
+            .as_mut()
+            .rust_mut()
+            .view_cache
+            .insert(key, cached);
+        controller
+            .as_mut()
+            .load("Updates".into(), "".into(), "".into(), false, false);
+        assert!(controller.rows().to_string().contains("recent update"));
+        assert!(!*controller.busy());
+        assert!(!*controller.refreshing());
+        assert!(controller.rust().worker.is_none());
+        let state: Value = serde_json::from_str(&controller.report_state().to_string()).unwrap();
+        assert_eq!(state["phase"], "cached");
+        assert_eq!(state["checked_at"], 1234);
+    }
+    #[test]
+    fn returning_to_an_old_section_refreshes_quietly_behind_it() {
+        let mut controller = idle_controller();
+        let mut controller = controller.pin_mut();
+        let key = cache_key("Installed", "", &[], false);
+        let mut cached = cached_view("old package");
+        cached.loaded = Instant::now() - VIEW_TTL;
+        controller
+            .as_mut()
+            .rust_mut()
+            .view_cache
+            .insert(key.clone(), cached);
+        // The previous section still reads in the background.
+        controller.as_mut().rust_mut().background = true;
+        controller.as_mut().rust_mut().worker =
+            Some(fake_worker(Job::Load("Sources".into(), "".into()), vec![]));
+        controller
+            .as_mut()
+            .load("Installed".into(), "".into(), "".into(), false, false);
+        assert!(controller.rows().to_string().contains("old package"));
+        assert!(!*controller.busy());
+        assert!(*controller.refreshing());
+        assert!(*controller.needs_poll());
+        assert!(
+            matches!(&controller.rust().queued, Some(Job::Load(view, _)) if view == "Installed")
+        );
+        // Asking for it again keeps the one reload.
+        controller.as_mut().rust_mut().background = false;
+        controller.as_mut().rust_mut().queued = None;
+        let report = PackageReport {
+            packages: vec![synthetic_package("fresh", "Fresh")],
+            failures: vec![],
+            successful_sources: vec!["apt".into()],
+        };
+        let reload = fake_worker(
+            Job::Load("Installed".into(), "".into()),
+            vec![Reply::Done(Ok(Payload::Packages(report)))],
+        );
+        let cancel = reload.cancel.clone();
+        controller.as_mut().rust_mut().worker = Some(reload);
+        controller
+            .as_mut()
+            .load("Installed".into(), "".into(), "".into(), false, false);
+        assert!(!cancel.requested());
+        assert!(*controller.refreshing());
+        assert!(!*controller.busy());
+        // The reload lands: fresh rows, spinner off, checked time recorded.
+        wait_until(&mut controller, |controller| {
+            controller.rust().worker.is_none()
+        });
+        assert!(controller.rows().to_string().contains("fresh"));
+        assert!(!*controller.refreshing());
+        assert!(!*controller.busy());
+        let state: Value = serde_json::from_str(&controller.report_state().to_string()).unwrap();
+        assert!(state["checked_at"].as_u64().unwrap() > 0);
+    }
+    #[test]
+    fn a_users_request_replaces_a_quiet_refresh() {
+        let mut controller = idle_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().rust_mut().active_view = "Installed".into();
+        controller.as_mut().set_refreshing(true);
+        let refresh = fake_worker(Job::Load("Installed".into(), "".into()), vec![]);
+        let cancel = refresh.cancel.clone();
+        controller.as_mut().rust_mut().worker = Some(refresh);
+        let operation = Operation::Install(synthetic_package("htop", "htop").id);
+        controller
+            .as_mut()
+            .start(Job::PlanOperation(operation.clone()));
+        assert!(cancel.requested());
+        assert!(!*controller.refreshing());
+        assert!(*controller.busy());
+        assert!(controller.rust().background);
+        assert!(
+            matches!(&controller.rust().queued, Some(Job::PlanOperation(op)) if *op == operation)
+        );
+        // Guards that refused while a foreground read ran let requests
+        // through to start() while only a quiet refresh runs.
+        controller.as_mut().rust_mut().background = false;
+        controller.as_mut().set_refreshing(true);
+        controller.as_mut().load_repositories();
+        assert!(matches!(
+            &controller.rust().queued,
+            Some(Job::Repositories(None))
+        ));
+    }
+    #[test]
+    fn a_waited_for_preload_of_an_old_section_is_quiet() {
+        let mut controller = idle_controller();
+        let mut controller = controller.pin_mut();
+        let key = cache_key("Clean", "", &[], false);
+        let mut cached = cached_view("old cleanup");
+        cached.expired = true;
+        controller
+            .as_mut()
+            .rust_mut()
+            .view_cache
+            .insert(key.clone(), cached);
+        controller.as_mut().rust_mut().prefetch_worker =
+            Some(fake_prefetch("Clean", key, vec![], false));
+        controller
+            .as_mut()
+            .load("Clean".into(), "".into(), "".into(), false, false);
+        assert!(controller.rust().awaiting_prefetch);
+        assert!(*controller.refreshing());
+        assert!(!*controller.busy());
+    }
+    #[test]
+    fn a_preloaded_section_says_when_it_was_read() {
+        let mut controller = idle_controller();
+        let mut controller = controller.pin_mut();
+        let key = cache_key("Updates", "", &[], false);
+        let loaded = Instant::now() - Duration::from_secs(20);
+        controller
+            .as_mut()
+            .rust_mut()
+            .prefetched
+            .insert(key, (loaded, Payload::Packages(PackageReport::default())));
+        controller
+            .as_mut()
+            .load("Updates".into(), "".into(), "".into(), false, false);
+        let state: Value = serde_json::from_str(&controller.report_state().to_string()).unwrap();
+        let checked = state["checked_at"].as_u64().unwrap();
+        assert!(epoch_seconds() - checked >= 19);
+        assert!(!*controller.busy());
+        assert!(!*controller.refreshing());
+        assert_eq!(epoch_seconds_at(Instant::now()), epoch_seconds());
+        // A loading partial carries no checked time.
+        controller
+            .as_mut()
+            .set_package_report_state(&PackageReport::default(), true);
+        let state: Value = serde_json::from_str(&controller.report_state().to_string()).unwrap();
+        assert!(state.get("checked_at").is_none());
+        controller.as_mut().apply(Ok(Payload::Sources(vec![])));
+        let state: Value = serde_json::from_str(&controller.report_state().to_string()).unwrap();
+        assert!(state["checked_at"].as_u64().is_some());
+    }
+    #[test]
+    fn progress_names_the_rows_it_changes_and_how_far_it_is() {
+        let first = synthetic_package("first", "First App").id;
+        let second = synthetic_package("second", "Second App").id;
+        let names = Names::from([(first.clone(), "First App".to_owned())]);
+        let job = Job::UpgradeAll(
+            vec![
+                Operation::Upgrade(first.clone()),
+                Operation::Upgrade(second.clone()),
+                Operation::UpgradeAll {
+                    backend: "flatpak".into(),
+                },
+            ],
+            None,
+        );
+        let mut state = ProgressState::new(&job, Some(7), &names);
+        let snapshot: Value = serde_json::from_str(&state.snapshot().to_string()).unwrap();
+        assert_eq!(snapshot["label"], "Update First App (APT)");
+        assert_eq!(snapshot["targets"][0], target_row(&first));
+        assert_eq!(snapshot["targets"][1]["name"], "second");
+        assert_eq!(snapshot["sources"], json!(["flatpak"]));
+        assert_eq!(snapshot["fraction"], 0.0);
+        assert_eq!(snapshot["current"], Value::Null);
+        assert_eq!(snapshot["action"], "");
+        state.apply(&Event::Started(Operation::Upgrade(second.clone())));
+        state.apply(&Event::Progress {
+            operation: Operation::Upgrade(second.clone()),
+            progress: Progress::Transfer {
+                completed: 50,
+                total: Some(100),
+            },
+        });
+        let snapshot: Value = serde_json::from_str(&state.snapshot().to_string()).unwrap();
+        assert_eq!(snapshot["current"], target_row(&second));
+        assert_eq!(snapshot["current_source"], "apt");
+        assert_eq!(snapshot["action"], "update");
+        assert!((snapshot["fraction"].as_f64().unwrap() - 0.5 / 3.0).abs() < 1e-9);
+        // One change: its transfer is the fraction, unknown without one.
+        let single = Job::Write(Operation::Install(first.clone()), None);
+        let mut state = ProgressState::new(&single, None, &names);
+        let snapshot: Value = serde_json::from_str(&state.snapshot().to_string()).unwrap();
+        assert_eq!(snapshot["fraction"], Value::Null);
+        assert_eq!(snapshot["current"], target_row(&first));
+        assert_eq!(snapshot["action"], "install");
+        state.apply(&Event::Progress {
+            operation: Operation::Install(first.clone()),
+            progress: Progress::Transfer {
+                completed: 30,
+                total: Some(40),
+            },
+        });
+        assert_eq!(state.fraction(), Some(0.75));
+        state.apply(&Event::Finished {
+            operation: Operation::Install(first),
+            result: Ok(OperationOutcome::default()),
+        });
+        assert_eq!(state.fraction(), Some(1.0));
+    }
+    #[test]
+    fn undo_is_offered_only_where_it_is_safe() {
+        let id = synthetic_package("tool", "Tool").id;
+        assert_eq!(undo_action(&Operation::Install(id.clone())), Some("remove"));
+        assert_eq!(undo_action(&Operation::Remove(id.clone())), Some("install"));
+        assert_eq!(undo_action(&Operation::Upgrade(id.clone())), None);
+        let mut local = id.clone();
+        local.reference = Some("local-deb:/tmp/tool.deb".into());
+        assert_eq!(undo_action(&Operation::Remove(local)), None);
+        let mut appimage = id.clone();
+        appimage.backend = "appimage".into();
+        assert_eq!(undo_action(&Operation::Remove(appimage.clone())), None);
+        assert_eq!(undo_action(&Operation::Install(appimage)), Some("remove"));
+        let mut firmware = id;
+        firmware.backend = "fwupd".into();
+        assert_eq!(undo_action(&Operation::Install(firmware)), None);
+        assert_eq!(
+            undo_action(&Operation::Clean(CleanupId {
+                backend: "apt".into(),
+                key: "autoremove".into()
+            })),
+            None
+        );
+        // Several changes or none are never undone as one.
+        let batch = notice_subject(
+            &[
+                Operation::Refresh {
+                    backend: "apt".into(),
+                },
+                Operation::Refresh {
+                    backend: "snap".into(),
+                },
+            ],
+            &Names::new(),
+            true,
+        );
+        assert_eq!(batch["operation"], "batch");
+        assert_eq!(batch["undo"], false);
+        assert_eq!(notice_subject(&[], &Names::new(), true)["operation"], "");
+        let refresh = notice_subject(
+            &[Operation::Refresh {
+                backend: "snap".into(),
+            }],
+            &Names::new(),
+            true,
+        );
+        assert_eq!(refresh["source_name"], "Snap");
+        assert!(refresh.get("target").is_none());
+        assert_eq!(job_backend(&[]), None);
+        assert_eq!(
+            operation_kind(&Operation::UpgradeAll {
+                backend: "apt".into()
+            }),
+            "update_all"
+        );
+        assert_eq!(
+            operation_kind(&Operation::Clean(CleanupId {
+                backend: "apt".into(),
+                key: "autoremove".into()
+            })),
+            "clean"
+        );
+    }
+    #[test]
+    fn confirmed_changes_remember_display_names_for_their_results() {
+        let mut controller = idle_controller();
+        let mut controller = controller.pin_mut();
+        let package = synthetic_package("htop", "Process Viewer");
+        controller.as_mut().rust_mut().packages = vec![package.clone()];
+        // The remembered names stay bounded.
+        for index in 0..300 {
+            let id = synthetic_package(&format!("old-{index}"), "Old").id;
+            controller
+                .as_mut()
+                .rust_mut()
+                .names
+                .insert(id, "Old".into());
+        }
+        // A busy worker keeps the confirmed change queued.
+        controller.as_mut().rust_mut().worker =
+            Some(fake_worker(Job::Load("Sources".into(), "".into()), vec![]));
+        controller
+            .as_mut()
+            .accept_confirmed(Job::Write(Operation::Remove(package.id.clone()), None));
+        controller.as_mut().rust_mut().packages.clear();
+        assert_eq!(controller.rust().names.len(), 1);
+        assert_eq!(
+            controller.rust().names.get(&package.id).map(String::as_str),
+            Some("Process Viewer")
+        );
+        let notice = write_notice(
+            &Job::Write(Operation::Remove(package.id.clone()), None),
+            &Ok(Payload::Written(OperationOutcome::default())),
+            false,
+            &controller
+                .rust()
+                .names_for(&[Operation::Remove(package.id)]),
+        );
+        assert_eq!(notice["title"], "Remove Process Viewer (APT) finished");
+        assert_eq!(notice["undo_action"], "install");
+        controller.as_mut().cancel_queued();
+        let worker = controller.as_mut().rust_mut().worker.take().unwrap();
+        worker.handle.join().unwrap();
+    }
+    #[test]
+    fn opened_repositories_and_cleanups_confirm_in_plain_words() {
+        let mut controller = idle_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().rust_mut().cleanup = vec![CleanupItem {
+            id: CleanupId {
+                backend: "apt".into(),
+                key: "autoremove".into(),
+            },
+            title: "Unused packages".into(),
+            summary: "Synthetic".into(),
+            preview: "Removes 2 packages".into(),
+            kind: CleanupKind::OrphanDependencies,
+        }];
+        controller.as_mut().propose("clean-all".into(), -1);
+        assert!(controller
+            .confirmation()
+            .to_string()
+            .contains("Unused packages (APT)"));
+        controller.as_mut().change_repository(
+            r#"{"backend":"flatpak","name":"flathub","scope":"system","action":"remove"}"#.into(),
+        );
+        assert!(controller
+            .confirmation()
+            .to_string()
+            .contains("flathub · Flatpak · System"));
     }
 }

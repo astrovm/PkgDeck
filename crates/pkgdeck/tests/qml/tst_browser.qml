@@ -221,14 +221,34 @@ TestCase {
         compare(browser.selected, null);
         browser.propose("install");
         compare(fake.confirmation, "");
+        // The first source to answer does not collapse the list to its rows.
         fake.rows = JSON.stringify([previous[0]]);
+        compare(browser.items.length, previous.length);
+        verify(browser.retainingResults);
+        // The complete answer replaces the retained rows.
+        fake.busy = false;
         compare(browser.items.length, 1);
         verify(!browser.retainingResults);
         verify(findChild(browser, "packageResults").enabled);
-        fake.busy = false;
         browser.reload(true);
         fake.busy = false; // Empty completion must discard the old snapshot.
         compare(browser.items.length, 0);
+    }
+    function test_details_load_again_after_a_refresh_keeps_the_selection() {
+        populate();
+        browser.choose(1);
+        verify(fake.details !== "{}");
+        const rows = fake.rows;
+        fake.simulateLoading = true;
+        browser.reload(true, true);
+        // The reload drops the open details, as the controller does.
+        fake.details = "{}";
+        fake.selection = -1;
+        fake.rows = rows;
+        fake.busy = false;
+        tryCompare(fake, "selection", 1);
+        verify(fake.details !== "{}");
+        compare(findChild(browser, "packageResults").currentIndex, 1);
     }
     function test_row_actions_stay_steady_during_refresh() {
         populate();
@@ -319,7 +339,7 @@ TestCase {
         compare(firstAction.text, "");
         compare(firstAction.width, 38);
         verify(firstAction.tooltipText.indexOf("Install") >= 0);
-        verify(firstAction.tooltipText.indexOf("apt") >= 0);
+        verify(firstAction.tooltipText.indexOf("APT") >= 0);
         waitForRendering(browser.contentItem);
         mouseClick(findChild(list.itemAtIndex(0), "rowPackageAction"));
         const dialog = findChild(browser, "confirmationDialog");
@@ -872,7 +892,9 @@ TestCase {
             // The full sidebar only narrows toward its minimum as the window does.
             compare(browser.sidebarWidth, width < 820 ? browser.railWidth
                 : Math.max(browser.sidebarMinimumWidth, Math.min(212, width - 748)));
-            compare(browser.compact, width - browser.sidebarWidth < 748);
+            // Cards below 560 px of page, a table without summaries below 748.
+            compare(browser.compact, width - browser.sidebarWidth < 560);
+            compare(browser.medium, !browser.compact && width - browser.sidebarWidth < 748);
             verify(!add.visible);
             for (const button of [activity, sources]) {
                 verify(button.visible);
@@ -948,6 +970,8 @@ TestCase {
         verify(preview.enabled);
         clickDelegate(preview);
         compare(fake.lastOpenedInput, "https://example.invalid/app.rpm");
+        // Dialogs fade out before they can open again.
+        tryCompare(dialog, "visible", false);
         clickDelegate(add);
         tryCompare(dialog, "opened", true);
         link.text = "flatpak+https://example.invalid/app.flatpakref";
@@ -1085,17 +1109,21 @@ TestCase {
         verify(banner.visible);
         mouseClick(findChild(browser, "changeNoticeSettings"));
         compare(browser.currentView, "Settings");
-        verify(!banner.visible);
+        tryCompare(banner, "visible", false);
         browser.openView("Search");
+        tryCompare(banner, "visible", true);
         mouseClick(findChild(browser, "dismissChangeNotice"));
         compare(fake.noticeDismissals, 1);
+        tryCompare(banner, "visible", false);
+        // Success shows as a toast that clears itself.
+        tryCompare(banner, "visible", false);
+        fake.notice = JSON.stringify({kind: "success", title: "Installed htop"});
+        const toast = findChild(browser, "changeToast");
+        verify(toast.open);
+        compare(toast.text, "Installed htop");
+        compare(toast.actionText, "");
         verify(!banner.visible);
-        // Success needs no action and clears itself.
-        fake.notice = JSON.stringify({kind: "success", title: "Install htop (apt) finished"});
-        verify(banner.visible);
-        verify(!findChild(browser, "changeNoticeSettings").visible);
-        verify(!findChild(browser, "changeNoticeDetail").visible);
-        tryCompare(fake, "noticeDismissals", 2, 6000);
+        tryCompare(fake, "noticeDismissals", 2, 7000);
     }
     function test_empty_search_shows_a_centered_prompt() {
         browser.openView("Search");
@@ -1151,8 +1179,8 @@ TestCase {
     function test_activity_uses_short_readable_actions() {
         browser.openView("Activity");
         const activity = findChild(browser, "activityPane");
-        compare(activity.target({upgrade_all: {backend: "apt"}}), "Update all (apt)");
-        compare(activity.target({install: {backend: "apt", name: "synthetic-tool", scope: "system"}}), "Install synthetic-tool (apt, System)");
+        compare(activity.target({upgrade_all: {backend: "apt"}}), "Update all (APT)");
+        compare(activity.target({install: {backend: "apt", name: "synthetic-tool", scope: "system"}}), "Install synthetic-tool (APT, System)");
         compare(activity.result({state: "running", outcomes: []}), "In progress");
     }
     function test_action_progress_shows_batch_steps_and_single_transfer() {
@@ -1267,7 +1295,7 @@ TestCase {
         verify(about.text.indexOf("9.9.9-test") >= 0);
         const shortcuts = findChild(browser, "aboutShortcuts");
         verify(shortcuts !== null);
-        compare(shortcuts.count, 15);
+        compare(shortcuts.count, 20);
         verify(findChild(browser, "shortcutsToggle") === null);
         waitForRendering(browser.contentItem);
         compare(shortcuts.itemAt(0).children[1].text, "Ctrl+1");
@@ -1487,7 +1515,9 @@ TestCase {
         verify(findChild(findChild(browser, "packageResults").itemAtIndex(0), "rowPackageAction").enabled);
         verify(findChild(browser, "activityIndicator").visible);
         browser.openView("Activity");
-        compare(browser.currentView, "Activity");
+        // Activity opens as a drawer over the current page.
+        compare(browser.currentView, "Installed");
+        verify(browser.activityOpen);
         const list = findChild(browser, "activityList");
         tryCompare(list, "count", 1);
         verify(findChild(browser, "cancelQueuedButton").enabled);
@@ -1498,11 +1528,13 @@ TestCase {
         browser.width = 380;
         browser.openView("Activity");
         waitForRendering(browser.contentItem);
-        compare(findChild(browser, "pageHeading").text, "Activity");
-        verify(!findChild(browser, "activityIndicator").visible);
-        browser.width = 1100;
-        waitForRendering(browser.contentItem);
-        verify(!findChild(browser, "activityIndicator").visible);
+        compare(findChild(browser, "activityHeading").text, "Activity");
+        const drawer = findChild(browser, "activityDrawer");
+        tryVerify(() => drawer.x + drawer.width <= browser.width + 1);
+        verify(drawer.width <= browser.width);
+        mouseClick(findChild(browser, "closeActivity"));
+        verify(!browser.activityOpen);
+        tryCompare(drawer, "visible", false);
     }
     function test_background_mode_requires_a_usable_tray_to_hide() {
         browser.openView("Settings");
@@ -1702,8 +1734,8 @@ TestCase {
         browser.height = 520;
         waitForRendering(browser.contentItem);
         const panel = findChild(browser, "detailsPanel");
-        const galleryPosition = gallery.mapToItem(panel, 0, 0);
-        verify(galleryPosition.y + gallery.height <= panel.height - 12);
+        // The panel animates to its new height.
+        tryVerify(() => gallery.mapToItem(panel, 0, 0).y + gallery.height <= panel.height - 12);
         const actions = findChild(browser, "updatesActions");
         const actionsPosition = actions.mapToItem(browser.contentItem, 0, 0);
         verify(actionsPosition.y + actions.height <= browser.contentItem.height,
@@ -1723,7 +1755,9 @@ TestCase {
         fake.details = JSON.stringify({package: row, screenshots: [{url: "https://example.invalid/stale.png"}]});
         compare(gallery.count, 0);
         verify(!gallery.visible);
-        verify(!findChild(browser, "detailsPanel").visible);
+        // The panel stays open for the new row and shows it loading.
+        verify(findChild(browser, "detailsPanel").visible);
+        verify(findChild(browser, "detailsPanel").loading);
         fake.details = JSON.stringify({package: JSON.parse(fake.rows)[1], description: "Additional details"});
         const close = findChild(browser, "closeDetailsButton");
         compare(close.text, "");
@@ -1748,8 +1782,9 @@ TestCase {
         compare(browser.detailText(), "");
         verify(!description.visible);
         verify(!metadata.visible);
-        verify(!panel.visible);
-        verify(panel.idealHeight < 130);
+        // The panel stays open with the row's header and action.
+        verify(panel.visible);
+        verify(panel.idealHeight < 160);
         fake.details = JSON.stringify({package: row, description: "A longer description from the package source.",
             publisher: "Example publisher", license: "MIT", homepage: "https://example.invalid/app",
             dependencies: ["synthetic-library"]});
@@ -2046,19 +2081,21 @@ TestCase {
         tryVerify(() => list.itemAtIndex(0) !== null);
         waitForRendering(browser.contentItem);
         const row = list.itemAtIndex(0);
-        verify(findChild(row, "packageName").width >= 120);
+        // The name column keeps room even at the minimum width.
+        verify(findChild(row, "packageName").parent.width >= 120);
         verify(findChild(row, "compactVersion").visible);
         verify(!findChild(row, "wideVersion").visible);
         const update = findChild(browser, "upgradeAllButton");
         const selectNone = findChild(browser, "selectNoneButton");
+        // Reload is an icon in the list header, above the page actions.
         const reload = findChild(browser, "reloadButton");
         compare(reload.text, "");
+        verify(reload.visible);
         const updateY = update.mapToItem(browser.contentItem, 0, 0).y;
         compare(selectNone.mapToItem(browser.contentItem, 0, 0).y, updateY);
-        compare(reload.mapToItem(browser.contentItem, 0, 0).y, updateY);
+        verify(reload.mapToItem(browser.contentItem, 0, 0).y < updateY);
         browser.togglePackage(rows[0]);
         compare(update.text, "Update");
-        compare(reload.mapToItem(browser.contentItem, 0, 0).y, update.mapToItem(browser.contentItem, 0, 0).y);
     }
     function test_results_leave_room_for_the_scrollbar() {
         browser.width = 1100;
@@ -2159,6 +2196,7 @@ TestCase {
         verify(reasonBottom > 0 && reasonBottom <= dialog.contentItem.height, "reason ends at " + reasonBottom);
         compare(browser.copyableDiagnostics(), "View: Search\nState: unknown\nnpm (failed): Source failed");
         dialog.close();
+        tryCompare(dialog, "visible", false);
         mouseClick(findChild(browser, "sourceFailureRetry"));
         compare(fake.lastRetry, "npm");
     }
@@ -2183,8 +2221,11 @@ TestCase {
         verify(findChild(browser, "resultsBox").height >= browser.detailsListHeight() - 1);
         const row = list.itemAtIndex(6);
         verify(row !== null);
-        const top = row.mapToItem(list, 0, 0).y;
-        verify(top >= -1 && top + row.height <= list.height + 1, "selected row at " + top + " in " + list.height);
+        // The details panel animates open; the row settles in view with it.
+        tryVerify(() => {
+            const top = row.mapToItem(list, 0, 0).y;
+            return top >= -1 && top + row.height <= list.height + 1;
+        }, 2000, "selected row stays in view");
         verify(panel.height < panel.idealHeight);
     }
     function test_open_details_fit_the_shortest_wide_window_data() {
@@ -2299,7 +2340,6 @@ TestCase {
         // There is no way to hide it completely.
         verify(findChild(browser, "sidebarToggle") === null);
         verify(findChild(browser, "sidebarShow") === null);
-        keyClick(Qt.Key_B, Qt.ControlModifier);
         verify(sidebar.visible);
         compare(browser.sidebarWidth, browser.railWidth);
         wait(Qt.styleHints.mouseDoubleClickInterval + 50);
@@ -2359,7 +2399,7 @@ TestCase {
         const wide = at(1300);
         verify(!browser.compact);
         const narrow = at(900);
-        verify(browser.compact);
+        verify(browser.medium);
         compare(narrow.x, wide.x);
         compare(narrow.y, wide.y);
         // A wide saved sidebar narrows smoothly with the window, never jumping.
@@ -2418,8 +2458,9 @@ TestCase {
         wait(30);
         verify(findChild(browser, "resultsBox").visible);
         verify(!findChild(browser, "sourceFailureNotice").visible);
-        compare(findChild(browser, "emptyState").text, "Couldn't check Flatpak");
-        compare(findChild(browser, "sourceFailureEmptyHint").text, "Retry to check for updates.");
+        // The sources that answered still report their good news.
+        compare(findChild(browser, "emptyState").text, browser.checkedSourceNames().length + " other sources are up to date");
+        compare(findChild(browser, "sourceFailureEmptyHint").text, "Couldn't check Flatpak. Retry to check for updates.");
         browser.width = 380;
         browser.height = 500;
         wait(30);
@@ -2499,13 +2540,18 @@ TestCase {
         fake.report_state = JSON.stringify({phase: "complete", failures: []});
         compare(browser.emptyStateMessage(), "You're up to date");
         fake.report_state = JSON.stringify({phase: "partial", failures: [{source: "npm", kind: "locked", detail: "Synthetic package lock"}]});
+        // Only the sources that answered are called up to date.
+        browser.viewSourceFilters = ({Updates: ["apt", "npm"]});
+        compare(browser.emptyStateMessage(), "APT is up to date");
+        browser.viewSourceFilters = ({Updates: ["npm"]});
         compare(browser.emptyStateMessage(), "Couldn't check npm");
-        verify(browser.emptyStateMessage() !== "You're up to date");
+        browser.viewSourceFilters = ({});
         compare(browser.copyableDiagnostics(), "View: Updates\nState: partial\nnpm (locked): Synthetic package lock");
         fake.report_state = JSON.stringify({phase: "failed", failures: [{source: "apt", kind: "authorization"}]});
         compare(browser.emptyStateMessage(), "Couldn't check APT");
         fake.report_state = JSON.stringify({phase: "cached", failures: []});
-        compare(browser.emptyStateMessage(), "No updates in the last check.");
+        // A cached check reads the same, with its time underneath.
+        compare(browser.emptyStateMessage(), "You're up to date");
         fake.report_state = JSON.stringify({phase: "complete", failures: []});
         fake.rows = JSON.stringify([{kind: "package", name: "anonymous", source: "homebrew", installed: "1", candidate: "2", update: "available"}]);
         browser.viewSourceFilters = ({Updates: ["apt"]});

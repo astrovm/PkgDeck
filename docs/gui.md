@@ -2,7 +2,8 @@
 
 Open PkgDeck from your app menu or run `pkgdeck`. The sidebar has six pages:
 **Search**, **Installed**, **Updates**, **Clean**, **Sources**, and **Settings**.
-The **Activity** button in the header shows running and finished work.
+The **Activity** button in the header opens a side panel with running and
+finished work; its badge counts changes waiting their turn.
 
 Drag the sidebar's edge to resize it; drag it narrow to keep only its icons,
 or double-click the edge to restore the default width. In narrow windows the
@@ -24,7 +25,7 @@ package. For Flatpak, pick the User or System row to choose where it installs.
 - App names, icons, and screenshots come from the source. Packages without
   app metadata show their package name.
 
-![Firefox from APT, Snap, and Flatpak, with the Flatpak details open](screenshots/details.png)
+![Firefox from APT and Flatpak, with the Flatpak details open](screenshots/details.png)
 
 ## Open a package file or link
 
@@ -78,7 +79,7 @@ only Docker or Podman and search for the full image name with its tag.
 
 Updates lists package updates and, if `fwupdmgr` is installed, firmware updates.
 
-![Updates from Homebrew and a standalone CLI, all checked](screenshots/updates.png)
+![Updates for three npm tools, all checked](screenshots/updates.png)
 
 - Click a row's arrow to update just that item.
 - Check several rows and click **Update selected**. When every row is checked,
@@ -109,6 +110,11 @@ default.
 Cancel stops work that hasn't started yet. If a package manager is already
 making changes, PkgDeck lets it finish first. Finished changes are not undone
 if a later step fails. Click **Reload** to see the current state.
+
+While a change runs, its row shows a progress bar and its button turns into
+**Cancel**. When it finishes, a short message at the bottom of the window says
+so; for a single install or remove it offers **Undo**, which asks before
+reversing the change.
 
 ## Clean
 
@@ -194,13 +200,19 @@ out of date, and each page refreshes when you open it.
 | Shortcut | Action |
 | --- | --- |
 | Ctrl+1 to Ctrl+5 | Go to Search, Installed, Updates, Clean, or Sources |
+| Ctrl+, or Ctrl+6 | Open Settings |
+| Ctrl+J | Show or hide Activity |
 | Ctrl+F | Focus the search field, package filter, or source picker |
-| Ctrl+R | Reload |
+| Ctrl+L | Move to the results list |
+| Enter | Install, remove, or update the selected row |
+| Ctrl+R | Reload the page |
 | Ctrl+Shift+U | Update checked packages |
+| Ctrl+Enter | Apply the open confirmation (Alt plus the underlined letter also works) |
+| Esc | Clear the search, or close the details |
 | Ctrl+Q | Quit (waits for any running package change to finish) |
 
 Use Tab to move between controls. Column headings also sort with Space or
-Enter. Row actions and icon buttons have screen reader labels.
+Enter, and Shift+Left or Shift+Right resizes a focused column. Row actions and icon buttons have screen reader labels.
 
 ## Platforms
 

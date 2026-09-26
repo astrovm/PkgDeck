@@ -691,13 +691,15 @@ impl Transport for FlatpakFixture {
             if let Some(installed) = &self.installed {
                 return Ok(output(installed));
             }
-            let name = if system {
-                "io.example.System"
+            // The user row carries flatpak's app name column; the system
+            // row leaves it out, like an older fixture or a nameless ref.
+            let (name, title) = if system {
+                ("io.example.System", "")
             } else {
-                "io.example.User"
+                ("io.example.User", "\tUser App")
             };
             return Ok(output(format!(
-                "{name}\t{}\tstable\t1.0\tSynthetic app\tflathub\tcurrent\n",
+                "{name}\t{}\tstable\t1.0\tSynthetic app\tflathub\tcurrent{title}\n",
                 std::env::consts::ARCH
             )));
         }
@@ -728,6 +730,9 @@ fn flatpak_operations_keep_scope_and_noninteractive_arguments() {
         .unwrap()
         .id
         .clone();
+    // Installed apps show their app name, falling back to the id.
+    let names: Vec<_> = packages.iter().map(|p| p.display_name.as_str()).collect();
+    assert!(names.contains(&"User App") && names.contains(&"io.example.System"));
     let offers = backend.search("io.example.User", &cancel).unwrap();
     assert_eq!(offers.len(), 2);
     let offer = offers

@@ -7,13 +7,16 @@ RowLayout {
     objectName: "searchPane"
     property alias text: search.text
     property bool writing: false
-    property color surface
-    property color ink
-    property color muted
-    property color line
-    property color accent
-    property color onAccent
-    property font textFont
+    property color surface: Theme.surface
+    property color ink: Theme.ink
+    property color muted: Theme.muted
+    property color line: Theme.line
+    property color accent: Theme.accent
+    property color onAccent: Theme.accentInk
+    property font textFont: Theme.baseFont
+    // The 2 px ring is for keyboard focus; a click shows a quieter accent edge.
+    readonly property bool keyboardFocus: search.activeFocus
+        && [Qt.TabFocusReason, Qt.BacktabFocusReason, Qt.ShortcutFocusReason].indexOf(search.focusReason) >= 0
     signal submitted()
     signal downRequested()
     signal queryEdited()
@@ -21,8 +24,10 @@ RowLayout {
     spacing: 8
     Layout.fillWidth: true
 
-    function focusSearch(selectAll) {
-        search.forceActiveFocus();
+    // reason: pass Qt.ShortcutFocusReason when a key shortcut asks for the
+    // field, so the keyboard focus ring shows.
+    function focusSearch(selectAll, reason) {
+        search.forceActiveFocus(reason === undefined ? Qt.OtherFocusReason : reason);
         if (selectAll)
             search.selectAll();
     }
@@ -41,10 +46,10 @@ RowLayout {
         rightPadding: 42
         background: Rectangle {
             color: pane.surface
-            radius: 10
+            radius: Theme.controlRadius
             border.color: search.activeFocus ? pane.accent : pane.line
-            border.width: search.activeFocus ? 2 : 1
-            Behavior on border.color { ColorAnimation { duration: 120 } }
+            border.width: pane.keyboardFocus ? 2 : 1
+            Behavior on border.color { ColorAnimation { duration: Theme.feedbackDuration } }
             DeckIcon {
                 name: "search"
                 ink: search.activeFocus ? pane.accent : pane.muted
@@ -60,13 +65,20 @@ RowLayout {
         onTextChanged: pane.queryEdited()
         ClearFieldButton {
             objectName: "clearSearchButton"
+            readonly property bool shown: search.text.length > 0
             anchors.right: parent.right
             anchors.rightMargin: 5
             anchors.verticalCenter: parent.verticalCenter
-            visible: search.text.length > 0
-            enabled: search.enabled
+            // Fades in with the first character. It leaves at once when
+            // cleared, so it never lingers over an empty field.
+            visible: shown
+            opacity: shown ? 1 : 0
+            scale: shown || !Theme.motionEnabled ? 1 : 0.8
+            Behavior on opacity { NumberAnimation { duration: Theme.feedbackDuration; easing.type: Easing.OutCubic } }
+            Behavior on scale { NumberAnimation { duration: Theme.feedbackDuration; easing.type: Easing.OutCubic } }
+            enabled: search.enabled && shown
             ink: pane.muted
-            hoverColor: pane.line
+            hoverColor: Theme.hoverTint
             clearLabel: "Clear search"
             onClicked: { search.clear(); search.forceActiveFocus(); }
         }

@@ -3,8 +3,8 @@ import QtQuick.Controls as Controls
 
 Controls.ToolButton {
     id: button
-    property color ink
-    property color hoverColor
+    property color ink: Theme.muted
+    property color hoverColor: Theme.hoverTint
     property string clearLabel: "Clear text"
 
     implicitWidth: 32
@@ -12,10 +12,14 @@ Controls.ToolButton {
     padding: 8
     Accessible.name: clearLabel
     Controls.ToolTip.visible: hovered
+    Controls.ToolTip.delay: 500
     Controls.ToolTip.text: clearLabel
     background: Rectangle {
-        radius: 6
-        color: button.hovered ? button.hoverColor : "transparent"
+        radius: Theme.smallRadius
+        color: button.hovered || button.down ? button.hoverColor : "transparent"
+        border.color: button.visualFocus ? Theme.accent : "transparent"
+        border.width: 2
+        Behavior on color { ColorAnimation { duration: Theme.feedbackDuration } }
     }
     contentItem: DeckIcon {
         name: "cancel"
