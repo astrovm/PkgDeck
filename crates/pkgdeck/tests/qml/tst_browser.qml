@@ -948,6 +948,8 @@ TestCase {
         verify(preview.enabled);
         clickDelegate(preview);
         compare(fake.lastOpenedInput, "https://example.invalid/app.rpm");
+        // Dialogs fade out before they can open again.
+        tryCompare(dialog, "visible", false);
         clickDelegate(add);
         tryCompare(dialog, "opened", true);
         link.text = "flatpak+https://example.invalid/app.flatpakref";
@@ -2159,6 +2161,7 @@ TestCase {
         verify(reasonBottom > 0 && reasonBottom <= dialog.contentItem.height, "reason ends at " + reasonBottom);
         compare(browser.copyableDiagnostics(), "View: Search\nState: unknown\nnpm (failed): Source failed");
         dialog.close();
+        tryCompare(dialog, "visible", false);
         mouseClick(findChild(browser, "sourceFailureRetry"));
         compare(fake.lastRetry, "npm");
     }
