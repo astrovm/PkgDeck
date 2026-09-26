@@ -1,0 +1,14 @@
+# Directory listing shared by the app (via resources.qrc) and the QML tests,
+# so Theme resolves as a singleton in both.
+singleton Theme 1.0 Theme.qml
+ActionProgress 1.0 ActionProgress.qml
+ActivityPane 1.0 ActivityPane.qml
+Browser 1.0 Browser.qml
+ClearFieldButton 1.0 ClearFieldButton.qml
+DeckIcon 1.0 DeckIcon.qml
+DeckScrollBar 1.0 DeckScrollBar.qml
+DeckScrollView 1.0 DeckScrollView.qml
+Main 1.0 Main.qml
+PackageDetails 1.0 PackageDetails.qml
+SearchPane 1.0 SearchPane.qml
+UpdatesActions 1.0 UpdatesActions.qml

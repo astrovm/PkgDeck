@@ -5,4 +5,8 @@
   <file alias="github.png">assets/github.png</file>
   <file alias="github-dark.png">assets/github-dark.png</file>
   <file alias="OCTICONS-LICENSE">assets/OCTICONS-LICENSE</file>
+</qresource>
+<qresource prefix="/qt/qml/io/github/astrovm/PkgDeck/qml">
+  <file alias="qmldir">qml/qmldir</file>
+  <file alias="Theme.qml">qml/Theme.qml</file>
 </qresource></RCC>

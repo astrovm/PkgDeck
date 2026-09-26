@@ -161,9 +161,9 @@ Controls.ApplicationWindow {
     property string retainedQuery: ""
     property var items: currentView === resultView ? (retainingResults ? retainedItems : liveItems) : []
     property bool reduceMotion: preferences.reduceMotion
-    readonly property bool motionEnabled: !reduceMotion && Kirigami.Units.shortDuration > 0
-    readonly property int feedbackDuration: motionEnabled ? Math.round(Kirigami.Units.shortDuration * 0.8) : 0
-    readonly property int revealDuration: motionEnabled ? Math.round(Kirigami.Units.shortDuration * 1.2) : 0
+    readonly property bool motionEnabled: Theme.motionEnabled
+    readonly property int feedbackDuration: Theme.feedbackDuration
+    readonly property int revealDuration: Theme.revealDuration
     property var beforeWrite: null
     property var completedRows: []
     function packageState(row) {
@@ -774,27 +774,29 @@ Controls.ApplicationWindow {
         return Math.min(shortResultsHeight(), (compact ? 60 : 85) + rows * rowHeight,
             budget * (compact ? 0.3 : 0.55), budget - detailsMinimumHeight());
     }
-    readonly property bool systemAppearance: preferences.appearance === 0
-    readonly property bool dark: preferences.appearance === 1 || (systemAppearance && Qt.styleHints.colorScheme === Qt.Dark)
-    readonly property color canvas: systemAppearance ? systemPalette.window : (dark ? "#0e1015" : "#f4f6f9")
-    readonly property color surface: systemAppearance ? systemPalette.base : (dark ? "#161a21" : "#ffffff")
-    readonly property color ink: systemAppearance ? systemPalette.text : (dark ? "#e9edf3" : "#18212d")
-    readonly property color muted: systemAppearance ? systemPalette.placeholderText : (dark ? "#98a3b3" : "#5a6676")
-    readonly property color accent: systemAppearance ? systemPalette.highlight : (dark ? "#7aa7ff" : "#2f68d8")
-    // Derived tokens stay legible on any palette: tints of the text and
-    // accent colors instead of palette roles that some themes leave flat.
-    function tint(base, alpha) { return Qt.rgba(base.r, base.g, base.b, alpha); }
-    readonly property color line: tint(ink, dark ? 0.12 : 0.13)
-    readonly property color strongLine: tint(ink, dark ? 0.3 : 0.32)
-    readonly property color hoverTint: tint(ink, dark ? 0.06 : 0.05)
-    readonly property color selection: tint(accent, dark ? 0.2 : 0.14)
-    readonly property color accentInk: systemAppearance ? systemPalette.highlightedText : "#ffffff"
-    readonly property color danger: dark ? "#f28b91" : "#c1343f"
-    readonly property color success: dark ? "#6fd39a" : "#1b7a45"
-    readonly property color warning: dark ? "#f2c56b" : "#9a6400"
-    readonly property int controlRadius: 9
-    readonly property int cardRadius: 12
-    readonly property int controlHeight: Math.max(36, Math.round(root.font.pointSize * 2.9))
+    // Tokens live in the Theme singleton; these aliases keep bindings short.
+    Binding { target: Theme; property: "appearance"; value: preferences.appearance }
+    Binding { target: Theme; property: "reduceMotion"; value: root.reduceMotion }
+    Binding { target: Theme; property: "baseFont"; value: root.font }
+    readonly property bool systemAppearance: Theme.systemAppearance
+    readonly property bool dark: Theme.dark
+    readonly property color canvas: Theme.canvas
+    readonly property color surface: Theme.surface
+    readonly property color ink: Theme.ink
+    readonly property color muted: Theme.muted
+    readonly property color accent: Theme.accent
+    function tint(base, alpha) { return Theme.tint(base, alpha); }
+    readonly property color line: Theme.line
+    readonly property color strongLine: Theme.strongLine
+    readonly property color hoverTint: Theme.hoverTint
+    readonly property color selection: Theme.selection
+    readonly property color accentInk: Theme.accentInk
+    readonly property color danger: Theme.danger
+    readonly property color success: Theme.success
+    readonly property color warning: Theme.warning
+    readonly property int controlRadius: Theme.controlRadius
+    readonly property int cardRadius: Theme.cardRadius
+    readonly property int controlHeight: Theme.controlHeight
     color: canvas
     palette.window: canvas
     palette.base: surface
