@@ -3390,7 +3390,7 @@ fn native_venv_pip_transport_uses_the_selected_environment() {
     let _ = std::fs::remove_dir_all(&base);
     let venv = base.join("venv");
     std::fs::create_dir_all(venv.join("bin")).unwrap();
-    std::os::unix::fs::symlink("/bin/true", venv.join("bin/python")).unwrap();
+    std::os::unix::fs::symlink("/usr/bin/true", venv.join("bin/python")).unwrap();
     std::fs::write(venv.join("pyvenv.cfg"), "home = /usr/bin\n").unwrap();
     let transport = NativeTransport {
         host: Host::new(

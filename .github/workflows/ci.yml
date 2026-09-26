@@ -38,8 +38,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install terminal dependencies
         run: |
-          packages=(libapt-pkg-dev jq)
-          if [[ "$RUNNER_ARCH" == X64 ]]; then packages+=(pkexec polkitd); fi
+          packages=(libapt-pkg-dev jq pkexec polkitd)
           sudo apt-get update
           sudo apt-get install -y "${packages[@]}"
       - name: Set up Rust
@@ -52,13 +51,11 @@ jobs:
       - name: Run terminal checks
         run: scripts/verify.sh fast
       - name: Build authorization probes
-        if: matrix.arch == 'x86_64'
         run: |
           cargo build --locked -p pkgdeck-core --example apt-probe
           cargo build --locked -p pkgdeck-core --bin pkgdeck-host-runner
           cargo build --locked -p pkd -p pkgdeck-tools
       - name: Run host authorization tests
-        if: matrix.arch == 'x86_64'
         run: |
           sudo env \
             GITHUB_ACTIONS="$GITHUB_ACTIONS" \
@@ -92,19 +89,15 @@ jobs:
       - name: Set up Rust and JSON assertions
         run: |
           rustup show
-          brew install jq
+          brew install jq coreutils
+          echo "$(brew --prefix coreutils)/libexec/gnubin" >> "$GITHUB_PATH"
       - name: Cache Rust build outputs
         uses: ./.github/actions/rust-cache
         with:
           arch: ${{ matrix.arch }}
           scope: macos-native
-      - name: Test native plist reads, discovery and cold details
-        run: cargo test --locked -p pkgdeck-core --lib backends::mac_apps
-      - name: Test orchestration and CLI planning
-        run: |
-          cargo test --locked -p pkgdeck-core --test engine
-          cargo test --locked -p pkd --bin pkd
-          cargo test --locked -p pkd --test entrypoint read_only_source
+      - name: Run all core and CLI tests
+        run: cargo test --locked -p pkgdeck-core -p pkd --no-fail-fast
       - name: Build CLI
         run: cargo build --locked -p pkd
       - name: Test real bundles and Homebrew cask lifecycle
@@ -162,9 +155,17 @@ jobs:
           path: build/verification
 
   build-backend-cli:
-    name: Build / Backend CLI (x86_64)
+    name: Build / Backend CLI (${{ matrix.platform }})
     if: github.event_name != 'push' && !inputs.homebrew_only
-    runs-on: ubuntu-26.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: linux-x86_64, runner: ubuntu-26.04, arch: x86_64 }
+          - { platform: linux-aarch64, runner: ubuntu-26.04-arm, arch: aarch64 }
+          - { platform: macos-x86_64, runner: macos-26-intel, arch: x86_64 }
+          - { platform: macos-aarch64, runner: macos-26, arch: aarch64 }
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 10
     steps:
       - name: Check out source
@@ -172,7 +173,7 @@ jobs:
       - name: Restore terminal build outputs
         uses: ./.github/actions/rust-cache
         with:
-          arch: x86_64
+          arch: ${{ matrix.arch }}
           scope: terminal
           save: 'false'
       - name: Build CLI
@@ -180,20 +181,26 @@ jobs:
       - name: Upload CLI for backend tests
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: backend-pkd-x86_64
+          name: backend-pkd-${{ matrix.platform }}
           path: target/debug/pkd
           if-no-files-found: error
           retention-days: 1
 
   test-backend:
-    name: Test / Backend / ${{ matrix.backend }} (x86_64)
+    name: Test / Backend / ${{ matrix.backend }} (${{ matrix.platform }})
     if: github.event_name != 'push' && !inputs.homebrew_only
     needs: build-backend-cli
     timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
+        platform: [linux-x86_64, linux-aarch64, macos-x86_64, macos-aarch64]
+        backend: [dnf, pacman, zypper, snap, cargo, npm, pnpm, bun, pip, pipx, uv, composer, gem]
         include:
+          - { platform: linux-x86_64, runner: ubuntu-26.04 }
+          - { platform: linux-aarch64, runner: ubuntu-26.04-arm }
+          - { platform: macos-x86_64, runner: macos-26-intel }
+          - { platform: macos-aarch64, runner: macos-26 }
           - backend: dnf
             kind: native
           - backend: pacman
@@ -220,7 +227,21 @@ jobs:
             kind: dev
           - backend: gem
             kind: dev
-    runs-on: ubuntu-26.04
+        exclude:
+          # Arch's official container is x86_64-only. Distro managers are Linux-only.
+          - { platform: linux-aarch64, backend: pacman }
+          - { platform: macos-x86_64, backend: dnf }
+          - { platform: macos-x86_64, backend: pacman }
+          - { platform: macos-x86_64, backend: zypper }
+          - { platform: macos-x86_64, backend: snap }
+          - { platform: macos-aarch64, backend: dnf }
+          - { platform: macos-aarch64, backend: pacman }
+          - { platform: macos-aarch64, backend: zypper }
+          - { platform: macos-aarch64, backend: snap }
+    runs-on: ${{ matrix.runner }}
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+      HOMEBREW_NO_INSTALL_CLEANUP: '1'
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -237,7 +258,7 @@ jobs:
       - name: Download CLI for backend tests
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: backend-pkd-x86_64
+          name: backend-pkd-${{ matrix.platform }}
           path: target/debug
       - name: Restore CLI executable permission
         run: chmod +x target/debug/pkd
@@ -338,7 +359,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-26.04, macos-26]
+        runner: [ubuntu-26.04, macos-26, macos-26-intel]
     env:
       HOMEBREW_NO_AUTO_UPDATE: '1'
       HOMEBREW_NO_INSTALL_CLEANUP: '1'
@@ -381,6 +402,16 @@ jobs:
         run: brew install --build-from-source --verbose astrovm/pkgdeck/pkgdeck
       - name: Test installed commands and GUI startup
         run: brew test astrovm/pkgdeck/pkgdeck
+      - name: Test macOS GUI controllers, QML, startup and media
+        if: runner.os == 'macOS' && !inputs.homebrew_only
+        shell: bash
+        run: |
+          brew install coreutils pkgconf openssl@3
+          export PATH="$(brew --prefix coreutils)/libexec/gnubin:$(brew --prefix qtbase)/bin:$(brew --prefix qtdeclarative)/bin:$(brew --prefix qttools)/bin:$(brew --prefix openssl@3)/bin:$PATH"
+          export QMAKE="$(brew --prefix qtbase)/bin/qmake"
+          export QML_IMPORT_PATH="$(brew --prefix astrovm/pkgdeck/pkgdeck)/libexec/kirigami/lib/qml"
+          export QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=software
+          cargo test --locked -p pkgdeck --no-fail-fast -- --test-threads=1
       - name: Check CLI has no Qt linkage
         shell: bash
         run: |

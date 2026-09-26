@@ -26,6 +26,6 @@ podman run --rm -v "$binary:/opt/pkd:ro" "$image" bash -lc "
     success install jq
     $query
     success remove jq
-    ! $query
+    if $query; then echo 'Package still installed after removal' >&2; exit 1; fi
     echo 'PASS real $backend lifecycle'
 "

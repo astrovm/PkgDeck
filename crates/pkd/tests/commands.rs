@@ -33,11 +33,19 @@ impl Fixture {
         command
     }
     fn terminal_install(&self, answer: &str, no_color: bool) -> Output {
-        let mut command = Command::new("/usr/bin/timeout");
+        let timeout = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+            .map(|path| path.join("timeout"))
+            .find(|path| path.is_file())
+            .expect("GNU timeout (coreutils) is required for terminal tests");
+        let mut command = Command::new(timeout);
+        command.args(["15s", "/usr/bin/script"]);
+        let invocation = "exec \"$PKGDECK_TEST_CLI\" --from homebrew install fixture";
+        if cfg!(target_os = "macos") {
+            command.args(["-q", "/dev/null", "/bin/sh", "-c", invocation]);
+        } else {
+            command.args(["-qec", invocation, "/dev/null"]);
+        }
         command
-            .args(["15s", "/usr/bin/script", "-qec"])
-            .arg("exec \"$PKGDECK_TEST_CLI\" --from homebrew install fixture")
-            .arg("/dev/null")
             .env("PKGDECK_TEST_CLI", env!("CARGO_BIN_EXE_pkd"))
             .env("SHELL", "/bin/sh")
             .env("TERM", "xterm-256color")

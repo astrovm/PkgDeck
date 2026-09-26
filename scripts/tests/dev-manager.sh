@@ -12,9 +12,18 @@ echo "dev-manager: backend=$backend pkd=$pkd user=$(whoami) home=$HOME"
 run() { "$pkd" --json --yes --auth sudo --from "$backend" "$@"; }
 success() { run "$@" | grep -q '"exit_code":0'; }
 have() { run list | grep -q "\"name\":\"$1\""; }
+absent() {
+    if grep "$1" >/dev/null; then
+        echo "Package still present after removal: $1" >&2
+        return 1
+    fi
+}
 
 setup_node() {
-    command -v npm >/dev/null || { sudo apt-get update && sudo apt-get install -y nodejs npm; }
+    if ! command -v npm >/dev/null; then
+        if [[ $(uname -s) == Darwin ]]; then brew install node
+        else sudo apt-get update && sudo apt-get install -y nodejs npm; fi
+    fi
     # Keep global installs inside the invoking user's home.
     npm config set prefix "$HOME/.npm-global"
     export PATH="$HOME/.npm-global/bin:$PATH"
@@ -30,7 +39,10 @@ setup_python() {
 
 setup_pipx() {
     setup_python
-    command -v pipx >/dev/null || { sudo apt-get update && sudo apt-get install -y pipx; }
+    if ! command -v pipx >/dev/null; then
+        if [[ $(uname -s) == Darwin ]]; then brew install pipx
+        else sudo apt-get update && sudo apt-get install -y pipx; fi
+    fi
     export PIPX_HOME="$HOME/.local/share/pipx"
     export PIPX_BIN_DIR="$HOME/.local/bin"
     export PATH="$PIPX_BIN_DIR:$PATH"
@@ -44,14 +56,24 @@ setup_uv() {
 }
 
 setup_composer() {
-    command -v composer >/dev/null || { sudo apt-get update && sudo apt-get install -y php-cli php-zip unzip composer; }
+    if ! command -v composer >/dev/null; then
+        if [[ $(uname -s) == Darwin ]]; then brew install composer
+        else sudo apt-get update && sudo apt-get install -y php-cli php-zip unzip composer; fi
+    fi
     export COMPOSER_HOME="$HOME/.config/composer"
     mkdir -p "$COMPOSER_HOME"
     composer --version
 }
 
 setup_gem() {
-    command -v gem >/dev/null || { sudo apt-get update && sudo apt-get install -y ruby; }
+    if [[ $(uname -s) == Darwin ]]; then
+        brew install ruby
+        local ruby_prefix
+        ruby_prefix=$(brew --prefix ruby)
+        export PATH="$ruby_prefix/bin:$PATH"
+    else
+        command -v gem >/dev/null || { sudo apt-get update && sudo apt-get install -y ruby; }
+    fi
     gem --version
 }
 
@@ -64,7 +86,7 @@ cargo)
     success upgrade cowsay
     cargo install --list | grep -q '^cowsay v'
     success remove cowsay
-    ! cargo install --list | grep -q '^cowsay v'
+    cargo install --list | absent '^cowsay v'
     ;;
 npm)
     setup_node
@@ -75,7 +97,7 @@ npm)
     success upgrade
     npm ls --global --depth=0 | grep -q 'cowsay@1.6.0'
     success remove cowsay
-    ! npm ls --global --depth=0 2>/dev/null | grep -q 'cowsay@'
+    npm ls --global --depth=0 | absent 'cowsay@'
     success install cowsay
     have cowsay
     success remove cowsay
@@ -96,7 +118,7 @@ pnpm)
     success upgrade
     pnpm ls --global --depth=0 | grep -q 'cowsay@1.6.0'
     success remove cowsay
-    ! pnpm ls --global --depth=0 | grep -q 'cowsay@'
+    pnpm ls --global --depth=0 | absent 'cowsay@'
     success install cowsay
     have cowsay
     success remove cowsay
@@ -104,8 +126,9 @@ pnpm)
 bun)
     setup_node
     if ! command -v bun >/dev/null; then
-        curl -fsSL https://bun.sh/install -o /tmp/bun-install.sh \
-            && bash /tmp/bun-install.sh || npm install --global bun
+        if ! { curl -fsSL https://bun.sh/install -o /tmp/bun-install.sh && bash /tmp/bun-install.sh; }; then
+            npm install --global bun
+        fi
         export PATH="$HOME/.bun/bin:$PATH"
     fi
     command -v bun
@@ -117,7 +140,7 @@ bun)
     success upgrade cowsay
     grep -q '"version": "1.6.0"' "$HOME/.bun/install/global/node_modules/cowsay/package.json"
     success remove cowsay
-    ! test -e "$HOME/.bun/install/global/node_modules/cowsay"
+    [[ ! -e $HOME/.bun/install/global/node_modules/cowsay ]]
     success install cowsay
     have cowsay
     success remove cowsay
@@ -134,7 +157,7 @@ pip)
     success upgrade
     "$VIRTUAL_ENV/bin/pip" show cowsay | grep 'Version: 6.1'
     success remove cowsay
-    ! "$VIRTUAL_ENV/bin/pip" show cowsay >/dev/null 2>&1
+    if "$VIRTUAL_ENV/bin/pip" show cowsay >/dev/null 2>&1; then exit 1; fi
     success install cowsay
     have cowsay
     success remove cowsay
@@ -148,7 +171,7 @@ pipx)
     success upgrade
     pipx list --short | grep 'cowsay 6.1'
     success remove cowsay
-    ! pipx list --short 2>/dev/null | grep -q 'cowsay'
+    pipx list --short | absent 'cowsay'
     success install cowsay
     have cowsay
     success remove cowsay
@@ -163,7 +186,7 @@ uv)
     success upgrade
     uv tool list | grep 'cowsay v6.1'
     success remove cowsay
-    ! uv tool list 2>/dev/null | grep -q 'cowsay'
+    uv tool list | absent 'cowsay'
     success install cowsay
     have cowsay
     success remove cowsay
@@ -177,7 +200,7 @@ composer)
     success upgrade
     composer global show --format=json | grep '"version": "3'
     success remove psr/log
-    ! composer global show --format=json 2>/dev/null | grep -q 'psr/log'
+    composer global show --format=json | absent 'psr/log'
     success install psr/log
     have psr/log
     success remove psr/log
@@ -191,7 +214,7 @@ gem)
     success upgrade rake
     gem list rake | grep 'rake (' | grep -v '(13.0.0)$'
     success remove rake
-    ! gem list 2>/dev/null | grep -q '^rake '
+    gem list | absent '^rake '
     success install cowsay
     have cowsay
     success remove cowsay

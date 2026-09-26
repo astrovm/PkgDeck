@@ -471,6 +471,10 @@ impl Backend for MacApps {
     fn query_errors(&self) -> Vec<EngineError> {
         self.scan_errors.clone()
     }
+    fn may_have(&self, name: &str) -> bool {
+        let path = Path::new(name);
+        path.is_absolute() && path.extension().is_some_and(|ext| ext == "app")
+    }
     fn search(&mut self, query: &str, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
         let query = query.to_lowercase();
         Ok(self
@@ -583,6 +587,28 @@ mod tests {
         casks: Vec<Value>,
     ) -> Result<BTreeMap<PathBuf, Vec<String>>, EngineError> {
         cask_owners(root, &serde_json::to_vec(&json!({"casks": casks})).unwrap())
+    }
+
+    #[test]
+    fn exact_package_names_do_not_probe_the_application_inventory() {
+        let f = Fixture::new();
+        let backend = f.backend(Err(EngineError::Cancelled));
+        for name in [
+            "curl",
+            "obsidian",
+            "App.app",
+            "/Applications",
+            "/Applications/App.app/Contents",
+        ] {
+            assert!(!backend.may_have(name), "{name}");
+        }
+        assert!(backend.may_have("/Applications/Utilities/App.app"));
+        let mut engine = Engine::default();
+        engine.register(backend).unwrap();
+        let report = engine.lookup("curl", &Cancellation::default());
+        assert!(report.failures.is_empty());
+        assert!(report.packages.is_empty());
+        assert!(report.successful_sources.is_empty());
     }
 
     #[test]

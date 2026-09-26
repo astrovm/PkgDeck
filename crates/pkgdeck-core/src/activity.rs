@@ -171,9 +171,15 @@ impl History {
     pub fn recover_dead(&self) -> io::Result<()> {
         self.edit(|entries| {
             for entry in entries {
-                if !entry.state.terminal()
-                    && !Path::new(&format!("/proc/{}", entry.owner_pid)).exists()
-                {
+                // A signal-0 probe works on both Linux and macOS, which has no
+                // /proc. Permission errors still mean the process may be alive.
+                let alive = i32::try_from(entry.owner_pid)
+                    .ok()
+                    .and_then(rustix::process::Pid::from_raw)
+                    .is_some_and(|pid| {
+                        rustix::process::test_kill_process(pid) != Err(rustix::io::Errno::SRCH)
+                    });
+                if !entry.state.terminal() && !alive {
                     entry.state = State::Interrupted;
                     entry.finished_at = Some(now());
                 }
@@ -207,6 +213,11 @@ mod tests {
         assert_eq!(entries.len(), LIMIT);
         assert_eq!(entries[0].id, 6);
         let id = store.begin("test", vec![], State::Running).unwrap();
+        store.recover_dead().unwrap();
+        assert_eq!(
+            store.entries().unwrap().last().unwrap().state,
+            State::Running
+        );
         store
             .edit(|rows| {
                 rows.iter_mut()

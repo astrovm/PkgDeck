@@ -1131,13 +1131,13 @@ mod flatpak_bridge_tests {
             ]
             .into(),
         );
-        host.bridge = "/bin/true".into();
+        host.bridge = "/usr/bin/true".into();
         for name in ["apt-get", "brew", "podman", "python3"] {
             let path = Path::new("/usr/bin").join(name);
             let command = host
                 .command(&path, &["literal;$(no-shell)".into()])
                 .unwrap();
-            assert_eq!(command.get_program(), "/bin/true");
+            assert_eq!(command.get_program(), "/usr/bin/true");
             let args: Vec<_> = command.get_args().collect();
             assert_eq!(args[args.len() - 2], path.as_os_str());
             assert_eq!(
@@ -1164,7 +1164,7 @@ mod flatpak_bridge_tests {
         assert!(host
             .host_file(Path::new("/synthetic-host-executable"), true)
             .unwrap());
-        host.bridge = "/bin/false".into();
+        host.bridge = "/usr/bin/false".into();
         assert!(!host
             .host_file(Path::new("/synthetic-host-executable"), true)
             .unwrap());
@@ -1194,7 +1194,7 @@ mod flatpak_bridge_tests {
         let directory =
             std::env::temp_dir().join(format!("pkgdeck-bridge-brew-{}", std::process::id()));
         std::fs::create_dir_all(&directory).unwrap();
-        std::os::unix::fs::symlink("/bin/true", directory.join("brew")).unwrap();
+        std::os::unix::fs::symlink("/usr/bin/true", directory.join("brew")).unwrap();
         host.env.insert("PATH".into(), directory.as_os_str().into());
         let result = host
             .brew(&["--version".into()], &Cancellation::default(), false)
@@ -1214,7 +1214,7 @@ mod flatpak_bridge_tests {
         assert!(String::from_utf8(pip.stdout)
             .unwrap()
             .contains("/bin/python -m pip list"));
-        std::os::unix::fs::symlink("/bin/true", directory.join("flatpak")).unwrap();
+        std::os::unix::fs::symlink("/usr/bin/true", directory.join("flatpak")).unwrap();
         let flatpak = host
             .flatpak(
                 &["--user".into(), "list".into()],
@@ -1268,7 +1268,7 @@ mod flatpak_bridge_tests {
         assert!(output.contains("/usr/bin/dnf install synthetic-package"));
         assert!(!output.contains("/home/fixture/untrusted-bin/dnf"));
 
-        host.bridge = "/bin/false".into();
+        host.bridge = "/usr/bin/false".into();
         assert!(matches!(
             host.flatpak(&[], &cancel, true, true, Authorization::Polkit),
             Err(ExecutionError::Disabled(reason)) if reason == "system Flatpak not found"
@@ -1291,7 +1291,7 @@ mod flatpak_bridge_tests {
 
     #[test]
     fn source_editor_reports_the_child_result() {
-        assert!(Host::run_source_editor(Command::new("/bin/true")).is_ok());
+        assert!(Host::run_source_editor(Command::new("/usr/bin/true")).is_ok());
         let mut rejected = Command::new("/bin/sh");
         rejected.args(["-c", "exit 7"]);
         assert!(matches!(
@@ -1357,9 +1357,9 @@ mod flatpak_bridge_tests {
     #[test]
     fn system_flatpak_write_availability_uses_the_host_namespace() {
         let mut host = Host::new(Runtime::Flatpak, BTreeMap::new());
-        host.bridge = "/bin/true".into();
+        host.bridge = "/usr/bin/true".into();
         assert_eq!(host.system_flatpak_available(), cfg!(target_os = "linux"));
-        host.bridge = "/bin/false".into();
+        host.bridge = "/usr/bin/false".into();
         assert!(!host.system_flatpak_available());
     }
 
@@ -1422,12 +1422,12 @@ mod flatpak_bridge_tests {
         );
         let command = host
             .flatpak_host_command_with_bridge(
-                Path::new("/bin/true"),
+                Path::new("/usr/bin/true"),
                 Path::new("/usr/bin/flatpak"),
                 &["--user".into(), "list".into()],
             )
             .unwrap();
-        assert_eq!(command.get_program(), "/bin/true");
+        assert_eq!(command.get_program(), "/usr/bin/true");
         let args = command
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
@@ -1452,7 +1452,7 @@ mod flatpak_bridge_tests {
         assert!(args.ends_with(&["/usr/bin/flatpak".into(), "--user".into(), "list".into()]));
         assert!(matches!(
             host.flatpak_host_command_with_bridge(
-                Path::new("/bin/true"),
+                Path::new("/usr/bin/true"),
                 Path::new("flatpak"),
                 &[]
             ),
@@ -1471,8 +1471,8 @@ mod flatpak_bridge_tests {
             Err(ExecutionError::Disabled(_))
         ));
         assert_eq!(
-            system_flatpak_path(Path::new("/bin/true")).unwrap(),
-            Path::new("/bin/true")
+            system_flatpak_path(Path::new("/usr/bin/true")).unwrap(),
+            Path::new("/usr/bin/true")
         );
         assert!(matches!(
             system_flatpak_path(Path::new("/missing-system-flatpak")),

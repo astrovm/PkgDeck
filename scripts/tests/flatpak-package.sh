@@ -27,4 +27,7 @@ check list 'any(.data.packages[]; .id.name == "org.kde.kcalc")' run_flatpak list
 check info '.exit_code == 0' run_flatpak --scope user info org.kde.kcalc
 check update '.exit_code == 0' run_flatpak update
 check remove '.exit_code == 0' run_flatpak --scope user remove org.kde.kcalc
-! flatpak --user list --app | grep -q org.kde.kcalc
+if flatpak --user list --app | grep -q org.kde.kcalc; then
+    echo 'KCalc still installed after removal' >&2
+    exit 1
+fi
