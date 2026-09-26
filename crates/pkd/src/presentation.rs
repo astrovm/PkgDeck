@@ -24,11 +24,24 @@ pub fn package_marker(installed: bool, update: bool) -> &'static str {
 fn target(id: &PackageId) -> String {
     clean(id.reference.as_deref().unwrap_or(&id.name))
 }
+/// The name people know a source by ("APT", "Flatpak"), for sentences.
+pub fn source_name(backend: &str) -> String {
+    clean(pkgdeck_core::backends::display_name(backend))
+}
+/// "all APT packages", "all Docker images", "all firmware".
+fn everything_from(backend: &str) -> String {
+    let name = source_name(backend);
+    match backend {
+        "fwupd" => "all firmware".into(),
+        _ if name.ends_with(" images") || name.ends_with(" Casks") => format!("all {name}"),
+        _ => format!("all {name} packages"),
+    }
+}
 /// Short imperative title for a planned change, such as "Install neovim".
 pub fn operation_title(op: &Operation) -> String {
     match op {
-        Operation::Refresh { backend } => format!("Refresh {}", clean(backend)),
-        Operation::UpgradeAll { backend } => format!("Update all {} packages", clean(backend)),
+        Operation::Refresh { backend } => format!("Refresh {}", source_name(backend)),
+        Operation::UpgradeAll { backend } => format!("Update {}", everything_from(backend)),
         Operation::Clean(id) => format!("Clean up {}", clean(&id.key)),
         Operation::Install(id) => format!("Install {}", target(id)),
         Operation::Remove(id) => format!("Remove {}", target(id)),
@@ -38,8 +51,8 @@ pub fn operation_title(op: &Operation) -> String {
 /// What PkgDeck is doing right now, for the spinner.
 pub fn operation_progress(op: &Operation) -> String {
     match op {
-        Operation::Refresh { backend } => format!("Refreshing {}", clean(backend)),
-        Operation::UpgradeAll { backend } => format!("Updating all {} packages", clean(backend)),
+        Operation::Refresh { backend } => format!("Refreshing {}", source_name(backend)),
+        Operation::UpgradeAll { backend } => format!("Updating {}", everything_from(backend)),
         Operation::Clean(id) => format!("Cleaning up {}", clean(&id.key)),
         Operation::Install(id) => format!("Installing {}", target(id)),
         Operation::Remove(id) => format!("Removing {}", target(id)),
@@ -50,9 +63,9 @@ pub fn operation_progress(op: &Operation) -> String {
 pub fn operation_context(op: &Operation) -> String {
     match op {
         Operation::Refresh { .. } | Operation::UpgradeAll { .. } => String::new(),
-        Operation::Clean(id) => clean(&id.backend),
+        Operation::Clean(id) => source_name(&id.backend),
         Operation::Install(id) | Operation::Remove(id) | Operation::Upgrade(id) => {
-            let mut parts = vec![clean(&id.backend)];
+            let mut parts = vec![source_name(&id.backend)];
             // Architecture only tells native packages apart (amd64 vs i386).
             if matches!(id.backend.as_str(), "apt" | "dnf" | "pacman" | "zypper")
                 && !matches!(id.architecture.as_str(), "" | "all" | "any" | "noarch")
@@ -145,16 +158,20 @@ pub fn error_text(error: &Value) -> String {
                 "Execution" => execution_text(inner),
                 "Unsupported" => format!(
                     "{} can't {}.",
-                    field(inner, "backend"),
+                    source_name(&field(inner, "backend")),
                     capability_verb(inner["capability"].as_str().unwrap_or_default())
                 ),
                 "Unavailable" => format!(
                     "{} isn't available: {}",
-                    field(inner, "backend"),
+                    source_name(&field(inner, "backend")),
                     field(inner, "reason")
                 ),
                 "InvalidResponse" => {
-                    format!("{}: {}", field(inner, "backend"), field(inner, "reason"))
+                    format!(
+                        "{}: {}",
+                        source_name(&field(inner, "backend")),
+                        field(inner, "reason")
+                    )
                 }
                 "Incomplete" => {
                     let failed: Vec<_> = inner
@@ -194,40 +211,60 @@ fn execution_text(error: &Value) -> String {
             {
                 clean(text)
             } else if let Some(result) = error.get("Failed") {
-                let stderr = result["stderr"].as_str().unwrap_or_default();
-                let tail: Vec<_> = stderr
-                    .lines()
-                    .map(str::trim)
-                    .filter(|line| !line.is_empty())
-                    .collect();
-                let tail = tail[tail.len().saturating_sub(3)..].join(" ");
-                let code = result["code"]
-                    .as_i64()
-                    .map_or_else(|| "was stopped".into(), |code| format!("exited with code {code}"));
-                if tail.is_empty() {
-                    format!("The package manager {code}.")
-                } else {
-                    format!("The package manager {code}: {}", clean(&tail))
-                }
+                format!("The package manager {}", outcome(result))
             } else {
                 value(error)
             }
         }
     }
 }
+/// How a failed command ended, as the end of a sentence, from its
+/// serialized result: "exited with code 1: error: …". Mirrors
+/// `Completion::outcome` in the engine.
+fn outcome(result: &Value) -> String {
+    let ended = match (result["code"].as_i64(), result["signal"].as_i64()) {
+        (Some(code), _) => format!("exited with code {code}"),
+        (None, Some(signal)) => format!("was stopped by signal {signal}"),
+        (None, None) => "was stopped".into(),
+    };
+    let stderr = result["stderr"].as_str().unwrap_or_default();
+    match pkgdeck_core::process::failure_summary(stderr.as_bytes()) {
+        Some(reason) => format!("{ended}: {reason}"),
+        None => format!("{ended}."),
+    }
+}
+/// A source's error as one sentence that names the source once, such as
+/// "Cargo exited with code 1: error: rustup could not choose a version".
 fn failure_text(failure: &Value) -> String {
     match failure["backend"].as_str() {
         Some(backend) => {
+            let name = source_name(backend);
+            if let Some(result) = failure["error"]["Execution"].get("Failed") {
+                return format!("{name} {}", outcome(result));
+            }
             let text = error_text(&failure["error"]);
             // Many errors already start with their source; don't repeat it.
-            if text.starts_with(&format!("{backend}:")) || text.starts_with(&format!("{backend} "))
-            {
+            if text.starts_with(&format!("{name}:")) || text.starts_with(&format!("{name} ")) {
                 text
             } else {
-                format!("{}: {text}", clean(backend))
+                format!("{name}: {text}")
             }
         }
         None => value(failure),
+    }
+}
+/// Why a source's availability check failed, for `pkd sources`.
+fn source_check_text(backend: &str, error: &Value) -> String {
+    let name = source_name(backend);
+    match error["Execution"].get("Failed") {
+        Some(result) => {
+            let stderr = result["stderr"].as_str().unwrap_or_default();
+            match pkgdeck_core::process::failure_summary(stderr.as_bytes()) {
+                Some(reason) => format!("Couldn't run {name}: {reason}"),
+                None => format!("Couldn't run {name}: it {}", outcome(result)),
+            }
+        }
+        None => format!("Couldn't check {name}: {}", error_text(error)),
     }
 }
 /// One finished change: a check or a cross, then the reason on its own line.
@@ -298,8 +335,22 @@ fn value(value: &Value) -> String {
         other => other.to_string(),
     }
 }
+/// Separates a cell's full text from the shorter form a narrow column uses.
+const SHORT: char = '\u{1f}';
+/// A cell that reads `long` when it fits and `short` when it doesn't.
+fn with_short(long: &str, short: &str) -> String {
+    format!("{long}{SHORT}{short}")
+}
+/// The full text of a cell, without its short form.
+fn long_text(text: &str) -> &str {
+    text.split(SHORT).next().unwrap_or(text)
+}
 fn cell(text: &str, width: usize) -> String {
-    let text = clean(text);
+    let text = match text.split_once(SHORT) {
+        Some((long, short)) if clean(long).width() > width => clean(short),
+        Some((long, _)) => clean(long),
+        None => clean(text),
+    };
     let mut output = String::new();
     let clipped = text.width() > width;
     let limit = width.saturating_sub(usize::from(clipped));
@@ -350,6 +401,48 @@ type Style = fn(Paint, &str) -> String;
 fn plain(_: Paint, text: &str) -> String {
     text.into()
 }
+/// "● VLC (org.videolan.VLC)": the id after the name is dimmed.
+fn with_dim_id(paint: Paint, text: &str, main: Style) -> String {
+    match text.rfind(" (") {
+        Some(split) => format!(
+            "{}{}",
+            main(paint, &text[..split]),
+            paint.dim(&text[split..])
+        ),
+        None => main(paint, text),
+    }
+}
+fn green_named(paint: Paint, text: &str) -> String {
+    with_dim_id(paint, text, Paint::green)
+}
+fn cyan_named(paint: Paint, text: &str) -> String {
+    with_dim_id(paint, text, Paint::cyan)
+}
+/// "system", "user", or the environment path.
+fn scope_text(scope: &Value) -> String {
+    match scope_label(scope) {
+        Some(label) => label.into(),
+        None => match scope["environment"]["path"].as_str() {
+            Some(path) => format!("environment {}", clean(path)),
+            None => value(scope),
+        },
+    }
+}
+/// The name to show for a package, and whether it ends with its id in
+/// parentheses: apps show their app name ("VLC (org.videolan.VLC)"), and
+/// firmware and container images, whose ids are opaque, only their name.
+fn package_name(package: &Value) -> (String, bool) {
+    let id = value(&package["id"]["name"]);
+    let display = package["display_name"]
+        .as_str()
+        .map(clean)
+        .filter(|name| !name.trim().is_empty());
+    match (package["id"]["backend"].as_str(), display) {
+        (Some("fwupd" | "docker" | "podman"), Some(display)) => (display, false),
+        (_, Some(display)) if display != id => (format!("{display} ({id})"), true),
+        _ => (id, false),
+    }
+}
 fn table(headers: &[&str], rows: &[Vec<(String, Style)>], width: usize, paint: Paint) -> String {
     // Drop trailing columns on narrow terminals; full metadata remains in `info`/JSON.
     let columns = if width < 60 {
@@ -367,7 +460,7 @@ fn table(headers: &[&str], rows: &[Vec<(String, Style)>], width: usize, paint: P
     let natural: Vec<usize> = (0..columns)
         .map(|i| {
             rows.iter()
-                .map(|row| clean(&row[i].0).width())
+                .map(|row| clean(long_text(&row[i].0)).width())
                 .chain([headers[i].width()])
                 .max()
                 .unwrap_or(0)
@@ -424,6 +517,83 @@ fn table(headers: &[&str], rows: &[Vec<(String, Style)>], width: usize, paint: P
         result.push_str(&render(row, false));
     }
     result
+}
+/// One ownership record of an executable, in words: "Installed by cowsay
+/// (APT)". Records about another file (a symlink target) name that file.
+fn owner_line(owner: &Value, candidate: &Value) -> String {
+    let manager = source_name(owner["manager"].as_str().unwrap_or_default());
+    let native = value(&owner["native_name"]);
+    let path = value(&owner["path"]);
+    let file = if owner["path"].is_null() || owner["path"] == candidate["path"] {
+        String::new()
+    } else {
+        format!(" as {path}")
+    };
+    match owner["state"].as_str() {
+        Some("known") => format!("Installed by {native} ({manager}){file}"),
+        Some("ambiguous") => format!(
+            "Installed by {native} ({manager}){file}, which matches several installed packages:"
+        ),
+        Some("unmatched") => format!(
+            "{manager} lists {path} under {native}, but {native} isn't in the installed list"
+        ),
+        _ => format!("No package manager claims {path}"),
+    }
+}
+/// Below 60 columns a table keeps two columns. Here the rest of each row
+/// is too useful to drop, so it wraps onto indented lines under the row.
+fn table_with_notes(
+    headers: &[&str],
+    rows: &[Vec<(String, Style)>],
+    width: usize,
+    paint: Paint,
+) -> String {
+    if width >= 60 || headers.len() <= 2 {
+        return table(headers, rows, width, paint);
+    }
+    let rendered = table(&headers[..2], rows, width, paint);
+    let mut lines = rendered.lines();
+    let mut output: Vec<String> = lines.by_ref().take(2).map(str::to_string).collect();
+    for (line, row) in lines.zip(rows) {
+        output.push(line.to_string());
+        let note: Vec<_> = row[2..]
+            .iter()
+            .map(|(text, _)| clean(long_text(text)))
+            .filter(|text| !text.trim().is_empty())
+            .collect();
+        for wrapped in wrap(&note.join("  "), width.saturating_sub(4).max(8)) {
+            output.push(format!("    {}", paint.dim(&wrapped)));
+        }
+    }
+    output.join("\n")
+}
+/// Greedy word wrap by display width; long words are cut.
+fn wrap(text: &str, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    for word in text.split_whitespace() {
+        let candidate = if line.is_empty() {
+            word.to_string()
+        } else {
+            format!("{line} {word}")
+        };
+        if candidate.width() <= width {
+            line = candidate;
+            continue;
+        }
+        if !line.is_empty() {
+            lines.push(std::mem::take(&mut line));
+        }
+        line = if word.width() > width {
+            cell(word, width).trim_end().to_string()
+        } else {
+            word.to_string()
+        };
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
 }
 fn failure_line(paint: Paint, detail: &str) -> String {
     format!("\n{} {detail}", paint.yellow("!"))
@@ -486,7 +656,7 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
         if !unsupported.is_empty() {
             let names: Vec<_> = unsupported
                 .iter()
-                .map(|failure| value(&failure["backend"]))
+                .map(|failure| source_name(failure["backend"].as_str().unwrap_or_default()))
                 .collect();
             output.push_str(&format!(
                 "\n\n{}",
@@ -494,25 +664,23 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
             ));
         }
     } else if let Some(packages) = data["packages"].as_array() {
+        // Which of the three states appear, for a legend without noise.
+        let mut states = [false; 3];
         let rows = packages
             .iter()
             .map(|p| {
                 let installed = !p["installed_version"].is_null();
                 let update = p["update"] == "available";
                 let marker = package_marker(installed, update);
-                let name = value(
-                    if matches!(
-                        p["id"]["backend"].as_str(),
-                        Some("fwupd" | "docker" | "podman")
-                    ) {
-                        &p["display_name"]
-                    } else {
-                        &p["id"]["name"]
-                    },
-                );
+                states[if update { 2 } else { usize::from(installed) }] = true;
+                let (name, named) = package_name(p);
                 // Flatpak can install the same app per user and system-wide.
+                // Narrow columns use "flatpak·sys" rather than cutting it.
                 let source = match (p["id"]["backend"].as_str(), scope_label(&p["id"]["scope"])) {
-                    (Some("flatpak"), Some(scope)) => format!("flatpak ({scope})"),
+                    (Some("flatpak"), Some(scope)) => with_short(
+                        &format!("flatpak ({scope})"),
+                        &format!("flatpak·{}", if scope == "system" { "sys" } else { scope }),
+                    ),
                     _ => value(&p["id"]["backend"]),
                 };
                 let version = if update && installed && !p["candidate_version"].is_null() {
@@ -528,12 +696,12 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
                         &p["candidate_version"]
                     })
                 };
-                let marker_style: Style = if update {
-                    Paint::cyan
-                } else if installed {
-                    Paint::green
-                } else {
-                    Paint::dim
+                let marker_style: Style = match (update, installed, named) {
+                    (true, _, true) => cyan_named,
+                    (true, _, false) => Paint::cyan,
+                    (false, true, true) => green_named,
+                    (false, true, false) => Paint::green,
+                    (false, false, _) => Paint::dim,
                 };
                 vec![
                     (format!("{marker} {name}"), marker_style),
@@ -567,6 +735,11 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
                 paint,
             ));
             let count = rows.len();
+            let legend: Vec<_> = ["○ not installed", "● installed", "↑ update available"]
+                .into_iter()
+                .zip(states)
+                .filter_map(|(entry, seen)| seen.then_some(entry))
+                .collect();
             output.push_str(&format!(
                 "\n\n{}{}\n{}",
                 paint.bold(&format!(
@@ -574,7 +747,7 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
                     if count == 1 { "" } else { "s" }
                 )),
                 paint.dim(". Run `pkd info <name>` for details."),
-                paint.dim("○ not installed   ● installed   ↑ update available")
+                paint.dim(&legend.join("   "))
             ));
         }
         if let Some(failures) = data["failures"].as_array() {
@@ -641,20 +814,14 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
                 }
                 if let Some(owners) = candidate["owners"].as_array() {
                     for owner in owners {
-                        output.push_str(&format!(
-                            "\n  Owner of {}: {} {} ({})",
-                            value(&owner["path"]),
-                            value(&owner["manager"]),
-                            value(&owner["native_name"]),
-                            value(&owner["state"])
-                        ));
+                        output.push_str(&format!("\n  {}", owner_line(owner, candidate)));
                         if let Some(packages) = owner["packages"].as_array() {
                             for package in packages {
                                 output.push_str(&format!(
-                                    "\n    Exact copy: {} from {}, {}",
+                                    "\n    Package: {} from {}, {}",
                                     value(&package["name"]),
-                                    value(&package["backend"]),
-                                    value(&package["scope"])
+                                    source_name(package["backend"].as_str().unwrap_or_default()),
+                                    scope_text(&package["scope"])
                                 ));
                             }
                         }
@@ -680,8 +847,8 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
                         output.push_str(&format!(
                             "  {} from {}, {}, version {}\n",
                             value(&copy["package"]["name"]),
-                            value(&copy["package"]["backend"]),
-                            value(&copy["package"]["scope"]),
+                            source_name(copy["package"]["backend"].as_str().unwrap_or_default()),
+                            scope_text(&copy["package"]["scope"]),
                             value(&copy["installed_version"])
                         ));
                     }
@@ -699,7 +866,7 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
                     "  {} ({} bytes, from {} package {})\n",
                     value(&row["path"]),
                     value(&row["size_bytes"]),
-                    value(&row["manager"]),
+                    source_name(row["manager"].as_str().unwrap_or_default()),
                     value(&row["native_name"])
                 ));
             }
@@ -707,14 +874,23 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
         output.push_str(&format!("\n{}", paint.dim(&value(&report["data_note"]))));
     } else if data.get("package").is_some() {
         let p = &data["package"];
-        output.push_str(&paint.bold(&value(&p["id"]["name"])));
+        let (name, named) = package_name(p);
+        output.push_str(&if named {
+            with_dim_id(paint, &name, Paint::bold)
+        } else {
+            paint.bold(&name)
+        });
         let description = value(&data["description"]);
         if !data["description"].is_null() && !description.trim().is_empty() {
             output.push_str(&format!("\n{description}"));
         }
         output.push_str("\n\n");
+        let source = p["id"]["backend"]
+            .as_str()
+            .map(|backend| Value::String(source_name(backend)))
+            .unwrap_or(Value::Null);
         for (label, field) in [
-            ("Source", &p["id"]["backend"]),
+            ("Source", &source),
             ("Reference", &p["id"]["reference"]),
             ("Architecture", &p["id"]["architecture"]),
             ("Scope", &p["id"]["scope"]),
@@ -727,19 +903,23 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
             // A missing installed version means not installed; other empty
             // fields carry no information and are left out.
             let text = if label == "Installed" && field.is_null() {
-                "not installed".into()
+                "no".into()
             } else if field.is_null()
                 || field.as_array().is_some_and(Vec::is_empty)
                 || (label == "Update" && field == "unknown")
             {
                 continue;
+            } else if label == "Scope" {
+                scope_text(field)
+            } else if label == "Update" && field == "current" {
+                "up to date".into()
+            } else if label == "Update" && field == "available" {
+                paint.cyan(&match p["candidate_version"].as_str() {
+                    Some(version) => format!("available ({})", clean(version)),
+                    None => "available".into(),
+                })
             } else {
                 value(field)
-            };
-            let text = if label == "Update" && text == "available" {
-                paint.cyan(&text)
-            } else {
-                text
             };
             output.push_str(&format!("{}  {text}\n", paint.dim(&format!("{label:>12}"))));
         }
@@ -785,10 +965,19 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
             .filter(available)
             .chain(sources.iter().filter(|s| !available(s)))
             .map(|s| {
-                let availability = value(&s["availability"]);
-                let (status, detail) = match availability.split_once(": ") {
-                    Some((status, reason)) => (status.to_string(), reason.to_string()),
-                    None => (availability.clone(), value(&s["capabilities"])),
+                let (status, detail) = match s["availability"].get("Err") {
+                    // The check itself failed: say why in one sentence.
+                    Some(error) => (
+                        "failed".to_string(),
+                        source_check_text(s["backend"].as_str().unwrap_or_default(), error),
+                    ),
+                    None => {
+                        let availability = value(&s["availability"]);
+                        match availability.split_once(": ") {
+                            Some((status, reason)) => (status.to_string(), reason.to_string()),
+                            None => (availability.clone(), value(&s["capabilities"])),
+                        }
+                    }
                 };
                 let available = status == "available";
                 vec![
@@ -812,7 +1001,7 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
                 ]
             })
             .collect::<Vec<_>>();
-        output.push_str(&table(
+        output.push_str(&table_with_notes(
             &["SOURCE", "STATUS", "DETAILS"],
             &rows,
             width,
@@ -1010,7 +1199,7 @@ mod tests {
             false,
         );
         assert!(incomplete.contains("No packages returned from checked sources."));
-        assert!(incomplete.contains("! apt: synthetic failure"));
+        assert!(incomplete.contains("! APT: synthetic failure"));
         let ambiguous = human(
             &json!({"error":{"Ambiguous":[
                 {"backend":"apt","name":"fixture","architecture":"amd64","scope":"system"},
@@ -1080,7 +1269,14 @@ mod tests {
         let output = human(&command, 100, false);
         assert!(output.contains("Resolved  /first/tool"));
         assert!(output.contains("/target/tool"));
-        assert!(output.contains("Exact copy: fixture from apt, system"));
+        assert!(
+            output.contains("Installed by fixture:amd64 (APT)"),
+            "{output}"
+        );
+        assert!(
+            output.contains("    Package: fixture from APT, system"),
+            "{output}"
+        );
         let audited = json!({"audit":{"groups":[{"key":"fixture","copies":[{"package":{"backend":"apt","name":"fixture","scope":"system"},"installed_version":"1"}]}],
             "leftovers":[{"manager":"apt","native_name":"old-fixture","path":"/etc/old.conf","size_bytes":4}],
             "data_note":"Unknown data remains unknown."}});
@@ -1104,13 +1300,13 @@ mod tests {
                 backend: "apt".into(),
                 key: "autoremove".into(),
             })),
-            "Clean up autoremove  apt"
+            "Clean up autoremove  APT"
         );
         assert_eq!(
             operation(&Operation::UpgradeAll {
                 backend: "homebrew".into(),
             }),
-            "Update all homebrew packages"
+            "Update all Homebrew packages"
         );
         let plans = json!({
             "items": [{
@@ -1127,8 +1323,8 @@ mod tests {
         assert!(output.contains("apt:autoremove"));
         assert!(output.contains("Unused dependencies"));
         assert!(output.contains("pkd clean --all"));
-        assert!(output.contains("No cleanup tasks in: snap"));
-        assert!(output.contains("homebrew: synthetic failure"));
+        assert!(output.contains("No cleanup tasks in: Snap"));
+        assert!(output.contains("Homebrew: synthetic failure"));
 
         let empty = human(&json!({"items": [], "failures": []}), 80, false);
         assert!(empty.contains("Nothing to clean"));
@@ -1162,13 +1358,13 @@ mod tests {
                 Operation::Install(id("apt", "i386", Scope::System)),
                 "Install tool",
                 "Installing tool",
-                "apt, i386",
+                "APT, i386",
             ),
             (
                 Operation::Remove(id("flatpak", "x86_64", Scope::System)),
                 "Remove tool",
                 "Removing tool",
-                "flatpak, system",
+                "Flatpak, system",
             ),
             (
                 Operation::Upgrade(id("npm", "all", Scope::User { uid: 1 })),
@@ -1180,16 +1376,16 @@ mod tests {
                 Operation::Refresh {
                     backend: "apt".into(),
                 },
-                "Refresh apt",
-                "Refreshing apt",
+                "Refresh APT",
+                "Refreshing APT",
                 "",
             ),
             (
                 Operation::UpgradeAll {
                     backend: "snap".into(),
                 },
-                "Update all snap packages",
-                "Updating all snap packages",
+                "Update all Snap packages",
+                "Updating all Snap packages",
                 "",
             ),
             (
@@ -1199,7 +1395,7 @@ mod tests {
                 }),
                 "Clean up autoclean",
                 "Cleaning up autoclean",
-                "apt",
+                "APT",
             ),
         ];
         let operations: Vec<_> = cases.iter().map(|case| case.0.clone()).collect();
@@ -1242,21 +1438,21 @@ mod tests {
             (json!({"Execution": {"Io": "broken pipe"}}), "broken pipe"),
             (
                 failed(Some(100), "E: one\n\nE: two\n"),
-                "exited with code 100: E: one E: two",
+                "The package manager exited with code 100: E: one",
             ),
             (failed(None, ""), "The package manager was stopped."),
             (json!({"Execution": {"Unknown": 1}}), "Unknown"),
             (
                 json!({"Unavailable": {"backend": "dnf", "reason": "not found"}}),
-                "dnf isn't available: not found",
+                "DNF isn't available: not found",
             ),
             (
                 json!({"InvalidResponse": {"backend": "apt", "reason": "odd"}}),
-                "apt: odd",
+                "APT: odd",
             ),
             (
                 json!({"Incomplete": [{"backend": "apt", "error": {"Execution": "TimedOut"}}]}),
-                "Some sources didn't answer, so nothing was changed. apt: The package manager took too long to answer. Try again, or leave them out with --from.",
+                "Some sources didn't answer, so nothing was changed. APT: The package manager took too long to answer. Try again, or leave them out with --from.",
             ),
             (json!({"Ambiguous": [{}, {}]}), "2 packages have this name"),
             (json!({"UnknownBackend": "x"}), "UnknownBackend: x"),
@@ -1304,8 +1500,132 @@ mod tests {
         assert!(human(&details, 80, true).contains("available"));
         let inspection = json!({"inspection": {"command": "tool", "candidates": []},
             "failures": [{"backend": "dnf", "error": {"Execution": "TimedOut"}}]});
-        assert!(human(&inspection, 80, false).contains("! dnf: The package manager took too long"));
+        assert!(human(&inspection, 80, false).contains("! DNF: The package manager took too long"));
         assert_eq!(error_text(&json!({"Execution": "Disabled"})), "Disabled");
+    }
+    #[test]
+    fn plain_wording_display_names_and_narrow_layouts() {
+        // Ownership records read as sentences in every state.
+        let candidate = json!({"path": "/usr/games/cowsay"});
+        let owner = |state: &str, path: &str| json!({"manager": "apt", "native_name": "cowsay", "state": state, "path": path});
+        for (owner, expected) in [
+            (
+                owner("known", "/usr/games/cowsay"),
+                "Installed by cowsay (APT)",
+            ),
+            (
+                owner("known", "/usr/share/cowsay"),
+                "Installed by cowsay (APT) as /usr/share/cowsay",
+            ),
+            (
+                owner("ambiguous", "/usr/games/cowsay"),
+                "Installed by cowsay (APT), which matches several installed packages:",
+            ),
+            (
+                owner("unmatched", "/usr/games/cowsay"),
+                "APT lists /usr/games/cowsay under cowsay, but cowsay isn't in the installed list",
+            ),
+            (
+                owner("unknown", "/usr/games/cowsay"),
+                "No package manager claims /usr/games/cowsay",
+            ),
+        ] {
+            assert_eq!(owner_line(&owner, &candidate), expected);
+        }
+        // Display names lead; the id follows when it differs.
+        let named = |backend: &str, display: &str| json!({"id": {"name": "org.example.App", "backend": backend}, "display_name": display});
+        assert_eq!(
+            package_name(&named("flatpak", "Example")),
+            ("Example (org.example.App)".into(), true)
+        );
+        assert_eq!(
+            package_name(&named("fwupd", "System Firmware")),
+            ("System Firmware".into(), false)
+        );
+        assert_eq!(
+            package_name(&named("flatpak", " ")),
+            ("org.example.App".into(), false)
+        );
+        // Info: the display name, plain states and the new version.
+        let details = json!({"package": {"id": {"name": "org.example.App", "backend": "flatpak",
+            "scope": {"user": {"uid": 1000}}}, "display_name": "Example", "installed_version": "1",
+            "candidate_version": "2", "update": "available"}});
+        let output = human(&details, 80, false);
+        for expected in [
+            "Example (org.example.App)",
+            "Source  Flatpak",
+            "Scope  user",
+            "Update  available (2)",
+        ] {
+            assert!(output.contains(expected), "{output}");
+        }
+        let current = json!({"package": {"id": {"name": "tool", "backend": "apt", "scope": "system"},
+            "installed_version": "1", "update": "current"}});
+        let output = human(&current, 80, true);
+        assert!(
+            output.contains("up to date") && output.contains("system"),
+            "{output}"
+        );
+        assert_eq!(
+            scope_text(&json!({"environment": {"path": "/opt/tools"}})),
+            "environment /opt/tools"
+        );
+        // Narrow tables abbreviate Flatpak scopes; the legend lists only
+        // states that appear.
+        let packages = json!({"packages": [
+            {"id": {"name": "org.example.App", "backend": "flatpak", "scope": "system"},
+             "display_name": "Example", "installed_version": "1"},
+            {"id": {"name": "org.example.App", "backend": "flatpak", "scope": {"user": {"uid": 1}}},
+             "installed_version": "1", "candidate_version": "2", "update": "available"}
+        ]});
+        let narrow = human(&packages, 30, false);
+        assert!(narrow.contains("flatpak·sys"), "{narrow}");
+        assert!(narrow.contains("flatpak·user"), "{narrow}");
+        assert!(
+            narrow.contains("● installed   ↑ update available"),
+            "{narrow}"
+        );
+        assert!(!narrow.contains("not installed"), "{narrow}");
+        let colored = human(&packages, 120, true);
+        assert!(colored.contains("flatpak (system)"), "{colored}");
+        assert!(colored.contains("Example"), "{colored}");
+        // Sources: a failed check says why, and narrow terminals keep the
+        // details on an indented line.
+        let sources = json!({"sources": [
+            {"backend": "apt", "availability": {"Err": {"Execution": {"Failed": {"code": 100,
+                "stderr": "W: noise\nE: The lock is held\n"}}}}, "capabilities": []},
+            {"backend": "dnf", "availability": {"Err": {"Execution": {"Failed": {"code": 1,
+                "stderr": ""}}}}, "capabilities": []},
+            {"backend": "snap", "availability": {"Err": {"Execution": "TimedOut"}}, "capabilities": []},
+            {"backend": "npm", "availability": {"Ok": "available"},
+             "capabilities": ["search", "details", "installed", "install", "remove", "upgrade"]}
+        ]});
+        let wide = human(&sources, 120, false);
+        for expected in [
+            "failed",
+            "Couldn't run APT: E: The lock is held",
+            "Couldn't run DNF: it exited with code 1.",
+            "Couldn't check Snap: The package manager took too long",
+        ] {
+            assert!(wide.contains(expected), "{wide}");
+        }
+        let narrow = human(&sources, 40, false);
+        assert!(narrow.contains("\n    Couldn't run APT:"), "{narrow}");
+        assert!(narrow.lines().all(|line| line.width() <= 40), "{narrow}");
+        assert!(narrow.contains("upgrade"), "{narrow}");
+        // Words wrap at the width; a word that can't fit is cut to it.
+        assert_eq!(wrap("one two three", 8), ["one two", "three"]);
+        assert_eq!(wrap("abcdefghij xy", 5), ["abcd…", "xy"]);
+        assert!(wrap("   ", 5).is_empty());
+        // A short form replaces the long one only when the long one can't fit.
+        let both = with_short("flatpak (system)", "flatpak·sys");
+        assert_eq!(cell(&both, 20).trim_end(), "flatpak (system)");
+        assert_eq!(cell(&both, 12).trim_end(), "flatpak·sys");
+        assert_eq!(long_text(&both), "flatpak (system)");
+        // Removing everything from a source names it plainly.
+        assert_eq!(everything_from("apt"), "all APT packages");
+        assert_eq!(everything_from("docker"), "all Docker images");
+        assert_eq!(everything_from("fwupd"), "all firmware");
     }
     #[test]
     fn sources_list_usable_ones_first_and_errors_name_their_source_once() {
@@ -1319,9 +1639,9 @@ mod tests {
             "{output}"
         );
         let failure = json!({"backend": "flatpak", "error": {"InvalidResponse": {"backend": "flatpak", "reason": "bad"}}});
-        assert_eq!(failure_text(&failure), "flatpak: bad");
+        assert_eq!(failure_text(&failure), "Flatpak: bad");
         let failure = json!({"backend": "dnf", "error": {"Unavailable": {"backend": "dnf", "reason": "missing"}}});
-        assert_eq!(failure_text(&failure), "dnf isn't available: missing");
+        assert_eq!(failure_text(&failure), "DNF isn't available: missing");
         let repositories = json!({"repositories": [
             {"title": "Flathub", "backend": "flatpak", "scope": {"user": {"uid": 1000}}, "enabled": true, "url": "https://dl.flathub.org/repo/"}
         ]});
@@ -1373,7 +1693,7 @@ mod tests {
             80,
             false,
         );
-        assert!(uninstalled.contains("Installed  not installed"));
+        assert!(uninstalled.contains("Installed  no"));
         let installed = human(
             &json!({"package":{"id":{"name":"synthetic","backend":"fixture","architecture":"all","scope":"system"},"installed_version":"1.0"}}),
             80,
@@ -1402,7 +1722,7 @@ mod tests {
         }
         let denied = json!({"operations":[{"operation":{"upgrade_all":{"backend":"apt"}},"result":{"Err":{"Execution":"AuthorizationDenied"}}}]});
         let output = human(&denied, 80, false);
-        assert!(output.contains("✗ Update all apt packages"), "{output}");
+        assert!(output.contains("✗ Update all APT packages"), "{output}");
         assert!(
             output.contains("Administrator access was denied"),
             "{output}"

@@ -1671,7 +1671,7 @@ mod tests {
             &args,
             &Cancellation::default(),
             &mut |operations| {
-                assert!(matches!(&operations[..], [Operation::Install(id)] if id.backend == "apt"));
+                assert!(matches!(operations, [Operation::Install(id)] if id.backend == "apt"));
                 true
             },
             &mut |event| {

@@ -743,7 +743,7 @@ impl<T: Transport> Flatpak<T> {
                 &[
                     prefix,
                     "list",
-                    "--columns=application,arch,branch,version,description,origin,options",
+                    "--columns=application,arch,branch,version,description,origin,options,name",
                 ],
                 cancel,
                 false,
@@ -755,7 +755,7 @@ impl<T: Transport> Flatpak<T> {
         let mut origins = Vec::new();
         for line in text.lines().filter(|line| !line.trim().is_empty()) {
             let fields: Vec<_> = line.split('\t').collect();
-            if !(6..=7).contains(&fields.len())
+            if !(6..=8).contains(&fields.len())
                 || !flatpak_id(fields[0])
                 || !flatpak_id(fields[1])
                 || !flatpak_id(fields[2])
@@ -778,7 +778,12 @@ impl<T: Transport> Flatpak<T> {
                     remote: None,
                     reference: Some(reference),
                 },
-                display_name: fields[0].into(),
+                display_name: fields
+                    .get(7)
+                    .filter(|name| !name.trim().is_empty())
+                    .unwrap_or(&fields[0])
+                    .trim()
+                    .into(),
                 summary: if runtime {
                     format!("Runtime {} ({})", fields[2], fields[4])
                 } else {
