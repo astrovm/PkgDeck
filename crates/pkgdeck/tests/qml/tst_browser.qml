@@ -163,7 +163,6 @@ TestCase {
         browser.sortAscending = true;
         browser.nameWidth = 202;
         browser.versionWidth = 150;
-        browser.sidebarHidden = false;
         browser.preferredSidebarWidth = 212;
         wait(30);
     }
@@ -1266,12 +1265,12 @@ TestCase {
         verify(about.text.indexOf("9.9.9-test") >= 0);
         const shortcuts = findChild(browser, "aboutShortcuts");
         verify(shortcuts !== null);
-        compare(shortcuts.count, 16);
+        compare(shortcuts.count, 15);
         verify(findChild(browser, "shortcutsToggle") === null);
         waitForRendering(browser.contentItem);
         compare(shortcuts.itemAt(0).children[1].text, "Ctrl+1");
-        compare(shortcuts.itemAt(5).children[1].text, "Ctrl+B");
-        compare(shortcuts.itemAt(12).children[1].text, "Ctrl+Shift+U");
+        compare(shortcuts.itemAt(5).children[1].text, "Ctrl+F");
+        compare(shortcuts.itemAt(11).children[1].text, "Ctrl+Shift+U");
         for (const name of ["animationsSetting", "backgroundModeSetting"]) {
             const setting = findChild(browser, name);
             compare(setting.contentItem.color.toString(), browser.ink.toString());
@@ -2259,7 +2258,7 @@ TestCase {
         verify(!footer.visible);
         verify(findChild(browser, "compactSignature").visible);
     }
-    function test_sidebar_resizes_collapses_to_icons_and_hides() {
+    function test_sidebar_resizes_and_collapses_to_icons() {
         const sidebar = findChild(browser, "sidebar");
         const handle = findChild(browser, "sidebarResize");
         // Repeater delegates are not QObject children; reach them through the column.
@@ -2292,26 +2291,13 @@ TestCase {
         compare(search.Accessible.name, "Search");
         clickDelegate(navigationButton("Installed"));
         compare(browser.currentView, "Installed");
-        // The sidebar's own button hides it; the header button, only
-        // shown while it is hidden, and Ctrl+B bring it back.
-        const hide = findChild(browser, "sidebarToggle");
-        const show = findChild(browser, "sidebarShow");
-        verify(!show.visible);
-        verify(hide.mapToItem(sidebar, 0, 0).x + hide.width <= sidebar.width);
-        verify(hide.mapToItem(sidebar, 0, 0).y > sidebar.height / 2);
-        wait(Qt.styleHints.mouseDoubleClickInterval + 50);
-        clickDelegate(hide);
-        verify(!sidebar.visible);
-        compare(browser.sidebarWidth, 0);
-        verify(show.visible);
-        wait(Qt.styleHints.mouseDoubleClickInterval + 50);
-        clickDelegate(show);
-        verify(sidebar.visible);
-        verify(!show.visible);
-        keyClick(Qt.Key_B, Qt.ControlModifier);
-        verify(!sidebar.visible);
+        // There is no way to hide it completely.
+        verify(findChild(browser, "sidebarToggle") === null);
+        verify(findChild(browser, "sidebarShow") === null);
         keyClick(Qt.Key_B, Qt.ControlModifier);
         verify(sidebar.visible);
+        compare(browser.sidebarWidth, browser.railWidth);
+        wait(Qt.styleHints.mouseDoubleClickInterval + 50);
         // Double-clicking the edge restores the default width.
         const edge = handle.mapToItem(browser.contentItem, handle.width / 2, 0).x;
         mouseDoubleClickSequence(browser, edge, y);
@@ -2322,7 +2308,6 @@ TestCase {
         const sidebar = findChild(browser, "sidebar");
         const title = findChild(browser, "sidebarTitle");
         const footer = findChild(browser, "signatureFooter");
-        const hide = findChild(browser, "sidebarToggle");
         const font = browser.font.pointSize;
         for (const size of [font, font * 1.5]) {
             browser.font.pointSize = size;
@@ -2333,8 +2318,7 @@ TestCase {
             // Nothing is elided or pushed outside the sidebar.
             verify(title.width >= title.implicitWidth - 1);
             verify(title.mapToItem(sidebar, 0, 0).x + title.width <= sidebar.width);
-            verify(footer.mapToItem(sidebar, 0, 0).x + footer.width <= hide.mapToItem(sidebar, 0, 0).x);
-            verify(hide.mapToItem(sidebar, 0, 0).x + hide.width <= sidebar.width);
+            verify(footer.mapToItem(sidebar, 0, 0).x + footer.width <= sidebar.width);
         }
         browser.font.pointSize = font;
     }
