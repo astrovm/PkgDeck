@@ -1224,11 +1224,18 @@ fn meaningful_line(output: &str) -> Option<String> {
 }
 const ROOT_MESSAGE: &str =
     "PkgDeck can't make changes while running as root. Start it as your normal user.";
+/// Whether engine text is the refusal to make changes as root, in the
+/// core's current wording or an older one.
+fn refuses_root(text: &str) -> bool {
+    text.contains("unprivileged user")
+        || text.contains("running as root")
+        || text.contains("runs as root")
+}
 /// One plain sentence for text that came from the engine, whatever its
 /// wording: internal prefixes and debug formatting are removed, and the
 /// tool's first meaningful output line is kept.
 fn plain_text(raw: &str, backend: Option<&str>) -> String {
-    if raw.contains("unprivileged user") || raw.contains("running as root") {
+    if refuses_root(raw) {
         return ROOT_MESSAGE.into();
     }
     let tool = backend.map(source_display_name);
@@ -1305,7 +1312,7 @@ fn plain_error(error: &EngineError, backend: Option<&str>, sudo: bool) -> String
             }
         }
         EngineError::Unavailable { backend, reason } => {
-            if reason.contains("unprivileged user") {
+            if refuses_root(reason) {
                 return ROOT_MESSAGE.into();
             }
             format!(
@@ -1320,7 +1327,7 @@ fn plain_error(error: &EngineError, backend: Option<&str>, sudo: bool) -> String
             plain_text(reason, Some(source.as_str()).filter(|s| !matches!(*s, "open" | "check")))
         }
         EngineError::InvalidResponse { backend: source, reason } => {
-            if reason.contains("unprivileged user") {
+            if refuses_root(reason) {
                 return ROOT_MESSAGE.into();
             }
             match meaningful_line(&strip_debug(reason)) {

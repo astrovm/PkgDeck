@@ -186,13 +186,27 @@ pub(crate) fn run(
         return Err(ExecutionError::Cancelled);
     }
     let program = command.get_program().to_string_lossy().into_owned();
-    let mut child = command
+    command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .process_group(0)
-        .spawn()
-        .map_err(|error| ExecutionError::Io(format!("spawn {program}: {error}")))?;
+        .process_group(0);
+    // A program written just before it runs can briefly report "text file
+    // busy" while another thread's fork still holds its write descriptor.
+    // Nothing ran yet, so trying again is safe, even for writes.
+    let mut busy_retries = 0;
+    let mut child = loop {
+        match command.spawn() {
+            Ok(child) => break child,
+            Err(error)
+                if error.kind() == io::ErrorKind::ExecutableFileBusy && busy_retries < 20 =>
+            {
+                busy_retries += 1;
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(error) => return Err(ExecutionError::Io(format!("spawn {program}: {error}"))),
+        }
+    };
     let mut stdout = child.stdout.take().expect("stdout was piped");
     let mut stderr = child.stderr.take().expect("stderr was piped");
     let start = Instant::now();
@@ -331,5 +345,34 @@ mod tests {
         assert_eq!(result.code, Some(0));
         assert_eq!(result.stdout, b"committed\n");
         assert!(result.cancellation_deferred);
+    }
+    #[test]
+    fn a_program_still_open_for_writing_runs_once_it_is_closed() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("pkgdeck-busy-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tool");
+        let mut file = std::fs::File::create(&path).unwrap();
+        file.write_all(b"#!/bin/sh\nprintf ran\n").unwrap();
+        file.set_permissions(std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        // The open write descriptor makes exec fail with "text file busy"
+        // until it closes.
+        let holder = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            drop(file);
+        });
+        let result = run(
+            Command::new(&path),
+            Limits::default(),
+            &Cancellation::default(),
+            false,
+        )
+        .unwrap();
+        holder.join().unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(result.code, Some(0));
+        assert_eq!(result.stdout, b"ran");
     }
 }
