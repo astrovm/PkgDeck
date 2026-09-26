@@ -44,6 +44,9 @@ pub struct Host {
     bridge: PathBuf,
 }
 
+/// Why a write refuses to start when the frontend itself runs as root.
+pub const ROOT_REFUSAL: &str = "PkgDeck can't make changes when it runs as root. Run it as your normal user; it asks for permission when needed.";
+
 pub const BACKENDS: &[(&str, &str)] = &[
     ("APT", "apt-get"),
     ("DNF", "dnf"),
@@ -440,9 +443,7 @@ impl Host {
         cancel: &Cancellation,
     ) -> Result<Completion, ExecutionError> {
         if rustix::process::geteuid().is_root() {
-            return Err(ExecutionError::Invalid(
-                "run the frontend as an unprivileged user".into(),
-            ));
+            return Err(ExecutionError::Invalid(ROOT_REFUSAL.into()));
         }
         let mut host = self.clone();
         host.env.extend(
@@ -470,9 +471,7 @@ impl Host {
     ) -> Result<Completion, ExecutionError> {
         self.enabled()?;
         if write && rustix::process::geteuid().is_root() {
-            return Err(ExecutionError::Invalid(
-                "run the frontend as an unprivileged user".into(),
-            ));
+            return Err(ExecutionError::Invalid(ROOT_REFUSAL.into()));
         }
         let path = self
             .resolve("brew")?
@@ -517,9 +516,7 @@ impl Host {
     ) -> Result<Completion, ExecutionError> {
         self.enabled()?;
         if write && rustix::process::geteuid().is_root() {
-            return Err(ExecutionError::Invalid(
-                "run the frontend as an unprivileged user".into(),
-            ));
+            return Err(ExecutionError::Invalid(ROOT_REFUSAL.into()));
         }
         let path = self
             .resolve(executable)?
@@ -607,9 +604,7 @@ impl Host {
     ) -> Result<Completion, ExecutionError> {
         self.enabled()?;
         if write && rustix::process::geteuid().is_root() {
-            return Err(ExecutionError::Invalid(
-                "run the frontend as an unprivileged user".into(),
-            ));
+            return Err(ExecutionError::Invalid(ROOT_REFUSAL.into()));
         }
         let path = self
             .resolve(executable)?
@@ -650,9 +645,7 @@ impl Host {
     ) -> Result<Completion, ExecutionError> {
         self.enabled()?;
         if write && rustix::process::geteuid().is_root() {
-            return Err(ExecutionError::Invalid(
-                "run the frontend as an unprivileged user".into(),
-            ));
+            return Err(ExecutionError::Invalid(ROOT_REFUSAL.into()));
         }
         if !venv.is_absolute() {
             return Err(ExecutionError::Invalid(
@@ -719,9 +712,7 @@ impl Host {
     ) -> Result<Completion, ExecutionError> {
         self.enabled()?;
         if rustix::process::geteuid().is_root() {
-            return Err(ExecutionError::Invalid(
-                "run the frontend as an unprivileged user".into(),
-            ));
+            return Err(ExecutionError::Invalid(ROOT_REFUSAL.into()));
         }
         let result = self.privileged(
             Path::new("/usr/bin/apt-get"),
@@ -741,9 +732,7 @@ impl Host {
     ) -> Result<Completion, ExecutionError> {
         self.enabled()?;
         if rustix::process::geteuid().is_root() {
-            return Err(ExecutionError::Invalid(
-                "run the frontend as an unprivileged user".into(),
-            ));
+            return Err(ExecutionError::Invalid(ROOT_REFUSAL.into()));
         }
         classify_apt(self.privileged(
             Path::new("/usr/bin/apt-get"),
@@ -764,9 +753,7 @@ impl Host {
         authorization: Authorization,
     ) -> Result<Completion, ExecutionError> {
         if write && rustix::process::geteuid().is_root() {
-            return Err(ExecutionError::Invalid(
-                "run the frontend as an unprivileged user".into(),
-            ));
+            return Err(ExecutionError::Invalid(ROOT_REFUSAL.into()));
         }
         self.enabled()?;
         let path = if write && system {
@@ -969,9 +956,7 @@ impl Host {
     ) -> Result<Completion, ExecutionError> {
         self.enabled()?;
         if rustix::process::geteuid().is_root() {
-            return Err(ExecutionError::Invalid(
-                "run the frontend as an unprivileged user".into(),
-            ));
+            return Err(ExecutionError::Invalid(ROOT_REFUSAL.into()));
         }
         let args = repository_install_args(source, backend, suffix, digest)?;
         execute(&args)
@@ -1027,9 +1012,7 @@ impl Host {
     ) -> Result<Completion, ExecutionError> {
         self.enabled()?;
         if write && rustix::process::geteuid().is_root() {
-            return Err(ExecutionError::Invalid(
-                "run the frontend as an unprivileged user".into(),
-            ));
+            return Err(ExecutionError::Invalid(ROOT_REFUSAL.into()));
         }
         let path = if write {
             let path = PathBuf::from("/usr/bin").join(executable);
