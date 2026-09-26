@@ -57,7 +57,7 @@ pkd refresh                      # refresh package lists
 pkd upgrade                      # install available updates
 ```
 
-![pkd search showing ripgrep from APT, Homebrew, Snap, and Flatpak](docs/screenshots/cli-search.png)
+![pkd search showing ripgrep and related packages from APT and Flatpak](docs/screenshots/cli-search.png)
 
 PkgDeck asks you to confirm every change, and system-wide changes may ask for your password. See the [CLI guide](docs/cli.md) for all commands.
 

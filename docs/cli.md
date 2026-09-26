@@ -10,7 +10,7 @@ In the Flatpak build, run it with:
 flatpak run --command=pkd io.github.astrovm.PkgDeck
 ```
 
-![pkd search showing ripgrep from APT, Homebrew, Snap, and Flatpak](screenshots/cli-search.png)
+![pkd search showing ripgrep and related packages from APT and Flatpak](screenshots/cli-search.png)
 
 ## Quick reference
 

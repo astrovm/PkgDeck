@@ -2217,7 +2217,8 @@ Controls.ApplicationWindow {
                             objectName: "resultsBusy"
                             readonly property bool running: ((backend.busy && !backend.writing) || !!backend.refreshing) && root.motionEnabled
                             visible: running && results.count > 0
-                            name: "refresh"
+                            // An open arc, so it never reads as a second reload button.
+                            name: "spinner"
                             ink: root.accent
                             Layout.preferredWidth: 16
                             Layout.preferredHeight: 16
@@ -2388,7 +2389,10 @@ Controls.ApplicationWindow {
                         Layout.fillHeight: true
                         model: resultsModel
                         clip: true
-                        reuseItems: true
+                        // Pooled delegates and the add/remove transitions do not mix:
+                        // a delegate reused mid-transition can stay on screen over
+                        // its successor, and keeps text measured for its old row.
+                        reuseItems: false
                         add: Transition {
                             enabled: root.motionEnabled && root.animateListChanges
                             NumberAnimation { property: "opacity"; from: 0; to: 1; duration: Theme.revealDuration; easing.type: Easing.OutCubic }
@@ -2995,7 +2999,9 @@ Controls.ApplicationWindow {
         anchors.centerIn: parent
         width: Math.min(root.width - 32, 850)
         // Sized to its repositories, scrolling only past most of the window.
-        height: Math.min(root.height * 0.85, Math.max(260, 200 + repositoryList.contentHeight + repositoryExtras.implicitHeight))
+        height: Math.min(root.height * 0.85, Math.max(260, implicitHeaderHeight + implicitFooterHeight + topPadding + bottomPadding
+            + repositoryActions.implicitHeight + 12 + repositoryList.contentHeight
+            + (repositoryExtras.visible ? repositoryExtras.implicitHeight + 12 : 0)))
         title: "Repositories"
         modal: true
         standardButtons: Controls.Dialog.Close
@@ -3004,6 +3010,7 @@ Controls.ApplicationWindow {
         contentItem: ColumnLayout {
             spacing: 12
             Flow {
+                id: repositoryActions
                 Layout.fillWidth: true
                 spacing: 8
                 ActionButton {
@@ -3062,11 +3069,14 @@ Controls.ApplicationWindow {
                                     checked = Qt.binding(() => modelData.enabled);
                                 }
                             }
-                            Controls.Label {
+                            // Repositories PkgDeck cannot switch show their state in
+                            // the same place, read-only, so every title lines up.
+                            Controls.CheckBox {
+                                objectName: "repositoryState"
                                 visible: !root.repositoryEditable(modelData)
-                                text: modelData.enabled ? "Enabled" : "Disabled"
-                                color: root.muted
-                                font.pointSize: root.font.pointSize * 0.9
+                                checked: modelData.enabled
+                                enabled: false
+                                Accessible.name: (modelData.title || modelData.name) + (modelData.enabled ? " is enabled" : " is disabled")
                             }
                             ColumnLayout {
                                 Layout.fillWidth: true
