@@ -96,7 +96,7 @@ The workflow is called `CI`. Check names follow `Category / Scope (architecture)
 | `Lint / Workspace (x86_64, aarch64)` | Clippy for the whole workspace |
 | `Coverage / Workspace (x86_64)` | Workspace tests with the 95% coverage gate |
 | `Test / Workspace (aarch64)` | Workspace tests without coverage |
-| `Test / Podman (x86_64, aarch64)` | Container tests and CLI APT/Homebrew install/remove tests |
+| `Test / Podman (x86_64, aarch64)` | CLI build in the development container and CLI APT/Homebrew install/remove tests |
 | `Test / Backend / <backend> (x86_64)` | Real package manager install/remove tests |
 | `Package / AppImage + Snap (x86_64, aarch64)` | Release build, packages, and GUI tests on the packaged app |
 | `Package / Flatpak (x86_64, aarch64)` | Flatpak build, installed GUI, and host bridge tests |
@@ -110,11 +110,14 @@ Naming rules:
 - Artifacts use `<kind>-<scope>-<architecture>`, like `logs-podman-aarch64`.
 - Rust tests use descriptive snake_case names. Qt Quick tests use `tst_*.qml`
   files and `test_*` functions.
+- A test name is a short sentence about the behavior it checks, like
+  `failed_update_check_keeps_known_updates`. Don't name tests after a list of
+  topics, a development phase, or the toolkit that runs them.
 
 Desktop jobs share `.github/actions/setup-desktop`. Packaging tools are only
 installed for packaging jobs, and `cargo-llvm-cov` only for coverage. Release
 builds happen in packaging jobs. The Podman job doesn't repeat lint, coverage,
-or release builds.
+workspace tests, or release builds.
 
 Rust caches are split by architecture and purpose (terminal, lint, tests,
 coverage, release). Cache keys include dependencies, toolchain, and source

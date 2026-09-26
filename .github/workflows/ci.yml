@@ -101,9 +101,10 @@ jobs:
             !build/container-cache/target/**/incremental
           key: podman-v1-${{ matrix.arch }}-${{ hashFiles('containers/development.Containerfile', 'scripts/setup-dev.sh', 'scripts/dev-env.sh', 'Cargo.toml', 'crates/*/Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
           restore-keys: podman-v1-${{ matrix.arch }}-${{ hashFiles('containers/development.Containerfile', 'scripts/setup-dev.sh', 'scripts/dev-env.sh', 'Cargo.toml', 'crates/*/Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml') }}-
-      - name: Run container workspace tests
-        # Native jobs own lint/coverage; packaging owns release builds.
-        run: scripts/verify.sh full --only tests --engine podman
+      # Building the CLI in the development container checks its recipe.
+      # The workspace tests already run natively on both architectures
+      # (coverage on x86_64, test-workspace on aarch64) with the same
+      # Ubuntu 26.04 Qt packages, so they are not repeated here.
       - name: Run container CLI lifecycle tests
         run: scripts/verify.sh containers --engine podman
       - name: Upload Podman logs
@@ -137,7 +138,7 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  test-backends:
+  test-backend:
     name: Test / Backend / ${{ matrix.backend }} (x86_64)
     if: github.event_name != 'push' && !inputs.homebrew_only
     needs: build-backend-cli
@@ -346,7 +347,7 @@ jobs:
             exit 1
           fi
 
-  package:
+  package-bundles:
     name: Package / AppImage + Snap (${{ matrix.arch }})
     if: '!inputs.homebrew_only'
     timeout-minutes: 30
@@ -550,7 +551,7 @@ jobs:
   release:
     name: Publish / Release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [release-gate, package, package-flatpak]
+    needs: [release-gate, package-bundles, package-flatpak]
     runs-on: ubuntu-26.04
     permissions:
       contents: write

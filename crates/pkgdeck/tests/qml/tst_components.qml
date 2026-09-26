@@ -261,7 +261,7 @@ TestCase {
         tryVerify(() => details.idealHeight < 130, 1000, "ideal height " + details.idealHeight);
     }
 
-    function test_details_facts_link_and_dependencies() {
+    function test_details_show_facts_a_safe_link_and_folded_dependencies() {
         App.Theme.reduceMotion = true;
         const details = createTemporaryObject(detailsComponent, test,
             {selected: row("synthetic-tool"), detailMatchesSelection: true, sourceName: (id) => id.toUpperCase()});
@@ -291,7 +291,7 @@ TestCase {
         verify(!findChild(details, "homepageLink").enabled);
     }
 
-    function test_details_action_button_and_installed_chip() {
+    function test_details_action_matches_the_installed_state() {
         const details = createTemporaryObject(detailsComponent, test,
             {selected: row("synthetic-tool"), detailMatchesSelection: true});
         const action = findChild(details, "detailsActionButton");
@@ -353,7 +353,7 @@ TestCase {
         verify(view.Controls.ScrollBar.horizontal.visible);
     }
 
-    function test_activity_empty_state_and_drawer_header() {
+    function test_activity_explains_its_empty_state_and_hides_an_unused_header() {
         const pane = createTemporaryObject(activityComponent, test);
         waitForRendering(pane);
         verify(findChild(pane, "activityEmpty").visible);

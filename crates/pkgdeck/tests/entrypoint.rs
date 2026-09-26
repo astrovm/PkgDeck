@@ -139,7 +139,7 @@ fn invalid_qml_module_fails_without_hanging() {
 }
 
 #[test]
-fn quick_controls_search_confirm_resize_and_cancel() {
+fn qml_component_tests_pass() {
     pkgdeck_tools::qml();
 }
 

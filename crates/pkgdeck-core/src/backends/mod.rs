@@ -4561,7 +4561,7 @@ mod tests {
     }
 
     #[test]
-    fn wave_five_name_policies() {
+    fn python_php_ruby_and_node_names_accept_registry_forms_only() {
         for name in [
             "cowsay", "requests", "Pillow", "foo-bar", "foo_bar", "foo.bar", "a", "a1",
         ] {
@@ -4613,7 +4613,7 @@ mod tests {
     }
 
     #[test]
-    fn wave_five_parsers() {
+    fn uv_and_gem_parsers_reject_malformed_lines() {
         assert_eq!(
             DevTool::<NativeTransport>::uv_entry("cowsay v6.0"),
             Some(("cowsay".into(), "6.0".into(), None))
