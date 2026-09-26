@@ -7,6 +7,9 @@ Controls.Button {
     SystemPalette { id: disabledPalette; colorGroup: SystemPalette.Disabled }
     property color glyphColor: Theme.ink
     property bool primary: false
+    // A primary button's fill and label; destructive actions use the danger colour.
+    property color primaryColor: Theme.accent
+    property color primaryInk: Theme.accentInk
     // Sidebar entry: borderless, with `current` marking the open page.
     property bool navigation: false
     property bool current: false
@@ -34,7 +37,7 @@ Controls.Button {
         radius: Theme.controlRadius
         Behavior on color { ColorAnimation { duration: Theme.feedbackDuration } }
         color: control.systemDisabled ? disabledPalette.button
-            : control.primary && control.enabled ? (control.down ? Qt.darker(Theme.accent, 1.08) : control.hovered ? Qt.lighter(Theme.accent, 1.08) : Theme.accent)
+            : control.primary && control.enabled ? (control.down ? Qt.darker(control.primaryColor, 1.08) : control.hovered ? Qt.lighter(control.primaryColor, 1.08) : control.primaryColor)
             : control.navigation ? (control.current ? Theme.selection : control.hovered ? Theme.hoverTint : "transparent")
             : control.flat ? (control.enabled && control.hovered ? Theme.tint(control.glyphColor, 0.14) : "transparent")
             : Theme.surface
@@ -62,7 +65,7 @@ Controls.Button {
             DeckIcon {
                 name: control.symbol
                 visible: control.symbol.length > 0
-                ink: control.systemDisabled ? disabledPalette.buttonText : !control.enabled && control.flat ? Theme.muted : control.primary && control.enabled ? Theme.accentInk
+                ink: control.systemDisabled ? disabledPalette.buttonText : !control.enabled && control.flat ? Theme.muted : control.primary && control.enabled ? control.primaryInk
                     : control.navigation && control.current ? Theme.accent : control.glyphColor
                 Layout.preferredWidth: 18
                 Layout.preferredHeight: 18
@@ -90,7 +93,7 @@ Controls.Button {
                 font.family: control.font.family
                 font.pointSize: control.font.pointSize
                 font.weight: control.primary || (control.navigation && control.current) ? Font.DemiBold : Font.Normal
-                color: control.systemDisabled ? disabledPalette.buttonText : !control.enabled && control.flat ? Theme.muted : control.primary && control.enabled ? Theme.accentInk : Theme.ink
+                color: control.systemDisabled ? disabledPalette.buttonText : !control.enabled && control.flat ? Theme.muted : control.primary && control.enabled ? control.primaryInk : Theme.ink
                 Layout.fillWidth: true
                 Layout.minimumWidth: 0
                 Layout.alignment: Qt.AlignVCenter

@@ -161,6 +161,10 @@ Controls.ApplicationWindow {
     property string resultQuery: ""
     // The query the retained rows were loaded for.
     property string retainedQuery: ""
+    // A refresh of the same rows keeps them until the answer covers as many
+    // rows or is complete, so the first source to reply never collapses the
+    // list to its own rows.
+    property bool retainUntilDone: false
     property var items: currentView === resultView ? (retainingResults ? retainedItems : liveItems) : []
     property bool reduceMotion: preferences.reduceMotion
     readonly property bool motionEnabled: Theme.motionEnabled
@@ -1126,6 +1130,7 @@ Controls.ApplicationWindow {
         const refining = currentView === "Search" && !emptySearch;
         retainedItems = currentView === resultView && (sameQuery || refining) ? items.slice() : [];
         retainingResults = retainedItems.length > 0;
+        retainUntilDone = retainingResults && sameQuery;
         retainedQuery = resultQuery;
         // A new page shows its rows once they are loaded (below), so the
         // previous page's rows are never filtered and laid out as its own.
@@ -1187,6 +1192,10 @@ Controls.ApplicationWindow {
         for (let i = 0; i < viewItems.length; i++) {
             if (rowIdentity(viewItems[i]) === selectedIdentity) {
                 results.currentIndex = i;
+                // A reload drops the open details; ask for them again once
+                // the rows are final, so the panel never waits forever.
+                if (backend.details === "{}" && !backend.busy)
+                    backend.select(originalIndex(i));
                 return;
             }
         }
@@ -1274,6 +1283,7 @@ Controls.ApplicationWindow {
                 Qt.callLater(() => { if (!backend.busy) root.openingInput = false; });
                 root.retainingResults = false;
                 root.markChangedRows();
+                Qt.callLater(root.restoreSelection);
                 if (!backend.writing && !postWriteReload.running)
                     root.beforeWrite = null;
             }
@@ -1294,7 +1304,7 @@ Controls.ApplicationWindow {
                 postWriteReload.restart();
         }
         function onRowsChanged() {
-            if (root.liveItems.length > 0) {
+            if (root.liveItems.length > 0 && (!root.retainUntilDone || !backend.busy || root.liveItems.length >= root.retainedItems.length)) {
                 root.retainingResults = false;
                 if (!backend.writing)
                     root.markChangedRows();
@@ -2602,8 +2612,9 @@ Controls.ApplicationWindow {
                                             font.bold: true
                                             textFormat: Text.PlainText
                                             elide: Text.ElideRight
+                                            // The chip, when shown, keeps to the column's end so it
+                                            // lines up from row to row.
                                             Layout.fillWidth: true
-                                            Layout.maximumWidth: implicitWidth
                                         }
                                         Controls.Label {
                                             objectName: "installedChip"
@@ -2618,7 +2629,6 @@ Controls.ApplicationWindow {
                                             bottomPadding: 1
                                             background: Rectangle { radius: height / 2; color: root.tint(root.success, 0.12) }
                                         }
-                                        Item { Layout.fillWidth: true }
                                     }
                                     Controls.Label {
                                         objectName: "packageSourceLine"
@@ -2807,7 +2817,9 @@ Controls.ApplicationWindow {
                                 width: parent.width
                                 horizontalAlignment: Text.AlignHCenter
                                 wrapMode: Text.WordWrap
-                                color: root.readFailures.length > 0 ? root.ink : root.muted
+                                // Titled like the Search page's empty state.
+                                color: root.ink
+                                font.weight: Font.DemiBold
                                 visible: text.length > 0
                                 text: root.emptyStateMessage()
                             }
@@ -3345,6 +3357,9 @@ Controls.ApplicationWindow {
                     tooltipText: confirmation.applyMnemonic >= 0 ? "Alt+" + text.charAt(mnemonicIndex).toUpperCase() + " or Ctrl+Enter" : "Ctrl+Enter"
                     symbol: ""
                     primary: true
+                    // Removing reads as destructive, not as the default go-ahead.
+                    primaryColor: confirmation.applyWord === "Remove" ? Theme.danger : Theme.accent
+                    primaryInk: confirmation.applyWord === "Remove" ? (Theme.dark ? "#0e1015" : "#ffffff") : Theme.accentInk
                     Layout.minimumWidth: 80
                     onClicked: confirmation.accept()
                 }

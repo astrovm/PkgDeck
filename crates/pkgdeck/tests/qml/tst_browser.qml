@@ -221,14 +221,34 @@ TestCase {
         compare(browser.selected, null);
         browser.propose("install");
         compare(fake.confirmation, "");
+        // The first source to answer does not collapse the list to its rows.
         fake.rows = JSON.stringify([previous[0]]);
+        compare(browser.items.length, previous.length);
+        verify(browser.retainingResults);
+        // The complete answer replaces the retained rows.
+        fake.busy = false;
         compare(browser.items.length, 1);
         verify(!browser.retainingResults);
         verify(findChild(browser, "packageResults").enabled);
-        fake.busy = false;
         browser.reload(true);
         fake.busy = false; // Empty completion must discard the old snapshot.
         compare(browser.items.length, 0);
+    }
+    function test_details_load_again_after_a_refresh_keeps_the_selection() {
+        populate();
+        browser.choose(1);
+        verify(fake.details !== "{}");
+        const rows = fake.rows;
+        fake.simulateLoading = true;
+        browser.reload(true, true);
+        // The reload drops the open details, as the controller does.
+        fake.details = "{}";
+        fake.selection = -1;
+        fake.rows = rows;
+        fake.busy = false;
+        tryCompare(fake, "selection", 1);
+        verify(fake.details !== "{}");
+        compare(findChild(browser, "packageResults").currentIndex, 1);
     }
     function test_row_actions_stay_steady_during_refresh() {
         populate();

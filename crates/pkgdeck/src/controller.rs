@@ -1994,8 +1994,18 @@ fn confirmation_preview(
         if let Some(version) = &package.candidate_version {
             lines.push(format!("Available: {version}"));
         }
-        if let (Some(old), Some(new)) = (&package.installed_version, &package.candidate_version) {
-            summary.push(format!("{old} → {new}"));
+        // The version line says what changes: old → new for an update, the
+        // version that goes for a removal, the one that arrives for an install.
+        match (
+            operation,
+            &package.installed_version,
+            &package.candidate_version,
+        ) {
+            (Operation::Remove(_), Some(old), _) => summary.push(old.clone()),
+            (Operation::Install(_), _, Some(new)) => summary.push(new.clone()),
+            (_, Some(old), Some(new)) if old != new => summary.push(format!("{old} → {new}")),
+            (_, Some(version), _) | (_, None, Some(version)) => summary.push(version.clone()),
+            _ => {}
         }
         if package.id.backend == "fwupd" {
             lines.push(package.summary.clone());
@@ -2048,6 +2058,9 @@ fn confirmation_preview(
                 PlannedAction::Upgrade => "Update",
             };
             let version = match (&change.installed_version, &change.candidate_version) {
+                (Some(old), Some(new)) if old == new || change.action == PlannedAction::Remove => {
+                    format!(" ({old})")
+                }
                 (Some(old), Some(new)) => format!(" ({old} → {new})"),
                 (Some(old), None) => format!(" ({old})"),
                 (None, Some(new)) => format!(" ({new})"),
