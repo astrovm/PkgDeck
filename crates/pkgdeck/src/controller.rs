@@ -3517,12 +3517,12 @@ impl ffi::PackageController {
                 let incomplete = if failed_sources == 0 {
                     String::new()
                 } else {
-                    let noun = if failed_sources == 1 {
-                        "source"
+                    let (noun, them) = if failed_sources == 1 {
+                        ("source", "it")
                     } else {
-                        "sources"
+                        ("sources", "them")
                     };
-                    format!("\n{failed_sources} {noun} could not be checked. Updates from them are not included.")
+                    format!("\n{failed_sources} {noun} could not be checked. Updates from {them} are not included.")
                 };
                 self.as_mut().set_confirmation_data(encoded(json!({"action":"Update", "body": format!("{count} listed {noun}{incomplete}{apt}\n\n{labels}"), "summary": format!("Update {count} {noun}{removals}{warning}{incomplete}"), "details": format!("{incomplete}{apt}\n\n{labels}")})));
                 self.as_mut().set_confirmation(

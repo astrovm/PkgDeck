@@ -298,8 +298,17 @@ Controls.ApplicationWindow {
             return "Search will resume shortly.";
         if (backend.busy || reportState.phase === "loading")
             return "";
-        if (readFailures.length > 0)
+        // Sources that answered still give their good news; the ones that
+        // failed show as a warning under it (see sourceFailureEmptyHint).
+        if (readFailures.length > 0 && (!someSourcesChecked() || reportState.phase === "failed" || ["Updates", "Clean"].indexOf(currentView) < 0))
             return sourceFailureTitle();
+        if (readFailures.length > 0 && items.filter((row) => row.kind !== "failure").length === 0) {
+            const names = checkedSourceNames();
+            const who = names.length <= 2 ? names.join(" and ") : names.length + " other sources";
+            return currentView === "Updates"
+                ? who + (names.length === 1 ? " is" : " are") + " up to date"
+                : "Nothing to clean in " + who;
+        }
         if (loadStopped && items.length === 0)
             return currentView === "Search" ? "Search stopped" : "Loading stopped";
         if (reportState.phase === "unsupported")
@@ -312,10 +321,8 @@ Controls.ApplicationWindow {
             return "No packages match these filters.";
         if (viewSourceFilters[currentView] && items.length > 0)
             return "No results from selected sources.";
-        if (reportState.phase === "cached" || reportState.phase === "stale")
-            return currentView === "Updates" ? "No updates in the last check." : "No results in the last check.";
         if (currentView === "Updates")
-            return reportState.phase === "complete" ? "You're up to date" : "No updates to show.";
+            return "You're up to date";
         if (currentView === "Clean")
             return "Nothing to clean";
         if (currentView === "Installed")
@@ -323,6 +330,41 @@ Controls.ApplicationWindow {
         if (currentView === "Sources")
             return "No available sources.";
         return currentView === "Search" ? "No matching packages." : "No results to show.";
+    }
+    // At least one source this page asks answered the last load.
+    function checkedSourceNames() {
+        const failed = readFailures.map((failure) => failure.source);
+        return effectiveSources().filter((id) => failed.indexOf(id) < 0
+            && sourceInfo(id).availability_kind === "available" && sourceSupportsView(id)).map((id) => sourceDisplayName(id));
+    }
+    function someSourcesChecked() {
+        return checkedSourceNames().length > 0;
+    }
+    // "Checked 3 minutes ago", from when the shown rows were loaded.
+    function checkedAgo() {
+        const at = reportState.checked_at;
+        if (!at)
+            return "";
+        const seconds = Math.max(0, Math.round(clock.now / 1000 - at));
+        if (seconds < 60)
+            return "Checked just now";
+        const minutes = Math.round(seconds / 60);
+        if (minutes < 60)
+            return "Checked " + minutes + (minutes === 1 ? " minute ago" : " minutes ago");
+        const hours = Math.round(minutes / 60);
+        if (hours < 24)
+            return "Checked " + hours + (hours === 1 ? " hour ago" : " hours ago");
+        return "Checked " + new Date(at * 1000).toLocaleString(Qt.locale(), Locale.ShortFormat);
+    }
+    QtObject {
+        id: clock
+        property real now: Date.now()
+    }
+    Timer {
+        interval: 30000
+        repeat: true
+        running: root.visible
+        onTriggered: clock.now = Date.now()
     }
     function resultsHeading() {
         if (backend.writing)
@@ -793,9 +835,16 @@ Controls.ApplicationWindow {
                 root.activeRows = [];
         }
     }
+    // Rows the running change names, from its progress.
+    readonly property var progressTargets: (actionProgress.targets || []).map((row) => rowIdentity(row))
+    function rowIsActive(identity) {
+        return backend.writing && (activeRows.indexOf(identity) >= 0 || progressTargets.indexOf(identity) >= 0);
+    }
     // Share of the running change that is done, or -1 when unknown.
     function actionFraction() {
         const p = actionProgress;
+        if (typeof p.fraction === "number")
+            return Math.max(0, Math.min(1, p.fraction));
         if ((p.transfer_total || 0) > 0)
             return Math.min(1, (p.transferred || 0) / p.transfer_total);
         if ((p.total || 0) > 1)
@@ -871,9 +920,10 @@ Controls.ApplicationWindow {
         let used = 0;
         let shown = 0;
         for (const child of pageContent.children) {
-            // The filler takes no height of its own; its visibility follows
-            // this budget, so it always counts as one gap (below).
-            if (!child.visible || child === resultsBox || child === detailsPanel || child.objectName === "pageFiller")
+            // The filler takes no height of its own, only a gap (below).
+            // Children that fill the page take what is left, so they are not "used".
+            if (!child.visible || child === resultsBox || child === detailsPanel || child.objectName === "pageFiller"
+                    || child === searchEmptyState || child === settingsScroll)
                 continue;
             used += child.height;
             shown++;
@@ -881,7 +931,8 @@ Controls.ApplicationWindow {
         // The window's space, not pageContent.height: the page grows past the
         // window to fit its children's minimums, which would feed back here.
         const page = root.contentItem.height - 2 * pageContent.Layout.margins;
-        return Math.max(0, page - used - pageContent.spacing * (shown + 2));
+        const filler = pageContent.children.some((child) => child.objectName === "pageFiller" && child.visible);
+        return Math.max(0, page - used - pageContent.spacing * (shown + 1 + (filler ? 1 : 0)));
     }
     function detailsMinimumHeight() {
         return Math.min(120, detailsPanel.idealHeight, detailsBudget() * 0.4);
@@ -1108,8 +1159,18 @@ Controls.ApplicationWindow {
         if (currentView !== "Search" || !items.some((row) => rowIdentity(row) === selectedIdentity))
             selectedIdentity = null;
     }
+    // Whether the list's rows need more height than the page has. Updated
+    // from signals rather than bound: the budget reads the page's laid-out
+    // children, and a binding would loop through the layout.
+    property bool listOverflowing: false
+    function updateOverflow() {
+        listOverflowing = shortResultsHeight() > detailsBudget();
+    }
+    onHeightChanged: Qt.callLater(updateOverflow)
+    onCompactChanged: Qt.callLater(updateOverflow)
     onViewItemsChanged: {
         syncResults();
+        updateOverflow();
         Qt.callLater(() => root.restoreSelection());
     }
     function propose(action) {
@@ -1259,6 +1320,7 @@ Controls.ApplicationWindow {
         easing.type: Easing.OutCubic
     }
     onCurrentViewChanged: {
+        Qt.callLater(updateOverflow);
         if (motionEnabled)
             pageSwitch.restart();
     }
@@ -1273,7 +1335,8 @@ Controls.ApplicationWindow {
     }
     Timer {
         interval: backend.busy ? 40 : 200
-        running: true
+        // Polls only while background work can still deliver something.
+        running: backend.busy || backend.needs_poll !== false
         repeat: true
         onTriggered: backend.poll()
     }
@@ -1463,6 +1526,7 @@ Controls.ApplicationWindow {
         }
         ColumnLayout {
             id: pageContent
+            onImplicitHeightChanged: Qt.callLater(root.updateOverflow)
             Layout.fillWidth: true
             Layout.fillHeight: true
             Layout.alignment: Qt.AlignTop
@@ -2031,7 +2095,7 @@ Controls.ApplicationWindow {
                 // has, then scroll. The first load fills the page for its
                 // placeholder rows; a running change never resizes the list.
                 readonly property bool loadingEmpty: backend.busy && !backend.writing && !root.openingInput && root.viewItems.length === 0
-                readonly property bool overflowing: root.shortResultsHeight() > root.detailsBudget()
+                readonly property bool overflowing: root.listOverflowing
                 Layout.fillHeight: loadingEmpty || overflowing
                 Layout.preferredHeight: root.viewItems.length === 0 && !backend.busy ? 150
                     : detailsPanel.visible ? Math.min(root.shortResultsHeight(), root.height * (root.compact ? 0.24 : 0.42),
@@ -2122,7 +2186,7 @@ Controls.ApplicationWindow {
                         Layout.topMargin: 10
                         Layout.bottomMargin: 10
                         Item { visible: root.currentView === "Updates"; Layout.preferredWidth: 28 }
-                        Item { Layout.preferredWidth: root.iconSlotSize }
+                        Item { Layout.preferredWidth: root.iconSlotSize; visible: root.pageWidth >= 420 }
                         Controls.Label {
                             objectName: "columnHeader0"
                             text: (root.currentView === "Sources" ? "SOURCE" : "NAME / SOURCE") + root.sortArrow("name")
@@ -2291,7 +2355,7 @@ Controls.ApplicationWindow {
                             readonly property var modelData: JSON.parse(rowJson)
                             readonly property string identity: root.rowIdentity(modelData)
                             // This row is being changed right now.
-                            readonly property bool active: backend.writing && root.activeRows.indexOf(identity) >= 0
+                            readonly property bool active: root.rowIsActive(identity)
                             readonly property string rowAction: root.rowActionName(modelData)
                             readonly property bool packageKind: modelData.kind === "package"
                             width: Math.max(0, ListView.view.width - Theme.scrollGutter)
@@ -2393,6 +2457,8 @@ Controls.ApplicationWindow {
                                 // source as a small badge; otherwise the source icon.
                                 Item {
                                     objectName: "rowIconSlot"
+                                    // The narrowest cards keep their width for the name.
+                                    visible: root.pageWidth >= 420
                                     Layout.preferredWidth: root.iconSlotSize
                                     Layout.preferredHeight: root.iconSlotSize
                                     Layout.alignment: root.compact ? Qt.AlignTop : Qt.AlignVCenter
@@ -2645,13 +2711,16 @@ Controls.ApplicationWindow {
                             spacing: 10
                             visible: results.count === 0
                             DeckIcon {
+                                id: emptyStateIcon
                                 objectName: "emptyStateIcon"
                                 readonly property string message: root.emptyStateMessage()
-                                name: root.readFailures.length > 0 ? "warning"
-                                    : message === "You're up to date" || message === "Nothing to clean" ? "installed"
+                                readonly property bool goodNews: /up to date$|^Nothing to clean/.test(message)
+                                readonly property bool failed: root.readFailures.length > 0 && !goodNews
+                                name: failed ? "warning"
+                                    : goodNews ? "installed"
                                     : root.currentView === "Search" ? "search" : "package"
-                                ink: root.readFailures.length > 0 ? root.warning
-                                    : message === "You're up to date" || message === "Nothing to clean" ? root.success : root.muted
+                                ink: failed ? root.warning
+                                    : goodNews ? root.success : root.muted
                                 visible: !backend.busy && message.length > 0
                                 anchors.horizontalCenter: parent.horizontalCenter
                                 width: 34
@@ -2671,9 +2740,11 @@ Controls.ApplicationWindow {
                                 width: parent.width
                                 horizontalAlignment: Text.AlignHCenter
                                 wrapMode: Text.WordWrap
-                                color: root.muted
-                                visible: root.readFailures.length > 0 && !backend.busy
-                                text: root.currentView === "Updates" ? "Retry to check for updates." : "Retry to check again."
+                                visible: (root.readFailures.length > 0 || text.length > 0) && !backend.busy
+                                text: root.readFailures.length > 0
+                                    ? (emptyStateIcon.goodNews ? root.sourceFailureTitle() + ". " : "") + (root.currentView === "Updates" ? "Retry to check for updates." : "Retry to check again.")
+                                    : (root.currentView === "Updates" || root.currentView === "Clean") && results.count === 0 ? root.checkedAgo() : ""
+                                color: root.readFailures.length > 0 && emptyStateIcon.goodNews ? root.warning : root.muted
                             }
                             Row {
                                 anchors.horizontalCenter: parent.horizontalCenter
@@ -3289,8 +3360,8 @@ Controls.ApplicationWindow {
     // Short-lived confirmation of a finished change, with Undo when the
     // change has a safe inverse (install and remove).
     function undoAction(notice) {
-        const undo = notice && notice.undo;
-        return undo && (undo.action === "install" || undo.action === "remove") && undo.package ? undo : null;
+        return notice && notice.undo === true && (notice.undo_action === "install" || notice.undo_action === "remove") && notice.target
+            ? {action: notice.undo_action, package: notice.target} : null;
     }
     function undoLastChange() {
         const undo = undoAction(JSON.parse(backend.notice || "{}"));
@@ -3335,7 +3406,7 @@ Controls.ApplicationWindow {
         width: Math.min(480, parent.width - (root.width < 520 ? 0 : 48))
         height: parent.height
         x: root.activityOpen ? parent.width - width : parent.width
-        visible: x < parent.width
+        visible: root.activityOpen || x < parent.width
         color: root.surface
         border.color: root.line
         Behavior on x { NumberAnimation { duration: Theme.revealDuration; easing.type: Easing.OutCubic } }

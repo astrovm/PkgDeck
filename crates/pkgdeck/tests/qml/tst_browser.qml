@@ -1089,17 +1089,21 @@ TestCase {
         verify(banner.visible);
         mouseClick(findChild(browser, "changeNoticeSettings"));
         compare(browser.currentView, "Settings");
-        verify(!banner.visible);
+        tryCompare(banner, "visible", false);
         browser.openView("Search");
+        tryCompare(banner, "visible", true);
         mouseClick(findChild(browser, "dismissChangeNotice"));
         compare(fake.noticeDismissals, 1);
+        tryCompare(banner, "visible", false);
+        // Success shows as a toast that clears itself.
+        tryCompare(banner, "visible", false);
+        fake.notice = JSON.stringify({kind: "success", title: "Installed htop"});
+        const toast = findChild(browser, "changeToast");
+        verify(toast.open);
+        compare(toast.text, "Installed htop");
+        compare(toast.actionText, "");
         verify(!banner.visible);
-        // Success needs no action and clears itself.
-        fake.notice = JSON.stringify({kind: "success", title: "Install htop (apt) finished"});
-        verify(banner.visible);
-        verify(!findChild(browser, "changeNoticeSettings").visible);
-        verify(!findChild(browser, "changeNoticeDetail").visible);
-        tryCompare(fake, "noticeDismissals", 2, 6000);
+        tryCompare(fake, "noticeDismissals", 2, 7000);
     }
     function test_empty_search_shows_a_centered_prompt() {
         browser.openView("Search");
@@ -1155,8 +1159,8 @@ TestCase {
     function test_activity_uses_short_readable_actions() {
         browser.openView("Activity");
         const activity = findChild(browser, "activityPane");
-        compare(activity.target({upgrade_all: {backend: "apt"}}), "Update all (apt)");
-        compare(activity.target({install: {backend: "apt", name: "synthetic-tool", scope: "system"}}), "Install synthetic-tool (apt, System)");
+        compare(activity.target({upgrade_all: {backend: "apt"}}), "Update all (APT)");
+        compare(activity.target({install: {backend: "apt", name: "synthetic-tool", scope: "system"}}), "Install synthetic-tool (APT, System)");
         compare(activity.result({state: "running", outcomes: []}), "In progress");
     }
     function test_action_progress_shows_batch_steps_and_single_transfer() {
@@ -1271,7 +1275,7 @@ TestCase {
         verify(about.text.indexOf("9.9.9-test") >= 0);
         const shortcuts = findChild(browser, "aboutShortcuts");
         verify(shortcuts !== null);
-        compare(shortcuts.count, 15);
+        compare(shortcuts.count, 20);
         verify(findChild(browser, "shortcutsToggle") === null);
         waitForRendering(browser.contentItem);
         compare(shortcuts.itemAt(0).children[1].text, "Ctrl+1");
@@ -1491,7 +1495,9 @@ TestCase {
         verify(findChild(findChild(browser, "packageResults").itemAtIndex(0), "rowPackageAction").enabled);
         verify(findChild(browser, "activityIndicator").visible);
         browser.openView("Activity");
-        compare(browser.currentView, "Activity");
+        // Activity opens as a drawer over the current page.
+        compare(browser.currentView, "Installed");
+        verify(browser.activityOpen);
         const list = findChild(browser, "activityList");
         tryCompare(list, "count", 1);
         verify(findChild(browser, "cancelQueuedButton").enabled);
@@ -1502,11 +1508,13 @@ TestCase {
         browser.width = 380;
         browser.openView("Activity");
         waitForRendering(browser.contentItem);
-        compare(findChild(browser, "pageHeading").text, "Activity");
-        verify(!findChild(browser, "activityIndicator").visible);
-        browser.width = 1100;
-        waitForRendering(browser.contentItem);
-        verify(!findChild(browser, "activityIndicator").visible);
+        compare(findChild(browser, "activityHeading").text, "Activity");
+        const drawer = findChild(browser, "activityDrawer");
+        tryVerify(() => drawer.x + drawer.width <= browser.width + 1);
+        verify(drawer.width <= browser.width);
+        mouseClick(findChild(browser, "closeActivity"));
+        verify(!browser.activityOpen);
+        tryCompare(drawer, "visible", false);
     }
     function test_background_mode_requires_a_usable_tray_to_hide() {
         browser.openView("Settings");
@@ -1706,8 +1714,8 @@ TestCase {
         browser.height = 520;
         waitForRendering(browser.contentItem);
         const panel = findChild(browser, "detailsPanel");
-        const galleryPosition = gallery.mapToItem(panel, 0, 0);
-        verify(galleryPosition.y + gallery.height <= panel.height - 12);
+        // The panel animates to its new height.
+        tryVerify(() => gallery.mapToItem(panel, 0, 0).y + gallery.height <= panel.height - 12);
         const actions = findChild(browser, "updatesActions");
         const actionsPosition = actions.mapToItem(browser.contentItem, 0, 0);
         verify(actionsPosition.y + actions.height <= browser.contentItem.height,
@@ -1727,7 +1735,9 @@ TestCase {
         fake.details = JSON.stringify({package: row, screenshots: [{url: "https://example.invalid/stale.png"}]});
         compare(gallery.count, 0);
         verify(!gallery.visible);
-        verify(!findChild(browser, "detailsPanel").visible);
+        // The panel stays open for the new row and shows it loading.
+        verify(findChild(browser, "detailsPanel").visible);
+        verify(findChild(browser, "detailsPanel").loading);
         fake.details = JSON.stringify({package: JSON.parse(fake.rows)[1], description: "Additional details"});
         const close = findChild(browser, "closeDetailsButton");
         compare(close.text, "");
@@ -1752,8 +1762,9 @@ TestCase {
         compare(browser.detailText(), "");
         verify(!description.visible);
         verify(!metadata.visible);
-        verify(!panel.visible);
-        verify(panel.idealHeight < 130);
+        // The panel stays open with the row's header and action.
+        verify(panel.visible);
+        verify(panel.idealHeight < 160);
         fake.details = JSON.stringify({package: row, description: "A longer description from the package source.",
             publisher: "Example publisher", license: "MIT", homepage: "https://example.invalid/app",
             dependencies: ["synthetic-library"]});
@@ -2050,19 +2061,21 @@ TestCase {
         tryVerify(() => list.itemAtIndex(0) !== null);
         waitForRendering(browser.contentItem);
         const row = list.itemAtIndex(0);
-        verify(findChild(row, "packageName").width >= 120);
+        // The name column keeps room even at the minimum width.
+        verify(findChild(row, "packageName").parent.width >= 120);
         verify(findChild(row, "compactVersion").visible);
         verify(!findChild(row, "wideVersion").visible);
         const update = findChild(browser, "upgradeAllButton");
         const selectNone = findChild(browser, "selectNoneButton");
+        // Reload is an icon in the list header, above the page actions.
         const reload = findChild(browser, "reloadButton");
         compare(reload.text, "");
+        verify(reload.visible);
         const updateY = update.mapToItem(browser.contentItem, 0, 0).y;
         compare(selectNone.mapToItem(browser.contentItem, 0, 0).y, updateY);
-        compare(reload.mapToItem(browser.contentItem, 0, 0).y, updateY);
+        verify(reload.mapToItem(browser.contentItem, 0, 0).y < updateY);
         browser.togglePackage(rows[0]);
         compare(update.text, "Update");
-        compare(reload.mapToItem(browser.contentItem, 0, 0).y, update.mapToItem(browser.contentItem, 0, 0).y);
     }
     function test_results_leave_room_for_the_scrollbar() {
         browser.width = 1100;
@@ -2422,8 +2435,9 @@ TestCase {
         wait(30);
         verify(findChild(browser, "resultsBox").visible);
         verify(!findChild(browser, "sourceFailureNotice").visible);
-        compare(findChild(browser, "emptyState").text, "Couldn't check Flatpak");
-        compare(findChild(browser, "sourceFailureEmptyHint").text, "Retry to check for updates.");
+        // The sources that answered still report their good news.
+        compare(findChild(browser, "emptyState").text, browser.checkedSourceNames().length + " other sources are up to date");
+        compare(findChild(browser, "sourceFailureEmptyHint").text, "Couldn't check Flatpak. Retry to check for updates.");
         browser.width = 380;
         browser.height = 500;
         wait(30);
@@ -2503,13 +2517,18 @@ TestCase {
         fake.report_state = JSON.stringify({phase: "complete", failures: []});
         compare(browser.emptyStateMessage(), "You're up to date");
         fake.report_state = JSON.stringify({phase: "partial", failures: [{source: "npm", kind: "locked", detail: "Synthetic package lock"}]});
+        // Only the sources that answered are called up to date.
+        browser.viewSourceFilters = ({Updates: ["apt", "npm"]});
+        compare(browser.emptyStateMessage(), "APT is up to date");
+        browser.viewSourceFilters = ({Updates: ["npm"]});
         compare(browser.emptyStateMessage(), "Couldn't check npm");
-        verify(browser.emptyStateMessage() !== "You're up to date");
+        browser.viewSourceFilters = ({});
         compare(browser.copyableDiagnostics(), "View: Updates\nState: partial\nnpm (locked): Synthetic package lock");
         fake.report_state = JSON.stringify({phase: "failed", failures: [{source: "apt", kind: "authorization"}]});
         compare(browser.emptyStateMessage(), "Couldn't check APT");
         fake.report_state = JSON.stringify({phase: "cached", failures: []});
-        compare(browser.emptyStateMessage(), "No updates in the last check.");
+        // A cached check reads the same, with its time underneath.
+        compare(browser.emptyStateMessage(), "You're up to date");
         fake.report_state = JSON.stringify({phase: "complete", failures: []});
         fake.rows = JSON.stringify([{kind: "package", name: "anonymous", source: "homebrew", installed: "1", candidate: "2", update: "available"}]);
         browser.viewSourceFilters = ({Updates: ["apt"]});
