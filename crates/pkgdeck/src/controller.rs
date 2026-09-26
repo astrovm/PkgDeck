@@ -2149,11 +2149,13 @@ impl ffi::PackageController {
             sources
         };
         // Reloading the section on screen keeps its rows until the new ones
-        // are complete (see hold_partials).
+        // are complete (see hold_partials). Reloading again while that
+        // refresh runs finds no rows here, yet the page still shows them.
         let refreshing = force
             && view != "Search"
             && self.rust().active_view == view
-            && self.rust().rows.to_string() != "[]";
+            && (self.rust().rows.to_string() != "[]"
+                || self.rust().hold_partials && self.rust().worker.is_some());
         self.as_mut().rust_mut().active_view = view.clone();
         self.as_mut().rust_mut().awaiting_prefetch = false;
         self.as_mut().rust_mut().hold_partials = refreshing;
@@ -4778,6 +4780,12 @@ mod tests {
             cancel: Cancellation::default(),
             job: Job::Load("Updates".into(), "".into()),
         });
+        controller
+            .as_mut()
+            .load("Updates".into(), "".into(), "".into(), false, true);
+        assert!(controller.rust().hold_partials);
+        // Reloading again before the refresh finishes still keeps them.
+        assert_eq!(controller.rows().to_string(), "[]");
         controller
             .as_mut()
             .load("Updates".into(), "".into(), "".into(), false, true);
