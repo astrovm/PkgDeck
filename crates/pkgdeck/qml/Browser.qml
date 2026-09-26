@@ -719,10 +719,9 @@ Controls.ApplicationWindow {
     // A sidebar dragged narrower than this becomes the icon rail.
     readonly property int railThreshold: 150
     // Widening the sidebar stops where the page would switch to its compact
-    // layout, so dragging never shifts the page. Windows already too narrow
-    // for that keep the usual limit.
-    readonly property int sidebarFitWidth: width - compactWidth
-    readonly property int sidebarMaximumWidth: sidebarFitWidth >= sidebarMinimumWidth ? Math.min(360, sidebarFitWidth) : 360
+    // layout, so dragging never shifts the page. The limit shrinks with the
+    // window down to the minimum width and never jumps back up.
+    readonly property int sidebarMaximumWidth: Math.max(sidebarMinimumWidth, Math.min(360, width - compactWidth))
     readonly property bool sidebarRail: width < 820 || preferences.sidebarWidth < railThreshold
     readonly property int sidebarWidth: sidebarRail ? railWidth
         : Math.max(sidebarMinimumWidth, Math.min(sidebarMaximumWidth, preferences.sidebarWidth))

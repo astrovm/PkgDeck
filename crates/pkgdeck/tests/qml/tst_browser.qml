@@ -869,7 +869,9 @@ TestCase {
             // Narrow windows keep the sidebar as an icon rail.
             compare(browser.sidebarRail, width < 820);
             verify(sidebar.visible);
-            compare(browser.sidebarWidth, width < 820 ? browser.railWidth : 212);
+            // The full sidebar only narrows toward its minimum as the window does.
+            compare(browser.sidebarWidth, width < 820 ? browser.railWidth
+                : Math.max(browser.sidebarMinimumWidth, Math.min(212, width - 748)));
             compare(browser.compact, width - browser.sidebarWidth < 748);
             verify(!add.visible);
             for (const button of [activity, sources]) {
@@ -2360,6 +2362,14 @@ TestCase {
         verify(browser.compact);
         compare(narrow.x, wide.x);
         compare(narrow.y, wide.y);
+        // A wide saved sidebar narrows smoothly with the window, never jumping.
+        browser.preferredSidebarWidth = 360;
+        let last = Infinity;
+        for (let width = 1200; width >= 820; width -= 4) {
+            browser.width = width;
+            verify(browser.sidebarWidth <= last, "sidebar grew at " + width);
+            last = browser.sidebarWidth;
+        }
     }
     function test_sidebar_title_and_footer_fit_at_the_narrowest_width() {
         const sidebar = findChild(browser, "sidebar");
