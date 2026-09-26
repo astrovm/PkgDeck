@@ -13,7 +13,9 @@ fn main() {
             .qml_file("qml/DeckIcon.qml")
             .qml_file("qml/DeckScrollBar.qml")
             .qml_file("qml/DeckScrollView.qml")
-            .qml_file("qml/ClearFieldButton.qml"),
+            .qml_file("qml/ClearFieldButton.qml")
+            .qml_file("qml/RowProgress.qml")
+            .qml_file("qml/Toast.qml"),
     )
     .qrc("resources.qrc")
     .file("src/controller.rs")

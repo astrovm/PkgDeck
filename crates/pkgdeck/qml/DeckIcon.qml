@@ -7,7 +7,7 @@ import QtQuick.Shapes
 Item {
     id: icon
     property string name: "package"
-    property color ink: "#ffffff"
+    property color ink: Theme.ink
     readonly property bool available: true
     implicitWidth: 20
     implicitHeight: 20
@@ -47,11 +47,15 @@ Item {
         "uv": [[6,4,18,4,18,16,12,20,6,16,6,4]],
         "composer": [[12,3,20,8,12,13,4,8,12,3], [12,13,12,21]],
         "gem": [[6,8,12,3,18,8,15,21,9,21,6,8], [6,8,18,8], [9,8,12,13,15,8]],
-        "warning": [[12,2,23,21,1,21,12,2], [12,8,12,14], [12,17,12,18]]
+        "warning": [[12,2,23,21,1,21,12,2], [12,8,12,14], [12,17,12,18]],
+        "external": [[14,4,20,4,20,10], [20,4,11,13], [18,14,18,20,4,20,4,6,10,6]],
+        "right": [[9,5,16,12,9,19]],
+        "info": [[12,11,12,17], [12,7,12,8]]
     })
     // Circles and arcs that polylines cannot express, as SVG path data.
     readonly property var arcs: ({
         "search": "M 17 10 A 7 7 0 1 1 3 10 A 7 7 0 1 1 17 10",
+        "info": "M 22 12 A 10 10 0 1 1 2 12 A 10 10 0 1 1 22 12",
         "help": "M 22 12 A 10 10 0 1 1 2 12 A 10 10 0 1 1 22 12",
         "refresh": "M 3.632 8.687 A 9 9 0 0 1 20.368 8.687 M 20.368 15.313 A 9 9 0 0 1 3.632 15.313"
     })
