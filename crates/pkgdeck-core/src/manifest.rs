@@ -14,8 +14,12 @@ use std::{
 };
 
 pub const SCHEMA_VERSION: u32 = 1;
-pub const MAX_BYTES: u64 = 1024 * 1024;
-pub const MAX_PACKAGES: usize = 256;
+/// Parse guard for untrusted files: a full desktop inventory (a few
+/// thousand packages, about 150 bytes each) fits many times over.
+pub const MAX_BYTES: u64 = 8 * 1024 * 1024;
+/// Covers real systems (a desktop Ubuntu has 1500 to 3000 packages) while
+/// bounding the per-entry work a preview does for an untrusted file.
+pub const MAX_PACKAGES: usize = 20_000;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -95,7 +99,7 @@ impl fmt::Display for ManifestError {
         match self {
             Self::Io(message) | Self::Invalid(message) => f.write_str(message),
             Self::UnsupportedVersion(version) => {
-                write!(f, "unsupported inventory version {version}")
+                write!(f, "This list uses format version {version}, which this PkgDeck can't read. Update PkgDeck, or export the list again.")
             }
         }
     }
@@ -117,9 +121,10 @@ impl Manifest {
             return Err(ManifestError::UnsupportedVersion(self.schema_version));
         }
         if self.packages.len() > MAX_PACKAGES {
-            return Err(ManifestError::Invalid(
-                "inventory has too many packages".into(),
-            ));
+            return Err(ManifestError::Invalid(format!(
+                "This list has {} packages, and PkgDeck handles at most {MAX_PACKAGES}. Name the packages to save, or save one source at a time with --from.",
+                self.packages.len()
+            )));
         }
         let mut seen = BTreeSet::new();
         for entry in &self.packages {
@@ -134,7 +139,8 @@ impl Manifest {
                     .is_some_and(|s| !safe_field(s))
             {
                 return Err(ManifestError::Invalid(
-                    "inventory contains an invalid identity or version".into(),
+                    "This list has a package entry PkgDeck can't use. Export the list again."
+                        .into(),
                 ));
             }
             let key = (
@@ -147,7 +153,7 @@ impl Manifest {
             );
             if !seen.insert(key) {
                 return Err(ManifestError::Invalid(
-                    "inventory contains a duplicate package".into(),
+                    "This list names the same package twice. Export the list again.".into(),
                 ));
             }
         }
@@ -171,7 +177,7 @@ pub fn export(packages: &[Package], selected: &[PackageId]) -> Result<Manifest, 
     }
     if selected.iter().any(|id| !found.contains(id)) {
         return Err(ManifestError::Invalid(
-            "selected package is no longer installed".into(),
+            "A package you picked is no longer installed. Reload the installed list, then try again.".into(),
         ));
     }
     entries.sort();
@@ -183,17 +189,51 @@ pub fn export(packages: &[Package], selected: &[PackageId]) -> Result<Manifest, 
     Ok(manifest)
 }
 
+/// "Can't open software.json: no such file." with the path as given.
+fn file_error(verb: &str, path: &Path, error: &std::io::Error) -> ManifestError {
+    let reason = match error.kind() {
+        std::io::ErrorKind::NotFound => "no such file".to_string(),
+        std::io::ErrorKind::PermissionDenied => "permission denied".into(),
+        std::io::ErrorKind::IsADirectory => "it's a folder".into(),
+        std::io::ErrorKind::AlreadyExists => {
+            return ManifestError::Io(format!(
+                "{} already exists. PkgDeck never overwrites a file; choose a new name.",
+                path.display()
+            ))
+        }
+        _ => {
+            let text = error.to_string();
+            // "No space left on device (os error 28)" → "no space left on device".
+            let text = text.split(" (os error").next().unwrap_or(&text);
+            let mut chars = text.chars();
+            chars
+                .next()
+                .map(|first| first.to_lowercase().chain(chars).collect())
+                .unwrap_or_default()
+        }
+    };
+    ManifestError::Io(format!("Can't {verb} {}: {reason}.", path.display()))
+}
+
 pub fn read(path: &Path) -> Result<Manifest, ManifestError> {
-    let file = File::open(path).map_err(|e| ManifestError::Io(e.to_string()))?;
+    let file = File::open(path).map_err(|e| file_error("open", path, &e))?;
     let mut bytes = Vec::new();
     file.take(MAX_BYTES + 1)
         .read_to_end(&mut bytes)
-        .map_err(|e| ManifestError::Io(e.to_string()))?;
+        .map_err(|e| file_error("read", path, &e))?;
     if bytes.len() as u64 > MAX_BYTES {
-        return Err(ManifestError::Invalid("inventory file is too large".into()));
+        return Err(ManifestError::Invalid(format!(
+            "{} is larger than {} MB, so PkgDeck won't read it. Check that it's a list saved by PkgDeck.",
+            path.display(),
+            MAX_BYTES / 1024 / 1024
+        )));
     }
-    let manifest: Manifest = serde_json::from_slice(&bytes)
-        .map_err(|e| ManifestError::Invalid(format!("invalid inventory: {e}")))?;
+    let manifest: Manifest = serde_json::from_slice(&bytes).map_err(|e| {
+        ManifestError::Invalid(format!(
+            "{} isn't a software list saved by PkgDeck ({e}).",
+            path.display()
+        ))
+    })?;
     manifest.validate()?;
     Ok(manifest)
 }
@@ -204,16 +244,19 @@ pub fn write_new(path: &Path, manifest: &Manifest) -> Result<(), ManifestError> 
     let bytes =
         serde_json::to_vec_pretty(manifest).map_err(|e| ManifestError::Invalid(e.to_string()))?;
     if bytes.len() as u64 + 1 > MAX_BYTES {
-        return Err(ManifestError::Invalid("inventory file is too large".into()));
+        return Err(ManifestError::Invalid(format!(
+            "This list would be larger than {} MB. Name the packages to save, or save one source at a time with --from.",
+            MAX_BYTES / 1024 / 1024
+        )));
     }
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(path)
-        .map_err(|e| ManifestError::Io(e.to_string()))?;
+        .map_err(|e| file_error("create", path, &e))?;
     file.write_all(&bytes)
         .and_then(|()| file.write_all(b"\n"))
-        .map_err(|e| ManifestError::Io(e.to_string()))
+        .map_err(|e| file_error("write", path, &e))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -383,7 +426,9 @@ pub fn inspect(
     let mut searched = BTreeSet::new();
     for entry in &manifest.packages {
         if cancel.requested() {
-            return Err(ManifestError::Invalid("inventory preview cancelled".into()));
+            return Err(ManifestError::Invalid(
+                "Preview cancelled. Nothing was changed.".into(),
+            ));
         }
         if entry.scope == PortableScope::Environment
             || installed
@@ -587,7 +632,15 @@ mod tests {
                 ..entry.clone()
             })
             .collect();
-        assert!(manifest.validate().is_err());
+        assert!(manifest
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("at most 20000"));
+        // A real desktop inventory is well within the limits.
+        manifest.packages.truncate(3000);
+        assert!(manifest.validate().is_ok());
+        assert!((serde_json::to_vec_pretty(&manifest).unwrap().len() as u64) < MAX_BYTES);
     }
 
     #[test]
@@ -725,13 +778,43 @@ mod tests {
         ));
         std::fs::write(&path, vec![b' '; MAX_BYTES as usize + 1]).unwrap();
         assert!(
-            matches!(read(&path), Err(ManifestError::Invalid(message)) if message.contains("too large"))
+            matches!(read(&path), Err(ManifestError::Invalid(message)) if message.contains("larger than 8 MB"))
+        );
+        std::fs::write(&path, b"{").unwrap();
+        assert!(
+            matches!(read(&path), Err(ManifestError::Invalid(message)) if message.contains("isn't a software list saved by PkgDeck"))
         );
         std::fs::remove_file(&path).unwrap();
-        assert!(matches!(read(&path), Err(ManifestError::Io(_))));
-
+        assert_eq!(
+            read(&path).unwrap_err().to_string(),
+            format!("Can't open {}: no such file.", path.display())
+        );
+        assert_eq!(
+            read(&std::env::temp_dir()).unwrap_err().to_string(),
+            format!(
+                "Can't read {}: it's a folder.",
+                std::env::temp_dir().display()
+            )
+        );
+        let other = std::io::Error::other("Disk on fire (os error 99)");
+        assert_eq!(
+            file_error("write", Path::new("list.json"), &other).to_string(),
+            "Can't write list.json: disk on fire."
+        );
+        let denied = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            file_error("open", Path::new("list.json"), &denied).to_string(),
+            "Can't open list.json: permission denied."
+        );
         let package = package("org.example.App", Scope::System, None);
         let manifest = export(std::slice::from_ref(&package), &[]).unwrap();
+        write_new(&path, &manifest).unwrap();
+        assert!(write_new(&path, &manifest)
+            .unwrap_err()
+            .to_string()
+            .ends_with("already exists. PkgDeck never overwrites a file; choose a new name."));
+        std::fs::remove_file(&path).unwrap();
+
         let cancel = Cancellation::default();
         cancel.cancel();
         assert!(
