@@ -2281,6 +2281,9 @@ TestCase {
         wait(Qt.styleHints.mouseDoubleClickInterval + 50);
         mouseDrag(browser, x + 60, y, 400, 0);
         tryCompare(browser, "sidebarWidth", browser.sidebarMaximumWidth);
+        // The widest sidebar still leaves the page its regular layout.
+        compare(browser.sidebarMaximumWidth, browser.width - 748);
+        verify(!browser.compact);
         // Dragging it narrow leaves an icon rail with named tooltips.
         wait(Qt.styleHints.mouseDoubleClickInterval + 50);
         mouseDrag(browser, browser.sidebarMaximumWidth - 4, y, -300, 0);
