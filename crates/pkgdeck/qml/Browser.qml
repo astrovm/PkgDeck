@@ -737,6 +737,39 @@ Controls.ApplicationWindow {
             : Math.max(56, font.pointSize * 5)) + (row.groupStart ? 38 : 0);
         return Math.max(130, (compact ? 60 : 85) + viewItems.reduce((height, row) => height + rowHeight(row), 0));
     }
+    // With details open the list keeps this many rows; details scroll instead.
+    // Height left for the results and details together: the page minus
+    // every other visible part (header, filters, banners, actions) and the
+    // spacing between them. Both minimums below come out of this budget, so
+    // opening details never pushes anything off a short window.
+    function detailsBudget() {
+        let used = 0;
+        let shown = 0;
+        for (const child of pageContent.children) {
+            if (!child.visible || child === resultsBox || child === detailsPanel)
+                continue;
+            // A visible filler takes no height of its own, but the layout
+            // still puts a gap before it.
+            if (child.objectName !== "pageFiller")
+                used += child.height;
+            shown++;
+        }
+        // The window's space, not pageContent.height: the page grows past the
+        // window to fit its children's minimums, which would feed back here.
+        const page = root.contentItem.height - 2 * pageContent.Layout.margins;
+        return Math.max(0, page - used - pageContent.spacing * (shown + 1));
+    }
+    function detailsMinimumHeight() {
+        return Math.min(120, detailsPanel.idealHeight, detailsBudget() * 0.4);
+    }
+    function detailsListHeight() {
+        const rows = compact ? 2 : 3;
+        const rowHeight = compact ? Math.max(94, font.pointSize * 8.5) : Math.max(56, font.pointSize * 5);
+        const budget = detailsBudget();
+        // Compact pages leave most of the space to the details' gallery.
+        return Math.min(shortResultsHeight(), (compact ? 60 : 85) + rows * rowHeight,
+            budget * (compact ? 0.3 : 0.55), budget - detailsMinimumHeight());
+    }
     readonly property bool systemAppearance: preferences.appearance === 0
     readonly property bool dark: preferences.appearance === 1 || (systemAppearance && Qt.styleHints.colorScheme === Qt.Dark)
     readonly property color canvas: systemAppearance ? systemPalette.window : (dark ? "#0e1015" : "#f4f6f9")
@@ -2451,8 +2484,10 @@ Controls.ApplicationWindow {
                 Layout.fillWidth: true
                 Layout.fillHeight: (backend.busy && !root.openingInput) || root.viewItems.length > root.shortListLimit
                 Layout.preferredHeight: root.viewItems.length === 0 && !backend.busy ? 150
-                    : Math.min(root.shortResultsHeight(), detailsPanel.visible ? root.height * (root.compact ? 0.24 : 0.42) : root.height * 0.7)
-                Layout.minimumHeight: root.compact && detailsPanel.visible ? 100 : 130
+                    : detailsPanel.visible ? Math.min(root.shortResultsHeight(), root.height * (root.compact ? 0.24 : 0.42),
+                        root.detailsBudget() - detailsPanel.Layout.preferredHeight)
+                    : Math.min(root.shortResultsHeight(), root.height * 0.7)
+                Layout.minimumHeight: detailsPanel.visible ? root.detailsListHeight() : 130
                 visible: root.currentView === root.resultView && root.currentView !== "Settings" && root.currentView !== "Activity" &&
                     (root.currentView !== "Search" || root.viewItems.length > 0 || root.readFailures.length > 0 ||
                         (backend.busy && !root.openingInput) || searchPane.text.trim().length > 0)
@@ -2635,6 +2670,8 @@ Controls.ApplicationWindow {
                             if (!root.selectedIdentity)
                                 currentIndex = -1;
                         }
+                        // Opening details shrinks the list; keep the open row in view.
+                        onHeightChanged: if (currentIndex >= 0) Qt.callLater(() => { if (results.currentIndex >= 0) results.positionViewAtIndex(results.currentIndex, ListView.Contain); })
                         keyNavigationEnabled: false
                         activeFocusOnTab: true
                         Controls.ScrollBar.vertical: Controls.ScrollBar {}
@@ -3006,7 +3043,13 @@ Controls.ApplicationWindow {
                     && (root.selected.kind !== "package" || (root.detailMatchesSelection
                         && (root.detailText().length > 0 || root.visibleScreenshots.length > 0 || detailsPanel.metadataText.length > 0)))
                 Layout.fillWidth: true
-                Layout.preferredHeight: Math.min(root.height * (root.compact ? 0.32 : 0.48), detailsPanel.idealHeight)
+                // Never taller than the page leaves after the list's minimum, so
+                // short windows keep the actions below on screen; the panel
+                // scrolls its own content instead.
+                Layout.preferredHeight: Math.max(root.detailsMinimumHeight(),
+                    Math.min(root.height * (root.compact ? 0.32 : 0.48), detailsPanel.idealHeight,
+                        root.detailsBudget() - root.detailsListHeight()))
+                Layout.minimumHeight: root.detailsMinimumHeight()
                 selected: root.selected
                 selectionIdentity: root.rowIdentity(root.selected)
                 screenshots: root.visibleScreenshots
@@ -3100,6 +3143,7 @@ Controls.ApplicationWindow {
                 }
             }
             Item {
+                objectName: "pageFiller"
                 visible: ["Search", "Installed", "Updates", "Clean", "Sources"].indexOf(root.currentView) >= 0 && !backend.busy &&
                     root.viewItems.length <= root.shortListLimit && !searchEmptyState.visible
                 Layout.fillHeight: true
