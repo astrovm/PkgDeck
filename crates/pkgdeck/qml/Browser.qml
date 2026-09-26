@@ -746,9 +746,12 @@ Controls.ApplicationWindow {
         let used = 0;
         let shown = 0;
         for (const child of pageContent.children) {
-            if (!child.visible || child === resultsBox || child === detailsPanel || child.objectName === "pageFiller")
+            if (!child.visible || child === resultsBox || child === detailsPanel)
                 continue;
-            used += child.height;
+            // A visible filler takes no height of its own, but the layout
+            // still puts a gap before it.
+            if (child.objectName !== "pageFiller")
+                used += child.height;
             shown++;
         }
         // The window's space, not pageContent.height: the page grows past the
@@ -2481,7 +2484,9 @@ Controls.ApplicationWindow {
                 Layout.fillWidth: true
                 Layout.fillHeight: (backend.busy && !root.openingInput) || root.viewItems.length > root.shortListLimit
                 Layout.preferredHeight: root.viewItems.length === 0 && !backend.busy ? 150
-                    : Math.min(root.shortResultsHeight(), detailsPanel.visible ? root.height * (root.compact ? 0.24 : 0.42) : root.height * 0.7)
+                    : detailsPanel.visible ? Math.min(root.shortResultsHeight(), root.height * (root.compact ? 0.24 : 0.42),
+                        root.detailsBudget() - detailsPanel.Layout.preferredHeight)
+                    : Math.min(root.shortResultsHeight(), root.height * 0.7)
                 Layout.minimumHeight: detailsPanel.visible ? root.detailsListHeight() : 130
                 visible: root.currentView === root.resultView && root.currentView !== "Settings" && root.currentView !== "Activity" &&
                     (root.currentView !== "Search" || root.viewItems.length > 0 || root.readFailures.length > 0 ||

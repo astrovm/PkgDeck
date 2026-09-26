@@ -2186,14 +2186,19 @@ TestCase {
         verify(top >= -1 && top + row.height <= list.height + 1, "selected row at " + top + " in " + list.height);
         verify(panel.height < panel.idealHeight);
     }
-    function test_open_details_fit_the_shortest_wide_window() {
+    function test_open_details_fit_the_shortest_wide_window_data() {
+        // A short list keeps the page filler, and the gap before it, visible.
+        return [{tag: "long list", rows: 20}, {tag: "short list", rows: 5}];
+    }
+    function test_open_details_fit_the_shortest_wide_window(data) {
         browser.width = 1100;
         browser.height = 400;
         browser.openView("Installed");
-        fake.rows = JSON.stringify(Array.from({length: 20}, (_, i) => ({kind: "package", name: "synthetic-" + i, source: "apt",
+        fake.rows = JSON.stringify(Array.from({length: data.rows}, (_, i) => ({kind: "package", name: "synthetic-" + i, source: "apt",
             architecture: "all", installed: "1", candidate: "1", scope: "system", summary: "Synthetic package " + i})));
         const list = findChild(browser, "packageResults");
-        tryVerify(() => list.count === 20);
+        tryVerify(() => list.count === data.rows);
+        compare(findChild(browser, "pageFiller").visible, data.rows <= browser.shortListLimit);
         browser.choose(2);
         fake.details = JSON.stringify({package: JSON.parse(fake.rows)[2],
             description: Array(40).fill("A long synthetic description line.").join("\n")});
