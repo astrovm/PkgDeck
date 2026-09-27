@@ -14,7 +14,12 @@ esac
 podman run --rm -v "$binary:/opt/pkd:ro" "$image" bash -lc "
     set -euo pipefail
     trap 'echo \"real $backend lifecycle FAILED at line \$LINENO: \$BASH_COMMAND\" >&2' ERR
-    $bootstrap
+    # Distro mirrors time out now and then; setup is not what this tests.
+    for attempt in 1 2 3; do
+        if ( $bootstrap ); then break; fi
+        [[ \$attempt == 3 ]] && exit 1
+        sleep 15
+    done
     useradd -m pkgdeck-test
     printf 'pkgdeck-test ALL=(root) NOPASSWD: /usr/bin/$manager\\n' >/etc/sudoers.d/pkgdeck
     run() { sudo -u pkgdeck-test /opt/pkd --json --yes --auth sudo --from $backend --arch \$(uname -m) \"\$@\"; }
