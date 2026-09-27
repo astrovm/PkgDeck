@@ -113,6 +113,8 @@ class Pkgdeck < Formula
     assert_match "pkd", shell_output("#{bin}/pkd --version")
     assert_match "Usage:", shell_output("#{bin}/pkd --help")
     if OS.mac?
+      # Exercise Cocoa startup without depending on the hosted runner's GPU.
+      ENV["QT_QUICK_BACKEND"] = "software"
       assert_match "pkgdeck", shell_output("#{bin}/pkgdeck --version")
       assert_match "PKGDECK_GUI_READY", shell_output("#{bin}/pkgdeck --smoke-test 2>&1")
       assert_match "AppImage requires Linux", shell_output("#{bin}/pkd --json sources")

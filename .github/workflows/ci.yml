@@ -401,6 +401,7 @@ jobs:
       - name: Build package
         run: brew install --build-from-source --verbose astrovm/pkgdeck/pkgdeck
       - name: Test installed commands and GUI startup
+        timeout-minutes: 5
         run: brew test astrovm/pkgdeck/pkgdeck
       - name: Test macOS GUI controllers, QML, startup and media
         if: runner.os == 'macOS' && !inputs.homebrew_only

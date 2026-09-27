@@ -1126,7 +1126,15 @@ TestCase {
         // Failures stay until dismissed and can open Settings.
         wait(50);
         verify(banner.visible);
-        mouseClick(findChild(browser, "changeNoticeSettings"));
+        const settings = findChild(browser, "changeNoticeSettings");
+        compare(settings.visible, Qt.platform.os === "linux");
+        if (Qt.platform.os === "linux") {
+            mouseClick(settings);
+        } else {
+            // The authorization shortcut is Linux-only. General navigation
+            // still hides the banner while Settings is open on macOS.
+            browser.openView("Settings");
+        }
         compare(browser.currentView, "Settings");
         tryCompare(banner, "visible", false);
         browser.openView("Search");

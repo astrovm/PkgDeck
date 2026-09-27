@@ -23,6 +23,8 @@ a supported build target.
 Native dpkg and AppImage execution tests, and the X11 keyboard driver, run only
 on Linux. X11 testing does not establish native Cocoa interaction coverage. The macOS GUI
 tests use the real Qt/Kirigami build installed by the Homebrew packaging job.
+The installed Mac app also receives a Cocoa startup smoke test using Qt Quick's
+software renderer; GPU/Metal behavior is outside this hosted-runner check.
 Mac-only code is compiled and exercised on native runners, not merely checked
 through Linux fixtures.
 
@@ -61,6 +63,10 @@ through Linux fixtures.
   including Homebrew's trusted-tap settings.
 - Mac QML component tests use the Basic style selected by the shipped Mac
   launcher, avoiding native controls that reject the app's customization.
+  Banner tests verify that the Linux authorization shortcut is hidden on Mac
+  and test ordinary Settings navigation on both platforms.
+- Applications removed during directory metadata or path resolution are
+  reported as skipped entries without discarding the remaining inventory.
 - Negated shell commands outside conditionals were not enforced by `set -e`.
   Removal checks now explicitly fail when native tools still report the package.
 
