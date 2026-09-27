@@ -2202,7 +2202,12 @@ TestCase {
         verify(!findChild(browser, "sourceFailureNotice").visible);
         verify(findChild(browser, "resultsBox").visible);
         compare(findChild(browser, "emptyState").text, "Couldn't check npm");
-        mouseClick(findChild(browser, "sourceFailureEmptyDetails"));
+        // Slow runners lay out the empty state after the rows land; clicking
+        // before then misses the button.
+        const details = findChild(browser, "sourceFailureEmptyDetails");
+        tryVerify(() => details.visible && details.width > 0 && details.height > 0);
+        waitForRendering(browser.contentItem);
+        mouseClick(details);
         const dialog = findChild(browser, "sourceFailuresDialog");
         tryCompare(dialog, "visible", true);
         function findInDialog(item, name) {
