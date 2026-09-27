@@ -1786,7 +1786,14 @@ fn cargo_lifecycle() {
     let installed = backend.installed(&cancel).unwrap();
     assert_eq!(installed.len(), 3);
     assert!(installed.iter().all(|p| p.installed_version.is_some()));
-    assert_eq!(backend.search("cargo-install", &cancel).unwrap().len(), 1);
+    // Rows a search lists; unversioned exact-name offers are never listed.
+    let listed = |packages: Vec<Package>| {
+        packages
+            .into_iter()
+            .filter(|p| p.installed_version.is_some() || p.candidate_version.is_some())
+            .count()
+    };
+    assert_eq!(listed(backend.search("cargo-install", &cancel).unwrap()), 1);
     let candidates = backend.search("missing-tool", &cancel).unwrap();
     assert_eq!(candidates.len(), 1);
     assert!(candidates[0].installed_version.is_none());
@@ -1886,7 +1893,12 @@ fn registries_without_search_offer_known_ai_tools_by_exact_package() {
     };
     let mut npm = DevTool::npm(npm_fixture.clone());
     npm.detect(&cancel).unwrap();
-    let offers = npm.search("copilot", &cancel).unwrap();
+    let offers: Vec<_> = npm
+        .search("copilot", &cancel)
+        .unwrap()
+        .into_iter()
+        .filter(|p| p.candidate_version.is_some())
+        .collect();
     assert_eq!(offers.len(), 1);
     assert_eq!(offers[0].id.name, "@github/copilot");
     assert_eq!(offers[0].display_name, "GitHub Copilot CLI");
@@ -1907,6 +1919,13 @@ fn registries_without_search_offer_known_ai_tools_by_exact_package() {
             "@github/copilot".into()
         ]]
     );
+    // A catalog alias keeps the exact package name typed installable:
+    // `amp` is also an unrelated npm package.
+    let amp = npm.search("amp", &cancel).unwrap();
+    assert!(amp.iter().any(|p| p.id.name == "@sourcegraph/amp"));
+    assert!(amp
+        .iter()
+        .any(|p| p.id.name == "amp" && p.candidate_version.is_none()));
     // PyPI-only tools are not offered through npm.
     assert!(npm
         .search("aider", &cancel)
@@ -1921,9 +1940,31 @@ fn registries_without_search_offer_known_ai_tools_by_exact_package() {
         ..DevFixture::default()
     });
     uv.detect(&cancel).unwrap();
-    let offers = uv.search("aider", &cancel).unwrap();
+    let offers: Vec<_> = uv
+        .search("aider", &cancel)
+        .unwrap()
+        .into_iter()
+        .filter(|p| p.candidate_version.is_some())
+        .collect();
     assert_eq!(offers.len(), 1);
     assert_eq!(offers[0].id.name, "aider-chat");
+    // An installed catalog tool found by its product name is shown as
+    // installed, not offered again.
+    let mut installed = DevTool::npm(DevFixture {
+        version: "12.0.2\n".into(),
+        root: Some("/home/test/lib/node_modules".into()),
+        list: r#"{"dependencies": {"@anthropic-ai/claude-code": {"version": "2.1.283"}}}"#.into(),
+        ..DevFixture::default()
+    });
+    installed.detect(&cancel).unwrap();
+    let claude: Vec<_> = installed
+        .search("Claude Code", &cancel)
+        .unwrap()
+        .into_iter()
+        .filter(|p| p.id.name == "@anthropic-ai/claude-code")
+        .collect();
+    assert_eq!(claude.len(), 1);
+    assert_eq!(claude[0].installed_version.as_deref(), Some("2.1.283"));
     // Cargo has no catalog route, so it keeps its plain install-by-name offer.
     let mut cargo = DevTool::cargo(DevFixture {
         home: Some("/home/test".into()),
@@ -2777,6 +2818,22 @@ fn mise_lists_and_changes_only_global_tools() {
         .unwrap()
         .iter()
         .all(|p| p.installed_version.is_some()));
+    // An installed tool found only through the registry (its description
+    // here) is shown as installed, not offered again.
+    let yaml: Vec<_> = backend
+        .search("yaml", &cancel)
+        .unwrap()
+        .into_iter()
+        .filter(|p| p.installed_version.is_some() || p.candidate_version.is_some())
+        .collect();
+    assert_eq!(yaml.len(), 1);
+    assert_eq!(yaml[0].installed_version.as_deref(), Some("4.40.5"));
+    // Backend-qualified tools are not registry entries but stay installable
+    // by exact name; the offer has no version, so it is not a listed match.
+    let exact = backend.search("cargo:ripgrep", &cancel).unwrap();
+    assert_eq!(exact.len(), 1);
+    assert_eq!(exact[0].id.name, "cargo:ripgrep");
+    assert!(exact[0].candidate_version.is_none());
     let cancel = Cancellation::default();
     for operation in [
         Operation::Install(dev_id("mise", "jq", home)),
@@ -2862,7 +2919,8 @@ fn mise_home_follows_its_data_directory() {
         let mut backend = DevTool::mise(fixture);
         assert_eq!(backend.detect(&cancel), Ok(Availability::Available));
         let offer = backend.search("anything-new", &cancel).unwrap();
-        assert!(offer.is_empty());
+        // Only the unlisted exact-name offer: no version, so never a match.
+        assert!(offer.iter().all(|p| p.candidate_version.is_none()));
         assert!(backend
             .execute(
                 &Operation::Install(dev_id("mise", "jq", expected)),

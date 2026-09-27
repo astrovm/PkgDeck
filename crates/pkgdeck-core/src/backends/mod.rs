@@ -4070,7 +4070,9 @@ impl<T: Transport> DevTool<T> {
     /// Tools from mise's global configuration only: project files such as
     /// `mise.toml` or `.tool-versions` pin versions for that project and stay
     /// out of PkgDeck. Candidates stay within the configured version range,
-    /// matching `mise upgrade`, which never rewrites the configuration.
+    /// matching `mise upgrade`, which never rewrites the configuration. Host
+    /// commands run from `/` with a cleared environment, so the project in
+    /// the caller's working directory never joins mise's configuration stack.
     fn mise_inventory(
         &self,
         home: &std::path::Path,
@@ -4107,7 +4109,8 @@ impl<T: Transport> DevTool<T> {
             })
             .collect()
     }
-    /// Search mise's registry for tools to install globally.
+    /// Search mise's registry for tools to install globally. A match that is
+    /// already installed comes back as its installed row.
     fn mise_offers(
         &self,
         home: &std::path::Path,
@@ -4125,39 +4128,67 @@ impl<T: Transport> DevTool<T> {
             .into_iter()
             .filter(|tool| mise_name(&tool.short))
             .filter(|tool| {
-                !installed
-                    .iter()
-                    .any(|package| package.id.name == tool.short)
-            })
-            .filter(|tool| {
                 matches(&tool.short)
                     || tool.aliases.iter().any(|alias| matches(alias))
                     || tool.description.as_deref().is_some_and(matches)
             })
             .take(50)
-            .map(|tool| Package {
-                id: PackageId {
-                    backend: id.into(),
-                    name: tool.short.clone(),
-                    architecture: std::env::consts::ARCH.into(),
-                    scope: Scope::Environment {
-                        path: home.to_path_buf(),
+            .map(|tool| {
+                match installed
+                    .iter()
+                    .find(|package| package.id.name == tool.short)
+                {
+                    Some(package) => package.clone(),
+                    None => Package {
+                        id: PackageId {
+                            backend: id.into(),
+                            name: tool.short.clone(),
+                            architecture: std::env::consts::ARCH.into(),
+                            scope: Scope::Environment {
+                                path: home.to_path_buf(),
+                            },
+                            remote: None,
+                            reference: None,
+                        },
+                        display_name: tool.short,
+                        summary: tool.description.unwrap_or_default(),
+                        installed_version: None,
+                        // Registry tools are real matches; `mise use --global` installs the
+                        // latest version, so that is the candidate.
+                        candidate_version: Some("latest".into()),
+                        update: UpdateAvailability::Unknown,
+                        icon: None,
+                        component_ids: vec![],
+                        homepages: vec![],
                     },
-                    remote: None,
-                    reference: None,
-                },
-                display_name: tool.short,
-                summary: tool.description.unwrap_or_default(),
-                installed_version: None,
-                // Registry tools are real matches; `mise use --global` installs the
-                // latest version, so that is the candidate.
-                candidate_version: Some("latest".into()),
-                update: UpdateAvailability::Unknown,
-                icon: None,
-                component_ids: vec![],
-                homepages: vec![],
+                }
             })
             .collect())
+    }
+    /// An offer to install exactly `query` by name, for registries PkgDeck
+    /// cannot search. It has no version, so searches never list it as a
+    /// match; it only lets an exact `install NAME` reach the manager.
+    fn exact_offer(&self, home: &std::path::Path, query: &str) -> Option<Package> {
+        self.kind.valid_name(query).then(|| Package {
+            id: PackageId {
+                backend: self.kind.id().into(),
+                name: query.into(),
+                architecture: std::env::consts::ARCH.into(),
+                scope: Scope::Environment {
+                    path: home.to_path_buf(),
+                },
+                remote: None,
+                reference: None,
+            },
+            display_name: query.into(),
+            summary: format!("Install {query} with {}", self.kind.id()),
+            installed_version: None,
+            candidate_version: None,
+            update: UpdateAvailability::Unknown,
+            icon: None,
+            component_ids: vec![],
+            homepages: vec![],
+        })
     }
     fn inventory(&self, cancel: &Cancellation) -> Result<Vec<PackageDetails>, EngineError> {
         let home = self
@@ -4392,22 +4423,39 @@ impl<T: Transport> Backend for DevTool<T> {
             .clone()
             .ok_or_else(|| invalid(self.kind.id(), "manager home not detected"))?;
         let lowered = query.to_ascii_lowercase();
-        let mut results: Vec<Package> = self
+        let inventory: Vec<Package> = self
             .inventory(cancel)?
             .into_iter()
             .map(|d| d.package)
+            .collect();
+        let mut results: Vec<Package> = inventory
+            .iter()
             .filter(|package| {
                 package.id.name.to_ascii_lowercase().contains(&lowered)
                     || package.display_name.to_ascii_lowercase().contains(&lowered)
             })
+            .cloned()
             .collect();
         if self.kind == DevKind::Mise {
-            let offers = self.mise_offers(&home, query, &results, cancel)?;
-            results.extend(offers);
+            // Registry matches can find an installed tool through an alias
+            // (`op` for `1password`); those come back as the installed row.
+            for package in self.mise_offers(&home, query, &inventory, cancel)? {
+                if !results.iter().any(|found| found.id == package.id) {
+                    results.push(package);
+                }
+            }
+            // A backend-qualified tool (`cargo:ripgrep`) is not a registry
+            // entry, so keep the exact name installable.
+            if !results.iter().any(|package| package.id.name == query) {
+                if let Some(offer) = self.exact_offer(&home, query) {
+                    results.push(offer);
+                }
+            }
             return Ok(results);
         }
         // npm and PyPI cannot be searched, so offer the exact packages of
-        // known AI command-line tools that match the query.
+        // known AI command-line tools that match the query. One already
+        // installed comes back as its installed row.
         for tool in ai_catalog::matching(query) {
             let package = match self.kind {
                 DevKind::Npm | DevKind::Pnpm | DevKind::Bun => tool.npm,
@@ -4418,6 +4466,10 @@ impl<T: Transport> Backend for DevTool<T> {
                 continue;
             };
             if results.iter().any(|package| package.id.name == name) {
+                continue;
+            }
+            if let Some(installed) = inventory.iter().find(|package| package.id.name == name) {
+                results.push(installed.clone());
                 continue;
             }
             results.push(Package {
@@ -4440,25 +4492,10 @@ impl<T: Transport> Backend for DevTool<T> {
                 homepages: vec![],
             });
         }
-        if results.is_empty() && self.kind.valid_name(query) {
-            results.push(Package {
-                id: PackageId {
-                    backend: self.kind.id().into(),
-                    name: query.into(),
-                    architecture: std::env::consts::ARCH.into(),
-                    scope: Scope::Environment { path: home },
-                    remote: None,
-                    reference: None,
-                },
-                display_name: query.into(),
-                summary: format!("Install {query} with {}", self.kind.id()),
-                installed_version: None,
-                candidate_version: None,
-                update: UpdateAvailability::Unknown,
-                icon: None,
-                component_ids: vec![],
-                homepages: vec![],
-            });
+        // A catalog alias must not hide the exact name the user typed:
+        // `install amp --from npm` still tries the npm package `amp`.
+        if !results.iter().any(|package| package.id.name == query) {
+            results.extend(self.exact_offer(&home, query));
         }
         Ok(results)
     }
