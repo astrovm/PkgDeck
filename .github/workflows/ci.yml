@@ -504,7 +504,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-26.04, macos-26, macos-26-intel]
+        runner: [ubuntu-26.04, ubuntu-26.04-arm, macos-26, macos-26-intel]
     env:
       HOMEBREW_NO_AUTO_UPDATE: '1'
       HOMEBREW_NO_INSTALL_CLEANUP: '1'
@@ -515,6 +515,14 @@ jobs:
       - name: Configure Homebrew
         run: |
           if [[ "$RUNNER_OS" == Linux ]]; then
+            if [[ ! -x /home/linuxbrew/.linuxbrew/bin/brew ]]; then
+              # The arm64 image has no Homebrew; use the release pinned for the VM tests.
+              sudo mkdir -p /home/linuxbrew/.linuxbrew
+              sudo chown -R "$USER" /home/linuxbrew
+              git clone --quiet --depth 1 --branch 7.0.6 https://github.com/Homebrew/brew /home/linuxbrew/.linuxbrew/Homebrew
+              mkdir -p /home/linuxbrew/.linuxbrew/bin
+              ln -s ../Homebrew/bin/brew /home/linuxbrew/.linuxbrew/bin/brew
+            fi
             echo /home/linuxbrew/.linuxbrew/bin >> "$GITHUB_PATH"
           fi
       - name: Download packages
@@ -546,7 +554,8 @@ jobs:
         run: |
           brew install astrovm/pkgdeck/pkd
           brew test astrovm/pkgdeck/pkd
-          if ! ldd "$(brew --prefix astrovm/pkgdeck/pkd)/bin/pkd" 2>&1 | grep -q 'not a dynamic executable'; then
+          # Rust links musl binaries as static PIE on some architectures.
+          if ! file -L "$(brew --prefix astrovm/pkgdeck/pkd)/bin/pkd" | grep -Eq 'statically linked|static-pie linked'; then
             echo 'Homebrew pkd is not static' >&2
             exit 1
           fi

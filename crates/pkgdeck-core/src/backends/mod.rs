@@ -4326,7 +4326,9 @@ pub fn native_engine(
         candidates.push((Box::new(Firmware::new(transport())), true));
     }
     if allowed("appimage") {
-        candidates.push((Box::new(AppImage::native()), false));
+        // Detection only checks the OS, so probing is free and keeps a
+        // Linux-only source out of automatic queries on macOS.
+        candidates.push((Box::new(AppImage::native()), true));
     }
     for tool in StandaloneTool::ALL {
         if allowed(tool.id()) {

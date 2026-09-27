@@ -19,7 +19,7 @@ cp "$built/pkd" "$stage/bin/"
 cp "$built/pkgdeck-host-runner" "$stage/libexec/"
 cp LICENSE "$stage/"
 for binary in "$stage/bin/pkd" "$stage/libexec/pkgdeck-host-runner"; do
-    file "$binary" | grep -Eq 'static(-pie)? linked' || { file "$binary"; echo "$binary is not static" >&2; exit 1; }
+    file "$binary" | grep -Eq 'statically linked|static-pie linked' || { file "$binary"; echo "$binary is not static" >&2; exit 1; }
 done
 tar -C build -czf "build/artifacts/$name.tar.gz" "$name"
 echo "Built build/artifacts/$name.tar.gz"
