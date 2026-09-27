@@ -1497,6 +1497,8 @@ struct DevFixture {
     pip_outdated: Option<String>,
     extra_env: std::collections::BTreeMap<String, String>,
     registry: Option<String>,
+    /// A read subcommand that behaves as if the user cancelled it.
+    cancel_on: Option<String>,
     calls: Arc<Mutex<Vec<DevCall>>>,
 }
 
@@ -1651,6 +1653,9 @@ impl Transport for DevFixture {
             }));
         }
         let first = rendered.first().map(String::as_str);
+        if !write && first.is_some() && first == self.cancel_on.as_deref() {
+            return Err(ExecutionError::Cancelled);
+        }
         match (executable, first) {
             (_, Some("--version")) => Ok(output(&self.version)),
             (_, Some("root")) => match &self.root {
@@ -2715,11 +2720,26 @@ fn mise_lists_and_changes_only_global_tools() {
     assert!(fixture.calls()[before..]
         .iter()
         .all(|(_, args, _)| args.first().map(String::as_str) != Some("outdated")));
-    // A registry match that is not installed still opens its details.
+    // A registry match that is not installed still opens its details,
+    // without the update check.
     let jq = backend.search("jq", &cancel).unwrap().remove(0);
+    let before = fixture.calls().len();
     let details = backend.details(&jq.id, &cancel).unwrap();
     assert_eq!(details.package.id.name, "jq");
     assert_eq!(details.description, "Command-line JSON processor");
+    assert!(fixture.calls()[before..]
+        .iter()
+        .all(|(_, args, _)| args.first().map(String::as_str) != Some("outdated")));
+    // An installed tool's details keep its update state.
+    assert_eq!(
+        backend
+            .details(&yq.id, &cancel)
+            .unwrap()
+            .package
+            .candidate_version
+            .as_deref(),
+        Some("4.53.6")
+    );
     assert!(backend
         .search("yq", &cancel)
         .unwrap()
@@ -2742,6 +2762,7 @@ fn mise_lists_and_changes_only_global_tools() {
     assert_eq!(exact[0].id.name, "cargo:ripgrep");
     assert!(exact[0].candidate_version.is_none());
     let cancel = Cancellation::default();
+    let before = fixture.calls().len();
     for operation in [
         Operation::Install(dev_id("mise", "jq", home)),
         Operation::Upgrade(yq.id.clone()),
@@ -2752,6 +2773,10 @@ fn mise_lists_and_changes_only_global_tools() {
     ] {
         backend.execute(&operation, &cancel, &mut |_| {}).unwrap();
     }
+    // `mise upgrade` finds outdated tools itself; upgrade-all skips the check.
+    assert!(fixture.calls()[before..]
+        .iter()
+        .all(|(_, args, _)| args.first().map(String::as_str) != Some("outdated")));
     assert_eq!(
         fixture.writes("mise"),
         vec![
@@ -2807,6 +2832,21 @@ fn mise_lists_and_changes_only_global_tools() {
             &mut |_| {}
         )
         .is_err());
+}
+
+#[test]
+fn cancelled_mise_update_checks_are_not_reported_as_current() {
+    let cancel = Cancellation::default();
+    let mut backend = DevTool::mise(DevFixture {
+        home: Some("/home/test".into()),
+        version: "2026.9.15\n".into(),
+        list: MISE_LIST.into(),
+        outdated: Some(MISE_OUTDATED.into()),
+        cancel_on: Some("outdated".into()),
+        ..DevFixture::default()
+    });
+    assert_eq!(backend.detect(&cancel), Ok(Availability::Available));
+    assert_eq!(backend.installed(&cancel), Err(EngineError::Cancelled));
 }
 
 #[test]

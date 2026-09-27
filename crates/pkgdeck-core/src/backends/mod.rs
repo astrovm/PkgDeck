@@ -4091,6 +4091,8 @@ impl<T: Transport> DevTool<T> {
         } else {
             match self.call(&["outdated", "--json"], cancel, false) {
                 Ok(result) => serde_json::from_slice(&bytes(id, result)?).unwrap_or_default(),
+                // A cancelled check must not report every tool as current.
+                Err(ExecutionError::Cancelled) => return Err(EngineError::Cancelled),
                 Err(_) => std::collections::BTreeMap::new(),
             }
         };
@@ -4315,9 +4317,14 @@ impl<T: Transport> DevTool<T> {
         }
         if self.kind == DevKind::Mise {
             // Plain `mise upgrade` also covers tools of the project in the
-            // working directory; name only the global tools.
+            // working directory; name only the global tools. `mise upgrade`
+            // finds which are outdated itself, so skip the update check.
+            let home = self
+                .home
+                .clone()
+                .ok_or_else(|| invalid(self.kind.id(), "manager home not detected"))?;
             let names: Vec<String> = self
-                .inventory(cancel)?
+                .mise_inventory(&home, false, cancel)?
                 .into_iter()
                 .map(|package| package.package.id.name)
                 .collect();
@@ -4484,12 +4491,26 @@ impl<T: Transport> Backend for DevTool<T> {
         cancel: &Cancellation,
     ) -> Result<PackageDetails, EngineError> {
         self.target(id)?;
-        if let Some(installed) = self
-            .inventory(cancel)?
-            .into_iter()
-            .find(|d| d.package.id == *id)
-        {
-            return Ok(installed);
+        // mise's update check is slow offline; only an installed tool needs it.
+        let installed = if self.kind == DevKind::Mise {
+            let home = self
+                .home
+                .clone()
+                .ok_or_else(|| invalid(self.kind.id(), "manager home not detected"))?;
+            self.mise_inventory(&home, false, cancel)?
+                .iter()
+                .any(|d| d.package.id == *id)
+        } else {
+            true
+        };
+        if installed {
+            if let Some(installed) = self
+                .inventory(cancel)?
+                .into_iter()
+                .find(|d| d.package.id == *id)
+            {
+                return Ok(installed);
+            }
         }
         // A search result that is not installed yet (a registry match) still
         // opens: find the same identity again. Unversioned exact-name offers
