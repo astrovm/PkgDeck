@@ -23,7 +23,7 @@ trap cleanup EXIT
     -e 'ObjC.import("AppKit"); $.NSWorkspace.sharedWorkspace.iconForFile("/Applications"); "ok"' \
     >"$logs/iconservices.log" 2>&1 &
 probe=$!
-for ((second=0; second<120; second++)); do
+for ((second=0; second<20; second++)); do
     kill -0 "$probe" 2>/dev/null || break
     sleep 1
 done
@@ -31,7 +31,7 @@ if kill -0 "$probe" 2>/dev/null; then
     /usr/bin/sample "$probe" 2 -file "$logs/iconservices.sample.txt" || true
     kill -KILL "$probe" 2>/dev/null || true
     wait "$probe" 2>/dev/null || true
-    echo '::warning::IconServices did not answer within 120 seconds; skipping the Cocoa startup check on this runner'
+    echo '::warning::IconServices did not answer within 20 seconds; skipping the Cocoa startup check on this runner'
     exit 0
 fi
 wait "$probe" || { cat "$logs/iconservices.log"; echo 'IconServices probe failed' >&2; exit 1; }

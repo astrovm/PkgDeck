@@ -135,11 +135,14 @@ builds happen in packaging jobs. The Podman job doesn't repeat lint, coverage,
 workspace tests, or release builds.
 
 Rust caches are split by architecture and purpose (terminal, lint, tests,
-coverage, release). Cache keys include dependencies, toolchain, and source
-revision, and fall back to the newest compatible cache. Backend jobs reuse the
+coverage, release, macOS native, Homebrew GUI tests). Cache keys include
+dependencies, toolchain, and source revision, and fall back to the newest cache
+for the same dependencies, then to any cache of that purpose. Only pushes to
+main save caches; they rerun the cache-owning jobs so every pull request starts
+from main's build outputs. Pull requests restore without saving, because GitHub
+never shares one pull request's caches with another. Backend jobs reuse the
 terminal cache without saving it. Container caches are separate. Incremental
-build folders aren't uploaded. A new cache starts empty and fills after the
-first successful run.
+build folders aren't uploaded.
 
 ## Podman details
 

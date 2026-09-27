@@ -2,6 +2,7 @@ name: CI
 on:
   pull_request:
   push:
+    branches: [main]
     tags: ['v*']
   workflow_dispatch:
     inputs:
@@ -15,14 +16,16 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   # PR and ordinary manual runs validate the full matrix. Formula updates use
   # a targeted manual run; tags reuse the PR run after release-gate verifies it.
+  # Pushes to main rerun only the jobs that save caches, so every pull request
+  # starts from main's build outputs instead of compiling from scratch.
   test-terminal:
     name: Test / Terminal (${{ matrix.arch }})
-    if: github.event_name != 'push' && !inputs.homebrew_only
+    if: (github.event_name != 'push' || github.ref == 'refs/heads/main') && !inputs.homebrew_only
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -68,7 +71,7 @@ jobs:
 
   test-macos:
     name: Test / macOS native (${{ matrix.arch }})
-    if: github.event_name != 'push' && !inputs.homebrew_only
+    if: (github.event_name != 'push' || github.ref == 'refs/heads/main') && !inputs.homebrew_only
     timeout-minutes: 25
     strategy:
       fail-fast: false
@@ -111,7 +114,7 @@ jobs:
 
   test-podman:
     name: Test / Podman (${{ matrix.arch }})
-    if: github.event_name != 'push' && !inputs.homebrew_only
+    if: (github.event_name != 'push' || github.ref == 'refs/heads/main') && !inputs.homebrew_only
     timeout-minutes: 35
     strategy:
       fail-fast: false
@@ -134,13 +137,27 @@ jobs:
           sudo apt-get install -y podman
           podman info
       - name: Cache container build outputs
+        if: github.ref == 'refs/heads/main'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             build/container-cache
             !build/container-cache/target/**/incremental
           key: podman-v1-${{ matrix.arch }}-${{ hashFiles('containers/development.Containerfile', 'scripts/setup-dev.sh', 'scripts/dev-env.sh', 'Cargo.toml', 'crates/*/Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
-          restore-keys: podman-v1-${{ matrix.arch }}-${{ hashFiles('containers/development.Containerfile', 'scripts/setup-dev.sh', 'scripts/dev-env.sh', 'Cargo.toml', 'crates/*/Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml') }}-
+          restore-keys: |
+            podman-v1-${{ matrix.arch }}-${{ hashFiles('containers/development.Containerfile', 'scripts/setup-dev.sh', 'scripts/dev-env.sh', 'Cargo.toml', 'crates/*/Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml') }}-
+            podman-v1-${{ matrix.arch }}-
+      - name: Restore container build outputs
+        if: github.ref != 'refs/heads/main'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            build/container-cache
+            !build/container-cache/target/**/incremental
+          key: podman-v1-${{ matrix.arch }}-${{ hashFiles('containers/development.Containerfile', 'scripts/setup-dev.sh', 'scripts/dev-env.sh', 'Cargo.toml', 'crates/*/Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            podman-v1-${{ matrix.arch }}-${{ hashFiles('containers/development.Containerfile', 'scripts/setup-dev.sh', 'scripts/dev-env.sh', 'Cargo.toml', 'crates/*/Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml') }}-
+            podman-v1-${{ matrix.arch }}-
       # Building the CLI in the development container checks its recipe.
       # The workspace tests already run natively on both architectures
       # (coverage on x86_64, test-workspace on aarch64) with the same
@@ -274,7 +291,7 @@ jobs:
 
   lint-workspace:
     name: Lint / Workspace (${{ matrix.arch }})
-    if: github.event_name != 'push' && !inputs.homebrew_only
+    if: (github.event_name != 'push' || github.ref == 'refs/heads/main') && !inputs.homebrew_only
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -303,7 +320,7 @@ jobs:
 
   coverage-workspace:
     name: Coverage / Workspace (x86_64)
-    if: github.event_name != 'push' && !inputs.homebrew_only
+    if: (github.event_name != 'push' || github.ref == 'refs/heads/main') && !inputs.homebrew_only
     timeout-minutes: 20
     runs-on: ubuntu-26.04
     env:
@@ -332,7 +349,7 @@ jobs:
 
   test-workspace:
     name: Test / Workspace (aarch64)
-    if: github.event_name != 'push' && !inputs.homebrew_only
+    if: (github.event_name != 'push' || github.ref == 'refs/heads/main') && !inputs.homebrew_only
     timeout-minutes: 20
     runs-on: ubuntu-26.04-arm
     env:
@@ -353,7 +370,7 @@ jobs:
 
   package-homebrew:
     name: Package / Homebrew (${{ matrix.runner }})
-    if: github.event_name != 'push'
+    if: github.event_name != 'push' || github.ref == 'refs/heads/main'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     strategy:
@@ -396,6 +413,12 @@ jobs:
         run: |
           brew tap-new --no-git astrovm/pkgdeck
           cp Formula/pkgdeck.rb "$(brew --repository astrovm/pkgdeck)/Formula/pkgdeck.rb"
+      - name: Cache macOS GUI test build outputs
+        if: runner.os == 'macOS' && !inputs.homebrew_only
+        uses: ./.github/actions/rust-cache
+        with:
+          arch: ${{ runner.arch == 'ARM64' && 'aarch64' || 'x86_64' }}
+          scope: homebrew-gui
       - name: Check formula style
         run: brew style astrovm/pkgdeck/pkgdeck
       - name: Build package
@@ -542,7 +565,7 @@ jobs:
 
   package-flatpak:
     name: Package / Flatpak (${{ matrix.arch }})
-    if: '!inputs.homebrew_only'
+    if: github.ref != 'refs/heads/main' && !inputs.homebrew_only
     timeout-minutes: 30
     strategy:
       fail-fast: false
