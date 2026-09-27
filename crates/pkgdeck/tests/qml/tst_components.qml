@@ -261,6 +261,20 @@ TestCase {
         tryVerify(() => details.idealHeight < 130, 1000, "ideal height " + details.idealHeight);
     }
 
+    function test_details_header_and_homepage_never_elide_short_text() {
+        const details = createTemporaryObject(detailsComponent, test,
+            {selected: row("Firefox", {source: "flatpak"}), detailMatchesSelection: true,
+             sourceName: (id) => id === "flatpak" ? "Flatpak" : id});
+        details.detailsData = {homepage: "https://www.mozilla.org/firefox"};
+        waitForRendering(details);
+        // Fractional text widths must not round down into an ellipsis.
+        const subtitle = findChild(details, "detailsSubtitle");
+        compare(subtitle.text, "Flatpak");
+        verify(!subtitle.truncated);
+        const link = findChild(details, "homepageLink");
+        verify(link.visible);
+        verify(!link.contentItem.children[0].truncated);
+    }
     function test_details_show_facts_a_safe_link_and_folded_dependencies() {
         App.Theme.reduceMotion = true;
         const details = createTemporaryObject(detailsComponent, test,

@@ -64,7 +64,7 @@ crash_report() {
 # Exercise the installed wrapper and native window system outside brew test's
 # sandbox. Keep offscreen coverage in the formula and full source GUI suite.
 # Shutdown has crashed intermittently, so one clean run is not enough.
-runs=5
+runs=15
 for ((run=1; run<=runs; run++)); do
     env QT_QPA_PLATFORM=cocoa QT_QUICK_BACKEND=software QT_DEBUG_PLUGINS=1 \
         XDG_CONFIG_HOME="$work" XDG_DATA_HOME="$work" \
