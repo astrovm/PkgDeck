@@ -182,7 +182,9 @@ Rectangle {
                         color: panel.muted
                         font.pointSize: Theme.pointSize(Theme.smallScale)
                         elide: Text.ElideRight
-                        Layout.maximumWidth: implicitWidth
+                        // Rounded up: layouts give whole pixels, and a width
+                        // just under the text's fractional one elides it.
+                        Layout.maximumWidth: Math.ceil(implicitWidth)
                         Layout.fillWidth: true
                     }
                     Controls.Label {
@@ -470,7 +472,7 @@ Rectangle {
                                 Layout.row: panel.facts.length
                                 Layout.column: 1
                                 Layout.fillWidth: true
-                                Layout.maximumWidth: implicitWidth
+                                Layout.maximumWidth: Math.ceil(implicitWidth)
                                 hoverEnabled: true
                                 Accessible.role: Accessible.Link
                                 Accessible.name: "Homepage " + panel.homepage

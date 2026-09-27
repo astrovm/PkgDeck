@@ -1287,6 +1287,45 @@ TestCase {
         verify(box.height <= 160);
         verify(!findChild(browser, "columnHeader0").visible);
         compare(findChild(browser, "emptyState").text, "You're up to date");
+        // The heading row hides with an empty list, so the page offers its own reload.
+        const reload = findChild(browser, "emptyReloadButton");
+        verify(reload.visible);
+        compare(reload.text, "Check again");
+    }
+    function test_filtered_empty_updates_show_both_actions_in_the_card() {
+        browser.openView("Updates");
+        fake.rows = "[]";
+        fake.report_state = JSON.stringify({phase: "complete", failures: []});
+        browser.viewSourceFilters = ({Updates: ["apt"]});
+        waitForRendering(browser.contentItem);
+        const box = findChild(browser, "resultsBox");
+        const reload = findChild(browser, "emptyReloadButton");
+        const clear = findChild(browser, "clearResultFilters");
+        verify(reload.visible);
+        verify(clear.visible);
+        // Side by side, both inside the fixed-height empty card.
+        compare(clear.mapToItem(box, 0, 0).y, reload.mapToItem(box, 0, 0).y);
+        for (const button of [reload, clear]) {
+            const at = button.mapToItem(box, 0, 0);
+            verify(at.y >= 0 && at.y + button.height <= box.height);
+        }
+        compare(reload.text, "Check again");
+        compare(clear.text, "Clear filters");
+        // At the minimum width the labels would not fit across the card, so
+        // both keep only their icons and stay inside it.
+        browser.width = 360;
+        waitForRendering(browser.contentItem);
+        compare(reload.text, "");
+        compare(clear.text, "");
+        compare(reload.Accessible.name, "Check again");
+        for (const button of [reload, clear]) {
+            const at = button.mapToItem(box, 0, 0);
+            verify(at.x >= 0 && at.x + button.width <= box.width);
+            verify(at.y >= 0 && at.y + button.height <= box.height);
+        }
+        browser.viewSourceFilters = ({});
+        verify(reload.visible);
+        verify(!clear.visible);
     }
     function test_new_search_does_not_show_previous_query_results() {
         browser.openView("Search");
@@ -1926,6 +1965,12 @@ TestCase {
         tryVerify(() => list.itemAtIndex(0) !== null);
         verify(!findChild(list.itemAtIndex(0), "repositoryEnabled").visible);
         verify(!findChild(list.itemAtIndex(0), "removeRepositoryButton").visible);
+        // Read-only and switchable rows use the shared indicator, not the
+        // platform style's, so they look the same on every desktop.
+        const state = findChild(list.itemAtIndex(0), "repositoryState");
+        verify(state.visible);
+        compare(state.indicator.ticked, true);
+        compare(findChild(list.itemAtIndex(0), "repositoryEnabled").indicator.ticked, true);
         dialog.close();
     }
     function test_repository_form_validates_before_submitting() {
@@ -2653,6 +2698,16 @@ TestCase {
         compare(browser.viewItems.length, 2);
         mouseClick(toggle);
         compare(browser.viewItems.length, 1);
+    }
+    function test_sources_with_only_unavailable_entries_show_one_reload() {
+        browser.openView("Sources");
+        fake.rows = JSON.stringify([
+            {kind: "source", name: "npm", source: "npm", summary: "Unavailable", available: false, capabilities: []}
+        ]);
+        tryCompare(findChild(browser, "unavailableSourcesButton"), "visible", true);
+        compare(browser.viewItems.length, 0);
+        verify(findChild(browser, "reloadButton").visible);
+        verify(!findChild(browser, "emptyReloadButton").visible);
     }
     function test_sources_only_show_availability_when_it_differs() {
         browser.openView("Sources");

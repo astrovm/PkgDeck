@@ -2866,15 +2866,50 @@ Controls.ApplicationWindow {
                                 symbol: "refresh"
                                 onClicked: root.reload(true)
                             }
-                            ActionButton {
-                                objectName: "clearResultFilters"
+                            // Side by side, so the fixed-height empty card never
+                            // clips a second action; icons only when the labels
+                            // would not fit across the card.
+                            Row {
+                                id: emptyActions
                                 anchors.horizontalCenter: parent.horizontalCenter
-                                visible: !backend.busy && root.readFailures.length === 0 &&
-                                    (root.viewSourceFilters[root.currentView] !== undefined ||
-                                    (root.currentView === "Installed" && (root.installedFilter.length > 0 || root.multiSourceOnly)))
-                                text: "Clear filters"
-                                symbol: "cancel"
-                                onClicked: root.clearVisibleFilters()
+                                spacing: 8
+                                visible: emptyReloadButton.shown || clearResultFilters.shown
+                                readonly property string reloadLabel: root.currentView === "Updates" || root.currentView === "Clean" ? "Check again" : "Reload"
+                                readonly property real labelledWidth: (emptyReloadButton.shown ? reloadMeasure.implicitWidth : 0)
+                                    + (clearResultFilters.shown ? clearMeasure.implicitWidth : 0)
+                                    + (emptyReloadButton.shown && clearResultFilters.shown ? spacing : 0)
+                                readonly property bool iconsOnly: labelledWidth > parent.width
+                                // Hidden copies with their labels, to measure against.
+                                ActionButton { id: reloadMeasure; visible: false; text: emptyActions.reloadLabel; symbol: "refresh" }
+                                ActionButton { id: clearMeasure; visible: false; text: "Clear filters"; symbol: "cancel" }
+                                // The heading row, and its reload button, usually hide
+                                // with an empty list, so an empty page offers its own.
+                                ActionButton {
+                                    id: emptyReloadButton
+                                    objectName: "emptyReloadButton"
+                                    // Not `visible`, which reads false while the row is hidden.
+                                    readonly property bool shown: !backend.busy && !root.loadStopped && root.readFailures.length === 0 &&
+                                        results.count === 0 && root.currentView !== "Search" && !resultsHeadingRow.visible
+                                    visible: shown
+                                    text: emptyActions.iconsOnly ? "" : emptyActions.reloadLabel
+                                    symbol: "refresh"
+                                    Accessible.name: emptyActions.reloadLabel
+                                    tooltipText: emptyActions.reloadLabel + " (Ctrl+R)"
+                                    onClicked: root.reload(true)
+                                }
+                                ActionButton {
+                                    id: clearResultFilters
+                                    objectName: "clearResultFilters"
+                                    readonly property bool shown: !backend.busy && root.readFailures.length === 0 &&
+                                        (root.viewSourceFilters[root.currentView] !== undefined ||
+                                        (root.currentView === "Installed" && (root.installedFilter.length > 0 || root.multiSourceOnly)))
+                                    visible: shown
+                                    text: emptyActions.iconsOnly ? "" : "Clear filters"
+                                    symbol: "cancel"
+                                    Accessible.name: "Clear filters"
+                                    tooltipText: emptyActions.iconsOnly ? "Clear filters" : ""
+                                    onClicked: root.clearVisibleFilters()
+                                }
                             }
                         }
                     }
@@ -3061,7 +3096,9 @@ Controls.ApplicationWindow {
                             Layout.fillWidth: true
                             spacing: 6
                             Controls.CheckBox {
+                                id: repositoryEnabled
                                 objectName: "repositoryEnabled"
+                                Layout.preferredWidth: 28
                                 visible: root.repositoryEditable(modelData)
                                 checked: modelData.enabled
                                 enabled: !backend.busy
@@ -3070,15 +3107,30 @@ Controls.ApplicationWindow {
                                     root.repositoryChange(modelData, "set_enabled", {enabled: checked});
                                     checked = Qt.binding(() => modelData.enabled);
                                 }
+                                // The shared indicator, not the platform style's.
+                                indicator: TickBox {
+                                    anchors.centerIn: parent
+                                    ticked: repositoryEnabled.checked
+                                    opacity: repositoryEnabled.enabled ? 1 : 0.45
+                                }
+                                contentItem: Item {}
                             }
                             // Repositories PkgDeck cannot switch show their state in
                             // the same place, read-only, so every title lines up.
                             Controls.CheckBox {
+                                id: repositoryState
                                 objectName: "repositoryState"
+                                Layout.preferredWidth: 28
                                 visible: !root.repositoryEditable(modelData)
                                 checked: modelData.enabled
                                 enabled: false
                                 Accessible.name: (modelData.title || modelData.name) + (modelData.enabled ? " is enabled" : " is disabled")
+                                indicator: TickBox {
+                                    anchors.centerIn: parent
+                                    ticked: repositoryState.checked
+                                    opacity: 0.45
+                                }
+                                contentItem: Item {}
                             }
                             ColumnLayout {
                                 Layout.fillWidth: true
