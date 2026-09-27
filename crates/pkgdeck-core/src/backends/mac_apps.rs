@@ -220,6 +220,8 @@ fn receipt_bundles(info: &str, files: &str) -> Vec<PathBuf> {
         return vec![];
     };
     let volume = Path::new(volume);
+    // Packages installed at the volume root report their location as `/`.
+    let location = if location == "/" { "" } else { location };
     if !volume.is_absolute() || !(location.is_empty() || relative_artifact(Path::new(location))) {
         return vec![];
     }
@@ -1370,6 +1372,14 @@ mod tests {
                 PathBuf::from("/Applications/Docs.app"),
                 PathBuf::from("/Applications/Sheets.app")
             ]
+        );
+        // A package installed at the volume root lists paths from there.
+        assert_eq!(
+            receipt_bundles(
+                "volume: /\nlocation: /\n",
+                "Applications\nApplications/Tool.app\nApplications/Tool.app/Contents\n"
+            ),
+            vec![PathBuf::from("/Applications/Tool.app")]
         );
         assert!(receipt_bundles("volume: /\nlocation: ../Applications\n", "Docs.app\n").is_empty());
         assert!(
