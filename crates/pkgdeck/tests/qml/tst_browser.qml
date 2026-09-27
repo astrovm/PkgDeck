@@ -2658,6 +2658,16 @@ TestCase {
         mouseClick(toggle);
         compare(browser.viewItems.length, 1);
     }
+    function test_sources_with_only_unavailable_entries_show_one_reload() {
+        browser.openView("Sources");
+        fake.rows = JSON.stringify([
+            {kind: "source", name: "npm", source: "npm", summary: "Unavailable", available: false, capabilities: []}
+        ]);
+        tryCompare(findChild(browser, "unavailableSourcesButton"), "visible", true);
+        compare(browser.viewItems.length, 0);
+        verify(findChild(browser, "reloadButton").visible);
+        verify(!findChild(browser, "emptyReloadButton").visible);
+    }
     function test_sources_only_show_availability_when_it_differs() {
         browser.openView("Sources");
         fake.rows = JSON.stringify([
