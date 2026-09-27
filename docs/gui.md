@@ -150,7 +150,7 @@ Open **Sources → Repositories** to see and manage repositories.
 | DNF and Zypper | View repositories; open `.repo` files to add them |
 | Pacman | No repository editing; open local package files |
 | Firmware (Linux) | Enable or disable firmware repositories |
-| Homebrew (macOS) | No repository editing; manage formulae and casks from the package pages |
+| Homebrew | No repository editing; manage formulae and casks from the package pages |
 
 If a Flatpak system installation is read-only, it's shown without edit
 controls. Controls that can't work on this computer are hidden. Repository
@@ -161,8 +161,10 @@ changes use the package manager's normal signature checks and password prompt.
 On macOS, the **macOS Applications** source lists bundles in `/Applications`
 and `~/Applications`, including folders such as Utilities. It shows the observed
 version, location, and whether the active Homebrew installation has an app
-artifact pointing to that exact copy. An unavailable Homebrew check is shown
-as unknown; a missing record does not prove the app is unmanaged.
+artifact pointing to that exact copy, whether an installed cask's installer
+package wrote it (its receipts), or whether a renamed cask left its app link
+under the old name. An unavailable Homebrew check is shown as unknown; a missing
+record does not prove the app is unmanaged.
 
 VS Code, Firefox, and Obsidian bundle identifiers have curated cask suggestions.
 **Available through Homebrew (candidate)** means an install route exists for
@@ -239,7 +241,10 @@ Enter, and Shift+Left or Shift+Right resizes a focused column. Row actions and i
 ## Platforms
 
 The app runs on Linux, and on macOS through Homebrew. Which sources you see
-depends on your system and installed package managers. On macOS, AppImage
+depends on your system and installed package managers. With Homebrew 6.0 or
+later, Homebrew Casks also work on Linux: search shows only casks Linux can
+install (AppImages, command-line tools and fonts), and AppImages a cask
+installed are listed under Homebrew Casks rather than as unmanaged AppImages. On macOS, AppImage
 support, start at login, and the authorization setting are hidden. The Flatpak
 and Snap
 builds manage your system's packages, not just sandboxed ones. See

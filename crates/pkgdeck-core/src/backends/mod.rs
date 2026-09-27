@@ -1911,6 +1911,54 @@ struct Cask {
     version: String,
     installed: Option<String>,
     outdated: bool,
+    #[serde(default)]
+    depends_on: serde_json::Value,
+    #[serde(default)]
+    artifacts: Vec<serde_json::Value>,
+}
+/// Artifacts only macOS can install. On Linux, `brew info` describes each cask
+/// for the running system: a Mac-only cask declares `depends_on: macos` or keeps
+/// one of these artifacts, while a Linux cask ships AppImages, binaries or fonts.
+const MACOS_ONLY_ARTIFACTS: &[&str] = &[
+    "app",
+    "pkg",
+    "suite",
+    "installer",
+    "prefpane",
+    "qlplugin",
+    "mdimporter",
+    "dictionary",
+    "colorpicker",
+    "input_method",
+    "internet_plugin",
+    "keyboard_layout",
+    "screen_saver",
+    "service",
+    "audio_unit_plugin",
+    "vst_plugin",
+    "vst3_plugin",
+];
+fn cask_installs_here(cask: &Cask) -> bool {
+    cfg!(target_os = "macos")
+        || (cask.depends_on.get("macos").is_none()
+            && !cask.artifacts.iter().any(|artifact| {
+                artifact.as_object().is_some_and(|kinds| {
+                    kinds
+                        .keys()
+                        .any(|kind| MACOS_ONLY_ARTIFACTS.contains(&kind.as_str()))
+                })
+            }))
+}
+/// Homebrew 6.0 added AppImage artifacts and Linux variations to casks; earlier
+/// releases only had preliminary Linux cask support.
+fn linux_casks_supported(version: &str) -> bool {
+    version
+        .lines()
+        .next()
+        .and_then(|line| line.strip_prefix("Homebrew "))
+        .and_then(|version| version.split(['.', '-']).next())
+        .and_then(|major| major.parse::<u32>().ok())
+        .is_some_and(|major| major >= 6)
 }
 impl<T: Transport> Homebrew<T> {
     fn call(
@@ -2157,7 +2205,13 @@ impl<T: Transport> HomebrewCask<T> {
             write,
         )?)
     }
-    fn parse(&self, result: Completion) -> Result<Vec<PackageDetails>, EngineError> {
+    /// `installable_only` drops casks this system cannot install; searches use
+    /// it on Linux, while installed casks always stay listed.
+    fn parse(
+        &self,
+        result: Completion,
+        installable_only: bool,
+    ) -> Result<Vec<PackageDetails>, EngineError> {
         let report: CaskReport = serde_json::from_slice(&bytes("homebrew-cask", result)?)
             .map_err(|e| invalid("homebrew-cask", e))?;
         let prefix = self
@@ -2167,6 +2221,7 @@ impl<T: Transport> HomebrewCask<T> {
         report
             .casks
             .into_iter()
+            .filter(|c| !installable_only || cask_installs_here(c))
             .map(|c| {
                 if !cask_token(&c.full_token) {
                     return Err(invalid("homebrew-cask", "invalid cask token"));
@@ -2250,6 +2305,14 @@ impl<T: Transport> Backend for HomebrewCask<T> {
                 return Err(invalid("homebrew-cask", "prefix must be absolute"));
             }
             self.prefix = Some(path);
+            if !cfg!(target_os = "macos") {
+                let version = bytes("homebrew-cask", self.call(&["--version"], cancel, false)?)?;
+                if !linux_casks_supported(&String::from_utf8_lossy(&version)) {
+                    return Ok(Availability::Unavailable(
+                        "Homebrew Casks on Linux need Homebrew 6.0 or later".into(),
+                    ));
+                }
+            }
         }
         availability(result)
     }
@@ -2268,7 +2331,7 @@ impl<T: Transport> Backend for HomebrewCask<T> {
             let mut args = vec!["info", "--json=v2", "--cask", "--"];
             args.extend(chunk);
             packages.extend(
-                self.parse(self.call(&args, cancel, false)?)?
+                self.parse(self.call(&args, cancel, false)?, true)?
                     .into_iter()
                     .map(|d| d.package),
             );
@@ -2277,11 +2340,14 @@ impl<T: Transport> Backend for HomebrewCask<T> {
     }
     fn installed(&mut self, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
         Ok(self
-            .parse(self.call(
-                &["info", "--json=v2", "--cask", "--installed"],
-                cancel,
+            .parse(
+                self.call(
+                    &["info", "--json=v2", "--cask", "--installed"],
+                    cancel,
+                    false,
+                )?,
                 false,
-            )?)?
+            )?
             .into_iter()
             .map(|d| d.package)
             .collect())
@@ -2292,10 +2358,13 @@ impl<T: Transport> Backend for HomebrewCask<T> {
         cancel: &Cancellation,
     ) -> Result<PackageDetails, EngineError> {
         let name = self.target(id)?;
-        self.parse(self.call(&["info", "--json=v2", "--cask", "--", name], cancel, false)?)?
-            .into_iter()
-            .find(|d| d.package.id == *id)
-            .ok_or(EngineError::NotFound)
+        self.parse(
+            self.call(&["info", "--json=v2", "--cask", "--", name], cancel, false)?,
+            false,
+        )?
+        .into_iter()
+        .find(|d| d.package.id == *id)
+        .ok_or(EngineError::NotFound)
     }
     fn execute(
         &mut self,
@@ -4303,7 +4372,8 @@ pub fn native_engine(
     if allowed("homebrew") {
         candidates.push((Box::new(Homebrew::new(transport())), true));
     }
-    if cfg!(target_os = "macos") && allowed("homebrew-cask") {
+    // Homebrew 6+ installs Linux casks too (AppImages, binaries and fonts).
+    if allowed("homebrew-cask") {
         candidates.push((Box::new(HomebrewCask::new(transport())), true));
     }
     if allowed("macos-apps") {
@@ -4414,6 +4484,67 @@ pub fn native_engine(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn linux_searches_only_offer_casks_linux_can_install() {
+        // Shapes `brew info --json=v2 --cask` reports on Linux (Homebrew 7.0.6).
+        let cask = |depends_on: serde_json::Value, artifacts: serde_json::Value| {
+            serde_json::from_value::<Cask>(serde_json::json!({
+                "full_token": "fixture", "name": ["Fixture"], "desc": null,
+                "homepage": "", "version": "1", "installed": null, "outdated": false,
+                "depends_on": depends_on, "artifacts": artifacts,
+            }))
+            .unwrap()
+        };
+        let obsidian = cask(
+            serde_json::json!({}),
+            serde_json::json!([{"app_image": ["Obsidian.AppImage"]}]),
+        );
+        let codex = cask(
+            serde_json::json!({}),
+            serde_json::json!([{"binary": ["codex"]}, {"zap": []}]),
+        );
+        let font = cask(
+            serde_json::json!({}),
+            serde_json::json!([{"font": ["Fira.ttf"]}]),
+        );
+        let rectangle = cask(
+            serde_json::json!({"macos": {">=": ["14"]}}),
+            serde_json::json!([{"app": ["Rectangle.app"]}]),
+        );
+        let undeclared_app = cask(
+            serde_json::json!({}),
+            serde_json::json!([{"app": ["Tool.app"]}]),
+        );
+        let pkg = cask(
+            serde_json::json!({}),
+            serde_json::json!([{"pkg": ["Tool.pkg"]}]),
+        );
+        for installable in [&obsidian, &codex, &font] {
+            assert!(cask_installs_here(installable));
+        }
+        for mac_only in [&rectangle, &undeclared_app, &pkg] {
+            assert_eq!(cask_installs_here(mac_only), cfg!(target_os = "macos"));
+        }
+        // Older reports without these fields still parse.
+        assert!(serde_json::from_value::<Cask>(serde_json::json!({
+            "full_token": "old", "name": [], "desc": null, "homepage": "",
+            "version": "1", "installed": null, "outdated": false
+        }))
+        .is_ok());
+    }
+
+    #[test]
+    fn linux_casks_need_homebrew_6() {
+        assert!(linux_casks_supported("Homebrew 7.0.6\n"));
+        assert!(linux_casks_supported(
+            "Homebrew 6.0.0-12-gabcdef\nHomebrew/core"
+        ));
+        assert!(!linux_casks_supported("Homebrew 5.1.2\n"));
+        assert!(!linux_casks_supported("Homebrew 4.6.20\n"));
+        assert!(!linux_casks_supported("brew: command not found\n"));
+        assert!(!linux_casks_supported(""));
+    }
 
     #[test]
     fn every_source_has_a_display_name() {

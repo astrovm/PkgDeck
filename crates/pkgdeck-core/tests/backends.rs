@@ -164,6 +164,7 @@ impl Transport for Fixture {
         }
         match args[0] {
             "--prefix" => Ok(output("/home/linuxbrew/.linuxbrew\n")),
+            "--version" => Ok(output("Homebrew 7.0.6\n")),
             "formulae" => Ok(output("synthetic-fixture\n")),
             "casks" => Ok(output("synthetic-fixture\n")),
             "info" => {

@@ -60,7 +60,8 @@ hidden. `pkd sources` lists every source, including unavailable ones and why.
 Search is case-insensitive and matches part of the name or description.
 Results are ranked: exact name, then names that start with the query, then
 names that contain it, then description matches. Homebrew searches formula and
-cask names only.
+cask names only. On Linux, cask search needs Homebrew 6.0 or later and skips
+casks that only install on macOS.
 
 `pkd info` shows one package's details:
 

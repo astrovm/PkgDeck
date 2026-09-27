@@ -159,7 +159,7 @@ or a dedicated design.
 | Priority | Opportunity | User benefit | Effort | Recommended first scope |
 | --- | --- | --- | --- | --- |
 | P0 | macOS app inventory and Brew matching | Makes software outside package databases visible | M | Shipped in PR #114 and validated on a Mac; PR #118 matches `.pkg` casks by receipt and follows cask renames |
-| P0 | Linux Homebrew cask compatibility | Expands an existing integration | M | 2,873 casks support Linux (214 AppImage); probe support, filter artifacts, test both CPUs |
+| P0 | Linux Homebrew cask compatibility | Expands an existing integration | M | Implemented in PR #118: Homebrew 6+ probe, Linux-only search, AppImage ownership, container lifecycle on both CPUs |
 | P0 | mise | Runtime and developer-tool coverage across Linux/macOS; Volta's successor | M–L | Global tools only: `mise ls --global --json` and `mise outdated --json`, then upgrades of those tools |
 | P0 | AI CLI catalog using current managers | Easier discovery without duplicate backends | S–M | Copilot, Kiro, Amp, Droid, Qwen Code, Crush, goose, Cline; exact package IDs only |
 | P1 | Standalone AI CLI adapters | Covers official installers outside package managers | M each | Antigravity CLI, Cursor CLI, Copilot CLI, Kiro CLI, Amp, Droid |
@@ -453,14 +453,24 @@ source**, so this is not only an unreleased-main observation.
 [acceptable casks](https://docs.brew.sh/Acceptable-Casks),
 [Obsidian cask](https://formulae.brew.sh/cask/obsidian).
 
-Do not merely remove the platform check. Probe the installed Brew's support,
-filter incompatible artifacts, retain its installation scope, and test search,
-install, update, and removal on both Linux architectures. In particular, ensure
-PkgDeck's external-AppImage discovery does not offer to import or remove a
-Homebrew-owned AppImage as though it were unmanaged. The minimum supported Brew
-version and complete artifact compatibility still need validation. Use 7.0.6 as
-the first explicit test target; this review does not establish the earliest
-compatible release or prove PkgDeck's existing adapter works with it.
+**Implemented in PR #118.** Checked against Homebrew 7.0.6 on Linux:
+
+- On Linux, `brew info --json=v2 --cask` describes each cask for Linux. A
+  Mac-only cask declares `depends_on: macos` (Firefox, Rectangle, Chrome) or
+  keeps `app` or `pkg` artifacts; a Linux cask ships `app_image`, `binary` or
+  `font` artifacts (Obsidian, Cursor, Warp, `claude-code`, `codex`). Search
+  drops Mac-only casks; installed casks always stay listed.
+- The source registers on Linux and requires Homebrew 6.0 or later, the first
+  release with AppImage artifacts and Linux variations.
+- Homebrew moves an AppImage into `~/Applications` and leaves a symlink to it
+  in the cask's installed version folder. The AppImage source skips files those
+  symlinks point to, so it no longer offers to update or remove an AppImage a
+  cask owns (for example after the AppImage added its own desktop entry).
+- Verified in a Linux arm64 container: search, details, install, remove, and
+  the AppImage exclusion with real casks (Obsidian, `1password-cli`). The
+  container lifecycle suite now runs a local cask through detect, search,
+  details, install, update, upgrade and remove on both Linux CPUs, from the CLI
+  and the GUI.
 
 ## Suggested implementation sequence and acceptance criteria
 
