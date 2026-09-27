@@ -63,6 +63,11 @@ names that contain it, then description matches. Homebrew searches formula and
 cask names only. On Linux, cask search needs Homebrew 6.0 or later and skips
 casks that only install on macOS.
 
+npm and PyPI can't be searched, so npm, pnpm, Bun, pipx and uv also offer
+known AI command-line tools by their exact package: `copilot` finds
+`@github/copilot`, `aider` finds `aider-chat`. The offer installs that
+package, never a guess from the name.
+
 `pkd info` shows one package's details:
 
 ![pkd info showing ripgrep from APT](screenshots/cli-info.png)

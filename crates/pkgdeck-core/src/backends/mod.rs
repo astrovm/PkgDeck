@@ -1,4 +1,5 @@
 //! Native package-manager, container image, Homebrew formula/cask, and local AppImage adapters.
+mod ai_catalog;
 mod appimage;
 mod apt_cli;
 mod cleanup;
@@ -4404,6 +4405,40 @@ impl<T: Transport> Backend for DevTool<T> {
             let offers = self.mise_offers(&home, query, &results, cancel)?;
             results.extend(offers);
             return Ok(results);
+        }
+        // npm and PyPI cannot be searched, so offer the exact packages of
+        // known AI command-line tools that match the query.
+        for tool in ai_catalog::matching(query) {
+            let package = match self.kind {
+                DevKind::Npm | DevKind::Pnpm | DevKind::Bun => tool.npm,
+                DevKind::Pipx | DevKind::Uv => tool.pypi,
+                _ => None,
+            };
+            let Some(name) = package.filter(|name| self.kind.valid_name(name)) else {
+                continue;
+            };
+            if results.iter().any(|package| package.id.name == name) {
+                continue;
+            }
+            results.push(Package {
+                id: PackageId {
+                    backend: self.kind.id().into(),
+                    name: name.into(),
+                    architecture: std::env::consts::ARCH.into(),
+                    scope: Scope::Environment { path: home.clone() },
+                    remote: None,
+                    reference: None,
+                },
+                display_name: tool.product.into(),
+                summary: format!("{} (AI command-line tool)", tool.product),
+                installed_version: None,
+                // Installing without a version takes the registry's latest.
+                candidate_version: Some("latest".into()),
+                update: UpdateAvailability::Unknown,
+                icon: None,
+                component_ids: vec![],
+                homepages: vec![],
+            });
         }
         if results.is_empty() && self.kind.valid_name(query) {
             results.push(Package {

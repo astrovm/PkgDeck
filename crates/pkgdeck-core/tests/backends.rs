@@ -1876,6 +1876,69 @@ fn cargo_lifecycle() {
 }
 
 #[test]
+fn registries_without_search_offer_known_ai_tools_by_exact_package() {
+    let cancel = Cancellation::default();
+    let npm_fixture = DevFixture {
+        version: "12.0.2\n".into(),
+        root: Some("/home/test/lib/node_modules".into()),
+        list: NPM_LIST.into(),
+        ..DevFixture::default()
+    };
+    let mut npm = DevTool::npm(npm_fixture.clone());
+    npm.detect(&cancel).unwrap();
+    let offers = npm.search("copilot", &cancel).unwrap();
+    assert_eq!(offers.len(), 1);
+    assert_eq!(offers[0].id.name, "@github/copilot");
+    assert_eq!(offers[0].display_name, "GitHub Copilot CLI");
+    assert_eq!(offers[0].candidate_version.as_deref(), Some("latest"));
+    assert!(offers[0].installed_version.is_none());
+    // The offer installs the exact package, never the product name.
+    npm.execute(
+        &Operation::Install(offers[0].id.clone()),
+        &cancel,
+        &mut |_| {},
+    )
+    .unwrap();
+    assert_eq!(
+        npm_fixture.writes("npm"),
+        vec![vec![
+            "install".to_string(),
+            "--global".into(),
+            "@github/copilot".into()
+        ]]
+    );
+    // PyPI-only tools are not offered through npm.
+    assert!(npm
+        .search("aider", &cancel)
+        .unwrap()
+        .iter()
+        .all(|p| p.id.name != "aider-chat"));
+
+    let mut uv = DevTool::uv(DevFixture {
+        version: "uv 0.12.11\n".into(),
+        root: Some("/home/test/.local/share/uv/tools".into()),
+        list: UV_LIST.into(),
+        ..DevFixture::default()
+    });
+    uv.detect(&cancel).unwrap();
+    let offers = uv.search("aider", &cancel).unwrap();
+    assert_eq!(offers.len(), 1);
+    assert_eq!(offers[0].id.name, "aider-chat");
+    // Cargo has no catalog route, so it keeps its plain install-by-name offer.
+    let mut cargo = DevTool::cargo(DevFixture {
+        home: Some("/home/test".into()),
+        version: "cargo 1.98.1\n".into(),
+        list: CARGO_LIST.into(),
+        ..DevFixture::default()
+    });
+    cargo.detect(&cancel).unwrap();
+    let offers = cargo.search("copilot", &cancel).unwrap();
+    assert_eq!(offers.len(), 1);
+    assert_eq!(offers[0].id.name, "copilot");
+    assert!(offers[0].candidate_version.is_none());
+}
+
+#[test]
 fn npm_lifecycle() {
     let fixture = DevFixture {
         version: "12.0.2\n".into(),
