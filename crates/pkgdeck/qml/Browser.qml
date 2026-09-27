@@ -2866,27 +2866,37 @@ Controls.ApplicationWindow {
                                 symbol: "refresh"
                                 onClicked: root.reload(true)
                             }
-                            // The heading row, and its reload button, usually hide
-                            // with an empty list, so an empty page offers its own.
-                            ActionButton {
-                                objectName: "emptyReloadButton"
+                            // Side by side, so the fixed-height empty card never
+                            // clips a second action.
+                            Row {
                                 anchors.horizontalCenter: parent.horizontalCenter
-                                visible: !backend.busy && !root.loadStopped && root.readFailures.length === 0 &&
-                                    results.count === 0 && root.currentView !== "Search" && !resultsHeadingRow.visible
-                                text: root.currentView === "Updates" || root.currentView === "Clean" ? "Check again" : "Reload"
-                                symbol: "refresh"
-                                tooltipText: "Reload (Ctrl+R)"
-                                onClicked: root.reload(true)
-                            }
-                            ActionButton {
-                                objectName: "clearResultFilters"
-                                anchors.horizontalCenter: parent.horizontalCenter
-                                visible: !backend.busy && root.readFailures.length === 0 &&
-                                    (root.viewSourceFilters[root.currentView] !== undefined ||
-                                    (root.currentView === "Installed" && (root.installedFilter.length > 0 || root.multiSourceOnly)))
-                                text: "Clear filters"
-                                symbol: "cancel"
-                                onClicked: root.clearVisibleFilters()
+                                spacing: 8
+                                visible: emptyReloadButton.shown || clearResultFilters.shown
+                                // The heading row, and its reload button, usually hide
+                                // with an empty list, so an empty page offers its own.
+                                ActionButton {
+                                    id: emptyReloadButton
+                                    objectName: "emptyReloadButton"
+                                    // Not `visible`, which reads false while the row is hidden.
+                                    readonly property bool shown: !backend.busy && !root.loadStopped && root.readFailures.length === 0 &&
+                                        results.count === 0 && root.currentView !== "Search" && !resultsHeadingRow.visible
+                                    visible: shown
+                                    text: root.currentView === "Updates" || root.currentView === "Clean" ? "Check again" : "Reload"
+                                    symbol: "refresh"
+                                    tooltipText: "Reload (Ctrl+R)"
+                                    onClicked: root.reload(true)
+                                }
+                                ActionButton {
+                                    id: clearResultFilters
+                                    objectName: "clearResultFilters"
+                                    readonly property bool shown: !backend.busy && root.readFailures.length === 0 &&
+                                        (root.viewSourceFilters[root.currentView] !== undefined ||
+                                        (root.currentView === "Installed" && (root.installedFilter.length > 0 || root.multiSourceOnly)))
+                                    visible: shown
+                                    text: "Clear filters"
+                                    symbol: "cancel"
+                                    onClicked: root.clearVisibleFilters()
+                                }
                             }
                         }
                     }

@@ -1292,6 +1292,27 @@ TestCase {
         verify(reload.visible);
         compare(reload.text, "Check again");
     }
+    function test_filtered_empty_updates_show_both_actions_in_the_card() {
+        browser.openView("Updates");
+        fake.rows = "[]";
+        fake.report_state = JSON.stringify({phase: "complete", failures: []});
+        browser.viewSourceFilters = ({Updates: ["apt"]});
+        waitForRendering(browser.contentItem);
+        const box = findChild(browser, "resultsBox");
+        const reload = findChild(browser, "emptyReloadButton");
+        const clear = findChild(browser, "clearResultFilters");
+        verify(reload.visible);
+        verify(clear.visible);
+        // Side by side, both inside the fixed-height empty card.
+        compare(clear.mapToItem(box, 0, 0).y, reload.mapToItem(box, 0, 0).y);
+        for (const button of [reload, clear]) {
+            const at = button.mapToItem(box, 0, 0);
+            verify(at.y >= 0 && at.y + button.height <= box.height);
+        }
+        browser.viewSourceFilters = ({});
+        verify(reload.visible);
+        verify(!clear.visible);
+    }
     function test_new_search_does_not_show_previous_query_results() {
         browser.openView("Search");
         const search = findChild(browser, "searchField");
