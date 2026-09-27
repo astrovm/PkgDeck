@@ -229,13 +229,17 @@ fn read_only_mutation(args: &Args) -> Option<EngineError> {
         Commands::Upgrade { .. } => Capability::Upgrade,
         _ => return None,
     };
-    args.from
+    if args
+        .from
         .iter()
-        .find(|id| pkgdeck_core::backends::read_only(id))
-        .map(|id| EngineError::Unsupported {
-            backend: id.clone(),
-            capability,
-        })
+        .any(|id| !pkgdeck_core::backends::read_only(id))
+    {
+        return None;
+    }
+    args.from.first().map(|id| EngineError::Unsupported {
+        backend: id.clone(),
+        capability,
+    })
 }
 /// What a typed package name is looked up for.
 #[derive(Clone, Copy, PartialEq)]

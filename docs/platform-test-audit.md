@@ -51,10 +51,16 @@ through Linux fixtures.
   live/dead owner assertions.
 - CLI confirmation fixtures assumed GNU `script` syntax and `/bin/true` paths.
   They now use the native terminal recorder and portable executable locations.
+- Symlink-loop reporting assumed Linux's numeric error code. It now uses the
+  platform's error constant, with real symlink-loop coverage on both OSes.
 - Read-only inventory failures no longer enter mutation planning. Exact package
   details only consult the macOS inventory for absolute `.app` identities.
 - GUI lifecycle checks wait for the recorded operation outcome before closing,
   rather than treating a short CPU-idle interval as transaction completion.
+  The driver runs as the application user and preserves native manager config,
+  including Homebrew's trusted-tap settings.
+- Mac QML component tests use the Basic style selected by the shipped Mac
+  launcher, avoiding native controls that reject the app's customization.
 - Negated shell commands outside conditionals were not enforced by `set -e`.
   Removal checks now explicitly fail when native tools still report the package.
 

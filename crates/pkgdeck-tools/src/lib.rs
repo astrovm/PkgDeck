@@ -551,6 +551,8 @@ pub fn qml() {
         .env("XDG_CONFIG_HOME", &dir.0)
         .env("XDG_DATA_HOME", &dir.0)
         .env("XDG_DATA_DIRS", &dir.0)
+        // Match the shipped application's customizable control style on Mac.
+        .env("QT_QUICK_CONTROLS_STYLE", "Basic")
         .env("QT_QPA_PLATFORM", "offscreen")
         .env("QT_QUICK_BACKEND", "software"));
 }

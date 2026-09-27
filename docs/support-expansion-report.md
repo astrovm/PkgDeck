@@ -13,7 +13,12 @@ a 26th source, `macos-apps`: read-only bundle discovery, exact-path ownership
 evidence from the active Homebrew prefix, and bundle-ID cask candidates. It does
 not verify publisher signatures, channels, architecture, or artifact equality;
 support for user-selected directories and adoption is still proposed. Native
-macOS execution has not been validated locally.
+macOS execution is validated through native GitHub-hosted runners, since the
+development host is Linux. The initial native inventory/cask lifecycle passed
+on both Intel and Apple Silicon in [CI run 36280176056](https://github.com/astrovm/PkgDeck/actions/runs/36280176056).
+The expanded suite and its remaining gaps are tracked in the
+[platform test audit](platform-test-audit.md); consult the exact PR commit's
+checks for its current result.
 
 **Recommendation:** prioritize unmanaged-app discovery and an explicit
 “Manage with Homebrew” workflow, improve AI-tool discovery through existing
@@ -366,7 +371,7 @@ Required behavioral checks:
 - Absent sources remain cheap to detect. Benchmark startup and background
   checks so new adapters do not undo the recent performance work.
 
-This report review changes documentation only. The next delivery gate is native
-macOS validation of the inventory already implemented in PR #114. Adoption
+The inventory in PR #114 now has native macOS CI coverage on both architectures.
+The delivery gate is a passing complete matrix for the reviewed commit. Adoption
 remains blocked on independent identity/content checks and tested recovery;
 the Linux-cask compatibility spike can proceed as a separate work item.

@@ -135,6 +135,25 @@ fn rustix_root() -> bool {
 }
 
 #[test]
+fn mixed_read_only_and_writable_sources_keep_writes_and_confirmation() {
+    let fixture = Fixture::new();
+    let from = ["--from", "macos-apps"];
+    assert_eq!(
+        fixture.call(&[from[0], from[1], "install", "fixture"], 2)["error"],
+        "confirmation_required"
+    );
+    if !rustix_root() {
+        for operation in ["install", "upgrade", "remove"] {
+            fixture.call(&[from[0], from[1], "--yes", operation, "fixture"], 0);
+        }
+        assert!(fixture.call(&["list"], 0)["packages"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+    }
+}
+
+#[test]
 fn container_images_keep_stable_ids_and_friendly_cli_names() {
     let fixture = Fixture::new();
     let docker = fixture.0.join("docker");
