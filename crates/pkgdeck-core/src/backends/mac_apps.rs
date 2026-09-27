@@ -14,6 +14,12 @@ trait AppIo: Send {
     fn read_dir(&self, path: &Path) -> std::io::Result<fs::ReadDir> {
         fs::read_dir(path)
     }
+    fn symlink_metadata(&self, path: &Path) -> std::io::Result<fs::Metadata> {
+        fs::symlink_metadata(path)
+    }
+    fn canonicalize(&self, path: &Path) -> std::io::Result<PathBuf> {
+        fs::canonicalize(path)
+    }
     fn plist(&self, path: &Path, cancel: &Cancellation) -> Result<Value, EngineError>;
     fn ownership(
         &self,
@@ -310,16 +316,40 @@ impl MacApps {
             *budget = budget
                 .checked_sub(1)
                 .ok_or_else(|| invalid(ID, "application inventory exceeds 4096 entries"))?;
-            paths.push(entry.map_err(ExecutionError::from)?.path());
+            match entry {
+                Ok(entry) => paths.push(entry.path()),
+                Err(error) => errors.push(invalid(
+                    ID,
+                    format!("skipped entry in {}: {error}", root.display()),
+                )),
+            }
         }
         paths.sort();
         for path in paths {
             if cancel.requested() {
                 return Err(EngineError::Cancelled);
             }
-            let metadata = fs::symlink_metadata(&path).map_err(ExecutionError::from)?;
+            let metadata = match self.io.symlink_metadata(&path) {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    errors.push(invalid(
+                        ID,
+                        format!("skipped entry {}: {error}", path.display()),
+                    ));
+                    continue;
+                }
+            };
             if path.extension().is_some_and(|e| e == "app") && path.is_dir() {
-                let canonical = fs::canonicalize(&path).map_err(ExecutionError::from)?;
+                let canonical = match self.io.canonicalize(&path) {
+                    Ok(canonical) => canonical,
+                    Err(error) => {
+                        errors.push(invalid(
+                            ID,
+                            format!("skipped entry {}: {error}", path.display()),
+                        ));
+                        continue;
+                    }
+                };
                 if seen.insert(canonical.clone()) {
                     apps.push(self.describe(&path, &canonical, scope, ownership, cancel)?);
                 }
@@ -653,6 +683,59 @@ mod tests {
         assert!(report.failures.is_empty());
         assert!(report.packages.is_empty());
         assert!(report.successful_sources.is_empty());
+    }
+
+    #[test]
+    fn disappearing_entries_preserve_siblings_and_report_partial_inventory() {
+        struct VanishingApp {
+            path: PathBuf,
+            during_canonicalize: bool,
+        }
+        impl AppIo for VanishingApp {
+            fn symlink_metadata(&self, path: &Path) -> std::io::Result<fs::Metadata> {
+                if path == self.path && !self.during_canonicalize {
+                    fs::remove_dir_all(path)?;
+                }
+                fs::symlink_metadata(path)
+            }
+            fn canonicalize(&self, path: &Path) -> std::io::Result<PathBuf> {
+                if path == self.path && self.during_canonicalize {
+                    fs::remove_dir_all(path)?;
+                }
+                fs::canonicalize(path)
+            }
+            fn plist(&self, path: &Path, cancel: &Cancellation) -> Result<Value, EngineError> {
+                FakeIo(Ok(BTreeMap::new())).plist(path, cancel)
+            }
+            fn ownership(
+                &self,
+                _: &Cancellation,
+            ) -> Result<BTreeMap<PathBuf, Vec<String>>, EngineError> {
+                Ok(BTreeMap::new())
+            }
+        }
+        for during_canonicalize in [false, true] {
+            let f = Fixture::new();
+            let first = f.bundle("A.app", "md.obsidian");
+            let gone = f.bundle("M.app", "md.obsidian");
+            let last = f.bundle("Z.app", "md.obsidian");
+            let mut backend = f.backend(Ok(BTreeMap::new()));
+            backend.io = Box::new(VanishingApp {
+                path: gone.clone(),
+                during_canonicalize,
+            });
+            let packages = backend.installed(&Cancellation::default()).unwrap();
+            assert_eq!(
+                packages
+                    .iter()
+                    .map(|p| PathBuf::from(&p.id.name))
+                    .collect::<Vec<_>>(),
+                vec![first, last]
+            );
+            let errors = backend.query_errors();
+            assert_eq!(errors.len(), 1);
+            assert!(errors[0].to_string().contains(gone.to_str().unwrap()));
+        }
     }
 
     #[test]
