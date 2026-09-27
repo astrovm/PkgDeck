@@ -4072,20 +4072,28 @@ impl<T: Transport> DevTool<T> {
     /// matching `mise upgrade`, which never rewrites the configuration. Host
     /// commands run from `/` with a cleared environment, so the project in
     /// the caller's working directory never joins mise's configuration stack.
+    ///
+    /// `check_updates` asks mise for newer versions, which reaches every
+    /// tool's version source over the network and can take many seconds
+    /// offline. Searches skip it and leave the update state unknown.
     fn mise_inventory(
         &self,
         home: &std::path::Path,
+        check_updates: bool,
         cancel: &Cancellation,
     ) -> Result<Vec<PackageDetails>, EngineError> {
         let id = self.kind.id();
         let output = bytes(id, self.call(&["ls", "--global", "--json"], cancel, false)?)?;
         let tools: std::collections::BTreeMap<String, Vec<MiseInstall>> =
             serde_json::from_slice(&output).map_err(|e| invalid(id, e))?;
-        let outdated: std::collections::BTreeMap<String, MiseOutdated> =
+        let outdated: std::collections::BTreeMap<String, MiseOutdated> = if !check_updates {
+            std::collections::BTreeMap::new()
+        } else {
             match self.call(&["outdated", "--json"], cancel, false) {
                 Ok(result) => serde_json::from_slice(&bytes(id, result)?).unwrap_or_default(),
                 Err(_) => std::collections::BTreeMap::new(),
-            };
+            }
+        };
         tools
             .into_iter()
             // Tools with backend options (`ubi:owner/repo[exe=x]`) are listed
@@ -4104,7 +4112,15 @@ impl<T: Transport> DevTool<T> {
                     Some(requested) => format!("Global mise tool, version {requested}"),
                     None => "Global mise tool".into(),
                 };
-                Some(self.detail(home, name, summary, None, install.version, Some(candidate)))
+                let mut details =
+                    self.detail(home, name, summary, None, install.version, Some(candidate));
+                if !check_updates {
+                    if let Ok(details) = &mut details {
+                        details.package.update = UpdateAvailability::Unknown;
+                        details.package.candidate_version = None;
+                    }
+                }
+                Some(details)
             })
             .collect()
     }
@@ -4202,7 +4218,7 @@ impl<T: Transport> DevTool<T> {
             DevKind::Pip => self.pip_inventory(&home, cancel),
             DevKind::Pipx => self.pipx_inventory(&home, cancel),
             DevKind::Uv => self.uv_inventory(&home, cancel),
-            DevKind::Mise => self.mise_inventory(&home, cancel),
+            DevKind::Mise => self.mise_inventory(&home, true, cancel),
             DevKind::Composer => self.composer_inventory(&home, cancel),
             DevKind::Gem => self.gem_inventory(&home, cancel),
         }
@@ -4422,11 +4438,16 @@ impl<T: Transport> Backend for DevTool<T> {
             .clone()
             .ok_or_else(|| invalid(self.kind.id(), "manager home not detected"))?;
         let lowered = query.to_ascii_lowercase();
-        let inventory: Vec<Package> = self
-            .inventory(cancel)?
-            .into_iter()
-            .map(|d| d.package)
-            .collect();
+        // mise's update check reaches the network for every global tool, so
+        // searches list its tools without it.
+        let inventory: Vec<Package> = if self.kind == DevKind::Mise {
+            self.mise_inventory(&home, false, cancel)?
+        } else {
+            self.inventory(cancel)?
+        }
+        .into_iter()
+        .map(|d| d.package)
+        .collect();
         let mut results: Vec<Package> = inventory
             .iter()
             .filter(|package| {
@@ -4463,9 +4484,25 @@ impl<T: Transport> Backend for DevTool<T> {
         cancel: &Cancellation,
     ) -> Result<PackageDetails, EngineError> {
         self.target(id)?;
-        self.inventory(cancel)?
+        if let Some(installed) = self
+            .inventory(cancel)?
             .into_iter()
             .find(|d| d.package.id == *id)
+        {
+            return Ok(installed);
+        }
+        // A search result that is not installed yet (a registry match) still
+        // opens: find the same identity again. Unversioned exact-name offers
+        // are not results, so they have no details.
+        self.search(&id.name, cancel)?
+            .into_iter()
+            .find(|package| package.id == *id && package.candidate_version.is_some())
+            .map(|package| PackageDetails {
+                description: package.summary.clone(),
+                homepage: package.homepages.first().cloned(),
+                dependencies: vec![],
+                package,
+            })
             .ok_or(EngineError::NotFound)
     }
     fn cleanup(&mut self, cancel: &Cancellation) -> Result<Vec<CleanupItem>, EngineError> {
