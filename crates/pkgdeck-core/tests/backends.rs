@@ -1499,6 +1499,8 @@ struct DevFixture {
     registry: Option<String>,
     /// A read subcommand that behaves as if the user cancelled it.
     cancel_on: Option<String>,
+    /// A write subcommand that finishes after the user asked to cancel.
+    deferred_write: Option<String>,
     calls: Arc<Mutex<Vec<DevCall>>>,
 }
 
@@ -1655,6 +1657,16 @@ impl Transport for DevFixture {
         let first = rendered.first().map(String::as_str);
         if !write && first.is_some() && first == self.cancel_on.as_deref() {
             return Err(ExecutionError::Cancelled);
+        }
+        if write && first.is_some() && first == self.deferred_write.as_deref() {
+            return Ok(Completion {
+                code: Some(0),
+                signal: None,
+                stdout: vec![],
+                stderr: vec![],
+                truncated: false,
+                cancellation_deferred: true,
+            });
         }
         match (executable, first) {
             (_, Some("--version")) => Ok(output(&self.version)),
@@ -2879,6 +2891,32 @@ fn cancelled_mise_update_checks_are_not_reported_as_current() {
     });
     assert_eq!(backend.detect(&cancel), Ok(Availability::Available));
     assert_eq!(backend.installed(&cancel), Err(EngineError::Cancelled));
+}
+
+#[test]
+fn mise_remove_stops_after_an_unuse_that_finished_past_a_cancel() {
+    let cancel = Cancellation::default();
+    let fixture = DevFixture {
+        home: Some("/home/test".into()),
+        version: "2026.9.15\n".into(),
+        list: MISE_LIST.into(),
+        deferred_write: Some("unuse".into()),
+        ..DevFixture::default()
+    };
+    let mut backend = DevTool::mise(fixture.clone());
+    backend.detect(&cancel).unwrap();
+    let outcome = backend
+        .execute(
+            &Operation::Remove(dev_id("mise", "yq", "/home/test/.local/share/mise")),
+            &cancel,
+            &mut |_| {},
+        )
+        .unwrap();
+    assert!(outcome.cancellation_deferred);
+    assert_eq!(
+        fixture.writes("mise"),
+        vec![vec!["unuse".to_string(), "--global".into(), "yq".into()]]
+    );
 }
 
 #[test]

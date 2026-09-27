@@ -565,6 +565,10 @@ fn venv_pip_runs_only_inside_explicit_absolute_environments() {
             ("BUN_INSTALL", "/home/test/.bun"),
             ("COMPOSER_HOME", "/home/test/.config/composer"),
             ("GEM_HOME", "/home/test/gem"),
+            ("MISE_DATA_DIR", "/home/test/mise"),
+            ("MISE_INSTALLS_DIR", "/home/test/mise/installs"),
+            ("MISE_STATE_DIR", "/home/test/mise/state"),
+            ("XDG_STATE_HOME", "/home/test/.local/state"),
             ("LD_LIBRARY_PATH", "/app/lib"),
             ("PYTHONPATH", "/app/python"),
         ]),
@@ -579,8 +583,12 @@ fn venv_pip_runs_only_inside_explicit_absolute_environments() {
         "BUN_INSTALL",
         "COMPOSER_HOME",
         "GEM_HOME",
+        "MISE_DATA_DIR",
+        "MISE_INSTALLS_DIR",
+        "MISE_STATE_DIR",
+        "XDG_STATE_HOME",
     ] {
-        assert!(host.var(name).is_some());
+        assert!(host.var(name).is_some(), "{name}");
     }
     assert!(host.var("LD_LIBRARY_PATH").is_none());
     assert!(host.var("PYTHONPATH").is_none());
