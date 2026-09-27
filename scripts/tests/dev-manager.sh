@@ -4,14 +4,30 @@
 # the underlying manager, never only PkgDeck output. Tool installations use
 # user-writable prefixes so no step ever needs elevation.
 # Usage: scripts/tests/dev-manager.sh cargo|npm|pnpm|bun|pip|pipx|uv|composer|gem <pkd>
-set -euo pipefail
+# -E lets failures inside the helper functions below reach the ERR trap.
+set -Eeuo pipefail
 trap 'echo "dev-manager FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
 backend=${1:?Usage: scripts/tests/dev-manager.sh cargo|npm|pnpm|bun|pip|pipx|uv|composer|gem <pkd>}
 pkd=${2:?Usage: scripts/tests/dev-manager.sh cargo|npm|pnpm|bun|pip|pipx|uv|composer|gem <pkd>}
 echo "dev-manager: backend=$backend pkd=$pkd user=$(whoami) home=$HOME"
 run() { "$pkd" --json --yes --auth sudo --from "$backend" "$@"; }
-success() { run "$@" | grep -q '"exit_code":0'; }
-have() { run list | grep -q "\"name\":\"$1\""; }
+# Keep pkd's report so a failed step shows what pkd said and how long it took.
+success() {
+    local output start=$SECONDS
+    output=$(run "$@") || true
+    if ! grep -q '"exit_code":0' <<<"$output"; then
+        echo "pkd $* failed after $((SECONDS - start))s: $output" >&2
+        return 1
+    fi
+}
+have() {
+    local output start=$SECONDS
+    output=$(run list) || true
+    if ! grep -q "\"name\":\"$1\"" <<<"$output"; then
+        echo "pkd list lacks $1 after $((SECONDS - start))s: $output" >&2
+        return 1
+    fi
+}
 absent() {
     if grep "$1" >/dev/null; then
         echo "Package still present after removal: $1" >&2
