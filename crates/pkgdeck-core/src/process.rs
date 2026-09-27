@@ -325,13 +325,19 @@ mod tests {
     fn writes_defer_cancellation_and_timeout_until_native_completion() {
         let cancel = Cancellation::default();
         let other = cancel.clone();
-        // The child waits for the flag so cancellation always lands while the
-        // write is running, however late a loaded runner schedules this thread.
-        let flag = std::env::temp_dir().join(format!("pkgdeck-cancelled-{}", std::process::id()));
-        let _ = std::fs::remove_file(&flag);
-        let marker = flag.clone();
+        // Handshake with the child: it reports that it started, then waits for
+        // the flag. Cancellation therefore always lands while the write runs,
+        // however a loaded runner schedules either thread.
+        let dir = std::env::temp_dir().join(format!("pkgdeck-deferred-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (ready, flag) = (dir.join("ready"), dir.join("cancelled"));
+        let (started, marker) = (ready.clone(), flag.clone());
         let thread = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(30));
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !started.exists() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(5));
+            }
             other.cancel();
             std::fs::write(marker, b"").unwrap();
         });
@@ -339,9 +345,10 @@ mod tests {
         command
             .args([
                 "-c",
-                "while [ ! -e \"$1\" ]; do sleep 0.01; done; printf 'committed\n'",
+                ": > \"$1\"; while [ ! -e \"$2\" ]; do sleep 0.01; done; printf 'committed\n'",
                 "sh",
             ])
+            .arg(&ready)
             .arg(&flag);
         let result = run(
             command,
@@ -354,7 +361,7 @@ mod tests {
         )
         .unwrap();
         thread.join().unwrap();
-        let _ = std::fs::remove_file(&flag);
+        let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(result.code, Some(0));
         assert_eq!(result.stdout, b"committed\n");
         assert!(result.cancellation_deferred);
