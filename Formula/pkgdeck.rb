@@ -121,9 +121,9 @@ class Pkgdeck < Formula
       assert_match "PKGDECK_GUI_READY", shell_output("#{bin}/pkgdeck --smoke-test 2>&1")
       # Host package managers can fail detection inside the test sandbox,
       # which exits 1; any other status means the command itself failed.
-      sources = shell_output("#{bin}/pkd --json sources", nil)
-      opoo sources unless $CHILD_STATUS.success?
-      assert_includes [0, 1], $CHILD_STATUS.exitstatus, sources
+      sources = shell_output("#{bin}/pkd --json sources; echo \"exit=$?\"")
+      opoo sources unless sources.end_with?("exit=0\n")
+      assert_match(/exit=[01]\n\z/, sources)
       assert_match "AppImage requires Linux", sources
     else
       refute_path_exists bin/"pkgdeck"
