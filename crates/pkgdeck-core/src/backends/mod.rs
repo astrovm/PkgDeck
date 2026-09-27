@@ -4657,7 +4657,14 @@ impl<T: Transport> Backend for DevTool<T> {
                     progress(Progress::Message(format!(
                         "Running {id}. If you cancel, PkgDeck waits for it to finish."
                     )));
-                    self.call(&["unuse", "--global", name], cancel, true)?;
+                    let unused = self.call(&["unuse", "--global", name], cancel, true)?;
+                    // Cancelled while `unuse` ran: it finished, so stop there
+                    // and report the deferral rather than a cancelled prune.
+                    if unused.cancellation_deferred {
+                        return Ok(OperationOutcome {
+                            cancellation_deferred: true,
+                        });
+                    }
                     let result = self.call(&["prune", "--yes", name], cancel, true)?;
                     return Ok(OperationOutcome {
                         cancellation_deferred: result.cancellation_deferred,

@@ -269,6 +269,7 @@ impl Host {
             "XDG_DATA_HOME",
             "XDG_DATA_DIRS",
             "XDG_CACHE_HOME",
+            "XDG_STATE_HOME",
             "SSH_AUTH_SOCK",
             "VIRTUAL_ENV",
             "PIPX_HOME",
@@ -277,6 +278,9 @@ impl Host {
             "MISE_DATA_DIR",
             "MISE_CONFIG_DIR",
             "MISE_GLOBAL_CONFIG_FILE",
+            "MISE_INSTALLS_DIR",
+            "MISE_STATE_DIR",
+            "MISE_CACHE_DIR",
             // pnpm refuses global commands when PNPM_HOME is set in the
             // session but missing here; Cargo and Bun read theirs too.
             "PNPM_HOME",
