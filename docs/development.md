@@ -40,7 +40,7 @@ To test without Podman, install the prerequisites below, run
 with Cargo directly, run `source scripts/dev-env.sh`. Qt-free tests don't
 need it.
 
-For macOS packaging and the Linux CLI-only Homebrew build, see
+For the macOS app bundle and the Linux CLI-only Homebrew package, see
 [distribution](distribution.md). The native `full` check targets Linux.
 
 ## SDK and prerequisites
@@ -101,7 +101,9 @@ The workflow is called `CI`. Check names follow `Category / Scope (architecture)
 | `Test / Backend / <backend> (<platform>)` | Real lifecycle tests on Linux and macOS, x86_64 and aarch64, where the manager supports the platform |
 | `Package / AppImage + Snap (x86_64, aarch64)` | Release build, packages, and GUI tests on the packaged app |
 | `Package / Flatpak (x86_64, aarch64)` | Flatpak build, installed GUI, and host bridge tests |
-| `Package / Homebrew (Linux, macOS)` | Formula build and installed commands; both Mac architectures also run GUI/controller, QML, startup and media tests |
+| `Package / macOS app (x86_64, aarch64)` | Self-contained `PkgDeck.app` build, bundle checks, and GUI/controller, QML, startup and media tests |
+| `Package / Linux CLI (x86_64, aarch64)` | Static `pkd` and host runner archive, tested on Alpine |
+| `Test / Homebrew (Linux, macOS)` | Renders the tap from those packages, installs the cask or formula, and tests the installed commands and Cocoa startup |
 
 The macOS native job uses real `plutil` with XML and binary bundles, system and
 user application directories, a locally built cask installed by Homebrew, and

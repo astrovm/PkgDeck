@@ -101,3 +101,48 @@ brew_lifecycle() {
     brew info --json=v2 "$name" | jq -e '.formulae[0].installed==[]'
     echo 'PASS package lifecycle Homebrew detect/search/details/install/update/upgrade/remove 1.0 → 2.0'
 }
+# A Linux cask ships a binary from a local archive, like the formula fixture.
+brew_cask_version() {
+    local number=$1 archive=/opt/pkgdeck-cask-fixture-$1.tar.gz
+    mkdir -p /tmp/pkgdeck-cask-source /opt/fixture-tap/Casks
+    printf '#!/bin/sh\nprintf "%s\\n"\n' "$number" >/tmp/pkgdeck-cask-source/pkgdeck-cask-fixture
+    chmod +x /tmp/pkgdeck-cask-source/pkgdeck-cask-fixture
+    tar -czf "$archive" -C /tmp/pkgdeck-cask-source pkgdeck-cask-fixture
+    cat >/opt/fixture-tap/Casks/pkgdeck-cask-fixture.rb <<RUBY
+cask "pkgdeck-cask-fixture" do
+  version "$number"
+  sha256 "$(sha256sum "$archive" | cut -d ' ' -f1)"
+
+  url "file://$archive"
+  name "PkgDeck Cask Fixture"
+  desc "Synthetic PkgDeck cask lifecycle fixture"
+  homepage "https://example.invalid/pkgdeck"
+
+  binary "pkgdeck-cask-fixture"
+end
+RUBY
+    git -c safe.directory=/opt/fixture-tap -C /opt/fixture-tap add .
+    git -c safe.directory=/opt/fixture-tap -C /opt/fixture-tap -c user.name=Synthetic -c user.email=fixture@example.invalid commit -qm "Cask fixture $number"
+    chown -R linuxbrew:linuxbrew /opt/fixture-tap
+}
+# Runs after brew_lifecycle, which taps and trusts the fixture repository.
+brew_cask_lifecycle() {
+    local name=pkgdeck/fixtures/pkgdeck-cask-fixture
+    brew_cask_version 1.0
+    write homebrew-cask update
+    cli homebrew-cask sources | jq -e '.sources[0].availability=={Ok:"available"}'
+    cli homebrew-cask search pkgdeck-cask-fixture | jq -e --arg n "$name" 'any(.packages[];.id.name==$n)'
+    cli homebrew-cask info "$name" | jq -e '.package.candidate_version=="1.0"'
+    write homebrew-cask install "$name"
+    [[ $(/home/linuxbrew/.linuxbrew/bin/pkgdeck-cask-fixture) == 1.0 ]]
+    brew_cask_version 2.0
+    write homebrew-cask update
+    cli homebrew-cask list | jq -e --arg n "$name" 'any(.packages[];.id.name==$n and .installed_version=="1.0" and .candidate_version=="2.0" and .update=="available")'
+    write homebrew-cask upgrade "$name"
+    [[ $(/home/linuxbrew/.linuxbrew/bin/pkgdeck-cask-fixture) == 2.0 ]]
+    cli homebrew-cask info "$name" | jq -e '.package.installed_version=="2.0"'
+    write homebrew-cask remove "$name"
+    [[ ! -e /home/linuxbrew/.linuxbrew/bin/pkgdeck-cask-fixture ]]
+    cli homebrew-cask list | jq -e --arg n "$name" 'all(.packages[];.id.name!=$n)'
+    echo 'PASS package lifecycle Homebrew Casks on Linux detect/search/details/install/update/upgrade/remove 1.0 → 2.0'
+}

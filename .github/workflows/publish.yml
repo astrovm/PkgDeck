@@ -52,16 +52,15 @@ jobs:
             echo '::error::HOMEBREW_REPO_TOKEN is required to publish the Homebrew formula.'
             exit 1
           fi
-      - name: Add stable release to formula
+      - name: Render formula and cask for the release
         env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_REPO_TOKEN }}
           TAG: ${{ steps.release.outputs.tag }}
           VERSION: ${{ steps.release.outputs.version }}
         run: |
-          archive="$RUNNER_TEMP/pkgdeck-$TAG.tar.gz"
-          curl -fL --retry 3 "https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/$TAG.tar.gz" -o "$archive"
-          sha=$(sha256sum "$archive" | cut -d' ' -f1)
-          URL="https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/$TAG.tar.gz" SHA="$sha" \
-            ruby -e 'path="Formula/pkgdeck.rb"; text=File.read(path); stable="  url #{ENV.fetch("URL").inspect}\n  version #{ENV.fetch("VERSION").inspect}\n  sha256 #{ENV.fetch("SHA").inspect}\n"; text.sub!(/^  url .*\n  version .*\n  sha256 .*\n/, ""); abort "Formula license entry missing" unless text.sub!(/^  license /, stable + "  license "); File.write(path, text)'
+          sums="$RUNNER_TEMP/PkgDeck-$TAG-SHA256SUMS"
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "$(basename "$sums")" --dir "$RUNNER_TEMP"
+          scripts/homebrew-render.sh "$VERSION" "$sums"
       - name: Open formula update
         id: formula_pr
         env:
@@ -78,7 +77,7 @@ jobs:
             git fetch --no-tags origin "refs/heads/$branch"
           fi
           git checkout -b "$branch"
-          git add Formula/pkgdeck.rb
+          git add -A Formula Casks
           if git diff --cached --quiet; then
             echo "Formula already publishes $TAG"
             exit 0
@@ -103,7 +102,7 @@ jobs:
             echo "Updated $existing"
           else
             existing=$(gh pr create --base main --head "$branch" --title "Publish Homebrew formula for $TAG" \
-              --body "Adds the immutable release archive and SHA-256 for $TAG. CI builds and tests the published formula before automatic merge.")
+              --body "Points the Linux CLI formula and the macOS cask at the $TAG release packages and their SHA-256 checksums. CI installs and tests both before automatic merge.")
           fi
           echo "pr=$existing" >> "$GITHUB_OUTPUT"
       - name: Merge formula after checks pass

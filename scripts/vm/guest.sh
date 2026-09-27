@@ -15,4 +15,5 @@ source scripts/vm/lifecycle.sh
 apt_fixture
 apt_lifecycle
 brew_lifecycle
+brew_cask_lifecycle
 echo PKGDECK_CONTAINER_PASS

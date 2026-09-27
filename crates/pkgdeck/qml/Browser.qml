@@ -263,6 +263,9 @@ Controls.ApplicationWindow {
     readonly property bool loadStopped: currentView === resultView && !backend.busy
         && (reportState.failures || []).some((failure) => failure.kind === "cancelled")
     function sourceFailureTitle() {
+        // Only the macOS inventory reports partial results: apps it could not read.
+        if (readFailures.every((failure) => failure.kind === "partial"))
+            return "Some apps couldn't be read";
         return readFailures.length === 1
             ? "Couldn't check " + sourceDisplayName(readFailures[0].source)
             : "Couldn't check " + readFailures.length + " sources";
@@ -2160,7 +2163,7 @@ Controls.ApplicationWindow {
                     }
                     ActionButton {
                         objectName: "turnOffFailedSource"
-                        visible: root.readFailures.length === 1 && root.canTurnOff(root.readFailures[0].source)
+                        visible: root.readFailures.length === 1 && root.readFailures[0].kind !== "partial" && root.canTurnOff(root.readFailures[0].source)
                         text: root.readFailures.length === 1 ? "Turn off " + root.sourceDisplayName(root.readFailures[0].source) : ""
                         symbol: "cancel"
                         flat: true
@@ -3288,7 +3291,7 @@ Controls.ApplicationWindow {
                                 }
                                 ActionButton {
                                     // A source that keeps failing can be switched off here.
-                                    visible: root.canTurnOff(modelData.source)
+                                    visible: modelData.kind !== "partial" && root.canTurnOff(modelData.source)
                                     text: "Turn off"
                                     symbol: "cancel"
                                     flat: true

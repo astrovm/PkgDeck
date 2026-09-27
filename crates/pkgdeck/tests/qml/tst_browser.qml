@@ -2529,7 +2529,19 @@ TestCase {
         compare(fake.loadCount, previousLoads + 1);
         verify(fake.lastForce);
     }
-    function test_update_failure_without_rows_has_retry_card() {
+function test_skipped_apps_are_a_partial_result_without_turn_off() {
+    browser.openView("Installed");
+    fake.rows = JSON.stringify([
+        {kind: "package", name: "/Applications/Tool.app", source: "macos-apps", architecture: "unknown", installed: "1", summary: "Tool"},
+        {kind: "failure", name: "macos-apps", source: "macos-apps", failure_kind: "partial", summary: "Couldn't read /Users/me/Applications/Locked (permission denied). The other apps are still listed.", available: false}
+    ]);
+    wait(30);
+    const notice = findChild(browser, "sourceFailureNotice");
+    verify(notice.visible);
+    compare(notice.text, "Some apps couldn't be read");
+    verify(!findChild(browser, "turnOffFailedSource").visible);
+}
+function test_update_failure_without_rows_has_retry_card() {
         browser.openView("Updates");
         fake.rows = JSON.stringify([{kind: "failure", name: "flatpak", source: "flatpak", summary: "Synthetic source timeout"}]);
         wait(30);

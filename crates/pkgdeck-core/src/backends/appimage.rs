@@ -29,6 +29,8 @@ pub struct AppImage {
     root: PathBuf,
     applications: PathBuf,
     uid: u32,
+    /// Homebrew Caskrooms whose `app_image` casks own AppImages outside PkgDeck.
+    caskrooms: Vec<PathBuf>,
     #[cfg(test)]
     updater: Option<PathBuf>,
 }
@@ -44,10 +46,23 @@ impl AppImage {
                     .map(|home| PathBuf::from(home).join(".local/share"))
             })
             .unwrap_or_else(|| PathBuf::from("/nonexistent/pkgdeck-host-data-unavailable"));
+        let caskrooms = host
+            .var("HOMEBREW_PREFIX")
+            .map(PathBuf::from)
+            .into_iter()
+            .chain(
+                host.var("HOME")
+                    .map(|home| PathBuf::from(home).join(".linuxbrew")),
+            )
+            .chain([PathBuf::from("/home/linuxbrew/.linuxbrew")])
+            .filter(|prefix| prefix.is_absolute())
+            .map(|prefix| prefix.join("Caskroom"))
+            .collect();
         Self {
             root: data.join("pkgdeck/appimages"),
             applications: data.join("applications"),
             uid: rustix::process::getuid().as_raw(),
+            caskrooms,
             #[cfg(test)]
             updater: None,
         }
@@ -58,10 +73,16 @@ impl AppImage {
             root,
             applications,
             uid,
+            caskrooms: vec![],
             updater: None,
         }
     }
     #[cfg(test)]
+    fn with_caskroom(mut self, caskroom: PathBuf) -> Self {
+        self.caskrooms.push(caskroom);
+        self
+    }
+    #[cfg(all(test, target_os = "linux"))]
     fn with_updater(mut self, updater: PathBuf) -> Self {
         self.updater = Some(updater);
         self
@@ -366,12 +387,36 @@ impl AppImage {
                 Self::desktop_value(contents, "Exec=").and_then(|value| Self::exec_path(&value))
             })
     }
+    /// AppImages a Homebrew cask installed. Homebrew moves the file into its
+    /// AppImage folder and leaves a symlink to it in the cask's installed
+    /// version folder, as it does for macOS apps; those belong to Homebrew
+    /// Casks, so this source must not offer to update or remove them.
+    fn homebrew_appimages(&self) -> std::collections::BTreeSet<PathBuf> {
+        let children = |dir: &Path| {
+            fs::read_dir(dir)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|entry| entry.path())
+                .collect::<Vec<_>>()
+        };
+        self.caskrooms
+            .iter()
+            .flat_map(|caskroom| children(caskroom))
+            .flat_map(|cask| children(&cask))
+            .filter(|version| version.file_name().is_some_and(|name| name != ".metadata"))
+            .flat_map(|version| children(&version))
+            .filter(|link| fs::symlink_metadata(link).is_ok_and(|m| m.file_type().is_symlink()))
+            .filter_map(|link| fs::canonicalize(link).ok())
+            .collect()
+    }
     fn external_entries(&self) -> Result<Vec<(Package, PathBuf)>, EngineError> {
         let entries = match fs::read_dir(&self.applications) {
             Ok(entries) => entries,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
             Err(e) => return Err(Self::invalid(e.to_string())),
         };
+        let homebrew = self.homebrew_appimages();
         Ok(entries
             .filter_map(Result::ok)
             .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "desktop"))
@@ -383,6 +428,7 @@ impl AppImage {
                 let metadata = fs::metadata(&canonical).ok()?;
                 if !canonical.is_absolute()
                     || canonical.starts_with(&self.root)
+                    || homebrew.contains(&canonical)
                     || !metadata.is_file()
                     || metadata.uid() != self.uid
                 {
@@ -758,6 +804,7 @@ mod tests {
         fs::write(path, header).unwrap();
     }
 
+    #[cfg(target_os = "linux")]
     fn updater(base: &Path, status: u8) -> (PathBuf, PathBuf) {
         use std::os::unix::fs::PermissionsExt;
         let updater = base.join("updater");
@@ -1108,6 +1155,48 @@ mod tests {
             .unwrap();
         assert!(!external.exists());
         assert!(!desktop.exists());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn homebrew_cask_appimages_belong_to_homebrew_casks() {
+        let base = std::env::temp_dir().join(format!(
+            "pkgdeck-appimage-homebrew-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        let applications = base.join("applications");
+        fs::create_dir_all(&applications).unwrap();
+        let obsidian = base.join("Applications/Obsidian.AppImage");
+        fs::create_dir_all(obsidian.parent().unwrap()).unwrap();
+        type2(&obsidian);
+        fs::write(
+            applications.join("appimagekit-obsidian.desktop"),
+            format!(
+                "[Desktop Entry]\nName=Obsidian\nExec={} %U\n",
+                obsidian.display()
+            ),
+        )
+        .unwrap();
+        let caskroom = base.join("Caskroom");
+        let version = caskroom.join("obsidian/1.13.7");
+        fs::create_dir_all(&version).unwrap();
+        fs::create_dir_all(caskroom.join("obsidian/.metadata/1.13.7")).unwrap();
+        let backend = || {
+            AppImage::new(
+                base.join("owned"),
+                applications.clone(),
+                rustix::process::getuid().as_raw(),
+            )
+            .with_caskroom(caskroom.clone())
+        };
+        let cancel = Cancellation::default();
+        // Until Homebrew links it, the AppImage looks like any external one.
+        assert_eq!(backend().search("obsidian", &cancel).unwrap().len(), 1);
+        std::os::unix::fs::symlink(&obsidian, version.join("Obsidian-1.13.7-arm64.AppImage"))
+            .unwrap();
+        assert!(backend().search("obsidian", &cancel).unwrap().is_empty());
+        assert!(backend().installed(&cancel).unwrap().is_empty());
         fs::remove_dir_all(base).unwrap();
     }
 

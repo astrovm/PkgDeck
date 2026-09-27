@@ -1,6 +1,6 @@
 # Platform test audit
 
-Reviewed 2026-09-26 for PR #114. Supported application platforms are Linux and
+Reviewed 2026-09-26 for PR #114; packaging rows updated 2026-09-27 for PR #118. Supported application platforms are Linux and
 macOS on x86_64 and aarch64. This document describes the CI coverage contract;
 the checks on the exact PR commit determine whether it passed. Windows is not
 a supported build target.
@@ -17,19 +17,20 @@ a supported build target.
 | Native window keyboard lifecycle | Xvfb/xdotool | Xvfb/xdotool | Not automated | Not automated |
 | Real sudo/polkit and APT lock handling | Yes | Yes | Not applicable | Not applicable |
 | AppImage/Snap/Flatpak packaged GUI and host bridge | Yes | Yes | Not applicable | Not applicable |
-| Homebrew packaged app/CLI | CLI | Container CLI lifecycle | App + CLI | App + CLI |
+| Homebrew packages | Static CLI formula | Static CLI formula | App + CLI cask | App + CLI cask |
+| Static CLI archive on another libc (Alpine) | Yes | Yes | Not applicable | Not applicable |
 | Native XML/binary plist, application folders and cask ownership | Not applicable | Not applicable | Yes | Yes |
 
 Native dpkg and AppImage execution tests, and the X11 keyboard driver, run only
 on Linux. X11 testing does not establish native Cocoa interaction coverage. The macOS GUI
-tests use the real Qt/Kirigami build installed by the Homebrew packaging job.
-The installed Mac app also receives a Cocoa startup smoke test using Qt Quick's
-software renderer outside Homebrew's test sandbox. Formula tests use offscreen
-rendering. Cocoa startup has a 60-second limit and retains process samples on
+tests use the Qt/Kirigami build that `scripts/bundle-macos.sh` bundles into the
+shipped app. The Homebrew test installs that app through the cask and runs a
+Cocoa startup smoke test through the linked `pkgdeck` command, using Qt Quick's
+software renderer. Cocoa startup has a 60-second limit and retains process samples on
 timeout; the source GUI suite still runs if that startup check fails. Qt asks
 IconServices for an icon on the main thread when the window takes focus, so the
 check first probes IconServices from a separate process and skips with a warning
-when the runner's daemon does not answer. Formula tests accept a nonzero
+when the runner's daemon does not answer. The Linux formula test accepts a nonzero
 `pkd sources` status when a host package manager fails detection in the sandbox.
 GPU/Metal behavior is outside this hosted-runner check.
 Mac-only code is compiled and exercised on native runners, not merely checked
@@ -68,14 +69,30 @@ through Linux fixtures.
   rather than treating a short CPU-idle interval as transaction completion.
   The driver runs as the application user and preserves native manager config,
   including Homebrew's trusted-tap settings.
-- Mac QML component tests use the Basic style selected by the shipped Mac
-  launcher, avoiding native controls that reject the app's customization.
+- Mac QML component tests use the Basic style the shipped Mac app selects, avoiding native controls that reject the app's customization.
   Banner tests verify that the Linux authorization shortcut is hidden on Mac
   and test ordinary Settings navigation on both platforms.
 - Applications removed during directory metadata or path resolution are
   reported as skipped entries without discarding the remaining inventory.
 - Negated shell commands outside conditionals were not enforced by `set -e`.
   Removal checks now explicitly fail when native tools still report the package.
+
+## Findings from PR #118
+
+- AppImage registered without an availability probe, so every macOS search
+  reported "AppImage requires Linux" as a failed source. It is now probed like
+  every other source and left out of automatic queries on macOS.
+- Homebrew still quarantines cask downloads, and Gatekeeper blocks the ad-hoc
+  signed app. The cask clears quarantine after the checksum is verified; CI
+  checks the installed app is not quarantined.
+- Qt could not find the bundled plugins when the app ran through Homebrew's
+  `pkgdeck` symlink. The binary now re-runs itself from inside the bundle, and
+  the Cocoa smoke test goes through that symlink.
+- Static-binary checks rejected valid output: `file` prints "statically linked"
+  on aarch64 and "static-pie linked" on x86_64.
+- The packaged app, its Finder launch, source detection and search were also
+  driven by hand on an Apple silicon Mac through the accessibility API. That is
+  a one-off check, not automated Cocoa interaction coverage.
 
 ## Remaining validation boundaries
 
