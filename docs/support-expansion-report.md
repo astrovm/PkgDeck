@@ -1,6 +1,8 @@
 # PkgDeck support expansion report
 
-Research date: 2026-09-26. Reviewed `main` at `67b85b4` after
+Research date: 2026-09-26; ecosystem facts re-checked 2026-09-27 (see
+[What changed since the first draft](#what-changed-since-the-first-draft)).
+Reviewed `main` at `67b85b4` after
 `git pull --ff-only origin main` (already current). This is a product and
 implementation assessment, not a test of these integrations on a Mac.
 Priorities and effort ratings below are engineering judgments, not usage
@@ -20,11 +22,39 @@ The expanded suite and its remaining gaps are tracked in the
 [platform test audit](platform-test-audit.md); consult the exact PR commit's
 checks for its current result.
 
-**Recommendation:** prioritize unmanaged-app discovery and an explicit
-“Manage with Homebrew” workflow, improve AI-tool discovery through existing
-managers, and add mise as the first substantial new developer-tool backend.
-Investigate Linux Homebrew casks immediately: upstream now supports them,
-but PkgDeck registers its cask backend only on macOS.
+**Recommendation:** make Linux Homebrew casks and mise the first new work,
+add the current AI CLIs through existing managers plus a few standalone
+adapters (Antigravity CLI, Copilot CLI, Cursor CLI, Kiro CLI), and keep the
+“Manage with Homebrew” adoption workflow behind verified identity checks and
+tested recovery.
+
+## What changed since the first draft
+
+Checked against vendor docs, release notes and the Homebrew API on 2026-09-27.
+
+- **Gemini CLI is deprecated.** Google ended it for consumer accounts on
+  2026-06-18; Antigravity CLI (`agy`, cask `antigravity-cli`) replaces it. The
+  `antigravity` cask is the desktop app, not the CLI. The `gemini-cli` formula is
+  deprecated and will be disabled on 2026-12-18.
+  [Google](https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/),
+  [Antigravity CLI](https://antigravity.google/docs/cli/install/)
+- **Other AI CLI changes:** Amazon Q Developer CLI became Kiro CLI; Cursor's
+  command is now `agent`; the `gh copilot` extension stopped working and Copilot
+  CLI (`copilot`) is generally available; Continue CLI is discontinued; Aider is
+  barely maintained (last release February 2026).
+- **Homebrew 6.0** (June 2026) can upgrade auto-updating casks without
+  `--greedy` when the installed bundle is older, requires third-party taps to be
+  trusted before they load, and added AppImage and Linux variations to casks.
+  [Release](https://brew.sh/2026/06/11/homebrew-6.0.0/),
+  [tap trust](https://docs.brew.sh/Tap-Trust)
+- **Other sources:** pnpm 11 isolates each global package and moved global
+  binaries; npm 12 disables dependency install scripts; Podman 6 dropped Intel
+  Macs; Docker Engine 29 hides untagged images without `--all`; RubyGems 4
+  removed `gem query`. PkgDeck already lists Docker images with `--all` and an
+  explicit format, uses none of the removed commands, and its pnpm, npm and
+  RubyGems lifecycle jobs pass against current releases. Tap trust still needs a
+  clear message when a cask from an untrusted tap cannot load.
+- **Volta is unmaintained** and points users to mise, which moves mise up.
 
 ## Validation on a Mac
 
@@ -117,20 +147,26 @@ or a dedicated design.
 
 | Priority | Opportunity | User benefit | Effort | Recommended first scope |
 | --- | --- | --- | --- | --- |
-| P0 | macOS app inventory and Brew matching | Makes software outside package databases visible | M | Basic discovery in PR #114; validate on macOS and strengthen identity evidence |
-| P0 | AI application catalog using current managers | Easier discovery without duplicate backends | S–M | Gemini, Copilot, Aider; source and channel labels |
-| P0 | Linux Homebrew cask compatibility | Expands an existing integration | M | Capability probe and compatible-artifact tests |
+| P0 | macOS app inventory and Brew matching | Makes software outside package databases visible | M | Shipped in PR #114 and validated on a Mac; next match `.pkg` casks by receipt and follow cask renames |
+| P0 | Linux Homebrew cask compatibility | Expands an existing integration | M | 2,873 casks support Linux (214 AppImage); probe support, filter artifacts, test both CPUs |
+| P0 | mise | Runtime and developer-tool coverage across Linux/macOS; Volta's successor | M–L | `mise ls --json` and `mise outdated --json`, then explicit global-tool upgrades |
+| P0 | AI CLI catalog using current managers | Easier discovery without duplicate backends | S–M | Copilot, Kiro, Amp, Droid, Qwen Code, Crush, goose, Cline; exact package IDs only |
+| P1 | Standalone AI CLI adapters | Covers official installers outside package managers | M each | Antigravity CLI, Cursor CLI, Copilot CLI, Kiro CLI, Amp, Droid |
 | P1 | Manage existing Mac apps with Homebrew | Converts manual installs into tracked installations | L | Independently verified adoption and recovery for an allowlist |
-| P1 | Cursor CLI standalone updates | Covers an official installer outside current sources | M | Verified inventory; updates after updater validation |
-| P1 | mise | Runtime and developer-tool coverage across Linux/macOS | M–L | Inventory, then explicit global-tool operations |
-| P1 | Mac App Store via mas | Covers apps that should retain App Store ownership | M | Inventory and selected updates |
-| P1 | Conda, followed by mamba/micromamba | Scientific and data-development environments | L | Explicit environment inventory and solver previews |
+| P1 | Mac App Store via mas | Covers apps that should retain App Store ownership | M | mas 7 has JSON `list` and `outdated`; inventory first, then updates with a privilege prompt |
+| P1 | Conda, mamba/micromamba and pixi | Scientific and data-development environments | L | Environment inventory and solver previews; one adapter switches the conda-family binary |
+| P2 | Rustup | Toolchain coverage beyond Cargo-installed executables | S–M | Installed toolchains; `rustup check` exits 100 when updates exist |
 | P2 | MacPorts | Completes another macOS package ecosystem | M | Native package lifecycle with variants preserved |
-| P2 | Rustup | Toolchain coverage beyond Cargo-installed executables | M | Installed toolchains and channel-aware updates |
-| P2 | Nix profiles | Useful cross-platform package coverage | L | User profiles only; no declarative configuration edits |
+| P2 | Nix profiles | Useful cross-platform package coverage | L | User profiles only; verify the real (version 3) profile JSON first |
+| P2 | rpm-ostree and bootc | Supports immutable desktops | L | Deployment inventory and pending-reboot state from both tools |
+| P2 | AUR | Broader Arch application availability | L | Read-only: `pacman -Qm` plus AUR versions; no builds after the 2026 AUR attack |
 | P2 | apk and XBPS | Extends distro coverage | M each | CLI-first integration and distro fixtures |
-| P2 | rpm-ostree | Supports immutable desktops | L | Deployment inventory and pending-reboot state first |
-| P2 | AUR via an existing helper | Broader Arch application availability | L | Search/inventory before build execution |
+| P3 | Go binaries, .NET tools | Covers developer tools outside package managers | M | Only with reliable metadata (`go version -m`, `dotnet tool list -g`) |
+
+Skipped: Volta (unmaintained), Deno and Yarn globals (no inventory command),
+asdf, proto and aqua (covered by mise or too small), and Distrobox (containers,
+not packages). [Topgrade](https://github.com/topgrade-rs/topgrade) upgrades
+across managers but keeps no inventory, which is PkgDeck's difference.
 
 ### Package-manager feasibility
 
@@ -155,13 +191,21 @@ supports JSON and dry-run output. An update can change several packages, so show
 the solver's full plan and revalidate it before execution. Use canonical prefix
 paths as scope; retain channels and build identities, and never silently update
 every environment. Start with Conda; test mamba and micromamba separately before
-advertising compatibility. [Conda update](https://docs.conda.io/projects/conda/en/stable/commands/update.html).
+advertising compatibility. Mamba 2 and micromamba share one codebase, so one
+adapter can switch binaries. pixi fits beside them: `pixi global list --json`
+and `pixi global update` cover its global tools. Anaconda's licensing moves many
+users to Miniforge, so do not assume the `defaults` channel.
+[Conda update](https://docs.conda.io/projects/conda/en/stable/commands/update.html),
+[pixi global](https://pixi.prefix.dev/latest/reference/cli/pixi/global/update/).
 
 **mas fills a different need from casks.** It inventories and updates App Store
 apps, with Apple Account and privilege requirements for mutations. Its accurate
 outdated check initiates a download to read metadata; do not describe that as a
 purely local read. Start with inventory and clearly labeled update checking;
-let Apple handle authentication. [mas documentation](https://github.com/mas-cli/mas).
+let Apple handle authentication. mas 7 added `--json` to `list`, `outdated`,
+`lookup` and `search`, and mas 4 fixed installs on macOS 26.1; installs and
+upgrades need root. [mas documentation](https://github.com/mas-cli/mas),
+[releases](https://github.com/mas-cli/mas/releases).
 
 **MacPorts** has native installed/outdated/upgrade operations. Keep variants,
 inactive versions, and dependency effects in the model; do not consolidate its
@@ -186,12 +230,19 @@ Validate the engine and host authorization first, then distribution support.
 
 **rpm-ostree** provides JSON status and deployment-based changes. Model booted
 and pending deployments and reboot requirements rather than presenting it as
-ordinary live RPM updates. [Upstream handbook](https://github.com/coreos/rpm-ostree/blob/main/docs/administrator-handbook.md).
+ordinary live RPM updates. Fedora's image-mode work adds DNF and bootc next to
+rpm-ostree rather than replacing it yet, so read both status outputs.
+[Upstream handbook](https://github.com/coreos/rpm-ostree/blob/main/docs/administrator-handbook.md),
+[Fedora change](https://fedoraproject.org/wiki/Changes/DNFAndBootcInImageModeFedora).
 
 **AUR** requires build-recipe review and helper-specific behavior. Integrate one
 installed helper first, retain its review/diff step, and distinguish AUR origin
 from Pacman's installed-package ownership. Avoid duplicate rows for the same
-installed package. [ArchWiki AUR helpers](https://wiki.archlinux.org/title/AUR_helpers).
+installed package. In June 2026 malicious commits reached about 1,500 AUR
+packages and new AUR accounts were blocked, so start read-only: list foreign
+packages with `pacman -Qm`, compare versions through the AUR RPC, and leave builds
+to the user's helper. [ArchWiki AUR helpers](https://wiki.archlinux.org/title/AUR_helpers),
+[SecurityWeek](https://www.securityweek.com/atomic-arch-supply-chain-attack-hits-1500-aur-packages/).
 
 Windows managers such as WinGet, Scoop, and Chocolatey should be a separate
 platform initiative. Current Unix host execution and Linux/macOS distribution
@@ -200,38 +251,56 @@ additional runtime managers until mise establishes multi-version semantics.
 
 ## AI CLIs: expand coverage without multiplying sources
 
-| Tool | Coverage today | Proposed addition |
-| --- | --- | --- |
-| Codex, Claude Code, Grok, OpenCode | Explicit standalone updater adapters; manager-owned copies use their manager | Improve ownership explanations, duplicate detection, channel display, and fixture maintenance |
-| Gemini CLI | Official npm/Homebrew install routes fit existing adapters | Catalog identity for `@google/gemini-cli` and `gemini-cli`; lifecycle verification |
-| GitHub Copilot CLI | Official npm/Homebrew routes fit existing adapters; official standalone route is not covered | Catalog identity for `@github/copilot`; standalone discovery later |
-| Aider | Official uv/pipx-style routes fit existing tool-management scope | Catalog entry for `aider-chat`, preserve isolated environment and dependency options |
-| Cursor CLI | No dedicated standalone adapter | Detect the official installation, verify identity, then support its updater |
-| Ollama | Manager-installed packages can use existing adapters | Separate desktop app, CLI/service, and model inventory; defer native Linux service migration |
+| Tool | Status (2026-09) | Install routes | Proposed handling |
+| --- | --- | --- | --- |
+| Claude Code, Codex, Grok, OpenCode | Active | Official installers, npm, casks (`claude-code`, `codex`), OpenCode tap | Keep the standalone adapters; Claude Code now also ships apt, dnf and apk repositories, which the native managers own |
+| Antigravity CLI (`agy`) | Active; replaces Gemini CLI | Installer to `~/.local/bin`, cask `antigravity-cli` | Standalone adapter; verify how it updates, since only background self-update is documented |
+| Gemini CLI | Deprecated for consumer accounts | npm `@google/gemini-cli`, deprecated formula `gemini-cli` | No new work; point existing installs to Antigravity CLI |
+| GitHub Copilot CLI (`copilot`) | Generally available | npm `@github/copilot`, cask `copilot-cli`, installer | Catalog npm and cask; standalone adapter using `copilot update` |
+| Cursor CLI (`agent`) | Active; `cursor-agent` is an alias | Installer to `~/.local/bin`, cask `cursor-cli` | Standalone adapter with `agent update`; see the `agent` clash below |
+| Kiro CLI (`kiro-cli`) | Replaces Amazon Q Developer CLI | Installer, cask `kiro-cli`, Linux `.deb` | Standalone adapter with `kiro-cli update`; the `amazon-q` cask now points here |
+| Amp (`amp`) | Active | Installer to `~/.amp/bin`, npm `@sourcegraph/amp` | Catalog npm; standalone adapter with `amp update`. The `amp` formula is an unrelated editor |
+| Factory Droid (`droid`) | Active | Installer, cask `droid`, npm `@factory/cli` | Catalog cask and npm; standalone adapter later |
+| Qwen Code (`qwen`) | Active | npm `@qwen-code/qwen-code`, formula `qwen-code` | Catalog only |
+| Crush (`crush`) | Active | Charm tap and repositories, npm `@charmland/crush`, AUR | Catalog only |
+| goose (`goose`) | Active; now under the Linux Foundation | Installer, formula `block-goose-cli` | Catalog only. The `goose` formula is an unrelated migration tool |
+| Warp Agent CLI (`warp`) | Launched August 2026 | Installer, cask `warp-agent-cli` | Catalog only; the `warp` cask is the terminal app |
+| Cline CLI (`cline`) | Active; Homebrew formula deprecated | npm `cline` | Catalog npm only; a malicious 2.3.0 was published in February 2026, so show the exact version |
+| Kimi Code, Mistral Vibe | Active | PyPI and formulae `kimi-code`, `mistral-vibe` | Catalog only |
+| Aider | Barely maintained | PyPI `aider-chat`, formula `aider` | Existing pip/pipx/uv/Homebrew sources are enough; no new work |
+| Continue CLI | Discontinued | npm `@continuedev/cli` | None |
+| Ollama | Active | Installer, formula `ollama`, cask `ollama-app` | Separate desktop app, CLI/service, and model inventory; defer native Linux service migration |
 
-“Fits existing adapters” is an architectural assessment, not a claim that these
-specific applications have passed PkgDeck end-to-end tests. Add targeted fixtures
-and real lifecycle smoke tests before advertising support.
+“Catalog” means mapping a product to exact package IDs in the managers PkgDeck
+already supports. It is an architectural assessment, not a claim that these
+applications have passed PkgDeck end-to-end tests; add targeted fixtures and
+real lifecycle smoke tests before advertising support.
 
-Official evidence: [Gemini installation](https://geminicli.com/docs/get-started/installation/),
-[Copilot installation](https://docs.github.com/en/copilot/how-tos/copilot-cli/set-up-copilot-cli/install-copilot-cli),
-[Aider installation](https://aider.chat/docs/install.html).
+**Never match an AI tool by name.** Homebrew's `amp`, `goose` and `grok`
+formulae and its `gemini` cask are unrelated tools. Use exact package IDs and
+installer layouts.
 
-Cursor's current documentation uses `agent --version` and `agent update`; older
-documentation uses `cursor-agent`. A generic executable named `agent` is not
-sufficient ownership evidence. Require a recognized installation layout and
-upstream identity, and verify whether a side-effect-free update check exists
-before adding automatic update discovery.
-[Current Cursor CLI installation](https://cursor.com/docs/cli/installation).
+**Two tools install an `agent` command.** Cursor's installer puts `agent` in
+`~/.local/bin`, and the Grok installer can create an `agent` symlink there too,
+so installing one can take over the other's command. A Cursor adapter must
+resolve the executable to Cursor's versions directory
+(`~/.local/share/cursor-agent/versions/`) before claiming it, and must not
+treat a bare `agent` on `PATH` as Cursor.
+[Cursor CLI installation](https://cursor.com/docs/cli/installation),
+[Grok Build](https://docs.x.ai/build/overview)
 
 Ollama's native Linux installation involves libraries and potentially a system
-service; its documented update reruns installation. Treat this as a separate
-service-aware integration. On macOS, distinguish the `ollama` formula from
-the `ollama-app` cask. Model downloads should have their own size and removal
-semantics, not be confused with updates to the program.
-[Linux installation](https://docs.ollama.com/linux),
-[formula](https://formulae.brew.sh/formula/ollama),
-[app cask](https://formulae.brew.sh/cask/ollama-app).
+service; its documented update reruns installation. On macOS, distinguish the
+`ollama` formula from the `ollama-app` cask. Model downloads should have their
+own size and removal semantics, not be confused with updates to the program.
+[Linux installation](https://docs.ollama.com/linux).
+
+Official evidence: [Copilot CLI](https://docs.github.com/en/copilot/how-tos/set-up/install-copilot-cli),
+[Kiro CLI](https://kiro.dev/docs/reference/cli-commands/),
+[Amp](https://ampcode.com/docs/cli),
+[Factory Droid](https://docs.factory.ai/cli/getting-started/overview),
+[Warp Agent CLI](https://docs.warp.dev/agents/cli/quickstart/),
+[Continue](https://github.com/continuedev/continue).
 
 The proposed catalog maps a product to exact package IDs, channels, platforms,
 and evidence. It improves search and explains available install routes; the
@@ -252,19 +321,26 @@ Treat managed-device or installer-owned applications as requiring a different
 workflow. On Linux, extend existing desktop-entry/AppImage discovery with
 selected application directories; do not claim arbitrary files in `/opt`.
 
-The following have verified Homebrew casks and make a useful evaluation set.
+Pick the evaluation set from Homebrew's install analytics (365 days to
+2026-09-27) rather than guesses. The most-installed app casks are, in order:
+docker-desktop, visual-studio-code, google-chrome, ghostty, libreoffice,
+iterm2, claude, obsidian, firefox, orbstack, warp, stats, postman,
+dbeaver-community, cursor, vlc, android-studio, raycast, wine-stable and
+rectangle. All of them auto-update except libreoffice and wine-stable.
 Their presence in Homebrew does **not** establish safe adoption of every
 existing installation.
+[Cask install analytics](https://formulae.brew.sh/api/analytics/cask-install/365d.json)
 
-| App | Cask | Initial handling |
+| App | Cask | Why it is in the set |
 | --- | --- | --- |
-| Visual Studio Code | [visual-studio-code](https://formulae.brew.sh/cask/visual-studio-code) | Early candidate; check `code` launcher conflicts |
-| Firefox | [firefox](https://formulae.brew.sh/cask/firefox) | Early candidate; distinguish stable, ESR, beta, and language |
-| Obsidian | [obsidian](https://formulae.brew.sh/cask/obsidian) | Early candidate; preserve vaults and settings |
-| Discord | [discord](https://formulae.brew.sh/cask/discord) | Candidate after self-updater behavior is tested |
-| Spotify | [spotify](https://formulae.brew.sh/cask/spotify) | Candidate after self-updater behavior is tested |
-| Slack | [slack](https://formulae.brew.sh/cask/slack) | Distinguish direct-download and App Store editions |
-| Google Chrome | [google-chrome](https://formulae.brew.sh/cask/google-chrome) | Later; validate updater and managed-install interactions |
+| Visual Studio Code | [visual-studio-code](https://formulae.brew.sh/cask/visual-studio-code) | Popular, self-updating; check `code` launcher conflicts |
+| Google Chrome | [google-chrome](https://formulae.brew.sh/cask/google-chrome) | Popular, self-updating; validate managed-install interactions |
+| Obsidian | [obsidian](https://formulae.brew.sh/cask/obsidian) | Also a Linux AppImage cask; preserve vaults and settings |
+| Cursor, Warp | [cursor](https://formulae.brew.sh/cask/cursor), [warp](https://formulae.brew.sh/cask/warp) | Also Linux AppImage casks |
+| LibreOffice | [libreoffice](https://formulae.brew.sh/cask/libreoffice) | Does not self-update, so Homebrew owns its updates |
+| Docker Desktop | [docker-desktop](https://formulae.brew.sh/cask/docker-desktop) | Heavy install and uninstall steps; not an adoption candidate |
+| Firefox | [firefox](https://formulae.brew.sh/cask/firefox) | Distinguish stable, ESR, beta and language |
+| A cask from a third-party tap | e.g. `steipete/tap/codexbar` | Exercises Homebrew 6 tap trust |
 
 Avoid building a universal updater for arbitrary `.app`, DMG, PKG, ZIP, or
 tarball installations. A supported package manager or a verified upstream
@@ -353,7 +429,12 @@ necessarily disable the vendor's updater.
 ## Linux casks: an immediate compatibility investigation
 
 Current Homebrew documentation explicitly permits Linux casks, with Linux
-`app_image` artifacts and portable binaries. Obsidian's cask currently includes
+`app_image` artifacts and portable binaries. Support started as preliminary in
+Homebrew 4.5 and gained AppImage artifacts and Linux variations in 6.0. On
+2026-09-27, 2,873 of 7,764 casks supported Linux: 2,592 fonts, 214 AppImages and
+the rest binaries. `app`, `pkg` and `suite` artifacts stay macOS-only. The two
+most-installed casks overall, `claude-code` and `codex`, are Linux-capable
+binary casks. Obsidian's cask currently includes
 Linux AppImages. PkgDeck's macOS-only registration therefore excludes a real
 upstream capability. Linux artifacts are also documented in the **7.0.6 release
 source**, so this is not only an unreleased-main observation.
@@ -378,14 +459,17 @@ compatible release or prove PkgDeck's existing adapter works with it.
    scan timing. Still open: `.pkg` receipts, renamed casks and cold-boot timing. Missing ownership evidence must
    stay unknown. Add publisher/channel/architecture verification before migration.
    Introduce the AI catalog using existing package routes; prototype Linux casks
-   separately. These are separate work items, not one P0 delivery commitment.
-2. **Bounded additions:** mise inventory and global-tool management, Cursor CLI
-   discovery/update validation, and mas inventory/selected updates.
+   and mise inventory separately. These are separate work items, not one P0
+   delivery commitment.
+2. **Bounded additions:** mise global-tool management, standalone adapters for
+   Antigravity, Cursor (resolving the shared `agent` name), Copilot and Kiro
+   CLIs, and mas inventory/selected updates.
 3. **Mac adoption MVP:** three curated app families (VS Code, Firefox stable,
    Obsidian), PkgDeck-enforced artifact checks, exact preconditions, and postchecks.
    Require tested recovery before enabling either adoption or replacement.
-4. **Broader ecosystems:** Conda environment plans, then MacPorts/Rustup; pursue
-   Nix, immutable systems, AUR, apk, and XBPS according to user demand.
+4. **Broader ecosystems:** Conda-family and pixi environment plans, then
+   Rustup/MacPorts; pursue Nix, immutable systems, read-only AUR, apk, and XBPS
+   according to user demand.
 
 Implementation should extend the core engine and host command authorization,
 then expose the same behavior through CLI and GUI. Update the source registry,
