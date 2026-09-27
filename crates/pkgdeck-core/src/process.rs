@@ -325,12 +325,24 @@ mod tests {
     fn writes_defer_cancellation_and_timeout_until_native_completion() {
         let cancel = Cancellation::default();
         let other = cancel.clone();
+        // The child waits for the flag so cancellation always lands while the
+        // write is running, however late a loaded runner schedules this thread.
+        let flag = std::env::temp_dir().join(format!("pkgdeck-cancelled-{}", std::process::id()));
+        let _ = std::fs::remove_file(&flag);
+        let marker = flag.clone();
         let thread = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(30));
             other.cancel();
+            std::fs::write(marker, b"").unwrap();
         });
         let mut command = Command::new("/bin/sh");
-        command.args(["-c", "sleep 0.1; printf 'committed\n'"]);
+        command
+            .args([
+                "-c",
+                "while [ ! -e \"$1\" ]; do sleep 0.01; done; printf 'committed\n'",
+                "sh",
+            ])
+            .arg(&flag);
         let result = run(
             command,
             Limits {
@@ -342,6 +354,7 @@ mod tests {
         )
         .unwrap();
         thread.join().unwrap();
+        let _ = std::fs::remove_file(&flag);
         assert_eq!(result.code, Some(0));
         assert_eq!(result.stdout, b"committed\n");
         assert!(result.cancellation_deferred);
