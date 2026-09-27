@@ -119,7 +119,12 @@ class Pkgdeck < Formula
       ENV["QT_QUICK_BACKEND"] = "software"
       assert_match "pkgdeck", shell_output("#{bin}/pkgdeck --version")
       assert_match "PKGDECK_GUI_READY", shell_output("#{bin}/pkgdeck --smoke-test 2>&1")
-      assert_match "AppImage requires Linux", shell_output("#{bin}/pkd --json sources")
+      # Host package managers can fail detection inside the test sandbox,
+      # which exits 1; any other status means the command itself failed.
+      sources = shell_output("#{bin}/pkd --json sources", nil)
+      opoo sources unless $CHILD_STATUS.success?
+      assert_includes [0, 1], $CHILD_STATUS.exitstatus, sources
+      assert_match "AppImage requires Linux", sources
     else
       refute_path_exists bin/"pkgdeck"
       assert_path_exists libexec/"pkgdeck-host-runner"

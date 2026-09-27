@@ -26,7 +26,11 @@ tests use the real Qt/Kirigami build installed by the Homebrew packaging job.
 The installed Mac app also receives a Cocoa startup smoke test using Qt Quick's
 software renderer outside Homebrew's test sandbox. Formula tests use offscreen
 rendering. Cocoa startup has a 60-second limit and retains process samples on
-timeout; the source GUI suite still runs if that startup check fails.
+timeout; the source GUI suite still runs if that startup check fails. Qt asks
+IconServices for an icon on the main thread when the window takes focus, so the
+check first probes IconServices from a separate process and skips with a warning
+when the runner's daemon does not answer. Formula tests accept a nonzero
+`pkd sources` status when a host package manager fails detection in the sandbox.
 GPU/Metal behavior is outside this hosted-runner check.
 Mac-only code is compiled and exercised on native runners, not merely checked
 through Linux fixtures.

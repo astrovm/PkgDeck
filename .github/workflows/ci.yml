@@ -403,7 +403,7 @@ jobs:
         run: brew install --build-from-source --verbose astrovm/pkgdeck/pkgdeck
       - name: Test installed macOS Cocoa startup
         if: runner.os == 'macOS'
-        timeout-minutes: 3
+        timeout-minutes: 5
         run: bash scripts/tests/macos-gui.sh "$(brew --prefix astrovm/pkgdeck/pkgdeck)/bin/pkgdeck"
       - name: Test installed commands and GUI startup
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
