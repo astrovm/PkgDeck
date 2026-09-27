@@ -22,7 +22,8 @@ done
 mkdir -p "$tap/Formula" "$tap/Casks"
 sed "${substitutions[@]}" packaging/homebrew/pkd.rb > "$tap/Formula/pkd.rb"
 sed "${substitutions[@]}" packaging/homebrew/pkgdeck.cask.rb > "$tap/Casks/pkgdeck.rb"
-# The formula was named pkgdeck while it also built the macOS app; renaming it
-# lets `brew install astrovm/pkgdeck/pkgdeck` resolve to the cask on macOS.
-rm -f "$tap/Formula/pkgdeck.rb"
-printf '{\n  "pkgdeck": "pkd"\n}\n' > "$tap/formula_renames.json"
+# The formula was named pkgdeck while it also built the macOS app. It is
+# removed rather than renamed: Homebrew follows formula renames before casks,
+# so a pkgdeck -> pkd rename would send `brew install astrovm/pkgdeck/pkgdeck`
+# on macOS to the Linux-only formula instead of the cask.
+rm -f "$tap/Formula/pkgdeck.rb" "$tap/formula_renames.json"

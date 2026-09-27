@@ -537,6 +537,8 @@ jobs:
       - name: Prepare tap
         run: |
           brew tap-new --no-git astrovm/pkgdeck
+          # As the install docs say: Homebrew 6+ only loads trusted third-party taps.
+          brew trust astrovm/pkgdeck
           tap=$(brew --repository astrovm/pkgdeck)
           if [[ $PUBLISHED == true ]]; then
             mkdir -p "$tap/Casks"
