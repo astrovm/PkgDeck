@@ -1904,6 +1904,9 @@ fn registries_without_search_offer_known_ai_tools_by_exact_package() {
     assert_eq!(offers[0].display_name, "GitHub Copilot CLI");
     assert_eq!(offers[0].candidate_version.as_deref(), Some("latest"));
     assert!(offers[0].installed_version.is_none());
+    // The visible offer opens its details, as the GUI does on selection.
+    let details = npm.details(&offers[0].id, &cancel).unwrap();
+    assert_eq!(details.package.display_name, "GitHub Copilot CLI");
     // The offer installs the exact package, never the product name.
     npm.execute(
         &Operation::Install(offers[0].id.clone()),
