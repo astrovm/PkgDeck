@@ -13,6 +13,8 @@ pub(super) struct AiTool {
     pub pypi: Option<&'static str>,
 }
 
+// Cline is left out: a malicious 2.3.0 was published to npm in February 2026,
+// and these offers install `latest` without a reviewed version.
 pub(super) const AI_TOOLS: &[AiTool] = &[
     AiTool {
         product: "Claude Code",
@@ -66,12 +68,6 @@ pub(super) const AI_TOOLS: &[AiTool] = &[
         product: "Crush",
         terms: &["crush", "charm"],
         npm: Some("@charmland/crush"),
-        pypi: None,
-    },
-    AiTool {
-        product: "Cline CLI",
-        terms: &["cline"],
-        npm: Some("cline"),
         pypi: None,
     },
     AiTool {
