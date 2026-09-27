@@ -160,7 +160,7 @@ or a dedicated design.
 | --- | --- | --- | --- | --- |
 | P0 | macOS app inventory and Brew matching | Makes software outside package databases visible | M | Shipped in PR #114 and validated on a Mac; PR #118 matches `.pkg` casks by receipt and follows cask renames |
 | P0 | Linux Homebrew cask compatibility | Expands an existing integration | M | Implemented in PR #118: Homebrew 6+ probe, Linux-only search, AppImage ownership, container lifecycle on both CPUs |
-| P0 | mise | Runtime and developer-tool coverage across Linux/macOS; Volta's successor | M–L | Global tools only: `mise ls --global --json` and `mise outdated --json`, then upgrades of those tools |
+| P0 | mise | Runtime and developer-tool coverage across Linux/macOS; Volta's successor | M–L | Implemented: global tools only, registry search, upgrades within the configured range, remove with prune |
 | P0 | AI CLI catalog using current managers | Easier discovery without duplicate backends | S–M | Copilot, Kiro, Amp, Droid, Qwen Code, Crush, goose, Cline; exact package IDs only |
 | P1 | Standalone AI CLI adapters | Covers official installers outside package managers | M each | Antigravity CLI, Cursor CLI, Copilot CLI, Kiro CLI, Amp, Droid |
 | P1 | Manage existing Mac apps with Homebrew | Converts manual installs into tracked installations | L | Independently verified adoption and recovery for an allowlist |

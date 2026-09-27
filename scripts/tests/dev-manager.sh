@@ -3,12 +3,12 @@
 # Ephemeral runners need no cleanup; lifecycle state is confirmed through
 # the underlying manager, never only PkgDeck output. Tool installations use
 # user-writable prefixes so no step ever needs elevation.
-# Usage: scripts/tests/dev-manager.sh cargo|npm|pnpm|bun|pip|pipx|uv|composer|gem <pkd>
+# Usage: scripts/tests/dev-manager.sh cargo|npm|pnpm|bun|pip|pipx|uv|mise|composer|gem <pkd>
 # -E lets failures inside the helper functions below reach the ERR trap.
 set -Eeuo pipefail
 trap 'echo "dev-manager FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
-backend=${1:?Usage: scripts/tests/dev-manager.sh cargo|npm|pnpm|bun|pip|pipx|uv|composer|gem <pkd>}
-pkd=${2:?Usage: scripts/tests/dev-manager.sh cargo|npm|pnpm|bun|pip|pipx|uv|composer|gem <pkd>}
+backend=${1:?Usage: scripts/tests/dev-manager.sh cargo|npm|pnpm|bun|pip|pipx|uv|mise|composer|gem <pkd>}
+pkd=${2:?Usage: scripts/tests/dev-manager.sh cargo|npm|pnpm|bun|pip|pipx|uv|mise|composer|gem <pkd>}
 echo "dev-manager: backend=$backend pkd=$pkd user=$(whoami) home=$HOME"
 run() { "$pkd" --json --yes --auth sudo --from "$backend" "$@"; }
 # Keep pkd's report so a failed step shows what pkd said and how long it took.
@@ -79,6 +79,12 @@ setup_composer() {
     export COMPOSER_HOME="$HOME/.config/composer"
     mkdir -p "$COMPOSER_HOME"
     composer --version
+}
+
+setup_mise() {
+    command -v mise >/dev/null || curl -fsSL https://mise.run | sh
+    export PATH="$HOME/.local/bin:$PATH"
+    mise --version
 }
 
 setup_gem() {
@@ -220,6 +226,29 @@ composer)
     success install psr/log
     have psr/log
     success remove psr/log
+    ;;
+mise)
+    setup_mise
+    success sources
+    # A global request of "4" with only 4.40.5 installed leaves a newer 4.x
+    # within the configured range, which is all an upgrade may move to.
+    mise install yq@4.40.5
+    mkdir -p "$HOME/.config/mise"
+    printf '[tools]\nyq = "4"\n' >"$HOME/.config/mise/config.toml"
+    have yq
+    success info yq
+    success upgrade
+    mise ls --global --json yq | jq -e '.[0].version != "4.40.5"'
+    # Upgrades never rewrite the configured request.
+    grep -qx 'yq = "4"' "$HOME/.config/mise/config.toml"
+    success remove yq
+    mise ls --global --json | absent '"yq"'
+    success search jq
+    success install jq
+    have jq
+    grep -qx 'jq = "latest"' "$HOME/.config/mise/config.toml"
+    success remove jq
+    mise ls --json jq | jq -e 'length == 0'
     ;;
 gem)
     setup_gem

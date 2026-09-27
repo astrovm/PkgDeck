@@ -64,6 +64,7 @@ pub const BACKEND_IDS: &[&str] = &[
     "pip",
     "pipx",
     "uv",
+    "mise",
     "composer",
     "gem",
     "codex",
@@ -108,7 +109,7 @@ pub fn display_name(id: &str) -> &str {
         "claude" => "Claude Code",
         "grok" => "Grok",
         "opencode" => "OpenCode",
-        // npm, pnpm, pip, pipx, and uv are written in lower case.
+        // npm, pnpm, pip, pipx, uv, and mise are written in lower case.
         other => other,
     }
 }
@@ -2901,6 +2902,7 @@ enum DevKind {
     Pip,
     Pipx,
     Uv,
+    Mise,
     Composer,
     Gem,
 }
@@ -2915,6 +2917,7 @@ impl DevKind {
             Self::Pip => "pip",
             Self::Pipx => "pipx",
             Self::Uv => "uv",
+            Self::Mise => "mise",
             Self::Composer => "composer",
             Self::Gem => "gem",
         }
@@ -2932,10 +2935,45 @@ impl DevKind {
         match self {
             Self::Cargo | Self::Npm | Self::Pnpm | Self::Bun => dev_name(name),
             Self::Pip | Self::Pipx | Self::Uv => python_name(name),
+            Self::Mise => mise_name(name),
             Self::Composer => composer_name(name),
             Self::Gem => gem_name(name),
         }
     }
+}
+
+/// mise tools: a registry short name such as `node`, or `backend:identifier`
+/// such as `aqua:cli/cli`, `cargo:ripgrep` or `npm:@scope/package`. `@` would
+/// select a version, so it may only open an npm scope right after the prefix.
+fn mise_name(name: &str) -> bool {
+    if name.is_empty() || name.len() > 214 || name.starts_with('-') {
+        return false;
+    }
+    let (prefix, body) = match name.split_once(':') {
+        Some((prefix, body)) => (Some(prefix), body),
+        None => (None, name),
+    };
+    if prefix.is_some_and(|prefix| {
+        prefix.is_empty()
+            || !prefix
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    }) {
+        return false;
+    }
+    let body = match body.strip_prefix('@') {
+        Some(scoped) if prefix.is_some() => scoped,
+        _ => body,
+    };
+    (prefix.is_some() || !body.contains('/'))
+        && body.split('/').all(|segment| {
+            !segment.is_empty()
+                && segment != "."
+                && segment != ".."
+                && segment
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+        })
 }
 
 /// Shared package-name policy for development registries: an optional
@@ -3173,6 +3211,27 @@ struct ComposerPackage {
     latest: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct MiseInstall {
+    version: String,
+    requested_version: Option<String>,
+    #[serde(default)]
+    installed: bool,
+    #[serde(default)]
+    active: bool,
+}
+#[derive(Deserialize)]
+struct MiseOutdated {
+    latest: Option<String>,
+}
+#[derive(Deserialize)]
+struct MiseRegistryTool {
+    short: String,
+    description: Option<String>,
+    #[serde(default)]
+    aliases: Vec<String>,
+}
+
 pub struct DevTool<T = NativeTransport> {
     kind: DevKind,
     transport: T,
@@ -3185,6 +3244,7 @@ pub type Bun<T = NativeTransport> = DevTool<T>;
 pub type Pip<T = NativeTransport> = DevTool<T>;
 pub type Pipx<T = NativeTransport> = DevTool<T>;
 pub type Uv<T = NativeTransport> = DevTool<T>;
+pub type Mise<T = NativeTransport> = DevTool<T>;
 pub type Composer<T = NativeTransport> = DevTool<T>;
 pub type Gem<T = NativeTransport> = DevTool<T>;
 
@@ -3216,6 +3276,9 @@ impl<T> DevTool<T> {
     }
     pub fn uv(transport: T) -> Self {
         Self::new(DevKind::Uv, transport)
+    }
+    pub fn mise(transport: T) -> Self {
+        Self::new(DevKind::Mise, transport)
     }
     pub fn composer(transport: T) -> Self {
         Self::new(DevKind::Composer, transport)
@@ -3303,6 +3366,28 @@ impl<T: Transport> DevTool<T> {
                 if !path.is_absolute() {
                     return Err(ExecutionError::Invalid(
                         "uv tool directory must be absolute".into(),
+                    ));
+                }
+                Ok(path)
+            }
+            // mise keeps installs in its data directory; only tools in its
+            // global configuration are listed (see `mise_inventory`).
+            DevKind::Mise => {
+                let path = match (
+                    self.transport.env("MISE_DATA_DIR"),
+                    self.transport.env("XDG_DATA_HOME"),
+                    self.transport.env("HOME"),
+                ) {
+                    (Some(dir), _, _) => PathBuf::from(dir),
+                    (None, Some(data), _) => PathBuf::from(data).join("mise"),
+                    (None, None, Some(home)) => PathBuf::from(home).join(".local/share/mise"),
+                    (None, None, None) => {
+                        return Err(ExecutionError::Disabled("mise home not found".into()))
+                    }
+                };
+                if !path.is_absolute() {
+                    return Err(ExecutionError::Invalid(
+                        "mise data directory must be absolute".into(),
                     ));
                 }
                 Ok(path)
@@ -3981,6 +4066,98 @@ impl<T: Transport> DevTool<T> {
             })
             .collect()
     }
+    /// Tools from mise's global configuration only: project files such as
+    /// `mise.toml` or `.tool-versions` pin versions for that project and stay
+    /// out of PkgDeck. Candidates stay within the configured version range,
+    /// matching `mise upgrade`, which never rewrites the configuration.
+    fn mise_inventory(
+        &self,
+        home: &std::path::Path,
+        cancel: &Cancellation,
+    ) -> Result<Vec<PackageDetails>, EngineError> {
+        let id = self.kind.id();
+        let output = bytes(id, self.call(&["ls", "--global", "--json"], cancel, false)?)?;
+        let tools: std::collections::BTreeMap<String, Vec<MiseInstall>> =
+            serde_json::from_slice(&output).map_err(|e| invalid(id, e))?;
+        let outdated: std::collections::BTreeMap<String, MiseOutdated> =
+            match self.call(&["outdated", "--json"], cancel, false) {
+                Ok(result) => serde_json::from_slice(&bytes(id, result)?).unwrap_or_default(),
+                Err(_) => std::collections::BTreeMap::new(),
+            };
+        tools
+            .into_iter()
+            // Tools with backend options (`ubi:owner/repo[exe=x]`) are listed
+            // by mise but cannot be addressed safely; leave them out.
+            .filter(|(name, _)| mise_name(name))
+            .filter_map(|(name, installs)| {
+                let install = installs
+                    .into_iter()
+                    .filter(|install| install.installed)
+                    .max_by_key(|install| install.active)?;
+                let candidate = outdated
+                    .get(&name)
+                    .and_then(|entry| entry.latest.clone())
+                    .unwrap_or_else(|| install.version.clone());
+                let summary = match &install.requested_version {
+                    Some(requested) => format!("Global mise tool, version {requested}"),
+                    None => "Global mise tool".into(),
+                };
+                Some(self.detail(home, name, summary, None, install.version, Some(candidate)))
+            })
+            .collect()
+    }
+    /// Search mise's registry for tools to install globally.
+    fn mise_offers(
+        &self,
+        home: &std::path::Path,
+        query: &str,
+        installed: &[Package],
+        cancel: &Cancellation,
+    ) -> Result<Vec<Package>, EngineError> {
+        let id = self.kind.id();
+        let output = bytes(id, self.call(&["registry", "--json"], cancel, false)?)?;
+        let registry: Vec<MiseRegistryTool> =
+            serde_json::from_slice(&output).map_err(|e| invalid(id, e))?;
+        let lowered = query.to_ascii_lowercase();
+        let matches = |text: &str| text.to_ascii_lowercase().contains(&lowered);
+        Ok(registry
+            .into_iter()
+            .filter(|tool| mise_name(&tool.short))
+            .filter(|tool| {
+                !installed
+                    .iter()
+                    .any(|package| package.id.name == tool.short)
+            })
+            .filter(|tool| {
+                matches(&tool.short)
+                    || tool.aliases.iter().any(|alias| matches(alias))
+                    || tool.description.as_deref().is_some_and(matches)
+            })
+            .take(50)
+            .map(|tool| Package {
+                id: PackageId {
+                    backend: id.into(),
+                    name: tool.short.clone(),
+                    architecture: std::env::consts::ARCH.into(),
+                    scope: Scope::Environment {
+                        path: home.to_path_buf(),
+                    },
+                    remote: None,
+                    reference: None,
+                },
+                display_name: tool.short,
+                summary: tool.description.unwrap_or_default(),
+                installed_version: None,
+                // Registry tools are real matches; `mise use --global` installs the
+                // latest version, so that is the candidate.
+                candidate_version: Some("latest".into()),
+                update: UpdateAvailability::Unknown,
+                icon: None,
+                component_ids: vec![],
+                homepages: vec![],
+            })
+            .collect())
+    }
     fn inventory(&self, cancel: &Cancellation) -> Result<Vec<PackageDetails>, EngineError> {
         let home = self
             .home
@@ -3994,6 +4171,7 @@ impl<T: Transport> DevTool<T> {
             DevKind::Pip => self.pip_inventory(&home, cancel),
             DevKind::Pipx => self.pipx_inventory(&home, cancel),
             DevKind::Uv => self.uv_inventory(&home, cancel),
+            DevKind::Mise => self.mise_inventory(&home, cancel),
             DevKind::Composer => self.composer_inventory(&home, cancel),
             DevKind::Gem => self.gem_inventory(&home, cancel),
         }
@@ -4030,6 +4208,8 @@ impl<T: Transport> DevTool<T> {
                 let latest = format!("{name}@latest");
                 self.call(&["tool", "install", "--force", &latest], cancel, true)?
             }
+            // Within the configured range; `--bump` would rewrite the config.
+            DevKind::Mise => self.call(&["upgrade", name], cancel, true)?,
             DevKind::Composer => self.call(
                 &[
                     "global",
@@ -4085,6 +4265,25 @@ impl<T: Transport> DevTool<T> {
                 self.call(&["tool", "install", "--force", &latest], cancel, true)?;
             }
             return Ok(OperationOutcome::default());
+        }
+        if self.kind == DevKind::Mise {
+            // Plain `mise upgrade` also covers tools of the project in the
+            // working directory; name only the global tools.
+            let names: Vec<String> = self
+                .inventory(cancel)?
+                .into_iter()
+                .map(|package| package.package.id.name)
+                .collect();
+            if names.is_empty() {
+                return Ok(OperationOutcome::default());
+            }
+            progress(Progress::Message("Upgrading global mise tools.".into()));
+            let mut args = vec!["upgrade"];
+            args.extend(names.iter().map(String::as_str));
+            let result = self.call(&args, cancel, true)?;
+            return Ok(OperationOutcome {
+                cancellation_deferred: result.cancellation_deferred,
+            });
         }
         if self.kind == DevKind::Composer {
             // `global update` respects pinned constraints, so re-require each
@@ -4201,6 +4400,11 @@ impl<T: Transport> Backend for DevTool<T> {
                     || package.display_name.to_ascii_lowercase().contains(&lowered)
             })
             .collect();
+        if self.kind == DevKind::Mise {
+            let offers = self.mise_offers(&home, query, &results, cancel)?;
+            results.extend(offers);
+            return Ok(results);
+        }
         if results.is_empty() && self.kind.valid_name(query) {
             results.push(Package {
                 id: PackageId {
@@ -4255,6 +4459,8 @@ impl<T: Transport> Backend for DevTool<T> {
                 DevKind::Pnpm | DevKind::Bun => vec!["add", "--global", self.target(target)?],
                 DevKind::Pipx => vec!["install", self.target(target)?],
                 DevKind::Uv => vec!["tool", "install", self.target(target)?],
+                // Adds the tool to the global configuration at its latest version.
+                DevKind::Mise => vec!["use", "--global", self.target(target)?],
                 DevKind::Composer => vec![
                     "global",
                     "require",
@@ -4289,6 +4495,19 @@ impl<T: Transport> Backend for DevTool<T> {
                 DevKind::Pnpm | DevKind::Bun => vec!["remove", "--global", self.target(target)?],
                 DevKind::Pipx => vec!["uninstall", self.target(target)?],
                 DevKind::Uv => vec!["tool", "uninstall", self.target(target)?],
+                // Drop the global request, then delete the versions no tracked
+                // project config still needs; `unuse` alone keeps them.
+                DevKind::Mise => {
+                    let name = self.target(target)?;
+                    progress(Progress::Message(format!(
+                        "Running {id}. If you cancel, PkgDeck waits for it to finish."
+                    )));
+                    self.call(&["unuse", "--global", name], cancel, true)?;
+                    let result = self.call(&["prune", "--yes", name], cancel, true)?;
+                    return Ok(OperationOutcome {
+                        cancellation_deferred: result.cancellation_deferred,
+                    });
+                }
                 DevKind::Composer => vec!["global", "remove", self.target(target)?],
                 DevKind::Gem => vec![
                     "uninstall",
@@ -4443,6 +4662,7 @@ pub fn native_engine(
         ("pip", DevTool::pip),
         ("pipx", DevTool::pipx),
         ("uv", DevTool::uv),
+        ("mise", DevTool::mise),
         ("composer", DevTool::composer),
         ("gem", DevTool::gem),
     ] {
@@ -4559,7 +4779,7 @@ mod tests {
             .iter()
             .filter(|id| display_name(id) != **id)
             .count();
-        assert_eq!(renamed, BACKEND_IDS.len() - 5);
+        assert_eq!(renamed, BACKEND_IDS.len() - 6);
     }
 
     #[test]

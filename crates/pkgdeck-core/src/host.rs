@@ -64,6 +64,7 @@ pub const BACKENDS: &[(&str, &str)] = &[
     ("pip (virtual environment)", "pip3"),
     ("pipx", "pipx"),
     ("uv", "uv"),
+    ("mise", "mise"),
     ("Composer", "composer"),
     ("RubyGems", "gem"),
 ];
@@ -273,6 +274,9 @@ impl Host {
             "PIPX_HOME",
             "PIPX_BIN_DIR",
             "UV_TOOL_DIR",
+            "MISE_DATA_DIR",
+            "MISE_CONFIG_DIR",
+            "MISE_GLOBAL_CONFIG_FILE",
             // pnpm refuses global commands when PNPM_HOME is set in the
             // session but missing here; Cargo and Bun read theirs too.
             "PNPM_HOME",

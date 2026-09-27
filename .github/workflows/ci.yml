@@ -212,7 +212,7 @@ jobs:
       fail-fast: false
       matrix:
         platform: [linux-x86_64, linux-aarch64, macos-x86_64, macos-aarch64]
-        backend: [dnf, pacman, zypper, snap, cargo, npm, pnpm, bun, pip, pipx, uv, composer, gem]
+        backend: [dnf, pacman, zypper, snap, cargo, npm, pnpm, bun, pip, pipx, uv, mise, composer, gem]
         include:
           - { platform: linux-x86_64, runner: ubuntu-26.04 }
           - { platform: linux-aarch64, runner: ubuntu-26.04-arm }
@@ -243,6 +243,8 @@ jobs:
           - backend: composer
             kind: dev
           - backend: gem
+            kind: dev
+          - backend: mise
             kind: dev
         exclude:
           # Arch's official container is x86_64-only. Distro managers are Linux-only.

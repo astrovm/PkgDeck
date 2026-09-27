@@ -46,7 +46,7 @@ pkd completions bash                     # print a shell completion script
 
 Sources for `--from`: `fwupd`, `apt`, `dnf`, `pacman`, `zypper`, `snap`,
 `homebrew`, `homebrew-cask`, `appimage`, `flatpak`, `docker`, `podman`,
-`cargo`, `npm`, `pnpm`, `bun`, `pip`, `pipx`, `uv`, `composer`, `gem`,
+`cargo`, `npm`, `pnpm`, `bun`, `pip`, `pipx`, `uv`, `mise`, `composer`, `gem`,
 `codex`, `claude`, `grok`, and `opencode`.
 
 Without `--from`, PkgDeck uses every package manager it finds. Package managers
@@ -86,6 +86,11 @@ fuzzy matching or aliases.
   `pkd --from flatpak --scope system install org.example.App`
 - Homebrew tap packages keep their full name, such as `owner/tap/formula`. PkgDeck
   uses the `brew` found in your `PATH`.
+- mise only covers its global tools, the ones `mise use --global` adds. Project
+  files such as `mise.toml` and `.tool-versions` are never read or changed.
+  `install` adds the tool at `latest`, `upgrade` stays within the version your
+  global config asks for, and `remove` also deletes versions no project still
+  uses. Search covers mise's registry, including tool aliases.
 - If a source fails to answer, PkgDeck won't guess which package you meant.
   Retry, or pick a working source with `--from`.
 
