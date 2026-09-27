@@ -34,10 +34,11 @@ Open PkgDeck from your app menu, or run `flatpak run io.github.astrovm.PkgDeck`.
 
 ```sh
 brew tap astrovm/pkgdeck https://github.com/astrovm/PkgDeck
+brew trust astrovm/pkgdeck
 brew install astrovm/pkgdeck/pkgdeck
 ```
 
-This installs PkgDeck.app in `/Applications` and the `pkd` CLI, prebuilt for macOS 26 or later. On Linux, `brew install astrovm/pkgdeck/pkd` installs only the CLI.
+This installs PkgDeck.app in `/Applications` and the `pkd` CLI, prebuilt for macOS 26 or later. On Linux, `brew install astrovm/pkgdeck/pkd` installs only the CLI. `brew trust` lets `brew upgrade` update PkgDeck; Homebrew 6 and later skip taps you haven't trusted.
 
 ## Command line
 

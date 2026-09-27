@@ -14,12 +14,15 @@ Install the latest release:
 
 ```sh
 brew tap astrovm/pkgdeck https://github.com/astrovm/PkgDeck
+brew trust astrovm/pkgdeck
 brew install astrovm/pkgdeck/pkgdeck   # macOS
 brew install astrovm/pkgdeck/pkd       # Linux
 ```
 
 The full URL is needed because the repository isn't named `homebrew-pkgdeck`.
-This is our own tap, not part of Homebrew core. Both recipes are rendered from
+This is our own tap, not part of Homebrew core. Homebrew 6 and later only load
+a third-party tap you trust; without `brew trust`, installing by full name
+still works, but `brew upgrade` skips PkgDeck. Both recipes are rendered from
 [`packaging/homebrew`](../packaging/homebrew) when a release is published.
 
 ### macOS
@@ -48,8 +51,16 @@ brew install astrovm/pkgdeck/pkgdeck
 distribution. The optional APT helper links the distro's `libapt-pkg`, so it
 isn't included; APT is unavailable in this build but other package managers
 still work. Use the Flatpak, Snap or AppImage for APT support. The formula
-never installs system packages or runs Homebrew as root. Existing installs of
-the old `pkgdeck` formula are renamed to `pkd` on `brew update`.
+never installs system packages or runs Homebrew as root.
+
+Before 0.1.10 the Linux CLI was the `pkgdeck` formula. It is not renamed
+automatically, because a rename would also redirect the macOS cask, so switch
+once:
+
+```sh
+brew uninstall pkgdeck
+brew install astrovm/pkgdeck/pkd
+```
 
 ### Releasing a new version
 

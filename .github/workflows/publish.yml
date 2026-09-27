@@ -77,7 +77,7 @@ jobs:
             git fetch --no-tags origin "refs/heads/$branch"
           fi
           git checkout -b "$branch"
-          git add -A Formula Casks formula_renames.json
+          git add -A Formula Casks
           if git diff --cached --quiet; then
             echo "Formula already publishes $TAG"
             exit 0
