@@ -35,26 +35,68 @@ if kill -0 "$probe" 2>/dev/null; then
     exit 0
 fi
 wait "$probe" || { cat "$logs/iconservices.log"; echo 'IconServices probe failed' >&2; exit 1; }
+# Print the crashed thread of the report macOS writes for a run that died
+# from a signal; ReportCrash can take a few seconds to write it.
+crash_report() {
+    local run=$1 report= second
+    for ((second=0; second<30; second++)); do
+        report=$(find "$HOME/Library/Logs/DiagnosticReports" -maxdepth 1 -iname 'pkgdeck*.ips' \
+            -newer "$logs/cocoa-$run.log" 2>/dev/null | head -n 1)
+        [[ -z $report ]] || break
+        sleep 1
+    done
+    if [[ -z $report ]]; then
+        echo "No crash report was written for run $run"
+        return
+    fi
+    cp "$report" "$logs/cocoa-$run.ips"
+    echo "Crash report for run $run: $(basename "$report")"
+    # The report is a JSON header line followed by the JSON body.
+    tail -n +2 "$report" | jq -r '
+        . as $report
+        | "exception: \(.exception | tostring)",
+          "termination: \(.termination | tostring)",
+          "asi: \(.asi // {} | tostring)",
+          (.threads[] | select(.triggered) | "crashed thread: \(.name // .queue // "unnamed")",
+            (.frames[] | "  \($report.usedImages[.imageIndex].name // "?")  \(.symbol // "?")+\(.symbolLocation // 0)"))
+    ' || head -c 20000 "$report"
+}
 # Exercise the installed wrapper and native window system outside brew test's
 # sandbox. Keep offscreen coverage in the formula and full source GUI suite.
-env QT_QPA_PLATFORM=cocoa QT_QUICK_BACKEND=software QT_DEBUG_PLUGINS=1 \
-    XDG_CONFIG_HOME="$work" XDG_DATA_HOME="$work" \
-    "$binary" --smoke-test >"$logs/cocoa.log" 2>&1 &
-pid=$!
-for ((second=0; second<60; second++)); do
-    if ! kill -0 "$pid" 2>/dev/null; then
-        status=0
-        wait "$pid" || status=$?
-        pid=
-        cat "$logs/cocoa.log"
-        [[ $status == 0 ]] || exit "$status"
-        grep -q PKGDECK_GUI_READY "$logs/cocoa.log"
-        exit 0
+# Shutdown has crashed intermittently, so one clean run is not enough.
+runs=5
+for ((run=1; run<=runs; run++)); do
+    env QT_QPA_PLATFORM=cocoa QT_QUICK_BACKEND=software QT_DEBUG_PLUGINS=1 \
+        XDG_CONFIG_HOME="$work" XDG_DATA_HOME="$work" \
+        "$binary" --smoke-test >"$logs/cocoa-$run.log" 2>&1 &
+    pid=$!
+    status=
+    for ((second=0; second<60; second++)); do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            status=0
+            wait "$pid" || status=$?
+            pid=
+            break
+        fi
+        sleep 1
+    done
+    if [[ -z $status ]]; then
+        # A failed startup must retain the main-thread stack, not only a job timeout.
+        /usr/bin/sample "$pid" 2 -file "$logs/cocoa-$run.sample.txt" || true
+        cat "$logs/cocoa-$run.log"
+        echo "Installed Cocoa startup did not exit within 60 seconds (run $run of $runs)" >&2
+        exit 1
     fi
-    sleep 1
+    if [[ $status != 0 ]]; then
+        cat "$logs/cocoa-$run.log"
+        crash_report "$run"
+        echo "Installed Cocoa startup exited with status $status (run $run of $runs)" >&2
+        exit "$status"
+    fi
+    grep -q PKGDECK_GUI_READY "$logs/cocoa-$run.log" || {
+        cat "$logs/cocoa-$run.log"
+        echo "Installed Cocoa startup never became ready (run $run of $runs)" >&2
+        exit 1
+    }
 done
-# A failed startup must retain the main-thread stack, not only a job timeout.
-/usr/bin/sample "$pid" 2 -file "$logs/cocoa.sample.txt" || true
-cat "$logs/cocoa.log"
-echo 'Installed Cocoa startup did not exit within 60 seconds' >&2
-exit 1
+echo "Installed Cocoa startup passed $runs runs"
