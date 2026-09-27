@@ -4102,10 +4102,18 @@ impl<T: Transport> DevTool<T> {
             // by mise but cannot be addressed safely; leave them out.
             .filter(|(name, _)| mise_name(name))
             .filter_map(|(name, installs)| {
-                let install = installs
+                // With several configured versions (`go = ["1.22", "1.25"]`)
+                // all are active and the first one is what runs.
+                let mut installed: Vec<_> = installs
                     .into_iter()
                     .filter(|install| install.installed)
-                    .max_by_key(|install| install.active)?;
+                    .collect();
+                let first_active = installed.iter().position(|install| install.active);
+                let install = installed.remove(
+                    first_active
+                        .unwrap_or(0)
+                        .min(installed.len().checked_sub(1)?),
+                );
                 let candidate = outdated
                     .get(&name)
                     .and_then(|entry| entry.latest.clone())
@@ -4141,7 +4149,7 @@ impl<T: Transport> DevTool<T> {
             serde_json::from_slice(&output).map_err(|e| invalid(id, e))?;
         let lowered = query.to_ascii_lowercase();
         let matches = |text: &str| text.to_ascii_lowercase().contains(&lowered);
-        Ok(registry
+        let mut found: Vec<MiseRegistryTool> = registry
             .into_iter()
             .filter(|tool| mise_name(&tool.short))
             .filter(|tool| {
@@ -4149,6 +4157,23 @@ impl<T: Transport> DevTool<T> {
                     || tool.aliases.iter().any(|alias| matches(alias))
                     || tool.description.as_deref().is_some_and(matches)
             })
+            .collect();
+        // Exact names and aliases first, so the result cap never drops them.
+        found.sort_by_key(|tool| {
+            if tool.short.eq_ignore_ascii_case(query) {
+                0
+            } else if tool
+                .aliases
+                .iter()
+                .any(|alias| alias.eq_ignore_ascii_case(query))
+            {
+                1
+            } else {
+                2
+            }
+        });
+        Ok(found
+            .into_iter()
             .take(50)
             .map(|tool| {
                 match installed

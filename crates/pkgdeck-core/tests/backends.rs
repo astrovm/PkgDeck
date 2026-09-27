@@ -2835,6 +2835,38 @@ fn mise_lists_and_changes_only_global_tools() {
 }
 
 #[test]
+fn mise_reports_the_running_version_and_keeps_exact_registry_matches() {
+    let cancel = Cancellation::default();
+    // `go = ["1.22.12", "1.25.1"]`: both are active, and the first one runs.
+    let list = r#"{"go": [
+      {"version": "1.22.12", "requested_version": "1.22.12", "installed": true, "active": true},
+      {"version": "1.25.1", "requested_version": "1.25.1", "installed": true, "active": true}
+    ]}"#;
+    // Sixty tools match "op"; the exact one comes last in registry order.
+    let mut registry: Vec<String> = (0..60)
+        .map(|n| format!(r#"{{"short": "tool{n}", "description": "op helper {n}"}}"#))
+        .collect();
+    registry.push(r#"{"short": "op", "description": "1Password CLI"}"#.into());
+    let mut backend = DevTool::mise(DevFixture {
+        home: Some("/home/test".into()),
+        version: "2026.9.15\n".into(),
+        list: list.into(),
+        registry: Some(format!("[{}]", registry.join(","))),
+        ..DevFixture::default()
+    });
+    backend.detect(&cancel).unwrap();
+    let go = backend.installed(&cancel).unwrap().remove(0);
+    assert_eq!(go.installed_version.as_deref(), Some("1.22.12"));
+    let found = backend.search("op", &cancel).unwrap();
+    let op = found.iter().find(|p| p.id.name == "op").unwrap();
+    assert_eq!(op.candidate_version.as_deref(), Some("latest"));
+    assert_eq!(
+        backend.details(&op.id, &cancel).unwrap().description,
+        "1Password CLI"
+    );
+}
+
+#[test]
 fn cancelled_mise_update_checks_are_not_reported_as_current() {
     let cancel = Cancellation::default();
     let mut backend = DevTool::mise(DevFixture {
