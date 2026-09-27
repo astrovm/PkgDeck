@@ -81,8 +81,160 @@ impl AppIo for NativeApps {
                 false,
             )?,
         )?;
-        cask_owners(&root, &installed)
+        let mut owners = cask_owners(&root, &installed)?;
+        for (cask, patterns) in receipt_patterns(&installed)? {
+            for id in patterns
+                .iter()
+                .flat_map(|pattern| self.receipts(pattern, cancel))
+                .collect::<BTreeSet<_>>()
+            {
+                for bundle in self.receipt_bundles(&id, cancel)? {
+                    if let Ok(target) = fs::canonicalize(&bundle) {
+                        owners.entry(target).or_default().push(cask.clone());
+                    }
+                }
+            }
+        }
+        for names in owners.values_mut() {
+            names.sort();
+            names.dedup();
+        }
+        Ok(owners)
     }
+}
+
+impl NativeApps {
+    fn pkgutil(&self, args: &[&str], cancel: &Cancellation) -> Result<Completion, EngineError> {
+        Ok(self.0.read(
+            Path::new("/usr/sbin/pkgutil"),
+            &args.iter().map(OsString::from).collect::<Vec<_>>(),
+            Limits {
+                timeout: Duration::from_secs(10),
+                output_bytes: 8 * 1024 * 1024,
+            },
+            cancel,
+        )?)
+    }
+    /// Installed receipt IDs matching a cask's `uninstall pkgutil:` pattern,
+    /// which Homebrew treats as a regular expression. No match is not an error.
+    fn receipts(&self, pattern: &str, cancel: &Cancellation) -> Vec<String> {
+        match self.pkgutil(&[&format!("--pkgs={pattern}")], cancel) {
+            Ok(result) if result.code == Some(0) && !result.truncated => {
+                String::from_utf8_lossy(&result.stdout)
+                    .lines()
+                    .map(str::trim)
+                    .filter(|id| receipt_id(id))
+                    .map(str::to_owned)
+                    .collect()
+            }
+            _ => vec![],
+        }
+    }
+    fn receipt_bundles(
+        &self,
+        id: &str,
+        cancel: &Cancellation,
+    ) -> Result<Vec<PathBuf>, EngineError> {
+        if cancel.requested() {
+            return Err(EngineError::Cancelled);
+        }
+        let (Ok(info), Ok(files)) = (
+            self.pkgutil(&["--pkg-info", id], cancel),
+            self.pkgutil(&["--files", id], cancel),
+        ) else {
+            return Ok(vec![]);
+        };
+        if info.code != Some(0) || files.code != Some(0) || info.truncated || files.truncated {
+            return Ok(vec![]);
+        }
+        Ok(receipt_bundles(
+            &String::from_utf8_lossy(&info.stdout),
+            &String::from_utf8_lossy(&files.stdout),
+        ))
+    }
+}
+
+fn receipt_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 255
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+}
+
+/// The receipt patterns each installed cask names in `uninstall pkgutil:`.
+/// A cask that runs an installer package leaves no app link, but its uninstall
+/// step names the receipts the package wrote.
+fn receipt_patterns(data: &[u8]) -> Result<Vec<(String, Vec<String>)>, EngineError> {
+    #[derive(Deserialize)]
+    struct InstalledCask {
+        full_token: String,
+        installed: Option<String>,
+        artifacts: Vec<Value>,
+    }
+    #[derive(Deserialize)]
+    struct Report {
+        casks: Vec<InstalledCask>,
+    }
+    let report: Report = serde_json::from_slice(data).map_err(|e| invalid(ID, e))?;
+    Ok(report
+        .casks
+        .into_iter()
+        .filter(|cask| cask.installed.is_some() && cask_token(&cask.full_token))
+        .filter_map(|cask| {
+            let patterns: Vec<String> = cask
+                .artifacts
+                .iter()
+                .filter_map(|artifact| artifact.get("uninstall")?.as_array())
+                .flatten()
+                .filter_map(|step| step.get("pkgutil"))
+                .flat_map(|value| match value {
+                    Value::String(pattern) => vec![pattern.clone()],
+                    Value::Array(patterns) => patterns
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect(),
+                    _ => vec![],
+                })
+                .filter(|pattern| {
+                    !pattern.is_empty()
+                        && pattern.len() <= 255
+                        && !pattern.chars().any(char::is_control)
+                })
+                .collect();
+            (!patterns.is_empty()).then_some((cask.full_token, patterns))
+        })
+        .collect())
+}
+
+/// App bundles a receipt installed: its location when that is a bundle, or
+/// each listed `.app` that is not inside another bundle.
+fn receipt_bundles(info: &str, files: &str) -> Vec<PathBuf> {
+    let field = |name: &str| {
+        info.lines()
+            .find_map(|line| line.strip_prefix(name))
+            .map(str::trim)
+    };
+    let (Some(volume), Some(location)) = (field("volume:"), field("location:")) else {
+        return vec![];
+    };
+    let volume = Path::new(volume);
+    if !volume.is_absolute() || !(location.is_empty() || relative_artifact(Path::new(location))) {
+        return vec![];
+    }
+    let base = volume.join(location);
+    let is_bundle = |path: &Path| path.extension().is_some_and(|ext| ext == "app");
+    if is_bundle(&base) {
+        return vec![base];
+    }
+    files
+        .lines()
+        .map(Path::new)
+        .filter(|path| relative_artifact(path) && is_bundle(path))
+        .filter(|path| path.ancestors().skip(1).all(|parent| !is_bundle(parent)))
+        .map(|path| base.join(path))
+        .collect()
 }
 
 fn relative_artifact(path: &Path) -> bool {
@@ -95,7 +247,10 @@ fn relative_artifact(path: &Path) -> bool {
 /// Homebrew leaves an app-artifact symlink in its installed version directory.
 /// Match its canonical destination, never just the app name or bundle ID. Only
 /// records from `brew info --installed` participate; stale staging directories
-/// and a second copy of the same app do not establish ownership.
+/// and a second copy of the same app do not establish ownership. A renamed
+/// cask keeps its Caskroom folder under an old token, and its current
+/// definition may no longer list the app it installed, so its installed
+/// version folder is also searched for app links under each old token.
 fn cask_owners(root: &Path, data: &[u8]) -> Result<BTreeMap<PathBuf, Vec<String>>, EngineError> {
     #[derive(Deserialize)]
     struct InstalledCask {
@@ -103,6 +258,8 @@ fn cask_owners(root: &Path, data: &[u8]) -> Result<BTreeMap<PathBuf, Vec<String>
         full_token: String,
         installed: Option<String>,
         artifacts: Vec<Value>,
+        #[serde(default)]
+        old_tokens: Vec<String>,
     }
     #[derive(Deserialize)]
     struct Report {
@@ -122,6 +279,7 @@ fn cask_owners(root: &Path, data: &[u8]) -> Result<BTreeMap<PathBuf, Vec<String>
         {
             return Err(invalid(ID, "invalid installed cask identity"));
         }
+        let mut links = BTreeSet::new();
         for artifact in cask.artifacts {
             let Some(source) = artifact
                 .get("app")
@@ -134,7 +292,25 @@ fn cask_owners(root: &Path, data: &[u8]) -> Result<BTreeMap<PathBuf, Vec<String>
             if !relative_artifact(Path::new(source)) {
                 return Err(invalid(ID, "invalid Homebrew app artifact"));
             }
-            let link = root.join(&cask.token).join(&version).join(source);
+            links.insert(root.join(&cask.token).join(&version).join(source));
+        }
+        for old in cask
+            .old_tokens
+            .iter()
+            .filter(|old| cask_token(old) && !old.contains('/'))
+        {
+            let folder = root.join(old).join(&version);
+            let Ok(entries) = fs::read_dir(&folder) else {
+                continue;
+            };
+            links.extend(
+                entries
+                    .flatten()
+                    .map(|entry| entry.path())
+                    .filter(|path| path.extension().is_some_and(|ext| ext == "app")),
+            );
+        }
+        for link in links {
             if fs::symlink_metadata(&link).is_ok_and(|m| m.file_type().is_symlink()) {
                 if let Ok(target) = fs::canonicalize(&link) {
                     owners
@@ -1114,6 +1290,94 @@ mod tests {
             owners(&root, vec![record("editor", "Editor.app", json!("1.0"))])
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn renamed_casks_own_app_links_left_under_their_old_token() {
+        let f = Fixture::new();
+        let app = f.bundle("Applications/Viewer.app", "com.example.viewer");
+        let copied = f.bundle("Other/Copied.app", "com.example.copied");
+        let root = f.0.join("Caskroom");
+        let old = root.join("old-viewer/7.1");
+        fs::create_dir_all(&old).unwrap();
+        symlink(&app, old.join("Viewer.app")).unwrap();
+        // Only Homebrew's links count, not a bundle copied into the folder.
+        fs::create_dir(old.join("Copied.app")).unwrap();
+        let renamed = |old_tokens: Value| {
+            json!({"token": "new-viewer", "full_token": "new-viewer", "installed": "7.1",
+                "old_tokens": old_tokens, "artifacts": [{"pkg": ["Viewer.pkg"]}]})
+        };
+        let records = owners(&root, vec![renamed(json!(["old-viewer"]))]).unwrap();
+        assert_eq!(
+            records[&fs::canonicalize(&app).unwrap()],
+            vec!["new-viewer"]
+        );
+        assert!(!records.contains_key(&fs::canonicalize(copied).unwrap()));
+        assert!(owners(&root, vec![renamed(json!([]))]).unwrap().is_empty());
+        assert!(owners(&root, vec![renamed(json!(["../old-viewer"]))])
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn installer_package_casks_name_their_receipts() {
+        let casks = json!({"casks": [
+            {"full_token": "drive", "installed": "130.0", "artifacts": [
+                {"pkg": ["Drive.pkg"]},
+                {"uninstall": [{"pkgutil": ["com.example.drive", "com.example.drive\\..*"], "delete": null}]}]},
+            {"full_token": "vpn", "installed": "1.0", "artifacts": [
+                {"uninstall": [{"pkgutil": "com.example.vpn"}]}]},
+            {"full_token": "gone", "installed": null, "artifacts": [
+                {"uninstall": [{"pkgutil": "com.example.gone"}]}]},
+            {"full_token": "plain", "installed": "2.0", "artifacts": [{"app": ["Plain.app"]}]}
+        ]});
+        assert_eq!(
+            receipt_patterns(&serde_json::to_vec(&casks).unwrap()).unwrap(),
+            vec![
+                (
+                    "drive".to_owned(),
+                    vec![
+                        "com.example.drive".to_owned(),
+                        "com.example.drive\\..*".to_owned()
+                    ]
+                ),
+                ("vpn".to_owned(), vec!["com.example.vpn".to_owned()]),
+            ]
+        );
+        assert!(receipt_id("com.google.drivefs.arm64"));
+        assert!(!receipt_id("com.example; rm"));
+        assert!(!receipt_id(""));
+    }
+
+    #[test]
+    fn receipts_locate_top_level_bundles_only() {
+        // A package that installs into the bundle itself.
+        assert_eq!(
+            receipt_bundles(
+                "package-id: com.example.vpn\nvolume: /\nlocation: Applications/VPN.app\n",
+                "Contents\nContents/Frameworks/Sparkle.framework/Updater.app\n"
+            ),
+            vec![PathBuf::from("/Applications/VPN.app")]
+        );
+        // A package that installs several apps and their contents.
+        assert_eq!(
+            receipt_bundles(
+                "volume: /\nlocation: Applications\n",
+                "Docs.app\nDocs.app/Contents\nDocs.app/Contents/Helper.app\nSheets.app\nREADME\n"
+            ),
+            vec![
+                PathBuf::from("/Applications/Docs.app"),
+                PathBuf::from("/Applications/Sheets.app")
+            ]
+        );
+        assert!(receipt_bundles("volume: /\nlocation: ../Applications\n", "Docs.app\n").is_empty());
+        assert!(
+            receipt_bundles("volume: relative\nlocation: Applications\n", "Docs.app\n").is_empty()
+        );
+        assert!(receipt_bundles("location: Applications\n", "Docs.app\n").is_empty());
+        assert!(
+            receipt_bundles("volume: /\nlocation: Applications\n", "../Escape.app\n").is_empty()
         );
     }
 

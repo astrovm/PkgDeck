@@ -65,18 +65,21 @@ in about two seconds without launching them. It matched the 29 casks that
 leave an app link to their exact bundles, including bundles named differently
 from their cask (`Code` for `visual-studio-code`).
 
-Every miss stayed unknown rather than being guessed, as step 1 below requires:
+The first run left six apps unmatched. Every one stayed unknown rather than
+being guessed, as step 1 below requires, and two kinds are now matched from
+evidence Homebrew already records:
 
-| Case | Apps | Why there is no app link |
+| Case | Apps | Now |
 | --- | --- | --- |
-| Cask installs a `.pkg` | Tailscale, Google Drive | Homebrew runs the installer and links nothing |
-| Renamed cask | VNC Viewer | `vnc-viewer` became `realvnc-connect-viewer`, whose current definition is a `.pkg`, while the Caskroom still uses the old token |
-| Broken Caskroom record | LibreOffice, qBittorrent | No installed-version folder, so `brew info --installed` omits them |
+| Cask installs a `.pkg` | Tailscale; Google Drive with its Docs, Sheets and Slides apps | Matched. The cask's `uninstall pkgutil:` step names the receipts its package wrote; `pkgutil` lists the bundles each receipt installed |
+| Renamed cask | VNC Viewer | Matched. `vnc-viewer` became `realvnc-connect-viewer`; `brew info` lists the old token, and the app link is still in the old token's Caskroom folder |
+| Broken Caskroom record | LibreOffice, qBittorrent | Still unknown: no installed-version folder, so `brew info --installed` omits them |
 
-The summary previously said "No Homebrew ownership record found" for all of
-these, which reads as "not from Homebrew". It now says ownership is unknown.
-Matching `.pkg` casks needs their package receipts (`pkgutil`), and renamed
-casks need Homebrew's rename map; both remain open.
+Receipt matching uses only receipts an installed cask names and bundles the
+receipt itself lists, so an app installed from the vendor's own package, with
+no matching cask installed, stays unmatched. It adds about 0.2 s to a scan. The
+summary for unmatched apps says ownership is unknown instead of "No Homebrew
+ownership record found", which read as "not from Homebrew".
 
 Edge cases, checked with temporary bundles in `~/Applications`:
 
@@ -85,7 +88,7 @@ Edge cases, checked with temporary bundles in `~/Applications`:
 | A second copy of a Homebrew app | Its own user-scope row with unknown ownership; the Homebrew copy stays managed. Neither claims the other |
 | Malformed, unreadable or missing `Info.plist` | Listed, with an unknown version |
 | A folder it may not open | Every other app is listed, and the skipped folder is reported |
-| Scan time, 46 bundles | About 1.1 s once warm, 0.7 s of it `brew info --installed`; the first run took 1.9 s. A cold boot was not measured |
+| Scan time, 46 bundles | About 1.3 s once warm with receipt matching, 0.7 s of it `brew info --installed`; the first run took 1.9 s. A cold boot was not measured |
 
 The GUI treated the skipped folder as a failed source: "Couldn't check macOS
 Applications", a raw OS error and a "Turn off" button. It now shows "Some apps
@@ -147,7 +150,7 @@ or a dedicated design.
 
 | Priority | Opportunity | User benefit | Effort | Recommended first scope |
 | --- | --- | --- | --- | --- |
-| P0 | macOS app inventory and Brew matching | Makes software outside package databases visible | M | Shipped in PR #114 and validated on a Mac; next match `.pkg` casks by receipt and follow cask renames |
+| P0 | macOS app inventory and Brew matching | Makes software outside package databases visible | M | Shipped in PR #114 and validated on a Mac; PR #118 matches `.pkg` casks by receipt and follows cask renames |
 | P0 | Linux Homebrew cask compatibility | Expands an existing integration | M | 2,873 casks support Linux (214 AppImage); probe support, filter artifacts, test both CPUs |
 | P0 | mise | Runtime and developer-tool coverage across Linux/macOS; Volta's successor | M–L | `mise ls --json` and `mise outdated --json`, then explicit global-tool upgrades |
 | P0 | AI CLI catalog using current managers | Easier discovery without duplicate backends | S–M | Copilot, Kiro, Amp, Droid, Qwen Code, Crush, goose, Cline; exact package IDs only |
@@ -456,7 +459,7 @@ compatible release or prove PkgDeck's existing adapter works with it.
 1. **Validate the foundation:** PR #114 now runs on an actual Mac (see
    [Validation on a Mac](#validation-on-a-mac)), including active-prefix
    ownership, broken Caskroom records, duplicate copies, unreadable bundles and
-   scan timing. Still open: `.pkg` receipts, renamed casks and cold-boot timing. Missing ownership evidence must
+   scan timing, and matches `.pkg` casks and renamed casks. Still open: cold-boot timing. Missing ownership evidence must
    stay unknown. Add publisher/channel/architecture verification before migration.
    Introduce the AI catalog using existing package routes; prototype Linux casks
    and mise inventory separately. These are separate work items, not one P0
