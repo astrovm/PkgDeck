@@ -340,6 +340,15 @@ impl MacApps {
                 }
             };
             if path.extension().is_some_and(|e| e == "app") && path.is_dir() {
+                // Identities are strings; a lossy name would point elsewhere
+                // and could collide with another bundle's identity.
+                if path.to_str().is_none() {
+                    errors.push(invalid(
+                        ID,
+                        format!("skipped entry {}: path is not valid UTF-8", path.display()),
+                    ));
+                    continue;
+                }
                 let canonical = match self.io.canonicalize(&path) {
                     Ok(canonical) => canonical,
                     Err(error) => {
@@ -438,6 +447,9 @@ impl MacApps {
             description.push("Matching evidence: the bundle identifier matches PkgDeck's curated cask catalog. Publisher signature, edition/channel, architecture, and artifact equality have not been verified. This is a discovery suggestion, not an adoption plan.".into());
         }
         description.push("Read-only inventory. PkgDeck cannot install, update, remove, or adopt this app from this source.".into());
+        let name = path
+            .to_str()
+            .ok_or_else(|| invalid(ID, format!("{} is not valid UTF-8", path.display())))?;
         let summary = format!(
             "{owner}{} · {}",
             suggestion
@@ -450,11 +462,11 @@ impl MacApps {
             package: Package {
                 id: PackageId {
                     backend: ID.into(),
-                    name: path.to_string_lossy().into(),
+                    name: name.into(),
                     architecture: "unknown".into(),
                     scope: scope.clone(),
                     remote: None,
-                    reference: Some(path.to_string_lossy().into()),
+                    reference: Some(name.into()),
                 },
                 display_name: display,
                 summary,
@@ -736,6 +748,29 @@ mod tests {
             assert_eq!(errors.len(), 1);
             assert!(errors[0].to_string().contains(gone.to_str().unwrap()));
         }
+    }
+
+    // APFS refuses non-UTF-8 names, so only Linux can create this fixture.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn non_utf8_bundle_paths_are_skipped_instead_of_published_lossily() {
+        use std::os::unix::ffi::OsStrExt;
+        let f = Fixture::new();
+        let kept = f.bundle("A.app", "md.obsidian");
+        let raw = f.0.join(std::ffi::OsStr::from_bytes(b"Bad\xff.app"));
+        fs::create_dir_all(raw.join("Contents")).unwrap();
+        let mut backend = f.backend(Ok(BTreeMap::new()));
+        let packages = backend.installed(&Cancellation::default()).unwrap();
+        assert_eq!(
+            packages
+                .iter()
+                .map(|p| PathBuf::from(&p.id.name))
+                .collect::<Vec<_>>(),
+            vec![kept]
+        );
+        let errors = backend.query_errors();
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].to_string().contains("not valid UTF-8"));
     }
 
     #[test]
