@@ -1496,6 +1496,11 @@ struct DevFixture {
     pip_list: String,
     pip_outdated: Option<String>,
     extra_env: std::collections::BTreeMap<String, String>,
+    registry: Option<String>,
+    /// A read subcommand that behaves as if the user cancelled it.
+    cancel_on: Option<String>,
+    /// A write subcommand that finishes after the user asked to cancel.
+    deferred_write: Option<String>,
     calls: Arc<Mutex<Vec<DevCall>>>,
 }
 
@@ -1650,6 +1655,19 @@ impl Transport for DevFixture {
             }));
         }
         let first = rendered.first().map(String::as_str);
+        if !write && first.is_some() && first == self.cancel_on.as_deref() {
+            return Err(ExecutionError::Cancelled);
+        }
+        if write && first.is_some() && first == self.deferred_write.as_deref() {
+            return Ok(Completion {
+                code: Some(0),
+                signal: None,
+                stdout: vec![],
+                stderr: vec![],
+                truncated: false,
+                cancellation_deferred: true,
+            });
+        }
         match (executable, first) {
             (_, Some("--version")) => Ok(output(&self.version)),
             (_, Some("root")) => match &self.root {
@@ -1730,6 +1748,13 @@ impl Transport for DevFixture {
                 } else {
                     self.list_result()
                 }
+            }
+            ("mise", Some("ls")) => self.list_result(),
+            ("mise", Some("outdated")) => {
+                Ok(output(self.outdated.clone().unwrap_or_else(|| "{}".into())))
+            }
+            ("mise", Some("registry")) => {
+                Ok(output(self.registry.clone().unwrap_or_else(|| "[]".into())))
             }
             ("gem", Some("env")) => match &self.root {
                 Some(root) => Ok(output(format!(
@@ -2441,6 +2466,24 @@ const PIPX_LIST: &str = r#"{"venvs": {"cowsay": {"metadata": {"main_package": {"
 const PIPX_OUTDATED: &str = r#"{"command": ["list"], "data": {"packages": [{"environment": "cowsay", "package": "cowsay", "version": "6.0", "latest_version": "6.1"}]}, "errors": [], "exit_code": 0}"#;
 const UV_LIST: &str = "cowsay v6.0\n- cowsay\nrequests v2.32.0\n- requests\n";
 const UV_OUTDATED: &str = "cowsay v6.0 [latest: 6.1]\n- cowsay\n";
+// `mise ls --global --json` and `mise outdated --json` from mise 2026.9.
+const MISE_LIST: &str = r#"{
+  "yq": [{"version": "4.40.5", "requested_version": "4", "installed": true, "active": true,
+    "install_path": "/home/test/.local/share/mise/installs/yq/4.40.5",
+    "source": {"type": "mise.toml", "path": "/home/test/.config/mise/config.toml"}}],
+  "go": [{"version": "1.24.12", "requested_version": "1.24", "installed": true, "active": false},
+         {"version": "1.24.13", "requested_version": "1.24", "installed": true, "active": true}],
+  "node": [{"version": "22.1.0", "requested_version": "22", "installed": false, "active": false}],
+  "ubi:owner/tool[exe=tool]": [{"version": "1.0.0", "installed": true, "active": true}]
+}"#;
+const MISE_OUTDATED: &str = r#"{"yq": {"name": "yq", "requested": "4", "current": "4.40.5", "bump": null,
+  "latest": "4.53.6", "source": {"type": "mise.toml", "path": "/home/test/.config/mise/config.toml"}}}"#;
+const MISE_REGISTRY: &str = r#"[
+  {"short": "yq", "backends": ["aqua:mikefarah/yq"], "description": "YAML processor"},
+  {"short": "jq", "backends": ["aqua:jqlang/jq"], "description": "Command-line JSON processor", "aliases": []},
+  {"short": "jaq", "backends": ["aqua:01mf02/jaq"], "description": "A jq clone"},
+  {"short": "1password", "backends": ["aqua:1password/cli"], "description": "Password manager", "aliases": ["op"]}
+]"#;
 const COMPOSER_LIST: &str = r#"{"installed": [{"name": "psr/log", "version": "1.0.0", "description": "Common interface for logging libraries", "homepage": "https://example.invalid"}]}"#;
 const COMPOSER_OUTDATED: &str = r#"{"installed": [{"name": "psr/log", "version": "1.0.0", "description": "Common interface for logging libraries", "latest": "3.0.2"}]}"#;
 
@@ -2639,6 +2682,284 @@ fn pipx_lifecycle() {
     assert!(writes.contains(&vec!["upgrade".into(), "cowsay".into()]));
     assert!(writes.contains(&vec!["uninstall".into(), "cowsay".into()]));
     assert!(writes.contains(&vec!["upgrade-all".into()]));
+}
+
+#[test]
+fn mise_lists_and_changes_only_global_tools() {
+    let fixture = DevFixture {
+        home: Some("/home/test".into()),
+        version: "2026.9.15 linux-arm64 (2026-09-27)\n".into(),
+        list: MISE_LIST.into(),
+        outdated: Some(MISE_OUTDATED.into()),
+        registry: Some(MISE_REGISTRY.into()),
+        ..DevFixture::default()
+    };
+    let home = "/home/test/.local/share/mise";
+    let mut backend = DevTool::mise(fixture.clone());
+    let cancel = Cancellation::default();
+    assert_eq!(backend.detect(&cancel), Ok(Availability::Available));
+    let installed = backend.installed(&cancel).unwrap();
+    // Not-installed requests and tools with backend options are left out.
+    let names: Vec<_> = installed.iter().map(|p| p.id.name.as_str()).collect();
+    assert_eq!(names, ["go", "yq"]);
+    let go = &installed[0];
+    assert_eq!(go.installed_version.as_deref(), Some("1.24.13"));
+    assert_eq!(go.update, UpdateAvailability::Current);
+    let yq = &installed[1];
+    assert_eq!(yq.id.scope, Scope::Environment { path: home.into() });
+    assert_eq!(yq.candidate_version.as_deref(), Some("4.53.6"));
+    assert_eq!(yq.update, UpdateAvailability::Available);
+    assert_eq!(yq.summary, "Global mise tool, version 4");
+    // Search covers installed tools and mise's registry, including aliases.
+    let found = backend.search("jq", &cancel).unwrap();
+    let found: Vec<_> = found
+        .iter()
+        .map(|p| (p.id.name.as_str(), p.installed_version.is_some()))
+        .collect();
+    assert_eq!(found, [("jq", false), ("jaq", false)]);
+    assert!(backend
+        .search("jq", &cancel)
+        .unwrap()
+        .iter()
+        .all(|p| p.candidate_version.as_deref() == Some("latest")));
+    assert_eq!(
+        backend.search("op", &cancel).unwrap()[0].id.name,
+        "1password"
+    );
+    // Searches skip mise's network-bound update check.
+    let before = fixture.calls().len();
+    backend.search("go", &cancel).unwrap();
+    assert!(fixture.calls()[before..]
+        .iter()
+        .all(|(_, args, _)| args.first().map(String::as_str) != Some("outdated")));
+    // A registry match that is not installed still opens its details,
+    // without the update check.
+    let jq = backend.search("jq", &cancel).unwrap().remove(0);
+    let before = fixture.calls().len();
+    let details = backend.details(&jq.id, &cancel).unwrap();
+    assert_eq!(details.package.id.name, "jq");
+    assert_eq!(details.description, "Command-line JSON processor");
+    assert!(fixture.calls()[before..]
+        .iter()
+        .all(|(_, args, _)| args.first().map(String::as_str) != Some("outdated")));
+    // An installed tool's details keep its update state.
+    assert_eq!(
+        backend
+            .details(&yq.id, &cancel)
+            .unwrap()
+            .package
+            .candidate_version
+            .as_deref(),
+        Some("4.53.6")
+    );
+    assert!(backend
+        .search("yq", &cancel)
+        .unwrap()
+        .iter()
+        .all(|p| p.installed_version.is_some()));
+    // An installed tool found only through the registry (its description
+    // here) is shown as installed, not offered again.
+    let yaml: Vec<_> = backend
+        .search("yaml", &cancel)
+        .unwrap()
+        .into_iter()
+        .filter(|p| p.installed_version.is_some() || p.candidate_version.is_some())
+        .collect();
+    assert_eq!(yaml.len(), 1);
+    assert_eq!(yaml[0].installed_version.as_deref(), Some("4.40.5"));
+    // Backend-qualified tools are not registry entries but stay installable
+    // by exact name; the offer has no version, so it is not a listed match.
+    let exact = backend.search("cargo:ripgrep", &cancel).unwrap();
+    assert_eq!(exact.len(), 1);
+    assert_eq!(exact[0].id.name, "cargo:ripgrep");
+    assert!(exact[0].candidate_version.is_none());
+    let cancel = Cancellation::default();
+    let before = fixture.calls().len();
+    for operation in [
+        Operation::Install(dev_id("mise", "jq", home)),
+        Operation::Upgrade(yq.id.clone()),
+        Operation::Remove(yq.id.clone()),
+        Operation::UpgradeAll {
+            backend: "mise".into(),
+        },
+    ] {
+        backend.execute(&operation, &cancel, &mut |_| {}).unwrap();
+    }
+    // `mise upgrade` finds outdated tools itself; upgrade-all skips the check.
+    assert!(fixture.calls()[before..]
+        .iter()
+        .all(|(_, args, _)| args.first().map(String::as_str) != Some("outdated")));
+    assert_eq!(
+        fixture.writes("mise"),
+        vec![
+            vec!["use".to_string(), "--global".into(), "jq".into()],
+            vec!["upgrade".into(), "yq".into()],
+            vec!["unuse".into(), "--global".into(), "yq".into()],
+            vec!["prune".into(), "--yes".into(), "yq".into()],
+            vec!["upgrade".into(), "go".into(), "yq".into()],
+        ]
+    );
+    // Versions, paths, options and foreign scopes never reach mise.
+    for name in [
+        "jq@1.7",
+        "--global",
+        "../jq",
+        "npm:@scope/pkg@1",
+        "ubi:o/r[exe=x]",
+        "Go Tool",
+    ] {
+        assert!(
+            backend
+                .execute(
+                    &Operation::Install(dev_id("mise", name, home)),
+                    &cancel,
+                    &mut |_| {}
+                )
+                .is_err(),
+            "{name}"
+        );
+    }
+    for name in [
+        "node",
+        "aqua:cli/cli",
+        "npm:@anthropic-ai/claude-code",
+        "cargo:ripgrep",
+        "go:github.com/x/y",
+    ] {
+        assert!(
+            backend
+                .execute(
+                    &Operation::Install(dev_id("mise", name, home)),
+                    &cancel,
+                    &mut |_| {}
+                )
+                .is_ok(),
+            "{name}"
+        );
+    }
+    assert!(backend
+        .execute(
+            &Operation::Install(dev_id("mise", "jq", "/elsewhere")),
+            &cancel,
+            &mut |_| {}
+        )
+        .is_err());
+}
+
+#[test]
+fn mise_reports_the_running_version_and_keeps_exact_registry_matches() {
+    let cancel = Cancellation::default();
+    // `go = ["1.22.12", "1.25.1"]`: both are active, and the first one runs.
+    let list = r#"{"go": [
+      {"version": "1.22.12", "requested_version": "1.22.12", "installed": true, "active": true},
+      {"version": "1.25.1", "requested_version": "1.25.1", "installed": true, "active": true}
+    ]}"#;
+    // Sixty tools match "op"; the exact one comes last in registry order.
+    let mut registry: Vec<String> = (0..60)
+        .map(|n| format!(r#"{{"short": "tool{n}", "description": "op helper {n}"}}"#))
+        .collect();
+    registry.push(r#"{"short": "op", "description": "1Password CLI"}"#.into());
+    let mut backend = DevTool::mise(DevFixture {
+        home: Some("/home/test".into()),
+        version: "2026.9.15\n".into(),
+        list: list.into(),
+        registry: Some(format!("[{}]", registry.join(","))),
+        ..DevFixture::default()
+    });
+    backend.detect(&cancel).unwrap();
+    let go = backend.installed(&cancel).unwrap().remove(0);
+    assert_eq!(go.installed_version.as_deref(), Some("1.22.12"));
+    let found = backend.search("op", &cancel).unwrap();
+    let op = found.iter().find(|p| p.id.name == "op").unwrap();
+    assert_eq!(op.candidate_version.as_deref(), Some("latest"));
+    assert_eq!(
+        backend.details(&op.id, &cancel).unwrap().description,
+        "1Password CLI"
+    );
+}
+
+#[test]
+fn cancelled_mise_update_checks_are_not_reported_as_current() {
+    let cancel = Cancellation::default();
+    let mut backend = DevTool::mise(DevFixture {
+        home: Some("/home/test".into()),
+        version: "2026.9.15\n".into(),
+        list: MISE_LIST.into(),
+        outdated: Some(MISE_OUTDATED.into()),
+        cancel_on: Some("outdated".into()),
+        ..DevFixture::default()
+    });
+    assert_eq!(backend.detect(&cancel), Ok(Availability::Available));
+    assert_eq!(backend.installed(&cancel), Err(EngineError::Cancelled));
+}
+
+#[test]
+fn mise_remove_stops_after_an_unuse_that_finished_past_a_cancel() {
+    let cancel = Cancellation::default();
+    let fixture = DevFixture {
+        home: Some("/home/test".into()),
+        version: "2026.9.15\n".into(),
+        list: MISE_LIST.into(),
+        deferred_write: Some("unuse".into()),
+        ..DevFixture::default()
+    };
+    let mut backend = DevTool::mise(fixture.clone());
+    backend.detect(&cancel).unwrap();
+    let outcome = backend
+        .execute(
+            &Operation::Remove(dev_id("mise", "yq", "/home/test/.local/share/mise")),
+            &cancel,
+            &mut |_| {},
+        )
+        .unwrap();
+    assert!(outcome.cancellation_deferred);
+    assert_eq!(
+        fixture.writes("mise"),
+        vec![vec!["unuse".to_string(), "--global".into(), "yq".into()]]
+    );
+}
+
+#[test]
+fn mise_home_follows_its_data_directory() {
+    let cancel = Cancellation::default();
+    for (env, expected) in [
+        (vec![("MISE_DATA_DIR", "/data/mise")], "/data/mise"),
+        (vec![("XDG_DATA_HOME", "/xdg")], "/xdg/mise"),
+    ] {
+        let fixture = DevFixture {
+            home: Some("/home/test".into()),
+            version: "2026.9.15\n".into(),
+            list: "{}".into(),
+            extra_env: env.into_iter().map(|(k, v)| (k.into(), v.into())).collect(),
+            ..DevFixture::default()
+        };
+        let mut backend = DevTool::mise(fixture);
+        assert_eq!(backend.detect(&cancel), Ok(Availability::Available));
+        let offer = backend.search("anything-new", &cancel).unwrap();
+        // Only the unlisted exact-name offer: no version, so never a match.
+        assert!(offer.iter().all(|p| p.candidate_version.is_none()));
+        assert!(backend
+            .execute(
+                &Operation::Install(dev_id("mise", "jq", expected)),
+                &cancel,
+                &mut |_| {}
+            )
+            .is_ok());
+    }
+    let relative = DevFixture {
+        version: "2026.9.15\n".into(),
+        extra_env: [("MISE_DATA_DIR".to_string(), "relative".to_string())].into(),
+        ..DevFixture::default()
+    };
+    assert!(DevTool::mise(relative).detect(&cancel).is_err());
+    let homeless = DevFixture {
+        version: "2026.9.15\n".into(),
+        ..DevFixture::default()
+    };
+    assert!(matches!(
+        DevTool::mise(homeless).detect(&cancel),
+        Ok(Availability::Unavailable(_))
+    ));
 }
 
 #[test]
