@@ -2813,6 +2813,17 @@ fn mise_lists_and_changes_only_global_tools() {
         backend.search("op", &cancel).unwrap()[0].id.name,
         "1password"
     );
+    // Searches skip mise's network-bound update check.
+    let before = fixture.calls().len();
+    backend.search("go", &cancel).unwrap();
+    assert!(fixture.calls()[before..]
+        .iter()
+        .all(|(_, args, _)| args.first().map(String::as_str) != Some("outdated")));
+    // A registry match that is not installed still opens its details.
+    let jq = backend.search("jq", &cancel).unwrap().remove(0);
+    let details = backend.details(&jq.id, &cancel).unwrap();
+    assert_eq!(details.package.id.name, "jq");
+    assert_eq!(details.description, "Command-line JSON processor");
     assert!(backend
         .search("yq", &cancel)
         .unwrap()
