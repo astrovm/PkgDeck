@@ -13,8 +13,8 @@ a 26th source, `macos-apps`: read-only bundle discovery, exact-path ownership
 evidence from the active Homebrew prefix, and bundle-ID cask candidates. It does
 not verify publisher signatures, channels, architecture, or artifact equality;
 support for user-selected directories and adoption is still proposed. Native
-macOS execution is validated through native GitHub-hosted runners, since the
-development host is Linux. The initial native inventory/cask lifecycle passed
+macOS execution is validated through native GitHub-hosted runners and, since
+2026-09-27, on a development Mac (below). The initial native inventory/cask lifecycle passed
 on both Intel and Apple Silicon in [CI run 36280176056](https://github.com/astrovm/PkgDeck/actions/runs/36280176056).
 The expanded suite and its remaining gaps are tracked in the
 [platform test audit](platform-test-audit.md); consult the exact PR commit's
@@ -25,6 +25,34 @@ checks for its current result.
 managers, and add mise as the first substantial new developer-tool backend.
 Investigate Linux Homebrew casks immediately: upstream now supports them,
 but PkgDeck registers its cask backend only on macOS.
+
+## Validation on a Mac
+
+On 2026-09-27 the `macos-apps` inventory from PR #114 ran on an Apple silicon
+Mac with macOS 26.6 and Homebrew 7.0.6, which has a real mix of Homebrew and
+other apps. `pkd --from macos-apps list` read the 42 bundles in `/Applications`
+in about two seconds without launching them. It matched the 29 casks that
+leave an app link to their exact bundles, including bundles named differently
+from their cask (`Code` for `visual-studio-code`).
+
+Every miss stayed unknown rather than being guessed, as step 1 below requires:
+
+| Case | Apps | Why there is no app link |
+| --- | --- | --- |
+| Cask installs a `.pkg` | Tailscale, Google Drive | Homebrew runs the installer and links nothing |
+| Renamed cask | VNC Viewer | `vnc-viewer` became `realvnc-connect-viewer`, whose current definition is a `.pkg`, while the Caskroom still uses the old token |
+| Broken Caskroom record | LibreOffice, qBittorrent | No installed-version folder, so `brew info --installed` omits them |
+
+The summary previously said "No Homebrew ownership record found" for all of
+these, which reads as "not from Homebrew". It now says ownership is unknown.
+Matching `.pkg` casks needs their package receipts (`pkgutil`), and renamed
+casks need Homebrew's rename map; both remain open.
+
+The same Mac also exercised the packaged GUI from PR #118: the standalone
+`PkgDeck.app` detected Homebrew, casks and developer managers when opened from
+Finder, and a search no longer reported the Linux-only AppImage source as
+failing. That was a detection gap: AppImage was the only source registered
+without an availability probe, so macOS searches always queried it.
 
 ## Baseline coverage and remaining gaps
 
@@ -331,9 +359,10 @@ compatible release or prove PkgDeck's existing adapter works with it.
 
 ## Suggested implementation sequence and acceptance criteria
 
-1. **Validate the foundation:** exercise PR #114 on an actual Mac, including
-   two copies of one app, active-prefix ownership, missing/broken Caskroom links,
-   unreadable bundles, and cold/warm scan timing. Missing ownership evidence must
+1. **Validate the foundation:** PR #114 now runs on an actual Mac (see
+   [Validation on a Mac](#validation-on-a-mac)), including active-prefix
+   ownership and broken Caskroom records. Still to check there: two copies of one
+   app, unreadable bundles, `.pkg` receipts, renamed casks, and cold/warm scan timing. Missing ownership evidence must
    stay unknown. Add publisher/channel/architecture verification before migration.
    Introduce the AI catalog using existing package routes; prototype Linux casks
    separately. These are separate work items, not one P0 delivery commitment.

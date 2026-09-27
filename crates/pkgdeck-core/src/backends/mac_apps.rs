@@ -414,7 +414,10 @@ impl MacApps {
             Ok(records) => match records.get(canonical) {
                 Some(names) if names.len() == 1 => format!("Managed by Homebrew ({})", names[0]),
                 Some(names) => format!("Homebrew ownership is ambiguous ({})", names.join(", ")),
-                None => "No Homebrew ownership record found".into(),
+                // Casks that install a .pkg, renamed casks and broken
+                // Caskroom records leave no app link, so this is unknown,
+                // not proof that Homebrew did not install the app.
+                None => "Homebrew ownership unknown: no cask app link points here".into(),
             },
             Err(_) => "Homebrew ownership could not be checked".into(),
         };
@@ -994,7 +997,7 @@ mod tests {
         assert!(external.candidate_version.is_none());
         assert!(external
             .summary
-            .contains("No Homebrew ownership record found"));
+            .contains("Homebrew ownership unknown: no cask app link points here"));
         assert!(external
             .summary
             .contains("Available through Homebrew: visual-studio-code (candidate)"));
