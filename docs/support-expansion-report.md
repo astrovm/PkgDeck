@@ -143,6 +143,14 @@ Code evidence: [source registry and adapters](../crates/pkgdeck-core/src/backend
 
 ## Prioritized opportunities
 
+**Scope rule:** PkgDeck manages what a tool installs globally, for the user or
+the system, not what a project pins. A new source qualifies only through its
+global installs: mise's global tools (`mise use -g`), pixi's global
+environments, Go binaries in `GOBIN`, .NET global tools. Project files such as
+`mise.toml`, `.tool-versions`, `pixi.toml`, `package.json` or lockfiles are never
+read as inventory or rewritten by an update. Tools with no global install mode
+are out of scope.
+
 Effort: S = bounded catalog/adapter change; M = adapter plus UI and lifecycle
 tests; L = new ownership, transaction, or platform behavior. These are relative
 sizes, not delivery estimates. P0 is foundational; P1 follows; P2 needs demand
@@ -152,12 +160,12 @@ or a dedicated design.
 | --- | --- | --- | --- | --- |
 | P0 | macOS app inventory and Brew matching | Makes software outside package databases visible | M | Shipped in PR #114 and validated on a Mac; PR #118 matches `.pkg` casks by receipt and follows cask renames |
 | P0 | Linux Homebrew cask compatibility | Expands an existing integration | M | 2,873 casks support Linux (214 AppImage); probe support, filter artifacts, test both CPUs |
-| P0 | mise | Runtime and developer-tool coverage across Linux/macOS; Volta's successor | M–L | `mise ls --json` and `mise outdated --json`, then explicit global-tool upgrades |
+| P0 | mise | Runtime and developer-tool coverage across Linux/macOS; Volta's successor | M–L | Global tools only: `mise ls --global --json` and `mise outdated --json`, then upgrades of those tools |
 | P0 | AI CLI catalog using current managers | Easier discovery without duplicate backends | S–M | Copilot, Kiro, Amp, Droid, Qwen Code, Crush, goose, Cline; exact package IDs only |
 | P1 | Standalone AI CLI adapters | Covers official installers outside package managers | M each | Antigravity CLI, Cursor CLI, Copilot CLI, Kiro CLI, Amp, Droid |
 | P1 | Manage existing Mac apps with Homebrew | Converts manual installs into tracked installations | L | Independently verified adoption and recovery for an allowlist |
 | P1 | Mac App Store via mas | Covers apps that should retain App Store ownership | M | mas 7 has JSON `list` and `outdated`; inventory first, then updates with a privilege prompt |
-| P1 | Conda, mamba/micromamba and pixi | Scientific and data-development environments | L | Environment inventory and solver previews; one adapter switches the conda-family binary |
+| P1 | Conda, mamba/micromamba and pixi | Scientific and data-development environments | L | Named environments and `pixi global` only, not project prefixes; solver previews; one adapter switches the conda-family binary |
 | P2 | Rustup | Toolchain coverage beyond Cargo-installed executables | S–M | Installed toolchains; `rustup check` exits 100 when updates exist |
 | P2 | MacPorts | Completes another macOS package ecosystem | M | Native package lifecycle with variants preserved |
 | P2 | Nix profiles | Useful cross-platform package coverage | L | User profiles only; verify the real (version 3) profile JSON first |
@@ -175,9 +183,9 @@ across managers but keeps no inventory, which is PkgDeck's difference.
 
 **mise is the strongest first addition.** Its inventory has JSON output and
 records multiple tool versions and their configuration sources. Its upgrade
-command exposes tool upgrades. Start with explicitly selected global tools;
-project configuration, pins, and installed-but-inactive versions must remain
-distinct. A tool installed through mise's npm backend must not also be claimed
+command exposes tool upgrades. Following the scope rule, list and update only
+the tools in mise's global configuration; project configuration, pins, and
+installed-but-inactive versions stay out of the inventory. A tool installed through mise's npm backend must not also be claimed
 as a global npm installation. Preserve the controlling manager and configuration
 path. [Inventory](https://mise.jdx.dev/cli/ls.html),
 [upgrades](https://mise.jdx.dev/cli/upgrade.html).
