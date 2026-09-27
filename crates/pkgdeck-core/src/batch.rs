@@ -1486,7 +1486,10 @@ done"#;
         for path in [&launcher, &runner] {
             fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
         }
-        assert_eq!(appimage_launcher(&launcher), Some(launcher.clone()));
+        assert_eq!(
+            appimage_launcher(&launcher),
+            Some(fs::canonicalize(&launcher).unwrap())
+        );
         let output = Command::new(&launcher)
             .arg("--batch-runner")
             .output()

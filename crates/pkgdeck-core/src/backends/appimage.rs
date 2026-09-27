@@ -834,6 +834,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn imports_reviewed_https_appimage_without_executing_it() {
         use std::os::unix::fs::PermissionsExt;
         let base = std::env::var_os("PKGDECK_REMOTE_APPIMAGE_DIR")
@@ -1111,6 +1112,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn upgrades_managed_and_external_appimages_with_the_bundled_helper() {
         let base = std::env::temp_dir().join(format!(
             "pkgdeck-appimage-updater-test-{}",
@@ -1325,7 +1327,11 @@ mod tests {
         assert!(backend.capabilities().contains(&Capability::Upgrade));
         assert_eq!(
             backend.detect(&Cancellation::default()),
-            Ok(Availability::Available)
+            Ok(if cfg!(target_os = "linux") {
+                Availability::Available
+            } else {
+                Availability::Unavailable("AppImage requires Linux".into())
+            })
         );
         let foreign = PackageId {
             backend: "other".into(),

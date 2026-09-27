@@ -239,6 +239,7 @@ pub fn stage(id: &PackageId, cancel: &Cancellation) -> Result<Option<StagedArchi
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "linux")]
     use std::process::Command;
     #[test]
     fn rejects_malformed_archives_and_symlinks() {
@@ -262,6 +263,7 @@ mod tests {
         fs::remove_dir_all(base).unwrap();
     }
     #[test]
+    #[cfg(target_os = "linux")]
     fn inspects_synthetic_deb_and_rejects_changes_after_preview() {
         let base =
             std::env::temp_dir().join(format!("pkgdeck-local-deb-valid-{}", std::process::id()));

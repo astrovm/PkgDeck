@@ -229,7 +229,7 @@ mod tests {
         fs::write(
             &script,
             format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n/usr/bin/cat '{}'\n",
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n/bin/cat '{}'\n",
                 calls.display(),
                 base.join("reference").display()
             ),

@@ -691,6 +691,7 @@ mod tests {
         fs::remove_dir_all(base).unwrap();
     }
     #[test]
+    #[cfg(target_os = "linux")]
     fn reviewed_debian_archive_rejects_changed_bytes() {
         let base =
             std::env::temp_dir().join(format!("pkgdeck-artifact-deb-{}", std::process::id()));
@@ -848,6 +849,10 @@ mod tests {
             ("https://example.invalid/Remote.AppImage", "appimage"),
             ("https://example.invalid/remote.snap", "snap"),
         ] {
+            if backend == "appimage" && !cfg!(target_os = "linux") {
+                assert!(inspect_with_host(url, &cancel, &host).is_err());
+                continue;
+            }
             let package = inspect_with_host(url, &cancel, &host).unwrap();
             assert_eq!(package.id.backend, backend);
             assert!(stage_with_host(&package.id, &cancel, &host)

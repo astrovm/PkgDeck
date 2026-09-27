@@ -124,6 +124,8 @@ jq -e --arg root "$system_root/" '
   .data | any(.failures[]; .backend == "macos-apps" and (.error.InvalidResponse.reason | contains($root + "Restricted"))) and
   ([.packages[] | select(.id.name | startswith($root))] | length == 6)
 ' "$logs/partial.json"
+"$pkd" --json --from macos-apps info "$owned" > "$logs/partial-exact-details.json"
+jq -e --arg path "$owned" '.data | .package.id.name == $path and .package.installed_version == "1.2.3"' "$logs/partial-exact-details.json"
 
 # Unsupported writes must never request approval or touch installed bundles.
 for verb in install remove upgrade; do

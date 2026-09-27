@@ -4761,6 +4761,7 @@ mod tests {
         assert!(source.exists());
     }
     #[test]
+    #[cfg(target_os = "linux")]
     fn opening_local_deb_reads_metadata_without_installing_it() {
         let base = std::env::temp_dir().join(format!("pkgdeck-open-deb-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);

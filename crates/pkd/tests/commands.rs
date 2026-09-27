@@ -62,13 +62,13 @@ impl Fixture {
             command.env_remove("NO_COLOR");
         }
         let mut child = command.spawn().unwrap();
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(answer.as_bytes())
-            .unwrap();
-        child.wait_with_output().unwrap()
+        // Apple script can forward EOF before its buffered input. Keep the
+        // pipe open until the command exits so approval cannot become Ctrl-D.
+        let mut input = child.stdin.take().unwrap();
+        input.write_all(answer.as_bytes()).unwrap();
+        let output = child.wait_with_output().unwrap();
+        drop(input);
+        output
     }
     fn call(&self, args: &[&str], code: i32) -> Value {
         let output = self.command().arg("--json").args(args).output().unwrap();

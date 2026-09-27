@@ -212,12 +212,16 @@ gem)
     have rake
     success info rake
     success upgrade rake
-    gem list rake | grep 'rake (' | grep -v '(13.0.0)$'
+    # System/default gems can remain after removing the user-owned copy.
+    # Assert the exact installation scope that PkgDeck manages.
+    user_gemhome=$(gem env user_gemhome)
+    find "$user_gemhome/specifications" -name 'rake-*.gemspec' | grep -v '/rake-13.0.0.gemspec$'
     success remove rake
-    gem list | absent '^rake '
+    find "$user_gemhome/specifications" -name 'rake-*.gemspec' | absent '.'
     success install cowsay
     have cowsay
     success remove cowsay
+    find "$user_gemhome/specifications" -name 'cowsay-*.gemspec' | absent '.'
     ;;
 *) exit 2 ;;
 esac

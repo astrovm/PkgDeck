@@ -518,7 +518,7 @@ mod tests {
                 std::process::id()
             ));
             fs::create_dir_all(&path).unwrap();
-            Self(path)
+            Self(fs::canonicalize(path).unwrap())
         }
     }
     impl Drop for Temp {

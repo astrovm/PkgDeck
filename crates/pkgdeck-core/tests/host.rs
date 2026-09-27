@@ -126,7 +126,7 @@ fn detection_skips_relative_empty_nonexecutable_and_bundled_paths() {
     let snap = Host::new(
         Runtime::Snap,
         env(&[
-            ("PATH", &format!("{}:/usr/bin", bundle.0.display())),
+            ("PATH", &format!("{}:/usr/bin:/bin", bundle.0.display())),
             ("SNAP", bundle.0.to_str().unwrap()),
         ]),
     );
@@ -629,6 +629,13 @@ fn venv_pip_rejects_malformed_and_packaged_environments() {
         env(&[("APPDIR", fixture.0.to_str().unwrap())]),
     );
     rejected(&packaged);
+    let alias = fixture.0.with_extension("alias");
+    symlink(&fixture.0, &alias).unwrap();
+    assert!(matches!(
+        packaged.venv_pip(&alias, &[], &cancel, false),
+        Err(ExecutionError::Disabled(_))
+    ));
+    fs::remove_file(alias).unwrap();
     fs::remove_file(&interpreter).unwrap();
     fs::write(&interpreter, "not an executable").unwrap();
     fs::set_permissions(&interpreter, fs::Permissions::from_mode(0o644)).unwrap();

@@ -167,6 +167,8 @@ pub struct MacApps {
     io: Box<dyn AppIo>,
     snapshot: Option<Vec<PackageDetails>>,
     scan_errors: Vec<EngineError>,
+    exact_query: bool,
+    selected: Option<PackageDetails>,
 }
 
 impl MacApps {
@@ -190,6 +192,8 @@ impl MacApps {
             io: Box::new(NativeApps(host)),
             snapshot: None,
             scan_errors: vec![],
+            exact_query: false,
+            selected: None,
         }
     }
 
@@ -462,6 +466,7 @@ impl Backend for MacApps {
         })
     }
     fn installed(&mut self, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
+        self.exact_query = false;
         Ok(self
             .inventory(cancel)?
             .iter()
@@ -469,11 +474,45 @@ impl Backend for MacApps {
             .collect())
     }
     fn query_errors(&self) -> Vec<EngineError> {
-        self.scan_errors.clone()
+        if self.exact_query {
+            vec![]
+        } else {
+            self.scan_errors.clone()
+        }
     }
     fn may_have(&self, name: &str) -> bool {
         let path = Path::new(name);
         path.is_absolute() && path.extension().is_some_and(|ext| ext == "app")
+    }
+    fn lookup(&mut self, name: &str, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
+        self.exact_query = true;
+        if cancel.requested() {
+            return Err(EngineError::Cancelled);
+        }
+        let Some((_, scope)) = self
+            .roots
+            .iter()
+            .find(|(root, _)| Path::new(name).starts_with(root))
+        else {
+            return Ok(vec![]);
+        };
+        let id = PackageId {
+            backend: ID.into(),
+            name: name.into(),
+            architecture: "unknown".into(),
+            scope: scope.clone(),
+            remote: None,
+            reference: Some(name.into()),
+        };
+        match self.details(&id, cancel) {
+            Ok(details) => {
+                let package = details.package.clone();
+                self.selected = Some(details);
+                Ok(vec![package])
+            }
+            Err(EngineError::NotFound) => Ok(vec![]),
+            Err(error) => Err(error),
+        }
     }
     fn search(&mut self, query: &str, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
         let query = query.to_lowercase();
@@ -493,6 +532,9 @@ impl Backend for MacApps {
     ) -> Result<PackageDetails, EngineError> {
         if cancel.requested() {
             return Err(EngineError::Cancelled);
+        }
+        if let Some(selected) = self.selected.as_ref().filter(|d| d.package.id == *id) {
+            return Ok(selected.clone());
         }
         if let Some(snapshot) = &self.snapshot {
             return snapshot
@@ -558,6 +600,8 @@ mod tests {
                 io: Box::new(FakeIo(ownership)),
                 snapshot: None,
                 scan_errors: vec![],
+                exact_query: false,
+                selected: None,
             }
         }
     }
@@ -649,6 +693,33 @@ mod tests {
         // Filtering a cached snapshot must not erase its incompleteness.
         assert!(backend.search("no matches", &cancel).unwrap().is_empty());
         assert_eq!(backend.query_errors(), errors);
+        let path = packages[0].id.name.as_str();
+        assert_eq!(
+            backend.lookup(path, &cancel).unwrap(),
+            vec![packages[0].clone()]
+        );
+        assert!(backend.query_errors().is_empty());
+        backend.installed(&cancel).unwrap();
+        assert_eq!(
+            backend.query_errors(),
+            errors,
+            "an exact lookup must not erase cached scan errors"
+        );
+        let mut fresh = f.backend(Ok(BTreeMap::new()));
+        fresh.io = Box::new(UnreadableFolder(skipped));
+        assert_eq!(
+            fresh.lookup(path, &cancel).unwrap(),
+            vec![packages[0].clone()]
+        );
+        assert!(
+            fresh.snapshot.is_none(),
+            "exact lookup must not scan siblings"
+        );
+        assert!(fresh.query_errors().is_empty());
+        assert_eq!(
+            fresh.details(&packages[0].id, &cancel).unwrap().package,
+            packages[0]
+        );
 
         // An unreadable root still fails, rather than becoming empty success.
         let mut backend = f.backend(Ok(BTreeMap::new()));

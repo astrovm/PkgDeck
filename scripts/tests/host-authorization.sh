@@ -66,7 +66,8 @@ source scripts/vm/lifecycle.sh
 apt_fixture
 
 doctor=$(runuser -u pkgdeck-test -- "$binaries/pkd" doctor)
-[[ $doctor =~ Runtime\ +native && $doctor =~ Architecture\ +x86_64 &&
+architecture=$(uname -m)
+[[ $doctor =~ Runtime\ +native && $doctor =~ Architecture\ +$architecture &&
     $doctor =~ ✓\ APT\ +/usr/bin/apt-get ]]
 cat >"$rule" <<'RULE'
 polkit.addRule(function(action, subject) {

@@ -669,11 +669,11 @@ impl Host {
                 "pip virtual environment not found".to_string(),
             ));
         }
-        if self
-            .excluded
-            .iter()
-            .any(|root| venv.starts_with(root) || python.starts_with(root))
-        {
+        let canonical_venv =
+            fs::canonicalize(self.filesystem_path(venv)).unwrap_or_else(|_| venv.to_owned());
+        if self.excluded.iter().any(|root| {
+            canonical_venv.starts_with(root) || venv.starts_with(root) || python.starts_with(root)
+        }) {
             return Err(ExecutionError::Disabled(
                 "pip virtual environment not found".to_string(),
             ));

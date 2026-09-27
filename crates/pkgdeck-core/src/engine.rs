@@ -110,6 +110,11 @@ pub trait Backend: Send {
     fn may_have(&self, _name: &str) -> bool {
         true
     }
+    /// Exact-name lookup can avoid enumerating an entire inventory. The
+    /// default retains each manager's existing search behavior.
+    fn lookup(&mut self, name: &str, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
+        self.search(name, cancel)
+    }
     fn details(
         &mut self,
         _id: &PackageId,
@@ -496,12 +501,12 @@ impl Engine {
     /// Mutation planning excludes inventory-only sources, including their
     /// errors: they cannot contribute an operation or an ambiguous target.
     pub fn installed_for_mutation(&mut self, cancel: &Cancellation) -> PackageReport {
-        self.query_where(None, cancel, &|backend| {
+        self.query_where(None, false, cancel, &|backend| {
             !crate::backends::read_only(backend.id())
         })
     }
     pub fn lookup_for_mutation(&mut self, name: &str, cancel: &Cancellation) -> PackageReport {
-        self.query_where(Some(name), cancel, &|backend| {
+        self.query_where(Some(name), true, cancel, &|backend| {
             !crate::backends::read_only(backend.id()) && backend.may_have(name)
         })
     }
@@ -569,20 +574,21 @@ impl Engine {
         self.cleanup_plans.insert(item.id.clone(), item);
     }
     fn query(&mut self, query: Option<&str>, cancel: &Cancellation) -> PackageReport {
-        self.query_where(query, cancel, &|_: &dyn Backend| true)
+        self.query_where(query, false, cancel, &|_: &dyn Backend| true)
     }
     /// Search for one exact package name. Backends whose package names can
     /// never be `name` (see [`Backend::may_have`]) are not asked at all, so
     /// they appear neither as failures nor as successful sources. Selection
     /// on the result behaves as on a full [`search`](Self::search).
     pub fn lookup(&mut self, name: &str, cancel: &Cancellation) -> PackageReport {
-        self.query_where(Some(name), cancel, &|backend: &dyn Backend| {
+        self.query_where(Some(name), true, cancel, &|backend: &dyn Backend| {
             backend.may_have(name)
         })
     }
     fn query_where(
         &mut self,
         query: Option<&str>,
+        exact: bool,
         cancel: &Cancellation,
         ask: &(dyn Fn(&dyn Backend) -> bool + Sync),
     ) -> PackageReport {
@@ -608,6 +614,7 @@ impl Engine {
                             noted,
                             capability,
                             query,
+                            exact,
                             cancel,
                         );
                         (id.clone(), result)
@@ -687,8 +694,15 @@ impl Engine {
                 };
                 let noted = noted.get(&id).cloned();
                 s.spawn(move || {
-                    let result =
-                        Self::query_backend(&mut *backend, &id, noted, capability, query, cancel);
+                    let result = Self::query_backend(
+                        &mut *backend,
+                        &id,
+                        noted,
+                        capability,
+                        query,
+                        false,
+                        cancel,
+                    );
                     let _ = tx.send((id, backend, result));
                 });
             }
@@ -739,6 +753,7 @@ impl Engine {
         noted: Option<Availability>,
         capability: Capability,
         query: Option<&str>,
+        exact: bool,
         cancel: &Cancellation,
     ) -> Result<(Vec<Package>, Vec<EngineError>), EngineError> {
         if cancel.requested() {
@@ -770,6 +785,7 @@ impl Engine {
             }
         }
         let packages = match query {
+            Some(name) if exact => backend.lookup(name, cancel)?,
             Some(query) => backend.search(query, cancel)?,
             None => backend.installed(cancel)?,
         };
