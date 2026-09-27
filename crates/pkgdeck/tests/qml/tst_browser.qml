@@ -1287,6 +1287,10 @@ TestCase {
         verify(box.height <= 160);
         verify(!findChild(browser, "columnHeader0").visible);
         compare(findChild(browser, "emptyState").text, "You're up to date");
+        // The heading row hides with an empty list, so the page offers its own reload.
+        const reload = findChild(browser, "emptyReloadButton");
+        verify(reload.visible);
+        compare(reload.text, "Check again");
     }
     function test_new_search_does_not_show_previous_query_results() {
         browser.openView("Search");

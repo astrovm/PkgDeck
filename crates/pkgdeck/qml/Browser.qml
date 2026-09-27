@@ -2866,6 +2866,18 @@ Controls.ApplicationWindow {
                                 symbol: "refresh"
                                 onClicked: root.reload(true)
                             }
+                            // The heading row, and its reload button, hide with
+                            // an empty list, so an empty page offers its own.
+                            ActionButton {
+                                objectName: "emptyReloadButton"
+                                anchors.horizontalCenter: parent.horizontalCenter
+                                visible: !backend.busy && !root.loadStopped && root.readFailures.length === 0 &&
+                                    results.count === 0 && root.currentView !== "Search"
+                                text: root.currentView === "Updates" || root.currentView === "Clean" ? "Check again" : "Reload"
+                                symbol: "refresh"
+                                tooltipText: "Reload (Ctrl+R)"
+                                onClicked: root.reload(true)
+                            }
                             ActionButton {
                                 objectName: "clearResultFilters"
                                 anchors.horizontalCenter: parent.horizontalCenter
