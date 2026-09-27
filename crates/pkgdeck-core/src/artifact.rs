@@ -611,6 +611,7 @@ mod tests {
     use crate::host::Runtime;
     use std::collections::BTreeMap;
     use std::os::unix::fs::PermissionsExt;
+    #[cfg(target_os = "linux")]
     use std::process::Command;
     fn fixture_host(base: &Path) -> Host {
         let mut env = BTreeMap::new();

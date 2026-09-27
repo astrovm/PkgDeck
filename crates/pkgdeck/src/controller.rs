@@ -1287,9 +1287,31 @@ fn lower_first(text: &str) -> String {
         _ => text.to_owned(),
     }
 }
+/// The macOS inventory lists every app it can read and reports each folder
+/// or bundle it had to skip. That is a partial result, not a failed source.
+fn skipped_app_entry(error: &EngineError) -> Option<(&str, &str)> {
+    let EngineError::InvalidResponse { backend, reason } = error else {
+        return None;
+    };
+    if backend != "macos-apps" {
+        return None;
+    }
+    reason
+        .strip_prefix("skipped folder ")
+        .or_else(|| reason.strip_prefix("skipped entry in "))
+        .or_else(|| reason.strip_prefix("skipped entry "))?
+        .rsplit_once(": ")
+}
 /// A plain explanation of an engine error, naming the tool when known.
 fn plain_error(error: &EngineError, backend: Option<&str>, sudo: bool) -> String {
     use pkgdeck_core::process::ExecutionError as E;
+    if let Some((path, why)) = skipped_app_entry(error) {
+        let why = why.split(" (os error ").next().unwrap_or(why);
+        return format!(
+            "Couldn't read {path} ({}). The other apps are still listed.",
+            lower_first(why)
+        );
+    }
     match error {
         EngineError::Execution(E::AuthorizationDenied) if sudo => "PkgDeck couldn't get administrator access. \"Existing sudo session\" needs a recent sudo login in a terminal, or pick the system prompt in Settings.".into(),
         EngineError::Execution(E::AuthorizationDenied) => "PkgDeck couldn't get administrator access. Make sure your desktop's password prompt is running, or pick another option in Settings.".into(),
@@ -1441,6 +1463,7 @@ fn failure_kind(error: &EngineError) -> &'static str {
             | pkgdeck_core::process::ExecutionError::AuthorizationDenied,
         ) => "authorization",
         EngineError::Execution(pkgdeck_core::process::ExecutionError::LockBusy) => "locked",
+        _ if skipped_app_entry(error).is_some() => "partial",
         _ => "failed",
     }
 }
@@ -8893,6 +8916,21 @@ mod tests {
             ),
             "Snap reported a problem."
         );
+        let skipped = EngineError::InvalidResponse {
+            backend: "macos-apps".into(),
+            reason: "skipped folder /Users/me/Applications/Locked: Permission denied (os error 13)"
+                .into(),
+        };
+        assert_eq!(
+    plain_error(&skipped, Some("macos-apps"), false),
+    "Couldn't read /Users/me/Applications/Locked (permission denied). The other apps are still listed."
+);
+        assert_eq!(failure_kind(&skipped), "partial");
+        let elsewhere = EngineError::InvalidResponse {
+            backend: "snap".into(),
+            reason: "skipped folder /x: denied".into(),
+        };
+        assert_eq!(failure_kind(&elsewhere), "failed");
         assert_eq!(
             plain_error(
                 &EngineError::InvalidResponse {

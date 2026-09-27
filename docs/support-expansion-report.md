@@ -48,6 +48,19 @@ these, which reads as "not from Homebrew". It now says ownership is unknown.
 Matching `.pkg` casks needs their package receipts (`pkgutil`), and renamed
 casks need Homebrew's rename map; both remain open.
 
+Edge cases, checked with temporary bundles in `~/Applications`:
+
+| Case | Result |
+| --- | --- |
+| A second copy of a Homebrew app | Its own user-scope row with unknown ownership; the Homebrew copy stays managed. Neither claims the other |
+| Malformed, unreadable or missing `Info.plist` | Listed, with an unknown version |
+| A folder it may not open | Every other app is listed, and the skipped folder is reported |
+| Scan time, 46 bundles | About 1.1 s once warm, 0.7 s of it `brew info --installed`; the first run took 1.9 s. A cold boot was not measured |
+
+The GUI treated the skipped folder as a failed source: "Couldn't check macOS
+Applications", a raw OS error and a "Turn off" button. It now shows "Some apps
+couldn't be read", names the folder in plain words and offers no "Turn off".
+
 The same Mac also exercised the packaged GUI from PR #118: the standalone
 `PkgDeck.app` detected Homebrew, casks and developer managers when opened from
 Finder, and a search no longer reported the Linux-only AppImage source as
@@ -361,8 +374,8 @@ compatible release or prove PkgDeck's existing adapter works with it.
 
 1. **Validate the foundation:** PR #114 now runs on an actual Mac (see
    [Validation on a Mac](#validation-on-a-mac)), including active-prefix
-   ownership and broken Caskroom records. Still to check there: two copies of one
-   app, unreadable bundles, `.pkg` receipts, renamed casks, and cold/warm scan timing. Missing ownership evidence must
+   ownership, broken Caskroom records, duplicate copies, unreadable bundles and
+   scan timing. Still open: `.pkg` receipts, renamed casks and cold-boot timing. Missing ownership evidence must
    stay unknown. Add publisher/channel/architecture verification before migration.
    Introduce the AI catalog using existing package routes; prototype Linux casks
    separately. These are separate work items, not one P0 delivery commitment.

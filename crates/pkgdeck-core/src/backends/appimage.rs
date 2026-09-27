@@ -61,7 +61,7 @@ impl AppImage {
             updater: None,
         }
     }
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     fn with_updater(mut self, updater: PathBuf) -> Self {
         self.updater = Some(updater);
         self
@@ -758,6 +758,7 @@ mod tests {
         fs::write(path, header).unwrap();
     }
 
+    #[cfg(target_os = "linux")]
     fn updater(base: &Path, status: u8) -> (PathBuf, PathBuf) {
         use std::os::unix::fs::PermissionsExt;
         let updater = base.join("updater");

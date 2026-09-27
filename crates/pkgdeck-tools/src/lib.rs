@@ -542,6 +542,16 @@ pub fn gui(args: &[String], failure: bool) {
 }
 pub fn qml() {
     let dir = Temp::new();
+    // macOS keeps Qt settings in the test runner's own preferences domain and
+    // ignores XDG_CONFIG_HOME, so start each run from a cleared domain like
+    // the fresh directory on Linux. Otherwise saved state, such as the last
+    // background check, leaks from one run into the next.
+    if cfg!(target_os = "macos") {
+        let _ = Command::new("defaults")
+            .args(["delete", "com.example-invalid.qmltestrunner"])
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
     run(Command::new("timeout")
         .args(["--kill-after=5s", "180s", "qmltestrunner"])
         .args([
