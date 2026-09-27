@@ -113,7 +113,9 @@ class Pkgdeck < Formula
     assert_match "pkd", shell_output("#{bin}/pkd --version")
     assert_match "Usage:", shell_output("#{bin}/pkd --help")
     if OS.mac?
-      # Exercise Cocoa startup without depending on the hosted runner's GPU.
+      # Use offscreen rendering inside Homebrew's formula-test sandbox.
+      # CI separately exercises the installed app through the Cocoa backend.
+      ENV["QT_QPA_PLATFORM"] = "offscreen"
       ENV["QT_QUICK_BACKEND"] = "software"
       assert_match "pkgdeck", shell_output("#{bin}/pkgdeck --version")
       assert_match "PKGDECK_GUI_READY", shell_output("#{bin}/pkgdeck --smoke-test 2>&1")

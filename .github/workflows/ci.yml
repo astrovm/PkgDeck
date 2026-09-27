@@ -399,12 +399,18 @@ jobs:
       - name: Check formula style
         run: brew style astrovm/pkgdeck/pkgdeck
       - name: Build package
+        id: build
         run: brew install --build-from-source --verbose astrovm/pkgdeck/pkgdeck
+      - name: Test installed macOS Cocoa startup
+        if: runner.os == 'macOS'
+        timeout-minutes: 3
+        run: bash scripts/tests/macos-gui.sh "$(brew --prefix astrovm/pkgdeck/pkgdeck)/bin/pkgdeck"
       - name: Test installed commands and GUI startup
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         timeout-minutes: 5
         run: brew test astrovm/pkgdeck/pkgdeck
       - name: Test macOS GUI controllers, QML, startup and media
-        if: runner.os == 'macOS' && !inputs.homebrew_only
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && runner.os == 'macOS' && !inputs.homebrew_only }}
         shell: bash
         run: |
           brew install coreutils pkgconf openssl@3
@@ -413,6 +419,13 @@ jobs:
           export QML_IMPORT_PATH="$(brew --prefix astrovm/pkgdeck/pkgdeck)/libexec/kirigami/lib/qml"
           export QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=software
           cargo test --locked -p pkgdeck --no-fail-fast -- --test-threads=1
+      - name: Upload macOS startup diagnostics
+        if: ${{ !cancelled() && runner.os == 'macOS' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: macos-startup-${{ matrix.runner }}
+          path: ${{ runner.temp }}/pkgdeck-macos-startup
+          if-no-files-found: ignore
       - name: Check CLI has no Qt linkage
         shell: bash
         run: |

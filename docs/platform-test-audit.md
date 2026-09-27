@@ -24,7 +24,10 @@ Native dpkg and AppImage execution tests, and the X11 keyboard driver, run only
 on Linux. X11 testing does not establish native Cocoa interaction coverage. The macOS GUI
 tests use the real Qt/Kirigami build installed by the Homebrew packaging job.
 The installed Mac app also receives a Cocoa startup smoke test using Qt Quick's
-software renderer; GPU/Metal behavior is outside this hosted-runner check.
+software renderer outside Homebrew's test sandbox. Formula tests use offscreen
+rendering. Cocoa startup has a 60-second limit and retains process samples on
+timeout; the source GUI suite still runs if that startup check fails.
+GPU/Metal behavior is outside this hosted-runner check.
 Mac-only code is compiled and exercised on native runners, not merely checked
 through Linux fixtures.
 
