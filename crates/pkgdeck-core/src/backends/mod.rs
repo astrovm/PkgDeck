@@ -4108,12 +4108,11 @@ impl<T: Transport> DevTool<T> {
                     .into_iter()
                     .filter(|install| install.installed)
                     .collect();
+                if installed.is_empty() {
+                    return None;
+                }
                 let first_active = installed.iter().position(|install| install.active);
-                let install = installed.remove(
-                    first_active
-                        .unwrap_or(0)
-                        .min(installed.len().checked_sub(1)?),
-                );
+                let install = installed.swap_remove(first_active.unwrap_or(0));
                 let candidate = outdated
                     .get(&name)
                     .and_then(|entry| entry.latest.clone())
