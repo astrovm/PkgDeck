@@ -28,5 +28,5 @@ success update
 success install hello-world
 snap list hello-world
 success remove hello-world
-! snap list hello-world
+if snap list hello-world; then echo 'Snap still installed after removal' >&2; exit 1; fi
 echo 'PASS real snap lifecycle'

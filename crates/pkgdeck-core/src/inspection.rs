@@ -147,7 +147,9 @@ pub fn inspect_with(
                     state,
                 )
             }
-            Err(error) if error.raw_os_error() == Some(40) => (None, CandidateState::LinkLoop),
+            Err(error) if error.raw_os_error() == Some(rustix::io::Errno::LOOP.raw_os_error()) => {
+                (None, CandidateState::LinkLoop)
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 (None, CandidateState::BrokenLink)
             }
@@ -518,7 +520,7 @@ mod tests {
                 std::process::id()
             ));
             fs::create_dir_all(&path).unwrap();
-            Self(path)
+            Self(fs::canonicalize(path).unwrap())
         }
     }
     impl Drop for Temp {

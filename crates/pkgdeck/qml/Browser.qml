@@ -391,9 +391,9 @@ Controls.ApplicationWindow {
     function updateOnly(source) {
         return ["fwupd", "codex", "claude", "grok", "opencode"].indexOf(source) >= 0;
     }
-    readonly property var knownSourceIds: ["apt", "dnf", "pacman", "zypper", "snap", "homebrew", "homebrew-cask", "appimage", "flatpak", "docker", "podman", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "composer", "gem", "fwupd", "codex", "claude", "grok", "opencode"]
+    readonly property var knownSourceIds: ["apt", "dnf", "pacman", "zypper", "snap", "homebrew", "homebrew-cask", "macos-apps", "appimage", "flatpak", "docker", "podman", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "composer", "gem", "fwupd", "codex", "claude", "grok", "opencode"]
     readonly property var sourceIds: knownSourceIds.concat(sourceCatalog.map((row) => row.source).filter((id) => knownSourceIds.indexOf(id) < 0))
-    readonly property var sourceNames: ["APT", "DNF", "Pacman", "Zypper", "Snap", "Homebrew", "Homebrew Casks", "AppImage", "Flatpak", "Docker images", "Podman images", "Cargo", "npm", "pnpm", "Bun", "pip", "pipx", "uv", "Composer", "RubyGems", "Firmware", "Codex (standalone)", "Claude Code (standalone)", "Grok (standalone)", "OpenCode (standalone)"]
+    readonly property var sourceNames: ["APT", "DNF", "Pacman", "Zypper", "Snap", "Homebrew", "Homebrew Casks", "macOS Applications", "AppImage", "Flatpak", "Docker images", "Podman images", "Cargo", "npm", "pnpm", "Bun", "pip", "pipx", "uv", "Composer", "RubyGems", "Firmware", "Codex (standalone)", "Claude Code (standalone)", "Grok (standalone)", "OpenCode (standalone)"]
     function containerSource(source) {
         return source === "docker" || source === "podman";
     }
@@ -458,7 +458,7 @@ Controls.ApplicationWindow {
     function sourceCategory(id) {
         if (["apt", "dnf", "pacman", "zypper", "fwupd"].indexOf(id) >= 0)
             return "System";
-        if (["snap", "homebrew", "homebrew-cask", "appimage", "flatpak"].indexOf(id) >= 0)
+        if (["snap", "homebrew", "homebrew-cask", "macos-apps", "appimage", "flatpak"].indexOf(id) >= 0)
             return "Applications";
         if (containerSource(id))
             return "Containers";
@@ -1160,6 +1160,8 @@ Controls.ApplicationWindow {
         if (row.kind === "cleanup")
             return "clean";
         if (row.kind !== "package")
+            return "";
+        if (row.source === "macos-apps")
             return "";
         if (updateOnly(row.source))
             return row.update === "available" ? "upgrade" : "";

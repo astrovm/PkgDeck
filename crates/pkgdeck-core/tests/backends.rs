@@ -3390,7 +3390,7 @@ fn native_venv_pip_transport_uses_the_selected_environment() {
     let _ = std::fs::remove_dir_all(&base);
     let venv = base.join("venv");
     std::fs::create_dir_all(venv.join("bin")).unwrap();
-    std::os::unix::fs::symlink("/bin/true", venv.join("bin/python")).unwrap();
+    std::os::unix::fs::symlink("/usr/bin/true", venv.join("bin/python")).unwrap();
     std::fs::write(venv.join("pyvenv.cfg"), "home = /usr/bin\n").unwrap();
     let transport = NativeTransport {
         host: Host::new(
@@ -3619,6 +3619,7 @@ fn apt_single_operation_preview_uses_read_only_simulation_and_exact_target() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn apt_local_archive_uses_exact_path_and_revalidates_before_install() {
     let base = std::env::temp_dir().join(format!("pkgdeck-apt-local-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);

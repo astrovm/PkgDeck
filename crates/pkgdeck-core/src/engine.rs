@@ -98,11 +98,22 @@ pub trait Backend: Send {
     fn installed(&mut self, _cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
         Err(self.unsupported(Capability::Installed))
     }
+    /// Failures from skipped portions of the most recent successful search or
+    /// installed query. These accompany usable rows, but prevent the source
+    /// from being treated as complete. Cached queries must retain their errors.
+    fn query_errors(&self) -> Vec<EngineError> {
+        vec![]
+    }
     /// Cheap, local check used by exact-name lookups: `false` only when no
     /// package or reference of this backend can ever be called `name` (for
     /// example a Flatpak app id always contains a dot). Never runs commands.
     fn may_have(&self, _name: &str) -> bool {
         true
+    }
+    /// Exact-name lookup can avoid enumerating an entire inventory. The
+    /// default retains each manager's existing search behavior.
+    fn lookup(&mut self, name: &str, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
+        self.search(name, cancel)
     }
     fn details(
         &mut self,
@@ -487,6 +498,18 @@ impl Engine {
     pub fn installed(&mut self, cancel: &Cancellation) -> PackageReport {
         self.query(None, cancel)
     }
+    /// Mutation planning excludes inventory-only sources, including their
+    /// errors: they cannot contribute an operation or an ambiguous target.
+    pub fn installed_for_mutation(&mut self, cancel: &Cancellation) -> PackageReport {
+        self.query_where(None, false, cancel, &|backend| {
+            !crate::backends::read_only(backend.id())
+        })
+    }
+    pub fn lookup_for_mutation(&mut self, name: &str, cancel: &Cancellation) -> PackageReport {
+        self.query_where(Some(name), true, cancel, &|backend| {
+            !crate::backends::read_only(backend.id()) && backend.may_have(name)
+        })
+    }
     /// Discover cleanup plans independently per backend. Sources without a
     /// cleanup capability are omitted; they have nothing to show on this view.
     pub fn cleanup(&mut self, cancel: &Cancellation) -> CleanupReport {
@@ -551,20 +574,21 @@ impl Engine {
         self.cleanup_plans.insert(item.id.clone(), item);
     }
     fn query(&mut self, query: Option<&str>, cancel: &Cancellation) -> PackageReport {
-        self.query_where(query, cancel, &|_: &dyn Backend| true)
+        self.query_where(query, false, cancel, &|_: &dyn Backend| true)
     }
     /// Search for one exact package name. Backends whose package names can
     /// never be `name` (see [`Backend::may_have`]) are not asked at all, so
     /// they appear neither as failures nor as successful sources. Selection
     /// on the result behaves as on a full [`search`](Self::search).
     pub fn lookup(&mut self, name: &str, cancel: &Cancellation) -> PackageReport {
-        self.query_where(Some(name), cancel, &|backend: &dyn Backend| {
+        self.query_where(Some(name), true, cancel, &|backend: &dyn Backend| {
             backend.may_have(name)
         })
     }
     fn query_where(
         &mut self,
         query: Option<&str>,
+        exact: bool,
         cancel: &Cancellation,
         ask: &(dyn Fn(&dyn Backend) -> bool + Sync),
     ) -> PackageReport {
@@ -590,6 +614,7 @@ impl Engine {
                             noted,
                             capability,
                             query,
+                            exact,
                             cancel,
                         );
                         (id.clone(), result)
@@ -604,9 +629,17 @@ impl Engine {
         let mut report = PackageReport::default();
         for (id, result) in results {
             match result {
-                Ok(packages) => {
+                Ok((packages, errors)) => {
                     report.packages.extend(packages);
-                    report.successful_sources.push(id);
+                    if errors.is_empty() {
+                        report.successful_sources.push(id.clone());
+                    }
+                    report
+                        .failures
+                        .extend(errors.into_iter().map(|error| BackendFailure {
+                            backend: id.clone(),
+                            error,
+                        }));
                 }
                 Err(error) => report.failures.push(BackendFailure { backend: id, error }),
             }
@@ -661,8 +694,15 @@ impl Engine {
                 };
                 let noted = noted.get(&id).cloned();
                 s.spawn(move || {
-                    let result =
-                        Self::query_backend(&mut *backend, &id, noted, capability, query, cancel);
+                    let result = Self::query_backend(
+                        &mut *backend,
+                        &id,
+                        noted,
+                        capability,
+                        query,
+                        false,
+                        cancel,
+                    );
                     let _ = tx.send((id, backend, result));
                 });
             }
@@ -671,9 +711,17 @@ impl Engine {
             let mut stash = Vec::new();
             for (id, backend, result) in rx {
                 match result {
-                    Ok(packages) => {
+                    Ok((packages, errors)) => {
                         accumulated.packages.extend(packages);
-                        accumulated.successful_sources.push(id.clone());
+                        if errors.is_empty() {
+                            accumulated.successful_sources.push(id.clone());
+                        }
+                        accumulated.failures.extend(errors.into_iter().map(|error| {
+                            BackendFailure {
+                                backend: id.clone(),
+                                error,
+                            }
+                        }));
                     }
                     Err(error) => accumulated.failures.push(BackendFailure {
                         backend: id.clone(),
@@ -705,8 +753,9 @@ impl Engine {
         noted: Option<Availability>,
         capability: Capability,
         query: Option<&str>,
+        exact: bool,
         cancel: &Cancellation,
-    ) -> Result<Vec<Package>, EngineError> {
+    ) -> Result<(Vec<Package>, Vec<EngineError>), EngineError> {
         if cancel.requested() {
             return Err(EngineError::Cancelled);
         }
@@ -736,6 +785,7 @@ impl Engine {
             }
         }
         let packages = match query {
+            Some(name) if exact => backend.lookup(name, cancel)?,
             Some(query) => backend.search(query, cancel)?,
             None => backend.installed(cancel)?,
         };
@@ -750,7 +800,7 @@ impl Engine {
                 reason: "foreign/duplicate identity or missing installed state".into(),
             });
         }
-        Ok(packages)
+        Ok((packages, backend.query_errors()))
     }
 
     pub fn details(

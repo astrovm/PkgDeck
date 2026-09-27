@@ -4,6 +4,7 @@ mod apt_cli;
 mod cleanup;
 mod container;
 mod firmware;
+mod mac_apps;
 mod standalone;
 use crate::{
     engine::*,
@@ -14,6 +15,7 @@ use crate::{
 pub use appimage::AppImage;
 pub use container::{Container, ContainerKind};
 pub use firmware::Firmware;
+pub use mac_apps::MacApps;
 use serde::Deserialize;
 pub use standalone::{Standalone, StandaloneTool};
 use std::{ffi::OsString, path::PathBuf, time::Duration};
@@ -50,6 +52,7 @@ pub const BACKEND_IDS: &[&str] = &[
     "snap",
     "homebrew",
     "homebrew-cask",
+    "macos-apps",
     "appimage",
     "flatpak",
     "docker",
@@ -74,6 +77,11 @@ pub fn update_only(id: &str) -> bool {
     matches!(id, "fwupd" | "codex" | "claude" | "grok" | "opencode")
 }
 
+/// Inventory sources whose rows must never offer package mutations.
+pub fn read_only(id: &str) -> bool {
+    id == "macos-apps"
+}
+
 /// The name people know a source by, for sentences and titles: "APT",
 /// "Flatpak", "Homebrew Casks". Ids stay the machine vocabulary (`--from`,
 /// JSON); unknown ids are returned unchanged.
@@ -87,6 +95,7 @@ pub fn display_name(id: &str) -> &str {
         "snap" => "Snap",
         "homebrew" => "Homebrew",
         "homebrew-cask" => "Homebrew Casks",
+        "macos-apps" => "macOS Applications",
         "appimage" => "AppImage",
         "flatpak" => "Flatpak",
         "docker" => "Docker images",
@@ -4296,6 +4305,9 @@ pub fn native_engine(
     }
     if cfg!(target_os = "macos") && allowed("homebrew-cask") {
         candidates.push((Box::new(HomebrewCask::new(transport())), true));
+    }
+    if allowed("macos-apps") {
+        candidates.push((Box::new(MacApps::native()), true));
     }
     for (backend, make) in [
         (

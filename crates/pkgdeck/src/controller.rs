@@ -1130,6 +1130,7 @@ fn source_display_name(id: &str) -> String {
         "snap" => "Snap",
         "homebrew" => "Homebrew",
         "homebrew-cask" => "Homebrew Casks",
+        "macos-apps" => "macOS Applications",
         "appimage" => "AppImage",
         "flatpak" => "Flatpak",
         "docker" => "Docker images",
@@ -2587,7 +2588,7 @@ impl ffi::PackageController {
             "unsupported"
         } else if failures.is_empty() {
             "complete"
-        } else if report.successful_sources.is_empty() {
+        } else if report.successful_sources.is_empty() && report.packages.is_empty() {
             "failed"
         } else {
             "partial"
@@ -3334,6 +3335,7 @@ impl ffi::PackageController {
                 self.rust()
                     .packages
                     .get(i)
+                    .filter(|p| !pkgdeck_core::backends::read_only(&p.id.backend))
                     .and_then(|p| match action.as_str() {
                         "install"
                             if !pkgdeck_core::backends::update_only(&p.id.backend)
@@ -4759,6 +4761,7 @@ mod tests {
         assert!(source.exists());
     }
     #[test]
+    #[cfg(target_os = "linux")]
     fn opening_local_deb_reads_metadata_without_installing_it() {
         let base = std::env::temp_dir().join(format!("pkgdeck-open-deb-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
@@ -5080,6 +5083,37 @@ mod tests {
             serde_json::from_str::<Value>(&controller.report_state().to_string()).unwrap()["phase"],
             "complete"
         );
+    }
+    #[test]
+    fn partial_inventory_from_one_source_keeps_rows_and_reports_partial_state() {
+        let package: Package = serde_json::from_value(json!({
+            "id": {"backend":"macos-apps", "name":"/Applications/Visible.app", "architecture":"unknown", "scope":"system"},
+            "display_name":"Visible", "summary":"Application", "installed_version":"1", "update":"unknown"
+        })).unwrap();
+        let failure = BackendFailure {
+            backend: "macos-apps".into(),
+            error: EngineError::InvalidResponse {
+                backend: "macos-apps".into(),
+                reason: "skipped folder /Applications/Restricted: permission denied".into(),
+            },
+        };
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller
+            .as_mut()
+            .apply(Ok(Payload::Packages(PackageReport {
+                packages: vec![package.clone()],
+                failures: vec![failure],
+                successful_sources: vec![],
+            })));
+        assert_eq!(controller.rust().packages, vec![package]);
+        let state: Value = serde_json::from_str(&controller.report_state().to_string()).unwrap();
+        assert_eq!(state["phase"], "partial");
+        assert!(state["failures"][0]["detail"]
+            .as_str()
+            .unwrap()
+            .contains("/Applications/Restricted"));
+        assert!(!controller.rust().last_success.contains_key("macos-apps"));
     }
     #[test]
     fn failed_update_check_keeps_known_updates_and_retry_merges_new_ones() {
@@ -7452,6 +7486,20 @@ mod tests {
             .is_some_and(CachedView::stale));
     }
     #[test]
+    fn macos_inventory_never_proposes_a_write() {
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        let mut package = synthetic_package("/Applications/Obsidian.app", "Obsidian");
+        package.id.backend = "macos-apps".into();
+        package.installed_version = Some("1.2.3".into());
+        controller.as_mut().rust_mut().packages = vec![package];
+        for action in ["install", "remove", "upgrade"] {
+            controller.as_mut().propose(action.into(), 0);
+            assert!(controller.rust().pending.is_none());
+            assert!(controller.confirmation().is_empty());
+        }
+    }
+    #[test]
     fn firmware_actions_require_confirmation_and_never_offer_removal() {
         let mut controller = ffi::create_controller();
         let mut controller = controller.pin_mut();
@@ -8628,6 +8676,7 @@ mod tests {
             ("snap", "Snap"),
             ("homebrew", "Homebrew"),
             ("homebrew-cask", "Homebrew Casks"),
+            ("macos-apps", "macOS Applications"),
             ("appimage", "AppImage"),
             ("flatpak", "Flatpak"),
             ("docker", "Docker images"),

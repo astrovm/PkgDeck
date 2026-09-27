@@ -217,6 +217,7 @@ impl Desktop {
                 .env_remove("WAYLAND_DISPLAY")
                 .env("XDG_RUNTIME_DIR", &self.dir.0)
                 .env("XDG_CONFIG_HOME", &self.dir.0)
+                .env("XDG_STATE_HOME", &self.dir.0)
                 .stdout(log.try_clone().unwrap())
                 .stderr(log)
                 .spawn()
@@ -315,6 +316,17 @@ impl Desktop {
         self.key("Down");
     }
     pub fn write(&mut self, op: &str, name: &str) {
+        let history = self.dir.0.join("pkgdeck/activity.json");
+        let entries = || -> Vec<Value> {
+            fs::read(&history)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+                .unwrap_or_default()
+        };
+        let previous = entries()
+            .last()
+            .and_then(|entry| entry["id"].as_u64())
+            .unwrap_or(0);
         if op == "update" {
             self.key("ctrl+5");
             self.key("ctrl+l");
@@ -335,6 +347,27 @@ impl Desktop {
             "upgrade" => "alt+u",
             _ => unreachable!(),
         });
+        // CPU idleness is not transaction completion. In particular, the ARM
+        // package test could request Quit while the real manager was writing.
+        let deadline = Instant::now() + Duration::from_secs(90);
+        loop {
+            let rows = entries();
+            if let Some(entry) = rows
+                .last()
+                .filter(|entry| entry["id"].as_u64().unwrap_or(0) > previous)
+            {
+                if entry["finished_at"].is_number() {
+                    assert_eq!(entry["state"], "finished", "{op}: {entry}\n{}", self.logs());
+                    break;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{op} did not finish: {rows:?}\n{}",
+                self.logs()
+            );
+            sleep(Duration::from_millis(50));
+        }
     }
     pub fn close(mut self) {
         self.xdo(&["key", "--clearmodifiers", "ctrl+q"]);
@@ -518,6 +551,8 @@ pub fn qml() {
         .env("XDG_CONFIG_HOME", &dir.0)
         .env("XDG_DATA_HOME", &dir.0)
         .env("XDG_DATA_DIRS", &dir.0)
+        // Match the shipped application's customizable control style on Mac.
+        .env("QT_QUICK_CONTROLS_STYLE", "Basic")
         .env("QT_QPA_PLATFORM", "offscreen")
         .env("QT_QUICK_BACKEND", "software"));
 }

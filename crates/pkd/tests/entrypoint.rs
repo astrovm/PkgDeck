@@ -7,6 +7,33 @@ fn pkd() -> Command {
 }
 
 #[test]
+fn read_only_source_is_rejected_before_noninteractive_confirmation() {
+    for verb in ["install", "remove", "upgrade"] {
+        for yes in [false, true] {
+            let mut command = pkd();
+            command.args([
+                "--json",
+                "--from",
+                "macos-apps",
+                verb,
+                "/Applications/Fixture.app",
+            ]);
+            if yes {
+                command.arg("--yes");
+            }
+            let output = command.output().unwrap();
+            assert_eq!(output.status.code(), Some(1));
+            let data: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(
+                data["data"]["error"]["Unsupported"]["backend"],
+                "macos-apps"
+            );
+            assert!(data["data"].get("operations").is_none());
+        }
+    }
+}
+
+#[test]
 fn version_and_help_work_without_a_display() {
     let version = pkd().arg("--version").output().unwrap();
     assert!(version.status.success());

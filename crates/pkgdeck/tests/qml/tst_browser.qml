@@ -362,6 +362,25 @@ TestCase {
         compare(action.symbol, "remove");
         verify(findChild(browser, "packageDetails").text.indexOf("<b>literal metadata</b>") >= 0);
     }
+    function test_macos_inventory_is_visible_without_mutation_actions() {
+        browser.openView("Installed");
+        const row = {kind: "package", name: "/Applications/Obsidian.app", display_name: "Obsidian", source: "macos-apps", architecture: "unknown", scope: "system", installed: "1.2.3", update: "unknown", summary: "Available through Homebrew: obsidian (candidate)"};
+        fake.rows = JSON.stringify([row]);
+        const list = findChild(browser, "packageResults");
+        tryCompare(list, "count", 1);
+        compare(browser.sourceDisplayName("macos-apps"), "macOS Applications");
+        compare(browser.rowActionName(row), "");
+        waitForRendering(browser.contentItem);
+        const action = findChild(list.itemAtIndex(0), "rowPackageAction");
+        verify(!action.visible);
+        browser.runRowAction(0);
+        compare(fake.confirmation, "");
+        compare(fake.writes, 0);
+        row.update = "available";
+        compare(browser.rowActionName(row), "", "Read-only sources cannot act on stale or malformed update metadata");
+        browser.choose(0);
+        compare(fake.selection, 0, "Read-only app details remain accessible");
+    }
     function test_reads_never_lock_navigation_and_results_fit_small_windows() {
         for (const view of ["Search", "Installed", "Updates", "Clean", "Sources", "Settings"]) {
             browser.openView(view);
@@ -1107,7 +1126,15 @@ TestCase {
         // Failures stay until dismissed and can open Settings.
         wait(50);
         verify(banner.visible);
-        mouseClick(findChild(browser, "changeNoticeSettings"));
+        const settings = findChild(browser, "changeNoticeSettings");
+        compare(settings.visible, Qt.platform.os === "linux");
+        if (Qt.platform.os === "linux") {
+            mouseClick(settings);
+        } else {
+            // The authorization shortcut is Linux-only. General navigation
+            // still hides the banner while Settings is open on macOS.
+            browser.openView("Settings");
+        }
         compare(browser.currentView, "Settings");
         tryCompare(banner, "visible", false);
         browser.openView("Search");
@@ -2136,7 +2163,7 @@ TestCase {
         compare(browser.sourceSelection, "");
         compare(fake.lastSource, "");
         browser.applySourceDraft();
-        compare(filter.text, "24 sources");
+        compare(filter.text, (browser.sourceIds.length - 1) + " sources");
         verify(fake.lastSource.split(",").indexOf("npm") < 0);
         compare(fake.lastView, "Installed");
         popup.open();

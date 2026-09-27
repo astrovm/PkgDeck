@@ -10,7 +10,10 @@ use std::{
 
 #[test]
 fn second_launch_activates_existing_instance() {
-    let runtime = std::env::temp_dir().join(format!("pkgdeck-instance-{}", std::process::id()));
+    // Keep Unix socket paths below macOS's sockaddr_un limit, including the
+    // Library/Application Support suffix used by QStandardPaths there.
+    let runtime =
+        std::path::PathBuf::from("/tmp").join(format!("pkgdeck-instance-{}", std::process::id()));
     fs::create_dir_all(&runtime).unwrap();
     fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
     struct Running {
@@ -32,6 +35,7 @@ fn second_launch_activates_existing_instance() {
             .env("XDG_RUNTIME_DIR", &runtime)
             .env("XDG_CONFIG_HOME", &runtime)
             .env("XDG_DATA_HOME", &runtime)
+            .env("HOME", &runtime)
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         command
@@ -40,7 +44,18 @@ fn second_launch_activates_existing_instance() {
         child: launch().spawn().unwrap(),
         runtime: runtime.clone(),
     };
-    let socket = runtime.join(format!(
+    let socket_root = if cfg!(target_os = "macos") {
+        let output = Command::new("qtpaths")
+            .args(["--writable-path", "RuntimeLocation"])
+            .env("HOME", &runtime)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        std::path::PathBuf::from(String::from_utf8(output.stdout).unwrap().trim())
+    } else {
+        runtime.clone()
+    };
+    let socket = socket_root.join(format!(
         "pkgdeck-open-{}",
         rustix::process::geteuid().as_raw()
     ));
@@ -144,6 +159,7 @@ fn qml_component_tests_pass() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn real_window_completes_synthetic_lifecycle() {
     pkgdeck_tools::gui_lifecycle(&[env!("CARGO_BIN_EXE_pkgdeck").into()]);
 }

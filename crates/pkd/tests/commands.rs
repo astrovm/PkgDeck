@@ -33,11 +33,19 @@ impl Fixture {
         command
     }
     fn terminal_install(&self, answer: &str, no_color: bool) -> Output {
-        let mut command = Command::new("/usr/bin/timeout");
+        let timeout = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+            .map(|path| path.join("timeout"))
+            .find(|path| path.is_file())
+            .expect("GNU timeout (coreutils) is required for terminal tests");
+        let mut command = Command::new(timeout);
+        command.args(["15s", "/usr/bin/script"]);
+        let invocation = "exec \"$PKGDECK_TEST_CLI\" --from homebrew install fixture";
+        if cfg!(target_os = "macos") {
+            command.args(["-q", "/dev/null", "/bin/sh", "-c", invocation]);
+        } else {
+            command.args(["-qec", invocation, "/dev/null"]);
+        }
         command
-            .args(["15s", "/usr/bin/script", "-qec"])
-            .arg("exec \"$PKGDECK_TEST_CLI\" --from homebrew install fixture")
-            .arg("/dev/null")
             .env("PKGDECK_TEST_CLI", env!("CARGO_BIN_EXE_pkd"))
             .env("SHELL", "/bin/sh")
             .env("TERM", "xterm-256color")
@@ -54,13 +62,13 @@ impl Fixture {
             command.env_remove("NO_COLOR");
         }
         let mut child = command.spawn().unwrap();
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(answer.as_bytes())
-            .unwrap();
-        child.wait_with_output().unwrap()
+        // Apple script can forward EOF before its buffered input. Keep the
+        // pipe open until the command exits so approval cannot become Ctrl-D.
+        let mut input = child.stdin.take().unwrap();
+        input.write_all(answer.as_bytes()).unwrap();
+        let output = child.wait_with_output().unwrap();
+        drop(input);
+        output
     }
     fn call(&self, args: &[&str], code: i32) -> Value {
         let output = self.command().arg("--json").args(args).output().unwrap();
@@ -124,6 +132,25 @@ fn commands_use_sanitized_host_transport_and_one_json_document() {
 }
 fn rustix_root() -> bool {
     std::env::var("USER").is_ok_and(|v| v == "root")
+}
+
+#[test]
+fn mixed_read_only_and_writable_sources_keep_writes_and_confirmation() {
+    let fixture = Fixture::new();
+    let from = ["--from", "macos-apps"];
+    assert_eq!(
+        fixture.call(&[from[0], from[1], "install", "fixture"], 2)["error"],
+        "confirmation_required"
+    );
+    if !rustix_root() {
+        for operation in ["install", "upgrade", "remove"] {
+            fixture.call(&[from[0], from[1], "--yes", operation, "fixture"], 0);
+        }
+        assert!(fixture.call(&["list"], 0)["packages"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+    }
 }
 
 #[test]

@@ -7,7 +7,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 [[ $EUID == 0 && ${GITHUB_ACTIONS:-} == true &&
     ${GITHUB_REPOSITORY:-} == astrovm/PkgDeck &&
     ${RUNNER_ENVIRONMENT:-} == github-hosted &&
-    ${RUNNER_OS:-} == Linux && ${RUNNER_ARCH:-} == X64 &&
+    ${RUNNER_OS:-} == Linux && ( ${RUNNER_ARCH:-} == X64 || ${RUNNER_ARCH:-} == ARM64 ) &&
     -n ${GITHUB_WORKSPACE:-} &&
     $(realpath "$GITHUB_WORKSPACE") == "$PWD" ]] || {
     echo 'Host authorization tests require the disposable PkgDeck GitHub-hosted runner.' >&2
@@ -66,7 +66,8 @@ source scripts/vm/lifecycle.sh
 apt_fixture
 
 doctor=$(runuser -u pkgdeck-test -- "$binaries/pkd" doctor)
-[[ $doctor =~ Runtime\ +native && $doctor =~ Architecture\ +x86_64 &&
+architecture=$(uname -m)
+[[ $doctor =~ Runtime\ +native && $doctor =~ Architecture\ +$architecture &&
     $doctor =~ ✓\ APT\ +/usr/bin/apt-get ]]
 cat >"$rule" <<'RULE'
 polkit.addRule(function(action, subject) {

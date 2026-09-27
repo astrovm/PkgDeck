@@ -115,7 +115,7 @@ fn detection_skips_relative_empty_nonexecutable_and_bundled_paths() {
     for name in ["missing", "bundled", "alias", "text", "directory"] {
         assert!(h.resolve(name).unwrap().is_none());
     }
-    for name in ["", "/bin/true", "../fixture"] {
+    for name in ["", "/usr/bin/true", "../fixture"] {
         assert!(matches!(h.resolve(name), Err(ExecutionError::Invalid(_))));
     }
     assert!(Host::new(Runtime::Native, env(&[]))
@@ -126,7 +126,7 @@ fn detection_skips_relative_empty_nonexecutable_and_bundled_paths() {
     let snap = Host::new(
         Runtime::Snap,
         env(&[
-            ("PATH", &format!("{}:/usr/bin", bundle.0.display())),
+            ("PATH", &format!("{}:/usr/bin:/bin", bundle.0.display())),
             ("SNAP", bundle.0.to_str().unwrap()),
         ]),
     );
@@ -179,7 +179,7 @@ fn host_environment_and_arguments_are_isolated_from_packaging() {
 #[test]
 fn flatpak_uses_the_sanitized_user_path_and_pins_system_writes() {
     let fixture = Fixture::new();
-    symlink("/bin/true", fixture.0.join("flatpak")).unwrap();
+    symlink("/usr/bin/true", fixture.0.join("flatpak")).unwrap();
     let host = Host::new(
         Runtime::Native,
         env(&[
@@ -279,7 +279,7 @@ fn reads_time_out_and_cancel_without_waiting_for_descendants() {
     let cancel = Cancellation::default();
     cancel.cancel();
     assert_eq!(
-        host().read(Path::new("/bin/true"), &[], limits, &cancel),
+        host().read(Path::new("/usr/bin/true"), &[], limits, &cancel),
         Err(ExecutionError::Cancelled)
     );
     let other = cancel.clone();
@@ -449,9 +449,9 @@ fn apt_refresh_upgrade_and_multiarch_keep_native_safety_options() {
 #[test]
 fn system_manager_reads_keep_snap_timeout_and_exit_status() {
     let fixture = Fixture::new();
-    link_executable(&fixture.0, "snap", "/bin/true");
-    link_executable(&fixture.0, "synthetic-ok", "/bin/true");
-    link_executable(&fixture.0, "synthetic-tool", "/bin/false");
+    link_executable(&fixture.0, "snap", "/usr/bin/true");
+    link_executable(&fixture.0, "synthetic-ok", "/usr/bin/true");
+    link_executable(&fixture.0, "synthetic-tool", "/usr/bin/false");
     let host = Host::new(
         Runtime::Native,
         env(&[("PATH", fixture.0.to_str().unwrap())]),
@@ -484,8 +484,8 @@ fn system_manager_reads_keep_snap_timeout_and_exit_status() {
 #[test]
 fn dev_tool_runs_unprivileged_and_reports_status() {
     let fixture = Fixture::new();
-    link_executable(&fixture.0, "synthetic-ok", "/bin/true");
-    link_executable(&fixture.0, "synthetic-fail", "/bin/false");
+    link_executable(&fixture.0, "synthetic-ok", "/usr/bin/true");
+    link_executable(&fixture.0, "synthetic-fail", "/usr/bin/false");
     let host = Host::new(
         Runtime::Native,
         env(&[
@@ -516,8 +516,8 @@ fn dev_tool_runs_unprivileged_and_reports_status() {
 #[test]
 fn container_engine_uses_bounded_user_commands_and_preserves_failures() {
     let fixture = Fixture::new();
-    link_executable(&fixture.0, "synthetic-ok", "/bin/true");
-    link_executable(&fixture.0, "synthetic-fail", "/bin/false");
+    link_executable(&fixture.0, "synthetic-ok", "/usr/bin/true");
+    link_executable(&fixture.0, "synthetic-fail", "/usr/bin/false");
     let host = Host::new(
         Runtime::Native,
         env(&[("PATH", fixture.0.to_str().unwrap())]),
@@ -550,7 +550,7 @@ fn venv_pip_runs_only_inside_explicit_absolute_environments() {
     let fixture = Fixture::new();
     let venv = fixture.0.join("venv");
     fs::create_dir_all(venv.join("bin")).unwrap();
-    symlink("/bin/true", venv.join("bin/python")).unwrap();
+    symlink("/usr/bin/true", venv.join("bin/python")).unwrap();
     fs::write(venv.join("pyvenv.cfg"), "home = /usr/bin\n").unwrap();
     let host = Host::new(
         Runtime::Native,
@@ -619,7 +619,7 @@ fn venv_pip_rejects_malformed_and_packaged_environments() {
     };
     rejected(&host());
     fs::remove_dir(&interpreter).unwrap();
-    symlink("/bin/true", &interpreter).unwrap();
+    symlink("/usr/bin/true", &interpreter).unwrap();
     fs::create_dir(fixture.0.join("pyvenv.cfg")).unwrap();
     rejected(&host());
     fs::remove_dir(fixture.0.join("pyvenv.cfg")).unwrap();
@@ -629,6 +629,13 @@ fn venv_pip_rejects_malformed_and_packaged_environments() {
         env(&[("APPDIR", fixture.0.to_str().unwrap())]),
     );
     rejected(&packaged);
+    let alias = fixture.0.with_extension("alias");
+    symlink(&fixture.0, &alias).unwrap();
+    assert!(matches!(
+        packaged.venv_pip(&alias, &[], &cancel, false),
+        Err(ExecutionError::Disabled(_))
+    ));
+    fs::remove_file(alias).unwrap();
     fs::remove_file(&interpreter).unwrap();
     fs::write(&interpreter, "not an executable").unwrap();
     fs::set_permissions(&interpreter, fs::Permissions::from_mode(0o644)).unwrap();
@@ -660,7 +667,7 @@ fn flatpak_remote_queries_allow_large_catalogs() {
 #[test]
 fn flatpak_failures_missing_tools_and_cancellation_are_diagnostic() {
     let fixture = Fixture::new();
-    link_executable(&fixture.0, "flatpak", "/bin/false");
+    link_executable(&fixture.0, "flatpak", "/usr/bin/false");
     let host = Host::new(
         Runtime::Native,
         env(&[("PATH", fixture.0.to_str().unwrap())]),

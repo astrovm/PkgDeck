@@ -265,6 +265,32 @@ To update one device, use the device ID from `pkd list --from fwupd --json`.
 Power and restart requirements are shown before you confirm. PkgDeck never
 restarts your computer, downgrades firmware, or forces an update.
 
+## macOS application inventory
+
+```sh
+pkd list --from macos-apps
+pkd list --from macos-apps --json
+pkd info '/Applications/Visual Studio Code.app' --from macos-apps
+```
+
+This read-only source scans `/Applications` and `~/Applications`. The exact
+bundle path is the package name and reference, so two copies keep separate
+identities. Details include location, observed version/build, Homebrew ownership
+evidence, and curated cask candidates for VS Code, Firefox, and Obsidian.
+Candidates are matched by bundle identifier, not by filename. They do not verify
+publisher or release channel and never authorize migration. App Store copies
+with receipts receive no cask suggestion.
+
+Ownership covers the active Homebrew prefix and requires an installed app-artifact
+symlink to the exact bundle. Failed checks stay unknown. Missing ownership
+records do not prove that an app is unmanaged. Apps with unreadable metadata
+remain visible, with an unknown version. Architecture and update status are
+unknown in this first inventory implementation. Install, remove, update, and
+adoption are unsupported. On other platforms the source reports that macOS is
+required. See the [GUI guide](gui.md#macos-application-inventory) for scan limits.
+Unreadable subfolders produce a partial inventory: readable apps remain listed,
+and source errors identify the skipped folders (also in JSON `failures`).
+
 ## Standalone CLI tools
 
 PkgDeck finds Codex, Claude Code, Grok, and OpenCode when they were installed
