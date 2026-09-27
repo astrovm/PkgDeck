@@ -37,7 +37,7 @@ brew tap astrovm/pkgdeck https://github.com/astrovm/PkgDeck
 brew install astrovm/pkgdeck/pkgdeck
 ```
 
-This installs both the app and the `pkd` CLI. On Linux, the same formula installs only the CLI.
+This installs PkgDeck.app in `/Applications` and the `pkd` CLI, prebuilt for macOS 26 or later. On Linux, `brew install astrovm/pkgdeck/pkd` installs only the CLI.
 
 ## Command line
 

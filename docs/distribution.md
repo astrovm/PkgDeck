@@ -2,67 +2,66 @@
 
 ## Homebrew
 
-This repository is also a Homebrew tap. The formula is
-[`Formula/pkgdeck.rb`](../Formula/pkgdeck.rb).
+This repository is also a Homebrew tap. It has two prebuilt packages, so
+nothing compiles on your machine:
 
-| System | Commands | App |
+| System | Package | Installs |
 | --- | --- | --- |
-| macOS | `pkd`, `pkgdeck` | `PkgDeck.app` |
-| Linux | `pkd` | Not included |
+| macOS 26+ | cask `pkgdeck` | `PkgDeck.app` in `/Applications`, plus `pkgdeck` and `pkd` commands |
+| Linux | formula `pkd` | The `pkd` CLI |
 
 Install the latest release:
 
 ```sh
 brew tap astrovm/pkgdeck https://github.com/astrovm/PkgDeck
-brew install astrovm/pkgdeck/pkgdeck
+brew install astrovm/pkgdeck/pkgdeck   # macOS
+brew install astrovm/pkgdeck/pkd       # Linux
 ```
 
 The full URL is needed because the repository isn't named `homebrew-pkgdeck`.
-This is our own tap, not part of Homebrew core.
-
-To build the latest development version instead:
-
-```sh
-brew install --HEAD astrovm/pkgdeck/pkgdeck
-brew upgrade --fetch-HEAD astrovm/pkgdeck/pkgdeck   # update it later
-```
+This is our own tap, not part of Homebrew core. Both recipes are rendered from
+[`packaging/homebrew`](../packaging/homebrew) when a release is published.
 
 ### macOS
 
-Homebrew provides Qt. The formula builds a pinned copy of Kirigami and installs
-a launcher that sets the right QML paths and Qt style. Run `pkgdeck` from a
-terminal, or add the app to Finder:
+[`scripts/bundle-macos.sh`](../scripts/bundle-macos.sh) builds a self-contained
+`PkgDeck.app` with Homebrew's Qt, a pinned Kirigami and `macdeployqt`, and
+checks that it loads nothing from Homebrew. CI builds it on macOS 26 runners
+for Apple silicon and Intel, so the app needs macOS 26 or later.
+
+The app is ad-hoc signed, not notarized, because notarization needs a paid
+Apple Developer ID. The cask removes the download quarantine after checking the
+release checksum, so Gatekeeper doesn't block the first launch.
+
+Before 0.1.10 the tap had a `pkgdeck` formula that built the app from source.
+If you installed that on macOS, switch to the cask once:
 
 ```sh
-mkdir -p ~/Applications
-ln -s "$(brew --prefix astrovm/pkgdeck/pkgdeck)/PkgDeck.app" ~/Applications/PkgDeck.app
+brew uninstall --formula pkgdeck
+brew install astrovm/pkgdeck/pkgdeck
 ```
-
-The formula builds from source (there's no bottle). The `.app` depends on
-Homebrew, so it isn't a standalone macOS download.
 
 ### Linux
 
-On Linux, the formula only builds the CLI. APT support needs the
-`pkgdeck-apt-query` helper, which is built only if your distro's
-`libapt-pkg-dev` is installed at build time. Without it, APT is unavailable
-but other package managers still work. The formula never installs system
-packages or runs Homebrew as root.
-
-CI builds and tests the formula on Linux and macOS. The macOS build must pass
-before the macOS package is considered supported. A Linux build alone doesn't
-count.
+[`scripts/package-cli.sh`](../scripts/package-cli.sh) builds static (musl)
+`pkd` and host runner binaries, so one archive per architecture works on any
+distribution. The optional APT helper links the distro's `libapt-pkg`, so it
+isn't included; APT is unavailable in this build but other package managers
+still work. Use the Flatpak, Snap or AppImage for APT support. The formula
+never installs system packages or runs Homebrew as root. Existing installs of
+the old `pkgdeck` formula are renamed to `pkd` on `brew update`.
 
 ### Releasing a new version
 
-1. Bump the workspace version in a pull request and wait for CI to pass. Check
-   the macOS GUI test and the Linux check that no GUI command was installed.
+1. Bump the workspace version in a pull request and wait for CI to pass,
+   including `Test / Homebrew`, which installs the app and CLI from that
+   build's packages.
 2. After merging, tag the merged commit on `main`. Never reuse or move a
    published tag. The release workflow checks that the tagged code matches the
    tested pull request, then publishes once packaging passes.
 3. Publishing the GitHub release runs `Publish / Homebrew`. It opens a PR that
-   updates the formula's archive URL and SHA-256, keeping `head` for
-   development builds. CI tests the updated formula on Linux and macOS.
+   points the formula and cask at the release packages and their SHA-256
+   checksums. CI installs and tests both from the published release.
 4. GitHub squash-merges the formula PR once all checks pass. If a check fails,
    the PR stays open for review. After `brew update`, users get the new version.
 
