@@ -1309,6 +1309,20 @@ TestCase {
             const at = button.mapToItem(box, 0, 0);
             verify(at.y >= 0 && at.y + button.height <= box.height);
         }
+        compare(reload.text, "Check again");
+        compare(clear.text, "Clear filters");
+        // At the minimum width the labels would not fit across the card, so
+        // both keep only their icons and stay inside it.
+        browser.width = 360;
+        waitForRendering(browser.contentItem);
+        compare(reload.text, "");
+        compare(clear.text, "");
+        compare(reload.Accessible.name, "Check again");
+        for (const button of [reload, clear]) {
+            const at = button.mapToItem(box, 0, 0);
+            verify(at.x >= 0 && at.x + button.width <= box.width);
+            verify(at.y >= 0 && at.y + button.height <= box.height);
+        }
         browser.viewSourceFilters = ({});
         verify(reload.visible);
         verify(!clear.visible);

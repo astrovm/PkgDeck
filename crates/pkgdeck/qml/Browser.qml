@@ -2867,11 +2867,21 @@ Controls.ApplicationWindow {
                                 onClicked: root.reload(true)
                             }
                             // Side by side, so the fixed-height empty card never
-                            // clips a second action.
+                            // clips a second action; icons only when the labels
+                            // would not fit across the card.
                             Row {
+                                id: emptyActions
                                 anchors.horizontalCenter: parent.horizontalCenter
                                 spacing: 8
                                 visible: emptyReloadButton.shown || clearResultFilters.shown
+                                readonly property string reloadLabel: root.currentView === "Updates" || root.currentView === "Clean" ? "Check again" : "Reload"
+                                readonly property real labelledWidth: (emptyReloadButton.shown ? reloadMeasure.implicitWidth : 0)
+                                    + (clearResultFilters.shown ? clearMeasure.implicitWidth : 0)
+                                    + (emptyReloadButton.shown && clearResultFilters.shown ? spacing : 0)
+                                readonly property bool iconsOnly: labelledWidth > parent.width
+                                // Hidden copies with their labels, to measure against.
+                                ActionButton { id: reloadMeasure; visible: false; text: emptyActions.reloadLabel; symbol: "refresh" }
+                                ActionButton { id: clearMeasure; visible: false; text: "Clear filters"; symbol: "cancel" }
                                 // The heading row, and its reload button, usually hide
                                 // with an empty list, so an empty page offers its own.
                                 ActionButton {
@@ -2881,9 +2891,10 @@ Controls.ApplicationWindow {
                                     readonly property bool shown: !backend.busy && !root.loadStopped && root.readFailures.length === 0 &&
                                         results.count === 0 && root.currentView !== "Search" && !resultsHeadingRow.visible
                                     visible: shown
-                                    text: root.currentView === "Updates" || root.currentView === "Clean" ? "Check again" : "Reload"
+                                    text: emptyActions.iconsOnly ? "" : emptyActions.reloadLabel
                                     symbol: "refresh"
-                                    tooltipText: "Reload (Ctrl+R)"
+                                    Accessible.name: emptyActions.reloadLabel
+                                    tooltipText: emptyActions.reloadLabel + " (Ctrl+R)"
                                     onClicked: root.reload(true)
                                 }
                                 ActionButton {
@@ -2893,8 +2904,10 @@ Controls.ApplicationWindow {
                                         (root.viewSourceFilters[root.currentView] !== undefined ||
                                         (root.currentView === "Installed" && (root.installedFilter.length > 0 || root.multiSourceOnly)))
                                     visible: shown
-                                    text: "Clear filters"
+                                    text: emptyActions.iconsOnly ? "" : "Clear filters"
                                     symbol: "cancel"
+                                    Accessible.name: "Clear filters"
+                                    tooltipText: emptyActions.iconsOnly ? "Clear filters" : ""
                                     onClicked: root.clearVisibleFilters()
                                 }
                             }
