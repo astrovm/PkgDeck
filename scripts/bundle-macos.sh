@@ -45,6 +45,9 @@ if [[ ! -d $kde/lib/qml/org/kde/kirigami ]]; then
     fetch kirigami 7b3247dfe349867d44244335beb8d549ad4a8f6b3179d1736d231512dea5b0ce
     kde_build kirigami -DKDE_INSTALL_QMLDIR=lib/qml -DKDE_INSTALL_LIBDIR=lib \
         -DBUILD_EXAMPLES=OFF -DBUILD_QCH=OFF
+    # Keep the licenses with the cached build; the source tree is not cached.
+    mkdir -p "$kde/share/licenses"
+    cp -R "$work/src/kirigami-$kf_version.0/LICENSES" "$kde/share/licenses/kirigami"
 fi
 
 QMAKE=$brew/opt/qtbase/bin/qmake cargo build --locked --release -p pkgdeck -p pkd
@@ -53,7 +56,7 @@ rm -rf "$app"
 mkdir -p "$contents/MacOS" "$contents/Resources" "$contents/Resources/licenses"
 cp "$target/pkgdeck" "$target/pkd" "$contents/MacOS/"
 cp LICENSE "$contents/Resources/licenses/PkgDeck"
-cp -R "$work/src/kirigami-$kf_version.0/LICENSES" "$contents/Resources/licenses/kirigami"
+cp -R "$kde/share/licenses/kirigami" "$contents/Resources/licenses/kirigami"
 iconset=$work/PkgDeck.iconset
 rm -rf "$iconset"
 mkdir -p "$iconset"
