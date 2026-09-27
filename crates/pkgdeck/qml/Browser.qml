@@ -3083,7 +3083,9 @@ Controls.ApplicationWindow {
                             Layout.fillWidth: true
                             spacing: 6
                             Controls.CheckBox {
+                                id: repositoryEnabled
                                 objectName: "repositoryEnabled"
+                                Layout.preferredWidth: 28
                                 visible: root.repositoryEditable(modelData)
                                 checked: modelData.enabled
                                 enabled: !backend.busy
@@ -3092,15 +3094,30 @@ Controls.ApplicationWindow {
                                     root.repositoryChange(modelData, "set_enabled", {enabled: checked});
                                     checked = Qt.binding(() => modelData.enabled);
                                 }
+                                // The shared indicator, not the platform style's.
+                                indicator: TickBox {
+                                    anchors.centerIn: parent
+                                    ticked: repositoryEnabled.checked
+                                    opacity: repositoryEnabled.enabled ? 1 : 0.45
+                                }
+                                contentItem: Item {}
                             }
                             // Repositories PkgDeck cannot switch show their state in
                             // the same place, read-only, so every title lines up.
                             Controls.CheckBox {
+                                id: repositoryState
                                 objectName: "repositoryState"
+                                Layout.preferredWidth: 28
                                 visible: !root.repositoryEditable(modelData)
                                 checked: modelData.enabled
                                 enabled: false
                                 Accessible.name: (modelData.title || modelData.name) + (modelData.enabled ? " is enabled" : " is disabled")
+                                indicator: TickBox {
+                                    anchors.centerIn: parent
+                                    ticked: repositoryState.checked
+                                    opacity: 0.45
+                                }
+                                contentItem: Item {}
                             }
                             ColumnLayout {
                                 Layout.fillWidth: true

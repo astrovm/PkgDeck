@@ -1951,6 +1951,12 @@ TestCase {
         tryVerify(() => list.itemAtIndex(0) !== null);
         verify(!findChild(list.itemAtIndex(0), "repositoryEnabled").visible);
         verify(!findChild(list.itemAtIndex(0), "removeRepositoryButton").visible);
+        // Read-only and switchable rows use the shared indicator, not the
+        // platform style's, so they look the same on every desktop.
+        const state = findChild(list.itemAtIndex(0), "repositoryState");
+        verify(state.visible);
+        compare(state.indicator.ticked, true);
+        compare(findChild(list.itemAtIndex(0), "repositoryEnabled").indicator.ticked, true);
         dialog.close();
     }
     function test_repository_form_validates_before_submitting() {
