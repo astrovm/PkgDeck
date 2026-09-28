@@ -218,7 +218,7 @@ VS Code, Firefox, and Obsidian bundle identifiers have curated cask suggestions.
 **Available through Homebrew (candidate)** means an install route exists for
 that product. Open details to see the matching evidence. Publisher, channel,
 architecture, and artifact equality are not verified by the suggestion itself.
-App Store receipt-bearing copies get no suggestion. For VS Code and Firefox,
+App Store receipt-bearing copies get no suggestion. For VS Code, Firefox and Obsidian,
 installing the suggested cask lets Homebrew manage the copy you already have,
 after PkgDeck checks its signature, version, architecture, and files, and keeps
 a copy until Homebrew finishes (see the [CLI guide](cli.md#letting-homebrew-manage-an-app-you-installed)).
