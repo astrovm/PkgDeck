@@ -733,6 +733,11 @@ const NATIVES: Natives = Natives {
     host: pkgdeck_core::host::Host::current,
     root: "/",
 };
+/// Unit tests never detect the machine's own package managers.
+#[cfg(not(test))]
+const DEFAULT_NATIVES: Natives = NATIVES;
+#[cfg(test)]
+const DEFAULT_NATIVES: Natives = tests::NO_MANAGERS;
 struct Worker {
     handle: thread::JoinHandle<()>,
     receiver: mpsc::Receiver<Reply>,
@@ -1006,7 +1011,7 @@ impl Default for Controller {
             sudo: false,
             worker: None,
             names: Names::new(),
-            natives: NATIVES,
+            natives: DEFAULT_NATIVES,
         }
     }
 }
@@ -5025,11 +5030,8 @@ mod tests {
         elf[..4].copy_from_slice(b"\x7fELF");
         elf[4..7].copy_from_slice(&[2, 1, 1]);
         elf[8..11].copy_from_slice(b"AI\x02");
-        let machine = if std::env::consts::ARCH == "aarch64" {
-            183_u16
-        } else {
-            62_u16
-        };
+        // ELF machine: AArch64 (183) or x86-64 (62).
+        let machine: u16 = [62, 183][usize::from(std::env::consts::ARCH == "aarch64")];
         elf[18..20].copy_from_slice(&machine.to_le_bytes());
         elf[20..24].copy_from_slice(&1_u32.to_le_bytes());
         elf[52..54].copy_from_slice(&64_u16.to_le_bytes());
@@ -6043,6 +6045,17 @@ mod tests {
         assert_eq!(state["notify"], true);
         assert_eq!(controller.rows().to_string(), "current view");
         controller.as_mut().acknowledge_notification();
+        let acknowledged = controller.notification_history().to_string();
+        // A restart restores what was already announced.
+        let mut restarted = ffi::create_controller();
+        let mut restarted = restarted.pin_mut();
+        restarted
+            .as_mut()
+            .restore_notification_history(acknowledged.as_str().into());
+        assert_eq!(restarted.notification_history().to_string(), acknowledged);
+        restarted.as_mut().finish_background_check(report.clone());
+        let state: Value = serde_json::from_str(&restarted.background_state().to_string()).unwrap();
+        assert_eq!(state["notify"], false);
         controller.as_mut().finish_background_check(report.clone());
         let state: Value =
             serde_json::from_str(&controller.background_state().to_string()).unwrap();
@@ -6702,6 +6715,10 @@ mod tests {
             "disabled by the administrator".into(),
         ))));
         assert_eq!(restricted["availability_kind"], "restricted");
+        let missing = source_row(&source(Ok(Availability::Unavailable(
+            "not installed".into(),
+        ))));
+        assert_eq!(missing["availability_kind"], "unavailable");
         assert_eq!(restricted["available"], false);
         for (error, kind) in [
             (
@@ -8436,6 +8453,16 @@ mod tests {
             ));
         }
 
+        let replies = run_job(
+            &mut engine,
+            Job::UpgradeAll(vec![Operation::Upgrade(firmware.clone())], None),
+            &cancel,
+        );
+        assert!(matches!(
+            replies.last(),
+            Some(Reply::Done(Ok(Payload::Batch(status, outcomes))))
+                if status.contains(": Completed") && outcomes == &[Outcome::Finished]
+        ));
         cancel.cancel();
         let replies = run_job(
             &mut engine,
@@ -10405,6 +10432,38 @@ mod tests {
             BTreeMap::from([("PATH".into(), "/nonexistent/pkgdeck-tests".into())]),
         )
     }
+    /// A machine without package managers: every known source is absent,
+    /// and an unknown one is refused as the real engine refuses it.
+    fn no_engine(
+        sources: &[String],
+        _: bool,
+        _: Authorization,
+        _: &Cancellation,
+    ) -> Result<Engine, EngineError> {
+        match sources
+            .iter()
+            .find(|source| !pkgdeck_core::backends::BACKEND_IDS.contains(&source.as_str()))
+        {
+            Some(unknown) => Err(EngineError::UnknownBackend(unknown.clone())),
+            None => Ok(Engine::default()),
+        }
+    }
+    pub(super) const NO_MANAGERS: Natives = Natives {
+        engine: no_engine,
+        host: bare_host,
+        root: "/nonexistent/pkgdeck-tests",
+    };
+    #[test]
+    fn production_workers_use_the_running_system() {
+        assert_eq!(NATIVES.root, "/");
+        let cancel = Cancellation::default();
+        assert!(matches!(
+            (NO_MANAGERS.engine)(&["missing-fixture".into()], false, Authorization::Polkit, &cancel),
+            Err(EngineError::UnknownBackend(name)) if name == "missing-fixture"
+        ));
+        let empty = (NO_MANAGERS.engine)(&["apt".into()], true, Authorization::Polkit, &cancel);
+        assert!(empty.unwrap().discover(&cancel).is_empty());
+    }
     const SYNTHETIC: Natives = Natives {
         engine: fixture_engine,
         host: bare_host,
@@ -10988,6 +11047,19 @@ mod tests {
         );
         let state: Value = serde_json::from_str(&controller.report_state().to_string()).unwrap();
         assert_eq!(state["phase"], "unsupported");
+        controller.as_mut().set_package_report_state(
+            &PackageReport {
+                packages: vec![],
+                failures: vec![BackendFailure {
+                    backend: "fixture".into(),
+                    error: EngineError::Cancelled,
+                }],
+                successful_sources: vec![],
+            },
+            false,
+        );
+        let state: Value = serde_json::from_str(&controller.report_state().to_string()).unwrap();
+        assert_eq!(state["phase"], "failed");
 
         let status = controller.status().to_string();
         controller.as_mut().load(
@@ -11322,6 +11394,16 @@ mod tests {
             data["summary"],
             "Update 1 package\n2 sources could not be checked. Updates from them are not included."
         );
+        controller.as_mut().rust_mut().failures.clear();
+        controller
+            .as_mut()
+            .apply(Ok(Payload::UpgradePreview(operations.clone(), 2, None)));
+        let data: Value =
+            serde_json::from_str(&controller.confirmation_data().to_string()).unwrap();
+        assert_eq!(
+            data["summary"],
+            "Update 2 packages\nIf one update fails, the others can still finish."
+        );
 
         // A queued cleanup whose tasks changed is confirmed again.
         let items = vec![cleanup_item("orphans"), cleanup_item("cache")];
@@ -11371,5 +11453,84 @@ mod tests {
             .apply(Ok(Payload::Details(fixture_details("Fresh"))));
         assert_eq!(controller.rust().detail_cache.len(), 1);
         assert!(controller.rust().detail_cache.contains_key(&row.id));
+    }
+
+    fn described_engine(
+        _: &[String],
+        _: bool,
+        _: Authorization,
+        _: &Cancellation,
+    ) -> Result<Engine, EngineError> {
+        let mut row = fixture_row();
+        row.id.backend = "described".into();
+        let mut engine = Engine::default();
+        engine.register(Described(row))?;
+        Ok(engine)
+    }
+    #[test]
+    fn elevated_reads_and_opened_packages_use_their_own_workers() {
+        let mut controller = synthetic_controller();
+        let mut controller = controller.pin_mut();
+        // An empty search only remembers the chosen sources and elevation.
+        controller
+            .as_mut()
+            .load("Search".into(), "  ".into(), "apt".into(), true, false);
+        assert!(controller.rust().worker.is_none());
+        assert_eq!(controller.rust().source_filter, ["apt"]);
+        assert!(controller.rust().sudo);
+
+        controller
+            .as_mut()
+            .load("Installed".into(), "".into(), "".into(), true, true);
+        assert!(matches!(
+            &controller.rust().worker,
+            Some(worker) if matches!(&worker.job, Job::Load(view, _) if view == "Installed")
+        ));
+        settle(&mut controller);
+        assert!(controller.rows().to_string().contains("synthetic"));
+        controller
+            .as_mut()
+            .start_prefetch("Updates".into(), cache_key("Updates", "", &[], true));
+        wait_until(&mut controller, |controller| {
+            controller.rust().prefetch_worker.is_none()
+        });
+        assert!(controller
+            .rust()
+            .prefetched
+            .contains_key(&cache_key("Updates", "", &[], true)));
+
+        // Details of an opened package arrive from the details worker.
+        let mut row = fixture_row();
+        row.id.backend = "described".into();
+        controller.as_mut().rust_mut().natives.engine = described_engine;
+        controller.as_mut().rust_mut().packages = vec![row];
+        controller.as_mut().select(0);
+        assert!(controller.rust().details_worker.is_some());
+        settle(&mut controller);
+        let details: Value = serde_json::from_str(&controller.details().to_string()).unwrap();
+        assert_eq!(details["description"], "Described by the warm engine");
+    }
+    #[test]
+    fn rows_offer_installs_and_source_refreshes() {
+        let mut controller = synthetic_controller();
+        let mut controller = controller.pin_mut();
+        let mut row = fixture_row();
+        row.installed_version = None;
+        controller.as_mut().rust_mut().packages = vec![row.clone()];
+        controller.as_mut().propose("install".into(), 0);
+        assert!(matches!(
+            &controller.rust().pending,
+            Some(Job::Write(Operation::Install(id), None)) if *id == row.id
+        ));
+        controller.as_mut().rust_mut().sources = vec![Source {
+            backend: "fixture".into(),
+            capabilities: vec![Capability::Refresh],
+            availability: Ok(Availability::Available),
+        }];
+        controller.as_mut().propose("refresh".into(), 0);
+        assert!(matches!(
+            &controller.rust().pending,
+            Some(Job::Write(Operation::Refresh { backend }, None)) if backend == "fixture"
+        ));
     }
 }
