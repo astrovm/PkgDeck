@@ -47,6 +47,14 @@ pub struct Host {
 /// Why a write refuses to start when the frontend itself runs as root.
 pub const ROOT_REFUSAL: &str = "PkgDeck can't make changes when it runs as root. Run it as your normal user; it asks for permission when needed.";
 
+/// Writes refuse to run as root (see [`ROOT_REFUSAL`]).
+fn refuse_root(write: bool) -> Result<(), ExecutionError> {
+    if write && rustix::process::geteuid().is_root() {
+        return Err(ExecutionError::Invalid(ROOT_REFUSAL.into()));
+    }
+    Ok(())
+}
+
 pub const BACKENDS: &[(&str, &str)] = &[
     ("APT", "apt-get"),
     ("DNF", "dnf"),
@@ -281,14 +289,17 @@ impl Host {
             "MISE_INSTALLS_DIR",
             "MISE_STATE_DIR",
             "MISE_CACHE_DIR",
-            // pixi and the conda family: their homes, and the manager a
-            // `conda init` shell names.
+            // Go and .NET: where their tools install and which proxy to use.
             "GOBIN",
             "GOPATH",
             "GOROOT",
             "GOPROXY",
             "DOTNET_ROOT",
             "DOTNET_CLI_HOME",
+            // A custom Homebrew location, for command ownership.
+            "HOMEBREW_PREFIX",
+            // pixi and the conda family: their homes, and the manager a
+            // `conda init` shell names.
             "PIXI_HOME",
             "CONDA_EXE",
             "MAMBA_EXE",
@@ -476,9 +487,7 @@ impl Host {
         env: &[(&str, OsString)],
         cancel: &Cancellation,
     ) -> Result<Completion, ExecutionError> {
-        if rustix::process::geteuid().is_root() {
-            return Err(ExecutionError::Invalid(ROOT_REFUSAL.into()));
-        }
+        refuse_root(true)?;
         let mut host = self.clone();
         host.env.extend(
             env.iter()
@@ -504,9 +513,7 @@ impl Host {
         write: bool,
     ) -> Result<Completion, ExecutionError> {
         self.enabled()?;
-        if write && rustix::process::geteuid().is_root() {
-            return Err(ExecutionError::Invalid(ROOT_REFUSAL.into()));
-        }
+        refuse_root(write)?;
         let path = self
             .resolve("brew")?
             .ok_or_else(|| ExecutionError::Disabled("Homebrew not found".into()))?;
@@ -611,9 +618,7 @@ impl Host {
         write: bool,
     ) -> Result<Completion, ExecutionError> {
         self.enabled()?;
-        if write && rustix::process::geteuid().is_root() {
-            return Err(ExecutionError::Invalid(ROOT_REFUSAL.into()));
-        }
+        refuse_root(write)?;
         let path = match self.resolve(executable)? {
             Some(path) => Some(path),
             None => self.user_install(executable)?,
@@ -701,9 +706,7 @@ impl Host {
         write: bool,
     ) -> Result<Completion, ExecutionError> {
         self.enabled()?;
-        if write && rustix::process::geteuid().is_root() {
-            return Err(ExecutionError::Invalid(ROOT_REFUSAL.into()));
-        }
+        refuse_root(write)?;
         let path = self
             .resolve(executable)?
             .ok_or_else(|| ExecutionError::Disabled(format!("{label} not found")))?;
@@ -742,9 +745,7 @@ impl Host {
         write: bool,
     ) -> Result<Completion, ExecutionError> {
         self.enabled()?;
-        if write && rustix::process::geteuid().is_root() {
-            return Err(ExecutionError::Invalid(ROOT_REFUSAL.into()));
-        }
+        refuse_root(write)?;
         if !venv.is_absolute() {
             return Err(ExecutionError::Invalid(
                 "virtual environment path must be absolute".into(),
@@ -809,9 +810,7 @@ impl Host {
         cancel: &Cancellation,
     ) -> Result<Completion, ExecutionError> {
         self.enabled()?;
-        if rustix::process::geteuid().is_root() {
-            return Err(ExecutionError::Invalid(ROOT_REFUSAL.into()));
-        }
+        refuse_root(true)?;
         let result = self.privileged(
             Path::new("/usr/bin/apt-get"),
             &action.arguments()?,
@@ -829,9 +828,7 @@ impl Host {
         cancel: &Cancellation,
     ) -> Result<Completion, ExecutionError> {
         self.enabled()?;
-        if rustix::process::geteuid().is_root() {
-            return Err(ExecutionError::Invalid(ROOT_REFUSAL.into()));
-        }
+        refuse_root(true)?;
         classify_apt(self.privileged(
             Path::new("/usr/bin/apt-get"),
             &AptAction::group_arguments(actions)?,
@@ -850,9 +847,7 @@ impl Host {
         system: bool,
         authorization: Authorization,
     ) -> Result<Completion, ExecutionError> {
-        if write && rustix::process::geteuid().is_root() {
-            return Err(ExecutionError::Invalid(ROOT_REFUSAL.into()));
-        }
+        refuse_root(write)?;
         self.enabled()?;
         let path = if write && system {
             if self.runtime == Runtime::Flatpak {
@@ -1062,9 +1057,7 @@ impl Host {
         execute: impl FnOnce(&[OsString]) -> Result<Completion, ExecutionError>,
     ) -> Result<Completion, ExecutionError> {
         self.enabled()?;
-        if rustix::process::geteuid().is_root() {
-            return Err(ExecutionError::Invalid(ROOT_REFUSAL.into()));
-        }
+        refuse_root(true)?;
         let args = repository_install_args(source, backend, suffix, digest)?;
         execute(&args)
     }
@@ -1118,9 +1111,7 @@ impl Host {
         authorization: Authorization,
     ) -> Result<Completion, ExecutionError> {
         self.enabled()?;
-        if write && rustix::process::geteuid().is_root() {
-            return Err(ExecutionError::Invalid(ROOT_REFUSAL.into()));
-        }
+        refuse_root(write)?;
         let path = if write {
             // Privileged writes only ever run the manager from its fixed
             // system location, never whatever PATH finds first.
@@ -1188,10 +1179,8 @@ impl Host {
         }
         // macOS has no polkit; its system prompt is the administrator
         // password dialog.
-        if cfg!(target_os = "macos")
-            && self.runtime == Runtime::Native
-            && matches!(authorization, Authorization::Polkit)
-        {
+        #[cfg(target_os = "macos")]
+        if self.runtime == Runtime::Native && matches!(authorization, Authorization::Polkit) {
             return self.macos_administrator(executable, args, cancel);
         }
         let (program, mut prefixed) = authorization.prefix(executable);
@@ -1204,6 +1193,7 @@ impl Host {
     }
 }
 
+#[cfg(target_os = "macos")]
 impl Host {
     /// Run one command as root after macOS's own administrator password
     /// dialog. Every argument is shell-quoted and then escaped for AppleScript,
@@ -1232,6 +1222,7 @@ impl Host {
 }
 
 /// One shell command line with every word single-quoted.
+#[cfg(any(target_os = "macos", test))]
 fn shell_command(executable: &Path, args: &[OsString]) -> Result<String, ExecutionError> {
     let quote = |arg: &std::ffi::OsStr| -> Result<String, ExecutionError> {
         let text = arg
@@ -1250,11 +1241,13 @@ fn shell_command(executable: &Path, args: &[OsString]) -> Result<String, Executi
 }
 
 /// An AppleScript string literal.
+#[cfg(any(target_os = "macos", test))]
 fn applescript_string(text: &str) -> String {
     format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
 /// `do shell script "'/opt/local/bin/port' '-N' 'install' 'xz'" …`
+#[cfg(any(target_os = "macos", test))]
 fn administrator_script(executable: &Path, args: &[OsString]) -> Result<String, ExecutionError> {
     Ok(format!(
         "do shell script {} with administrator privileges without altering line endings",

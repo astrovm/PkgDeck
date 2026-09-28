@@ -343,6 +343,12 @@ mod tests {
         profile: Arc<Mutex<String>>,
         calls: Arc<Mutex<Vec<String>>>,
         old_nix: bool,
+        /// How `nix --version` fails, if it does.
+        missing: Option<fn() -> ExecutionError>,
+        /// The profile format version `profile list` reports.
+        format: Option<u32>,
+        /// Writes succeed without changing the profile.
+        inert: bool,
     }
     fn done(text: &str) -> Completion {
         Completion {
@@ -396,7 +402,10 @@ mod tests {
             assert_eq!(executable, "nix");
             let args: Vec<String> = args.iter().map(|a| a.to_string_lossy().into()).collect();
             if args[0] == "--version" {
-                return Ok(done("nix (Nix) 2.35.2"));
+                return match self.missing {
+                    Some(error) => Err(error()),
+                    None => Ok(done("nix (Nix) 2.35.2")),
+                };
             }
             assert_eq!(&args[..2], &FEATURES.map(String::from));
             let line = args[2..].join(" ");
@@ -404,8 +413,10 @@ mod tests {
             let mut profile = self.profile.lock().unwrap();
             match line.as_str() {
                 "profile list --json" => Ok(done(&format!(
-                    r#"{{"elements":{{{profile}}},"version":3}}"#
+                    r#"{{"elements":{{{profile}}},"version":{}}}"#,
+                    self.format.unwrap_or(3)
                 ))),
+                _ if self.inert => Ok(done("")),
                 "profile add nixpkgs#hello" if self.old_nix => {
                     Err(ExecutionError::Failed(Completion {
                         code: Some(1),
@@ -505,7 +516,137 @@ mod tests {
         let mut nix = Nix::new(fake);
         assert!(nix.installed(&Cancellation::default()).unwrap().is_empty());
         // Nix 2.19 and older wrote version 2, a list without names.
-        let old: Profile = serde_json::from_str(r#"{"version":2}"#).unwrap();
-        assert_eq!(old.version, 2);
+        let mut nix = Nix::new(Fake {
+            format: Some(2),
+            ..Fake::default()
+        });
+        let error = nix.installed(&Cancellation::default()).unwrap_err();
+        assert!(
+            error.to_string().contains("version 2 isn't supported"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn availability_follows_the_nix_command() {
+        let detect = |missing: Option<fn() -> ExecutionError>| {
+            Nix::new(Fake {
+                missing,
+                ..Fake::default()
+            })
+            .detect(&Cancellation::default())
+        };
+        assert_eq!(detect(None).unwrap(), Availability::Available);
+        assert_eq!(
+            detect(Some(|| ExecutionError::Disabled("nix not found".into()))).unwrap(),
+            Availability::Unavailable("nix not found".into())
+        );
+        assert!(matches!(
+            detect(Some(|| ExecutionError::Cancelled)),
+            Err(EngineError::Cancelled)
+        ));
+        assert!(matches!(
+            detect(Some(|| ExecutionError::TimedOut)),
+            Err(EngineError::Execution(ExecutionError::TimedOut))
+        ));
+        let nix = Nix::new(Fake::default());
+        assert!(nix.may_have("python3.12") && !nix.may_have("--impure"));
+    }
+
+    #[test]
+    fn only_active_elements_are_rows() {
+        // Elements are active unless the profile says otherwise.
+        let fake = Fake {
+            profile: Arc::new(Mutex::new(
+                r#""jq":{"storePaths":["/nix/store/aaaa-jq-1.8.1-bin"]},"old":{"active":false,"storePaths":[]}"#.into(),
+            )),
+            ..Fake::default()
+        };
+        let rows = Nix::new(fake).installed(&Cancellation::default()).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id.name, "jq");
+        assert_eq!(rows[0].installed_version.as_deref(), Some("1.8.1"));
+    }
+
+    #[test]
+    fn details_say_whether_an_upgrade_can_change_anything() {
+        let fake = Fake {
+            profile: Arc::new(Mutex::new(format!("{CURL},{HELLO}"))),
+            ..Fake::default()
+        };
+        let mut nix = Nix::new(fake);
+        let rows = nix.installed(&Cancellation::default()).unwrap();
+        let cancel = Cancellation::default();
+        let hello = nix.details(&rows[1].id, &cancel).unwrap();
+        assert!(hello
+            .description
+            .contains("Store path: /nix/store/kwhxkl8yn5y8wqiq11jsybagw3fbc4iv-hello-2.12.3"));
+        assert!(hello.description.contains("re-evaluates its flake"));
+        let curl = nix.details(&rows[0].id, &cancel).unwrap();
+        assert!(curl.description.contains("nothing to upgrade from"));
+        let mut foreign = rows[1].id.clone();
+        foreign.backend = "homebrew".into();
+        assert!(matches!(
+            nix.details(&foreign, &cancel),
+            Err(EngineError::NotFound)
+        ));
+        foreign.backend = ID.into();
+        foreign.name = "absent".into();
+        assert!(matches!(
+            nix.details(&foreign, &cancel),
+            Err(EngineError::NotFound)
+        ));
+    }
+
+    #[test]
+    fn operations_check_the_profile_before_and_after() {
+        let fake = Fake {
+            profile: Arc::new(Mutex::new(format!("{CURL},{HELLO}"))),
+            ..Fake::default()
+        };
+        let mut nix = Nix::new(fake.clone());
+        let cancel = Cancellation::default();
+        let rows = nix.installed(&cancel).unwrap();
+        let hello = rows[1].id.clone();
+        let run = |nix: &mut Nix<Fake>, operation: Operation| {
+            nix.execute(&operation, &cancel, &mut |_| {})
+        };
+        // Already there: nothing runs.
+        fake.calls.lock().unwrap().clear();
+        run(&mut nix, Operation::Install(hello.clone())).unwrap();
+        assert_eq!(*fake.calls.lock().unwrap(), vec!["profile list --json"]);
+        assert!(matches!(
+            run(&mut nix, Operation::UpgradeAll { backend: ID.into() }),
+            Err(EngineError::Unsupported { .. })
+        ));
+        for name in ["-rf", ""] {
+            let mut bad = hello.clone();
+            bad.name = name.into();
+            let error = run(&mut nix, Operation::Remove(bad)).unwrap_err();
+            assert!(error.to_string().contains("invalid profile element"));
+        }
+        let mut foreign = hello.clone();
+        foreign.backend = "homebrew".into();
+        assert!(run(&mut nix, Operation::Remove(foreign)).is_err());
+        let mut absent = hello.clone();
+        absent.name = "absent".into();
+        assert!(matches!(
+            run(&mut nix, Operation::Remove(absent.clone())),
+            Err(EngineError::NotFound)
+        ));
+        assert!(matches!(
+            run(&mut nix, Operation::Upgrade(absent)),
+            Err(EngineError::NotFound)
+        ));
+        // A write that leaves the profile unchanged is caught.
+        let mut nix = Nix::new(Fake {
+            inert: true,
+            ..fake
+        });
+        let error = run(&mut nix, Operation::Remove(hello)).unwrap_err();
+        assert!(
+            error.to_string().contains("not in the expected state"),
+            "{error}"
+        );
     }
 }

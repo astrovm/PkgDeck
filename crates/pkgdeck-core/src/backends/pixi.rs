@@ -894,4 +894,124 @@ ruff = { version = "*" }
             .is_err());
         std::fs::remove_dir_all(home).unwrap();
     }
+
+    #[test]
+    fn details_name_the_spec_updates_stay_within() {
+        let (fake, home) = fake("details", Some("14.1.0"), ">=14,<15");
+        let mut pixi = Pixi::new(fake);
+        assert_eq!(
+            pixi.detect(&Cancellation::default()).unwrap(),
+            Availability::Available
+        );
+        let details = pixi.details(&id(), &Cancellation::default()).unwrap();
+        assert_eq!(
+            details.description,
+            "pixi global environment\n\nPackages: ripgrep 14.1.0\n\nUpdates stay within >=14,<15, as recorded in the global manifest."
+        );
+        assert_eq!(details.dependencies, vec!["ripgrep"]);
+        assert_eq!(
+            details.homepage.as_deref(),
+            Some("https://prefix.dev/channels/conda-forge/packages/ripgrep")
+        );
+        let mut foreign = id();
+        foreign.backend = "conda".into();
+        assert!(matches!(
+            pixi.details(&foreign, &Cancellation::default()),
+            Err(EngineError::NotFound)
+        ));
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn operations_refuse_or_skip_before_pixi_writes() {
+        let (fake, home) = fake("refusals", Some("15.2.0"), "*");
+        let mut pixi = Pixi::new(fake.clone());
+        let run = |pixi: &mut Pixi<Fake>, operation: Operation, cancel: &Cancellation| {
+            pixi.execute(&operation, cancel, &mut |_| {})
+        };
+        let cancel = Cancellation::default();
+        // Already installed: nothing to do.
+        run(&mut pixi, Operation::Install(id()), &cancel).unwrap();
+        assert!(matches!(
+            run(
+                &mut pixi,
+                Operation::UpgradeAll { backend: ID.into() },
+                &cancel
+            ),
+            Err(EngineError::Unsupported { .. })
+        ));
+        let cancelled = Cancellation::default();
+        cancelled.cancel();
+        assert!(matches!(
+            run(&mut pixi, Operation::Remove(id()), &cancelled),
+            Err(EngineError::Cancelled)
+        ));
+        assert!(
+            !fake
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|call| call.starts_with("global install")
+                    || call.starts_with("global uninstall"))
+        );
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn an_update_that_moves_backwards_is_reported() {
+        // An unmodeled spec leaves the update to pixi, which here installs
+        // an older build than the one that was there.
+        let (fake, home) = fake("backwards", Some("15.2.0"), ">=14|<2");
+        let mut pixi = Pixi::new(fake);
+        let error = pixi
+            .execute(
+                &Operation::Upgrade(id()),
+                &Cancellation::default(),
+                &mut |_| {},
+            )
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("not in the expected state"),
+            "{error}"
+        );
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn environments_without_a_recorded_spec_have_unknown_updates() {
+        let (fake, home) = fake("unplaced", None, "*");
+        let pixi = Pixi::new(fake);
+        let cancel = Cancellation::default();
+        let manifest = pixi.manifest();
+        let environment = |name: &str, dependencies: &[&str]| GlobalEnvironment {
+            name: name.into(),
+            dependencies: dependencies
+                .iter()
+                .map(|name| Dependency {
+                    name: (*name).into(),
+                    version: "1.0".into(),
+                })
+                .collect(),
+            exposed: vec![],
+        };
+        // Two packages, neither named like the environment: no main package.
+        let tools = environment("tools", &["jq", "yq"]);
+        assert_eq!(pixi.candidate(&tools, &manifest, &cancel).unwrap(), None);
+        let row = Pixi::<Fake>::package(&tools, None);
+        assert_eq!(row.installed_version.as_deref(), Some("unknown"));
+        assert_eq!(row.summary, "pixi global environment");
+        // Not in the manifest, or no spec recorded for its package.
+        for unrecorded in [
+            environment("jq", &["jq"]),
+            environment("ripgrep", &["other"]),
+        ] {
+            assert_eq!(
+                pixi.candidate(&unrecorded, &manifest, &cancel).unwrap(),
+                None
+            );
+        }
+        assert!(pixi.may_have("ripgrep") && !pixi.may_have("-rf"));
+        std::fs::remove_dir_all(home).unwrap();
+    }
 }

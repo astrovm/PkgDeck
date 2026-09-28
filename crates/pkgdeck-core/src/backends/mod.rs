@@ -768,10 +768,13 @@ impl<T: Transport> HomebrewCask<T> {
         }
     }
     /// Casks can take over apps someone installed themselves (macOS only).
-    pub fn with_adoption(mut self) -> Self {
-        if cfg!(target_os = "macos") {
-            self.adoption = Some(Box::new(adopt::NativeAdopt(Host::current())));
-        }
+    pub fn with_adoption(self) -> Self {
+        #[cfg(target_os = "macos")]
+        return Self {
+            adoption: Some(Box::new(adopt::NativeAdopt(Host::current()))),
+            ..self
+        };
+        #[cfg(not(target_os = "macos"))]
         self
     }
 }
@@ -5469,6 +5472,10 @@ pub fn native_engine(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        path::Path,
+        sync::{Arc, Mutex},
+    };
 
     #[test]
     fn linux_searches_only_offer_casks_linux_can_install() {
@@ -6032,5 +6039,242 @@ mod tests {
             Some(theme.join("pkgdeck-fixture-icon.png"))
         );
         std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    const CODE_APP: &str = "/Applications/Visual Studio Code.app";
+    const CODE_COMMAND: &str =
+        "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code";
+
+    /// `brew` answering for a few casks; any other name is no cask.
+    #[derive(Clone, Default)]
+    struct CaskBrew {
+        version: &'static str,
+        installed: Arc<Mutex<bool>>,
+        calls: Arc<Mutex<Vec<String>>>,
+    }
+    impl Transport for CaskBrew {
+        fn apt_query(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &Cancellation,
+        ) -> Result<Completion, ExecutionError> {
+            unreachable!()
+        }
+        fn apt_write(&self, _: AptAction, _: &Cancellation) -> Result<Completion, ExecutionError> {
+            unreachable!()
+        }
+        fn flatpak(
+            &self,
+            _: &[OsString],
+            _: &Cancellation,
+            _: bool,
+            _: bool,
+        ) -> Result<Completion, ExecutionError> {
+            unreachable!()
+        }
+        fn brew(
+            &self,
+            args: &[OsString],
+            _: &Cancellation,
+            write: bool,
+        ) -> Result<Completion, ExecutionError> {
+            let line = args
+                .iter()
+                .map(|arg| arg.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join(" ");
+            self.calls.lock().unwrap().push(line.clone());
+            let cask = |token: &str, artifacts: serde_json::Value| {
+                serde_json::json!({"casks": [{
+                    "full_token": token, "name": [token], "desc": null,
+                    "homepage": "https://example.com", "version": "1.139.1",
+                    "installed": null, "outdated": false, "auto_updates": true,
+                    "artifacts": artifacts,
+                }]})
+                .to_string()
+            };
+            let stdout = match line.as_str() {
+                "--prefix" => "/home/linuxbrew/.linuxbrew\n".into(),
+                "--version" => format!("Homebrew {}\n", self.version),
+                "info --json=v2 --cask -- visual-studio-code" => cask(
+                    "visual-studio-code",
+                    serde_json::json!([
+                        {"app": ["Visual Studio Code.app"], "target": CODE_APP},
+                        {"binary": [CODE_COMMAND], "target": "/home/linuxbrew/.linuxbrew/bin/code"},
+                    ]),
+                ),
+                "info --json=v2 --cask -- codex" => {
+                    cask("codex", serde_json::json!([{"binary": ["codex"]}]))
+                }
+                "upgrade --cask" => {
+                    assert!(write);
+                    String::new()
+                }
+                "install --cask --adopt -- visual-studio-code" => {
+                    assert!(write);
+                    *self.installed.lock().unwrap() = true;
+                    String::new()
+                }
+                "list --cask --versions -- visual-studio-code"
+                    if *self.installed.lock().unwrap() =>
+                {
+                    "visual-studio-code 1.139.1\n".into()
+                }
+                _ => {
+                    return Err(ExecutionError::Failed(Completion {
+                        code: Some(1),
+                        signal: None,
+                        stdout: vec![],
+                        stderr: b"Error: No available cask".to_vec(),
+                        truncated: false,
+                        cancellation_deferred: false,
+                    }))
+                }
+            };
+            Ok(Completion {
+                code: Some(0),
+                signal: None,
+                stdout: stdout.into_bytes(),
+                stderr: vec![],
+                truncated: false,
+                cancellation_deferred: false,
+            })
+        }
+    }
+
+    /// A signed copy of the app already in place, with the cask's command
+    /// already linked where Homebrew would link it.
+    struct Adoptable(Arc<Mutex<Vec<&'static str>>>);
+    impl adopt::AdoptIo for Adoptable {
+        fn occupied(&self, path: &Path) -> bool {
+            path == Path::new(CODE_APP) || path.ends_with("bin/code")
+        }
+        fn is_folder(&self, path: &Path) -> bool {
+            path == Path::new(CODE_APP)
+        }
+        fn is_file(&self, path: &Path) -> bool {
+            path == Path::new(CODE_COMMAND)
+        }
+        fn links_to(&self, link: &Path, source: &Path) -> bool {
+            link.starts_with("/home/linuxbrew") && source == Path::new(CODE_COMMAND)
+        }
+        fn plist(&self, _: &Path, _: &Cancellation) -> Result<serde_json::Value, EngineError> {
+            Ok(serde_json::json!({
+                "CFBundleIdentifier": "com.microsoft.VSCode",
+                "CFBundleExecutable": "Electron",
+                "CFBundleShortVersionString": "1.139.1",
+            }))
+        }
+        fn team(&self, _: &Path, _: &Cancellation) -> Result<Option<String>, EngineError> {
+            Ok(Some("UBF8T346G9".into()))
+        }
+        fn architectures(&self, _: &Path, _: &Cancellation) -> Result<Vec<String>, EngineError> {
+            Ok(vec!["x86_64".into(), "arm64".into()])
+        }
+        fn backup(&self, app: &Path, _: &Cancellation) -> Result<PathBuf, EngineError> {
+            self.0.lock().unwrap().push("backup");
+            Ok(Path::new("/backups/1").join(app.file_name().unwrap()))
+        }
+        fn restore(&self, _: &Path, _: &Path, _: &Cancellation) -> Result<(), EngineError> {
+            unreachable!("the app stays in place")
+        }
+        fn discard(&self, _: &Path) {
+            self.0.lock().unwrap().push("discard");
+        }
+    }
+
+    #[test]
+    fn a_cask_install_adopts_the_copy_already_in_place() {
+        let brew = CaskBrew {
+            version: "7.0.6",
+            ..CaskBrew::default()
+        };
+        let log = Arc::new(Mutex::new(vec![]));
+        let mut casks = HomebrewCask::new(brew.clone());
+        casks.adoption = Some(Box::new(Adoptable(log.clone())));
+        let cancel = Cancellation::default();
+        assert_eq!(casks.detect(&cancel).unwrap(), Availability::Available);
+        let id = PackageId {
+            backend: "homebrew-cask".into(),
+            name: "visual-studio-code".into(),
+            architecture: std::env::consts::ARCH.into(),
+            scope: Scope::Environment {
+                path: "/home/linuxbrew/.linuxbrew".into(),
+            },
+            remote: None,
+            reference: None,
+        };
+        let mut messages = vec![];
+        casks
+            .execute(&Operation::Install(id), &cancel, &mut |progress| {
+                if let Progress::Message(message) = progress {
+                    messages.push(message);
+                }
+            })
+            .unwrap();
+        assert!(brew
+            .calls
+            .lock()
+            .unwrap()
+            .contains(&"install --cask --adopt -- visual-studio-code".into()));
+        assert_eq!(*log.lock().unwrap(), vec!["backup", "discard"]);
+        assert_eq!(
+            messages.last().unwrap(),
+            "Homebrew now manages Visual Studio Code."
+        );
+    }
+
+    #[test]
+    fn exact_cask_names_are_looked_up_directly() {
+        let brew = CaskBrew {
+            version: "7.0.6",
+            ..CaskBrew::default()
+        };
+        let mut casks = HomebrewCask::new(brew.clone());
+        let cancel = Cancellation::default();
+        casks.detect(&cancel).unwrap();
+        let found = casks.lookup("codex", &cancel).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id.name, "codex");
+        // Not a cask, or not a cask name at all: nothing, without an error.
+        assert!(casks.lookup("no-such-cask", &cancel).unwrap().is_empty());
+        let calls = brew.calls.lock().unwrap().len();
+        assert!(casks.lookup("--help", &cancel).unwrap().is_empty());
+        assert_eq!(brew.calls.lock().unwrap().len(), calls);
+        casks
+            .execute(
+                &Operation::UpgradeAll {
+                    backend: "homebrew-cask".into(),
+                },
+                &cancel,
+                &mut |_| {},
+            )
+            .unwrap();
+        assert!(brew
+            .calls
+            .lock()
+            .unwrap()
+            .contains(&"upgrade --cask".into()));
+    }
+
+    #[test]
+    fn linux_casks_wait_for_homebrew_6() {
+        let mut casks = HomebrewCask::new(CaskBrew {
+            version: "5.1.2",
+            ..CaskBrew::default()
+        });
+        let availability = casks.detect(&Cancellation::default()).unwrap();
+        if cfg!(target_os = "macos") {
+            assert_eq!(availability, Availability::Available);
+        } else {
+            assert_eq!(
+                availability,
+                Availability::Unavailable(
+                    "Homebrew Casks on Linux need Homebrew 6.0 or later".into()
+                )
+            );
+        }
     }
 }

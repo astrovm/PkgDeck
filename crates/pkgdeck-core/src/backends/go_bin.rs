@@ -770,6 +770,8 @@ mod tests {
         /// module → latest version
         latest: Arc<Mutex<BTreeMap<String, String>>>,
         calls: Arc<Mutex<Vec<String>>>,
+        /// GOBIN is unset, so programs go to GOPATH's first entry.
+        gopath_only: bool,
     }
     impl Fake {
         fn new(tag: &str) -> Self {
@@ -783,6 +785,7 @@ mod tests {
                 built: Arc::default(),
                 latest: Arc::default(),
                 calls: Arc::default(),
+                gopath_only: false,
             }
         }
         fn build(&self, name: &str, path: &str, module: &str, version: &str) {
@@ -862,6 +865,13 @@ mod tests {
                 .as_slice()
             {
                 ["version"] => Ok(done("go version go1.25.1 linux/arm64\n", 0)),
+                ["env", "-json", "GOBIN", "GOPATH"] if self.gopath_only => Ok(done(
+                    &format!(
+                        "{{\n\t\"GOBIN\": \"\",\n\t\"GOPATH\": \"{}:/else\"\n}}\n",
+                        self.dir.parent().unwrap().display()
+                    ),
+                    0,
+                )),
                 ["env", "-json", "GOBIN", "GOPATH"] => Ok(done(
                     &format!(
                         "{{\n\t\"GOBIN\": \"{dir}/\",\n\t\"GOPATH\": \"/nowhere:/else\"\n}}\n"
@@ -1278,5 +1288,101 @@ mod tests {
         .unwrap();
         assert!(!fake.dir.join("stringer").exists());
         assert!(fake.dir.join("hello").exists());
+    }
+
+    #[test]
+    fn details_explain_local_builds_and_refuse_other_rows() {
+        let fake = installed_fake("details");
+        let mut go = GoBinaries::new(fake.clone());
+        let cancel = Cancellation::default();
+        assert_eq!(go.detect(&cancel).unwrap(), Availability::Available);
+        assert!(go.may_have("stringer") && go.may_have("golang.org/x/tools/cmd/stringer"));
+        assert!(!go.may_have("-rf"));
+        let rows = go.installed(&cancel).unwrap();
+        let hello = rows.iter().find(|r| r.id.name == "hello").unwrap();
+        assert_eq!(
+            hello.summary,
+            "Go program built from local source · example.com/hello"
+        );
+        let details = go.details(&hello.id, &cancel).unwrap();
+        assert!(details
+            .description
+            .contains("It wasn't installed from a published module version"));
+        assert_eq!(
+            details.homepage.as_deref(),
+            Some("https://pkg.go.dev/example.com/hello")
+        );
+        let mut foreign = hello.id.clone();
+        foreign.backend = "cargo".into();
+        assert!(matches!(
+            go.details(&foreign, &cancel),
+            Err(EngineError::NotFound)
+        ));
+        let mut script = hello.id.clone();
+        script.name = "script".into();
+        assert!(matches!(
+            go.details(&script, &cancel),
+            Err(EngineError::NotFound)
+        ));
+        assert!(matches!(
+            go.execute(
+                &Operation::UpgradeAll { backend: ID.into() },
+                &cancel,
+                &mut |_| {}
+            ),
+            Err(EngineError::Unsupported { .. })
+        ));
+    }
+
+    #[test]
+    fn stale_or_renamed_programs_are_left_alone() {
+        let fake = installed_fake("stale");
+        // Built from a package whose program would be named differently.
+        fake.build("renamed", "example.com/tool", "example.com/tool", "v1.0.0");
+        let mut go = GoBinaries::new(fake.clone());
+        let cancel = Cancellation::default();
+        let rows = go.installed(&cancel).unwrap();
+        let renamed = rows.iter().find(|r| r.id.name == "renamed").unwrap();
+        let error = go
+            .execute(
+                &Operation::Upgrade(renamed.id.clone()),
+                &cancel,
+                &mut |_| {},
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("was renamed"), "{error}");
+        // A row listed from another package path than what is there now.
+        let stringer = rows.iter().find(|r| r.id.name == "stringer").unwrap();
+        let mut stale = stringer.id.clone();
+        stale.reference = Some("golang.org/x/tools/cmd/other".into());
+        let error = go
+            .execute(&Operation::Remove(stale), &cancel, &mut |_| {})
+            .unwrap_err();
+        assert!(error.to_string().contains("changed; refresh"), "{error}");
+        assert!(fake.dir.join("stringer").exists());
+        assert!(!fake.calls().iter().any(|c| c.starts_with("install")));
+    }
+
+    #[test]
+    fn programs_are_found_in_gopath_without_gobin() {
+        let mut fake = installed_fake("gopath");
+        fake.gopath_only = true;
+        let mut go = GoBinaries::new(fake.clone());
+        let rows = go.search("stringer", &Cancellation::default()).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(fake
+            .calls()
+            .contains(&format!("version -m -- {}", fake.dir.display())));
+        // A cancelled install never runs go install.
+        let cancel = Cancellation::default();
+        cancel.cancel();
+        let mut offer = rows[0].id.clone();
+        offer.name = "hey".into();
+        offer.reference = Some("github.com/rakyll/hey".into());
+        assert!(matches!(
+            go.execute(&Operation::Install(offer), &cancel, &mut |_| {}),
+            Err(EngineError::Cancelled)
+        ));
+        assert!(!fake.calls().iter().any(|c| c.starts_with("install")));
     }
 }

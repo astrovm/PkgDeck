@@ -649,6 +649,39 @@ mod tests {
         fs::remove_dir_all(&root).unwrap();
     }
 
+    #[test]
+    fn manager_folders_follow_the_session_and_stay_off_in_sandboxes() {
+        let env: BTreeMap<OsString, OsString> = [
+            ("HOME", "/nonexistent-home"),
+            ("PIPX_HOME", "/nonexistent-pipx"),
+            ("CARGO_HOME", "/nonexistent-cargo"),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.into(), value.into()))
+        .collect();
+        let native = Layout::native(&Host::new(Runtime::Native, env.clone()));
+        let root = |manager: &str| {
+            native
+                .roots
+                .iter()
+                .find(|(_, name)| *name == manager)
+                .map(|(root, _)| root.clone())
+        };
+        assert_eq!(root("pipx"), Some("/nonexistent-pipx/venvs".into()));
+        assert_eq!(
+            root("uv"),
+            Some("/nonexistent-home/.local/share/uv/tools".into())
+        );
+        assert_eq!(
+            root("mise"),
+            Some("/nonexistent-home/.local/share/mise/installs".into())
+        );
+        assert_eq!(native.cargo_home, Some("/nonexistent-cargo".into()));
+        // Inside a sandbox these paths are not the host's.
+        let flatpak = Layout::native(&Host::new(Runtime::Flatpak, env));
+        assert!(flatpak.roots.is_empty() && flatpak.cargo_home.is_none());
+    }
+
     use super::*;
     use crate::package::UpdateAvailability;
     use std::{

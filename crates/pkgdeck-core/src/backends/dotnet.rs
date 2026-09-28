@@ -754,6 +754,8 @@ Installed an ASP.NET Core HTTPS development certificate.
         calls: Arc<Mutex<Vec<String>>>,
         old_sdk: bool,
         offline: bool,
+        /// Only the .NET runtime: `dotnet --version` fails without an SDK.
+        runtime_only: bool,
     }
     fn done(stdout: &str, code: i32) -> Completion {
         Completion {
@@ -811,6 +813,7 @@ Installed an ASP.NET Core HTTPS development certificate.
             let mut tools = self.tools.lock().unwrap();
             let words: Vec<&str> = args.iter().map(String::as_str).collect();
             match words.as_slice() {
+                ["--version"] if self.runtime_only => failed(""),
                 ["--version"] => Ok(done("10.0.401\n", 0)),
                 ["tool", "list", "--global", "--format", "json"] if self.old_sdk => failed(
                     "Unrecognized command or argument '--format'.\nUnrecognized command or argument 'json'.\n",
@@ -1067,5 +1070,110 @@ Installed an ASP.NET Core HTTPS development certificate.
         let calls = fake.calls.lock().unwrap().clone();
         assert!(calls.contains(&"tool update --global -- dotnetsay".into()));
         assert!(!calls.contains(&"tool update --global -- dotnet-ef".into()));
+    }
+
+    #[test]
+    fn an_empty_search_lists_installed_tools_without_the_catalog() {
+        let fake = fake(&[("dotnet-ef", "10.0.12")]);
+        let mut dotnet = DotnetTools::new(fake.clone());
+        assert!(dotnet.may_have("dotnet-ef") && !dotnet.may_have("--global"));
+        let rows = dotnet.search("  ", &Cancellation::default()).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(!fake
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call.starts_with("tool search")));
+        // Update checks stop at cancellation.
+        let cancel = Cancellation::default();
+        cancel.cancel();
+        assert!(matches!(
+            dotnet.installed(&cancel),
+            Err(EngineError::Cancelled)
+        ));
+    }
+
+    #[test]
+    fn a_runtime_without_the_sdk_is_unavailable() {
+        let mut fake = fake(&[]);
+        fake.runtime_only = true;
+        assert_eq!(
+            DotnetTools::new(fake)
+                .detect(&Cancellation::default())
+                .unwrap(),
+            Availability::Unavailable(
+                ".NET SDK not found; global tools need the SDK, not only the runtime".into()
+            )
+        );
+    }
+
+    #[test]
+    fn prerelease_labels_compare_part_by_part() {
+        for (a, b, order) in [
+            ("2.0.0", "2.0.0-rc.1", Ordering::Greater),
+            ("2.0.0-rc.1", "2.0.0-rc", Ordering::Greater),
+            ("2.0.0-rc.1", "2.0.0-rc.1", Ordering::Equal),
+            ("2.0.0-1", "2.0.0-alpha", Ordering::Less),
+            ("2.0.0-alpha", "2.0.0-1", Ordering::Greater),
+            ("2.0.0-Beta", "2.0.0-alpha", Ordering::Greater),
+        ] {
+            assert_eq!(compare_versions(a, b), order, "{a} {b}");
+        }
+    }
+
+    #[test]
+    fn offline_details_and_updates_stay_honest() {
+        let mut fake = fake(&[("dotnetsay", "4.0.0")]);
+        fake.offline = true;
+        let mut dotnet = DotnetTools::new(fake.clone());
+        let rows = dotnet.installed(&Cancellation::default()).unwrap();
+        let details = dotnet
+            .details(&rows[0].id, &Cancellation::default())
+            .unwrap();
+        assert!(
+            details.description.contains("Update check failed"),
+            "{}",
+            details.description
+        );
+        assert_eq!(details.package.update, UpdateAvailability::Unknown);
+        let mut foreign = rows[0].id.clone();
+        foreign.backend = "nuget".into();
+        assert!(matches!(
+            dotnet.details(&foreign, &Cancellation::default()),
+            Err(EngineError::NotFound)
+        ));
+        // Without a check the update runs, and an older result is an error.
+        let error = run(&mut dotnet, Operation::Upgrade(rows[0].id.clone())).unwrap_err();
+        assert!(
+            error.to_string().contains("not in the expected state"),
+            "{error}"
+        );
+        // Cancelled before anything is written.
+        let cancel = Cancellation::default();
+        cancel.cancel();
+        fake.calls.lock().unwrap().clear();
+        assert!(matches!(
+            dotnet.execute(&Operation::Remove(rows[0].id.clone()), &cancel, &mut |_| {}),
+            Err(EngineError::Cancelled)
+        ));
+        assert!(matches!(
+            dotnet.execute(
+                &Operation::UpgradeAll { backend: ID.into() },
+                &cancel,
+                &mut |_| {}
+            ),
+            Err(EngineError::Cancelled)
+        ));
+        assert!(!fake
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call.starts_with("tool uninstall") || call.starts_with("tool update")));
+        assert!(matches!(
+            run(&mut dotnet, Operation::Refresh { backend: ID.into() }),
+            Err(EngineError::Unsupported { .. })
+        ));
     }
 }

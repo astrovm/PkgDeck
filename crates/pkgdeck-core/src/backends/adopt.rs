@@ -13,15 +13,18 @@
 //! version, architecture and every place the cask writes to beforehand, and
 //! keeps an APFS clone of the app (instant, no extra space) until Homebrew
 //! has finished, restoring it if the app went missing.
-use super::{bytes, conda::compare_versions, invalid};
-use crate::{engine::*, host::Host, package::*, process::*};
+use super::{conda::compare_versions, invalid};
+use crate::{engine::*, package::*, process::*};
 use serde_json::Value;
 use std::{
     cmp::Ordering,
-    ffi::OsString,
-    fs,
     path::{Path, PathBuf},
-    time::Duration,
+};
+#[cfg(target_os = "macos")]
+use {
+    super::bytes,
+    crate::host::Host,
+    std::{ffi::OsString, fs, time::Duration},
 };
 
 const ID: &str = "homebrew-cask";
@@ -71,21 +74,12 @@ pub(super) fn rule(token: &str) -> Option<&'static Rule> {
 /// What adoption needs from the system; tests replace it.
 pub(super) trait AdoptIo: Send {
     /// Anything at this path, including a dangling symlink.
-    fn occupied(&self, path: &Path) -> bool {
-        fs::symlink_metadata(path).is_ok()
-    }
+    fn occupied(&self, path: &Path) -> bool;
     /// A real folder, not a symlink to one.
-    fn is_folder(&self, path: &Path) -> bool {
-        fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir())
-    }
-    fn is_file(&self, path: &Path) -> bool {
-        path.is_file()
-    }
+    fn is_folder(&self, path: &Path) -> bool;
+    fn is_file(&self, path: &Path) -> bool;
     /// A symlink at `link` that resolves to the same file as `source`.
-    fn links_to(&self, link: &Path, source: &Path) -> bool {
-        fs::symlink_metadata(link).is_ok_and(|meta| meta.file_type().is_symlink())
-            && matches!((fs::canonicalize(link), fs::canonicalize(source)), (Ok(a), Ok(b)) if a == b)
-    }
+    fn links_to(&self, link: &Path, source: &Path) -> bool;
     fn plist(&self, path: &Path, cancel: &Cancellation) -> Result<Value, EngineError>;
     /// The Developer ID team of a valid signature; `None` for ad-hoc.
     /// An invalid or missing signature is an error.
@@ -352,8 +346,10 @@ pub(super) fn run(
 }
 
 /// The real system: plutil, codesign, lipo and APFS clones.
+#[cfg(target_os = "macos")]
 pub(super) struct NativeAdopt(pub Host);
 
+#[cfg(target_os = "macos")]
 impl NativeAdopt {
     fn read(
         &self,
@@ -400,7 +396,21 @@ impl NativeAdopt {
     }
 }
 
+#[cfg(target_os = "macos")]
 impl AdoptIo for NativeAdopt {
+    fn occupied(&self, path: &Path) -> bool {
+        fs::symlink_metadata(path).is_ok()
+    }
+    fn is_folder(&self, path: &Path) -> bool {
+        fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir())
+    }
+    fn is_file(&self, path: &Path) -> bool {
+        path.is_file()
+    }
+    fn links_to(&self, link: &Path, source: &Path) -> bool {
+        fs::symlink_metadata(link).is_ok_and(|meta| meta.file_type().is_symlink())
+            && matches!((fs::canonicalize(link), fs::canonicalize(source)), (Ok(a), Ok(b)) if a == b)
+    }
     fn plist(&self, path: &Path, cancel: &Cancellation) -> Result<Value, EngineError> {
         let result = self.read(
             "/usr/bin/plutil",
@@ -510,6 +520,7 @@ mod tests {
         present: Arc<Mutex<bool>>,
         receipt: bool,
         bundle: &'static str,
+        executable: &'static str,
         team: Result<Option<&'static str>, &'static str>,
         archs: Vec<&'static str>,
         version: &'static str,
@@ -525,6 +536,7 @@ mod tests {
             present: Arc::new(Mutex::new(true)),
             receipt: false,
             bundle: "com.microsoft.VSCode",
+            executable: "Electron",
             team: Ok(Some("UBF8T346G9")),
             archs: vec!["x86_64", "arm64"],
             version: "1.139.1",
@@ -555,7 +567,7 @@ mod tests {
         fn plist(&self, _: &Path, _: &Cancellation) -> Result<Value, EngineError> {
             Ok(serde_json::json!({
                 "CFBundleIdentifier": self.bundle,
-                "CFBundleExecutable": "Electron",
+                "CFBundleExecutable": self.executable,
                 "CFBundleShortVersionString": self.version,
             }))
         }
@@ -833,5 +845,128 @@ mod tests {
             "{error}"
         );
         assert_eq!(*io.log.lock().unwrap(), vec!["backup", "restore"]);
+    }
+
+    /// The checks that read the file system directly, on throwaway files:
+    /// a symlink never counts as the app folder, and only a link to the
+    /// cask's own command counts as Homebrew's.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn file_system_checks_tell_links_from_real_files() {
+        use crate::host::Runtime;
+        let root = std::env::temp_dir().join(format!("pkgdeck-adopt-fs-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let app = root.join("Fixture.app");
+        let command = app.join("fixture");
+        fs::create_dir_all(&app).unwrap();
+        fs::write(&command, "binary").unwrap();
+        fs::write(root.join("other"), "other").unwrap();
+        let link = |name: &str, to: &Path| {
+            let path = root.join(name);
+            std::os::unix::fs::symlink(to, &path).unwrap();
+            path
+        };
+        let app_link = link("App link.app", &app);
+        let ours = link("ours", &command);
+        let theirs = link("theirs", &root.join("other"));
+        let dangling = link("dangling", &root.join("gone"));
+        let io = NativeAdopt(Host::new(Runtime::Native, Default::default()));
+        assert!(io.is_folder(&app));
+        assert!(!io.is_folder(&app_link));
+        assert!(!io.is_folder(&command));
+        assert!(io.is_file(&command));
+        assert!(!io.is_file(&app));
+        assert!(io.occupied(&dangling));
+        assert!(!io.occupied(&root.join("gone")));
+        assert!(io.links_to(&ours, &command));
+        assert!(!io.links_to(&theirs, &command));
+        assert!(!io.links_to(&dangling, &command));
+        // The command itself is not a link to it.
+        assert!(!io.links_to(&command, &command));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn casks_without_one_placed_app_install_normally() {
+        let io = fake();
+        let cancel = Cancellation::default();
+        let mut no_app = cask();
+        no_app["artifacts"].as_array_mut().unwrap().remove(1);
+        assert!(plan(&io, &no_app, &cancel).unwrap().is_none());
+        let mut two_apps = cask();
+        let second = two_apps["artifacts"][1].clone();
+        two_apps["artifacts"].as_array_mut().unwrap().push(second);
+        assert!(plan(&io, &two_apps, &cancel).unwrap().is_none());
+        let mut no_target = cask();
+        no_target["artifacts"][1] = serde_json::json!({"app": ["Visual Studio Code.app"]});
+        assert!(plan(&io, &no_target, &cancel).unwrap().is_none());
+    }
+
+    #[test]
+    fn unusual_copies_and_casks_are_refused() {
+        let cancel = Cancellation::default();
+        for (executable, version, expected) in [
+            ("", "1.139.1", "names no executable"),
+            ("../Electron", "1.139.1", "names no executable"),
+            ("Electron", "", "version unknown"),
+        ] {
+            let mut io = fake();
+            io.executable = executable;
+            io.version = version;
+            let reason = reason(plan(&io, &cask(), &cancel));
+            assert!(reason.contains(expected), "{expected}: {reason}");
+        }
+        let mut relative = cask();
+        relative["artifacts"][1]["target"] = "Visual Studio Code.app".into();
+        let mut io = fake();
+        io.taken = vec!["Visual Studio Code.app"];
+        assert!(reason(plan(&io, &relative, &cancel)).contains("is not an app folder"));
+        let mut unplaced = cask();
+        unplaced["artifacts"][2] = serde_json::json!({"binary": [CODE]});
+        assert!(
+            reason(plan(&fake(), &unplaced, &cancel)).contains("didn't say where its binary goes")
+        );
+        // A wrapper script Homebrew writes itself must not replace anything.
+        let mut wrapper = cask();
+        wrapper["artifacts"][2] =
+            serde_json::json!({"command_wrapper": [CODE], "target": "/opt/homebrew/bin/code"});
+        assert!(plan(&fake(), &wrapper, &cancel).unwrap().is_some());
+        let mut io = fake();
+        io.taken = vec!["/opt/homebrew/bin/code"];
+        assert!(
+            reason(plan(&io, &wrapper, &cancel)).contains("/opt/homebrew/bin/code already exists")
+        );
+    }
+
+    #[test]
+    fn a_deferred_cancellation_is_reported_and_an_unknown_app_is_never_intact() {
+        let io = fake();
+        let plan = plan(&io, &cask(), &Cancellation::default())
+            .unwrap()
+            .unwrap();
+        let outcome = run(
+            &io,
+            &plan,
+            &Cancellation::default(),
+            &mut |_| {},
+            &mut || {
+                Ok(Completion {
+                    code: Some(0),
+                    signal: None,
+                    stdout: vec![],
+                    stderr: vec![],
+                    truncated: false,
+                    cancellation_deferred: true,
+                })
+            },
+            &mut || true,
+        )
+        .unwrap();
+        assert!(outcome.cancellation_deferred);
+        let stranger = Plan {
+            token: "some-other-app".into(),
+            ..plan
+        };
+        assert!(!intact(&io, &stranger, &Cancellation::default()));
     }
 }

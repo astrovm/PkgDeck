@@ -483,6 +483,8 @@ mod tests {
         ripgrep: Arc<Mutex<String>>,
         calls: Arc<Mutex<Vec<String>>>,
         updates: bool,
+        /// How the manager's `--version` fails, if it does.
+        broken: Option<fn() -> ExecutionError>,
     }
     fn done(value: Value) -> Completion {
         Completion {
@@ -535,6 +537,9 @@ mod tests {
                 return Err(ExecutionError::Disabled(format!("{executable} not found")));
             }
             let args: Vec<String> = args.iter().map(|a| a.to_string_lossy().into()).collect();
+            if let (Some(error), "--version") = (self.broken, args[0].as_str()) {
+                return Err(error());
+            }
             let line = args.join(" ");
             self.calls.lock().unwrap().push(line.clone());
             let micromamba = self.manager != "conda";
@@ -747,5 +752,52 @@ mod tests {
             conda.detect(&Cancellation::default()).unwrap(),
             Availability::Unavailable(_)
         ));
+        // A manager that is there but fails is an error, not a missing one.
+        let detect = |broken: fn() -> ExecutionError| {
+            let mut fake = fake("mamba");
+            fake.broken = Some(broken);
+            Conda::new(fake).detect(&Cancellation::default())
+        };
+        assert!(matches!(
+            detect(|| ExecutionError::Cancelled),
+            Err(EngineError::Cancelled)
+        ));
+        assert!(matches!(
+            detect(|| ExecutionError::TimedOut),
+            Err(EngineError::Execution(ExecutionError::TimedOut))
+        ));
+    }
+
+    #[test]
+    fn details_name_the_environment_and_its_manager() {
+        let mut conda = Conda::new(fake("micromamba"));
+        conda.detect(&Cancellation::default()).unwrap();
+        let details = conda.details(&ripgrep(), &Cancellation::default()).unwrap();
+        assert_eq!(
+            details.description,
+            "Requested in the tools environment\n\nLocation: /c/envs/tools\n\nManaged with micromamba. PkgDeck updates requested packages; install and remove them with the manager."
+        );
+        assert_eq!(details.package.installed_version.as_deref(), Some("14.1.0"));
+        let mut libgcc = ripgrep();
+        libgcc.name = "libgcc".into();
+        assert!(matches!(
+            conda.details(&libgcc, &Cancellation::default()),
+            Err(EngineError::NotFound)
+        ));
+    }
+
+    #[test]
+    fn a_cancelled_update_stops_after_planning() {
+        let mut fake = fake("conda");
+        fake.updates = true;
+        let mut conda = Conda::new(fake.clone());
+        conda.detect(&Cancellation::default()).unwrap();
+        let cancel = Cancellation::default();
+        cancel.cancel();
+        assert!(matches!(
+            conda.execute(&Operation::Upgrade(ripgrep()), &cancel, &mut |_| {}),
+            Err(EngineError::Cancelled)
+        ));
+        assert_eq!(fake.ripgrep.lock().unwrap().as_str(), "14.1.0");
     }
 }

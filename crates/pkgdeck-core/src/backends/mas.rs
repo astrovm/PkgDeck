@@ -45,6 +45,7 @@ fn records(output: &[u8]) -> Result<Vec<MasApp>, EngineError> {
 }
 
 /// mas 7 added the JSON output this adapter reads.
+#[cfg(any(target_os = "macos", test))]
 fn supported_version(text: &str) -> bool {
     text.trim()
         .split('.')
@@ -248,12 +249,14 @@ impl<T: Transport> Backend for MacAppStore<T> {
     fn capabilities(&self) -> &[Capability] {
         CAPABILITIES
     }
+    #[cfg(not(target_os = "macos"))]
+    fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
+        Ok(Availability::Unavailable(
+            "The Mac App Store requires macOS".into(),
+        ))
+    }
+    #[cfg(target_os = "macos")]
     fn detect(&mut self, cancel: &Cancellation) -> Result<Availability, EngineError> {
-        if !cfg!(target_os = "macos") {
-            return Ok(Availability::Unavailable(
-                "The Mac App Store requires macOS".into(),
-            ));
-        }
         let version = match self.run(&["version"], cancel, false) {
             Ok(output) => String::from_utf8_lossy(&output).into_owned(),
             Err(EngineError::Execution(ExecutionError::Disabled(reason))) => {
@@ -616,5 +619,65 @@ mod tests {
         assert!(supported_version("12.1"));
         assert!(!supported_version("6.9.0"));
         assert!(!supported_version("garbage"));
+    }
+
+    #[test]
+    fn the_app_store_is_only_offered_on_macos() {
+        let availability = MacAppStore::new(fake())
+            .detect(&Cancellation::default())
+            .unwrap();
+        if cfg!(target_os = "macos") {
+            assert_eq!(availability, Availability::Available);
+        } else {
+            assert_eq!(
+                availability,
+                Availability::Unavailable("The Mac App Store requires macOS".into())
+            );
+        }
+    }
+
+    #[test]
+    fn details_link_the_store_page_and_never_offer_installs() {
+        let mut store = MacAppStore::new(fake());
+        // Any app name can be an installed App Store app.
+        assert!(store.may_have("Final Cut Pro") && !store.may_have(""));
+        let details = store.details(&id("2"), &Cancellation::default()).unwrap();
+        assert_eq!(details.package.display_name, "Beta");
+        assert_eq!(
+            details.homepage.as_deref(),
+            Some("https://apps.apple.com/app/id2")
+        );
+        assert!(details
+            .description
+            .starts_with("Location: /Applications/Beta.app\n\nApp Store ID: 2\n\nBundle identifier: com.example.Beta"));
+        assert!(details.description.contains("does not install or remove"));
+        let mut foreign = id("2");
+        foreign.backend = "homebrew-cask".into();
+        assert!(matches!(
+            store.details(&foreign, &Cancellation::default()),
+            Err(EngineError::NotFound)
+        ));
+    }
+
+    #[test]
+    fn groups_take_only_updates_and_cancellation_stops_before_mas_runs() {
+        let fake = fake();
+        let mut store = MacAppStore::new(fake.clone());
+        let mixed = [Operation::Upgrade(id("1")), Operation::Remove(id("2"))];
+        assert!(store
+            .execute_group(&mixed, &Cancellation::default(), &mut |_| {})
+            .is_none());
+        let cancel = Cancellation::default();
+        cancel.cancel();
+        assert!(matches!(
+            store.execute(&Operation::Upgrade(id("1")), &cancel, &mut |_| {}),
+            Err(EngineError::Cancelled)
+        ));
+        assert!(!fake
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call.starts_with("update")));
     }
 }

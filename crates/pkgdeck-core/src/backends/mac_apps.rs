@@ -27,8 +27,33 @@ trait AppIo: Send {
     ) -> Result<BTreeMap<PathBuf, Vec<String>>, EngineError>;
 }
 
+/// plutil, pkgutil and Homebrew's Caskroom.
+#[cfg(target_os = "macos")]
 struct NativeApps(Host);
 
+/// Elsewhere there are no app bundles to read and no casks that own them.
+#[cfg(not(target_os = "macos"))]
+struct NativeApps;
+
+#[cfg(not(target_os = "macos"))]
+impl AppIo for NativeApps {
+    fn plist(&self, _: &Path, _: &Cancellation) -> Result<Value, EngineError> {
+        Err(macos_only())
+    }
+    fn ownership(&self, _: &Cancellation) -> Result<BTreeMap<PathBuf, Vec<String>>, EngineError> {
+        Err(macos_only())
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn macos_only() -> EngineError {
+    EngineError::Unavailable {
+        backend: ID.into(),
+        reason: "Application bundle discovery requires macOS".into(),
+    }
+}
+
+#[cfg(target_os = "macos")]
 impl AppIo for NativeApps {
     fn plist(&self, path: &Path, cancel: &Cancellation) -> Result<Value, EngineError> {
         let metadata = fs::metadata(path).map_err(ExecutionError::from)?;
@@ -103,6 +128,7 @@ impl AppIo for NativeApps {
     }
 }
 
+#[cfg(target_os = "macos")]
 impl NativeApps {
     fn pkgutil(&self, args: &[&str], cancel: &Cancellation) -> Result<Completion, EngineError> {
         Ok(self.0.read(
@@ -154,6 +180,7 @@ impl NativeApps {
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn receipt_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 255
@@ -165,6 +192,7 @@ fn receipt_id(id: &str) -> bool {
 /// The receipt patterns each installed cask names in `uninstall pkgutil:`.
 /// A cask that runs an installer package leaves no app link, but its uninstall
 /// step names the receipts the package wrote.
+#[cfg(any(target_os = "macos", test))]
 fn receipt_patterns(data: &[u8]) -> Result<Vec<(String, Vec<String>)>, EngineError> {
     #[derive(Deserialize)]
     struct InstalledCask {
@@ -210,6 +238,7 @@ fn receipt_patterns(data: &[u8]) -> Result<Vec<(String, Vec<String>)>, EngineErr
 
 /// App bundles a receipt installed: its location when that is a bundle, or
 /// each listed `.app` that is not inside another bundle.
+#[cfg(any(target_os = "macos", test))]
 fn receipt_bundles(info: &str, files: &str) -> Vec<PathBuf> {
     let field = |name: &str| {
         info.lines()
@@ -253,6 +282,7 @@ fn relative_artifact(path: &Path) -> bool {
 /// cask keeps its Caskroom folder under an old token, and its current
 /// definition may no longer list the app it installed, so its installed
 /// version folder is also searched for app links under each old token.
+#[cfg(any(target_os = "macos", test))]
 fn cask_owners(root: &Path, data: &[u8]) -> Result<BTreeMap<PathBuf, Vec<String>>, EngineError> {
     #[derive(Deserialize)]
     struct InstalledCask {
@@ -373,7 +403,10 @@ impl MacApps {
         }
         Self {
             roots,
+            #[cfg(target_os = "macos")]
             io: Box::new(NativeApps(host)),
+            #[cfg(not(target_os = "macos"))]
+            io: Box::new(NativeApps),
             snapshot: None,
             scan_errors: vec![],
             exact_query: false,
@@ -1505,5 +1538,27 @@ mod tests {
             native.plist(&path, &cancel).unwrap()["CFBundleIdentifier"],
             "md.obsidian"
         );
+    }
+
+    /// Off macOS nothing runs plutil or asks Homebrew for casks: a bundle
+    /// found anyway is listed without metadata or an owner.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn other_systems_read_no_bundles() {
+        let f = Fixture::new();
+        f.bundle("Native.app", "md.obsidian");
+        let mut backend = f.backend(Ok(BTreeMap::new()));
+        backend.io = Box::new(NativeApps);
+        let cancel = Cancellation::default();
+        assert!(matches!(
+            backend.io.ownership(&cancel),
+            Err(EngineError::Unavailable { .. })
+        ));
+        let rows = backend.installed(&cancel).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].installed_version.as_deref(), Some("unknown"));
+        assert!(rows[0]
+            .summary
+            .starts_with("Homebrew ownership could not be checked"));
     }
 }
