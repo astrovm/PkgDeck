@@ -310,6 +310,117 @@ pub trait Transport: Send {
         self.dev_tool(executable, args, cancel, write)
     }
 }
+
+/// A test transport for managers that only run development tools: the fake
+/// implements `dev_tool` (and `env` if it needs one), and every system
+/// package manager seam refuses.
+#[cfg(test)]
+pub(crate) mod dev_tools {
+    use super::*;
+
+    pub(crate) trait DevTool: Send {
+        fn dev_tool(
+            &self,
+            executable: &str,
+            args: &[OsString],
+            cancel: &Cancellation,
+            write: bool,
+        ) -> Result<Completion, ExecutionError>;
+        fn env(&self, _name: &str) -> Option<OsString> {
+            None
+        }
+    }
+
+    pub(crate) struct DevTools<F>(pub F);
+
+    fn refused() -> ExecutionError {
+        ExecutionError::Disabled("only development tools run here".into())
+    }
+
+    impl<F: DevTool> Transport for DevTools<F> {
+        fn apt_query(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &Cancellation,
+        ) -> Result<Completion, ExecutionError> {
+            Err(refused())
+        }
+        fn apt_write(&self, _: AptAction, _: &Cancellation) -> Result<Completion, ExecutionError> {
+            Err(refused())
+        }
+        fn brew(
+            &self,
+            _: &[OsString],
+            _: &Cancellation,
+            _: bool,
+        ) -> Result<Completion, ExecutionError> {
+            Err(refused())
+        }
+        fn flatpak(
+            &self,
+            _: &[OsString],
+            _: &Cancellation,
+            _: bool,
+            _: bool,
+        ) -> Result<Completion, ExecutionError> {
+            Err(refused())
+        }
+        fn env(&self, name: &str) -> Option<OsString> {
+            self.0.env(name)
+        }
+        fn dev_tool(
+            &self,
+            executable: &str,
+            args: &[OsString],
+            cancel: &Cancellation,
+            write: bool,
+        ) -> Result<Completion, ExecutionError> {
+            self.0.dev_tool(executable, args, cancel, write)
+        }
+    }
+
+    #[test]
+    fn only_development_tools_run() {
+        struct Echo;
+        impl DevTool for Echo {
+            fn dev_tool(
+                &self,
+                executable: &str,
+                args: &[OsString],
+                _: &Cancellation,
+                write: bool,
+            ) -> Result<Completion, ExecutionError> {
+                Ok(Completion {
+                    code: Some(0),
+                    signal: None,
+                    stdout: format!("{executable} {args:?} {write}").into_bytes(),
+                    stderr: vec![],
+                    truncated: false,
+                    cancellation_deferred: false,
+                })
+            }
+        }
+        let transport = DevTools(Echo);
+        let cancel = Cancellation::default();
+        let ran = transport
+            .dev_tool("go", &["version".into()], &cancel, true)
+            .unwrap();
+        assert_eq!(ran.stdout, b"go [\"version\"] true");
+        assert_eq!(transport.env("HOME"), None);
+        let refusals = [
+            transport.apt_query("search", "x", "amd64", &cancel),
+            transport.apt_write(AptAction::Refresh, &cancel),
+            transport.brew(&[], &cancel, false),
+            transport.flatpak(&[], &cancel, false, false),
+        ];
+        for refusal in refusals {
+            assert!(matches!(refusal, Err(ExecutionError::Disabled(_))));
+        }
+    }
+}
+
 pub struct NativeTransport {
     pub host: Host,
     pub authorization: Authorization,

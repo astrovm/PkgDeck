@@ -50,7 +50,11 @@ struct ManifestEnvironment {
 
 /// The conda subdirectory for this machine.
 fn subdir() -> &'static str {
-    match (std::env::consts::OS, std::env::consts::ARCH) {
+    subdir_for(std::env::consts::OS, std::env::consts::ARCH)
+}
+
+fn subdir_for(os: &str, arch: &str) -> &'static str {
+    match (os, arch) {
         ("macos", "aarch64") => "osx-arm64",
         ("macos", _) => "osx-64",
         ("linux", "aarch64") => "linux-aarch64",
@@ -628,8 +632,13 @@ impl<T: Transport> Backend for Pixi<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::host::AptAction;
+    use crate::backends::dev_tools::{DevTool, DevTools};
     use std::sync::{Arc, Mutex};
+
+    fn backend(fake: Fake) -> Pixi<DevTools<Fake>> {
+        Pixi::new(DevTools(fake))
+    }
+    fn ignore(_: Progress) {}
 
     #[test]
     fn manifest_specs_are_read_from_both_table_styles() {
@@ -682,6 +691,8 @@ ruff = { version = "*" }
         home: PathBuf,
         ripgrep: Arc<Mutex<Option<String>>>,
         calls: Arc<Mutex<Vec<String>>>,
+        /// How every pixi command fails, if it does.
+        broken: Option<fn() -> ExecutionError>,
     }
     fn done(stdout: String) -> Completion {
         Completion {
@@ -693,36 +704,7 @@ ruff = { version = "*" }
             cancellation_deferred: false,
         }
     }
-    impl Transport for Fake {
-        fn apt_query(
-            &self,
-            _: &str,
-            _: &str,
-            _: &str,
-            _: &Cancellation,
-        ) -> Result<Completion, ExecutionError> {
-            unreachable!()
-        }
-        fn apt_write(&self, _: AptAction, _: &Cancellation) -> Result<Completion, ExecutionError> {
-            unreachable!()
-        }
-        fn brew(
-            &self,
-            _: &[OsString],
-            _: &Cancellation,
-            _: bool,
-        ) -> Result<Completion, ExecutionError> {
-            unreachable!()
-        }
-        fn flatpak(
-            &self,
-            _: &[OsString],
-            _: &Cancellation,
-            _: bool,
-            _: bool,
-        ) -> Result<Completion, ExecutionError> {
-            unreachable!()
-        }
+    impl DevTool for Fake {
         fn env(&self, name: &str) -> Option<OsString> {
             (name == "PIXI_HOME").then(|| self.home.clone().into())
         }
@@ -736,6 +718,9 @@ ruff = { version = "*" }
             assert_eq!(executable, "pixi");
             let args: Vec<String> = args.iter().map(|a| a.to_string_lossy().into()).collect();
             self.calls.lock().unwrap().push(args.join(" "));
+            if let Some(error) = self.broken {
+                return Err(error());
+            }
             let mut ripgrep = self.ripgrep.lock().unwrap();
             let environment = |version: &str| {
                 format!(
@@ -762,17 +747,25 @@ ruff = { version = "*" }
                         subdir()
                     )))
                 }
-                ("global", Some(verb)) => {
-                    assert!(write);
-                    *ripgrep = match verb {
-                        "install" => Some("15.2.0".into()),
-                        "uninstall" => None,
-                        "update" => Some("14.1.1".into()),
-                        other => panic!("unexpected {other}"),
+                _ => {
+                    assert!(write && args[0] == "global", "{args:?}");
+                    let output = match args[1].as_str() {
+                        "install" => {
+                            *ripgrep = Some("15.2.0".into());
+                            "Installed ripgrep"
+                        }
+                        "uninstall" => {
+                            *ripgrep = None;
+                            ""
+                        }
+                        verb => {
+                            assert_eq!(verb, "update");
+                            *ripgrep = Some("14.1.1".into());
+                            ""
+                        }
                     };
-                    Ok(done(String::new()))
+                    Ok(done(output.into()))
                 }
-                other => panic!("unexpected {other:?}"),
             }
         }
     }
@@ -789,18 +782,19 @@ ruff = { version = "*" }
                 home: home.clone(),
                 ripgrep: Arc::new(Mutex::new(installed.map(Into::into))),
                 calls: Arc::default(),
+                broken: None,
             },
             home,
         )
     }
     fn id() -> PackageId {
-        Pixi::<Fake>::offer("ripgrep", "0".into()).id
+        Pixi::<DevTools<Fake>>::offer("ripgrep", "0".into()).id
     }
 
     #[test]
     fn updates_stay_within_the_manifest_spec() {
         let (fake, home) = fake("range", Some("14.1.0"), ">=14,<15");
-        let mut pixi = Pixi::new(fake.clone());
+        let mut pixi = backend(fake.clone());
         let rows = pixi.installed(&Cancellation::default()).unwrap();
         assert_eq!(rows[0].summary, "pixi global environment · rg");
         assert_eq!(rows[0].update, UpdateAvailability::Available);
@@ -814,7 +808,7 @@ ruff = { version = "*" }
         pixi.execute(
             &Operation::Upgrade(id()),
             &Cancellation::default(),
-            &mut |_| {},
+            &mut ignore,
         )
         .unwrap();
         assert_eq!(fake.ripgrep.lock().unwrap().as_deref(), Some("14.1.1"));
@@ -823,7 +817,7 @@ ruff = { version = "*" }
         pixi.execute(
             &Operation::Upgrade(id()),
             &Cancellation::default(),
-            &mut |_| {},
+            &mut ignore,
         )
         .unwrap();
         assert!(!fake
@@ -838,7 +832,7 @@ ruff = { version = "*" }
     #[test]
     fn unmodeled_specs_leave_updates_unknown() {
         let (fake, home) = fake("unmodeled", Some("14.1.0"), ">=14|<2");
-        let mut pixi = Pixi::new(fake);
+        let mut pixi = backend(fake);
         assert_eq!(
             pixi.installed(&Cancellation::default()).unwrap()[0].update,
             UpdateAvailability::Unknown
@@ -849,7 +843,7 @@ ruff = { version = "*" }
     #[test]
     fn install_and_remove_are_verified() {
         let (fake, home) = fake("lifecycle", None, "*");
-        let mut pixi = Pixi::new(fake.clone());
+        let mut pixi = backend(fake.clone());
         let offers = pixi.search("ripgrep", &Cancellation::default()).unwrap();
         assert_eq!(offers.len(), 1);
         assert_eq!(offers[0].candidate_version.as_deref(), Some("15.2.0"));
@@ -859,10 +853,11 @@ ruff = { version = "*" }
             .search("nothing-here", &Cancellation::default())
             .unwrap()
             .is_empty());
+        let mut messages = vec![];
         pixi.execute(
             &Operation::Install(id()),
             &Cancellation::default(),
-            &mut |_| {},
+            &mut |progress| messages.push(progress),
         )
         .unwrap();
         assert!(fake
@@ -870,10 +865,29 @@ ruff = { version = "*" }
             .lock()
             .unwrap()
             .contains(&"global install ripgrep".into()));
+        // pixi's own output follows the step.
+        assert_eq!(
+            messages,
+            vec![
+                Progress::Message("Installing ripgrep with pixi global".into()),
+                Progress::Message("Installed ripgrep".into()),
+            ]
+        );
+        // Installed now: searching its name lists it without an offer.
+        fake.calls.lock().unwrap().clear();
+        let found = pixi.search("ripgrep", &Cancellation::default()).unwrap();
+        assert_eq!(found.len(), 1);
+        assert!(found[0].installed_version.is_some());
+        assert!(!fake
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call.starts_with("search")));
         pixi.execute(
             &Operation::Remove(id()),
             &Cancellation::default(),
-            &mut |_| {},
+            &mut ignore,
         )
         .unwrap();
         assert!(fake.ripgrep.lock().unwrap().is_none());
@@ -881,7 +895,7 @@ ruff = { version = "*" }
             pixi.execute(
                 &Operation::Remove(id()),
                 &Cancellation::default(),
-                &mut |_| {}
+                &mut ignore
             ),
             Err(EngineError::NotFound)
         ));
@@ -891,7 +905,7 @@ ruff = { version = "*" }
             .execute(
                 &Operation::Install(bad),
                 &Cancellation::default(),
-                &mut |_| {}
+                &mut ignore
             )
             .is_err());
         std::fs::remove_dir_all(home).unwrap();
@@ -900,7 +914,7 @@ ruff = { version = "*" }
     #[test]
     fn details_name_the_spec_updates_stay_within() {
         let (fake, home) = fake("details", Some("14.1.0"), ">=14,<15");
-        let mut pixi = Pixi::new(fake);
+        let mut pixi = backend(fake);
         assert_eq!(
             pixi.detect(&Cancellation::default()).unwrap(),
             Availability::Available
@@ -927,9 +941,9 @@ ruff = { version = "*" }
     #[test]
     fn operations_refuse_or_skip_before_pixi_writes() {
         let (fake, home) = fake("refusals", Some("15.2.0"), "*");
-        let mut pixi = Pixi::new(fake.clone());
-        let run = |pixi: &mut Pixi<Fake>, operation: Operation, cancel: &Cancellation| {
-            pixi.execute(&operation, cancel, &mut |_| {})
+        let mut pixi = backend(fake.clone());
+        let run = |pixi: &mut Pixi<DevTools<Fake>>, operation: Operation, cancel: &Cancellation| {
+            pixi.execute(&operation, cancel, &mut ignore)
         };
         let cancel = Cancellation::default();
         // Already installed: nothing to do.
@@ -965,12 +979,12 @@ ruff = { version = "*" }
         // An unmodeled spec leaves the update to pixi, which here installs
         // an older build than the one that was there.
         let (fake, home) = fake("backwards", Some("15.2.0"), ">=14|<2");
-        let mut pixi = Pixi::new(fake);
+        let mut pixi = backend(fake);
         let error = pixi
             .execute(
                 &Operation::Upgrade(id()),
                 &Cancellation::default(),
-                &mut |_| {},
+                &mut ignore,
             )
             .unwrap_err();
         assert!(
@@ -983,7 +997,7 @@ ruff = { version = "*" }
     #[test]
     fn environments_without_a_recorded_spec_have_unknown_updates() {
         let (fake, home) = fake("unplaced", None, "*");
-        let pixi = Pixi::new(fake);
+        let pixi = backend(fake);
         let cancel = Cancellation::default();
         let manifest = pixi.manifest();
         let environment = |name: &str, dependencies: &[&str]| GlobalEnvironment {
@@ -1000,7 +1014,7 @@ ruff = { version = "*" }
         // Two packages, neither named like the environment: no main package.
         let tools = environment("tools", &["jq", "yq"]);
         assert_eq!(pixi.candidate(&tools, &manifest, &cancel).unwrap(), None);
-        let row = Pixi::<Fake>::package(&tools, None);
+        let row = Pixi::<DevTools<Fake>>::package(&tools, None);
         assert_eq!(row.installed_version.as_deref(), Some("unknown"));
         assert_eq!(row.summary, "pixi global environment");
         // Not in the manifest, or no spec recorded for its package.
@@ -1014,6 +1028,101 @@ ruff = { version = "*" }
             );
         }
         assert!(pixi.may_have("ripgrep") && !pixi.may_have("-rf"));
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn subdirs_follow_the_platform() {
+        assert_eq!(subdir_for("macos", "aarch64"), "osx-arm64");
+        assert_eq!(subdir_for("macos", "x86_64"), "osx-64");
+        assert_eq!(subdir_for("linux", "aarch64"), "linux-aarch64");
+        assert_eq!(subdir_for("linux", "x86_64"), "linux-64");
+    }
+
+    #[test]
+    fn unrecognized_manifest_lines_are_skipped() {
+        let manifest = read_manifest(
+            r#"[envs.jq]
+channels = "conda-forge"
+dependencies = "jq"
+stray line
+
+[envs.jq.exposed]
+jq = "jq"
+
+[envs.yq]
+dependencies = { yq = "*" }
+"#,
+        );
+        // Only the inline table counts; the rest is not recognized.
+        assert_eq!(manifest["jq"], ManifestEnvironment::default());
+        assert_eq!(manifest["yq"].specs["yq"], "*");
+        assert_eq!(manifest.len(), 2);
+    }
+
+    #[test]
+    fn unmodeled_globs_and_operators_are_unknown() {
+        for (version, spec, expected) in [
+            ("1.2.3", "1.*.*", None),
+            ("1.2.3", ">=1.*", None),
+            ("1.2.3", ">1*", None),
+            ("1.2.3", "!=1.2.*", Some(false)),
+            ("1.3.0", "!=1.2.*", Some(true)),
+            ("1.2.3", "<=1.2.3", Some(true)),
+            ("1.2.3", ">1.2.3", Some(false)),
+            ("1.2.3", "!=1.2.3", Some(false)),
+            ("1.2.3", "", Some(true)),
+        ] {
+            assert_eq!(satisfies(version, spec), expected, "{version} {spec}");
+        }
+    }
+
+    #[test]
+    fn the_newest_release_within_the_spec_is_current() {
+        let (fake, home) = fake("current", Some("15.2.0"), "*");
+        let mut pixi = backend(fake);
+        let rows = pixi.installed(&Cancellation::default()).unwrap();
+        assert_eq!(rows[0].update, UpdateAvailability::Current);
+        assert_eq!(rows[0].candidate_version, None);
+        // Invalid names are never offered, and nothing is searched for them.
+        assert!(pixi
+            .search("No Such", &Cancellation::default())
+            .unwrap()
+            .is_empty());
+        assert_eq!(pixi.id(), "pixi");
+        assert!(pixi.capabilities().contains(&Capability::Install));
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn a_failing_pixi_is_unavailable_or_an_error() {
+        let (fake, home) = fake("broken", Some("15.2.0"), "*");
+        let run = |broken: fn() -> ExecutionError| {
+            let mut pixi = backend(Fake {
+                broken: Some(broken),
+                ..fake.clone()
+            });
+            (
+                pixi.detect(&Cancellation::default()),
+                pixi.installed(&Cancellation::default()),
+            )
+        };
+        let (detected, _) = run(|| ExecutionError::Disabled("pixi not found".into()));
+        assert_eq!(
+            detected.unwrap(),
+            Availability::Unavailable("pixi not found".into())
+        );
+        let (detected, _) = run(|| ExecutionError::Cancelled);
+        assert!(matches!(detected, Err(EngineError::Cancelled)));
+        let (detected, listed) = run(|| ExecutionError::TimedOut);
+        assert!(matches!(
+            detected,
+            Err(EngineError::Execution(ExecutionError::TimedOut))
+        ));
+        assert!(matches!(
+            listed,
+            Err(EngineError::Execution(ExecutionError::TimedOut))
+        ));
         std::fs::remove_dir_all(home).unwrap();
     }
 }
