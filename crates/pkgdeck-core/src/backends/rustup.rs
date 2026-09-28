@@ -429,8 +429,10 @@ mod tests {
                     *list = list.replace("beta-aarch64-apple-darwin\n", "");
                     Ok(done("", 0))
                 }
-                "update" | "self" => Ok(done("", 0)),
-                other => panic!("unexpected {other}"),
+                other => {
+                    assert!(matches!(other, "update" | "self"), "unexpected {other}");
+                    Ok(done("", 0))
+                }
             }
         }
     }
@@ -474,14 +476,14 @@ mod tests {
             .execute(
                 &Operation::Upgrade(rows[0].id.clone()),
                 &Cancellation::default(),
-                &mut |_| {},
+                &mut drop::<Progress>,
             )
             .unwrap();
         rustup
             .execute(
                 &Operation::Upgrade(rows[3].id.clone()),
                 &Cancellation::default(),
-                &mut |_| {},
+                &mut drop::<Progress>,
             )
             .unwrap();
         let calls = fake.calls.lock().unwrap().clone();
@@ -543,7 +545,7 @@ mod tests {
             .execute(
                 &Operation::Install(offers[0].id.clone()),
                 &Cancellation::default(),
-                &mut |_| {},
+                &mut drop::<Progress>,
             )
             .unwrap();
         assert!(fake
@@ -557,7 +559,7 @@ mod tests {
             .execute(
                 &Operation::Remove(rows[0].id.clone()),
                 &Cancellation::default(),
-                &mut |_| {},
+                &mut drop::<Progress>,
             )
             .unwrap_err();
         assert!(error.to_string().contains("default toolchain"), "{error}");
@@ -565,7 +567,7 @@ mod tests {
             .execute(
                 &Operation::Remove(rows[1].id.clone()),
                 &Cancellation::default(),
-                &mut |_| {},
+                &mut drop::<Progress>,
             )
             .unwrap();
         assert!(!fake.list.lock().unwrap().contains("beta"));
@@ -575,7 +577,7 @@ mod tests {
             .execute(
                 &Operation::Install(bad),
                 &Cancellation::default(),
-                &mut |_| {}
+                &mut drop::<Progress>
             )
             .is_err());
     }
@@ -600,6 +602,7 @@ mod tests {
         ));
         let rustup = Rustup::new(fake());
         assert!(rustup.may_have("1.80.0-aarch64-apple-darwin") && !rustup.may_have("--help"));
+        assert_eq!(rustup.capabilities(), CAPABILITIES);
     }
 
     #[test]
@@ -629,7 +632,7 @@ mod tests {
         let rows = rustup.installed(&cancel).unwrap();
         let beta = rows[1].id.clone();
         let mut run = |operation: Operation, cancel: &Cancellation| {
-            rustup.execute(&operation, cancel, &mut |_| {})
+            rustup.execute(&operation, cancel, &mut drop::<Progress>)
         };
         assert!(matches!(
             run(Operation::UpgradeAll { backend: ID.into() }, &cancel),
@@ -665,5 +668,33 @@ mod tests {
             error.to_string().contains("not in the expected state"),
             "{error}"
         );
+    }
+
+    /// The fake answers only rustup, so no test passes by reaching another
+    /// package manager.
+    #[test]
+    fn the_fake_refuses_every_other_manager() {
+        let fake = fake();
+        let cancel = Cancellation::default();
+        let refused = |call: &dyn Fn() -> Result<Completion, ExecutionError>| {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(call)).is_err()
+        };
+        assert!(refused(&|| fake.apt_query("search", "x", "all", &cancel)));
+        assert!(refused(&|| fake.apt_write(AptAction::Autoclean, &cancel)));
+        assert!(refused(&|| fake.brew(&[], &cancel, false)));
+        assert!(refused(&|| fake.flatpak(&[], &cancel, false, false)));
+        assert!(refused(&|| fake.dev_tool("cargo", &[], &cancel, false)));
+        assert!(refused(&|| fake.dev_tool(
+            "rustup",
+            &["frobnicate".into()],
+            &cancel,
+            true
+        )));
+        assert!(fake
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|call| call == "frobnicate"));
     }
 }

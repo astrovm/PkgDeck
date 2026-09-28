@@ -232,14 +232,11 @@ pub(super) fn plan(
         .as_str()
         .filter(|exe| !exe.is_empty() && !exe.contains('/'))
         .ok_or_else(|| refuse(&name, "its Info.plist names no executable"))?;
-    let host = match std::env::consts::ARCH {
-        "aarch64" => "arm64",
-        other => other,
-    };
+    // lipo names arm64 what Rust calls aarch64.
+    let host = std::env::consts::ARCH.replace("aarch64", "arm64");
     if !io
         .architectures(&target.join("Contents/MacOS").join(executable), cancel)?
-        .iter()
-        .any(|arch| arch == host)
+        .contains(&host)
     {
         return Err(refuse(
             &name,
@@ -387,13 +384,19 @@ pub(super) struct NativeAdopt(pub Host);
 
 #[cfg(target_os = "macos")]
 impl NativeAdopt {
+    /// Run a read-only system tool on one file.
     fn read(
         &self,
         tool: &str,
-        args: &[&OsString],
+        flags: &[&str],
+        file: &Path,
         cancel: &Cancellation,
     ) -> Result<Completion, EngineError> {
-        let args: Vec<OsString> = args.iter().map(|arg| (*arg).clone()).collect();
+        let args: Vec<OsString> = flags
+            .iter()
+            .map(OsString::from)
+            .chain([file.into()])
+            .collect();
         Ok(self.0.read(
             Path::new(tool),
             &args,
@@ -448,35 +451,14 @@ impl AdoptIo for NativeAdopt {
             && matches!((fs::canonicalize(link), fs::canonicalize(source)), (Ok(a), Ok(b)) if a == b)
     }
     fn plist(&self, path: &Path, cancel: &Cancellation) -> Result<Value, EngineError> {
-        let result = self.read(
-            "/usr/bin/plutil",
-            &[
-                &"-convert".into(),
-                &"json".into(),
-                &"-o".into(),
-                &"-".into(),
-                &"--".into(),
-                &path.into(),
-            ],
-            cancel,
-        )?;
+        let flags = ["-convert", "json", "-o", "-", "--"];
+        let result = self.read("/usr/bin/plutil", &flags, path, cancel)?;
         serde_json::from_slice(&bytes(ID, result)?).map_err(|error| invalid(ID, error))
     }
     fn team(&self, app: &Path, cancel: &Cancellation) -> Result<Option<String>, EngineError> {
-        let app = OsString::from(app);
-        bytes(
-            ID,
-            self.read(
-                "/usr/bin/codesign",
-                &[&"--verify".into(), &"--strict".into(), &"--".into(), &app],
-                cancel,
-            )?,
-        )?;
-        let details = self.read(
-            "/usr/bin/codesign",
-            &[&"-dv".into(), &"--verbose=2".into(), &"--".into(), &app],
-            cancel,
-        )?;
+        let codesign = |flags: &[&str]| self.read("/usr/bin/codesign", flags, app, cancel);
+        bytes(ID, codesign(&["--verify", "--strict", "--"])?)?;
+        let details = codesign(&["-dv", "--verbose=2", "--"])?;
         let text = String::from_utf8_lossy(&details.stderr).into_owned();
         bytes(ID, details)?;
         let team = text
@@ -494,11 +476,7 @@ impl AdoptIo for NativeAdopt {
     ) -> Result<Vec<String>, EngineError> {
         let output = bytes(
             ID,
-            self.read(
-                "/usr/bin/lipo",
-                &[&"-archs".into(), &executable.into()],
-                cancel,
-            )?,
+            self.read("/usr/bin/lipo", &["-archs"], executable, cancel)?,
         )?;
         Ok(String::from_utf8_lossy(&output)
             .split_whitespace()
@@ -510,12 +488,12 @@ impl AdoptIo for NativeAdopt {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|time| time.as_millis())
             .unwrap_or_default();
+        let name = app
+            .file_name()
+            .ok_or_else(|| invalid(ID, "app path has no name"))?;
         let folder = self.backups()?.join(stamp.to_string());
         fs::create_dir_all(&folder).map_err(ExecutionError::from)?;
-        let copy = folder.join(
-            app.file_name()
-                .ok_or_else(|| invalid(ID, "app path has no name"))?,
-        );
+        let copy = folder.join(name);
         if let Err(error) = self.clone_tree(app, &copy, cancel) {
             let _ = fs::remove_dir_all(&folder);
             return Err(error);
@@ -665,13 +643,15 @@ mod tests {
         let mut newer = fake();
         newer.version = "1.140.0";
         newer.links = vec!["/opt/homebrew/bin/code"];
-        newer.archs = vec![if cfg!(target_arch = "aarch64") {
-            "arm64"
-        } else {
-            "x86_64"
-        }];
+        newer.archs = vec![NATIVE_ARCH];
         assert!(plan_ok(&newer));
     }
+    /// What lipo calls this machine's architecture.
+    const NATIVE_ARCH: &str = if cfg!(target_arch = "aarch64") {
+        "arm64"
+    } else {
+        "x86_64"
+    };
     fn plan_ok(io: &Fake) -> bool {
         plan(io, &cask(), &Cancellation::default())
             .unwrap()
@@ -696,12 +676,11 @@ mod tests {
             .push(serde_json::json!({"postflight": null}));
         let reason = reason(plan(&fake(), &vscode, &Cancellation::default()));
         assert!(reason.contains("also installs a postflight"), "{reason}");
-        if cfg!(debug_assertions) {
-            assert_eq!(
-                rule("pkgdeck/fixtures/pkgdeck-adopt-failure").unwrap().also,
-                ["postflight"]
-            );
-        }
+        #[cfg(debug_assertions)]
+        assert_eq!(
+            rule("pkgdeck/fixtures/pkgdeck-adopt-failure").unwrap().also,
+            ["postflight"]
+        );
         assert!(rule("visual-studio-code").unwrap().also.is_empty());
     }
 
@@ -884,6 +863,89 @@ mod tests {
         // Discarding only ever removes a folder under the backups root.
         io.discard(&app.join("Contents/MacOS/fixture"));
         assert!(app.exists());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A failed clone leaves no backup folder behind, and a backup that is
+    /// gone can't be put back.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_backups_that_fail_leave_nothing_behind() {
+        use crate::host::Runtime;
+        let root = std::env::temp_dir().join(format!("pkgdeck-adopt-fail-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let backups = root.join("home/Library/Application Support/PkgDeck/Adoption backups");
+        let env = [(OsString::from("HOME"), root.join("home").into_os_string())]
+            .into_iter()
+            .collect();
+        let io = NativeAdopt(Host::new(Runtime::Native, env));
+        let cancel = Cancellation::default();
+        assert!(io.backup(&root.join("Apps/Missing.app"), &cancel).is_err());
+        assert_eq!(fs::read_dir(&backups).unwrap().count(), 0);
+        // Cancelled before cp starts: nothing is copied, nothing is kept.
+        let app = root.join("Apps/Fixture.app");
+        fs::create_dir_all(&app).unwrap();
+        let cancelled = Cancellation::default();
+        cancelled.cancel();
+        assert!(io.backup(&app, &cancelled).is_err());
+        assert_eq!(fs::read_dir(&backups).unwrap().count(), 0);
+        let gone = backups.join("1/Fixture.app");
+        let restored = root.join("Apps/Restored.app");
+        assert!(io.restore(&gone, &restored, &cancel).is_err());
+        assert!(!restored.exists());
+        assert!(io
+            .backup(Path::new("/"), &cancel)
+            .unwrap_err()
+            .to_string()
+            .contains("no name"));
+        assert_eq!(fs::read_dir(&backups).unwrap().count(), 0);
+        // Without an absolute HOME there is nowhere to keep a backup.
+        let homeless = NativeAdopt(Host::new(Runtime::Native, Default::default()));
+        assert!(homeless
+            .backup(&app, &cancel)
+            .unwrap_err()
+            .to_string()
+            .contains("HOME is not set"));
+        homeless.discard(&app.join("Contents"));
+        assert!(app.exists());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// plutil, codesign and lipo on throwaway files and the system's own
+    /// /bin/ls, which Apple signs without a Developer ID team.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_tools_read_plists_signatures_and_architectures() {
+        use crate::host::Runtime;
+        let root = std::env::temp_dir().join(format!("pkgdeck-adopt-tools-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let plist = root.join("Info.plist");
+        fs::write(&plist, r#"<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>io.github.astrovm.pkgdeck.adopt-fixture</string><key>CFBundleShortVersionString</key><string>1.2.3</string></dict></plist>"#).unwrap();
+        let text = root.join("not-an-app");
+        fs::write(&text, "plain text").unwrap();
+        let io = NativeAdopt(Host::new(Runtime::Native, Default::default()));
+        let cancel = Cancellation::default();
+        let info = io.plist(&plist, &cancel).unwrap();
+        assert_eq!(
+            info["CFBundleIdentifier"],
+            "io.github.astrovm.pkgdeck.adopt-fixture"
+        );
+        assert_eq!(info["CFBundleShortVersionString"], "1.2.3");
+        assert!(io.plist(&text, &cancel).is_err());
+        assert!(io.plist(&root.join("missing.plist"), &cancel).is_err());
+        // An Apple platform binary verifies but names no team.
+        assert_eq!(io.team(Path::new("/bin/ls"), &cancel).unwrap(), None);
+        assert!(io.team(&text, &cancel).is_err());
+        let archs = io.architectures(Path::new("/bin/ls"), &cancel).unwrap();
+        assert!(archs.iter().any(|arch| arch == "x86_64"), "{archs:?}");
+        assert!(archs.iter().all(|arch| !arch.contains(char::is_whitespace)));
+        assert!(io.architectures(&text, &cancel).is_err());
+        let cancelled = Cancellation::default();
+        cancelled.cancel();
+        assert!(io.plist(&plist, &cancelled).is_err());
+        assert!(io.team(Path::new("/bin/ls"), &cancelled).is_err());
+        assert!(io.architectures(Path::new("/bin/ls"), &cancelled).is_err());
         fs::remove_dir_all(&root).unwrap();
     }
 
