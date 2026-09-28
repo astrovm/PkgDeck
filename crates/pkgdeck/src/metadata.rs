@@ -182,22 +182,30 @@ fn host_catalog() -> Catalog {
 pub fn invalidate() {
     STORE.invalidate();
 }
-pub fn catalog() -> Arc<Catalog> {
-    STORE.catalog.get(host_catalog)
-}
 pub fn cached_info(package: &Package) -> Option<AppInfo> {
     STORE.cached_info(package)
 }
-pub fn enrich(package: &mut Package) {
-    let _ = catalog();
+/// Where the catalog and provider details come from: the running system, or
+/// fixtures in tests.
+#[derive(Clone, Copy)]
+pub struct Sources {
+    pub catalog: fn() -> Catalog,
+    pub fetch: fn(&str, &Cancellation) -> String,
+}
+pub const SYSTEM: Sources = Sources {
+    catalog: host_catalog,
+    fetch: crate::network::fetch,
+};
+pub fn enrich(package: &mut Package, sources: Sources) {
+    STORE.catalog.get(sources.catalog);
     enrich_cached(package);
 }
 pub fn enrich_cached(package: &mut Package) {
     STORE.enrich_cached(package);
 }
-pub fn details(package: &mut Package, cancel: &Cancellation) {
-    let fetch = |url: &str| crate::network::fetch(url, cancel);
-    STORE.details(package, cancel, host_catalog, fetch);
+pub fn details(package: &mut Package, cancel: &Cancellation, sources: Sources) {
+    let fetch = |url: &str| (sources.fetch)(url, cancel);
+    STORE.details(package, cancel, sources.catalog, fetch);
 }
 fn detail_info(
     package: &Package,
@@ -836,6 +844,16 @@ mod tests {
     use pkgdeck_core::package::{PackageId, Scope, UpdateAvailability};
     use std::io::Write;
 
+    #[test]
+    fn the_app_reads_the_running_systems_catalog() {
+        let host = pkgdeck_core::host::Host::current();
+        let home = host.var("HOME").map(PathBuf::from);
+        let expected = Catalog::load(Path::new("/"), home.as_deref(), Some(&host));
+        let loaded = (SYSTEM.catalog)();
+        assert_eq!(loaded.metadata_dir, expected.metadata_dir);
+        assert!(loaded.apps.keys().eq(expected.apps.keys()));
+        assert!(loaded.aliases.eq(&expected.aliases));
+    }
     #[test]
     fn appstream_icons_resolve_cached_remote_and_missing_assets() {
         let dir =

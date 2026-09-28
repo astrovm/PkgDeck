@@ -727,11 +727,13 @@ struct Natives {
     engine: fn(&[String], bool, Authorization, &Cancellation) -> Result<Engine, EngineError>,
     host: fn() -> pkgdeck_core::host::Host,
     root: &'static str,
+    metadata: crate::metadata::Sources,
 }
 const NATIVES: Natives = Natives {
     engine: pkgdeck_core::backends::native_engine,
     host: pkgdeck_core::host::Host::current,
     root: "/",
+    metadata: crate::metadata::SYSTEM,
 };
 /// Unit tests never detect the machine's own package managers.
 #[cfg(not(test))]
@@ -2834,9 +2836,9 @@ impl ffi::PackageController {
                         }
                     }
                     Reply::Done(Ok(Payload::Details(details))) => {
-                        crate::metadata::enrich(&mut details.package);
+                        crate::metadata::enrich(&mut details.package, natives.metadata);
                         let _ = sender.send(Reply::DetailsPreview(details.clone()));
-                        crate::metadata::details(&mut details.package, &token)
+                        crate::metadata::details(&mut details.package, &token, natives.metadata)
                     }
                     _ => {}
                 }
@@ -4137,9 +4139,9 @@ impl ffi::PackageController {
         let handle = thread::spawn(move || {
             let mut send = |mut reply| {
                 if let Reply::Done(Ok(Payload::Details(details))) = &mut reply {
-                    crate::metadata::enrich(&mut details.package);
+                    crate::metadata::enrich(&mut details.package, natives.metadata);
                     let _ = sender.send(Reply::DetailsPreview(details.clone()));
-                    crate::metadata::details(&mut details.package, &token);
+                    crate::metadata::details(&mut details.package, &token, natives.metadata);
                 }
                 if matches!(reply, Reply::Done(_) | Reply::DetailsPreview(_)) {
                     let _ = sender.send(reply);
@@ -10448,10 +10450,22 @@ mod tests {
             None => Ok(Engine::default()),
         }
     }
+    fn no_catalog() -> crate::metadata::Catalog {
+        crate::metadata::Catalog::default()
+    }
+    fn offline(_: &str, _: &Cancellation) -> String {
+        String::new()
+    }
+    /// No local catalog and no provider lookups, so details never leave the test.
+    const NO_METADATA: crate::metadata::Sources = crate::metadata::Sources {
+        catalog: no_catalog,
+        fetch: offline,
+    };
     pub(super) const NO_MANAGERS: Natives = Natives {
         engine: no_engine,
         host: bare_host,
         root: "/nonexistent/pkgdeck-tests",
+        metadata: NO_METADATA,
     };
     #[test]
     fn production_workers_use_the_running_system() {
@@ -10468,6 +10482,7 @@ mod tests {
         engine: fixture_engine,
         host: bare_host,
         root: "/nonexistent/pkgdeck-tests",
+        metadata: NO_METADATA,
     };
     fn synthetic_controller() -> cxx::UniquePtr<ffi::PackageController> {
         let mut controller = idle_controller();
