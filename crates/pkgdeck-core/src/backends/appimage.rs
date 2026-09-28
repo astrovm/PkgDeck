@@ -130,12 +130,23 @@ impl AppImage {
         };
         Ok(arch.into())
     }
-    fn digest(path: &Path) -> Result<String, EngineError> {
+    fn digest(path: &Path, cancel: &Cancellation) -> Result<String, EngineError> {
+        Self::digest_bounded(path, MAX_IMPORT_BYTES, cancel)
+    }
+    /// Hashing a large file takes a while, so cancellation is checked per chunk.
+    fn digest_bounded(
+        path: &Path,
+        limit: u64,
+        cancel: &Cancellation,
+    ) -> Result<String, EngineError> {
         let mut file = fs::File::open(path).map_err(|e| Self::invalid(e.to_string()))?;
         let mut hash = Sha256::new();
         let mut buffer = [0_u8; 64 * 1024];
         let mut total = 0_u64;
         loop {
+            if cancel.requested() {
+                return Err(EngineError::Cancelled);
+            }
             let count = file
                 .read(&mut buffer)
                 .map_err(|e| Self::invalid(e.to_string()))?;
@@ -143,12 +154,23 @@ impl AppImage {
                 break;
             }
             total += count as u64;
-            if total > MAX_IMPORT_BYTES {
+            if total > limit {
                 return Err(Self::invalid("AppImage exceeds 2 GiB"));
             }
             hash.update(&buffer[..count]);
         }
         Ok(hex::encode(hash.finalize()))
+    }
+    /// Hashes `path` and requires the digest the user reviewed.
+    fn verify_digest(
+        path: &Path,
+        expected: &str,
+        cancel: &Cancellation,
+    ) -> Result<(), EngineError> {
+        if Self::digest(path, cancel)? != expected {
+            return Err(Self::invalid("AppImage changed or was not previewed"));
+        }
+        Ok(())
     }
     fn copy_bounded(
         input: &mut impl Read,
@@ -273,7 +295,10 @@ impl AppImage {
             && entry
                 .symlink_metadata()
                 .is_ok_and(|meta| meta.file_type().is_file())
-            && Self::digest(destination).ok().as_deref() == Some(digest)
+            && Self::digest(destination, &Cancellation::default())
+                .ok()
+                .as_deref()
+                == Some(digest)
             && fs::read_to_string(entry).ok().is_some_and(|desktop| {
                 Self::desktop_entry(destination, "Imported AppImage")
                     .lines()
@@ -499,7 +524,7 @@ impl AppImage {
                 .ok_or_else(|| Self::invalid("missing AppImage"))?;
             let mut local = id.clone();
             local.name = staged.path().to_string_lossy().into_owned();
-            local.reference = Some(Self::digest(staged.path())?);
+            local.reference = Some(Self::digest(staged.path(), cancel)?);
             return self.import(&local, cancel);
         }
         if cancel.requested() {
@@ -521,13 +546,8 @@ impl AppImage {
         if architecture != id.architecture {
             return Err(Self::invalid("AppImage architecture changed during import"));
         }
-        let digest = Self::digest(&source)?;
-        if cancel.requested() {
-            return Err(EngineError::Cancelled);
-        }
-        if id.reference.as_deref() != Some(digest.as_str()) {
-            return Err(Self::invalid("AppImage changed or was not previewed"));
-        }
+        let digest = id.reference.as_deref().unwrap_or_default();
+        Self::verify_digest(&source, digest, cancel)?;
         let name = format!("pkgdeck-{digest}.AppImage");
         fs::create_dir_all(&self.root).map_err(|e| Self::invalid(e.to_string()))?;
         let destination = self.root.join(&name);
@@ -535,7 +555,7 @@ impl AppImage {
         let entry = self
             .applications
             .join(format!("pkgdeck-{}.desktop", &name[8..72]));
-        if Self::existing_import(&destination, &entry, &digest)? {
+        if Self::existing_import(&destination, &entry, digest)? {
             return Ok(());
         }
         let temporary = self.root.join(format!(
@@ -559,12 +579,7 @@ impl AppImage {
                 .sync_all()
                 .map_err(|e| Self::invalid(e.to_string()))?;
             drop(output);
-            if Self::digest(&temporary)? != digest {
-                return Err(Self::invalid("AppImage changed during import"));
-            }
-            if cancel.requested() {
-                return Err(EngineError::Cancelled);
-            }
+            Self::verify_digest(&temporary, digest, cancel)?;
             fs::set_permissions(&temporary, fs::Permissions::from_mode(0o755))
                 .map_err(|e| Self::invalid(e.to_string()))?;
             fs::hard_link(&temporary, &destination).map_err(|e| Self::invalid(e.to_string()))?;
@@ -672,10 +687,7 @@ impl Backend for AppImage {
         if source.is_absolute() && source.symlink_metadata().is_ok() {
             let architecture = Self::type2(&source)?;
             let has_updates = Self::has_update_metadata(&source)?;
-            let digest = Self::digest(&source)?;
-            if cancel.requested() {
-                return Err(EngineError::Cancelled);
-            }
+            let digest = Self::digest(&source, cancel)?;
             let destination = self.root.join(format!("pkgdeck-{digest}.AppImage"));
             let desktop = self.applications.join(format!("pkgdeck-{digest}.desktop"));
             let already_imported = Self::existing_import(&destination, &desktop, &digest)?;
@@ -807,6 +819,30 @@ mod tests {
         fs::write(path, header).unwrap();
     }
 
+    fn ignore(_: Progress) {}
+
+    /// Adds a `.upd_info` section carrying `zsyn` to the Type 2 file at `path`.
+    fn with_update_info(path: &Path) -> Vec<u8> {
+        let mut bytes = fs::read(path).unwrap();
+        bytes[40..48].copy_from_slice(&64_u64.to_le_bytes());
+        bytes[58..60].copy_from_slice(&64_u16.to_le_bytes());
+        bytes[60..62].copy_from_slice(&3_u16.to_le_bytes());
+        bytes[62..64].copy_from_slice(&1_u16.to_le_bytes());
+        bytes.resize(64 + 3 * 64, 0);
+        let names = b"\0.shstrtab\0.upd_info\0";
+        let names_offset = bytes.len() as u64;
+        bytes[64 + 64 + 24..64 + 64 + 32].copy_from_slice(&names_offset.to_le_bytes());
+        bytes[64 + 64 + 32..64 + 64 + 40].copy_from_slice(&(names.len() as u64).to_le_bytes());
+        let update_offset = names_offset + names.len() as u64;
+        bytes[64 + 128..64 + 132].copy_from_slice(&11_u32.to_le_bytes());
+        bytes[64 + 128 + 24..64 + 128 + 32].copy_from_slice(&update_offset.to_le_bytes());
+        bytes[64 + 128 + 32..64 + 128 + 40].copy_from_slice(&4_u64.to_le_bytes());
+        bytes.extend_from_slice(names);
+        bytes.extend_from_slice(b"zsyn");
+        fs::write(path, &bytes).unwrap();
+        bytes
+    }
+
     #[cfg(target_os = "linux")]
     fn updater(base: &Path, status: u8) -> (PathBuf, PathBuf) {
         use std::os::unix::fs::PermissionsExt;
@@ -907,11 +943,8 @@ mod tests {
                 .env("XDG_DATA_HOME", base.join("data"))
                 .env("PATH", &base)
                 .output().unwrap();
-            assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(output.status.success(), "{stderr}");
             fs::remove_dir_all(base).unwrap();
             return;
         }
@@ -976,20 +1009,17 @@ mod tests {
     }
     #[test]
     fn interrupted_copy_stops_before_publishing_more_bytes() {
-        struct CancelAfterRead(Cancellation, bool);
+        struct CancelAfterRead(Cancellation);
         impl Read for CancelAfterRead {
+            // Copying checks cancellation before every read, so this runs once.
             fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
-                if self.1 {
-                    return Ok(0);
-                }
-                self.1 = true;
                 buffer[..4].copy_from_slice(b"data");
                 self.0.cancel();
                 Ok(4)
             }
         }
         let cancel = Cancellation::default();
-        let mut source = CancelAfterRead(cancel.clone(), false);
+        let mut source = CancelAfterRead(cancel.clone());
         let mut output = Vec::new();
         assert_eq!(
             AppImage::copy_bounded(&mut source, &mut output, &cancel),
@@ -1016,23 +1046,7 @@ mod tests {
         let _ = fs::create_dir_all(&base);
         let source = base.join("with-update.AppImage");
         type2(&source);
-        let mut bytes = fs::read(&source).unwrap();
-        bytes[40..48].copy_from_slice(&64_u64.to_le_bytes());
-        bytes[58..60].copy_from_slice(&64_u16.to_le_bytes());
-        bytes[60..62].copy_from_slice(&3_u16.to_le_bytes());
-        bytes[62..64].copy_from_slice(&1_u16.to_le_bytes());
-        bytes.resize(64 + 3 * 64, 0);
-        let names = b"\0.shstrtab\0.upd_info\0";
-        let names_offset = bytes.len() as u64;
-        bytes[64 + 64 + 24..64 + 64 + 32].copy_from_slice(&names_offset.to_le_bytes());
-        bytes[64 + 64 + 32..64 + 64 + 40].copy_from_slice(&(names.len() as u64).to_le_bytes());
-        let update_offset = names_offset + names.len() as u64;
-        bytes[64 + 128..64 + 132].copy_from_slice(&11_u32.to_le_bytes());
-        bytes[64 + 128 + 24..64 + 128 + 32].copy_from_slice(&update_offset.to_le_bytes());
-        bytes[64 + 128 + 32..64 + 128 + 40].copy_from_slice(&4_u64.to_le_bytes());
-        bytes.extend_from_slice(names);
-        bytes.extend_from_slice(b"zsyn");
-        fs::write(&source, &bytes).unwrap();
+        let mut bytes = with_update_info(&source);
         assert!(AppImage::has_update_metadata(&source).unwrap());
         let mut backend = AppImage::new(base.join("owned"), base.join("apps"), 1000);
         assert!(backend
@@ -1270,7 +1284,7 @@ mod tests {
                     backend: "appimage".into(),
                 },
                 &cancel,
-                &mut |_| {},
+                &mut ignore,
             )
             .unwrap();
         assert_eq!(fs::read_to_string(&calls).unwrap().lines().count(), 10);
@@ -1437,7 +1451,7 @@ mod tests {
             .execute(
                 &Operation::Install(foreign),
                 &Cancellation::default(),
-                &mut |_| {}
+                &mut ignore
             )
             .is_err());
 
@@ -1483,6 +1497,241 @@ mod tests {
             backend.details(&installed[0].id, &cancel).unwrap().package,
             installed[0]
         );
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    fn test_base(name: &str) -> PathBuf {
+        let base =
+            std::env::temp_dir().join(format!("pkgdeck-appimage-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        base
+    }
+
+    #[test]
+    fn non_type2_files_are_rejected_before_hashing() {
+        let base = test_base("header");
+        let file = base.join("file.AppImage");
+        let mut backend = AppImage::new(base.join("owned"), base.join("applications"), 1000);
+        let cancel = Cancellation::default();
+        fs::write(&file, [b'#'; 64]).unwrap();
+        assert_eq!(
+            backend.search(file.to_str().unwrap(), &cancel),
+            Err(AppImage::invalid("expected a Type 2 AppImage ELF file"))
+        );
+        type2(&file);
+        let mut bytes = fs::read(&file).unwrap();
+        // A 32-bit ELF class.
+        bytes[4] = 1;
+        fs::write(&file, bytes).unwrap();
+        assert_eq!(
+            backend.search(file.to_str().unwrap(), &cancel),
+            Err(AppImage::invalid("malformed or unsupported ELF header"))
+        );
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn hashing_and_copying_stop_at_the_size_limit() {
+        let base = test_base("limits");
+        let file = base.join("file");
+        fs::write(&file, b"0123456789").unwrap();
+        let cancel = Cancellation::default();
+        assert_eq!(
+            AppImage::digest_bounded(&file, 9, &cancel),
+            Err(AppImage::invalid("AppImage exceeds 2 GiB"))
+        );
+        assert_eq!(
+            AppImage::digest_bounded(&file, 10, &cancel),
+            AppImage::digest(&file, &cancel)
+        );
+        fs::remove_dir_all(base).unwrap();
+
+        /// Endless input that never fills the buffer with real bytes.
+        struct Endless;
+        impl Read for Endless {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                Ok(buffer.len())
+            }
+        }
+        assert_eq!(
+            AppImage::copy_bounded(&mut Endless, &mut std::io::sink(), &cancel),
+            Err(AppImage::invalid("AppImage exceeds 2 GiB"))
+        );
+    }
+
+    #[test]
+    fn imports_require_the_reviewed_digest() {
+        let base = test_base("digest");
+        let source = base.join("external.AppImage");
+        type2(&source);
+        let root = base.join("owned");
+        let mut backend = AppImage::new(root.clone(), base.join("applications"), 1000);
+        let cancel = Cancellation::default();
+        let candidate = backend
+            .search(source.to_str().unwrap(), &cancel)
+            .unwrap()
+            .remove(0);
+        for reference in [None, Some("0".repeat(64))] {
+            let id = PackageId {
+                reference,
+                ..candidate.id.clone()
+            };
+            assert_eq!(
+                backend.execute(&Operation::Install(id), &cancel, &mut ignore),
+                Err(AppImage::invalid("AppImage changed or was not previewed"))
+            );
+        }
+        // Changed after the preview: the reviewed digest no longer matches.
+        fs::write(
+            &source,
+            [fs::read(&source).unwrap(), b"more".to_vec()].concat(),
+        )
+        .unwrap();
+        assert_eq!(
+            backend.execute(&Operation::Install(candidate.id), &cancel, &mut ignore),
+            Err(AppImage::invalid("AppImage changed or was not previewed"))
+        );
+        assert!(!root.exists());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn an_unwritable_applications_folder_leaves_no_managed_copy() {
+        // Needs a non-root user: root ignores directory permissions.
+        let base = test_base("readonly");
+        let source = base.join("external.AppImage");
+        type2(&source);
+        let root = base.join("owned");
+        let applications = base.join("applications");
+        fs::create_dir_all(&applications).unwrap();
+        fs::set_permissions(&applications, fs::Permissions::from_mode(0o555)).unwrap();
+        let mut backend = AppImage::new(root.clone(), applications.clone(), 1000);
+        let cancel = Cancellation::default();
+        let candidate = backend
+            .search(source.to_str().unwrap(), &cancel)
+            .unwrap()
+            .remove(0);
+        let error = backend
+            .execute(&Operation::Install(candidate.id), &cancel, &mut ignore)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("desktop entry failed"), "{error}");
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+        fs::set_permissions(&applications, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn a_failed_desktop_entry_write_removes_the_partial_import() {
+        use rustix::process::{getrlimit, setrlimit, Resource, Rlimit};
+        const CHILD: &str = "PKGDECK_APPIMAGE_FSIZE_CHILD";
+        let base = match std::env::var_os(CHILD) {
+            Some(base) => PathBuf::from(base),
+            None => {
+                let base = test_base("fsize");
+                // A size limit that fails the write needs SIGXFSZ ignored, which
+                // only an exec can set up; the child runs just this test.
+                let output = std::process::Command::new("/bin/sh")
+                    .arg("-c")
+                    .arg("trap '' XFSZ; exec \"$0\" \"$@\"")
+                    .arg(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "backends::appimage::tests::a_failed_desktop_entry_write_removes_the_partial_import",
+                        "--nocapture",
+                    ])
+                    .env(CHILD, &base)
+                    .output()
+                    .unwrap();
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                assert!(output.status.success(), "{stderr}");
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                assert!(stdout.contains("1 passed"), "{stdout}");
+                fs::remove_dir_all(base).unwrap();
+                return;
+            }
+        };
+        let source = base.join("external.AppImage");
+        type2(&source);
+        let root = base.join("owned");
+        let applications = base.join("applications");
+        let mut backend = AppImage::new(root.clone(), applications.clone(), 1000);
+        let cancel = Cancellation::default();
+        let candidate = backend
+            .search(source.to_str().unwrap(), &cancel)
+            .unwrap()
+            .remove(0);
+        // The 64-byte AppImage fits; its much longer desktop entry does not.
+        let limit = getrlimit(Resource::Fsize);
+        setrlimit(
+            Resource::Fsize,
+            Rlimit {
+                current: Some(100),
+                maximum: limit.maximum,
+            },
+        )
+        .unwrap();
+        let result = backend.execute(&Operation::Install(candidate.id), &cancel, &mut ignore);
+        setrlimit(Resource::Fsize, limit).unwrap();
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("desktop entry failed"), "{error}");
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+        assert_eq!(fs::read_dir(&applications).unwrap().count(), 0);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn appimages_with_update_metadata_offer_updates() {
+        let base = test_base("offers");
+        let applications = base.join("applications");
+        fs::create_dir_all(&applications).unwrap();
+        let (updater, _) = updater(&base, 0);
+        let source = base.join("source.AppImage");
+        type2(&source);
+        with_update_info(&source);
+        let external = base.join("external.AppImage");
+        type2(&external);
+        with_update_info(&external);
+        fs::write(
+            applications.join("external.desktop"),
+            format!("[Desktop Entry]\nExec={}\n", external.display()),
+        )
+        .unwrap();
+        let mut backend = AppImage::new(
+            base.join("owned"),
+            applications,
+            rustix::process::getuid().as_raw(),
+        )
+        .with_updater(updater);
+        let cancel = Cancellation::default();
+        let candidate = backend
+            .search(source.to_str().unwrap(), &cancel)
+            .unwrap()
+            .remove(0);
+        backend
+            .execute(&Operation::Install(candidate.id), &cancel, &mut ignore)
+            .unwrap();
+        let installed = backend.installed(&cancel).unwrap();
+        assert_eq!(installed.len(), 2);
+        assert!(installed
+            .iter()
+            .all(|package| package.update == UpdateAvailability::Available));
+        // An updater that cannot start fails the update.
+        let mut broken = AppImage::new(
+            base.join("owned"),
+            base.join("applications"),
+            rustix::process::getuid().as_raw(),
+        )
+        .with_updater(base.join("missing-updater"));
+        let managed = installed
+            .into_iter()
+            .find(|package| AppImage::managed_name(&package.id.name))
+            .unwrap();
+        assert!(matches!(
+            broken.execute(&Operation::Upgrade(managed.id), &cancel, &mut ignore),
+            Err(EngineError::Execution(_))
+        ));
         fs::remove_dir_all(base).unwrap();
     }
 }

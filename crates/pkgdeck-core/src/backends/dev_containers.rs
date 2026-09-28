@@ -511,7 +511,8 @@ impl<T: Transport> DevContainers<T> {
     /// The upgrade commands for a Toolbx container's package manager, each
     /// run through `sudo -S` (Toolbx users have an empty password, so sudo
     /// asks nothing; with a real password it fails instead of waiting).
-    fn toolbox_steps(manager: &str) -> Option<Vec<Vec<&'static str>>> {
+    /// `manager` is one of `MANAGERS`.
+    fn toolbox_steps(manager: &str) -> Vec<Vec<&'static str>> {
         const APT: [&str; 2] = ["env", "DEBIAN_FRONTEND=noninteractive"];
         let steps: Vec<Vec<&str>> = match manager {
             "dnf" => vec![vec!["dnf", "-y", "upgrade", "--refresh"]],
@@ -534,15 +535,12 @@ impl<T: Transport> DevContainers<T> {
             "pacman" => vec![vec!["pacman", "-Syu", "--noconfirm"]],
             "zypper" => vec![vec!["zypper", "--non-interactive", "update"]],
             "apk" => vec![vec!["apk", "upgrade", "--update-cache"]],
-            "xbps-install" => vec![vec!["xbps-install", "-Suy"]],
-            _ => return None,
+            _ => vec![vec!["xbps-install", "-Suy"]],
         };
-        Some(
-            steps
-                .into_iter()
-                .map(|step| [&["sudo", "-S"][..], &step].concat())
-                .collect(),
-        )
+        steps
+            .into_iter()
+            .map(|step| [&["sudo", "-S"][..], &step].concat())
+            .collect()
     }
 
     fn sudo_refused(error: &ExecutionError) -> bool {
@@ -599,7 +597,7 @@ impl<T: Transport> DevContainers<T> {
                     .rfind(|line| MANAGERS.contains(line))
                     .map(str::to_owned)
                     .ok_or_else(unknown)?;
-                let steps = Self::toolbox_steps(&manager).expect("known manager");
+                let steps = Self::toolbox_steps(&manager);
                 if cancel.requested() {
                     return Err(EngineError::Cancelled);
                 }
@@ -784,7 +782,6 @@ impl<T: Transport> Backend for DevContainers<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::host::AptAction;
     use std::sync::{Arc, Mutex};
 
     /// `podman ps --all --format json` (Podman 5.8, Fedora 43) with a Toolbx
@@ -877,7 +874,19 @@ d03cf38f6ad7 | dbx-fedora           | Created            | registry.fedoraprojec
         manager: Option<&'static str>,
         /// Make `sudo -S` fail the way it does when a password is set.
         password: bool,
+        /// Every upgrade step inside a Toolbx container fails with this.
+        run_failure: Option<ExecutionError>,
         missing: bool,
+        /// Every call fails with this.
+        failure: Option<ExecutionError>,
+        /// Replaces the `podman ps` answer.
+        podman: Option<Completion>,
+        /// `distrobox list` exits with an error.
+        list_fails: bool,
+        /// Cancellation arrives while looking for the package manager.
+        cancel_after_probe: bool,
+        /// Cancellation arrives during the first upgrade step, which finishes.
+        cancel_on_write: bool,
         /// `distrobox upgrade` leaves the list without the container.
         vanish: bool,
         home: Option<PathBuf>,
@@ -893,35 +902,6 @@ d03cf38f6ad7 | dbx-fedora           | Created            | registry.fedoraprojec
         }
     }
     impl Transport for Fake {
-        fn apt_query(
-            &self,
-            _: &str,
-            _: &str,
-            _: &str,
-            _: &Cancellation,
-        ) -> Result<Completion, ExecutionError> {
-            unreachable!()
-        }
-        fn apt_write(&self, _: AptAction, _: &Cancellation) -> Result<Completion, ExecutionError> {
-            unreachable!()
-        }
-        fn brew(
-            &self,
-            _: &[OsString],
-            _: &Cancellation,
-            _: bool,
-        ) -> Result<Completion, ExecutionError> {
-            unreachable!()
-        }
-        fn flatpak(
-            &self,
-            _: &[OsString],
-            _: &Cancellation,
-            _: bool,
-            _: bool,
-        ) -> Result<Completion, ExecutionError> {
-            unreachable!()
-        }
         fn env(&self, name: &str) -> Option<OsString> {
             (name == "HOME").then(|| self.home.clone().map(Into::into))?
         }
@@ -929,7 +909,7 @@ d03cf38f6ad7 | dbx-fedora           | Created            | registry.fedoraprojec
             &self,
             executable: &str,
             args: &[OsString],
-            _: &Cancellation,
+            cancel: &Cancellation,
             write: bool,
         ) -> Result<Completion, ExecutionError> {
             let args: Vec<String> = args.iter().map(|a| a.to_string_lossy().into()).collect();
@@ -941,11 +921,17 @@ d03cf38f6ad7 | dbx-fedora           | Created            | registry.fedoraprojec
             if self.missing {
                 return Err(ExecutionError::Disabled(format!("{executable} not found")));
             }
+            if let Some(error) = &self.failure {
+                return Err(error.clone());
+            }
             match (executable, args[0].as_str()) {
-                ("podman", "ps") => Ok(done(PODMAN, 0)),
+                ("podman", "ps") => Ok(self.podman.clone().unwrap_or_else(|| done(PODMAN, 0))),
                 ("toolbox", "--version") => Ok(done("toolbox version 0.3\n", 0)),
                 ("distrobox", "version") => Ok(done("distrobox: 1.8.2.5\n", 0)),
-                ("distrobox", "list") => Ok(done(&self.list.lock().unwrap(), 0)),
+                ("distrobox", "list") => Ok(done(
+                    &self.list.lock().unwrap(),
+                    if self.list_fails { 1 } else { 0 },
+                )),
                 ("distrobox", "upgrade") => {
                     if self.vanish {
                         self.list.lock().unwrap().clear();
@@ -955,21 +941,39 @@ d03cf38f6ad7 | dbx-fedora           | Created            | registry.fedoraprojec
                         0,
                     ))
                 }
-                ("toolbox", "run") if args[3] == "sh" => match self.manager {
-                    Some(manager) => Ok(done(&format!("{manager}\n"), 0)),
-                    None => Err(ExecutionError::Failed(done("", 3))),
-                },
+                ("toolbox", "run") if args[3] == "sh" => {
+                    if self.cancel_after_probe {
+                        cancel.cancel();
+                    }
+                    match self.manager {
+                        Some(manager) => Ok(done(&format!("{manager}\n"), 0)),
+                        None => Err(ExecutionError::Failed(done("", 3))),
+                    }
+                }
                 ("toolbox", "run") if self.password => {
                     let mut result = done("", 1);
                     result.stderr =
                         b"sudo: no password was provided\nsudo: a password is required\n".to_vec();
                     Err(ExecutionError::Failed(result))
                 }
-                ("toolbox", "run") => Ok(done("Complete!\n", 0)),
-                other => panic!("unexpected {other:?}"),
+                _ if self.run_failure.is_some() => Err(self.run_failure.clone().unwrap()),
+                _ => {
+                    assert_eq!(
+                        line.split_whitespace().take(2).collect::<Vec<_>>(),
+                        ["toolbox", "run"]
+                    );
+                    if self.cancel_on_write {
+                        cancel.cancel();
+                    }
+                    Ok(Completion {
+                        cancellation_deferred: self.cancel_on_write,
+                        ..done("\u{1b}[32mComplete!\u{1b}[0m\n", 0)
+                    })
+                }
             }
         }
     }
+    fn ignore(_: Progress) {}
     fn fake() -> Fake {
         Fake {
             list: Arc::new(Mutex::new(DISTROBOX_LIST.into())),
@@ -1242,6 +1246,8 @@ nothexnothex | bad | Up | x\n";
     fn nothing_but_upgrades_and_nothing_foreign_or_cancelled_runs() {
         let fake = fake();
         let mut distrobox = DevContainers::distrobox(fake.clone());
+        assert!(!distrobox.capabilities().contains(&Capability::Install));
+        assert!(!distrobox.capabilities().contains(&Capability::Remove));
         let cancel = Cancellation::default();
         let row = distrobox.installed(&cancel).unwrap().remove(0);
         for operation in [
@@ -1330,5 +1336,216 @@ nothexnothex | bad | Up | x\n";
             assert!(matches!(available, Availability::Unavailable(_)));
             assert!(matches!(missing, Availability::Unavailable(_)));
         }
+    }
+
+    fn sudo_failure(stderr: &str) -> ExecutionError {
+        let mut result = done("", 1);
+        result.stderr = stderr.as_bytes().to_vec();
+        ExecutionError::Failed(result)
+    }
+
+    #[test]
+    fn toolbox_sudo_refusals_are_told_apart_from_other_failures() {
+        let cancel = Cancellation::default();
+        let row = DevContainers::toolbox(fake())
+            .installed(&cancel)
+            .unwrap()
+            .remove(0);
+        for stderr in [
+            "sudo: no password was provided\n",
+            "sudo: 1 incorrect password attempt\n",
+        ] {
+            let mut toolbox = DevContainers::toolbox(Fake {
+                run_failure: Some(sudo_failure(stderr)),
+                ..fake()
+            });
+            let error = toolbox
+                .execute(&Operation::Upgrade(row.id.clone()), &cancel, &mut ignore)
+                .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("toolbox enter fedora-toolbox-43"),
+                "{error}"
+            );
+        }
+        for failure in [
+            sudo_failure("sudo: unknown user dev\n"),
+            ExecutionError::Io("toolbox crashed".into()),
+        ] {
+            let mut toolbox = DevContainers::toolbox(Fake {
+                run_failure: Some(failure.clone()),
+                ..fake()
+            });
+            assert_eq!(
+                toolbox.execute(&Operation::Upgrade(row.id.clone()), &cancel, &mut ignore),
+                Err(EngineError::Execution(failure))
+            );
+        }
+    }
+
+    #[test]
+    fn toolbox_cancellation_stops_before_the_next_step() {
+        let row = DevContainers::toolbox(fake())
+            .installed(&Cancellation::default())
+            .unwrap()
+            .remove(0);
+        // Cancelled while looking for the manager: nothing is written.
+        let probe = Fake {
+            cancel_after_probe: true,
+            ..fake()
+        };
+        let mut toolbox = DevContainers::toolbox(probe.clone());
+        assert_eq!(
+            toolbox.execute(
+                &Operation::Upgrade(row.id.clone()),
+                &Cancellation::default(),
+                &mut ignore
+            ),
+            Err(EngineError::Cancelled)
+        );
+        assert!(!probe
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|c| c.starts_with("write:")));
+        // Cancelled during apt-get update: the upgrade step never starts, and
+        // the finished step is reported as deferred.
+        let apt = Fake {
+            manager: Some("apt-get"),
+            cancel_on_write: true,
+            ..fake()
+        };
+        let mut toolbox = DevContainers::toolbox(apt.clone());
+        let mut messages = vec![];
+        let outcome = toolbox
+            .execute(
+                &Operation::Upgrade(row.id),
+                &Cancellation::default(),
+                &mut |progress| messages.push(progress),
+            )
+            .unwrap();
+        assert!(outcome.cancellation_deferred);
+        let writes = apt
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c.starts_with("write:"))
+            .count();
+        assert_eq!(writes, 1);
+        assert_eq!(
+            messages.last(),
+            Some(&Progress::Message("Complete!".into()))
+        );
+    }
+
+    #[test]
+    fn failed_listings_are_errors_not_empty_lists() {
+        let cancel = Cancellation::default();
+        let mut toolbox = DevContainers::toolbox(Fake {
+            podman: Some(done("", 125)),
+            ..fake()
+        });
+        assert!(matches!(
+            toolbox.installed(&cancel),
+            Err(EngineError::Execution(ExecutionError::Failed(result))) if result.code == Some(125)
+        ));
+        let mut distrobox = DevContainers::distrobox(Fake {
+            list_fails: true,
+            ..fake()
+        });
+        assert!(matches!(
+            distrobox.installed(&cancel),
+            Err(EngineError::Execution(ExecutionError::Failed(result))) if result.code == Some(1)
+        ));
+        let failure = ExecutionError::Io("permission denied".into());
+        let mut broken = DevContainers::toolbox(Fake {
+            failure: Some(failure.clone()),
+            ..fake()
+        });
+        if cfg!(target_os = "linux") {
+            assert_eq!(broken.detect(&cancel), Err(EngineError::Execution(failure)));
+        } else {
+            assert_eq!(
+                broken.detect(&cancel),
+                Ok(Availability::Unavailable(
+                    "Toolbx containers run on Linux".into()
+                ))
+            );
+        }
+    }
+
+    #[test]
+    fn a_container_without_a_status_shows_its_state() {
+        let podman = r#"[{"Id":"1b418630ab8e0776","Image":"registry.fedoraproject.org/fedora-toolbox:43",
+            "Labels":{"com.github.containers.toolbox":"true"},"Names":["plain"],"State":"exited","Status":""}]"#;
+        let mut toolbox = DevContainers::toolbox(Fake {
+            podman: Some(done(podman, 0)),
+            ..fake()
+        });
+        let cancel = Cancellation::default();
+        let row = toolbox.installed(&cancel).unwrap().remove(0);
+        let details = toolbox.details(&row.id, &cancel).unwrap();
+        assert!(
+            details
+                .description
+                .contains("Container 1b418630ab8e, status: exited."),
+            "{}",
+            details.description
+        );
+    }
+
+    #[test]
+    fn plain_drops_escape_sequences_only() {
+        assert_eq!(plain("\u{1b}[1;32mok\u{1b}[0m done"), "ok done");
+        // A lone escape swallows the character after it and nothing more.
+        assert_eq!(plain("a\u{1b}Xb"), "ab");
+        assert_eq!(plain("tail\u{1b}"), "tail");
+    }
+
+    #[test]
+    fn distrobox_details_name_host_exports() {
+        let home = std::env::temp_dir().join(format!("pkgdeck-dbx-details-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let bin = home.join(".local/bin");
+        let apps = home.join(".local/share/applications");
+        std::fs::create_dir_all(bin.join("not-a-script")).unwrap();
+        std::fs::create_dir_all(&apps).unwrap();
+        std::fs::write(
+            bin.join("busybox"),
+            "#!/bin/sh\n# distrobox_binary\n# name: alpine-box\n",
+        )
+        .unwrap();
+        // Oversized files are never read, even when they look like exports.
+        let mut large = "#!/bin/sh\n# distrobox_binary\n# name: alpine-box\n".to_string();
+        large.push_str(&"#".repeat(64 * 1024));
+        std::fs::write(bin.join("huge"), large).unwrap();
+        std::fs::write(
+            apps.join("alpine-box-hello.desktop"),
+            "[Desktop Entry]\nName=Hello (on alpine-box)\nExec=/usr/bin/distrobox-enter -n alpine-box -- hello\n",
+        )
+        .unwrap();
+        let mut distrobox = DevContainers::distrobox(Fake {
+            home: Some(home.clone()),
+            ..fake()
+        });
+        let cancel = Cancellation::default();
+        let row = distrobox.installed(&cancel).unwrap().remove(0);
+        let details = distrobox.details(&row.id, &cancel).unwrap();
+        assert!(
+            details.description.contains(
+                "Exported to the host: applications Hello; commands busybox in ~/.local/bin."
+            ),
+            "{}",
+            details.description
+        );
+        std::fs::remove_file(apps.join("alpine-box-hello.desktop")).unwrap();
+        let details = distrobox.details(&row.id, &cancel).unwrap();
+        assert!(details
+            .description
+            .contains("Exported to the host: commands busybox in ~/.local/bin."));
+        let _ = std::fs::remove_dir_all(&home);
     }
 }

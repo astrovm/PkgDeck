@@ -195,18 +195,24 @@ pub trait Transport: Send {
             "Software Sources editor unavailable".into(),
         ))
     }
+    // Fixtures only implement the managers their adapter drives; the native
+    // transport overrides every one of these.
     fn apt_query(
         &self,
-        mode: &str,
-        query: &str,
-        arch: &str,
-        cancel: &Cancellation,
-    ) -> Result<Completion, ExecutionError>;
+        _mode: &str,
+        _query: &str,
+        _arch: &str,
+        _cancel: &Cancellation,
+    ) -> Result<Completion, ExecutionError> {
+        Err(ExecutionError::Disabled("APT not found".into()))
+    }
     fn apt_write(
         &self,
-        action: AptAction,
-        cancel: &Cancellation,
-    ) -> Result<Completion, ExecutionError>;
+        _action: AptAction,
+        _cancel: &Cancellation,
+    ) -> Result<Completion, ExecutionError> {
+        Err(ExecutionError::Disabled("APT not found".into()))
+    }
     fn apt_write_group(
         &self,
         _actions: &[AptAction],
@@ -218,17 +224,21 @@ pub trait Transport: Send {
     }
     fn brew(
         &self,
-        args: &[OsString],
-        cancel: &Cancellation,
-        write: bool,
-    ) -> Result<Completion, ExecutionError>;
+        _args: &[OsString],
+        _cancel: &Cancellation,
+        _write: bool,
+    ) -> Result<Completion, ExecutionError> {
+        Err(ExecutionError::Disabled("Homebrew not found".into()))
+    }
     fn flatpak(
         &self,
-        args: &[OsString],
-        cancel: &Cancellation,
-        write: bool,
-        system: bool,
-    ) -> Result<Completion, ExecutionError>;
+        _args: &[OsString],
+        _cancel: &Cancellation,
+        _write: bool,
+        _system: bool,
+    ) -> Result<Completion, ExecutionError> {
+        Err(ExecutionError::Disabled("Flatpak not found".into()))
+    }
     /// An unused-ref preview is only supported by transports with an
     /// authoritative native libflatpak implementation. A CLI approximation
     /// must never authorize `uninstall --unused`.

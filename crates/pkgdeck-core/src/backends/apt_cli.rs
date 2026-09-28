@@ -539,21 +539,16 @@ pub(crate) fn details_package(
     installed_rows: &[DpkgRow],
 ) -> Option<PackageDetails> {
     let entry = policy_for(policy, name, arch)?;
-    let stanza_arch = policy
-        .get(&(name.into(), Some(arch.into())))
-        .map(|_| arch.to_owned())
-        .or_else(|| {
-            entry
-                .candidate
-                .as_deref()
-                .and_then(|version| {
-                    show.iter()
-                        .find(|record| record.name == name && record.version == version)
-                })
-                .map(|record| record.arch.clone())
-                .filter(|candidate| candidate == arch)
-        })?;
-    if stanza_arch != arch {
+    // A native stanza only answers for the architecture its candidate record
+    // was built for; an architecture-qualified stanza answers for itself.
+    let exact = policy.contains_key(&(name.into(), Some(arch.into())));
+    if !exact
+        && !entry.candidate.as_deref().is_some_and(|version| {
+            show.iter().any(|record| {
+                record.name == name && record.version == version && record.arch == arch
+            })
+        })
+    {
         return None;
     }
     let installed = entry.installed.clone();
@@ -808,5 +803,90 @@ mod tests {
         assert_eq!(search[0].package.update, UpdateAvailability::Current);
         let details = details_package("held", "amd64", &policy, &show, &rows).unwrap();
         assert_eq!(details.package.update, UpdateAvailability::Current);
+    }
+
+    #[test]
+    fn malformed_dpkg_policy_and_show_input_is_skipped() {
+        let rows = parse_dpkg_table(
+            "nostatus\tamd64\t1.0\t\nextra\tamd64\t1.0\tinstall ok installed\tx\n",
+        );
+        assert!(rows.is_empty());
+
+        let policy = parse_policy_dump(
+            "  orphan line before any stanza\n\
+             :\n\
+             not a header:\n\
+             :i386:\n\
+             garbage\n\
+               Installed: 9.9\n\
+             ok:\n  Installed: 1.0\n  Candidate: 2.0\n  Version table:\n     \n     2.0 500 (phased)\n     3.0 500 (phased 100%)\n",
+        );
+        assert_eq!(policy.len(), 1);
+        let ok = &policy[&("ok".into(), None)];
+        assert_eq!(ok.installed.as_deref(), Some("1.0"));
+        // An unreadable phasing marker fails closed, a full rollout does not.
+        assert!(ok.phased.contains("2.0"));
+        assert!(!ok.phased.contains("3.0"));
+
+        let records = parse_show_dump(
+            "\n continuation without a field\nno colon here\nPackage: nover\nArchitecture: amd64\n\n\
+             Package: good\nVersion: 1.0\nArchitecture: amd64\nDescription: Good\nPhased-Update-Percentage: 40\nHomepage:  \n",
+        );
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].name, "good");
+        assert_eq!(records[0].phased_percent, Some(40));
+        assert_eq!(records[0].homepage, None);
+    }
+
+    #[test]
+    fn search_dump_accepts_bare_names_and_rejects_prose() {
+        let rows = parse_search_dump("alpha - First\n  bare  \nnot a name\n\n - no name\n");
+        assert_eq!(
+            rows,
+            [
+                ("alpha".to_string(), "First".to_string()),
+                ("bare".to_string(), String::new()),
+            ]
+        );
+    }
+
+    #[test]
+    fn search_dedupes_stanzas_skips_versionless_and_sorts() {
+        let policy = parse_policy_dump(
+            "zeta:\n  Installed: (none)\n  Candidate: 1.0\n\
+             zeta:amd64:\n  Installed: (none)\n  Candidate: 1.0\n\
+             zeta:i386:\n  Installed: (none)\n  Candidate: (none)\n\
+             alpha:\n  Installed: 1.0\n  Candidate: 1.0\n",
+        );
+        let show = parse_show_dump(
+            "Package: zeta\nArchitecture: amd64\nVersion: 1.0\nDescription: Zeta\n\n\
+             Package: alpha\nArchitecture: amd64\nVersion: 1.0\nDescription: Alpha\n",
+        );
+        let found = search_packages(
+            "",
+            &[
+                ("zeta".into(), "Zeta".into()),
+                ("alpha".into(), "Alpha".into()),
+            ],
+            &policy,
+            &show,
+            &[],
+        );
+        let ids: Vec<_> = found
+            .iter()
+            .map(|details| {
+                (
+                    details.package.id.name.as_str(),
+                    details.package.id.architecture.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(ids, [("alpha", "amd64"), ("zeta", "amd64")]);
+    }
+
+    #[test]
+    fn details_for_an_exact_stanza_without_versions_is_not_found() {
+        let policy = parse_policy_dump("ghost:amd64:\n  Installed: (none)\n  Candidate: (none)\n");
+        assert!(details_package("ghost", "amd64", &policy, &[], &[]).is_none());
     }
 }
