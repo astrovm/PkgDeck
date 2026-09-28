@@ -1803,7 +1803,14 @@ fn cargo_lifecycle() {
     let installed = backend.installed(&cancel).unwrap();
     assert_eq!(installed.len(), 3);
     assert!(installed.iter().all(|p| p.installed_version.is_some()));
-    assert_eq!(backend.search("cargo-install", &cancel).unwrap().len(), 1);
+    // Rows a search lists; unversioned exact-name offers are never listed.
+    let listed = |packages: Vec<Package>| {
+        packages
+            .into_iter()
+            .filter(|p| p.installed_version.is_some() || p.candidate_version.is_some())
+            .count()
+    };
+    assert_eq!(listed(backend.search("cargo-install", &cancel).unwrap()), 1);
     let candidates = backend.search("missing-tool", &cancel).unwrap();
     assert_eq!(candidates.len(), 1);
     assert!(candidates[0].installed_version.is_none());
@@ -1890,6 +1897,106 @@ fn cargo_lifecycle() {
             .count(),
         4
     );
+}
+
+#[test]
+fn registries_without_search_offer_known_ai_tools_by_exact_package() {
+    let cancel = Cancellation::default();
+    let npm_fixture = DevFixture {
+        version: "12.0.2\n".into(),
+        root: Some("/home/test/lib/node_modules".into()),
+        list: NPM_LIST.into(),
+        ..DevFixture::default()
+    };
+    let mut npm = DevTool::npm(npm_fixture.clone());
+    npm.detect(&cancel).unwrap();
+    let offers: Vec<_> = npm
+        .search("copilot", &cancel)
+        .unwrap()
+        .into_iter()
+        .filter(|p| p.candidate_version.is_some())
+        .collect();
+    assert_eq!(offers.len(), 1);
+    assert_eq!(offers[0].id.name, "@github/copilot");
+    assert_eq!(offers[0].display_name, "GitHub Copilot CLI");
+    assert_eq!(offers[0].candidate_version.as_deref(), Some("latest"));
+    assert!(offers[0].installed_version.is_none());
+    // The visible offer opens its details, as the GUI does on selection.
+    let details = npm.details(&offers[0].id, &cancel).unwrap();
+    assert_eq!(details.package.display_name, "GitHub Copilot CLI");
+    // The offer installs the exact package, never the product name.
+    npm.execute(
+        &Operation::Install(offers[0].id.clone()),
+        &cancel,
+        &mut |_| {},
+    )
+    .unwrap();
+    assert_eq!(
+        npm_fixture.writes("npm"),
+        vec![vec![
+            "install".to_string(),
+            "--global".into(),
+            "@github/copilot".into()
+        ]]
+    );
+    // A catalog alias keeps the exact package name typed installable:
+    // `amp` is also an unrelated npm package.
+    let amp = npm.search("amp", &cancel).unwrap();
+    assert!(amp.iter().any(|p| p.id.name == "@sourcegraph/amp"));
+    assert!(amp
+        .iter()
+        .any(|p| p.id.name == "amp" && p.candidate_version.is_none()));
+    // PyPI-only tools are not offered through npm.
+    assert!(npm
+        .search("aider", &cancel)
+        .unwrap()
+        .iter()
+        .all(|p| p.id.name != "aider-chat"));
+
+    let mut uv = DevTool::uv(DevFixture {
+        version: "uv 0.12.11\n".into(),
+        root: Some("/home/test/.local/share/uv/tools".into()),
+        list: UV_LIST.into(),
+        ..DevFixture::default()
+    });
+    uv.detect(&cancel).unwrap();
+    let offers: Vec<_> = uv
+        .search("aider", &cancel)
+        .unwrap()
+        .into_iter()
+        .filter(|p| p.candidate_version.is_some())
+        .collect();
+    assert_eq!(offers.len(), 1);
+    assert_eq!(offers[0].id.name, "aider-chat");
+    // An installed catalog tool found by its product name is shown as
+    // installed, not offered again.
+    let mut installed = DevTool::npm(DevFixture {
+        version: "12.0.2\n".into(),
+        root: Some("/home/test/lib/node_modules".into()),
+        list: r#"{"dependencies": {"@anthropic-ai/claude-code": {"version": "2.1.283"}}}"#.into(),
+        ..DevFixture::default()
+    });
+    installed.detect(&cancel).unwrap();
+    let claude: Vec<_> = installed
+        .search("Claude Code", &cancel)
+        .unwrap()
+        .into_iter()
+        .filter(|p| p.id.name == "@anthropic-ai/claude-code")
+        .collect();
+    assert_eq!(claude.len(), 1);
+    assert_eq!(claude[0].installed_version.as_deref(), Some("2.1.283"));
+    // Cargo has no catalog route, so it keeps its plain install-by-name offer.
+    let mut cargo = DevTool::cargo(DevFixture {
+        home: Some("/home/test".into()),
+        version: "cargo 1.98.1\n".into(),
+        list: CARGO_LIST.into(),
+        ..DevFixture::default()
+    });
+    cargo.detect(&cancel).unwrap();
+    let offers = cargo.search("copilot", &cancel).unwrap();
+    assert_eq!(offers.len(), 1);
+    assert_eq!(offers[0].id.name, "copilot");
+    assert!(offers[0].candidate_version.is_none());
 }
 
 #[test]

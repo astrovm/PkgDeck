@@ -1,4 +1,5 @@
 //! Native package-manager, container image, Homebrew formula/cask, and local AppImage adapters.
+mod ai_catalog;
 mod appimage;
 mod apt_cli;
 mod cleanup;
@@ -4504,7 +4505,48 @@ impl<T: Transport> Backend for DevTool<T> {
             }
             return Ok(results);
         }
-        if results.is_empty() {
+        // npm and PyPI cannot be searched, so offer the exact packages of
+        // known AI command-line tools that match the query. One already
+        // installed comes back as its installed row.
+        for tool in ai_catalog::matching(query) {
+            let package = match self.kind {
+                DevKind::Npm | DevKind::Pnpm | DevKind::Bun => tool.npm,
+                DevKind::Pipx | DevKind::Uv => tool.pypi,
+                _ => None,
+            };
+            let Some(name) = package.filter(|name| self.kind.valid_name(name)) else {
+                continue;
+            };
+            if results.iter().any(|package| package.id.name == name) {
+                continue;
+            }
+            if let Some(installed) = inventory.iter().find(|package| package.id.name == name) {
+                results.push(installed.clone());
+                continue;
+            }
+            results.push(Package {
+                id: PackageId {
+                    backend: self.kind.id().into(),
+                    name: name.into(),
+                    architecture: std::env::consts::ARCH.into(),
+                    scope: Scope::Environment { path: home.clone() },
+                    remote: None,
+                    reference: None,
+                },
+                display_name: tool.product.into(),
+                summary: format!("{} (AI command-line tool)", tool.product),
+                installed_version: None,
+                // Installing without a version takes the registry's latest.
+                candidate_version: Some("latest".into()),
+                update: UpdateAvailability::Unknown,
+                icon: None,
+                component_ids: vec![],
+                homepages: vec![],
+            });
+        }
+        // A catalog alias must not hide the exact name the user typed:
+        // `install amp --from npm` still tries the npm package `amp`.
+        if !results.iter().any(|package| package.id.name == query) {
             results.extend(self.exact_offer(&home, query));
         }
         Ok(results)
