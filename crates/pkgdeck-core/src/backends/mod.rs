@@ -7,7 +7,9 @@ mod aur;
 mod cleanup;
 mod conda;
 mod container;
+mod dotnet;
 mod firmware;
+mod go_bin;
 mod mac_apps;
 mod mas;
 mod nix;
@@ -25,7 +27,9 @@ pub use appimage::AppImage;
 pub use aur::Aur;
 pub use conda::Conda;
 pub use container::{Container, ContainerKind};
+pub use dotnet::DotnetTools;
 pub use firmware::Firmware;
+pub use go_bin::GoBinaries;
 pub use mac_apps::MacApps;
 pub use mas::MacAppStore;
 pub use nix::Nix;
@@ -81,6 +85,8 @@ pub const BACKEND_IDS: &[&str] = &[
     "podman",
     "cargo",
     "rustup",
+    "go",
+    "dotnet",
     "npm",
     "pnpm",
     "bun",
@@ -142,6 +148,8 @@ pub fn display_name(id: &str) -> &str {
         "xbps" => "XBPS",
         "system-image" => "System image",
         "nix" => "Nix",
+        "go" => "Go",
+        "dotnet" => ".NET tools",
         "appimage" => "AppImage",
         "flatpak" => "Flatpak",
         "docker" => "Docker images",
@@ -2410,6 +2418,27 @@ impl<T: Transport> Backend for HomebrewCask<T> {
         }
         Ok(packages)
     }
+    /// An exact name is looked up directly, which also finds casks in a tap
+    /// that `brew casks` hasn't listed yet, and skips reading every cask.
+    fn lookup(&mut self, name: &str, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
+        if !cask_token(name) {
+            return Ok(vec![]);
+        }
+        match self.call(&["info", "--json=v2", "--cask", "--", name], cancel, false) {
+            Ok(result) => Ok(self
+                .parse(result, true)?
+                .into_iter()
+                .map(|details| details.package)
+                .collect()),
+            // brew exits 1 for a name that is no cask.
+            Err(EngineError::Execution(ExecutionError::Failed(result)))
+                if result.code == Some(1) =>
+            {
+                Ok(vec![])
+            }
+            Err(error) => Err(error),
+        }
+    }
     fn installed(&mut self, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
         Ok(self
             .parse(
@@ -2995,11 +3024,16 @@ impl<T: Transport> SystemManager<T> {
             // Packages no repository has (AUR builds) are the AUR source's
             // rows. Without synced databases every package looks foreign;
             // then Pacman keeps them all.
-            let foreign = String::from_utf8(bytes(
-                "pacman",
-                self.call(vec!["-Qmq".into()], cancel, false)?,
-            )?)
-            .map_err(|e| invalid("pacman", e))?;
+            let foreign = match self.call(vec!["-Qmq".into()], cancel, false) {
+                // pacman -Q exits 1 when nothing matches: no foreign packages.
+                Err(EngineError::Execution(ExecutionError::Failed(result)))
+                    if result.code == Some(1) && result.stdout.is_empty() =>
+                {
+                    String::new()
+                }
+                result => String::from_utf8(bytes("pacman", result?)?)
+                    .map_err(|e| invalid("pacman", e))?,
+            };
             let foreign: std::collections::BTreeSet<&str> =
                 foreign.lines().map(str::trim).collect();
             if foreign.len() < packages.len() {
@@ -5387,6 +5421,12 @@ pub fn native_engine(
     }
     if allowed("nix") {
         candidates.push((Box::new(Nix::new(transport())), probe_unless_listed));
+    }
+    if allowed("go") {
+        candidates.push((Box::new(GoBinaries::new(transport())), probe_unless_listed));
+    }
+    if allowed("dotnet") {
+        candidates.push((Box::new(DotnetTools::new(transport())), probe_unless_listed));
     }
     // Both check the platform first, so probing is cheap elsewhere.
     if allowed("aur") {

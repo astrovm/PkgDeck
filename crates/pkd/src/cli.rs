@@ -5,7 +5,7 @@ use pkgdeck_core::{
     activity::{History, Outcome, State},
     engine::*,
     host::{Authorization, Host},
-    inspection::{audit, inspect_native, native_leftovers},
+    inspection::{audit, inspect_native, native_leftovers, OwnerState},
     manifest::{self, PreviewStatus},
     package::*,
     process::{Cancellation, ExecutionError},
@@ -27,7 +27,7 @@ pub struct Args {
     /// Only use this source, such as apt or flatpak. Repeat to pick
     /// several; omit to use every available source. `pkd sources` lists
     /// them.
-    #[arg(long, global = true, value_name = "SOURCE", hide_possible_values = true, value_parser = ["fwupd", "apt", "dnf", "pacman", "zypper", "snap", "homebrew", "homebrew-cask", "macos-apps", "mas", "aur", "apk", "xbps", "system-image", "macports", "rustup", "nix", "appimage", "flatpak", "docker", "podman", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "mise", "pixi", "conda", "composer", "gem", "codex", "claude", "grok", "opencode", "cursor", "copilot", "kiro", "antigravity", "amp", "droid"])]
+    #[arg(long, global = true, value_name = "SOURCE", hide_possible_values = true, value_parser = ["fwupd", "apt", "dnf", "pacman", "zypper", "snap", "homebrew", "homebrew-cask", "macos-apps", "mas", "aur", "apk", "xbps", "system-image", "macports", "rustup", "nix", "go", "dotnet", "appimage", "flatpak", "docker", "podman", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "mise", "pixi", "conda", "composer", "gem", "codex", "claude", "grok", "opencode", "cursor", "copilot", "kiro", "antigravity", "amp", "droid"])]
     pub from: Vec<String>,
     /// Pick a package architecture when the same name exists for several.
     #[arg(long, global = true)]
@@ -470,8 +470,46 @@ pub fn dispatch_with(
             inventory
                 .packages
                 .retain(|p| args.scope.is_none_or(|scope| scope.native() == p.id.scope));
+            let host = Host::current();
+            let mut result = inspect_native(&host, command, &inventory.packages, cancel);
+            // Owners found from a manager's own folders (Homebrew's Cellar,
+            // pipx venvs, …) name sources whose inventories weren't read up
+            // front; read just those, then match again.
+            if let Ok(report) = &result {
+                let extra: Vec<String> = report
+                    .candidates
+                    .iter()
+                    .flat_map(|candidate| &candidate.owners)
+                    .filter(|owner| owner.state == OwnerState::Unmatched)
+                    .map(|owner| owner.manager.clone())
+                    .filter(|manager| args.from.is_empty() || args.from.contains(manager))
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .collect();
+                if !extra.is_empty() {
+                    if let Ok(mut more) = pkgdeck_core::backends::native_engine(
+                        &extra,
+                        false,
+                        args.auth.into(),
+                        cancel,
+                    ) {
+                        let more = more.installed(cancel);
+                        inventory
+                            .packages
+                            .extend(more.packages.into_iter().filter(|p| {
+                                args.scope.is_none_or(|scope| scope.native() == p.id.scope)
+                            }));
+                        inventory
+                            .failures
+                            .extend(more.failures.into_iter().filter(|failure| {
+                                !matches!(failure.error, EngineError::Unavailable { .. })
+                            }));
+                        result = inspect_native(&host, command, &inventory.packages, cancel);
+                    }
+                }
+            }
             let code = if inventory.failures.is_empty() { 0 } else { 8 };
-            return match inspect_native(&Host::current(), command, &inventory.packages, cancel) {
+            return match result {
                 Ok(report) => (
                     json!({"inspection": report, "failures": inventory.failures}),
                     code,

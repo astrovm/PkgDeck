@@ -1139,6 +1139,8 @@ fn source_display_name(id: &str) -> String {
         "macports" => "MacPorts",
         "rustup" => "rustup",
         "nix" => "Nix",
+        "go" => "Go",
+        "dotnet" => ".NET tools",
         "appimage" => "AppImage",
         "flatpak" => "Flatpak",
         "docker" => "Docker images",
@@ -1330,7 +1332,7 @@ fn plain_error(error: &EngineError, backend: Option<&str>, sudo: bool) -> String
     }
     match error {
         // mas asks for the Mac password through sudo, which needs a terminal.
-        EngineError::Execution(E::AuthorizationDenied) if backend == Some("mas") => "App Store updates need your Mac password, and mas can only ask for it in a terminal. Run `pkd upgrade --from mas` in Terminal, or update in the App Store app.".into(),
+        EngineError::Execution(E::AuthorizationDenied) if backend == Some("mas") => "App Store updates need your Mac password, which mas can only ask for in a terminal. PkgDeck opened the App Store's Updates page so you can update there, or run `pkd upgrade --from mas` in Terminal.".into(),
         EngineError::Execution(E::AuthorizationDenied) if sudo => "PkgDeck couldn't get administrator access. The sudo option needs a recent sudo login in the same terminal.".into(),
         EngineError::Execution(E::AuthorizationDenied) => "PkgDeck couldn't get administrator access. Make sure your desktop's password prompt is running, then try again.".into(),
         EngineError::Execution(E::AuthorizationCancelled) => "The password prompt was closed. Nothing was changed.".into(),
@@ -8713,6 +8715,8 @@ mod tests {
             ("macports", "MacPorts"),
             ("rustup", "rustup"),
             ("nix", "Nix"),
+            ("go", "Go"),
+            ("dotnet", ".NET tools"),
             ("appimage", "AppImage"),
             ("flatpak", "Flatpak"),
             ("docker", "Docker images"),

@@ -45,6 +45,12 @@ const RULES: &[Rule] = &[
         bundle_id: "org.mozilla.firefox",
         team: Some("43AQ936H96"),
     },
+    // Read from the signed app in the cask's own DMG (Dynalist Inc.).
+    Rule {
+        token: "obsidian",
+        bundle_id: "md.obsidian",
+        team: Some("6JSW4SJWN9"),
+    },
     // Only test builds know the CI fixture, an ad-hoc signed app in a local tap.
     #[cfg(debug_assertions)]
     Rule {

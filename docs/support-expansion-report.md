@@ -128,8 +128,9 @@ inspection, and duplicate-copy auditing. However:
   version, installed version, and outdated state. Adoption needs artifact and
   installation-location information too.
 - `pkd inspect` resolves executable paths, but its native ownership queries
-  currently cover dpkg, RPM, and Pacman. Extend authoritative ownership for
-  Homebrew and other new sources before relying on it for migration.
+  cover dpkg, RPM, and Pacman, plus (implemented since) the folders only one
+  manager writes to: Homebrew's Cellar and Caskroom, Cargo's install records,
+  pipx venvs, uv tools and mise installs.
 - Duplicate grouping is display-only. It must not authorize replacement.
 - `Operation` has no ownership-transfer operation; ordinary batches have no
   rollback guarantee. A migration cannot safely be represented as an ordinary
@@ -163,14 +164,14 @@ or a dedicated design.
 | P0 | mise | Runtime and developer-tool coverage across Linux/macOS; Volta's successor | M–L | Implemented: global tools only, registry search, upgrades within the configured range, remove with prune |
 | P0 | AI CLI catalog using current managers | Easier discovery without duplicate backends | S–M | Implemented: npm and PyPI searches offer exact packages for 13 tools; Homebrew already finds the casks and formulae by name. npm, crates.io, RubyGems and Packagist searches now also query the registry |
 | P1 | Standalone AI CLI adapters | Covers official installers outside package managers | M each | Implemented for Antigravity, Cursor, Copilot and Kiro CLIs, Amp and Factory Droid |
-| P1 | Manage existing Mac apps with Homebrew | Converts manual installs into tracked installations | L | Implemented for VS Code and Firefox: `brew install --cask --adopt` after PkgDeck checks the publisher team, bundle id, App Store receipt, architecture, version and every cask target, with an APFS clone restored if Homebrew's rollback deletes the app; tested with a fixture cask on disposable Mac runners. Obsidian waits for a verified publisher team |
+| P1 | Manage existing Mac apps with Homebrew | Converts manual installs into tracked installations | L | Implemented for VS Code, Firefox and Obsidian: `brew install --cask --adopt` after PkgDeck checks the publisher team, bundle id, App Store receipt, architecture, version and every cask target, with an APFS clone restored if Homebrew's rollback deletes the app; tested with a fixture cask on disposable Mac runners. |
 | P1 | Mac App Store via mas | Covers apps that should retain App Store ownership | M | Implemented: inventory, update checks that never download, and verified `mas update` runs; mas asks for the password itself, so updates need a terminal |
 | P1 | Conda, mamba/micromamba and pixi | Scientific and data-development environments | L | Implemented: requested packages in named conda/mamba/micromamba environments (dry-run solve, verified update) and `pixi global` environments (full lifecycle, updates within the manifest spec); tested end to end in CI |
 | P2 | Rustup | Toolchain coverage beyond Cargo-installed executables | S–M | Implemented: installed toolchains with channel updates via `rustup check` (rustup 1.28.2 exits 0 with updates, not the documented 100; both are accepted), minimal-profile installs, `--no-self-update` on toolchain changes, rustup itself as a separate row, and the default toolchain protected from removal |
 | P2 | MacPorts | Completes another macOS package ecosystem | M | Implemented: search, install, remove and upgrade with `port -N`, updates from `port outdated`, variants kept on upgrade, only active ports listed, writes only through `/opt/local/bin/port` |
 | P2 | Nix profiles | Useful cross-platform package coverage | L | Implemented: the user profile only (version 3 JSON), exact `nixpkgs#NAME` installs, remove, and explicit flake upgrades; updates are never guessed, and store-path entries can't be upgraded |
 | P2 | rpm-ostree and bootc | Supports immutable desktops | L | Implemented: one update-only `system` row from bootc status (rpm-ostree as fallback) with staged, rollback and layered-package details; upgrades stage a deployment and PkgDeck never restarts |
-| P2 | AUR | Broader Arch application availability | L | Implemented read-only: `pacman -Qm` checked against the AUR RPC with `vercmp`; Pacman no longer lists these packages, and unsynced databases are an error; no builds after the 2026 AUR attack |
+| P2 | AUR | Broader Arch application availability | L | Implemented: `pacman -Qm` checked against the AUR RPC with `vercmp`; Pacman no longer lists these packages, and unsynced databases are an error. Updates only, through the user's helper (paru, then yay), after a preview linking the PKGBUILD history; PkgDeck never builds itself |
 | P2 | apk and XBPS | Extends distro coverage | M each | Implemented: search, install, remove, upgrade and refresh, with updates from `apk list --upgradable` and `xbps-install -Mun`; writes use the fixed system paths only |
 | P3 | Go binaries, .NET tools | Covers developer tools outside package managers | M | Only with reliable metadata (`go version -m`, `dotnet tool list -g`) |
 
@@ -270,8 +271,11 @@ packages and new AUR accounts were blocked, so start read-only: list foreign
 packages with `pacman -Qm`, compare versions through the AUR RPC, and leave builds
 to the user's helper. [ArchWiki AUR helpers](https://wiki.archlinux.org/title/AUR_helpers),
 [SecurityWeek](https://www.securityweek.com/atomic-arch-supply-chain-attack-hits-1500-aur-packages/).
-Implemented read-only as described. Pacman omits foreign packages, so each
-appears once; no helper integration yet.
+Implemented: listing as described, and updates through the user's own helper
+(paru, then yay) with a preview that links the PKGBUILD's change history before
+anything builds. The helper gets root through the desktop prompt (pkexec) or an
+existing sudo login. PkgDeck never installs, removes or builds AUR packages
+itself. Pacman omits foreign packages, so each appears once.
 
 Windows managers such as WinGet, Scoop, and Chocolatey should be a separate
 platform initiative. Current Unix host execution and Linux/macOS distribution
@@ -289,7 +293,7 @@ additional runtime managers until mise establishes multi-version semantics.
 | Cursor CLI (`agent`) | Active; `cursor-agent` is an alias | Installer to `~/.local/bin`, cask `cursor-cli` | Standalone adapter with `agent update`; see the `agent` clash below |
 | Kiro CLI (`kiro-cli`) | Replaces Amazon Q Developer CLI | Installer, cask `kiro-cli`, Linux `.deb` | Standalone adapter with `kiro-cli update`; the `amazon-q` cask now points here |
 | Amp (`amp`) | Active | Installer to `~/.amp/bin`, npm `@sourcegraph/amp` | Catalog npm; standalone adapter with `amp update`. The `amp` formula is an unrelated editor |
-| Factory Droid (`droid`) | Active | Installer, cask `droid`, npm `@factory/cli` | Catalog cask and npm; standalone adapter later |
+| Factory Droid (`droid`) | Active | Installer, cask `droid`, npm `@factory/cli` | Catalog cask and npm; standalone adapter implemented |
 | Qwen Code (`qwen`) | Active | npm `@qwen-code/qwen-code`, formula `qwen-code` | Catalog only |
 | Crush (`crush`) | Active | Charm tap and repositories, npm `@charmland/crush`, AUR | Catalog only |
 | goose (`goose`) | Active; now under the Linux Foundation | Installer, formula `block-goose-cli` | Catalog only. The `goose` formula is an unrelated migration tool |

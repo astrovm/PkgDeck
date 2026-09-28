@@ -3,12 +3,12 @@
 # Ephemeral runners need no cleanup; lifecycle state is confirmed through
 # the underlying manager, never only PkgDeck output. Tool installations use
 # user-writable prefixes so no step ever needs elevation.
-# Usage: scripts/tests/dev-manager.sh cargo|npm|pnpm|bun|pip|pipx|uv|mise|pixi|conda|composer|gem|rustup|nix <pkd>
+# Usage: scripts/tests/dev-manager.sh cargo|rustup|go|dotnet|npm|pnpm|bun|pip|pipx|uv|mise|pixi|conda|nix|composer|gem|rustup|nix <pkd>
 # -E lets failures inside the helper functions below reach the ERR trap.
 set -Eeuo pipefail
 trap 'echo "dev-manager FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
-backend=${1:?Usage: scripts/tests/dev-manager.sh cargo|npm|pnpm|bun|pip|pipx|uv|mise|pixi|conda|composer|gem|rustup|nix <pkd>}
-pkd=${2:?Usage: scripts/tests/dev-manager.sh cargo|npm|pnpm|bun|pip|pipx|uv|mise|pixi|conda|composer|gem|rustup|nix <pkd>}
+backend=${1:?Usage: scripts/tests/dev-manager.sh cargo|rustup|go|dotnet|npm|pnpm|bun|pip|pipx|uv|mise|pixi|conda|nix|composer|gem|rustup|nix <pkd>}
+pkd=${2:?Usage: scripts/tests/dev-manager.sh cargo|rustup|go|dotnet|npm|pnpm|bun|pip|pipx|uv|mise|pixi|conda|nix|composer|gem|rustup|nix <pkd>}
 echo "dev-manager: backend=$backend pkd=$pkd user=$(whoami) home=$HOME"
 run() { "$pkd" --json --yes --auth sudo --from "$backend" "$@"; }
 # Keep pkd's report so a failed step shows what pkd said and how long it took.
@@ -155,6 +155,32 @@ setup_nix() {
     fi
     nix() { "$nix_bin" --extra-experimental-features 'nix-command flakes' "$@"; }
     nix --version
+}
+
+# `go install` writes to GOBIN, else the first GOPATH entry's bin; the
+# runners ship Go, elsewhere the distribution package is enough.
+setup_go() {
+    if ! command -v go >/dev/null; then
+        if [[ $(uname -s) == Darwin ]]; then brew install go
+        else sudo apt-get update && sudo apt-get install -y golang-go; fi
+    fi
+    go version
+    gobin=$(go env GOBIN)
+    [[ -n $gobin ]] || gobin=$(go env GOPATH | cut -d: -f1)/bin
+    echo "go bin directory: $gobin"
+}
+
+# The runners ship the .NET SDK; elsewhere the official script installs the
+# LTS SDK into ~/.dotnet, off PATH, where pkd looks for it.
+setup_dotnet() {
+    export DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1
+    if ! command -v dotnet >/dev/null && [[ ! -x $HOME/.dotnet/dotnet ]]; then
+        curl -fsSL https://dot.net/v1/dotnet-install.sh -o "$HOME/dotnet-install.sh"
+        bash "$HOME/dotnet-install.sh" --channel LTS --install-dir "$HOME/.dotnet" --no-path
+    fi
+    dotnet_bin=$(command -v dotnet || echo "$HOME/.dotnet/dotnet")
+    dotnet() { "$dotnet_bin" "$@"; }
+    dotnet --version
 }
 
 case $backend in
@@ -400,6 +426,54 @@ nix)
     success remove hello
     nix profile list --json | absent '"hello"'
     [[ ! -e $HOME/.nix-profile/bin/hello ]]
+    ;;
+go)
+    setup_go
+    success sources
+    # An old release, so the proxy has a newer one to move to.
+    go install golang.org/x/tools/cmd/stringer@v0.30.0
+    have stringer
+    run list | jq -e '.data.packages[] | select(.id.name == "stringer") | .installed_version == "v0.30.0" and .update == "available" and .id.reference == "golang.org/x/tools/cmd/stringer"'
+    success info stringer
+    success upgrade stringer
+    go version -m "$gobin/stringer" | awk '$1 == "mod" {print $3}' | grep -qv '^v0\.30\.0$'
+    # A file that isn't a Go program is neither listed nor removed.
+    printf '#!/bin/sh\n' >"$gobin/not-go"
+    chmod +x "$gobin/not-go"
+    run list | absent '"not-go"'
+    run remove not-go >/dev/null || true
+    [[ -e $gobin/not-go ]]
+    success remove stringer
+    [[ ! -e $gobin/stringer ]]
+    run list | absent '"stringer"'
+    # A package path is an exact install offer.
+    run search golang.org/x/tools/cmd/stringer | jq -e '.data.packages[] | select(.id.name == "stringer") | .candidate_version | startswith("v")'
+    success install golang.org/x/tools/cmd/stringer
+    have stringer
+    go version -m "$gobin/stringer" | grep -q $'^\tpath\tgolang.org/x/tools/cmd/stringer$'
+    success remove stringer
+    [[ ! -e $gobin/stringer ]]
+    [[ -e $gobin/not-go ]]
+    ;;
+dotnet)
+    setup_dotnet
+    success sources
+    dotnet tool list --global | absent '^dotnetsay '
+    # An old release, so the feed has a newer one to move to.
+    dotnet tool install --global dotnetsay --version 2.1.7
+    have dotnetsay
+    run list | jq -e '.data.packages[] | select(.id.name == "dotnetsay") | .installed_version == "2.1.7" and .update == "available"'
+    success info dotnetsay
+    success upgrade dotnetsay
+    dotnet tool list --global | awk '$1 == "dotnetsay" {print $2}' | grep -qv '^2\.1\.7$'
+    success remove dotnetsay
+    dotnet tool list --global | absent '^dotnetsay '
+    run search dotnetsay | jq -e '.data.packages[] | select(.id.name == "dotnetsay") | .candidate_version | test("^[0-9]")'
+    success install dotnetsay
+    have dotnetsay
+    dotnet tool list --global | grep -q '^dotnetsay '
+    success remove dotnetsay
+    dotnet tool list --global | absent '^dotnetsay '
     ;;
 *) exit 2 ;;
 esac

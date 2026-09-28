@@ -4976,19 +4976,24 @@ impl Transport for Script {
             .lock()
             .unwrap()
             .push(format!("{line}{}", if write { " (write)" } else { "" }));
-        self.replies
+        let reply = self
+            .replies
             .lock()
             .unwrap()
             .iter()
             .filter(|(command, _)| line.starts_with(command.as_str()))
             .max_by_key(|(command, _)| command.len())
-            .map(|(_, reply)| output(reply))
-            .ok_or_else(|| {
-                ExecutionError::Failed(Completion {
-                    code: Some(1),
-                    ..output("")
-                })
-            })
+            .map(|(_, reply)| reply.clone());
+        // No reply, or a reply of "exit N", fails with that code and no output.
+        let code = match reply.as_deref().map(|reply| reply.strip_prefix("exit ")) {
+            Some(None) => return Ok(output(reply.unwrap())),
+            Some(Some(code)) => code.parse().unwrap(),
+            None => 1,
+        };
+        Err(ExecutionError::Failed(Completion {
+            code: Some(code),
+            ..output("")
+        }))
     }
 }
 
@@ -5148,6 +5153,12 @@ fn pacman_leaves_aur_packages_to_the_aur_source() {
         .map(|p| p.id.name)
         .collect();
     assert_eq!(names, ["bash"]);
+    // pacman -Q exits 1 when no package is foreign: every row stays Pacman's.
+    let none = Script::new(&[
+        ("pacman -Q", "bash 5.3-1\nyay 12.0.0-1\n"),
+        ("pacman -Qmq", "exit 1"),
+    ]);
+    assert_eq!(Pacman::pacman(none).installed(&cancel).unwrap().len(), 2);
     // Without synced databases every package looks foreign; keep them all.
     let unsynced = Script::new(&[
         ("pacman -Q", "bash 5.3-1\nyay 12.0.0-1\n"),

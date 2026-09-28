@@ -283,6 +283,12 @@ impl Host {
             "MISE_CACHE_DIR",
             // pixi and the conda family: their homes, and the manager a
             // `conda init` shell names.
+            "GOBIN",
+            "GOPATH",
+            "GOROOT",
+            "GOPROXY",
+            "DOTNET_ROOT",
+            "DOTNET_CLI_HOME",
             "PIXI_HOME",
             "CONDA_EXE",
             "MAMBA_EXE",
@@ -306,6 +312,17 @@ impl Host {
             if let Some(value) = source.get(&OsString::from(name)) {
                 env.insert(name.into(), value.clone());
             }
+        }
+        // A first `dotnet` run would otherwise print a welcome banner, send
+        // telemetry, create an HTTPS development certificate and edit the
+        // user's PATH setup, none of which a tool listing should do.
+        for (name, value) in [
+            ("DOTNET_CLI_TELEMETRY_OPTOUT", "1"),
+            ("DOTNET_NOLOGO", "1"),
+            ("DOTNET_GENERATE_ASPNET_CERTIFICATE", "false"),
+            ("DOTNET_ADD_GLOBAL_TOOLS_TO_PATH", "false"),
+        ] {
+            env.insert(name.into(), value.into());
         }
         let path = source
             .get(&OsString::from("PATH"))
@@ -544,6 +561,17 @@ impl Host {
                             .map(|home| home.join(dir).join("bin").join(name)),
                     );
                 }
+            }
+            // `go install` writes to GOBIN, else GOPATH/bin, else ~/go/bin.
+            "go" => {
+                candidates.extend(path("GOROOT").map(|dir| dir.join("bin/go")));
+                candidates.push("/usr/local/go/bin/go".into());
+                candidates.push("/opt/homebrew/bin/go".into());
+            }
+            "dotnet" => {
+                candidates.extend(path("DOTNET_ROOT").map(|dir| dir.join("dotnet")));
+                candidates.extend(home.as_ref().map(|home| home.join(".dotnet/dotnet")));
+                candidates.push("/usr/local/share/dotnet/dotnet".into());
             }
             "rustup" => {
                 candidates.extend(path("CARGO_HOME").map(|dir| dir.join("bin/rustup")));

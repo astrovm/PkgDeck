@@ -240,8 +240,10 @@ before running it.
 
 `pkd inspect COMMAND` shows which file runs when you type `COMMAND` and which
 package installed it. It searches your `PATH` in order, shows other matches
-and symlink targets, and asks your package managers who owns each file.
-It never runs the command.
+and symlink targets, and asks your package managers who owns each file:
+the APT, RPM and Pacman databases, and the folders only one manager writes to
+(Homebrew's Cellar and Caskroom, Cargo's install records, pipx venvs, uv tools,
+mise installs). It never runs the command.
 
 Each file says who installed it, such as "Installed by cowsay (APT)", then
 the matching package, such as "Package: cowsay from APT, system".
@@ -411,19 +413,19 @@ receive no cask suggestion.
 pkd install --from homebrew-cask visual-studio-code
 ```
 
-When VS Code or Firefox is already in `/Applications`, installing its cask hands
+When VS Code, Firefox or Obsidian is already in `/Applications`, installing its cask hands
 that copy to Homebrew (`brew install --cask --adopt`) instead of failing. The app
 stays where it is. Before running Homebrew, PkgDeck checks that the copy:
 
-- is signed by the expected publisher (Microsoft or Mozilla) and the signature verifies,
+- is signed by the expected publisher (Microsoft, Mozilla or Dynalist) and the signature verifies,
 - is the stable edition (by bundle identifier), didn't come from the App Store,
   runs natively on this Mac, and isn't older than the cask,
 - leaves every place the cask writes to free, or already linked to this app.
 
 If any check fails, nothing changes and PkgDeck says why. Homebrew undoes a
 failed adoption by deleting the app, so PkgDeck keeps an instant APFS copy until
-Homebrew finishes and puts the app back if it went missing. Obsidian and other
-apps aren't adopted yet. After adoption, removing the cask removes the app, as
+Homebrew finishes and puts the app back if it went missing. Other apps aren't
+adopted. After adoption, removing the cask removes the app, as
 for any cask.
 
 Ownership covers the active Homebrew prefix and requires an installed app-artifact

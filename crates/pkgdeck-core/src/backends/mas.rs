@@ -192,7 +192,16 @@ impl<T: Transport> MacAppStore<T> {
         let args: Vec<OsString> = args.into_iter().map(OsString::from).collect();
         let completion = match self.transport.dev_tool(ID, &args, cancel, true) {
             Err(ExecutionError::Failed(result)) if needs_password(&result) => {
-                return Err(ExecutionError::AuthorizationDenied.into())
+                // Without a terminal mas can't ask for the password. The App
+                // Store app can: open its Updates page so the update is one
+                // click away.
+                let _ = self.transport.dev_tool(
+                    "open",
+                    &["macappstore://showUpdatesPage".into()],
+                    &Cancellation::default(),
+                    false,
+                );
+                return Err(ExecutionError::AuthorizationDenied.into());
             }
             result => result?,
         };
@@ -406,8 +415,15 @@ mod tests {
             _: &Cancellation,
             write: bool,
         ) -> Result<Completion, ExecutionError> {
-            assert_eq!(executable, "mas");
             let args: Vec<String> = args.iter().map(|a| a.to_string_lossy().into()).collect();
+            if executable == "open" {
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push(format!("open {}", args.join(" ")));
+                return Ok(done(String::new()));
+            }
+            assert_eq!(executable, "mas");
             self.calls.lock().unwrap().push(args.join(" "));
             match args[0].as_str() {
                 "version" => Ok(done("7.0.0\n".into())),
@@ -577,7 +593,7 @@ mod tests {
     fn a_missing_password_prompt_is_an_authorization_failure() {
         let mut fake = fake();
         fake.update_error = Some("sudo: a terminal is required to read the password; either use the -S option to read from standard input or configure an askpass helper\nsudo: a password is required\n");
-        let mut store = MacAppStore::new(fake);
+        let mut store = MacAppStore::new(fake.clone());
         assert!(matches!(
             store.execute(
                 &Operation::Upgrade(id("1")),
@@ -586,6 +602,12 @@ mod tests {
             ),
             Err(EngineError::Execution(ExecutionError::AuthorizationDenied))
         ));
+        // The App Store app can ask for the password, so its Updates page opens.
+        assert!(fake
+            .calls
+            .lock()
+            .unwrap()
+            .contains(&"open macappstore://showUpdatesPage".into()));
     }
 
     #[test]
