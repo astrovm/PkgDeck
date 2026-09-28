@@ -33,6 +33,15 @@ TestCase {
         App.ActivityPane { width: 600; height: 400 }
     }
     Component {
+        id: activityHostComponent
+        Item {
+            property alias pane: hostedPane
+            width: 600
+            height: 400
+            App.ActivityPane { id: hostedPane; anchors.fill: parent; canCancelRunning: true }
+        }
+    }
+    Component {
         id: scrollComponent
         ListView {
             width: 200
@@ -408,5 +417,26 @@ TestCase {
         // Expansion survives a model refresh.
         pane.entries = pane.entries.slice();
         tryVerify(() => list.itemAtIndex(0) !== null && list.itemAtIndex(0).expanded);
+    }
+
+    function test_activity_progress_reflows_without_recursive_layout() {
+        failOnWarning(/recursive rearrange/);
+        const host = createTemporaryObject(activityHostComponent, test);
+        const pane = host.pane;
+        const operation = {install: {backend: "apt", name: "synthetic-tool", scope: "system"}};
+        const entry = (state, outcomes) => [{id: 1, state: state, started_at: 1, operations: [operation, operation], outcomes: outcomes}];
+        pane.entries = entry("queued", []);
+        wait(20);
+        pane.entries = entry("running", []);
+        // Progress arriving while the pane crosses the stacking width, then
+        // the run finishing, reflows the progress line mid layout pass.
+        for (let step = 0; step < 20; ++step) {
+            pane.progress = {activity_id: 1, label: "Downloading " + "x".repeat(step * 4),
+                done: step % 3, total: 3, transferred: step, transfer_total: step % 2 ? 20 : 0};
+            host.width = [600, 470, 455, 480, 440, 500][step % 6];
+            wait(20);
+        }
+        pane.entries = entry("finished", ["finished", "finished"]);
+        wait(100);
     }
 }

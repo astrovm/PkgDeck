@@ -17,7 +17,11 @@ Browser {
             if (reason === Platform.SystemTrayIcon.Trigger)
                 browser.toggleFromTray();
         }
+        // Hidden until the tray opens it. Plasma's tray menu is a QMenu, and a
+        // visible one pops up at startup; on Wayland that fails with no
+        // parent window ("Failed to create grabbing popup").
         menu: Platform.Menu {
+            visible: false
             Platform.MenuItem { text: "Open"; onTriggered: browser.showFromTray() }
             Platform.MenuItem { text: "Check now"; onTriggered: browser.checkUpdates(true) }
             Platform.MenuItem { text: "Quit"; onTriggered: { browser.forceQuit = true; Qt.quit(); } }
