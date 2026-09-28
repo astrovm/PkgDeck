@@ -84,21 +84,30 @@ Examples:
 #[derive(Subcommand)]
 pub enum Commands {
     /// Search packages by name or description. Best matches come first.
-    Search { query: String },
+    Search {
+        /// Words to look for.
+        query: String,
+    },
     /// Show details for one package, by exact name.
-    Info { name: String },
+    Info {
+        /// The exact package name, as `pkd search` shows it.
+        name: String,
+    },
     /// Install packages, by exact name.
     Install {
+        /// Exact package names, as `pkd search` shows them.
         #[arg(required = true)]
         names: Vec<String>,
     },
     /// Remove installed packages.
     Remove {
+        /// Installed package names, as `pkd list` shows them.
         #[arg(required = true)]
         names: Vec<String>,
     },
     /// Update the named packages, or everything if no names are given.
     Upgrade {
+        /// Installed packages to update. Omit to update everything.
         names: Vec<String>,
         /// Allow an APT full upgrade to remove packages.
         #[arg(long)]
@@ -127,7 +136,10 @@ pub enum Commands {
         command: Option<RepoCommand>,
     },
     /// Show which file runs for a command and which package installed it. Never runs the command.
-    Inspect { command: String },
+    Inspect {
+        /// A command name, such as `python3`, or a path.
+        command: String,
+    },
     /// Find apps installed more than once, and config files left behind by removed packages.
     Audit,
     /// Save your installed software to a file, or check a saved list on this machine.
@@ -170,9 +182,17 @@ fn completions(shell: Shell, out: &mut dyn Write) {
 #[derive(Subcommand)]
 pub enum InventoryCommand {
     /// Save the named installed packages, or all of them if no names are given.
-    Export { path: PathBuf, names: Vec<String> },
+    Export {
+        /// New file to write. An existing file is never overwritten.
+        path: PathBuf,
+        /// Installed packages to save. Omit to save everything.
+        names: Vec<String>,
+    },
     /// Check a saved list against this machine. Changes nothing.
-    Preview { path: PathBuf },
+    Preview {
+        /// A list saved with `pkd inventory export`.
+        path: PathBuf,
+    },
 }
 #[derive(Subcommand)]
 pub enum RepoCommand {

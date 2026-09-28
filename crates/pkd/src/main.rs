@@ -76,7 +76,9 @@ fn doctor() -> Result<(), Box<dyn std::error::Error>> {
             "2",
             &format!(
                 "{found} package managers found. PkgDeck uses every one it finds. \
-                 pip also needs an active virtual environment (VIRTUAL_ENV)."
+                 pip also needs an active virtual environment (VIRTUAL_ENV). \
+                 `pkd sources` also lists sources without a command here, such as \
+                 installed apps and standalone tools."
             )
         )
     );

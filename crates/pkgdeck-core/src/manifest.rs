@@ -82,7 +82,12 @@ impl Entry {
             && self.reference == id.reference
             && matches!(
                 (&self.scope, &id.scope),
-                (PortableScope::System, Scope::System) | (PortableScope::User, Scope::User { .. })
+                (PortableScope::System, Scope::System)
+                    | (PortableScope::User, Scope::User { .. })
+                    // The path is not exported, so the entry means this machine's
+                    // environment for that source (the Homebrew prefix, the npm
+                    // global folder).
+                    | (PortableScope::Environment, Scope::Environment { .. })
             )
     }
 }
@@ -310,12 +315,7 @@ pub fn preview(
         .packages
         .iter()
         .map(|entry| {
-            let (status, reason) = if entry.scope == PortableScope::Environment {
-                (
-                    PreviewStatus::Unsupported,
-                    "Select an environment on this machine before installing".into(),
-                )
-            } else if installed.iter().any(|package| entry.matches(&package.id)) {
+            let (status, reason) = if installed.iter().any(|package| entry.matches(&package.id)) {
                 (PreviewStatus::AlreadyInstalled, String::new())
             } else if failures
                 .iter()
@@ -430,11 +430,10 @@ pub fn inspect(
                 "Preview cancelled. Nothing was changed.".into(),
             ));
         }
-        if entry.scope == PortableScope::Environment
-            || installed
-                .packages
-                .iter()
-                .any(|package| entry.matches(&package.id))
+        if installed
+            .packages
+            .iter()
+            .any(|package| entry.matches(&package.id))
             || !searched.insert((&entry.backend, &entry.name))
         {
             continue;
@@ -645,7 +644,7 @@ mod tests {
     }
 
     #[test]
-    fn environment_export_omits_path_and_requires_local_choice() {
+    fn environment_export_omits_path_and_matches_this_machines_environment() {
         let package = package(
             "virtual-tool",
             Scope::Environment {
@@ -656,8 +655,25 @@ mod tests {
         let manifest = export(std::slice::from_ref(&package), &[]).unwrap();
         let text = serde_json::to_string(&manifest).unwrap();
         assert!(!text.contains("/home/private"));
-        let preview = preview(&manifest, &[], &[], &[], &[]).unwrap();
-        assert_eq!(preview.packages[0].status, PreviewStatus::Unsupported);
+        // Installed here in another folder: the same tool, already installed.
+        let mut here = package.clone();
+        here.id.scope = Scope::Environment {
+            path: "/home/other/.venv".into(),
+        };
+        let result = preview(&manifest, &[here.clone()], &[], &[], &[]).unwrap();
+        assert_eq!(result.packages[0].status, PreviewStatus::AlreadyInstalled);
+        // Not installed, and the source is missing here.
+        let result = preview(&manifest, &[], &[], &[], &[]).unwrap();
+        assert_eq!(result.packages[0].status, PreviewStatus::Unavailable);
+        // Not installed, but this machine's environment offers it.
+        let source = Source {
+            backend: "flatpak".into(),
+            availability: Ok(Availability::Available),
+            capabilities: vec![Capability::Install],
+        };
+        here.installed_version = None;
+        let result = preview(&manifest, &[], &[here], &[source], &[]).unwrap();
+        assert_eq!(result.packages[0].status, PreviewStatus::Installable);
     }
 
     #[test]
