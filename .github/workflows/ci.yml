@@ -25,12 +25,42 @@ jobs:
   # a targeted manual run; tags reuse the PR run after release-gate verifies it.
   # Pushes to main rerun only the jobs that save caches, so every pull request
   # starts from main's build outputs instead of compiling from scratch.
+  reviewed:
+    # A squash merge whose tree equals a pull request head that already passed
+    # CI needs no second test run: main then only builds, to save caches.
+    # Anything else, like a merge of a branch behind main, is tested in full.
+    name: Main / Check tested pull request
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+    outputs:
+      tested: ${{ steps.check.outputs.tested }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Match this commit to a passing pull request run
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if scripts/reviewed-pr.sh "$GITHUB_SHA"; then
+            echo tested=true >> "$GITHUB_OUTPUT"
+          else
+            echo '::notice::Running the full test suite on main.'
+            echo tested=false >> "$GITHUB_OUTPUT"
+          fi
+
   test-linux:
     # One job per architecture runs the whole Linux suite once: the shared
     # checks, lint, every workspace test (measured for coverage on x86_64),
     # and the real sudo/polkit authorization tests.
     name: Test / Linux (${{ matrix.arch }})
-    if: (github.event_name != 'push' || github.ref == 'refs/heads/main') && !inputs.homebrew_only
+    needs: [reviewed]
+    if: "!cancelled() && (github.event_name != 'push' || github.ref == 'refs/heads/main') && !inputs.homebrew_only"
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -62,7 +92,7 @@ jobs:
         # The 100% gate applies to all platforms together (Coverage / Combined).
         run: scripts/verify.sh full --only ${{ matrix.suite }}
       - name: Upload coverage report
-        if: matrix.coverage == 'true'
+        if: ${{ matrix.coverage == 'true' && needs.reviewed.outputs.tested != 'true' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: coverage-linux-${{ matrix.arch }}
@@ -74,6 +104,7 @@ jobs:
           cargo build --locked -p pkgdeck-core --bin pkgdeck-host-runner
           cargo build --locked -p pkd -p pkgdeck-tools
       - name: Run host authorization tests
+        if: needs.reviewed.outputs.tested != 'true'
         run: |
           sudo env \
             GITHUB_ACTIONS="$GITHUB_ACTIONS" \
@@ -86,7 +117,8 @@ jobs:
 
   test-macos:
     name: Test / macOS native (${{ matrix.arch }})
-    if: (github.event_name != 'push' || github.ref == 'refs/heads/main') && !inputs.homebrew_only
+    needs: [reviewed]
+    if: "!cancelled() && (github.event_name != 'push' || github.ref == 'refs/heads/main') && !inputs.homebrew_only"
     timeout-minutes: 35
     strategy:
       fail-fast: false
@@ -128,7 +160,7 @@ jobs:
             cargo test --locked -p pkgdeck-core -p pkd --no-fail-fast
           fi
       - name: Upload coverage report
-        if: matrix.arch == 'aarch64'
+        if: ${{ matrix.arch == 'aarch64' && needs.reviewed.outputs.tested != 'true' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: coverage-macos-aarch64
@@ -137,11 +169,13 @@ jobs:
       - name: Build CLI
         run: cargo build --locked -p pkd
       - name: Test real bundles and Homebrew cask lifecycle
+        if: needs.reviewed.outputs.tested != 'true'
         run: bash scripts/tests/macos-inventory.sh
       - name: Test adopting an existing app into Homebrew
+        if: needs.reviewed.outputs.tested != 'true'
         run: bash scripts/tests/macos-adoption.sh
       - name: Upload native inventory evidence
-        if: always()
+        if: ${{ always() && needs.reviewed.outputs.tested != 'true' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: macos-native-${{ matrix.arch }}
@@ -149,7 +183,8 @@ jobs:
 
   test-podman:
     name: Test / Podman (${{ matrix.arch }})
-    if: (github.event_name != 'push' || github.ref == 'refs/heads/main') && !inputs.homebrew_only
+    needs: [reviewed]
+    if: "!cancelled() && (github.event_name != 'push' || github.ref == 'refs/heads/main') && !inputs.homebrew_only"
     timeout-minutes: 35
     strategy:
       fail-fast: false
@@ -197,10 +232,14 @@ jobs:
       # The workspace tests already run natively on both architectures
       # (coverage on x86_64, test-workspace on aarch64) with the same
       # Ubuntu 26.04 Qt packages, so they are not repeated here.
+      - name: Build CLI in the development container
+        if: needs.reviewed.outputs.tested == 'true'
+        run: scripts/container.sh development --build-cli
       - name: Run container CLI lifecycle tests
+        if: needs.reviewed.outputs.tested != 'true'
         run: scripts/verify.sh containers --engine podman
       - name: Upload Podman logs
-        if: always()
+        if: ${{ always() && needs.reviewed.outputs.tested != 'true' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: logs-podman-${{ matrix.arch }}
@@ -268,8 +307,11 @@ jobs:
     # One number for all the code: a line counts once and is covered when a
     # test ran it on any platform.
     name: Coverage / Combined
-    needs: [test-linux, test-macos]
-    if: (github.event_name != 'push' || github.ref == 'refs/heads/main') && !inputs.homebrew_only
+    needs: [reviewed, test-linux, test-macos]
+    # Main skips it when the pull request already passed it.
+    if: >-
+      !cancelled() && (github.event_name != 'push' || github.ref == 'refs/heads/main') && !inputs.homebrew_only &&
+      needs.test-linux.result == 'success' && needs.test-macos.result == 'success' && needs.reviewed.outputs.tested != 'true'
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     steps:
@@ -287,8 +329,9 @@ jobs:
             "macOS (core and CLI)=coverage/coverage-macos-aarch64/lcov.info"
 
   package-macos:
+    needs: [reviewed]
     name: Package / macOS app (${{ matrix.arch }})
-    if: '!inputs.homebrew_only'
+    if: "!cancelled() && !inputs.homebrew_only"
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     strategy:
@@ -338,6 +381,7 @@ jobs:
       - name: Build app bundle
         run: scripts/bundle-macos.sh
       - name: Check bundle requirements
+        if: needs.reviewed.outputs.tested != 'true'
         run: |
           minimum=$(plutil -extract LSMinimumSystemVersion raw build/macos/PkgDeck.app/Contents/Info.plist)
           # The cask declares macOS 26 (Tahoe); the bundle must not need newer.
@@ -347,6 +391,8 @@ jobs:
             exit 1
           fi
       - name: Test macOS GUI controllers, QML, startup and media
+        env:
+          TESTED: ${{ needs.reviewed.outputs.tested }}
         run: |
           PATH="$(brew --prefix coreutils)/libexec/gnubin:$(brew --prefix qtbase)/bin:$(brew --prefix qtdeclarative)/bin:$(brew --prefix qttools)/bin:$(brew --prefix openssl@3)/bin:$PATH"
           QMAKE="$(brew --prefix qtbase)/bin/qmake"
@@ -355,19 +401,25 @@ jobs:
           export QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=software
           # The bundle step already built the release profile; testing it
           # reuses those outputs instead of compiling everything again.
-          cargo test --locked --release -p pkgdeck --no-fail-fast -- --test-threads=1
+          if [[ "$TESTED" == true ]]; then
+            cargo test --locked --release -p pkgdeck --no-run
+          else
+            cargo test --locked --release -p pkgdeck --no-fail-fast -- --test-threads=1
+          fi
       - name: Upload macOS startup diagnostics
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && needs.reviewed.outputs.tested != 'true' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: macos-startup-${{ matrix.arch }}
           path: ${{ runner.temp }}/pkgdeck-macos-startup
           if-no-files-found: ignore
       - name: Test Homebrew cask install
+        if: needs.reviewed.outputs.tested != 'true'
         # Installs this job's own package, instead of a separate job waiting
         # for a macOS runner and downloading it again.
         run: bash scripts/tests/homebrew-cask.sh build/artifacts
       - name: Upload app
+        if: needs.reviewed.outputs.tested != 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: packages-macos-${{ matrix.arch }}
@@ -375,8 +427,9 @@ jobs:
           if-no-files-found: error
 
   package-linux-cli:
+    needs: [reviewed]
     name: Package / Linux CLI (${{ matrix.arch }})
-    if: '!inputs.homebrew_only'
+    if: "!cancelled() && !inputs.homebrew_only"
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     strategy:
@@ -403,6 +456,7 @@ jobs:
       - name: Build static CLI
         run: scripts/package-cli.sh
       - name: Test CLI on another libc
+        if: needs.reviewed.outputs.tested != 'true'
         run: |
           unpacked=$(mktemp -d)
           tar -xzf build/artifacts/PkgDeck-v*-linux-${{ matrix.arch }}-cli.tar.gz -C "$unpacked"
@@ -414,6 +468,7 @@ jobs:
             test -x libexec/pkgdeck-host-runner
           '
       - name: Upload CLI
+        if: needs.reviewed.outputs.tested != 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: packages-linux-cli-${{ matrix.arch }}
@@ -422,12 +477,12 @@ jobs:
 
   test-homebrew:
     name: Test / Homebrew (${{ matrix.runner }})
-    needs: [package-linux-cli]
+    needs: [reviewed, package-linux-cli]
     # Release formula PRs and homebrew_only runs test the committed recipes
     # against published assets; other runs test this checkout's packages.
     if: >-
       !cancelled() && (github.event_name != 'push' || github.ref == 'refs/heads/main') &&
-      (inputs.homebrew_only || needs.package-linux-cli.result == 'success')
+      (inputs.homebrew_only || (needs.package-linux-cli.result == 'success' && needs.reviewed.outputs.tested != 'true'))
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     strategy:
@@ -523,8 +578,9 @@ jobs:
           if-no-files-found: ignore
 
   package-bundles:
+    needs: [reviewed]
     name: Package / AppImage + Snap (${{ matrix.arch }})
-    if: '!inputs.homebrew_only'
+    if: "!cancelled() && !inputs.homebrew_only"
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -552,10 +608,14 @@ jobs:
           packaging: 'true'
       - name: Build release binaries
         run: scripts/verify.sh full --only release
-      - name: Test staged bundle
+      - name: Build GUI test helper
         run: |
           source scripts/dev-env.sh
           cargo build --locked -p pkgdeck-tools
+      - name: Test staged bundle
+        if: needs.reviewed.outputs.tested != 'true'
+        run: |
+          source scripts/dev-env.sh
           scripts/bundle.sh
           scripts/tests/media-cache.sh "$PWD/build/AppDir/usr"
           test -x build/AppDir/usr/lib/pkgdeck/appimageupdatetool.AppImage
@@ -567,8 +627,10 @@ jobs:
           build/AppDir/AppRun --cli --version
           build/AppDir/AppRun --cli doctor
       - name: Run packaged GUI lifecycle tests
+        if: needs.reviewed.outputs.tested != 'true'
         run: PKGDECK_FRONTEND=gui PKGDECK_BINARY_DIR="$PWD/build/AppDir/usr/bin" scripts/container.sh lifecycle
       - name: Build and test AppImage
+        if: needs.reviewed.outputs.tested != 'true'
         env:
           APPIMAGETOOL: ${{ github.workspace }}/build/appimagetool
         run: |
@@ -601,6 +663,7 @@ jobs:
           imported=$(XDG_DATA_HOME="$data" "$appimage" --cli --json --from appimage list | jq -r '.data.packages[0].id.name')
           XDG_DATA_HOME="$data" "$appimage" --cli --json --yes --from appimage remove "$imported" | jq -e '.exit_code == 0'
       - name: Build and test Snap
+        if: needs.reviewed.outputs.tested != 'true'
         run: |
           scripts/package.sh snap
           unsquashfs -d build/snap-check build/artifacts/*.snap
@@ -617,6 +680,7 @@ jobs:
           snap run pkgdeck.pkd doctor
           scripts/tests/host-package.sh direct snap run pkgdeck.pkd
       - name: Upload packages
+        if: needs.reviewed.outputs.tested != 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: packages-linux-bundles-${{ matrix.arch }}
@@ -720,32 +784,7 @@ jobs:
             exit 1
           fi
 
-          pr=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls" |
-            jq -r --arg sha "$GITHUB_SHA" \
-              '[.[] | select(.merged_at != null and .base.ref == "main" and .merge_commit_sha == $sha)] | first | if . == null then empty else [.number, .head.sha, .head.repo.full_name] | @tsv end')
-          if [[ -z "$pr" ]]; then
-            echo '::error::Release tag must point to a pull request merge commit on main.'
-            exit 1
-          fi
-          IFS=$'\t' read -r pr_number head_sha head_repo <<< "$pr"
-          test -n "$head_sha"
-          test -n "$head_repo"
-
-          head_tree=$(gh api "repos/$GITHUB_REPOSITORY/git/commits/$head_sha" --jq '.tree.sha')
-          if [[ "$head_tree" != "$(git rev-parse 'HEAD^{tree}')" ]]; then
-            echo '::error::Tagged tree differs from the reviewed pull request head.'
-            exit 1
-          fi
-
-          run=$(gh api --method GET "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs" \
-            -f event=pull_request -f "head_sha=$head_sha" -f per_page=100 |
-            jq -r --arg sha "$head_sha" --arg repo "$head_repo" \
-              '[.workflow_runs[] | select(.event == "pull_request" and .head_sha == $sha and .head_repository.full_name == $repo and .status == "completed" and .conclusion == "success" and .path == ".github/workflows/ci.yml")] | first | .html_url // empty')
-          if [[ -z "$run" ]]; then
-            echo "::error::PR #$pr_number has no successful CI run for its merged head commit."
-            exit 1
-          fi
-          echo "Release tag matches PR #$pr_number and successful CI run $run"
+          scripts/reviewed-pr.sh "$GITHUB_SHA"
 
   release:
     name: Publish / Release
