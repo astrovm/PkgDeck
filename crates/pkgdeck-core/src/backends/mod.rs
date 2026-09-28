@@ -2594,7 +2594,9 @@ impl ManagerKind {
             (Self::Xbps, true) => vec!["-l"],
             (Self::Xbps, false) => vec!["-Rs", query],
             (Self::MacPorts, true) => vec!["-q", "installed"],
-            (Self::MacPorts, false) => vec!["-q", "search", "--name", "--line", query],
+            // Quiet mode would print only names; --line gives tab-separated
+            // name, version, categories and description.
+            (Self::MacPorts, false) => vec!["search", "--name", "--line", query],
         }
         .into_iter()
         .map(OsString::from)
@@ -2961,10 +2963,9 @@ impl<T: Transport> SystemManager<T> {
             // name <tab> version <tab> categories <tab> description
             (ManagerKind::MacPorts, false) => {
                 let columns: Vec<&str> = line.split('\t').map(str::trim).collect();
-                let (name, version, summary) = if columns.len() >= 4 {
-                    (columns[0], columns[1], columns[3])
-                } else {
-                    (*fields.first()?, *fields.get(1)?, "")
+                let [name, version, _, summary, ..] = columns[..] else {
+                    // Not a result line, such as "No match for … found".
+                    return None;
                 };
                 Some((
                     name,
