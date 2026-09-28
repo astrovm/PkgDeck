@@ -296,8 +296,10 @@ impl Host {
             "GOPROXY",
             "DOTNET_ROOT",
             "DOTNET_CLI_HOME",
-            // A custom Homebrew location, for command ownership.
+            // A custom Homebrew location (command ownership) and cache
+            // (when cached Homebrew listings expire).
             "HOMEBREW_PREFIX",
+            "HOMEBREW_CACHE",
             // pixi and the conda family: their homes, and the manager a
             // `conda init` shell names.
             "PIXI_HOME",
@@ -527,21 +529,88 @@ impl Host {
         ] {
             host.env.insert(name.into(), "1".into());
         }
-        let command = host.command(&path, args)?;
-        let result = process::run(
-            command,
-            Limits {
-                timeout: std::time::Duration::from_secs(120),
-                output_bytes: 32 * 1024 * 1024,
-            },
-            cancel,
-            write,
-        )?;
+        let run = || {
+            let command = host.command(&path, args)?;
+            process::run(
+                command,
+                Limits {
+                    timeout: std::time::Duration::from_secs(120),
+                    output_bytes: 32 * 1024 * 1024,
+                },
+                cancel,
+                write,
+            )
+        };
+        // The installed listings take seconds of Homebrew's own start-up, and
+        // their answer only changes with what is installed, fetched cask and
+        // formula data, taps, or Homebrew itself.
+        let text: Vec<&str> = args.iter().filter_map(|arg| arg.to_str()).collect();
+        let source = match text.as_slice() {
+            ["info", "--json=v2", "--cask", "--installed"] => Some("homebrew-cask"),
+            ["info", "--json=v2", "--installed"] => Some("homebrew"),
+            _ => None,
+        };
+        let result = match source.filter(|_| !write && self.runtime == Runtime::Native) {
+            Some(source) => crate::cache::completion(
+                crate::cache::Store::user().as_ref(),
+                source,
+                "brew",
+                &text,
+                &self.brew_watches(&path),
+                &[],
+                run,
+            )?,
+            None => run()?,
+        };
         if result.code == Some(0) {
             Ok(result)
         } else {
             Err(ExecutionError::Failed(result))
         }
+    }
+
+    /// Everything a Homebrew installed-package listing depends on.
+    fn brew_watches(&self, brew: &Path) -> Vec<crate::cache::Watch> {
+        use crate::cache::Watch;
+        let brew = fs::canonicalize(brew).unwrap_or_else(|_| brew.to_owned());
+        // bin/brew lives in the Homebrew repository, which is the prefix on
+        // Apple Silicon and a Homebrew folder inside it elsewhere.
+        let Some(repository) = brew.parent().and_then(Path::parent).map(Path::to_owned) else {
+            return vec![];
+        };
+        let prefix = if repository
+            .file_name()
+            .is_some_and(|name| name == "Homebrew")
+        {
+            repository
+                .parent()
+                .map_or_else(|| repository.clone(), Path::to_owned)
+        } else {
+            repository.clone()
+        };
+        let cache = self
+            .var("HOMEBREW_CACHE")
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+            .or_else(|| {
+                let home = self.var("HOME").map(PathBuf::from)?;
+                Some(if cfg!(target_os = "macos") {
+                    home.join("Library/Caches/Homebrew")
+                } else {
+                    self.var("XDG_CACHE_HOME")
+                        .map(PathBuf::from)
+                        .unwrap_or_else(|| home.join(".cache"))
+                        .join("Homebrew")
+                })
+            });
+        let mut watches = vec![
+            Watch::tree(prefix.join("Caskroom"), 2),
+            Watch::tree(prefix.join("Cellar"), 2),
+            Watch::tree(repository.join("Library/Taps"), 4),
+            Watch::file(repository.join(".git/HEAD")),
+        ];
+        watches.extend(cache.map(|cache| Watch::tree(cache.join("api"), 2)));
+        watches
     }
 
     /// Official installers put rustup, Nix, pixi and the conda family outside
@@ -1253,6 +1322,60 @@ fn administrator_script(executable: &Path, args: &[OsString]) -> Result<String, 
         "do shell script {} with administrator privileges without altering line endings",
         applescript_string(&shell_command(executable, args)?)
     ))
+}
+
+#[cfg(test)]
+mod brew_cache_tests {
+    use super::*;
+
+    /// A cached Homebrew listing is dropped when an install, a tap or
+    /// fetched Homebrew data changes, on both Homebrew layouts.
+    #[test]
+    fn brew_listings_expire_when_homebrew_changes() {
+        for nested in [false, true] {
+            let root = std::env::temp_dir().join(format!(
+                "pkgdeck-brew-cache-{}-{nested}",
+                std::process::id()
+            ));
+            let _ = fs::remove_dir_all(&root);
+            let repository = if nested {
+                root.join("Homebrew")
+            } else {
+                root.clone()
+            };
+            fs::create_dir_all(repository.join("bin")).unwrap();
+            fs::write(repository.join("bin/brew"), "").unwrap();
+            fs::create_dir_all(root.join("Caskroom")).unwrap();
+            fs::create_dir_all(repository.join("Library/Taps/me/homebrew-tools/Casks")).unwrap();
+            let env = [
+                ("HOME", root.join("home")),
+                ("HOMEBREW_CACHE", root.join("cache")),
+                ("PATH", "/usr/bin:/bin".into()),
+            ]
+            .into_iter()
+            .map(|(key, value)| (OsString::from(key), value.into_os_string()))
+            .collect();
+            let host = Host::new(Runtime::Native, env);
+            let watches = host.brew_watches(&repository.join("bin/brew"));
+            let now = || crate::cache::fingerprint(&watches, &[]).unwrap();
+            let before = now();
+            assert_eq!(before, now(), "nothing changed");
+            fs::create_dir_all(root.join("Caskroom/firefox/1.0")).unwrap();
+            let installed = now();
+            assert_ne!(before, installed, "an installed cask");
+            fs::write(
+                repository.join("Library/Taps/me/homebrew-tools/Casks/tool.rb"),
+                "cask",
+            )
+            .unwrap();
+            let tapped = now();
+            assert_ne!(installed, tapped, "a tap's cask");
+            fs::create_dir_all(root.join("cache/api")).unwrap();
+            fs::write(root.join("cache/api/cask.jws.json"), "{}").unwrap();
+            assert_ne!(tapped, now(), "fetched cask data");
+            fs::remove_dir_all(&root).unwrap();
+        }
+    }
 }
 
 #[cfg(test)]

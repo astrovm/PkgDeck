@@ -525,11 +525,13 @@ pkd completions fish > ~/.config/fish/completions/pkd.fish
 
 ## Cache
 
-To answer faster, PkgDeck keeps APT search and list results, and Flatpak
-search results, in `$XDG_CACHE_HOME/pkgdeck` (or `~/.cache/pkgdeck`). The
-app and `pkd` share it. An entry is used only while the package lists,
-the package database, the helper, and your locale are exactly as they were
-when it was saved. Any change there, and any change PkgDeck makes, discards
+To answer faster, PkgDeck keeps APT search and list results, Flatpak search
+results, and Homebrew's installed formula and cask listings in
+`$XDG_CACHE_HOME/pkgdeck` (or `~/.cache/pkgdeck`). The app and `pkd` share
+it. An entry is used only while what it depends on is exactly as it was when
+it was saved: for APT the package lists, the package database, the helper and
+your locale; for Homebrew the installed kegs and casks, your taps, the cask and
+formula data `brew update` fetched, and Homebrew itself. Any change there, and any change PkgDeck makes, discards
 it. Only successful, complete answers are saved, readable only by you. Set
 `PKGDECK_NO_CACHE=1` to turn it off. It's never used when running as root.
 
