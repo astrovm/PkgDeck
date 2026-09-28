@@ -1256,7 +1256,7 @@ Controls.ApplicationWindow {
         property int versionWidth: 150
         property string sortColumn: ""
         property bool sortAscending: true
-        property bool backgroundMode: false
+        property bool backgroundMode: true
         property bool autostart: false
         property string notificationHistory: "{}"
         property string lastBackgroundState: "{}"

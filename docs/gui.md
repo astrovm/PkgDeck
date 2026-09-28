@@ -255,8 +255,8 @@ See [supported install layouts](cli.md#standalone-cli-tools).
 
 ## Update notifications
 
-Turn on **Background checks** in Settings to check for updates while PkgDeck
-is running.
+**Background checks** are on by default: PkgDeck checks for updates while it
+is running. Turn them off in Settings.
 
 - The first check runs about 30 seconds after launch, then at most every 30
   minutes.
@@ -266,6 +266,8 @@ is running.
   log in.
 - Click the tray icon to show or hide the window. Its menu has **Check now**
   and **Quit**. Clicking a notification opens Updates.
+- When your desktop has a system tray, closing the window keeps PkgDeck
+  running there. Use **Quit** in the tray menu to exit.
 
 You get one notification for each new batch of updates, including on the first
 check. PkgDeck remembers what it already told you about, even after a restart.

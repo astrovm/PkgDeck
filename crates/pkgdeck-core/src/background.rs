@@ -1,4 +1,4 @@
-//! Policy for opt-in, read-only update checks. The caller supplies a clock and
+//! Policy for read-only background update checks. The caller supplies a clock and
 //! network state so scheduling can be tested without waiting or networking.
 #[cfg(target_os = "linux")]
 use crate::host::Host;
