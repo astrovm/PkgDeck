@@ -69,7 +69,8 @@ impl Completion {
 }
 
 /// The stderr line that best explains a failed command: the first line
-/// marked as an error (`E:`, `error:`, `fatal:` …), else the first line that
+/// marked as an error (`E:`, `error:`, `fatal:` …) that says more than the
+/// marker (Nix prints a bare `error:` before the cause), else the first line that
 /// is not a warning or hint, else the first non-empty line. Long lines are
 /// shortened and control characters never pass through.
 pub fn failure_summary(stderr: &[u8]) -> Option<String> {
@@ -85,9 +86,14 @@ pub fn failure_summary(stderr: &[u8]) -> Option<String> {
         let line = line.to_ascii_lowercase();
         markers.iter().any(|marker| line.starts_with(marker))
     };
+    let bare = |line: &str| {
+        line.trim_end_matches(|c: char| c == ':' || c.is_whitespace())
+            .chars()
+            .all(|c| c.is_ascii_alphabetic())
+    };
     let line = lines
         .iter()
-        .find(|line| starts(line, &ERRORS))
+        .find(|line| starts(line, &ERRORS) && !bare(line))
         .or_else(|| lines.iter().find(|line| !starts(line, &NOISE)))
         .or_else(|| lines.first())?;
     let clean: String = line
@@ -307,6 +313,13 @@ mod tests {
             failure_summary(b"warning: only\n").unwrap(),
             "warning: only"
         );
+        let nix = "error:\n       … while calling the 'throw' builtin\n       error: Nixpkgs 26.11 has dropped support for x86_64-darwin.\n";
+        assert_eq!(
+            failure_summary(nix.as_bytes()).unwrap(),
+            "error: Nixpkgs 26.11 has dropped support for x86_64-darwin."
+        );
+        // A bare marker alone is still better than nothing.
+        assert_eq!(failure_summary(b"error:\n").unwrap(), "error:");
         assert_eq!(failure_summary(b"\n  \n"), None);
         assert_eq!(failure_summary(b"bad\x1b[31m").unwrap(), "bad [31m");
         let long = "x".repeat(400);

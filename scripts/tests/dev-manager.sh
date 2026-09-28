@@ -157,6 +157,11 @@ setup_nix() {
     fi
     nix() { "$nix_bin" --extra-experimental-features 'nix-command flakes' "$@"; }
     nix --version
+    # Nixpkgs 26.11 dropped Intel Macs; their users pin nixpkgs to the
+    # 26.05 branch, which pkd then uses like any registry entry.
+    if [[ $(uname -s) == Darwin && $(uname -m) == x86_64 ]]; then
+        nix registry add nixpkgs github:NixOS/nixpkgs/nixpkgs-26.05-darwin
+    fi
 }
 
 # `go install` writes to GOBIN, else the first GOPATH entry's bin; the
