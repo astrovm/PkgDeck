@@ -3,10 +3,12 @@ mod ai_catalog;
 mod appimage;
 mod apt_cli;
 mod cleanup;
+mod conda;
 mod container;
 mod firmware;
 mod mac_apps;
 mod mas;
+mod pixi;
 mod standalone;
 use crate::{
     engine::*,
@@ -15,10 +17,12 @@ use crate::{
     process::*,
 };
 pub use appimage::AppImage;
+pub use conda::Conda;
 pub use container::{Container, ContainerKind};
 pub use firmware::Firmware;
 pub use mac_apps::MacApps;
 pub use mas::MacAppStore;
+pub use pixi::Pixi;
 use serde::Deserialize;
 pub use standalone::{Standalone, StandaloneTool};
 use std::{ffi::OsString, path::PathBuf, time::Duration};
@@ -69,6 +73,8 @@ pub const BACKEND_IDS: &[&str] = &[
     "pipx",
     "uv",
     "mise",
+    "pixi",
+    "conda",
     "composer",
     "gem",
     "codex",
@@ -85,7 +91,14 @@ pub const BACKEND_IDS: &[&str] = &[
 
 /// These sources update existing installations but do not install or remove them.
 pub fn update_only(id: &str) -> bool {
-    id == "fwupd" || id == "mas" || StandaloneTool::ALL.iter().any(|tool| tool.id() == id)
+    matches!(id, "fwupd" | "mas" | "conda")
+        || StandaloneTool::ALL.iter().any(|tool| tool.id() == id)
+}
+
+/// Sources upgraded package by package: they have no single "upgrade
+/// everything" command, so `pkd upgrade` without names lists each package.
+pub fn per_package_upgrades(id: &str) -> bool {
+    update_only(id) || id == "pixi"
 }
 
 /// Inventory sources whose rows must never offer package mutations.
@@ -114,6 +127,7 @@ pub fn display_name(id: &str) -> &str {
         "podman" => "Podman images",
         "cargo" => "Cargo",
         "bun" => "Bun",
+        "conda" => "Conda",
         "composer" => "Composer",
         "gem" => "RubyGems",
         "codex" => "Codex",
@@ -126,7 +140,7 @@ pub fn display_name(id: &str) -> &str {
         "antigravity" => "Antigravity CLI",
         "amp" => "Amp",
         "droid" => "Factory Droid",
-        // npm, pnpm, pip, pipx, uv, and mise are written in lower case.
+        // npm, pnpm, pip, pipx, uv, mise, and pixi are written in lower case.
         other => other,
     }
 }
@@ -5057,6 +5071,13 @@ pub fn native_engine(
             candidates.push((Box::new(make(transport())), probe_unless_listed));
         }
     }
+    if allowed("pixi") {
+        candidates.push((Box::new(Pixi::new(transport())), probe_unless_listed));
+    }
+    if allowed("conda") {
+        // Detection picks conda, mamba, or micromamba, so it always runs.
+        candidates.push((Box::new(Conda::new(transport())), true));
+    }
     type Probed = (Box<dyn Backend>, Option<Result<Availability, EngineError>>);
     let probed: Vec<Probed> = std::thread::scope(|scope| {
         let workers: Vec<_> = candidates
@@ -5154,6 +5175,16 @@ mod tests {
     }
 
     #[test]
+    fn upgrade_everything_lists_packages_where_there_is_no_single_command() {
+        for id in ["pixi", "mas", "conda", "fwupd", "codex"] {
+            assert!(per_package_upgrades(id), "{id}");
+        }
+        for id in ["apt", "homebrew", "npm", "mise"] {
+            assert!(!per_package_upgrades(id), "{id}");
+        }
+    }
+
+    #[test]
     fn every_source_has_a_display_name() {
         for id in BACKEND_IDS {
             assert!(!display_name(id).is_empty());
@@ -5166,7 +5197,7 @@ mod tests {
             .iter()
             .filter(|id| display_name(id) != **id)
             .count();
-        assert_eq!(renamed, BACKEND_IDS.len() - 6);
+        assert_eq!(renamed, BACKEND_IDS.len() - 7);
     }
 
     #[test]

@@ -3,12 +3,12 @@
 # Ephemeral runners need no cleanup; lifecycle state is confirmed through
 # the underlying manager, never only PkgDeck output. Tool installations use
 # user-writable prefixes so no step ever needs elevation.
-# Usage: scripts/tests/dev-manager.sh cargo|npm|pnpm|bun|pip|pipx|uv|mise|composer|gem <pkd>
+# Usage: scripts/tests/dev-manager.sh cargo|npm|pnpm|bun|pip|pipx|uv|mise|pixi|conda|composer|gem <pkd>
 # -E lets failures inside the helper functions below reach the ERR trap.
 set -Eeuo pipefail
 trap 'echo "dev-manager FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
-backend=${1:?Usage: scripts/tests/dev-manager.sh cargo|npm|pnpm|bun|pip|pipx|uv|mise|composer|gem <pkd>}
-pkd=${2:?Usage: scripts/tests/dev-manager.sh cargo|npm|pnpm|bun|pip|pipx|uv|mise|composer|gem <pkd>}
+backend=${1:?Usage: scripts/tests/dev-manager.sh cargo|npm|pnpm|bun|pip|pipx|uv|mise|pixi|conda|composer|gem <pkd>}
+pkd=${2:?Usage: scripts/tests/dev-manager.sh cargo|npm|pnpm|bun|pip|pipx|uv|mise|pixi|conda|composer|gem <pkd>}
 echo "dev-manager: backend=$backend pkd=$pkd user=$(whoami) home=$HOME"
 run() { "$pkd" --json --yes --auth sudo --from "$backend" "$@"; }
 # Keep pkd's report so a failed step shows what pkd said and how long it took.
@@ -85,6 +85,30 @@ setup_mise() {
     command -v mise >/dev/null || curl -fsSL https://mise.run | sh
     export PATH="$HOME/.local/bin:$PATH"
     mise --version
+}
+
+# pixi's installer and micromamba's archive stay off PATH, the way a
+# desktop app finds them, so pkd has to look in their usual places.
+setup_pixi() {
+    export PIXI_HOME="$HOME/.pixi"
+    [[ -x $PIXI_HOME/bin/pixi ]] || curl -fsSL https://pixi.sh/install.sh | PIXI_NO_PATH_UPDATE=1 bash
+    pixi() { "$PIXI_HOME/bin/pixi" "$@"; }
+    pixi --version
+}
+
+setup_micromamba() {
+    local platform
+    case "$(uname -s)-$(uname -m)" in
+    Darwin-arm64) platform=osx-arm64 ;;
+    Darwin-*) platform=osx-64 ;;
+    Linux-aarch64) platform=linux-aarch64 ;;
+    *) platform=linux-64 ;;
+    esac
+    mkdir -p "$HOME/.local/bin"
+    curl -fsSL "https://micro.mamba.pm/api/micromamba/$platform/latest" | tar -xj -C "$HOME/.local" bin/micromamba
+    export MAMBA_ROOT_PREFIX="$HOME/micromamba"
+    micromamba() { "$HOME/.local/bin/micromamba" "$@"; }
+    micromamba --version
 }
 
 setup_gem() {
@@ -249,6 +273,32 @@ mise)
     grep -qx 'jq = "latest"' "$HOME/.config/mise/config.toml"
     success remove jq
     mise ls --json jq | jq -e 'length == 0'
+    ;;
+pixi)
+    setup_pixi
+    success sources
+    # A range with a newer 14.x lets the update move within it, never to 15.
+    pixi global install 'ripgrep==14.1.0'
+    sed -i.bak 's/"==14.1.0"/">=14,<15"/' "$PIXI_HOME/manifests/pixi-global.toml"
+    have ripgrep
+    success info ripgrep
+    success upgrade ripgrep
+    pixi global list --json | jq -e '.[] | select(.name == "ripgrep") | .dependencies[] | select(.name == "ripgrep") | .version | startswith("14.") and . != "14.1.0"'
+    success remove ripgrep
+    pixi global list --json | absent '"ripgrep"'
+    success install fd-find
+    have fd-find
+    success remove fd-find
+    pixi global list --json | absent '"fd-find"'
+    ;;
+conda)
+    setup_micromamba
+    micromamba create --yes --quiet --name tools --channel conda-forge 'jq=1.7.1'
+    success sources
+    have jq
+    success info jq
+    success upgrade jq
+    micromamba list --name tools --json | jq -e '(.packages // .)[] | select(.name == "jq") | .version != "1.7.1"'
     ;;
 gem)
     setup_gem

@@ -165,7 +165,7 @@ or a dedicated design.
 | P1 | Standalone AI CLI adapters | Covers official installers outside package managers | M each | Implemented for Antigravity, Cursor, Copilot and Kiro CLIs, Amp and Factory Droid |
 | P1 | Manage existing Mac apps with Homebrew | Converts manual installs into tracked installations | L | Independently verified adoption and recovery for an allowlist |
 | P1 | Mac App Store via mas | Covers apps that should retain App Store ownership | M | Implemented: inventory, update checks that never download, and verified `mas update` runs; mas asks for the password itself, so updates need a terminal |
-| P1 | Conda, mamba/micromamba and pixi | Scientific and data-development environments | L | Named environments and `pixi global` only, not project prefixes; solver previews; one adapter switches the conda-family binary |
+| P1 | Conda, mamba/micromamba and pixi | Scientific and data-development environments | L | Implemented: requested packages in named conda/mamba/micromamba environments (dry-run solve, verified update) and `pixi global` environments (full lifecycle, updates within the manifest spec); tested end to end in CI |
 | P2 | Rustup | Toolchain coverage beyond Cargo-installed executables | S–M | Installed toolchains; `rustup check` exits 100 when updates exist |
 | P2 | MacPorts | Completes another macOS package ecosystem | M | Native package lifecycle with variants preserved |
 | P2 | Nix profiles | Useful cross-platform package coverage | L | User profiles only; verify the real (version 3) profile JSON first |

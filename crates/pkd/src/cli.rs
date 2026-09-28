@@ -27,7 +27,7 @@ pub struct Args {
     /// Only use this source, such as apt or flatpak. Repeat to pick
     /// several; omit to use every available source. `pkd sources` lists
     /// them.
-    #[arg(long, global = true, value_name = "SOURCE", hide_possible_values = true, value_parser = ["fwupd", "apt", "dnf", "pacman", "zypper", "snap", "homebrew", "homebrew-cask", "macos-apps", "mas", "appimage", "flatpak", "docker", "podman", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "mise", "composer", "gem", "codex", "claude", "grok", "opencode", "cursor", "copilot", "kiro", "antigravity", "amp", "droid"])]
+    #[arg(long, global = true, value_name = "SOURCE", hide_possible_values = true, value_parser = ["fwupd", "apt", "dnf", "pacman", "zypper", "snap", "homebrew", "homebrew-cask", "macos-apps", "mas", "appimage", "flatpak", "docker", "podman", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "mise", "pixi", "conda", "composer", "gem", "codex", "claude", "grok", "opencode", "cursor", "copilot", "kiro", "antigravity", "amp", "droid"])]
     pub from: Vec<String>,
     /// Pick a package architecture when the same name exists for several.
     #[arg(long, global = true)]
@@ -573,14 +573,16 @@ pub fn dispatch_with(
                     .packages
                     .into_iter()
                     .filter(|p| p.update == UpdateAvailability::Available)
+                    .filter(|p| !pkgdeck_core::backends::read_only(&p.id.backend))
                 {
-                    let operation = if pkgdeck_core::backends::update_only(&package.id.backend) {
-                        Operation::Upgrade(package.id)
-                    } else {
-                        Operation::UpgradeAll {
-                            backend: package.id.backend,
-                        }
-                    };
+                    let operation =
+                        if pkgdeck_core::backends::per_package_upgrades(&package.id.backend) {
+                            Operation::Upgrade(package.id)
+                        } else {
+                            Operation::UpgradeAll {
+                                backend: package.id.backend,
+                            }
+                        };
                     if !operations.contains(&operation) {
                         operations.push(operation);
                     }

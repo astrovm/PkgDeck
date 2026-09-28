@@ -45,8 +45,9 @@ pkd completions bash                     # print a shell completion script
 | `--json` | Print machine-readable JSON. See [JSON output](#json-output). |
 
 Sources for `--from`: `fwupd`, `apt`, `dnf`, `pacman`, `zypper`, `snap`,
-`homebrew`, `homebrew-cask`, `macos-apps`, `mas`, `appimage`, `flatpak`, `docker`, `podman`,
-`cargo`, `npm`, `pnpm`, `bun`, `pip`, `pipx`, `uv`, `mise`, `composer`, `gem`,
+`homebrew`, `homebrew-cask`, `macos-apps`, `mas`, `appimage`, `flatpak`,
+`docker`, `podman`, `cargo`, `npm`, `pnpm`, `bun`, `pip`, `pipx`, `uv`, `mise`,
+`pixi`, `conda`, `composer`, `gem`,
 `codex`, `claude`, `grok`, `opencode`, `cursor`, `copilot`, `kiro`,
 `antigravity`, `amp`, and `droid`.
 
@@ -104,6 +105,15 @@ fuzzy matching or aliases.
   `install` adds the tool at `latest`, `upgrade` stays within the version your
   global config asks for, and `remove` also deletes versions no project still
   uses. Search covers mise's registry, including tool aliases.
+- pixi covers `pixi global` environments, one per installed tool. `install`
+  creates one for an exact conda-forge package, `upgrade` stays within the
+  version the global manifest records, and `remove` uninstalls the environment.
+  Project workspaces are never read or changed.
+- conda uses conda, mamba, or micromamba, whichever it finds first. It lists the
+  packages you asked for in the base environment and in each named environment
+  (those in an `envs` folder), not their dependencies. It updates them after
+  a dry-run solve; install and remove them with the manager itself. Project
+  prefixes elsewhere are left alone.
 - If a source fails to answer, PkgDeck won't guess which package you meant.
   Retry, or pick a working source with `--from`.
 
