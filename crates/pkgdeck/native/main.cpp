@@ -3,8 +3,13 @@
 
 #include <QApplication>
 #include <QCoreApplication>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
 #include <QGuiApplication>
 #include <QQmlApplicationEngine>
+#include <QSettings>
+#include <QStandardPaths>
 #include <QUrl>
 
 #include <cstdio>
@@ -22,15 +27,52 @@ void shutdownMessageHandler(QtMsgType, const QMessageLogContext &context, const 
     line.append(message.toLocal8Bit()).append('\n');
     std::fwrite(line.constData(), 1, size_t(line.size()), stderr);
 }
+
+// Earlier releases stored settings and caches under the "astrovm"
+// organization (~/.config/astrovm, ~/.cache/astrovm) instead of the pkgdeck
+// folders the rest of PkgDeck uses. Carry the settings over once and drop the
+// old cache, which is rebuilt on demand.
+void migrateLegacyLocations() {
+#ifdef Q_OS_DARWIN
+    const auto legacyOrganization = QStringLiteral("github.com/astrovm");
+#else
+    const auto legacyOrganization = QStringLiteral("astrovm");
+#endif
+    QSettings current;
+    QSettings legacy(legacyOrganization, QCoreApplication::applicationName());
+    const auto keys = legacy.allKeys();
+    if (!keys.isEmpty() && current.allKeys().isEmpty()) {
+        for (const auto &key : keys) current.setValue(key, legacy.value(key));
+        current.sync();
+    }
+    if (!keys.isEmpty() && current.status() == QSettings::NoError) {
+        legacy.clear();
+        legacy.sync();
+#ifndef Q_OS_DARWIN
+        const QFileInfo file(legacy.fileName());
+        QFile::remove(file.filePath());
+        QDir().rmdir(file.path());
+#endif
+    }
+    const auto cache = QStandardPaths::writableLocation(QStandardPaths::GenericCacheLocation);
+    if (!cache.isEmpty()) {
+        QDir(cache + QStringLiteral("/astrovm/PkgDeck")).removeRecursively();
+        QDir().rmdir(cache + QStringLiteral("/astrovm"));
+    }
+}
 }
 
 extern "C" int pkgdeck_run_gui(int argc, char **argv, const char *version) {
     QApplication app(argc, argv);
     QCoreApplication::setApplicationName(QStringLiteral("PkgDeck"));
     QCoreApplication::setApplicationVersion(QString::fromUtf8(version));
-    QCoreApplication::setOrganizationName(QStringLiteral("astrovm"));
-    QCoreApplication::setOrganizationDomain(QStringLiteral("github.com/astrovm"));
+    // Linux keeps settings in ~/.config/pkgdeck and caches in ~/.cache/pkgdeck,
+    // next to the core's own files. macOS names preferences after the domain,
+    // which reverses to the bundle identifier io.github.astrovm.PkgDeck.
+    QCoreApplication::setOrganizationName(QStringLiteral("pkgdeck"));
+    QCoreApplication::setOrganizationDomain(QStringLiteral("astrovm.github.io"));
     QGuiApplication::setDesktopFileName(QStringLiteral("io.github.astrovm.PkgDeck"));
+    migrateLegacyLocations();
 
     QQmlApplicationEngine engine;
     pkgdeck::configure_network(engine);
