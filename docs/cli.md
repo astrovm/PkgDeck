@@ -63,10 +63,15 @@ names that contain it, then description matches. Homebrew searches formula and
 cask names only. On Linux, cask search needs Homebrew 6.0 or later and skips
 casks that only install on macOS.
 
-npm and PyPI can't be searched, so npm, pnpm, Bun, pipx and uv also offer
-known AI command-line tools by their exact package: `copilot` finds
-`@github/copilot`, `aider` finds `aider-chat`. The offer installs that
-package, never a guess from the name.
+`pkd search` also searches the registries of npm (for npm, pnpm and Bun),
+Cargo (crates.io), RubyGems and Composer (Packagist) with each manager's own
+search command. pnpm and Bun have no search command, so they search the npm
+registry through `npm` when it's installed. It needs a network connection; offline, only installed
+packages match. PyPI has had no search since 2020, so pip, pipx and uv only
+match installed packages. For AI command-line tools, npm, pnpm, Bun, pipx and
+uv also offer the exact package when you search the product name:
+`copilot` finds `@github/copilot`, `aider` finds `aider-chat`. The offer
+installs that package, never a guess from the name.
 
 `pkd info` shows one package's details:
 
@@ -78,14 +83,16 @@ package, never a guess from the name.
 fuzzy matching or aliases.
 
 - If the same name exists in more than one source, pick one with `--from`.
-- npm, Cargo, and pipx can't be searched by exact name, so PkgDeck can't
-  check that a name exists there. They never make a name ambiguous: if
-  another source has the package, PkgDeck uses it and says which of them
-  may also have it, for example "npm may also have this name. To use it
-  instead, add --from npm." If only they could have it, `install` tries
-  the one that can. If nothing matches, the error names them: "No package
-  named X was found. PkgDeck can't search npm and pipx, but they can try to
-  install it by name: add --from npm or --from pipx."
+- npm, pnpm, Bun, Cargo, RubyGems, Composer, pip, pipx and uv install any
+  name their registry has, and a registry name alone doesn't prove it's the
+  package you mean (npm has an unrelated `ripgrep`). So for exact names
+  PkgDeck only confirms what's already installed there. They never make a
+  name ambiguous: if another source has the package, PkgDeck uses it and says
+  which of them may also have it, for example "npm may also have this name.
+  To use it instead, add --from npm." If only they could have it, `install`
+  tries the one that can. If nothing matches, the error names them: "No
+  package named X was found. PkgDeck can't confirm names in npm and pipx, but
+  they can try to install it by name: add --from npm or --from pipx."
 - Use `--arch` to choose between APT architectures.
 - If a Flatpak is installed for both User and System, add `--scope`:
   `pkd --from flatpak --scope system install org.example.App`

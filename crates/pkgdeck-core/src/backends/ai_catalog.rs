@@ -1,6 +1,8 @@
-//! AI command-line tools published to registries PkgDeck cannot search: npm
-//! and PyPI. Searching npm, pnpm, Bun, pipx or uv for a product name or alias
-//! offers the exact package below; a name alone never picks a package.
+//! AI command-line tools on npm and PyPI. PyPI cannot be searched, and npm
+//! search does not match product names such as "Claude Code" or aliases such
+//! as "droid" to scoped packages, so searching npm, pnpm, Bun, pipx or uv for
+//! a product name or alias also offers the exact package below; a name alone
+//! never picks a package.
 //! Homebrew needs no entries: its own search already finds `copilot-cli`,
 //! `kiro-cli` or `block-goose-cli`. Checked against each vendor's install docs
 //! on 2026-09-27 (see docs/support-expansion-report.md).

@@ -656,7 +656,7 @@ pub fn dispatch_with(
             let (mut data, code) = failure(e);
             if let Some((name, offers)) = missing {
                 data["message"] = json!(format!(
-                    "No package named {name} was found. PkgDeck can't search {sources}, but they can try to install it by name: add {flags}.",
+                    "No package named {name} was found. PkgDeck can't confirm names in {sources}, but they can try to install it by name: add {flags}.",
                     name = crate::presentation::clean(&name),
                     sources = source_list(&offers),
                     flags = from_flags(&offers)
@@ -1951,7 +1951,7 @@ mod tests {
         assert_eq!(data["offers"], json!(["cargo", "npm", "pipx"]));
         assert_eq!(
             data["message"],
-            "No package named fixture was found. PkgDeck can't search Cargo, npm, and pipx, but they can try to install it by name: add --from cargo, --from npm, or --from pipx."
+            "No package named fixture was found. PkgDeck can't confirm names in Cargo, npm, and pipx, but they can try to install it by name: add --from cargo, --from npm, or --from pipx."
         );
         let (data, code) = call(&mut guesses, &["info", "fixture"], false);
         assert_eq!(code, 3);
