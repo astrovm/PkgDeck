@@ -105,6 +105,8 @@ jobs:
         run: cargo build --locked -p pkd
       - name: Test real bundles and Homebrew cask lifecycle
         run: bash scripts/tests/macos-inventory.sh
+      - name: Test adopting an existing app into Homebrew
+        run: bash scripts/tests/macos-adoption.sh
       - name: Upload native inventory evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

@@ -186,8 +186,11 @@ record does not prove the app is unmanaged.
 VS Code, Firefox, and Obsidian bundle identifiers have curated cask suggestions.
 **Available through Homebrew (candidate)** means an install route exists for
 that product. Open details to see the matching evidence. Publisher, channel,
-architecture, and artifact equality are not verified, so this is not an adoption
-offer. App Store receipt-bearing copies get no suggestion.
+architecture, and artifact equality are not verified by the suggestion itself.
+App Store receipt-bearing copies get no suggestion. For VS Code and Firefox,
+installing the suggested cask lets Homebrew manage the copy you already have,
+after PkgDeck checks its signature, version, architecture, and files, and keeps
+a copy until Homebrew finishes (see the [CLI guide](cli.md#letting-homebrew-manage-an-app-you-installed)).
 
 This source is read-only: no install, remove, update, or adoption buttons. Copies
 already listed under Homebrew also appear in this inventory with their ownership
