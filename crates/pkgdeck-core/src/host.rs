@@ -520,8 +520,8 @@ impl Host {
         }
     }
 
-    /// Official installers put pixi and the conda family outside the PATH a
-    /// desktop app starts with. Only their fixed per-user locations, or the
+    /// Official installers put rustup, Nix, pixi and the conda family outside
+    /// the PATH a desktop app starts with. Only their fixed per-user locations, or the
     /// executable a `conda init` shell names, are tried.
     fn user_install(&self, name: &str) -> Result<Option<PathBuf>, ExecutionError> {
         let path = |key: &str| {
@@ -544,6 +544,16 @@ impl Host {
                             .map(|home| home.join(dir).join("bin").join(name)),
                     );
                 }
+            }
+            "rustup" => {
+                candidates.extend(path("CARGO_HOME").map(|dir| dir.join("bin/rustup")));
+                candidates.extend(home.as_ref().map(|home| home.join(".cargo/bin/rustup")));
+            }
+            // Single-user installs link into the profile; multi-user ones
+            // into the default profile.
+            "nix" => {
+                candidates.extend(home.as_ref().map(|home| home.join(".nix-profile/bin/nix")));
+                candidates.push("/nix/var/nix/profiles/default/bin/nix".into());
             }
             "micromamba" => {
                 candidates.extend(path("MAMBA_EXE"));
@@ -1084,14 +1094,33 @@ impl Host {
             return Err(ExecutionError::Invalid(ROOT_REFUSAL.into()));
         }
         let path = if write {
-            let path = PathBuf::from("/usr/bin").join(executable);
-            if !self.host_file(&path, true)? {
-                return Err(ExecutionError::Disabled(format!("{executable} not found")));
+            // Privileged writes only ever run the manager from its fixed
+            // system location, never whatever PATH finds first.
+            let dirs: &[&str] = match executable {
+                "apk" => &["/sbin", "/usr/sbin"],
+                "port" => &["/opt/local/bin"],
+                _ => &["/usr/bin"],
+            };
+            let mut found = None;
+            for dir in dirs {
+                let path = Path::new(dir).join(executable);
+                if self.host_file(&path, true)? {
+                    found = Some(path);
+                    break;
+                }
             }
-            path
+            found.ok_or_else(|| ExecutionError::Disabled(format!("{executable} not found")))?
         } else {
-            self.resolve(executable)?
-                .ok_or_else(|| ExecutionError::Disabled(format!("{executable} not found")))?
+            match self.resolve(executable)? {
+                Some(path) => path,
+                // MacPorts' folder is rarely on a shell's PATH.
+                None if executable == "port"
+                    && self.host_file(Path::new("/opt/local/bin/port"), true)? =>
+                {
+                    PathBuf::from("/opt/local/bin/port")
+                }
+                None => return Err(ExecutionError::Disabled(format!("{executable} not found"))),
+            }
         };
         if write {
             self.privileged(&path, args, authorization, cancel)
@@ -1129,6 +1158,14 @@ impl Host {
         if let Some(result) = crate::batch::run_in_scope(executable, args, cancel) {
             return result;
         }
+        // macOS has no polkit; its system prompt is the administrator
+        // password dialog.
+        if cfg!(target_os = "macos")
+            && self.runtime == Runtime::Native
+            && matches!(authorization, Authorization::Polkit)
+        {
+            return self.macos_administrator(executable, args, cancel);
+        }
         let (program, mut prefixed) = authorization.prefix(executable);
         prefixed.extend(args.iter().cloned());
         let mut host = self.clone();
@@ -1136,6 +1173,114 @@ impl Host {
             .insert("PATH".into(), "/usr/sbin:/usr/bin:/sbin:/bin".into());
         let command = host.command(Path::new(program), &prefixed)?;
         process::run(command, Limits::default(), cancel, true)
+    }
+}
+
+impl Host {
+    /// Run one command as root after macOS's own administrator password
+    /// dialog. Every argument is shell-quoted and then escaped for AppleScript,
+    /// so no argument can change the command.
+    fn macos_administrator(
+        &self,
+        executable: &Path,
+        args: &[OsString],
+        cancel: &Cancellation,
+    ) -> Result<Completion, ExecutionError> {
+        let script = administrator_script(executable, args)?;
+        let mut host = self.clone();
+        host.env
+            .insert("PATH".into(), "/usr/sbin:/usr/bin:/sbin:/bin".into());
+        let command = host.command(
+            Path::new("/usr/bin/osascript"),
+            &["-e".into(), script.into()],
+        )?;
+        let result = process::run(command, Limits::default(), cancel, true)?;
+        // AppleScript error -128 is the dialog's Cancel button.
+        if result.code != Some(0) && String::from_utf8_lossy(&result.stderr).contains("(-128)") {
+            return Err(ExecutionError::AuthorizationCancelled);
+        }
+        Ok(result)
+    }
+}
+
+/// One shell command line with every word single-quoted.
+fn shell_command(executable: &Path, args: &[OsString]) -> Result<String, ExecutionError> {
+    let quote = |arg: &std::ffi::OsStr| -> Result<String, ExecutionError> {
+        let text = arg
+            .to_str()
+            .filter(|text| !text.contains('\0'))
+            .ok_or_else(|| {
+                ExecutionError::Invalid("administrator command arguments must be text".into())
+            })?;
+        Ok(format!("'{}'", text.replace('\'', "'\\''")))
+    };
+    Ok(std::iter::once(executable.as_os_str())
+        .chain(args.iter().map(OsString::as_os_str))
+        .map(quote)
+        .collect::<Result<Vec<_>, _>>()?
+        .join(" "))
+}
+
+/// An AppleScript string literal.
+fn applescript_string(text: &str) -> String {
+    format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+/// `do shell script "'/opt/local/bin/port' '-N' 'install' 'xz'" …`
+fn administrator_script(executable: &Path, args: &[OsString]) -> Result<String, ExecutionError> {
+    Ok(format!(
+        "do shell script {} with administrator privileges without altering line endings",
+        applescript_string(&shell_command(executable, args)?)
+    ))
+}
+
+#[cfg(test)]
+mod administrator_tests {
+    use super::*;
+
+    /// The administrator command survives quotes, spaces and backslashes:
+    /// the real shell gets back exactly the arguments, and on macOS the real
+    /// AppleScript parser gets back exactly the shell line.
+    #[test]
+    fn administrator_commands_quote_every_argument() {
+        let args: Vec<OsString> = [
+            "%s|",
+            "it's",
+            "\"quoted\" \\ back",
+            "$(touch /tmp/x)",
+            "a b",
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .collect();
+        let line = shell_command(Path::new("/usr/bin/printf"), &args).unwrap();
+        let out = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(&line)
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            "it's|\"quoted\" \\ back|$(touch /tmp/x)|a b|"
+        );
+        assert!(shell_command(Path::new("/bin/echo"), &["a\0b".into()]).is_err());
+        let script = administrator_script(Path::new("/usr/bin/printf"), &args).unwrap();
+        assert!(
+            script.starts_with(r#"do shell script "'/usr/bin/printf' '%s|' 'it'\\''s'"#),
+            "{script}"
+        );
+        assert!(script.ends_with("with administrator privileges without altering line endings"));
+        if cfg!(target_os = "macos") {
+            let out = std::process::Command::new("/usr/bin/osascript")
+                .arg("-e")
+                .arg(format!("return {}", applescript_string(&line)))
+                .output()
+                .unwrap();
+            assert_eq!(
+                String::from_utf8_lossy(&out.stdout).trim_end_matches('\n'),
+                line
+            );
+        }
     }
 }
 

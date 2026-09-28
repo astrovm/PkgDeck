@@ -3,14 +3,18 @@ mod adopt;
 mod ai_catalog;
 mod appimage;
 mod apt_cli;
+mod aur;
 mod cleanup;
 mod conda;
 mod container;
 mod firmware;
 mod mac_apps;
 mod mas;
+mod nix;
 mod pixi;
+mod rustup;
 mod standalone;
+mod system_image;
 use crate::{
     engine::*,
     host::{AptAction, Authorization, Host},
@@ -18,15 +22,19 @@ use crate::{
     process::*,
 };
 pub use appimage::AppImage;
+pub use aur::Aur;
 pub use conda::Conda;
 pub use container::{Container, ContainerKind};
 pub use firmware::Firmware;
 pub use mac_apps::MacApps;
 pub use mas::MacAppStore;
+pub use nix::Nix;
 pub use pixi::Pixi;
+pub use rustup::Rustup;
 use serde::Deserialize;
 pub use standalone::{Standalone, StandaloneTool};
-use std::{ffi::OsString, path::PathBuf, time::Duration};
+use std::{collections::BTreeMap, ffi::OsString, path::PathBuf, time::Duration};
+pub use system_image::SystemImage;
 
 const CAPABILITIES: &[Capability] = &[
     Capability::Search,
@@ -56,17 +64,23 @@ pub const BACKEND_IDS: &[&str] = &[
     "apt",
     "dnf",
     "pacman",
+    "aur",
     "zypper",
+    "apk",
+    "xbps",
     "snap",
+    "system-image",
     "homebrew",
     "homebrew-cask",
     "macos-apps",
     "mas",
+    "macports",
     "appimage",
     "flatpak",
     "docker",
     "podman",
     "cargo",
+    "rustup",
     "npm",
     "pnpm",
     "bun",
@@ -76,6 +90,7 @@ pub const BACKEND_IDS: &[&str] = &[
     "mise",
     "pixi",
     "conda",
+    "nix",
     "composer",
     "gem",
     "codex",
@@ -92,14 +107,14 @@ pub const BACKEND_IDS: &[&str] = &[
 
 /// These sources update existing installations but do not install or remove them.
 pub fn update_only(id: &str) -> bool {
-    matches!(id, "fwupd" | "mas" | "conda")
+    matches!(id, "fwupd" | "mas" | "conda" | "system-image" | "aur")
         || StandaloneTool::ALL.iter().any(|tool| tool.id() == id)
 }
 
 /// Sources upgraded package by package: they have no single "upgrade
 /// everything" command, so `pkd upgrade` without names lists each package.
 pub fn per_package_upgrades(id: &str) -> bool {
-    update_only(id) || id == "pixi"
+    update_only(id) || matches!(id, "pixi" | "rustup" | "nix")
 }
 
 /// Inventory sources whose rows must never offer package mutations.
@@ -122,6 +137,11 @@ pub fn display_name(id: &str) -> &str {
         "homebrew-cask" => "Homebrew Casks",
         "macos-apps" => "macOS Applications",
         "mas" => "Mac App Store",
+        "macports" => "MacPorts",
+        "aur" => "AUR",
+        "xbps" => "XBPS",
+        "system-image" => "System image",
+        "nix" => "Nix",
         "appimage" => "AppImage",
         "flatpak" => "Flatpak",
         "docker" => "Docker images",
@@ -141,7 +161,7 @@ pub fn display_name(id: &str) -> &str {
         "antigravity" => "Antigravity CLI",
         "amp" => "Amp",
         "droid" => "Factory Droid",
-        // npm, pnpm, pip, pipx, uv, mise, and pixi are written in lower case.
+        // npm, pnpm, pip, pipx, uv, mise, pixi, apk, and rustup are written in lower case.
         other => other,
     }
 }
@@ -224,6 +244,11 @@ pub trait Transport: Send {
     /// Read one sanitized host environment value, if the fixture provides it.
     fn env(&self, _name: &str) -> Option<OsString> {
         None
+    }
+    /// How system changes get permission; tools that call sudo themselves
+    /// (AUR helpers) are pointed at the same prompt.
+    fn authorization(&self) -> Authorization {
+        Authorization::SudoNonInteractive
     }
     /// Run a user-scoped development tool (`cargo`, `npm`, `pnpm`, `bun`,
     /// `pipx`, `uv`, `composer`, `gem`). Fixtures override this one seam for
@@ -619,6 +644,9 @@ impl Transport for NativeTransport {
     }
     fn env(&self, name: &str) -> Option<OsString> {
         self.host.var(name)
+    }
+    fn authorization(&self) -> Authorization {
+        self.authorization
     }
     fn dev_tool(
         &self,
@@ -2479,6 +2507,9 @@ enum ManagerKind {
     Pacman,
     Zypper,
     Snap,
+    Apk,
+    Xbps,
+    MacPorts,
 }
 
 impl ManagerKind {
@@ -2488,10 +2519,35 @@ impl ManagerKind {
             Self::Pacman => "pacman",
             Self::Zypper => "zypper",
             Self::Snap => "snap",
+            Self::Apk => "apk",
+            Self::Xbps => "xbps",
+            Self::MacPorts => "macports",
         }
     }
     fn executable(self) -> &'static str {
-        self.id()
+        match self {
+            Self::Xbps => "xbps-query",
+            Self::MacPorts => "port",
+            _ => self.id(),
+        }
+    }
+    /// XBPS splits writes across two commands.
+    fn write_executable(self, operation: &Operation) -> &'static str {
+        match (self, operation) {
+            (Self::Xbps, Operation::Remove(_)) => "xbps-remove",
+            (Self::Xbps, _) => "xbps-install",
+            _ => self.executable(),
+        }
+    }
+    /// Where the manager lists pending updates, if it can without writing.
+    fn update_args(self) -> Option<(&'static str, &'static [&'static str])> {
+        match self {
+            Self::Apk => Some(("apk", &["list", "--upgradable"])),
+            // -M reads the repository index into memory; -n only reports.
+            Self::Xbps => Some(("xbps-install", &["-Mun"])),
+            Self::MacPorts => Some(("port", &["-q", "outdated"])),
+            _ => None,
+        }
     }
     fn read_args(self, installed: bool, query: &str) -> Vec<OsString> {
         match (self, installed) {
@@ -2533,6 +2589,12 @@ impl ManagerKind {
             ],
             (Self::Snap, true) => vec!["list"],
             (Self::Snap, false) => vec!["find", query],
+            (Self::Apk, true) => vec!["list", "--installed"],
+            (Self::Apk, false) => vec!["search", "-v", query],
+            (Self::Xbps, true) => vec!["-l"],
+            (Self::Xbps, false) => vec!["-Rs", query],
+            (Self::MacPorts, true) => vec!["-q", "installed"],
+            (Self::MacPorts, false) => vec!["-q", "search", "--name", "--line", query],
         }
         .into_iter()
         .map(OsString::from)
@@ -2569,9 +2631,38 @@ impl ManagerKind {
             (Self::Snap, Operation::Remove(_)) => vec!["remove"],
             (Self::Snap, Operation::Upgrade(_)) => vec!["refresh"],
             (Self::Snap, Operation::UpgradeAll { .. }) => vec!["refresh"],
+            (Self::Apk, Operation::Refresh { .. }) => vec!["update"],
+            (Self::Apk, Operation::Install(_)) => vec!["add", "--"],
+            (Self::Apk, Operation::Remove(_)) => vec!["del", "--"],
+            (Self::Apk, Operation::Upgrade(_)) => vec!["upgrade", "--"],
+            (Self::Apk, Operation::UpgradeAll { .. }) => vec!["upgrade"],
+            (Self::Xbps, Operation::Refresh { .. }) => vec!["-S"],
+            (Self::Xbps, Operation::Install(_) | Operation::Remove(_)) => vec!["-y"],
+            (Self::Xbps, Operation::Upgrade(_) | Operation::UpgradeAll { .. }) => vec!["-yu"],
+            // -N never asks; MacPorts keeps each port's variants on upgrade.
+            (Self::MacPorts, Operation::Refresh { .. }) => vec!["-N", "selfupdate"],
+            (Self::MacPorts, Operation::Install(_)) => vec!["-N", "install"],
+            (Self::MacPorts, Operation::Remove(_)) => vec!["-N", "uninstall"],
+            (Self::MacPorts, Operation::Upgrade(_)) => vec!["-N", "upgrade"],
+            (Self::MacPorts, Operation::UpgradeAll { .. }) => vec!["-N", "upgrade", "outdated"],
             (_, Operation::Clean(_)) => vec![],
         }
     }
+}
+
+/// `name-1.2.3-r0` into (`name`, `1.2.3-r0`).
+fn apk_pkgver(pkgver: &str) -> Option<(&str, String)> {
+    let mut parts = pkgver.rsplitn(3, '-');
+    let (release, version, name) = (parts.next()?, parts.next()?, parts.next()?);
+    (release.starts_with('r')
+        && version.starts_with(|c: char| c.is_ascii_digit())
+        && !name.is_empty())
+    .then(|| (name, format!("{version}-{release}")))
+}
+/// `name-1.2.3_1` into (`name`, `1.2.3_1`).
+fn xbps_pkgver(pkgver: &str) -> Option<(&str, String)> {
+    let (name, version) = pkgver.rsplit_once('-')?;
+    (version.contains('_') && !name.is_empty()).then(|| (name, version.to_owned()))
 }
 
 pub struct SystemManager<T = NativeTransport> {
@@ -2598,15 +2689,70 @@ impl<T: Transport> SystemManager<T> {
     pub fn snap(transport: T) -> Self {
         Self::new(ManagerKind::Snap, transport)
     }
+    pub fn apk(transport: T) -> Self {
+        Self::new(ManagerKind::Apk, transport)
+    }
+    pub fn xbps(transport: T) -> Self {
+        Self::new(ManagerKind::Xbps, transport)
+    }
+    pub fn macports(transport: T) -> Self {
+        Self::new(ManagerKind::MacPorts, transport)
+    }
     fn call(
         &self,
         args: Vec<OsString>,
         cancel: &Cancellation,
         write: bool,
     ) -> Result<Completion, EngineError> {
+        self.call_with(self.kind.executable(), args, cancel, write)
+    }
+    fn call_with(
+        &self,
+        executable: &str,
+        args: Vec<OsString>,
+        cancel: &Cancellation,
+        write: bool,
+    ) -> Result<Completion, EngineError> {
         Ok(self
             .transport
-            .system_manager(self.kind.executable(), &args, cancel, write)?)
+            .system_manager(executable, &args, cancel, write)?)
+    }
+    /// Pending updates by package name. An unavailable listing leaves every
+    /// row's update status as it was rather than failing the inventory.
+    fn updates(&self, cancel: &Cancellation) -> Result<BTreeMap<String, String>, EngineError> {
+        let Some((executable, args)) = self.kind.update_args() else {
+            return Ok(BTreeMap::new());
+        };
+        let result = self.call_with(
+            executable,
+            args.iter().map(OsString::from).collect(),
+            cancel,
+            false,
+        );
+        let text = match result {
+            Ok(done) => String::from_utf8_lossy(&bytes(self.kind.id(), done)?).into_owned(),
+            Err(EngineError::Cancelled | EngineError::Execution(ExecutionError::Cancelled)) => {
+                return Err(EngineError::Cancelled)
+            }
+            Err(_) => return Ok(BTreeMap::new()),
+        };
+        Ok(text
+            .lines()
+            .filter_map(|line| {
+                let fields: Vec<&str> = line.split_whitespace().collect();
+                match self.kind {
+                    ManagerKind::Apk => apk_pkgver(fields.first()?),
+                    ManagerKind::Xbps if fields.get(1) == Some(&"update") => {
+                        xbps_pkgver(fields.first()?)
+                    }
+                    ManagerKind::MacPorts if fields.get(2) == Some(&"<") => {
+                        Some((*fields.first()?, (*fields.get(3)?).to_owned()))
+                    }
+                    _ => None,
+                }
+                .map(|(name, version)| (name.to_owned(), version))
+            })
+            .collect())
     }
     fn valid_name(&self, name: &str) -> bool {
         !name.is_empty()
@@ -2718,6 +2864,20 @@ impl<T: Transport> SystemManager<T> {
                     packages.push(package);
                 }
             }
+            ManagerKind::Apk | ManagerKind::Xbps | ManagerKind::MacPorts => {
+                for line in text.lines().filter(|line| !line.trim().is_empty()) {
+                    let Some((name, version, arch, summary)) = self.parse_line(line, installed)
+                    else {
+                        continue;
+                    };
+                    let mut package = self.package(name, &arch, &version, &summary)?;
+                    if installed {
+                        package.installed_version = Some(version);
+                        package.update = UpdateAvailability::Current;
+                    }
+                    packages.push(package);
+                }
+            }
             ManagerKind::Snap => {
                 for line in text.lines().skip(1).filter(|line| !line.trim().is_empty()) {
                     let fields = line.split_whitespace().collect::<Vec<_>>();
@@ -2748,6 +2908,74 @@ impl<T: Transport> SystemManager<T> {
         }
         Ok(packages)
     }
+    /// One apk, XBPS or MacPorts listing line: name, version, architecture
+    /// and summary. Lines that are not package entries return `None`.
+    fn parse_line<'a>(
+        &self,
+        line: &'a str,
+        installed: bool,
+    ) -> Option<(&'a str, String, String, String)> {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        let host = std::env::consts::ARCH.to_owned();
+        match (self.kind, installed) {
+            // name-1.2.3-r0 aarch64 {origin} (license) [installed]
+            (ManagerKind::Apk, true) => {
+                let (name, version) = apk_pkgver(fields.first()?)?;
+                Some((
+                    name,
+                    version,
+                    fields.get(1).map_or(host, |a| (*a).to_owned()),
+                    String::new(),
+                ))
+            }
+            // name-1.2.3-r0 - description
+            (ManagerKind::Apk, false) => {
+                let (pkgver, summary) = line.split_once(" - ").unwrap_or((line, ""));
+                let (name, version) = apk_pkgver(pkgver.trim())?;
+                Some((name, version, host, summary.trim().to_owned()))
+            }
+            // ii name-1.2.3_1   description
+            (ManagerKind::Xbps, true) => {
+                let (name, version) = xbps_pkgver(fields.get(1)?)?;
+                Some((name, version, host, fields.get(2..)?.join(" ")))
+            }
+            // [-] name-1.2.3_1  description ([*] when installed)
+            (ManagerKind::Xbps, false) => {
+                let (name, version) = xbps_pkgver(fields.get(1)?)?;
+                Some((name, version, host, fields.get(2..)?.join(" ")))
+            }
+            // "  name @1.2.3_0+variant (active)"; inactive versions stay
+            // installed but are not what runs, so only active ones are rows.
+            (ManagerKind::MacPorts, true) => {
+                if !line.contains("(active)") {
+                    return None;
+                }
+                let version = fields.get(1)?.strip_prefix('@')?;
+                Some((
+                    fields.first()?,
+                    version.to_owned(),
+                    host,
+                    "MacPorts port".into(),
+                ))
+            }
+            // name <tab> version <tab> categories <tab> description
+            (ManagerKind::MacPorts, false) => {
+                let columns: Vec<&str> = line.split('\t').map(str::trim).collect();
+                let (name, version, summary) = if columns.len() >= 4 {
+                    (columns[0], columns[1], columns[3])
+                } else {
+                    (*fields.first()?, *fields.get(1)?, "")
+                };
+                Some((
+                    name,
+                    version.trim_start_matches('@').to_owned(),
+                    host,
+                    summary.to_owned(),
+                ))
+            }
+            _ => None,
+        }
+    }
     fn query(
         &self,
         installed: bool,
@@ -2758,10 +2986,26 @@ impl<T: Transport> SystemManager<T> {
             return Err(invalid(self.kind.id(), "invalid package query"));
         }
         let args = self.kind.read_args(installed, query);
-        self.parse(
+        let mut packages = self.parse(
             bytes(self.kind.id(), self.call(args, cancel, false)?)?,
             installed,
-        )
+        )?;
+        if installed && matches!(self.kind, ManagerKind::Pacman) {
+            // Packages no repository has (AUR builds) are the AUR source's
+            // rows. Without synced databases every package looks foreign;
+            // then Pacman keeps them all.
+            let foreign = String::from_utf8(bytes(
+                "pacman",
+                self.call(vec!["-Qmq".into()], cancel, false)?,
+            )?)
+            .map_err(|e| invalid("pacman", e))?;
+            let foreign: std::collections::BTreeSet<&str> =
+                foreign.lines().map(str::trim).collect();
+            if foreign.len() < packages.len() {
+                packages.retain(|package| !foreign.contains(package.id.name.as_str()));
+            }
+        }
+        Ok(packages)
     }
     fn target(&self, id: &PackageId) -> Result<String, EngineError> {
         if id.backend != self.kind.id() || id.scope != Scope::System || !self.valid_name(&id.name) {
@@ -2830,9 +3074,14 @@ impl<T: Transport> Backend for SystemManager<T> {
     }
     fn installed(&mut self, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
         let mut packages = self.query(true, "", cancel)?;
+        let updates = self.updates(cancel)?;
         for package in &mut packages {
             self.snap_icon(package);
             self.snap_components(package);
+            if let Some(candidate) = updates.get(&package.id.name) {
+                package.candidate_version = Some(candidate.clone());
+                package.update = UpdateAvailability::Available;
+            }
         }
         Ok(packages)
     }
@@ -2912,6 +3161,9 @@ impl<T: Transport> Backend for SystemManager<T> {
                     )?;
                     vec!["install".into(), path]
                 }
+                ManagerKind::Apk | ManagerKind::Xbps | ManagerKind::MacPorts => {
+                    return Err(invalid(self.kind.id(), "unsupported local archive"))
+                }
             };
             progress(Progress::Message(format!(
                 "Installing local {} package.",
@@ -2944,7 +3196,7 @@ impl<T: Transport> Backend for SystemManager<T> {
             "Running {}. If you cancel, PkgDeck waits for it to finish.",
             self.kind.id()
         )));
-        let result = self.call(args, cancel, true)?;
+        let result = self.call_with(self.kind.write_executable(operation), args, cancel, true)?;
         bytes(self.kind.id(), result.clone())?;
         Ok(OperationOutcome {
             cancellation_deferred: result.cancellation_deferred,
@@ -5055,6 +5307,9 @@ pub fn native_engine(
         ("pacman", SystemManager::pacman),
         ("zypper", SystemManager::zypper),
         ("snap", SystemManager::snap),
+        ("apk", SystemManager::apk),
+        ("xbps", SystemManager::xbps),
+        ("macports", SystemManager::macports),
     ] {
         if allowed(backend) {
             candidates.push((Box::new(make(transport())), probe_unless_listed));
@@ -5125,6 +5380,19 @@ pub fn native_engine(
     if allowed("conda") {
         // Detection picks conda, mamba, or micromamba, so it always runs.
         candidates.push((Box::new(Conda::new(transport())), true));
+    }
+    if allowed("rustup") {
+        candidates.push((Box::new(Rustup::new(transport())), probe_unless_listed));
+    }
+    if allowed("nix") {
+        candidates.push((Box::new(Nix::new(transport())), probe_unless_listed));
+    }
+    // Both check the platform first, so probing is cheap elsewhere.
+    if allowed("aur") {
+        candidates.push((Box::new(Aur::new(transport())), true));
+    }
+    if allowed("system-image") {
+        candidates.push((Box::new(SystemImage::new(transport())), true));
     }
     type Probed = (Box<dyn Backend>, Option<Result<Availability, EngineError>>);
     let probed: Vec<Probed> = std::thread::scope(|scope| {
@@ -5224,7 +5492,9 @@ mod tests {
 
     #[test]
     fn upgrade_everything_lists_packages_where_there_is_no_single_command() {
-        for id in ["pixi", "mas", "conda", "fwupd", "codex"] {
+        for id in [
+            "pixi", "rustup", "nix", "aur", "mas", "conda", "fwupd", "codex",
+        ] {
             assert!(per_package_upgrades(id), "{id}");
         }
         for id in ["apt", "homebrew", "npm", "mise"] {
@@ -5245,7 +5515,7 @@ mod tests {
             .iter()
             .filter(|id| display_name(id) != **id)
             .count();
-        assert_eq!(renamed, BACKEND_IDS.len() - 7);
+        assert_eq!(renamed, BACKEND_IDS.len() - 9);
     }
 
     #[test]

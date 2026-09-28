@@ -20,7 +20,11 @@ fn prepare_macos_environment() {
     let current =
         std::env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin:/usr/sbin:/sbin".into());
     let mut dirs: Vec<std::path::PathBuf> = std::env::split_paths(&current).collect();
+    // Finder starts apps with a minimal PATH; add Homebrew's and MacPorts'
+    // folders (Homebrew's end up first).
     for dir in [
+        "/opt/local/sbin",
+        "/opt/local/bin",
         "/usr/local/sbin",
         "/usr/local/bin",
         "/opt/homebrew/sbin",

@@ -3,12 +3,12 @@
 # Ephemeral runners need no cleanup; lifecycle state is confirmed through
 # the underlying manager, never only PkgDeck output. Tool installations use
 # user-writable prefixes so no step ever needs elevation.
-# Usage: scripts/tests/dev-manager.sh cargo|npm|pnpm|bun|pip|pipx|uv|mise|pixi|conda|composer|gem <pkd>
+# Usage: scripts/tests/dev-manager.sh cargo|npm|pnpm|bun|pip|pipx|uv|mise|pixi|conda|composer|gem|rustup|nix <pkd>
 # -E lets failures inside the helper functions below reach the ERR trap.
 set -Eeuo pipefail
 trap 'echo "dev-manager FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
-backend=${1:?Usage: scripts/tests/dev-manager.sh cargo|npm|pnpm|bun|pip|pipx|uv|mise|pixi|conda|composer|gem <pkd>}
-pkd=${2:?Usage: scripts/tests/dev-manager.sh cargo|npm|pnpm|bun|pip|pipx|uv|mise|pixi|conda|composer|gem <pkd>}
+backend=${1:?Usage: scripts/tests/dev-manager.sh cargo|npm|pnpm|bun|pip|pipx|uv|mise|pixi|conda|composer|gem|rustup|nix <pkd>}
+pkd=${2:?Usage: scripts/tests/dev-manager.sh cargo|npm|pnpm|bun|pip|pipx|uv|mise|pixi|conda|composer|gem|rustup|nix <pkd>}
 echo "dev-manager: backend=$backend pkd=$pkd user=$(whoami) home=$HOME"
 run() { "$pkd" --json --yes --auth sudo --from "$backend" "$@"; }
 # Keep pkd's report so a failed step shows what pkd said and how long it took.
@@ -121,6 +121,40 @@ setup_gem() {
         command -v gem >/dev/null || { sudo apt-get update && sudo apt-get install -y ruby; }
     fi
     gem --version
+}
+
+# rustup lives in the runner's ~/.cargo/bin; elsewhere a minimal install
+# there is enough. The wrapper keeps assertions on that exact rustup.
+setup_rustup() {
+    local bin=${CARGO_HOME:-$HOME/.cargo}/bin
+    if [[ ! -x $bin/rustup ]] && ! command -v rustup >/dev/null; then
+        curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs |
+            sh -s -- -y --no-modify-path --profile minimal --default-toolchain stable
+    fi
+    rustup_bin=$(command -v rustup || echo "$bin/rustup")
+    rustup() { "$rustup_bin" "$@"; }
+    rustup --version
+    rustup toolchain list
+}
+
+# Nix stays off PATH, the way a desktop app starts, so pkd has to find it
+# in the profile the installer made. Linux gets the official single-user
+# install; macOS needs the multi-user daemon, which the Determinate
+# installer sets up without prompts.
+setup_nix() {
+    if [[ $(uname -s) == Darwin ]]; then
+        nix_bin=/nix/var/nix/profiles/default/bin/nix
+        [[ -x $nix_bin ]] || curl --proto '=https' --tlsv1.2 -fsSL https://install.determinate.systems/nix |
+            sh -s -- install --no-confirm
+    else
+        nix_bin=$HOME/.nix-profile/bin/nix
+        if [[ ! -x $nix_bin ]]; then
+            curl --proto '=https' --tlsv1.2 -fsSL -o "$HOME/nix-install" https://nixos.org/nix/install
+            sh "$HOME/nix-install" --no-daemon --no-modify-profile
+        fi
+    fi
+    nix() { "$nix_bin" --extra-experimental-features 'nix-command flakes' "$@"; }
+    nix --version
 }
 
 case $backend in
@@ -318,5 +352,55 @@ gem)
     success remove cowsay
     find "$user_gemhome/specifications" -name 'cowsay-*.gemspec' | absent '.'
     ;;
+rustup)
+    # The checkout's rust-toolchain.toml would make rustup install its pin.
+    cd "$HOME"
+    setup_rustup
+    success sources
+    default=$(rustup default | awk '{print $1}')
+    have "$default"
+    # `rustup check` must be understood: the default reports a real version.
+    run list | jq -e --arg name "$default" '.data.packages[] | select(.id.name == $name) | .installed_version | test("^[0-9]")'
+    # A pinned release installs with the minimal profile and never moves.
+    rustup toolchain list | absent '^1\.80\.0-'
+    success install 1.80.0
+    pinned=$(rustup toolchain list | awk '/^1\.80\.0-/ {print $1}')
+    [[ -n $pinned ]]
+    rustup run "$pinned" rustc --version | grep -q '^rustc 1\.80\.0 '
+    rustup component list --toolchain "$pinned" --installed | absent '^rust-docs'
+    have "$pinned"
+    run list | jq -e --arg name "$pinned" '.data.packages[] | select(.id.name == $name) | .installed_version == "1.80.0" and .update == "current"'
+    success info "$pinned"
+    success upgrade "$pinned"
+    rustup run "$pinned" rustc --version | grep -q '^rustc 1\.80\.0 '
+    # The default toolchain is refused before rustup is asked to remove it.
+    output=$(run remove "$default") || true
+    grep -q 'is the default toolchain' <<<"$output"
+    rustup toolchain list | grep -q "^$default"
+    success remove "$pinned"
+    rustup toolchain list | absent '^1\.80\.0-'
+    ;;
+nix)
+    setup_nix
+    success sources
+    nix profile list --json | absent '"hello"'
+    success install hello
+    have hello
+    nix profile list --json | jq -e '.elements.hello | .active and (.originalUrl == "flake:nixpkgs") and (.storePaths[0] | test("-hello-[0-9]"))'
+    "$HOME/.nix-profile/bin/hello" | grep -qx 'Hello, world!'
+    run info hello | jq -e '.data.package.installed_version | test("^[0-9]")'
+    success upgrade hello
+    nix profile list --json | jq -e '.elements.hello.active'
+    # The single-user installer adds Nix itself as a store path, which has
+    # no flake to upgrade from.
+    if nix profile list --json | jq -e '.elements.nix | . != null and .originalUrl == null' >/dev/null; then
+        output=$(run upgrade nix) || true
+        grep -q 'installed from a store path' <<<"$output"
+    fi
+    success remove hello
+    nix profile list --json | absent '"hello"'
+    [[ ! -e $HOME/.nix-profile/bin/hello ]]
+    ;;
 *) exit 2 ;;
 esac
+echo "PASS dev-manager $backend lifecycle"

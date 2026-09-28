@@ -485,7 +485,6 @@ TestCase {
         browser.openView("Settings");
         const appearance = findChild(browser, "appearanceSetting");
         verify(typeof appearance.contentItem.positionToRectangle === "function");
-        verify(typeof findChild(browser, "authorizationSetting").contentItem.positionToRectangle === "function");
         waitForRendering(browser.contentItem);
         mouseClick(appearance);
         tryCompare(appearance.popup, "visible", true);
@@ -1119,23 +1118,17 @@ TestCase {
         const banner = findChild(browser, "changeNotice");
         verify(!banner.visible);
         fake.notice = JSON.stringify({kind: "error", title: "Install htop (apt) failed",
-            detail: "PkgDeck couldn't get administrator access.", action: "settings"});
+            detail: "PkgDeck couldn't get administrator access."});
         verify(banner.visible);
         compare(findChild(browser, "changeNoticeTitle").text, "Install htop (apt) failed");
         compare(findChild(browser, "changeNoticeDetail").text, "PkgDeck couldn't get administrator access.");
-        // Failures stay until dismissed and can open Settings.
+        // Failures stay until dismissed. There is no authentication
+        // setting to send the user to, so the banner offers no Settings
+        // shortcut; it just hides while Settings is open.
         wait(50);
         verify(banner.visible);
-        const settings = findChild(browser, "changeNoticeSettings");
-        compare(settings.visible, Qt.platform.os === "linux");
-        if (Qt.platform.os === "linux") {
-            mouseClick(settings);
-        } else {
-            // The authorization shortcut is Linux-only. General navigation
-            // still hides the banner while Settings is open on macOS.
-            browser.openView("Settings");
-        }
-        compare(browser.currentView, "Settings");
+        compare(findChild(browser, "changeNoticeSettings"), null);
+        browser.openView("Settings");
         tryCompare(banner, "visible", false);
         browser.openView("Search");
         tryCompare(banner, "visible", true);
@@ -1393,7 +1386,11 @@ TestCase {
     function test_each_view_shows_its_own_columns() {
         browser.openView("Settings");
         verify(findChild(browser, "appearanceSetting") !== null);
-        verify(findChild(browser, "authorizationSetting") !== null);
+        // The app always uses the system password prompt, so there is no
+        // authentication choice, and nothing is remembered for it.
+        compare(findChild(browser, "authorizationSetting"), null);
+        verify(!browser.useSudo);
+        compare(browser.store.authorization, undefined);
         verify(findChild(browser, "aboutText").visible);
         browser.openView("Sources");
         compare(findChild(browser, "columnHeader0").text, "SOURCE");
@@ -1936,10 +1933,8 @@ TestCase {
         verify(!findChild(browser, "addPackageButton").visible);
         verify(!findChild(browser, "repositoriesButton").visible);
         browser.desktopAutostartSupported = false;
-        browser.systemAuthorizationSupported = false;
         browser.openView("Settings");
         verify(!findChild(browser, "autostartSetting").visible);
-        verify(!findChild(browser, "authorizationSetting").visible);
 
         browser.openView("Sources");
         fake.source_catalog = JSON.stringify([

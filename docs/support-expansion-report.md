@@ -166,12 +166,12 @@ or a dedicated design.
 | P1 | Manage existing Mac apps with Homebrew | Converts manual installs into tracked installations | L | Implemented for VS Code and Firefox: `brew install --cask --adopt` after PkgDeck checks the publisher team, bundle id, App Store receipt, architecture, version and every cask target, with an APFS clone restored if Homebrew's rollback deletes the app; tested with a fixture cask on disposable Mac runners. Obsidian waits for a verified publisher team |
 | P1 | Mac App Store via mas | Covers apps that should retain App Store ownership | M | Implemented: inventory, update checks that never download, and verified `mas update` runs; mas asks for the password itself, so updates need a terminal |
 | P1 | Conda, mamba/micromamba and pixi | Scientific and data-development environments | L | Implemented: requested packages in named conda/mamba/micromamba environments (dry-run solve, verified update) and `pixi global` environments (full lifecycle, updates within the manifest spec); tested end to end in CI |
-| P2 | Rustup | Toolchain coverage beyond Cargo-installed executables | S–M | Installed toolchains; `rustup check` exits 100 when updates exist |
-| P2 | MacPorts | Completes another macOS package ecosystem | M | Native package lifecycle with variants preserved |
-| P2 | Nix profiles | Useful cross-platform package coverage | L | User profiles only; verify the real (version 3) profile JSON first |
-| P2 | rpm-ostree and bootc | Supports immutable desktops | L | Deployment inventory and pending-reboot state from both tools |
-| P2 | AUR | Broader Arch application availability | L | Read-only: `pacman -Qm` plus AUR versions; no builds after the 2026 AUR attack |
-| P2 | apk and XBPS | Extends distro coverage | M each | CLI-first integration and distro fixtures |
+| P2 | Rustup | Toolchain coverage beyond Cargo-installed executables | S–M | Implemented: installed toolchains with channel updates via `rustup check` (rustup 1.28.2 exits 0 with updates, not the documented 100; both are accepted), minimal-profile installs, `--no-self-update` on toolchain changes, rustup itself as a separate row, and the default toolchain protected from removal |
+| P2 | MacPorts | Completes another macOS package ecosystem | M | Implemented: search, install, remove and upgrade with `port -N`, updates from `port outdated`, variants kept on upgrade, only active ports listed, writes only through `/opt/local/bin/port` |
+| P2 | Nix profiles | Useful cross-platform package coverage | L | Implemented: the user profile only (version 3 JSON), exact `nixpkgs#NAME` installs, remove, and explicit flake upgrades; updates are never guessed, and store-path entries can't be upgraded |
+| P2 | rpm-ostree and bootc | Supports immutable desktops | L | Implemented: one update-only `system` row from bootc status (rpm-ostree as fallback) with staged, rollback and layered-package details; upgrades stage a deployment and PkgDeck never restarts |
+| P2 | AUR | Broader Arch application availability | L | Implemented read-only: `pacman -Qm` checked against the AUR RPC with `vercmp`; Pacman no longer lists these packages, and unsynced databases are an error; no builds after the 2026 AUR attack |
+| P2 | apk and XBPS | Extends distro coverage | M each | Implemented: search, install, remove, upgrade and refresh, with updates from `apk list --upgradable` and `xbps-install -Mun`; writes use the fixed system paths only |
 | P3 | Go binaries, .NET tools | Covers developer tools outside package managers | M | Only with reliable metadata (`go version -m`, `dotnet tool list -g`) |
 
 Skipped: Volta (unmaintained), Deno and Yarn globals (no inventory command),
@@ -223,23 +223,34 @@ upgrades need root. [mas documentation](https://github.com/mas-cli/mas),
 **MacPorts** has native installed/outdated/upgrade operations. Keep variants,
 inactive versions, and dependency effects in the model; do not consolidate its
 packages into Brew by name. [MacPorts guide](https://guide.macports.org/#using.port).
+Implemented: variants are kept on upgrade and only active ports are rows;
+inactive versions stay installed but aren't listed.
 
 **Rustup** manages Rust toolchains separately from Cargo packages. Preserve
 stable/beta/nightly and pinned toolchains. Separate toolchain updates from
 rustup's own update, which can be suppressed per invocation.
 [Rustup basics](https://rust-lang.github.io/rustup/basics.html).
+Implemented: toolchain changes pass `--no-self-update` and rustup is its own
+row. The docs say `rustup check` exits 100 when updates exist, but rustup 1.28.2
+was observed exiting 0 with updates, so PkgDeck accepts both.
 
 **Nix** offers JSON profile inventory including flake references and store paths.
 Limit the first backend to explicit user profiles. Do not mutate NixOS or
 Home Manager configuration, infer upgrades from display versions, or make
 global garbage collection a routine cleanup task.
 [Nix profile list](https://nix.dev/manual/nix/2.34/command-ref/new-cli/nix3-profile-list.html).
+Implemented: user profile only, version 3 JSON required, update status always
+unknown, and no cleanup task. Installs fall back to `nix profile install` on
+Nix older than 2.25.
 
 **apk and XBPS** are reasonable distro extensions, but available package commands
 do not prove PkgDeck's current GUI/build dependencies work on those systems.
 Validate the engine and host authorization first, then distribution support.
 [Alpine APK](https://wiki.alpinelinux.org/wiki/Apk),
 [Void XBPS](https://docs.voidlinux.org/xbps/index.html).
+Implemented: search, list, install, remove, update and refresh, with privileged
+writes only from fixed system paths. The GUI build on Alpine and Void is still
+unvalidated.
 
 **rpm-ostree** provides JSON status and deployment-based changes. Model booted
 and pending deployments and reboot requirements rather than presenting it as
@@ -247,6 +258,9 @@ ordinary live RPM updates. Fedora's image-mode work adds DNF and bootc next to
 rpm-ostree rather than replacing it yet, so read both status outputs.
 [Upstream handbook](https://github.com/coreos/rpm-ostree/blob/main/docs/administrator-handbook.md),
 [Fedora change](https://fedoraproject.org/wiki/Changes/DNFAndBootcInImageModeFedora).
+Implemented as the update-only `system-image` source: bootc status is read
+first, rpm-ostree's otherwise; an upgrade stages a deployment, and PkgDeck
+never restarts.
 
 **AUR** requires build-recipe review and helper-specific behavior. Integrate one
 installed helper first, retain its review/diff step, and distinguish AUR origin
@@ -256,6 +270,8 @@ packages and new AUR accounts were blocked, so start read-only: list foreign
 packages with `pacman -Qm`, compare versions through the AUR RPC, and leave builds
 to the user's helper. [ArchWiki AUR helpers](https://wiki.archlinux.org/title/AUR_helpers),
 [SecurityWeek](https://www.securityweek.com/atomic-arch-supply-chain-attack-hits-1500-aur-packages/).
+Implemented read-only as described. Pacman omits foreign packages, so each
+appears once; no helper integration yet.
 
 Windows managers such as WinGet, Scoop, and Chocolatey should be a separate
 platform initiative. Current Unix host execution and Linux/macOS distribution
@@ -492,7 +508,7 @@ source**, so this is not only an unreleased-main observation.
    Require tested recovery before enabling either adoption or replacement.
 4. **Broader ecosystems:** Conda-family and pixi environment plans, then
    Rustup/MacPorts; pursue Nix, immutable systems, read-only AUR, apk, and XBPS
-   according to user demand.
+   according to user demand. All of these are now implemented.
 
 Implementation should extend the core engine and host command authorization,
 then expose the same behavior through CLI and GUI. Update the source registry,

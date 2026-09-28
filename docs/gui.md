@@ -164,6 +164,37 @@ the packages you asked for in each named conda, mamba, or micromamba
 environment and updates them; install and remove them with the manager.
 Project environments are never touched.
 
+### Rustup and Nix
+
+**rustup** lists your Rust toolchains and can install, update, and remove
+them. Channels update within their channel; pinned versions never do.
+Toolchain updates never update rustup itself: it has its own row. The default
+toolchain can't be removed. **Nix** lists your user profile (`nix profile`),
+never NixOS or Home Manager configuration, and can add, upgrade, and remove
+entries. It never shows updates, because only evaluating the flake can tell;
+upgrade an entry with `pkd upgrade NAME --from nix`. See the
+[CLI guide](cli.md#choosing-packages).
+
+### AUR
+
+On Arch, the **AUR** source lists installed packages that aren't in Pacman's
+repositories and shows which have a newer AUR version. They're no longer
+listed under Pacman. It's read-only: building an AUR package runs its
+PKGBUILD, so review it and update with your AUR helper. See the
+[CLI guide](cli.md#arch-user-repository-aur).
+
+### Image-based systems
+
+On Fedora Atomic, CoreOS, and other bootc or rpm-ostree systems, the
+**System image** source shows the whole OS as one row, including an update
+waiting for a restart. Updating downloads the new deployment; it applies on
+the next restart. PkgDeck never restarts your computer.
+
+### apk, XBPS, and MacPorts
+
+Alpine's apk, Void's XBPS, and MacPorts work like the other system package
+managers. MacPorts keeps variants when it upgrades and lists only active ports.
+
 ### Mac App Store
 
 With [mas](https://github.com/mas-cli/mas) 7 or newer installed, the **Mac App
@@ -265,7 +296,12 @@ depends on your system and installed package managers. With Homebrew 6.0 or
 later, Homebrew Casks also work on Linux: search shows only casks Linux can
 install (AppImages, command-line tools and fonts), and AppImages a cask
 installed are listed under Homebrew Casks rather than as unmanaged AppImages. On macOS, AppImage
-support, start at login, and the authorization setting are hidden. The Flatpak
+support and start at login are hidden.
+
+When a change needs administrator rights, the app always asks with your
+system's password prompt: polkit on Linux, and the standard administrator
+password dialog on macOS. There is no setting for this, because a sudo login
+from a terminal doesn't carry over to the app. The Flatpak
 and Snap
 builds manage your system's packages, not just sandboxed ones. See
 [packages and releases](distribution.md) and
