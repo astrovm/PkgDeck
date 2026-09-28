@@ -8,6 +8,15 @@ static void print_file(const char *path, const char *fallback) {
     int c; while ((c = fgetc(f)) != EOF) putchar(c);
     fclose(f);
 }
+/* Copy <argv0>.prefix (how a tool names itself in --version) into out. */
+static void copy_prefix(const char *argv0, FILE *out) {
+    char path[4096];
+    snprintf(path, sizeof(path), "%s.prefix", argv0);
+    FILE *f = fopen(path, "r");
+    if (!f) return;
+    int c; while ((c = fgetc(f)) != EOF) fputc(c, out);
+    fclose(f);
+}
 int main(int argc, char **argv) {
     char path[4096];
     if (argc == 2 && strcmp(argv[1], "--version") == 0) {
@@ -26,6 +35,7 @@ int main(int argc, char **argv) {
     fclose(f);
     snprintf(path, sizeof(path), "%s.version", argv[0]);
     f = fopen(path, "w"); if (!f) return 1;
+    copy_prefix(argv[0], f);
     fputs("2.0.0\n", f); fclose(f);
     puts("Synthetic update complete");
     return 0;

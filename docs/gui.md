@@ -182,8 +182,8 @@ apps remain visible in the partial inventory.
 
 ### Standalone CLI tools
 
-Codex, Claude Code, Grok, and OpenCode installed with their official
-installers show up in Installed and Updates. PkgDeck updates them with their
+Codex, Claude Code, Grok, OpenCode, Cursor CLI, GitHub Copilot CLI, Kiro CLI,
+Antigravity CLI, Amp and Factory Droid installed with their official installers show up in Installed and Updates. PkgDeck updates them with their
 own updaters, without admin rights. It can't install or remove them. Copies
 installed with npm or Homebrew are managed by that package manager instead.
 See [supported install layouts](cli.md#standalone-cli-tools).

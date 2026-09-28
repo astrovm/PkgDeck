@@ -15,15 +15,38 @@ pub enum StandaloneTool {
     Claude,
     Grok,
     OpenCode,
+    Cursor,
+    Copilot,
+    Kiro,
+    Antigravity,
+    Amp,
+    Droid,
 }
 impl StandaloneTool {
-    pub const ALL: [Self; 4] = [Self::Codex, Self::Claude, Self::Grok, Self::OpenCode];
+    pub const ALL: [Self; 10] = [
+        Self::Codex,
+        Self::Claude,
+        Self::Grok,
+        Self::OpenCode,
+        Self::Cursor,
+        Self::Copilot,
+        Self::Kiro,
+        Self::Antigravity,
+        Self::Amp,
+        Self::Droid,
+    ];
     pub fn id(self) -> &'static str {
         match self {
             Self::Codex => "codex",
             Self::Claude => "claude",
             Self::Grok => "grok",
             Self::OpenCode => "opencode",
+            Self::Cursor => "cursor",
+            Self::Copilot => "copilot",
+            Self::Kiro => "kiro",
+            Self::Antigravity => "antigravity",
+            Self::Amp => "amp",
+            Self::Droid => "droid",
         }
     }
     fn name(self) -> &'static str {
@@ -32,6 +55,21 @@ impl StandaloneTool {
             Self::Claude => "Claude Code",
             Self::Grok => "Grok",
             Self::OpenCode => "OpenCode",
+            Self::Cursor => "Cursor CLI",
+            Self::Copilot => "GitHub Copilot CLI",
+            Self::Kiro => "Kiro CLI",
+            Self::Antigravity => "Antigravity CLI",
+            Self::Amp => "Amp",
+            Self::Droid => "Factory Droid",
+        }
+    }
+    /// Text a tool's `--version` output must contain, where it names itself.
+    /// The rest install a bare binary whose output is only a version.
+    fn version_marker(self) -> Option<&'static str> {
+        match self {
+            Self::Copilot => Some("GitHub Copilot CLI"),
+            Self::Kiro => Some("kiro-cli"),
+            _ => None,
         }
     }
 }
@@ -82,15 +120,39 @@ fn invalid_data(tool: StandaloneTool, reason: impl std::fmt::Display) -> EngineE
     invalid(tool.id(), reason)
 }
 fn version(tool: StandaloneTool, text: &str) -> Result<Version, EngineError> {
-    Version::parse(
-        text.trim()
-            .trim_start_matches("rust-v")
-            .trim_start_matches('v'),
-    )
-    .map_err(|error| invalid_data(tool, format!("invalid version: {error}")))
+    let text = text
+        .trim()
+        .trim_start_matches("rust-v")
+        .trim_start_matches('v');
+    Version::parse(text)
+        .or_else(|error| date_version(text).ok_or(error))
+        .map_err(|error| invalid_data(tool, format!("invalid version: {error}")))
+}
+/// Date versions such as Cursor's `2026.09.26-dd393fe`, which semver rejects
+/// for the leading zero. The build suffix is metadata: dates set precedence.
+fn date_version(text: &str) -> Option<Version> {
+    let (date, build) = match text.split_once('-') {
+        Some((date, build)) => (date, Some(build)),
+        None => (text, None),
+    };
+    let mut parts = date.split('.').map(|part| {
+        (!part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| part.parse::<u64>().ok())
+            .flatten()
+    });
+    let (major, minor, patch) = (parts.next()??, parts.next()??, parts.next()??);
+    if parts.next().is_some() {
+        return None;
+    }
+    let mut version = Version::new(major, minor, patch);
+    if let Some(build) = build {
+        version.build = semver::BuildMetadata::new(build).ok()?;
+    }
+    Some(version)
 }
 fn installed_version(tool: StandaloneTool, text: &str) -> Result<Version, EngineError> {
     text.split_whitespace()
+        .map(|part| part.trim_end_matches(['.', ',']))
         .find_map(|part| version(tool, part).ok())
         .ok_or_else(|| invalid_data(tool, "unrecognized installed version"))
 }
@@ -323,11 +385,20 @@ impl NativeStandalone {
         tool: StandaloneTool,
         launcher: &Path,
         cancel: &Cancellation,
-    ) -> Result<Version, EngineError> {
+    ) -> Result<Option<Version>, EngineError> {
         let output = self
             .host
             .read(launcher, &["--version".into()], Limits::default(), cancel)?;
-        installed_version(tool, &String::from_utf8_lossy(&bytes(tool.id(), output)?))
+        let text = String::from_utf8_lossy(&bytes(tool.id(), output)?).into_owned();
+        // A binary with the right name that does not identify as the tool is
+        // someone else's.
+        if tool
+            .version_marker()
+            .is_some_and(|marker| !text.contains(marker))
+        {
+            return Ok(None);
+        }
+        installed_version(tool, &text).map(Some)
     }
 }
 
@@ -366,8 +437,32 @@ impl StandaloneIo for NativeStandalone {
                 home.join(".opencode/bin/opencode"),
                 home.join(".opencode/bin"),
             ),
+            // Grok's installer can also create `~/.local/bin/agent`; only a
+            // launcher resolving into Cursor's own versions folder is Cursor's.
+            StandaloneTool::Cursor => {
+                let root = home.join(".local/share/cursor-agent/versions");
+                let agent = home.join(".local/bin/agent");
+                let launcher = if native_binary(tool, &agent, &root)?.is_some() {
+                    agent
+                } else {
+                    home.join(".local/bin/cursor-agent")
+                };
+                (launcher, root)
+            }
+            // These installers place one binary in ~/.local/bin; Homebrew, npm
+            // and system packages link from elsewhere and are not adopted.
+            StandaloneTool::Copilot => (home.join(".local/bin/copilot"), home.join(".local/bin")),
+            StandaloneTool::Kiro => (home.join(".local/bin/kiro-cli"), home.join(".local/bin")),
+            StandaloneTool::Antigravity => (home.join(".local/bin/agy"), home.join(".local/bin")),
+            StandaloneTool::Amp => {
+                let root = self
+                    .setting_path("AMP_HOME", home.join(".amp"))?
+                    .join("bin");
+                (root.join("amp"), root)
+            }
+            StandaloneTool::Droid => (home.join(".local/bin/droid"), home.join(".local/bin")),
         };
-        let Some(binary) = native_binary(&launcher, &root)? else {
+        let Some(binary) = native_binary(tool, &launcher, &root)? else {
             return Ok(None);
         };
         if tool == StandaloneTool::Codex {
@@ -413,8 +508,11 @@ impl StandaloneIo for NativeStandalone {
         } else if tool == StandaloneTool::Grok {
             channel = "configured channel".into();
         }
+        let Some(version) = self.version_at(tool, &launcher, cancel)? else {
+            return Ok(None);
+        };
         Ok(Some(Installation {
-            version: self.version_at(tool, &launcher, cancel)?,
+            version,
             launcher,
             channel,
         }))
@@ -455,6 +553,57 @@ impl StandaloneIo for NativeStandalone {
                     .ok_or_else(|| invalid_data(tool, "missing latestVersion"))?,
             );
         }
+        if tool == StandaloneTool::Droid {
+            // The installer script pins the current release as VER="x.y.z".
+            let script = self.fetch("https://app.factory.ai/cli", cancel)?;
+            let release = script
+                .lines()
+                .find_map(|line| line.trim().strip_prefix("VER=\""))
+                .and_then(|rest| rest.split('"').next())
+                .ok_or_else(|| invalid_data(tool, "installer names no release"))?;
+            return version(tool, release);
+        }
+        if tool == StandaloneTool::Amp {
+            return version(
+                tool,
+                &self.fetch("https://static.ampcode.com/cli/cli-version.txt", cancel)?,
+            );
+        }
+        if tool == StandaloneTool::Cursor {
+            // The installer script names the current release in its download URL.
+            let script = self.fetch("https://cursor.com/install", cancel)?;
+            let release = script
+                .split("downloads.cursor.com/lab/")
+                .nth(1)
+                .and_then(|rest| rest.split('/').next())
+                .ok_or_else(|| invalid_data(tool, "installer names no release"))?;
+            return version(tool, release);
+        }
+        if matches!(tool, StandaloneTool::Kiro | StandaloneTool::Antigravity) {
+            let url = if tool == StandaloneTool::Kiro {
+                "https://prod.download.cli.kiro.dev/stable/latest/manifest.json".to_owned()
+            } else {
+                let os = if cfg!(target_os = "macos") {
+                    "darwin"
+                } else {
+                    "linux"
+                };
+                let arch = if cfg!(target_arch = "aarch64") {
+                    "arm64"
+                } else {
+                    "amd64"
+                };
+                format!("https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/{os}_{arch}.json")
+            };
+            let data: Value = serde_json::from_str(&self.fetch(&url, cancel)?)
+                .map_err(|e| invalid_data(tool, e))?;
+            return version(
+                tool,
+                data["version"]
+                    .as_str()
+                    .ok_or_else(|| invalid_data(tool, "missing version"))?,
+            );
+        }
         let url = match tool {
             StandaloneTool::Codex => "https://releases.openai.com/codex/channels/latest".into(),
             StandaloneTool::Claude => format!(
@@ -464,7 +613,15 @@ impl StandaloneIo for NativeStandalone {
             StandaloneTool::OpenCode => {
                 "https://api.github.com/repos/anomalyco/opencode/releases/latest".into()
             }
-            StandaloneTool::Grok => unreachable!(),
+            StandaloneTool::Copilot => {
+                "https://api.github.com/repos/github/copilot-cli/releases/latest".into()
+            }
+            StandaloneTool::Grok
+            | StandaloneTool::Cursor
+            | StandaloneTool::Kiro
+            | StandaloneTool::Antigravity
+            | StandaloneTool::Amp
+            | StandaloneTool::Droid => unreachable!(),
         };
         let text = self.fetch(&url, cancel)?;
         if tool == StandaloneTool::Claude {
@@ -543,6 +700,14 @@ impl StandaloneIo for NativeStandalone {
                 "--method".into(),
                 "curl".into(),
             ],
+            // These update to their latest release; the version check that
+            // follows confirms it.
+            StandaloneTool::Cursor
+            | StandaloneTool::Copilot
+            | StandaloneTool::Antigravity
+            | StandaloneTool::Amp
+            | StandaloneTool::Droid => vec!["update".into()],
+            StandaloneTool::Kiro => vec!["update".into(), "--non-interactive".into()],
             StandaloneTool::Codex => unreachable!(),
         };
         Ok(self
@@ -553,7 +718,11 @@ impl StandaloneIo for NativeStandalone {
 
 /// A standalone install is an owned native binary in the upstream's private
 /// storage. npm scripts and Homebrew/package-manager symlinks are not adopted.
-fn native_binary(launcher: &Path, root: &Path) -> Result<Option<PathBuf>, EngineError> {
+fn native_binary(
+    tool: StandaloneTool,
+    launcher: &Path,
+    root: &Path,
+) -> Result<Option<PathBuf>, EngineError> {
     let binary = match fs::canonicalize(launcher) {
         Ok(path) => path,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -581,6 +750,16 @@ fn native_binary(launcher: &Path, root: &Path) -> Result<Option<PathBuf>, Engine
         || metadata.permissions().mode() & 0o111 == 0
     {
         return Ok(None);
+    }
+    // Cursor ships a launcher script beside its bundled Node app.
+    if tool == StandaloneTool::Cursor {
+        let bundled = binary
+            .file_name()
+            .is_some_and(|name| name == "cursor-agent")
+            && binary
+                .parent()
+                .is_some_and(|dir| dir.join("index.js").is_file());
+        return Ok(bundled.then_some(binary));
     }
     let mut header = [0; 4];
     if fs::File::open(&binary)
@@ -721,6 +900,15 @@ mod tests {
                 }
                 StandaloneTool::Grok => (".grok/bin/grok", ".grok/downloads/grok-linux-test"),
                 StandaloneTool::OpenCode => (".opencode/bin/opencode", ".opencode/bin/opencode"),
+                StandaloneTool::Cursor => (
+                    ".local/bin/agent",
+                    ".local/share/cursor-agent/versions/1.0.0/cursor-agent",
+                ),
+                StandaloneTool::Copilot => (".local/bin/copilot", ".local/bin/copilot"),
+                StandaloneTool::Kiro => (".local/bin/kiro-cli", ".local/bin/kiro-cli"),
+                StandaloneTool::Antigravity => (".local/bin/agy", ".local/bin/agy"),
+                StandaloneTool::Amp => (".amp/bin/amp", ".amp/bin/amp"),
+                StandaloneTool::Droid => (".local/bin/droid", ".local/bin/droid"),
             };
             let target_path = self.0.join(target);
             fs::create_dir_all(target_path.parent().unwrap()).unwrap();
@@ -732,6 +920,30 @@ mod tests {
             }
             if tool == StandaloneTool::Codex {
                 self.write(".codex/packages/standalone/releases/1.0.0-test/codex-package.json", r#"{"layoutVersion":1,"version":"1.0.0","entrypoint":"bin/codex","variant":"codex"}"#);
+            }
+            if tool == StandaloneTool::Cursor {
+                self.write(".local/share/cursor-agent/versions/1.0.0/index.js", "");
+            }
+            // Tools that name themselves in --version keep doing so after updates.
+            if let Some(prefix) = match tool {
+                StandaloneTool::Copilot => Some("GitHub Copilot CLI "),
+                StandaloneTool::Kiro => Some("kiro-cli "),
+                _ => None,
+            } {
+                self.write(
+                    &format!(
+                        "{}.prefix",
+                        launcher.strip_prefix(&self.0).unwrap().display()
+                    ),
+                    prefix,
+                );
+                self.write(
+                    &format!(
+                        "{}.version",
+                        launcher.strip_prefix(&self.0).unwrap().display()
+                    ),
+                    format!("{prefix}1.0.0."),
+                );
             }
             launcher
         }
@@ -950,6 +1162,98 @@ mod tests {
         assert!(native.locate(StandaloneTool::Codex, &cancel).is_err());
     }
     #[test]
+    fn new_ai_clis_are_adopted_only_from_their_own_installers() {
+        let temp = Temp::new();
+        let native = temp.native();
+        let cancel = Cancellation::default();
+        // Grok's installer can own ~/.local/bin/agent; Cursor then answers to
+        // its other launcher, and a Grok link is never taken for Cursor.
+        let grok = temp.install(StandaloneTool::Grok);
+        let agent = temp.0.join(".local/bin/agent");
+        fs::create_dir_all(agent.parent().unwrap()).unwrap();
+        symlink(&grok, &agent).unwrap();
+        assert!(native
+            .locate(StandaloneTool::Cursor, &cancel)
+            .unwrap()
+            .is_none());
+        fs::remove_file(&agent).unwrap();
+        temp.install(StandaloneTool::Cursor);
+        fs::remove_file(&agent).unwrap();
+        symlink(&grok, &agent).unwrap();
+        let fallback = temp.0.join(".local/bin/cursor-agent");
+        symlink(
+            temp.0
+                .join(".local/share/cursor-agent/versions/1.0.0/cursor-agent"),
+            &fallback,
+        )
+        .unwrap();
+        assert_eq!(
+            native
+                .locate(StandaloneTool::Cursor, &cancel)
+                .unwrap()
+                .unwrap()
+                .launcher,
+            fallback
+        );
+        // A Cursor script without its bundle is not Cursor's.
+        fs::remove_file(
+            temp.0
+                .join(".local/share/cursor-agent/versions/1.0.0/index.js"),
+        )
+        .unwrap();
+        assert!(native
+            .locate(StandaloneTool::Cursor, &cancel)
+            .unwrap()
+            .is_none());
+        // A binary named copilot that does not identify as Copilot is not adopted.
+        temp.install(StandaloneTool::Copilot);
+        temp.write(".local/bin/copilot.version", "some other tool 3.0.0");
+        assert!(native
+            .locate(StandaloneTool::Copilot, &cancel)
+            .unwrap()
+            .is_none());
+        temp.write(
+            ".local/bin/copilot.version",
+            "GitHub Copilot CLI 1.0.88. Run 'copilot update' to check for updates.",
+        );
+        assert_eq!(
+            native
+                .locate(StandaloneTool::Copilot, &cancel)
+                .unwrap()
+                .unwrap()
+                .version,
+            Version::new(1, 0, 88)
+        );
+        // Homebrew and npm copies link from elsewhere and are not adopted.
+        let npm = temp.script(
+            "lib/node_modules/@github/copilot/copilot",
+            "#!/bin/sh
+",
+        );
+        fs::remove_file(temp.0.join(".local/bin/copilot")).unwrap();
+        symlink(npm, temp.0.join(".local/bin/copilot")).unwrap();
+        assert!(native
+            .locate(StandaloneTool::Copilot, &cancel)
+            .unwrap()
+            .is_none());
+    }
+    #[test]
+    fn date_versions_compare_by_date() {
+        let cursor = version(StandaloneTool::Cursor, "2026.09.26-dd393fe").unwrap();
+        assert_eq!((cursor.major, cursor.minor, cursor.patch), (2026, 9, 26));
+        assert_eq!(cursor.build.as_str(), "dd393fe");
+        assert!(version(StandaloneTool::Cursor, "2026.10.01-aaaaaaa")
+            .unwrap()
+            .cmp_precedence(&cursor)
+            .is_gt());
+        assert!(version(StandaloneTool::Cursor, "2026.09").is_err());
+        assert!(version(StandaloneTool::Cursor, "2026.09.26.1").is_err());
+        assert_eq!(
+            installed_version(StandaloneTool::Copilot, "GitHub Copilot CLI 1.0.88.").unwrap(),
+            Version::new(1, 0, 88)
+        );
+    }
+    #[test]
     fn network_checks_never_rewrite_the_curl_shim() {
         let temp = Temp::new();
         let _native = temp.native();
@@ -974,10 +1278,12 @@ mod tests {
         for tool in StandaloneTool::ALL {
             temp.install(tool);
             let installation = native.locate(tool, &cancel).unwrap().unwrap();
-            temp.network(if tool == StandaloneTool::Claude {
-                "2.0.0"
-            } else {
-                r#"{"tag_name":"rust-v2.0.0"}"#
+            temp.network(match tool {
+                StandaloneTool::Claude | StandaloneTool::Amp => "2.0.0",
+                StandaloneTool::Droid => "#!/bin/sh\nbinary_name=\"droid\"\nVER=\"2.0.0\"\n",
+                StandaloneTool::Cursor => "DOWNLOAD_URL=\"https://downloads.cursor.com/lab/2.0.0/${OS}/${ARCH}/agent-cli-package.tar.gz\"",
+                StandaloneTool::Kiro | StandaloneTool::Antigravity => r#"{"version":"2.0.0"}"#,
+                _ => r#"{"tag_name":"rust-v2.0.0"}"#,
             });
             assert_eq!(
                 native.latest(tool, &installation, &cancel).unwrap(),

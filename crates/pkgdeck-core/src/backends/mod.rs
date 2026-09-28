@@ -72,11 +72,17 @@ pub const BACKEND_IDS: &[&str] = &[
     "claude",
     "grok",
     "opencode",
+    "cursor",
+    "copilot",
+    "kiro",
+    "antigravity",
+    "amp",
+    "droid",
 ];
 
 /// These sources update existing installations but do not install or remove them.
 pub fn update_only(id: &str) -> bool {
-    matches!(id, "fwupd" | "codex" | "claude" | "grok" | "opencode")
+    id == "fwupd" || StandaloneTool::ALL.iter().any(|tool| tool.id() == id)
 }
 
 /// Inventory sources whose rows must never offer package mutations.
@@ -110,6 +116,12 @@ pub fn display_name(id: &str) -> &str {
         "claude" => "Claude Code",
         "grok" => "Grok",
         "opencode" => "OpenCode",
+        "cursor" => "Cursor CLI",
+        "copilot" => "GitHub Copilot CLI",
+        "kiro" => "Kiro CLI",
+        "antigravity" => "Antigravity CLI",
+        "amp" => "Amp",
+        "droid" => "Factory Droid",
         // npm, pnpm, pip, pipx, uv, and mise are written in lower case.
         other => other,
     }
