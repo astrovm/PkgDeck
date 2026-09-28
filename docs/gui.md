@@ -79,7 +79,7 @@ only Docker or Podman and search for the full image name with its tag.
 
 Updates lists package updates and, if `fwupdmgr` is installed, firmware updates.
 
-![Updates for three npm tools, all checked](screenshots/updates.png)
+![Updates for an APT package and three npm tools, all checked](screenshots/updates.png)
 
 - Click a row's arrow to update just that item.
 - Check several rows and click **Update selected**. When every row is checked,
