@@ -232,6 +232,99 @@ pub fn inspect_with(
 pub struct NativeOwnership<'a> {
     pub host: &'a Host,
     pub rpm_backend: String,
+    pub layout: Layout,
+}
+
+/// Folders only one manager writes to. A file that really lives inside one
+/// belongs to that manager's package named by the next folder, as reliably
+/// as a package database says so.
+#[derive(Default)]
+pub struct Layout {
+    roots: Vec<(PathBuf, &'static str)>,
+    cargo_home: Option<PathBuf>,
+}
+impl Layout {
+    pub fn native(host: &Host) -> Self {
+        if host.runtime != Runtime::Native {
+            return Self::default();
+        }
+        let var = |name: &str| {
+            host.var(name)
+                .map(PathBuf::from)
+                .filter(|path| path.is_absolute())
+        };
+        let home = var("HOME");
+        let data = var("XDG_DATA_HOME").or_else(|| home.as_ref().map(|h| h.join(".local/share")));
+        let mut roots = vec![];
+        let prefixes: Vec<PathBuf> = match var("HOMEBREW_PREFIX") {
+            Some(prefix) => vec![prefix],
+            None => ["/opt/homebrew", "/usr/local", "/home/linuxbrew/.linuxbrew"]
+                .into_iter()
+                .map(PathBuf::from)
+                .collect(),
+        };
+        for prefix in prefixes {
+            roots.push((prefix.join("Cellar"), "homebrew"));
+            roots.push((prefix.join("Caskroom"), "homebrew-cask"));
+        }
+        if let Some(pipx) = var("PIPX_HOME").or_else(|| data.as_ref().map(|d| d.join("pipx"))) {
+            roots.push((pipx.join("venvs"), "pipx"));
+        }
+        if let Some(uv) = var("UV_TOOL_DIR").or_else(|| data.as_ref().map(|d| d.join("uv/tools"))) {
+            roots.push((uv, "uv"));
+        }
+        if let Some(mise) = var("MISE_DATA_DIR").or_else(|| data.as_ref().map(|d| d.join("mise"))) {
+            roots.push((mise.join("installs"), "mise"));
+        }
+        Self {
+            // Compare real paths: /usr/local and Linuxbrew may be symlinks.
+            roots: roots
+                .into_iter()
+                .map(|(root, manager)| (fs::canonicalize(&root).unwrap_or(root), manager))
+                .collect(),
+            cargo_home: var("CARGO_HOME").or_else(|| home.map(|h| h.join(".cargo"))),
+        }
+    }
+
+    fn owners(&self, path: &Path) -> Vec<(String, String)> {
+        let mut records = vec![];
+        for (root, manager) in &self.roots {
+            if let Some(Component::Normal(name)) = path
+                .strip_prefix(root)
+                .ok()
+                .and_then(|rest| rest.components().next())
+            {
+                if let Some(name) = name.to_str().filter(|name| !name.starts_with('.')) {
+                    records.push(((*manager).to_owned(), name.to_owned()));
+                }
+            }
+        }
+        // Cargo's own record of which crate installed which binary.
+        if let (Some(cargo), Some(file)) = (&self.cargo_home, path.file_name()) {
+            if path.parent() == Some(cargo.join("bin").as_path()) {
+                let installs = fs::read(cargo.join(".crates2.json"))
+                    .ok()
+                    .and_then(|data| serde_json::from_slice::<serde_json::Value>(&data).ok());
+                for (key, install) in installs
+                    .as_ref()
+                    .and_then(|value| value["installs"].as_object())
+                    .into_iter()
+                    .flatten()
+                {
+                    let bins = install["bins"].as_array().into_iter().flatten();
+                    if bins
+                        .filter_map(|bin| bin.as_str())
+                        .any(|bin| Some(bin) == file.to_str())
+                    {
+                        if let Some(name) = key.split(' ').next() {
+                            records.push(("cargo".into(), name.to_owned()));
+                        }
+                    }
+                }
+            }
+        }
+        records
+    }
 }
 impl NativeOwnership<'_> {
     fn query(&self, executable: &str, args: &[OsString], cancel: &Cancellation) -> Option<String> {
@@ -303,6 +396,7 @@ impl OwnershipSource for NativeOwnership<'_> {
         if let Some(text) = self.query("pacman", &["-Qqo".into(), "--".into(), target], cancel) {
             records.extend(parse_owner_records("pacman", &text));
         }
+        records.extend(self.layout.owners(path));
         records
     }
 }
@@ -333,6 +427,7 @@ pub fn inspect_native(
         &NativeOwnership {
             host,
             rpm_backend: rpm_backend.into(),
+            layout: Layout::native(host),
         },
         cancel,
     )
@@ -501,6 +596,59 @@ pub fn native_leftovers(host: &Host) -> Vec<LeftoverData> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn manager_folders_name_their_packages() {
+        let root = std::env::temp_dir().join(format!("pkgdeck-layout-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let cargo = root.join("cargo");
+        fs::create_dir_all(cargo.join("bin")).unwrap();
+        fs::write(
+            cargo.join(".crates2.json"),
+            r#"{"installs":{"ripgrep 14.1.0 (registry+https://github.com/rust-lang/crates.io-index)":{"bins":["rg"]}}}"#,
+        )
+        .unwrap();
+        let layout = Layout {
+            roots: vec![
+                (root.join("brew/Cellar"), "homebrew"),
+                (root.join("brew/Caskroom"), "homebrew-cask"),
+                (root.join("pipx/venvs"), "pipx"),
+                (root.join("uv/tools"), "uv"),
+                (root.join("mise/installs"), "mise"),
+            ],
+            cargo_home: Some(cargo.clone()),
+        };
+        let owner = |path: PathBuf| layout.owners(&path);
+        let one = |manager: &str, name: &str| vec![(manager.to_owned(), name.to_owned())];
+        assert_eq!(
+            owner(root.join("brew/Cellar/jq/1.8.1/bin/jq")),
+            one("homebrew", "jq")
+        );
+        assert_eq!(
+            owner(root.join("brew/Caskroom/codex/1.0/codex")),
+            one("homebrew-cask", "codex")
+        );
+        assert_eq!(
+            owner(root.join("pipx/venvs/black/bin/black")),
+            one("pipx", "black")
+        );
+        assert_eq!(
+            owner(root.join("uv/tools/ruff/bin/ruff")),
+            one("uv", "ruff")
+        );
+        assert_eq!(
+            owner(root.join("mise/installs/node/22.1.0/bin/node")),
+            one("mise", "node")
+        );
+        assert_eq!(owner(cargo.join("bin/rg")), one("cargo", "ripgrep"));
+        // Cargo's folder also holds tools it didn't install (rustup's proxies).
+        assert!(owner(cargo.join("bin/cargo")).is_empty());
+        // The folder itself, hidden entries and look-alike paths own nothing.
+        assert!(owner(root.join("brew/Cellar")).is_empty());
+        assert!(owner(root.join("brew/Cellar/.metadata/x")).is_empty());
+        assert!(owner(root.join("brew/Cellarx/jq/bin/jq")).is_empty());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
     use super::*;
     use crate::package::UpdateAvailability;
     use std::{

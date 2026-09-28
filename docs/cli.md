@@ -240,8 +240,10 @@ before running it.
 
 `pkd inspect COMMAND` shows which file runs when you type `COMMAND` and which
 package installed it. It searches your `PATH` in order, shows other matches
-and symlink targets, and asks your package managers who owns each file.
-It never runs the command.
+and symlink targets, and asks your package managers who owns each file:
+the APT, RPM and Pacman databases, and the folders only one manager writes to
+(Homebrew's Cellar and Caskroom, Cargo's install records, pipx venvs, uv tools,
+mise installs). It never runs the command.
 
 Each file says who installed it, such as "Installed by cowsay (APT)", then
 the matching package, such as "Package: cowsay from APT, system".
