@@ -35,6 +35,9 @@ pub(super) struct Rule {
     pub token: &'static str,
     pub bundle_id: &'static str,
     pub team: Option<&'static str>,
+    /// Cask parts allowed beyond `KNOWN_ARTIFACTS`. Only the recovery test
+    /// fixture uses it, to make Homebrew fail after adopting the app.
+    pub also: &'static [&'static str],
 }
 
 const RULES: &[Rule] = &[
@@ -42,17 +45,20 @@ const RULES: &[Rule] = &[
         token: "visual-studio-code",
         bundle_id: "com.microsoft.VSCode",
         team: Some("UBF8T346G9"),
+        also: &[],
     },
     Rule {
         token: "firefox",
         bundle_id: "org.mozilla.firefox",
         team: Some("43AQ936H96"),
+        also: &[],
     },
     // Read from the signed app in the cask's own DMG (Dynalist Inc.).
     Rule {
         token: "obsidian",
         bundle_id: "md.obsidian",
         team: Some("6JSW4SJWN9"),
+        also: &[],
     },
     // Only test builds know the CI fixture, an ad-hoc signed app in a local tap.
     #[cfg(debug_assertions)]
@@ -60,6 +66,17 @@ const RULES: &[Rule] = &[
         token: "pkgdeck/fixtures/pkgdeck-adopt-fixture",
         bundle_id: "io.github.astrovm.pkgdeck.adopt-fixture",
         team: None,
+        also: &[],
+    },
+    // The same fixture app, whose cask fails in a postflight step after the
+    // app was adopted: Homebrew's rollback then deletes it, and the CI test
+    // checks that PkgDeck puts it back.
+    #[cfg(debug_assertions)]
+    Rule {
+        token: "pkgdeck/fixtures/pkgdeck-adopt-failure",
+        bundle_id: "io.github.astrovm.pkgdeck.adopt-fixture",
+        team: None,
+        also: &["postflight"],
     },
 ];
 
@@ -172,7 +189,7 @@ pub(super) fn plan(
     if let Some(unknown) = artifacts
         .iter()
         .filter_map(artifact_kind)
-        .find(|kind| !KNOWN_ARTIFACTS.contains(kind))
+        .find(|kind| !KNOWN_ARTIFACTS.contains(kind) && !rule.also.contains(kind))
     {
         return Err(refuse(
             &name,
@@ -668,6 +685,24 @@ mod tests {
         assert!(plan(&absent, &cask(), &Cancellation::default())
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn only_the_recovery_fixture_may_fail_after_the_app_step() {
+        let mut vscode = cask();
+        vscode["artifacts"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"postflight": null}));
+        let reason = reason(plan(&fake(), &vscode, &Cancellation::default()));
+        assert!(reason.contains("also installs a postflight"), "{reason}");
+        if cfg!(debug_assertions) {
+            assert_eq!(
+                rule("pkgdeck/fixtures/pkgdeck-adopt-failure").unwrap().also,
+                ["postflight"]
+            );
+        }
+        assert!(rule("visual-studio-code").unwrap().also.is_empty());
     }
 
     type Change = Box<dyn Fn(&mut Fake, &mut Value)>;

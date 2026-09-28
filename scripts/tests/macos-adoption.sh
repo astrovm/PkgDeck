@@ -18,6 +18,7 @@ trap 'echo "macos-adoption FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
 # Only debug builds know this fixture's cask (see backends/adopt.rs).
 tap=pkgdeck/fixtures
 cask="$tap/pkgdeck-adopt-fixture"
+failing="$tap/pkgdeck-adopt-failure"
 app='/Applications/PkgDeck Adopt Fixture.app'
 command_link="$(brew --prefix)/bin/pkgdeck-adopt-fixture"
 backups="$HOME/Library/Application Support/PkgDeck/Adoption backups"
@@ -28,6 +29,7 @@ done
 cleanup() {
     set +e
     brew uninstall --cask "$cask"
+    brew uninstall --cask "$failing"
     brew untap "$tap"
     rm -rf "$app" "$work"
     if [[ -L $command_link || -f $command_link ]]; then rm -f "$command_link"; fi
@@ -109,4 +111,36 @@ installed
 # 4. Once Homebrew owns it, removing the cask removes the app, as for any cask.
 "$pkd" --json --yes --from homebrew-cask remove "$cask" | grep -q '"exit_code":0'
 [[ ! -e $app ]]
-echo 'PASS checked adoption, refusals, and removal through real Homebrew'
+
+# 5. Recovery: this cask fails in postflight, after Homebrew took the app.
+# Homebrew's rollback deletes the adopted app; PkgDeck must put it back with
+# its permissions and extended attributes, and leave no copy behind.
+cat > "$(brew --repository "$tap")/Casks/pkgdeck-adopt-failure.rb" <<EOF
+cask "pkgdeck-adopt-failure" do
+  version "1.2.3"
+  sha256 "$digest"
+  url "file://$work/fixture.zip"
+  name "PkgDeck Adopt Failure"
+  desc "Disposable adoption recovery fixture"
+  homepage "https://github.com/astrovm/PkgDeck"
+  auto_updates true
+  app "PkgDeck Adopt Fixture.app"
+  postflight do
+    raise "PkgDeck recovery test: failing after the app was adopted"
+  end
+end
+EOF
+ditto "$bundle" "$app"
+xattr -w io.github.astrovm.pkgdeck.test kept "$app"
+chmod 700 "$app/Contents/Resources/pkgdeck-adopt-fixture"
+output=$("$pkd" --json --yes --from homebrew-cask install "$failing") || true
+grep -q 'PkgDeck put it back' <<<"$output" || { echo "Expected a restored app: $output" >&2; exit 1; }
+[[ -d $app ]] || { echo 'The app is gone after the failed adoption' >&2; exit 1; }
+[[ $(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist") == io.github.astrovm.pkgdeck.adopt-fixture ]]
+[[ $(xattr -p io.github.astrovm.pkgdeck.test "$app") == kept ]]
+[[ $(/usr/bin/stat -f %Lp "$app/Contents/Resources/pkgdeck-adopt-fixture") == 700 ]]
+cmp "$bundle/Contents/MacOS/fixture" "$app/Contents/MacOS/fixture"
+if brew list --cask --versions "$failing" >/dev/null 2>&1; then echo 'The failed cask is installed' >&2; exit 1; fi
+[[ ! -d $backups ]] || [[ -z $(ls -A "$backups") ]] || { echo "Backup left behind: $(ls "$backups")" >&2; exit 1; }
+rm -rf "$app"
+echo 'PASS checked adoption, refusals, recovery and removal through real Homebrew'
