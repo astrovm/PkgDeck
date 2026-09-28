@@ -95,11 +95,10 @@ else
     if want coverage; then
         mkdir -p coverage
         stage test-coverage cargo llvm-cov --workspace --include-build-script --ignore-filename-regex pkgdeck-tools --locked --lcov --output-path coverage/lcov.info
-        # CI gates the lines covered on any platform instead (Coverage /
-        # Combined), so its per-platform runs set PKGDECK_COVERAGE_GATE=0.
-        if [[ ${PKGDECK_COVERAGE_GATE:-1} != 0 ]]; then
-            stage check-coverage cargo llvm-cov report --summary-only --include-build-script --ignore-filename-regex pkgdeck-tools --fail-under-lines 96
-        fi
+        # The 100% gate counts every platform together (CI's Coverage /
+        # Combined); code for other platforms is not built here, so this one
+        # report is shown, not gated.
+        stage coverage-summary cargo llvm-cov report --summary-only --include-build-script --ignore-filename-regex pkgdeck-tools
     fi
     want release && stage build-release cargo build --workspace --release --locked
     # Plain debug test run without coverage instrumentation; the aarch64 CI

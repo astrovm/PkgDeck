@@ -59,8 +59,8 @@ jobs:
         with:
           coverage: ${{ matrix.coverage }}
       - name: Run checks, lint and workspace tests
-        # The 96% gate applies to all platforms together (Coverage / Combined).
-        run: PKGDECK_COVERAGE_GATE=0 scripts/verify.sh full --only ${{ matrix.suite }}
+        # The 100% gate applies to all platforms together (Coverage / Combined).
+        run: scripts/verify.sh full --only ${{ matrix.suite }}
       - name: Upload coverage report
         if: matrix.coverage == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -280,9 +280,9 @@ jobs:
         with:
           pattern: coverage-*
           path: coverage
-      - name: Require 96% of all lines
+      - name: Require 100% of all lines
         run: |
-          bash scripts/coverage-merge.sh --fail-under 96 --summary "$GITHUB_STEP_SUMMARY" \
+          bash scripts/coverage-merge.sh --fail-under 100 --summary "$GITHUB_STEP_SUMMARY" \
             "Linux (workspace)=coverage/coverage-linux-x86_64/lcov.info" \
             "macOS (core and CLI)=coverage/coverage-macos-aarch64/lcov.info"
 
