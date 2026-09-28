@@ -95,6 +95,12 @@ pub fn update_only(id: &str) -> bool {
         || StandaloneTool::ALL.iter().any(|tool| tool.id() == id)
 }
 
+/// Sources upgraded package by package: they have no single "upgrade
+/// everything" command, so `pkd upgrade` without names lists each package.
+pub fn per_package_upgrades(id: &str) -> bool {
+    update_only(id) || id == "pixi"
+}
+
 /// Inventory sources whose rows must never offer package mutations.
 pub fn read_only(id: &str) -> bool {
     id == "macos-apps"
@@ -5166,6 +5172,16 @@ mod tests {
         assert!(!linux_casks_supported("Homebrew 4.6.20\n"));
         assert!(!linux_casks_supported("brew: command not found\n"));
         assert!(!linux_casks_supported(""));
+    }
+
+    #[test]
+    fn upgrade_everything_lists_packages_where_there_is_no_single_command() {
+        for id in ["pixi", "mas", "conda", "fwupd", "codex"] {
+            assert!(per_package_upgrades(id), "{id}");
+        }
+        for id in ["apt", "homebrew", "npm", "mise"] {
+            assert!(!per_package_upgrades(id), "{id}");
+        }
     }
 
     #[test]

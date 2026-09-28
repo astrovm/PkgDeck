@@ -573,14 +573,16 @@ pub fn dispatch_with(
                     .packages
                     .into_iter()
                     .filter(|p| p.update == UpdateAvailability::Available)
+                    .filter(|p| !pkgdeck_core::backends::read_only(&p.id.backend))
                 {
-                    let operation = if pkgdeck_core::backends::update_only(&package.id.backend) {
-                        Operation::Upgrade(package.id)
-                    } else {
-                        Operation::UpgradeAll {
-                            backend: package.id.backend,
-                        }
-                    };
+                    let operation =
+                        if pkgdeck_core::backends::per_package_upgrades(&package.id.backend) {
+                            Operation::Upgrade(package.id)
+                        } else {
+                            Operation::UpgradeAll {
+                                backend: package.id.backend,
+                            }
+                        };
                     if !operations.contains(&operation) {
                         operations.push(operation);
                     }
