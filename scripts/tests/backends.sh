@@ -13,9 +13,9 @@ here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 case $group in
 native)
     [[ $(uname -s) == Linux ]] || { echo 'Native managers are tested on Linux only' >&2; exit 2; }
-    backends=(dnf zypper apk xbps snap)
+    backends=(dnf zypper apk xbps snap toolbox distrobox)
     # Arch's official container (Pacman and the AUR) is x86_64-only.
-    [[ $(uname -m) == x86_64 ]] && backends=(dnf pacman aur zypper apk xbps snap)
+    [[ $(uname -m) == x86_64 ]] && backends=(dnf pacman aur zypper apk xbps snap toolbox distrobox)
     ;;
 dev) backends=(cargo rustup go dotnet npm pnpm bun pip pipx uv mise pixi conda nix composer gem) ;;
 macports) backends=(macports) ;;
@@ -33,6 +33,7 @@ for backend in "${backends[@]}"; do
     apk | xbps) "$here/native-manager.sh" "$backend" "$musl" ;;
     aur) "$here/aur-manager.sh" "$pkd" ;;
     snap) "$here/snap-manager.sh" "$pkd" ;;
+    toolbox | distrobox) "$here/dev-containers.sh" "$backend" "$pkd" ;;
     macports) "$here/macports-manager.sh" "$pkd" ;;
     *) "$here/dev-manager.sh" "$backend" "$pkd" ;;
     esac
