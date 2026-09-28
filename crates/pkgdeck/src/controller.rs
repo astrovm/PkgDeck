@@ -1149,6 +1149,12 @@ fn source_display_name(id: &str) -> String {
         "claude" => "Claude Code (standalone)",
         "grok" => "Grok (standalone)",
         "opencode" => "OpenCode (standalone)",
+        "cursor" => "Cursor CLI (standalone)",
+        "copilot" => "GitHub Copilot CLI (standalone)",
+        "kiro" => "Kiro CLI (standalone)",
+        "antigravity" => "Antigravity CLI (standalone)",
+        "amp" => "Amp (standalone)",
+        "droid" => "Factory Droid (standalone)",
         other => other,
     }
     .to_owned()
@@ -8718,6 +8724,12 @@ mod tests {
             ("claude", "Claude Code (standalone)"),
             ("grok", "Grok (standalone)"),
             ("opencode", "OpenCode (standalone)"),
+            ("cursor", "Cursor CLI (standalone)"),
+            ("copilot", "GitHub Copilot CLI (standalone)"),
+            ("kiro", "Kiro CLI (standalone)"),
+            ("antigravity", "Antigravity CLI (standalone)"),
+            ("amp", "Amp (standalone)"),
+            ("droid", "Factory Droid (standalone)"),
             ("fixture", "fixture"),
         ] {
             assert_eq!(source_display_name(id), name);

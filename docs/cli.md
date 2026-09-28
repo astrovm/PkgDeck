@@ -47,7 +47,8 @@ pkd completions bash                     # print a shell completion script
 Sources for `--from`: `fwupd`, `apt`, `dnf`, `pacman`, `zypper`, `snap`,
 `homebrew`, `homebrew-cask`, `appimage`, `flatpak`, `docker`, `podman`,
 `cargo`, `npm`, `pnpm`, `bun`, `pip`, `pipx`, `uv`, `mise`, `composer`, `gem`,
-`codex`, `claude`, `grok`, and `opencode`.
+`codex`, `claude`, `grok`, `opencode`, `cursor`, `copilot`, `kiro`,
+`antigravity`, `amp`, and `droid`.
 
 Without `--from`, PkgDeck uses every package manager it finds. Package managers
 that aren't installed are skipped. Sources that fail are reported, not
@@ -311,7 +312,8 @@ and source errors identify the skipped folders (also in JSON `failures`).
 
 ## Standalone CLI tools
 
-PkgDeck finds Codex, Claude Code, Grok, and OpenCode when they were installed
+PkgDeck finds Codex, Claude Code, Grok, OpenCode, Cursor CLI, GitHub Copilot
+CLI, Kiro CLI, Antigravity CLI, Amp, and Factory Droid when they were installed
 with their official installers. They appear in `pkd list` and `pkd upgrade`.
 
 ```sh
@@ -331,6 +333,12 @@ program must be owned by you and installed in the official location:
 | Claude Code | `~/.local/bin/claude`, linking into `~/.local/share/claude/versions` | `XDG_DATA_HOME`; `CLAUDE_CONFIG_DIR` for the update channel |
 | Grok | `~/.grok/bin/grok`, linking into `~/.grok/downloads` | `GROK_BIN_DIR` |
 | OpenCode | `~/.opencode/bin/opencode` | |
+| Cursor CLI | `~/.local/bin/agent` or `cursor-agent`, linking into `~/.local/share/cursor-agent/versions` | |
+| GitHub Copilot CLI | `~/.local/bin/copilot`, reporting itself as GitHub Copilot CLI | |
+| Kiro CLI | `~/.local/bin/kiro-cli`, reporting itself as kiro-cli (Linux; on macOS the installer ships an app) | |
+| Antigravity CLI | `~/.local/bin/agy` | |
+| Amp | `~/.amp/bin/amp` | `AMP_HOME` |
+| Factory Droid | `~/.local/bin/droid` | |
 
 How updates are checked and installed:
 
@@ -340,6 +348,12 @@ How updates are checked and installed:
 | Claude Code | Your configured stable or latest channel | `claude update` |
 | Grok | `grok update --check --json` | Grok's own updater |
 | OpenCode | Latest stable release | `opencode upgrade VERSION --method curl` |
+| Cursor CLI | The release named by Cursor's installer | `agent update` |
+| GitHub Copilot CLI | Latest stable release | `copilot update` |
+| Kiro CLI | Kiro's stable release manifest | `kiro-cli update --non-interactive` |
+| Antigravity CLI | Antigravity's release manifest for your platform | `agy update` |
+| Amp | Amp's published CLI version | `amp update` |
+| Factory Droid | The release Droid's installer names | `droid update` |
 
 `curl` is needed for the release checks and the Codex installer. If a check
 fails, it's reported as an error, never as "up to date". Updates need
