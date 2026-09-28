@@ -121,6 +121,17 @@ fn autostart_path_from(config: Option<OsString>, home: Option<OsString>) -> Opti
     Some(base.join("autostart/io.github.astrovm.PkgDeck.desktop"))
 }
 pub fn set_autostart(path: &Path, enabled: bool) -> io::Result<()> {
+    let environment: BTreeMap<OsString, OsString> = std::env::vars_os().collect();
+    let runtime = Runtime::detect(&environment, Path::new("/.flatpak-info").exists());
+    let appimage = environment.get(&OsString::from("APPIMAGE")).map(Path::new);
+    set_autostart_for(path, enabled, runtime, appimage)
+}
+fn set_autostart_for(
+    path: &Path,
+    enabled: bool,
+    runtime: Runtime,
+    appimage: Option<&Path>,
+) -> io::Result<()> {
     if !enabled {
         if path.exists() {
             fs::remove_file(path)?;
@@ -131,14 +142,11 @@ pub fn set_autostart(path: &Path, enabled: bool) -> io::Result<()> {
         path.parent()
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid autostart path"))?,
     )?;
-    let environment: BTreeMap<OsString, OsString> = std::env::vars_os().collect();
-    let runtime = Runtime::detect(&environment, Path::new("/.flatpak-info").exists());
     let executable = if matches!(runtime, Runtime::Native | Runtime::AppImage) {
         std::env::current_exe()?
     } else {
         PathBuf::new()
     };
-    let appimage = environment.get(&OsString::from("APPIMAGE")).map(Path::new);
     let exec = autostart_exec(runtime, &executable, appimage)?;
     let mut file = OpenOptions::new()
         .create(true)
@@ -281,6 +289,13 @@ mod tests {
         assert!(fs::read_to_string(&path).unwrap().contains("--background"));
         set_autostart(&path, false).unwrap();
         assert!(!path.exists());
+        set_autostart(&path, false).unwrap();
+        set_autostart_for(&path, true, Runtime::Snap, None).unwrap();
+        assert!(fs::read_to_string(&path)
+            .unwrap()
+            .contains("\nExec=snap run pkgdeck --background\n"));
+        let blocked = path.join("app.desktop");
+        assert!(set_autostart(&blocked, true).is_err());
         fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 

@@ -11,6 +11,7 @@
 use crate::process::{Completion, ExecutionError};
 use sha2::{Digest, Sha256};
 use std::{
+    ffi::OsString,
     fs,
     io::{Read, Write},
     os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
@@ -125,13 +126,19 @@ impl Store {
     /// `PKGDECK_NO_CACHE` is set, or when running as root, where a cache in
     /// someone else's home could lock them out of it.
     pub fn user() -> Option<Self> {
-        if std::env::var_os("PKGDECK_NO_CACHE").is_some() || rustix::process::geteuid().is_root() {
+        Self::user_with(
+            |name| std::env::var_os(name),
+            rustix::process::geteuid().is_root(),
+        )
+    }
+    fn user_with(var: impl Fn(&str) -> Option<OsString>, root: bool) -> Option<Self> {
+        if var("PKGDECK_NO_CACHE").is_some() || root {
             return None;
         }
-        let base = std::env::var_os("XDG_CACHE_HOME")
+        let base = var("XDG_CACHE_HOME")
             .filter(|p| Path::new(p).is_absolute())
             .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))?;
+            .or_else(|| var("HOME").map(|home| PathBuf::from(home).join(".cache")))?;
         Some(Self::new(base.join("pkgdeck")))
     }
 
@@ -528,13 +535,81 @@ mod tests {
 
     #[test]
     fn the_user_store_follows_xdg_and_can_be_turned_off() {
-        // Only checks the resolution rules; the environment is restored.
-        let store = Store::user();
-        if rustix::process::geteuid().is_root() {
-            assert!(store.is_none());
-        } else if std::env::var_os("PKGDECK_NO_CACHE").is_none() {
-            assert!(store.is_some_and(|store| store.dir.ends_with("pkgdeck")));
-        }
+        let dir = |env: &[(&str, &str)], root: bool| {
+            let env: Vec<(String, OsString)> = env
+                .iter()
+                .map(|(key, value)| (key.to_string(), OsString::from(value)))
+                .collect();
+            Store::user_with(
+                |name| {
+                    env.iter()
+                        .find(|(key, _)| key == name)
+                        .map(|(_, v)| v.clone())
+                },
+                root,
+            )
+            .map(|store| store.dir)
+        };
+        let home = [("HOME", "/home/fixture")];
+        assert_eq!(
+            dir(&home, false),
+            Some(PathBuf::from("/home/fixture/.cache/pkgdeck"))
+        );
+        assert_eq!(
+            dir(
+                &[("HOME", "/home/fixture"), ("XDG_CACHE_HOME", "/xdg")],
+                false
+            ),
+            Some(PathBuf::from("/xdg/pkgdeck"))
+        );
+        assert_eq!(
+            dir(
+                &[("HOME", "/home/fixture"), ("XDG_CACHE_HOME", "relative")],
+                false
+            ),
+            Some(PathBuf::from("/home/fixture/.cache/pkgdeck"))
+        );
+        assert_eq!(dir(&[], false), None);
+        assert_eq!(dir(&home, true), None);
+        assert_eq!(
+            dir(&[("HOME", "/h"), ("PKGDECK_NO_CACHE", "1")], false),
+            None
+        );
         invalidate("pkgdeck-test-source-that-never-exists");
+    }
+
+    #[test]
+    fn oversized_unwritable_and_unfingerprintable_entries_are_skipped() {
+        let root = scratch("skipped");
+        let store = Store::new(root.join("store"));
+        store.put("apt", "installed", &[], "key", b"value");
+        let file = store.file("apt", "installed", &[]);
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_len(MAX_ENTRY_BYTES + 1)
+            .unwrap();
+        assert!(store.get("apt", "installed", &[], "key").is_none());
+        // A folder where the entry belongs makes the final rename fail.
+        fs::remove_file(&file).unwrap();
+        fs::create_dir_all(file.join("occupied")).unwrap();
+        assert!(store
+            .write("apt", "installed", &[], "key", b"value")
+            .is_err());
+        assert_eq!(fs::read_dir(root.join("store")).unwrap().count(), 1);
+        let big = root.join("big");
+        fs::create_dir_all(&big).unwrap();
+        for index in 0..=MAX_FINGERPRINT_ENTRIES {
+            fs::write(big.join(index.to_string()), "").unwrap();
+        }
+        let watches = [Watch::tree(&big, 1)];
+        let read = || Ok::<_, ()>(b"uncached".to_vec());
+        assert_eq!(
+            read_through(Some(&store), "apt", "list", &[], &watches, &[], read),
+            Ok(b"uncached".to_vec())
+        );
+        assert!(store.entries("apt-list-").is_empty());
+        fs::remove_dir_all(root).unwrap();
     }
 }

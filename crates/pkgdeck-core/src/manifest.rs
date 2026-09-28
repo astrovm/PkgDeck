@@ -677,6 +677,41 @@ mod tests {
     }
 
     #[test]
+    fn scope_must_match_and_uninstalled_rows_are_not_exported() {
+        let system = package("org.example.App", Scope::System, None);
+        let mut offered = package("org.example.Offer", Scope::System, None);
+        offered.installed_version = None;
+        let manifest = export(&[system.clone(), offered], &[]).unwrap();
+        assert_eq!(manifest.packages.len(), 1);
+        // The same identity installed for a user is a different installation.
+        let mut user = system;
+        user.id.scope = Scope::User { uid: 1000 };
+        let result = preview(&manifest, &[user], &[], &[], &[]).unwrap();
+        assert_ne!(result.packages[0].status, PreviewStatus::AlreadyInstalled);
+    }
+
+    #[test]
+    fn lists_too_large_to_save_are_refused_before_writing() {
+        let entry = Entry::from_package(&package("org.example.App", Scope::System, None));
+        let long = "x".repeat(500);
+        let manifest = Manifest {
+            schema_version: SCHEMA_VERSION,
+            packages: (0..MAX_PACKAGES)
+                .map(|index| Entry {
+                    name: format!("{index}-{long}"),
+                    reference: Some(long.clone()),
+                    ..entry.clone()
+                })
+                .collect(),
+        };
+        let path =
+            std::env::temp_dir().join(format!("pkgdeck-huge-list-{}.json", std::process::id()));
+        let error = write_new(&path, &manifest).unwrap_err();
+        assert!(error.to_string().contains("larger than 8 MB"), "{error}");
+        assert!(!path.exists());
+    }
+
+    #[test]
     fn cross_machine_versions_are_informational_and_malformed_input_is_rejected() {
         let mut linux = package("org.example.App", Scope::System, None);
         let manifest = export(std::slice::from_ref(&linux), &[]).unwrap();

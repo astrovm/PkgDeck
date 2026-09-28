@@ -39,7 +39,8 @@ fn digest(path: &Path, cancel: &Cancellation) -> Result<String, EngineError> {
     }
     let mut hash = Sha256::new();
     hash.update(magic);
-    let mut total = 8_u64;
+    // Bytes past the limit, if the file grows meanwhile, are never read.
+    let mut file = file.take(MAX_BYTES - 8);
     let mut buffer = [0_u8; 64 * 1024];
     loop {
         if cancel.requested() {
@@ -48,10 +49,6 @@ fn digest(path: &Path, cancel: &Cancellation) -> Result<String, EngineError> {
         let count = file.read(&mut buffer).map_err(invalid)?;
         if count == 0 {
             break;
-        }
-        total += count as u64;
-        if total > MAX_BYTES {
-            return Err(invalid("Debian archive exceeds 1 GiB"));
         }
         hash.update(&buffer[..count]);
     }
@@ -86,23 +83,22 @@ fn valid_version(value: &str) -> bool {
 }
 
 pub fn inspect(path: &Path, cancel: &Cancellation) -> Result<Package, EngineError> {
+    inspect_with(path, cancel, &Host::current())
+}
+fn inspect_with(path: &Path, cancel: &Cancellation, host: &Host) -> Result<Package, EngineError> {
     if !path.is_absolute() || path.extension().is_none_or(|ext| ext != "deb") {
         return Err(invalid("expected an absolute .deb path"));
     }
     let hash = digest(path, cancel)?;
-    let host = Host::current();
     let executable = host
         .resolve("dpkg-deb")?
         .ok_or_else(|| invalid("dpkg-deb is unavailable"))?;
-    let result = host.read(
-        &executable,
-        &[OsString::from("--field"), path.as_os_str().to_os_string()],
-        Limits {
-            timeout: Duration::from_secs(15),
-            output_bytes: 64 * 1024,
-        },
-        cancel,
-    )?;
+    let args = [OsString::from("--field"), path.as_os_str().to_os_string()];
+    let limits = Limits {
+        timeout: Duration::from_secs(15),
+        output_bytes: 64 * 1024,
+    };
+    let result = host.read(&executable, &args, limits, cancel)?;
     if result.code != Some(0) || result.truncated {
         return Err(invalid("dpkg-deb could not read bounded control metadata"));
     }
@@ -142,6 +138,13 @@ pub fn verified_path(
     id: &PackageId,
     cancel: &Cancellation,
 ) -> Result<Option<PathBuf>, EngineError> {
+    verified_path_with(id, cancel, &Host::current())
+}
+fn verified_path_with(
+    id: &PackageId,
+    cancel: &Cancellation,
+    host: &Host,
+) -> Result<Option<PathBuf>, EngineError> {
     let Some(reference) = id
         .reference
         .as_deref()
@@ -156,7 +159,7 @@ pub fn verified_path(
     if digest(&path, cancel)? != expected {
         return Err(invalid("Debian archive changed since preview"));
     }
-    let current = inspect(&path, cancel)?;
+    let current = inspect_with(&path, cancel, host)?;
     if current.id != *id {
         return Err(invalid("Debian package identity changed since preview"));
     }
@@ -179,7 +182,14 @@ impl Drop for StagedArchive {
     }
 }
 pub fn stage(id: &PackageId, cancel: &Cancellation) -> Result<Option<StagedArchive>, EngineError> {
-    let Some(source) = verified_path(id, cancel)? else {
+    stage_with(id, cancel, &Host::current())
+}
+fn stage_with(
+    id: &PackageId,
+    cancel: &Cancellation,
+    host: &Host,
+) -> Result<Option<StagedArchive>, EngineError> {
+    let Some(source) = verified_path_with(id, cancel, host)? else {
         return Ok(None);
     };
     let expected = id
@@ -197,7 +207,7 @@ pub fn stage(id: &PackageId, cancel: &Cancellation) -> Result<Option<StagedArchi
             .unwrap_or_default()
             .as_nanos()
     ));
-    let mut input = fs::File::open(&source).map_err(invalid)?;
+    let input = fs::File::open(&source).map_err(invalid)?;
     let mut output = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -205,36 +215,39 @@ pub fn stage(id: &PackageId, cancel: &Cancellation) -> Result<Option<StagedArchi
         .open(&path)
         .map_err(invalid)?;
     let staged = StagedArchive { path };
-    let result = (|| {
-        let mut hash = Sha256::new();
-        let mut total = 0_u64;
-        let mut buffer = [0_u8; 64 * 1024];
-        loop {
-            if cancel.requested() {
-                return Err(EngineError::Cancelled);
-            }
-            let count = input.read(&mut buffer).map_err(invalid)?;
-            if count == 0 {
-                break;
-            }
-            total += count as u64;
-            if total > MAX_BYTES {
-                return Err(invalid("Debian archive exceeds 1 GiB"));
-            }
-            hash.update(&buffer[..count]);
-            output.write_all(&buffer[..count]).map_err(invalid)?;
-        }
-        output.sync_all().map_err(invalid)?;
+    copy_reviewed(input, &mut output, expected, cancel)?;
+    output.sync_all().map_err(invalid)?;
+    Ok(Some(staged))
+}
+
+/// Copy at most the size limit, and only if the bytes still match `expected`.
+fn copy_reviewed(
+    input: impl Read,
+    output: &mut impl Write,
+    expected: &str,
+    cancel: &Cancellation,
+) -> Result<(), EngineError> {
+    let mut input = input.take(MAX_BYTES);
+    let mut hash = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
         if cancel.requested() {
             return Err(EngineError::Cancelled);
         }
-        if hex::encode(hash.finalize()) != expected {
-            return Err(invalid("Debian archive changed during staging"));
+        let count = input.read(&mut buffer).map_err(invalid)?;
+        if count == 0 {
+            break;
         }
-        Ok(())
-    })();
-    result?;
-    Ok(Some(staged))
+        hash.update(&buffer[..count]);
+        output.write_all(&buffer[..count]).map_err(invalid)?;
+    }
+    if cancel.requested() {
+        return Err(EngineError::Cancelled);
+    }
+    if hex::encode(hash.finalize()) != expected {
+        return Err(invalid("Debian archive changed during staging"));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -293,5 +306,106 @@ mod tests {
         file.write_all(b"changed").unwrap();
         assert!(verified_path(&package.id, &cancel).is_err());
         fs::remove_dir_all(base).unwrap();
+    }
+    #[test]
+    fn reviewed_archives_are_read_through_dpkg_deb_and_staged_unchanged() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = std::env::temp_dir().join(format!(
+            "pkgdeck-local-deb-host-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&base).unwrap();
+        let tool = base.join("dpkg-deb");
+        fs::write(
+            &tool,
+            format!(
+                "#!/bin/sh\ndir='{}'\n[ -e \"$dir/fail\" ] && exit 2\n/bin/cat \"$dir/control\"\n[ -e \"$dir/mutate\" ] && printf x >> \"$2\"\nexit 0\n",
+                base.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).unwrap();
+        let control = |text: &str| fs::write(base.join("control"), text).unwrap();
+        control("Package: synthetic\nVersion: 1.0\nArchitecture: all\nDescription: Synthetic\n");
+        let archive = base.join("synthetic.deb");
+        fs::write(&archive, b"!<arch>\nsynthetic payload").unwrap();
+        let host = Host::new(
+            crate::host::Runtime::Native,
+            [(OsString::from("PATH"), base.as_os_str().to_owned())].into(),
+        );
+        let cancel = Cancellation::default();
+        let package = inspect_with(&archive, &cancel, &host).unwrap();
+        assert_eq!(package.id.name, "synthetic");
+        assert_eq!(package.candidate_version.as_deref(), Some("1.0"));
+        let staged = stage_with(&package.id, &cancel, &host).unwrap().unwrap();
+        assert_eq!(
+            fs::read(staged.path()).unwrap(),
+            b"!<arch>\nsynthetic payload"
+        );
+        drop(staged);
+        control("Package: other\nVersion: 1.0\nArchitecture: all\n");
+        assert!(matches!(
+            verified_path_with(&package.id, &cancel, &host),
+            Err(EngineError::InvalidResponse { reason, .. }) if reason.contains("identity changed")
+        ));
+        control("Package: Not-Valid\nVersion: 1.0\nArchitecture: all\n");
+        assert!(matches!(
+            inspect_with(&archive, &cancel, &host),
+            Err(EngineError::InvalidResponse { reason, .. }) if reason == "invalid Debian package identity"
+        ));
+        control("Package: synthetic\nVersion: 1.0\nArchitecture: all\nDescription: Synthetic\n");
+        // The archive changes right after its last check.
+        fs::write(base.join("mutate"), "").unwrap();
+        assert!(matches!(
+            stage_with(&package.id, &cancel, &host),
+            Err(EngineError::InvalidResponse { reason, .. }) if reason.contains("changed during staging")
+        ));
+        fs::write(base.join("fail"), "").unwrap();
+        assert!(matches!(
+            inspect_with(&archive, &cancel, &host),
+            Err(EngineError::InvalidResponse { reason, .. }) if reason.contains("could not read")
+        ));
+        fs::remove_dir_all(base).unwrap();
+    }
+    #[test]
+    fn staging_copies_stop_when_cancelled() {
+        struct CancelAtEnd<'a>(&'a [u8], &'a Cancellation);
+        impl Read for CancelAtEnd<'_> {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                let count = self.0.read(buffer)?;
+                if count == 0 {
+                    self.1.cancel();
+                }
+                Ok(count)
+            }
+        }
+        let expected = hex::encode(Sha256::digest(b"payload"));
+        let mut output = Vec::new();
+        copy_reviewed(
+            &b"payload"[..],
+            &mut output,
+            &expected,
+            &Cancellation::default(),
+        )
+        .unwrap();
+        assert_eq!(output, b"payload");
+        let late = Cancellation::default();
+        assert_eq!(
+            copy_reviewed(
+                CancelAtEnd(b"payload", &late),
+                &mut Vec::new(),
+                &expected,
+                &late
+            ),
+            Err(EngineError::Cancelled)
+        );
+        assert_eq!(
+            copy_reviewed(&b"payload"[..], &mut Vec::new(), &expected, &late),
+            Err(EngineError::Cancelled)
+        );
     }
 }

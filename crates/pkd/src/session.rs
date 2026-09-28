@@ -159,15 +159,30 @@ pub fn sudo_login(
     cancel: &Cancellation,
 ) -> Result<(), EngineError> {
     use pkgdeck_core::host::{Host, Runtime};
+    let interactive = io::stdin().is_terminal()
+        && io::stderr().is_terminal()
+        && matches!(Host::current().runtime, Runtime::Native | Runtime::AppImage);
     let sources = protected_sources(operations);
-    if sources.is_empty()
-        || !io::stdin().is_terminal()
-        || !io::stderr().is_terminal()
-        || !matches!(Host::current().runtime, Runtime::Native | Runtime::AppImage)
-    {
+    sudo_login_with(
+        live,
+        &sources,
+        interactive,
+        cancel,
+        Path::new("/usr/bin/sudo"),
+    )
+}
+
+fn sudo_login_with(
+    live: &Live,
+    sources: &[String],
+    interactive: bool,
+    cancel: &Cancellation,
+    sudo: &Path,
+) -> Result<(), EngineError> {
+    if sources.is_empty() || !interactive {
         return Ok(());
     }
-    sudo_prompt(live, &sources, cancel, Path::new("/usr/bin/sudo"))
+    sudo_prompt(live, sources, cancel, sudo)
 }
 
 fn sudo_prompt(
@@ -305,6 +320,12 @@ mod tests {
             ["apt"]
         );
         assert!(protected_sources(&[homebrew()]).is_empty());
+        // A plan that can't be turned into commands protects nothing.
+        let unknown_cleanup = Operation::Clean(pkgdeck_core::package::CleanupId {
+            backend: "apt".into(),
+            key: "unknown".into(),
+        });
+        assert!(protected_sources(&[unknown_cleanup]).is_empty());
         // Tests never run in a terminal, so no prompt is attempted.
         let live = Live::new(false);
         assert!(sudo_login(&live, &[apt("one")], &Cancellation::default()).is_ok());
@@ -327,6 +348,15 @@ mod tests {
         let cancel = Cancellation::default();
         let cached = fake("cached", "exit 0");
         assert!(sudo_prompt(&live, &sources, &cancel, &cached).is_ok());
+        let denied = fake("refuses", "exit 1");
+        // Outside a terminal, or with nothing protected, sudo never runs.
+        assert!(sudo_login_with(&live, &sources, false, &cancel, &denied).is_ok());
+        assert!(sudo_login_with(&live, &[], true, &cancel, &denied).is_ok());
+        assert!(sudo_login_with(&live, &sources, true, &cancel, &cached).is_ok());
+        assert_eq!(
+            sudo_login_with(&live, &sources, true, &cancel, &denied),
+            Err(ExecutionError::AuthorizationDenied.into())
+        );
         let asks = fake("asks", r#"[ "$1" = -n ] && exit 1; exit 0"#);
         assert!(sudo_prompt(&live, &sources, &cancel, &asks).is_ok());
         let denied = fake("denied", "exit 1");

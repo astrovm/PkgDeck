@@ -86,11 +86,13 @@ fn reference_bytes(
         if !path.is_absolute() || path.extension().is_none_or(|ext| ext != "flatpakref") {
             return Err(invalid("expected an absolute .flatpakref path"));
         }
-        let metadata = fs::symlink_metadata(path).map_err(invalid)?;
-        if !metadata.file_type().is_file() || metadata.len() > MAX_BYTES as u64 {
-            return Err(invalid(
-                "expected a regular Flatpak reference no larger than 64 KiB",
-            ));
+        let too_big = || invalid("expected a regular Flatpak reference no larger than 64 KiB");
+        if !fs::symlink_metadata(path)
+            .map_err(invalid)?
+            .file_type()
+            .is_file()
+        {
+            return Err(too_big());
         }
         let mut bytes = Vec::new();
         fs::File::open(path)
@@ -99,7 +101,7 @@ fn reference_bytes(
             .read_to_end(&mut bytes)
             .map_err(invalid)?;
         if bytes.len() > MAX_BYTES {
-            return Err(invalid("Flatpak reference exceeds 64 KiB"));
+            return Err(too_big());
         }
         Ok(bytes)
     }
@@ -259,6 +261,12 @@ mod tests {
         assert!(reference_bytes("https://example.invalid", &cancel, &host).is_err());
         fs::write(&script, "#!/bin/sh\nexit 22\n").unwrap();
         assert!(reference_bytes(url, &cancel, &host).is_err());
+        let cancelled = Cancellation::default();
+        cancelled.cancel();
+        assert!(matches!(
+            reference_bytes(url, &cancelled, &host),
+            Err(EngineError::Cancelled)
+        ));
         fs::remove_file(&script).unwrap();
         assert!(reference_bytes(url, &cancel, &host).is_err());
         fs::remove_dir_all(base).unwrap();
@@ -332,6 +340,12 @@ mod tests {
             assert!(inspect_bytes(source, body.as_bytes()).is_err(), "{body}");
         }
         assert!(inspect_bytes(source, &[0xff]).is_err());
+        let commented = inspect_bytes(
+            source,
+            b"[Other]\nName=ignored\n[Flatpak Ref]\n# a comment\nName=org.example.App\nUrl=https://example.invalid/repo\n",
+        )
+        .unwrap();
+        assert_eq!(commented.id.name, "org.example.App");
         let runtime = inspect_bytes(source, b"[Flatpak Ref]\nName=org.example.Runtime\nUrl=https://example.invalid/repo\nIsRuntime=true\nGPGKey=synthetic\nSuggestRemoteName=example\n").unwrap();
         assert!(runtime.summary.contains("Runtime:"));
         assert!(runtime.summary.contains("Signing key: included"));
