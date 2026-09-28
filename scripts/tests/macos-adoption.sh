@@ -14,6 +14,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 pkd="$PWD/target/debug/pkd"
 trap 'echo "macos-adoption FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
 [[ -x $pkd ]]
+# The macOS jobs put GNU coreutils first on PATH; BSD stat reads inodes.
 # Only debug builds know this fixture's cask (see backends/adopt.rs).
 tap=pkgdeck/fixtures
 cask="$tap/pkgdeck-adopt-fixture"
@@ -29,7 +30,7 @@ cleanup() {
     brew uninstall --cask "$cask"
     brew untap "$tap"
     rm -rf "$app" "$work"
-    [[ -L $command_link || -f $command_link ]] && rm -f "$command_link"
+    if [[ -L $command_link || -f $command_link ]]; then rm -f "$command_link"; fi
 }
 trap cleanup EXIT
 
@@ -73,7 +74,7 @@ EOF
 
 # The copy someone installed themselves.
 ditto "$bundle" "$app"
-inode=$(stat -f %i "$app")
+inode=$(/usr/bin/stat -f %i "$app")
 install() { "$pkd" --json --yes --from homebrew-cask install "$cask"; }
 installed() { brew list --cask --versions "$cask" >/dev/null 2>&1; }
 
@@ -82,7 +83,7 @@ printf '#!/bin/sh\n' > "$command_link"
 output=$(install) || true
 grep -q 'belongs to something else' <<<"$output" || { echo "Expected a refusal: $output" >&2; exit 1; }
 if installed; then echo "Refused adoption still installed the cask" >&2; exit 1; fi
-[[ $(stat -f %i "$app") == "$inode" ]]
+[[ $(/usr/bin/stat -f %i "$app") == "$inode" ]]
 rm "$command_link"
 
 # 2. A different publisher (here, an unsigned copy): refused before any backup.
@@ -91,14 +92,14 @@ output=$(install) || true
 grep -q "signature doesn't verify\|signed by" <<<"$output" || { echo "Expected a signature refusal: $output" >&2; exit 1; }
 if installed; then echo "Refused adoption still installed the cask" >&2; exit 1; fi
 codesign --force --sign - "$app"
-inode=$(stat -f %i "$app")
+inode=$(/usr/bin/stat -f %i "$app")
 
 # 3. Checked adoption: Homebrew manages the same folder, links the command,
 # and the temporary copy is gone.
 output=$(install)
 grep -q '"exit_code":0' <<<"$output" || { echo "Adoption failed: $output" >&2; exit 1; }
 installed
-[[ $(stat -f %i "$app") == "$inode" ]] || { echo 'The app was replaced instead of adopted' >&2; exit 1; }
+[[ $(/usr/bin/stat -f %i "$app") == "$inode" ]] || { echo 'The app was replaced instead of adopted' >&2; exit 1; }
 [[ $("$command_link") == adopted ]]
 [[ ! -d $backups ]] || [[ -z $(ls -A "$backups") ]] || { echo "Backup left behind: $(ls "$backups")" >&2; exit 1; }
 # The inventory now names the cask as the owner of this exact copy.
