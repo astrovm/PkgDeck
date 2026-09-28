@@ -7,7 +7,9 @@ mod aur;
 mod cleanup;
 mod conda;
 mod container;
+mod dotnet;
 mod firmware;
+mod go_bin;
 mod mac_apps;
 mod mas;
 mod nix;
@@ -25,7 +27,9 @@ pub use appimage::AppImage;
 pub use aur::Aur;
 pub use conda::Conda;
 pub use container::{Container, ContainerKind};
+pub use dotnet::DotnetTools;
 pub use firmware::Firmware;
+pub use go_bin::GoBinaries;
 pub use mac_apps::MacApps;
 pub use mas::MacAppStore;
 pub use nix::Nix;
@@ -81,6 +85,8 @@ pub const BACKEND_IDS: &[&str] = &[
     "podman",
     "cargo",
     "rustup",
+    "go",
+    "dotnet",
     "npm",
     "pnpm",
     "bun",
@@ -142,6 +148,8 @@ pub fn display_name(id: &str) -> &str {
         "xbps" => "XBPS",
         "system-image" => "System image",
         "nix" => "Nix",
+        "go" => "Go",
+        "dotnet" => ".NET tools",
         "appimage" => "AppImage",
         "flatpak" => "Flatpak",
         "docker" => "Docker images",
@@ -5386,6 +5394,12 @@ pub fn native_engine(
     }
     if allowed("nix") {
         candidates.push((Box::new(Nix::new(transport())), probe_unless_listed));
+    }
+    if allowed("go") {
+        candidates.push((Box::new(GoBinaries::new(transport())), probe_unless_listed));
+    }
+    if allowed("dotnet") {
+        candidates.push((Box::new(DotnetTools::new(transport())), probe_unless_listed));
     }
     // Both check the platform first, so probing is cheap elsewhere.
     if allowed("aur") {

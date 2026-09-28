@@ -283,6 +283,12 @@ impl Host {
             "MISE_CACHE_DIR",
             // pixi and the conda family: their homes, and the manager a
             // `conda init` shell names.
+            "GOBIN",
+            "GOPATH",
+            "GOROOT",
+            "GOPROXY",
+            "DOTNET_ROOT",
+            "DOTNET_CLI_HOME",
             "PIXI_HOME",
             "CONDA_EXE",
             "MAMBA_EXE",
@@ -544,6 +550,17 @@ impl Host {
                             .map(|home| home.join(dir).join("bin").join(name)),
                     );
                 }
+            }
+            // `go install` writes to GOBIN, else GOPATH/bin, else ~/go/bin.
+            "go" => {
+                candidates.extend(path("GOROOT").map(|dir| dir.join("bin/go")));
+                candidates.push("/usr/local/go/bin/go".into());
+                candidates.push("/opt/homebrew/bin/go".into());
+            }
+            "dotnet" => {
+                candidates.extend(path("DOTNET_ROOT").map(|dir| dir.join("dotnet")));
+                candidates.extend(home.as_ref().map(|home| home.join(".dotnet/dotnet")));
+                candidates.push("/usr/local/share/dotnet/dotnet".into());
             }
             "rustup" => {
                 candidates.extend(path("CARGO_HOME").map(|dir| dir.join("bin/rustup")));
