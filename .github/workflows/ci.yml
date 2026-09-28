@@ -116,10 +116,13 @@ jobs:
             scripts/tests/host-authorization.sh
 
   test-macos:
-    name: Test / macOS native (${{ matrix.arch }})
+    # One job per Mac runs every macOS test: native inventory and adoption,
+    # then the development manager lifecycles. The account gets 5 concurrent
+    # macOS runners, so separate jobs for each queued behind one another.
+    name: Test / macOS (${{ matrix.arch }})
     needs: [reviewed]
     if: "!cancelled() && (github.event_name != 'push' || github.ref == 'refs/heads/main') && !inputs.homebrew_only"
-    timeout-minutes: 35
+    timeout-minutes: 70
     strategy:
       fail-fast: false
       matrix:
@@ -167,6 +170,7 @@ jobs:
           path: coverage/lcov.info
           if-no-files-found: error
       - name: Build CLI
+        id: build-cli
         run: cargo build --locked -p pkd
       - name: Test real bundles and Homebrew cask lifecycle
         if: needs.reviewed.outputs.tested != 'true'
@@ -180,6 +184,21 @@ jobs:
         with:
           name: macos-native-${{ matrix.arch }}
           path: build/macos-native
+      # Last, since these install whole toolchains. They still run after a
+      # native test failure, so one job reports both. Main never runs them.
+      - name: Run backend lifecycle tests
+        if: ${{ !cancelled() && steps.build-cli.outcome == 'success' && github.event_name != 'push' }}
+        run: |
+          # These ran with the macOS tools, not the GNU coreutils added above.
+          PATH=$(tr ':' '\n' <<<"$PATH" | grep -v '/coreutils/libexec/gnubin$' | paste -sd: -)
+          scripts/tests/backends.sh dev "$PWD/target/debug/pkd"
+      - name: Upload MacPorts logs
+        if: ${{ !cancelled() && github.event_name != 'push' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: macports-macos-${{ matrix.arch }}
+          path: build/macports
+          if-no-files-found: ignore
 
   test-podman:
     name: Test / Podman (${{ matrix.arch }})
@@ -247,8 +266,8 @@ jobs:
 
   test-backends:
     # One job per platform and group: separate per-backend jobs spent most of
-    # their time queued for runners (5 concurrent macOS jobs per account) and
-    # setting up. scripts/tests/backends.sh still reports each backend.
+    # their time queued for runners and setting up. scripts/tests/backends.sh
+    # still reports each backend. The macOS managers run in Test / macOS.
     name: Test / Backends / ${{ matrix.group }} (${{ matrix.platform }})
     if: github.event_name != 'push' && !inputs.homebrew_only
     timeout-minutes: 45
@@ -260,8 +279,6 @@ jobs:
           - { group: native, platform: linux-aarch64, runner: ubuntu-26.04-arm, arch: aarch64 }
           - { group: dev, platform: linux-x86_64, runner: ubuntu-26.04, arch: x86_64 }
           - { group: dev, platform: linux-aarch64, runner: ubuntu-26.04-arm, arch: aarch64 }
-          - { group: dev, platform: macos-x86_64, runner: macos-26-intel, arch: x86_64 }
-          - { group: dev, platform: macos-aarch64, runner: macos-26, arch: aarch64 }
     runs-on: ${{ matrix.runner }}
     env:
       HOMEBREW_NO_AUTO_UPDATE: '1'
@@ -280,7 +297,7 @@ jobs:
         uses: ./.github/actions/rust-cache
         with:
           arch: ${{ matrix.arch }}
-          scope: ${{ startsWith(matrix.platform, 'linux-') && 'linux' || 'macos-native' }}
+          scope: linux
           save: 'false'
       - name: Build CLI
         run: cargo build --locked -p pkd
@@ -295,13 +312,6 @@ jobs:
         run: |
           scripts/tests/backends.sh ${{ matrix.group }} "$PWD/target/debug/pkd" \
             "$PWD/target/${{ matrix.arch }}-unknown-linux-musl/debug/pkd"
-      - name: Upload MacPorts logs
-        if: always() && startsWith(matrix.platform, 'macos-')
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: macports-${{ matrix.platform }}
-          path: build/macports
-          if-no-files-found: ignore
 
   coverage-combined:
     # One number for all the code: a line counts once and is covered when a
