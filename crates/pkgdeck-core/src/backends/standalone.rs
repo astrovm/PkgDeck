@@ -1152,6 +1152,16 @@ mod tests {
             assert_eq!(installation.launcher, launcher);
             assert_eq!(installation.version, Version::new(1, 0, 0));
         }
+        // Settings without a channel keep the default one.
+        temp.write(".claude/settings.json", r#"{"theme":"dark"}"#);
+        assert_eq!(
+            native
+                .locate(StandaloneTool::Claude, &cancel)
+                .unwrap()
+                .unwrap()
+                .channel,
+            "latest"
+        );
         temp.write(
             ".claude/settings.json",
             r#"{"autoUpdatesChannel":"stable"}"#,
