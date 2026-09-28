@@ -17,7 +17,7 @@ native)
     # Arch's official container (Pacman and the AUR) is x86_64-only.
     [[ $(uname -m) == x86_64 ]] && backends=(dnf pacman aur zypper apk xbps snap)
     ;;
-dev) backends=(cargo rustup npm pnpm bun pip pipx uv mise pixi conda nix composer gem) ;;
+dev) backends=(cargo rustup go dotnet npm pnpm bun pip pipx uv mise pixi conda nix composer gem) ;;
 macports) backends=(macports) ;;
 *) echo "Expected native, dev or macports, got $group" >&2; exit 2 ;;
 esac

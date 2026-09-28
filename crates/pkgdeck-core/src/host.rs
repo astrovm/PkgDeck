@@ -313,6 +313,17 @@ impl Host {
                 env.insert(name.into(), value.clone());
             }
         }
+        // A first `dotnet` run would otherwise print a welcome banner, send
+        // telemetry, create an HTTPS development certificate and edit the
+        // user's PATH setup, none of which a tool listing should do.
+        for (name, value) in [
+            ("DOTNET_CLI_TELEMETRY_OPTOUT", "1"),
+            ("DOTNET_NOLOGO", "1"),
+            ("DOTNET_GENERATE_ASPNET_CERTIFICATE", "false"),
+            ("DOTNET_ADD_GLOBAL_TOOLS_TO_PATH", "false"),
+        ] {
+            env.insert(name.into(), value.into());
+        }
         let path = source
             .get(&OsString::from("PATH"))
             .cloned()
