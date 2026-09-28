@@ -156,6 +156,14 @@ If a Flatpak system installation is read-only, it's shown without edit
 controls. Controls that can't work on this computer are hidden. Repository
 changes use the package manager's normal signature checks and password prompt.
 
+### pixi and Conda
+
+**pixi** lists your `pixi global` tools and can install, update and remove them.
+Updates stay within the version the global manifest records. **Conda** lists
+the packages you asked for in each named conda, mamba, or micromamba
+environment and updates them; install and remove them with the manager.
+Project environments are never touched.
+
 ### Mac App Store
 
 With [mas](https://github.com/mas-cli/mas) 7 or newer installed, the **Mac App

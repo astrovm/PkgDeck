@@ -281,6 +281,15 @@ impl Host {
             "MISE_INSTALLS_DIR",
             "MISE_STATE_DIR",
             "MISE_CACHE_DIR",
+            // pixi and the conda family: their homes, and the manager a
+            // `conda init` shell names.
+            "PIXI_HOME",
+            "CONDA_EXE",
+            "MAMBA_EXE",
+            "MAMBA_ROOT_PREFIX",
+            "CONDARC",
+            "CONDA_ENVS_PATH",
+            "CONDA_PKGS_DIRS",
             // pnpm refuses global commands when PNPM_HOME is set in the
             // session but missing here; Cargo and Bun read theirs too.
             "PNPM_HOME",
@@ -511,6 +520,47 @@ impl Host {
         }
     }
 
+    /// Official installers put pixi and the conda family outside the PATH a
+    /// desktop app starts with. Only their fixed per-user locations, or the
+    /// executable a `conda init` shell names, are tried.
+    fn user_install(&self, name: &str) -> Result<Option<PathBuf>, ExecutionError> {
+        let path = |key: &str| {
+            self.var(key)
+                .map(PathBuf::from)
+                .filter(|path| path.is_absolute())
+        };
+        let home = path("HOME");
+        let mut candidates = vec![];
+        match name {
+            "pixi" => {
+                candidates.extend(path("PIXI_HOME").map(|dir| dir.join("bin/pixi")));
+                candidates.extend(home.as_ref().map(|home| home.join(".pixi/bin/pixi")));
+            }
+            "conda" | "mamba" => {
+                candidates.extend(path("CONDA_EXE").map(|exe| exe.with_file_name(name)));
+                for dir in ["miniforge3", "miniconda3", "anaconda3", "mambaforge"] {
+                    candidates.extend(
+                        home.as_ref()
+                            .map(|home| home.join(dir).join("bin").join(name)),
+                    );
+                }
+            }
+            "micromamba" => {
+                candidates.extend(path("MAMBA_EXE"));
+                candidates.extend(home.as_ref().map(|home| home.join(".local/bin/micromamba")));
+            }
+            _ => {}
+        }
+        for candidate in candidates {
+            if candidate.file_name().is_some_and(|file| file == name)
+                && self.host_file(&candidate, true)?
+            {
+                return Ok(Some(candidate));
+            }
+        }
+        Ok(None)
+    }
+
     /// Development tools always run as the invoking user with a bounded
     /// output cap; arguments are never interpreted by a shell. `label` names
     /// the manager for disabled diagnostics.
@@ -526,9 +576,11 @@ impl Host {
         if write && rustix::process::geteuid().is_root() {
             return Err(ExecutionError::Invalid(ROOT_REFUSAL.into()));
         }
-        let path = self
-            .resolve(executable)?
-            .ok_or_else(|| ExecutionError::Disabled(format!("{label} not found")))?;
+        let path = match self.resolve(executable)? {
+            Some(path) => Some(path),
+            None => self.user_install(executable)?,
+        }
+        .ok_or_else(|| ExecutionError::Disabled(format!("{label} not found")))?;
         let command = self.command(&path, args)?;
         let result = process::run(
             command,
