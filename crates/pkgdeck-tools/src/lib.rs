@@ -327,26 +327,41 @@ impl Desktop {
             .last()
             .and_then(|entry| entry["id"].as_u64())
             .unwrap_or(0);
+        let (propose, confirm) = match op {
+            "install" => ("ctrl+i", "alt+i"),
+            "remove" => ("ctrl+d", "alt+r"),
+            "upgrade" => ("ctrl+u", "alt+u"),
+            "update" => ("ctrl+m", "alt+r"),
+            _ => panic!("unknown operation"),
+        };
         if op == "update" {
             self.key("ctrl+5");
             self.key("ctrl+l");
             self.key("Down");
-            self.key("ctrl+m");
         } else {
             self.search(name);
-            self.key(match op {
-                "install" => "ctrl+i",
-                "remove" => "ctrl+d",
-                "upgrade" => "ctrl+u",
-                _ => panic!("unknown operation"),
-            });
         }
-        self.key(match op {
-            "install" => "alt+i",
-            "remove" | "update" => "alt+r",
-            "upgrade" => "alt+u",
-            _ => unreachable!(),
-        });
+        let started = || {
+            entries()
+                .last()
+                .is_some_and(|entry| entry["id"].as_u64().unwrap_or(0) > previous)
+        };
+        // idle() gives up after two seconds, and the shortcuts are disabled
+        // while the app is busy. A slow details query on a real manager can
+        // swallow both keys. History records an operation when it begins, so
+        // nothing was applied until an entry appears and resending is safe.
+        for attempt in 1.. {
+            self.key(propose);
+            self.key(confirm);
+            let wait = Instant::now() + Duration::from_secs(15);
+            while !started() && Instant::now() < wait {
+                sleep(Duration::from_millis(50));
+            }
+            if started() {
+                break;
+            }
+            assert!(attempt < 3, "{op} did not start\n{}", self.logs());
+        }
         // CPU idleness is not transaction completion. In particular, the ARM
         // package test could request Quit while the real manager was writing.
         let deadline = Instant::now() + Duration::from_secs(90);

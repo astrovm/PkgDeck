@@ -25,6 +25,15 @@ dev)
 *) echo "Expected native or dev, got $group" >&2; exit 2 ;;
 esac
 
+# Runner networks drop out for tens of seconds at a time, longer than curl's
+# default backoff covers. Every curl the backends run, installer scripts
+# included, reads this config and keeps retrying for about a minute.
+if [[ -n ${GITHUB_ACTIONS:-} ]]; then
+    export CURL_HOME=${RUNNER_TEMP:-/tmp}/pkgdeck-curl
+    mkdir -p "$CURL_HOME"
+    printf 'retry = 6\nretry-delay = 10\nretry-connrefused\n' >"$CURL_HOME/.curlrc"
+fi
+
 failed=()
 summary=${GITHUB_STEP_SUMMARY:-/dev/null}
 printf '| Backend | Result | Time |\n| --- | --- | --- |\n' >>"$summary"
