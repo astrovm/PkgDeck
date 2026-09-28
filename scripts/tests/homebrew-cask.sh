@@ -28,7 +28,7 @@ PKGDECK_RENDER_PLACEHOLDERS=1 scripts/homebrew-render.sh "$version" "$dist/SHA25
 brew style --cask astrovm/pkgdeck/pkgdeck
 # The unqualified name must reach the cask, not the Linux-only formula.
 brew install astrovm/pkgdeck/pkgdeck
-brew list --cask astrovm/pkgdeck/pkgdeck
+brew info --json=v2 --cask astrovm/pkgdeck/pkgdeck | jq -e '.casks[0].installed != null' >/dev/null
 if xattr -p com.apple.quarantine /Applications/PkgDeck.app 2>/dev/null; then
     echo 'Installed app is still quarantined' >&2
     exit 1

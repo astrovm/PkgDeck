@@ -98,7 +98,7 @@ else
         # CI gates the lines covered on any platform instead (Coverage /
         # Combined), so its per-platform runs set PKGDECK_COVERAGE_GATE=0.
         if [[ ${PKGDECK_COVERAGE_GATE:-1} != 0 ]]; then
-            stage check-coverage cargo llvm-cov report --summary-only --include-build-script --ignore-filename-regex pkgdeck-tools --fail-under-lines 95
+            stage check-coverage cargo llvm-cov report --summary-only --include-build-script --ignore-filename-regex pkgdeck-tools --fail-under-lines 96
         fi
     fi
     want release && stage build-release cargo build --workspace --release --locked

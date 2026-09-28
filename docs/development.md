@@ -9,7 +9,7 @@ the same scripts.
 ```sh
 scripts/verify.sh fast --engine podman                # formatting, script tests, Qt-free lint/tests/build
 scripts/verify.sh full --only tests --engine podman   # workspace tests only
-scripts/verify.sh full --engine podman                # lint, tests, ≥95% coverage, release builds
+scripts/verify.sh full --engine podman                # lint, tests, ≥96% coverage, release builds
 scripts/verify.sh containers --engine podman          # real APT and Homebrew install/remove tests
 ```
 
@@ -94,7 +94,7 @@ The workflow is called `CI`. Check names follow `Category / Scope (architecture)
 | --- | --- |
 | `Test / Linux (x86_64, aarch64)` | Everything on Linux once per architecture: format and infrastructure checks, the APT helper, clippy (x86_64), all workspace tests (measured for coverage on x86_64), and real sudo/polkit and APT lock tests |
 | `Test / macOS native (x86_64, aarch64)` | All core/CLI tests (measured for coverage on Apple Silicon), real app inventory, Homebrew cask ownership and adoption, including recovery from a failed adoption |
-| `Coverage / Combined` | The 95% gate: merges the Linux and macOS reports; a line counts once and is covered when a test ran it on any platform |
+| `Coverage / Combined` | The 96% gate: merges the Linux and macOS reports; a line counts once and is covered when a test ran it on any platform |
 | `Test / Podman (x86_64, aarch64)` | CLI build in the development container and CLI APT/Homebrew install/remove tests |
 | `Test / Backends / native (linux-x86_64, linux-aarch64)` | Real DNF, Zypper, apk, XBPS, Snap, Toolbx and Distrobox lifecycle tests, plus Pacman and the AUR on x86_64 |
 | `Test / Backends / dev (<platform>)` | Real lifecycle tests for every development manager on Linux and macOS, x86_64 and aarch64, and MacPorts on macOS; the job summary lists each backend's result |
@@ -221,7 +221,7 @@ Flatpak/Snap bridges, FUSE, or a real display.
   `gui-lifecycle`, `gui-write`, `apt-lock-probe`, and `qml`. Build it once with
   `cargo build -p pkgdeck-tools`; `scripts/xtask.sh` runs it for package
   checks. GUI tests use private Xvfb displays and temporary settings. These
-  test tools don't count toward the 95% coverage gate.
+  test tools don't count toward the 96% coverage gate.
 - `scripts/build-apt.sh` builds the separate APT reader (GPL-2.0-or-later)
   from `libapt-pkg-dev`. It stays a separate program so APT isn't linked into
   the app. `scripts/bundle.sh` bundles its libraries and license notices, so

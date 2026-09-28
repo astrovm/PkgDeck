@@ -2,7 +2,7 @@
 # Hand a copy of an app someone installed themselves to real Homebrew through
 # pkd, with a fixture app from a local tap. Refused checks must change
 # nothing; a successful adoption must leave the very same app in place.
-set -euo pipefail
+set -Eeuo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 [[ ${GITHUB_ACTIONS:-} == true && ${GITHUB_REPOSITORY:-} == astrovm/PkgDeck &&
    ${RUNNER_ENVIRONMENT:-} == github-hosted && ${RUNNER_OS:-} == macOS &&
@@ -78,7 +78,11 @@ EOF
 ditto "$bundle" "$app"
 inode=$(/usr/bin/stat -f %i "$app")
 install() { "$pkd" --json --yes --from homebrew-cask install "$cask"; }
-installed() { brew list --cask --versions "$cask" >/dev/null 2>&1; }
+# brew info takes a tap cask's full name, which brew list may reject.
+installed() {
+    brew info --json=v2 --cask "${1:-$cask}" 2>/dev/null |
+        jq -e '.casks[0].installed // "" | length > 0' >/dev/null
+}
 
 # 1. A command link that belongs to something else: refused, nothing changes.
 printf '#!/bin/sh\n' > "$command_link"
@@ -101,7 +105,7 @@ inode=$(/usr/bin/stat -f %i "$app")
 output=$(install) || true
 grep -q '"exit_code":0' <<<"$output" || {
     echo "Adoption failed: $output" >&2
-    brew list --cask --versions "$cask" || true
+    brew info --json=v2 --cask "$cask" | jq -c '.casks[0] | {installed}' || true
     exit 1
 }
 installed
@@ -144,7 +148,7 @@ grep -q 'PkgDeck put it back' <<<"$output" || { echo "Expected a restored app: $
 [[ $(xattr -p io.github.astrovm.pkgdeck.test "$app") == kept ]]
 [[ $(/usr/bin/stat -f %Lp "$app/Contents/Resources/pkgdeck-adopt-fixture") == 700 ]]
 cmp "$bundle/Contents/MacOS/fixture" "$app/Contents/MacOS/fixture"
-if brew list --cask --versions "$failing" >/dev/null 2>&1; then echo 'The failed cask is installed' >&2; exit 1; fi
+if installed "$failing"; then echo 'The failed cask is installed' >&2; exit 1; fi
 [[ ! -d $backups ]] || [[ -z $(ls -A "$backups") ]] || { echo "Backup left behind: $(ls "$backups")" >&2; exit 1; }
 rm -rf "$app"
 echo 'PASS checked adoption, refusals, recovery and removal through real Homebrew'
