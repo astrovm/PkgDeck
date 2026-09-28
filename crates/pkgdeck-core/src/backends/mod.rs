@@ -2418,6 +2418,27 @@ impl<T: Transport> Backend for HomebrewCask<T> {
         }
         Ok(packages)
     }
+    /// An exact name is looked up directly, which also finds casks in a tap
+    /// that `brew casks` hasn't listed yet, and skips reading every cask.
+    fn lookup(&mut self, name: &str, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
+        if !cask_token(name) {
+            return Ok(vec![]);
+        }
+        match self.call(&["info", "--json=v2", "--cask", "--", name], cancel, false) {
+            Ok(result) => Ok(self
+                .parse(result, true)?
+                .into_iter()
+                .map(|details| details.package)
+                .collect()),
+            // brew exits 1 for a name that is no cask.
+            Err(EngineError::Execution(ExecutionError::Failed(result)))
+                if result.code == Some(1) =>
+            {
+                Ok(vec![])
+            }
+            Err(error) => Err(error),
+        }
+    }
     fn installed(&mut self, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
         Ok(self
             .parse(
@@ -3003,11 +3024,16 @@ impl<T: Transport> SystemManager<T> {
             // Packages no repository has (AUR builds) are the AUR source's
             // rows. Without synced databases every package looks foreign;
             // then Pacman keeps them all.
-            let foreign = String::from_utf8(bytes(
-                "pacman",
-                self.call(vec!["-Qmq".into()], cancel, false)?,
-            )?)
-            .map_err(|e| invalid("pacman", e))?;
+            let foreign = match self.call(vec!["-Qmq".into()], cancel, false) {
+                // pacman -Q exits 1 when nothing matches: no foreign packages.
+                Err(EngineError::Execution(ExecutionError::Failed(result)))
+                    if result.code == Some(1) && result.stdout.is_empty() =>
+                {
+                    String::new()
+                }
+                result => String::from_utf8(bytes("pacman", result?)?)
+                    .map_err(|e| invalid("pacman", e))?,
+            };
             let foreign: std::collections::BTreeSet<&str> =
                 foreign.lines().map(str::trim).collect();
             if foreign.len() < packages.len() {

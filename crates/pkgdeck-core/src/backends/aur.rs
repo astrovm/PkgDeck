@@ -96,11 +96,18 @@ impl<T: Transport> Aur<T> {
 
     fn pacman(&self, args: &[&str], cancel: &Cancellation) -> Result<String, EngineError> {
         let args: Vec<OsString> = args.iter().map(OsString::from).collect();
-        let output = bytes(
-            ID,
-            self.transport
-                .system_manager("pacman", &args, cancel, false)?,
-        )?;
+        let output = match self
+            .transport
+            .system_manager("pacman", &args, cancel, false)
+        {
+            // pacman -Q exits 1 when nothing matches, such as no foreign packages.
+            Err(ExecutionError::Failed(result))
+                if result.code == Some(1) && result.stdout.is_empty() =>
+            {
+                vec![]
+            }
+            result => bytes(ID, result?)?,
+        };
         String::from_utf8(output).map_err(|error| invalid(ID, error))
     }
 
@@ -502,6 +509,8 @@ mod tests {
     #[derive(Clone, Default)]
     struct Fake {
         unsynced: bool,
+        /// Every package is from a repository: pacman -Qm exits 1.
+        none_foreign: bool,
         offline: bool,
         helper: Option<&'static str>,
         sudo_fails: bool,
@@ -572,6 +581,12 @@ mod tests {
                 .unwrap()
                 .push(format!("{executable} {}", args.join(" ")));
             match (executable, args[0].as_str()) {
+                ("pacman", "-Qm" | "-Qmq") if self.none_foreign => {
+                    Err(ExecutionError::Failed(Completion {
+                        code: Some(1),
+                        ..done("")
+                    }))
+                }
                 ("pacman", "-Qm") if self.unsynced => Ok(done("bash 5.3-1\nyay 12.0.0-1\n")),
                 ("pacman", "-Qm") => Ok(done(&format!(
                     "yay {}\nlocal-tool 1.0-1\nparu 2.1.0-1\n",
@@ -774,6 +789,23 @@ mod tests {
             .iter()
             .all(|row| row.update == UpdateAvailability::Unknown));
         assert_eq!(aur.query_errors().len(), 1);
+    }
+
+    #[test]
+    fn a_system_without_aur_packages_lists_none() {
+        let mut aur = Aur::new(Fake {
+            none_foreign: true,
+            ..Fake::default()
+        });
+        assert_eq!(
+            aur.detect(&Cancellation::default()).unwrap(),
+            if cfg!(target_os = "linux") {
+                Availability::Available
+            } else {
+                Availability::Unavailable("The AUR is for Arch Linux".into())
+            }
+        );
+        assert!(aur.installed(&Cancellation::default()).unwrap().is_empty());
     }
 
     #[test]
