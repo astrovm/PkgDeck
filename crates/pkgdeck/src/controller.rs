@@ -229,6 +229,13 @@ impl Job {
                 | Self::ImportRepository(_)
         )
     }
+    /// Previews that decide whether a confirmed change may run.
+    fn reviews(&self) -> bool {
+        matches!(
+            self,
+            Self::PlanOperation(_) | Self::PlanUpgrade(..) | Self::PlanCleanAll(_)
+        )
+    }
     fn operations(&self) -> Vec<Operation> {
         match self {
             Self::Write(operation, _) => vec![operation.clone()],
@@ -713,6 +720,19 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
     send(Reply::Done(result));
 }
 
+/// How workers reach the running system: its package managers, and the host
+/// and root that source lists are read from. Tests substitute synthetic ones.
+#[derive(Clone, Copy)]
+struct Natives {
+    engine: fn(&[String], bool, Authorization, &Cancellation) -> Result<Engine, EngineError>,
+    host: fn() -> pkgdeck_core::host::Host,
+    root: &'static str,
+}
+const NATIVES: Natives = Natives {
+    engine: pkgdeck_core::backends::native_engine,
+    host: pkgdeck_core::host::Host::current,
+    root: "/",
+};
 struct Worker {
     handle: thread::JoinHandle<()>,
     receiver: mpsc::Receiver<Reply>,
@@ -910,6 +930,7 @@ pub struct Controller {
     worker: Option<Worker>,
     /// Display names of confirmed changes' packages (see `Names`).
     names: Names,
+    natives: Natives,
 }
 impl Default for Controller {
     fn default() -> Self {
@@ -985,6 +1006,7 @@ impl Default for Controller {
             sudo: false,
             worker: None,
             names: Names::new(),
+            natives: NATIVES,
         }
     }
 }
@@ -1336,25 +1358,19 @@ fn plain_text(raw: &str, backend: Option<&str>) -> String {
         return ROOT_MESSAGE.into();
     }
     let tool = backend.map(source_display_name);
+    let failed = |output: &str| match (meaningful_line(output), &tool) {
+        (Some(line), Some(tool)) => format!("{tool} couldn't run: {}", sentence_tail(&line)),
+        (Some(line), None) => sentence(&line),
+        (None, Some(tool)) => format!("{tool} reported an error without details."),
+        (None, None) => "The package manager reported an error without details.".into(),
+    };
     if let Some(at) = raw.find("host command failed") {
         let rest = &raw[at..];
-        let output = rest.find("):").map_or("", |end| &rest[end + 2..]);
-        return match (meaningful_line(output), tool) {
-            (Some(line), Some(tool)) => format!("{tool} couldn't run: {}", sentence_tail(&line)),
-            (Some(line), None) => sentence(&line),
-            (None, Some(tool)) => format!("{tool} reported an error without details."),
-            (None, None) => "The package manager reported an error without details.".into(),
-        };
+        return failed(rest.find("):").map_or("", |end| &rest[end + 2..]));
     }
     // Core's own wording: "the package manager exited with code N: reason".
     if let Some(rest) = raw.trim_start().strip_prefix("the package manager ") {
-        let reason = rest.split_once(": ").map_or("", |(_, reason)| reason);
-        return match (meaningful_line(reason), tool) {
-            (Some(line), Some(tool)) => format!("{tool} couldn't run: {}", sentence_tail(&line)),
-            (Some(line), None) => sentence(&line),
-            (None, Some(tool)) => format!("{tool} reported an error without details."),
-            (None, None) => "The package manager reported an error without details.".into(),
-        };
+        return failed(rest.split_once(": ").map_or("", |(_, reason)| reason));
     }
     let cleaned = strip_debug(raw);
     let line = meaningful_line(&cleaned).unwrap_or_default();
@@ -1508,11 +1524,10 @@ fn repository_error(error: &str) -> String {
 /// Every original field stays for the frontend's own logic.
 fn repositories_json(report: &repositories::Report) -> QString {
     let mut value = serde_json::to_value(report).unwrap_or_else(|_| json!({}));
-    if let Some(rows) = value["repositories"].as_array_mut() {
-        for (row, repository) in rows.iter_mut().zip(&report.repositories) {
-            row["source_name"] = json!(source_display_name(&repository.backend));
-            row["where"] = json!(source_and_scope(&repository.backend, &repository.scope));
-        }
+    let rows = value["repositories"].as_array_mut().into_iter().flatten();
+    for (row, repository) in rows.zip(&report.repositories) {
+        row["source_name"] = json!(source_display_name(&repository.backend));
+        row["where"] = json!(source_and_scope(&repository.backend, &repository.scope));
     }
     value["errors"] = json!(report
         .errors
@@ -2787,7 +2802,7 @@ impl ffi::PackageController {
         // Details can reuse a warm engine; mutation jobs always rediscover.
         // Searches reuse a recent engine with the same scope, so typing
         // does not detect every package manager again for each query.
-        let cached = self.as_mut().rust_mut().engine.take();
+        let mut cached = self.as_mut().rust_mut().engine.take();
         let scope = self.as_mut().rust_mut().engine_scope.take();
         let search_scope = engine_source(&job, &source_filter);
         let warm_search = matches!(&job, Job::Load(view, _) if view == "Search")
@@ -2797,6 +2812,7 @@ impl ffi::PackageController {
         self.as_mut().rust_mut().reused_engine_born =
             scope.filter(|_| warm_search).map(|(_, _, born)| born);
         let cleanup = self.rust().cleanup.clone();
+        let natives = self.rust().natives;
         // Keep read snapshots while a native write owns the worker. The UI
         // can browse them, clearly marked stale, until the queue drains.
         let handle = thread::spawn(move || {
@@ -2821,41 +2837,27 @@ impl ffi::PackageController {
                 }
                 let _ = sender.send(reply);
             };
+            let root = std::path::Path::new(natives.root);
             if let Job::Repositories(action) = &job {
                 let transport = pkgdeck_core::backends::NativeTransport {
-                    host: pkgdeck_core::host::Host::current(),
+                    host: (natives.host)(),
                     authorization,
                 };
-                let result = if let Some(reason) = transport.host.runtime.disabled_reason() {
-                    Err(pkgdeck_core::process::ExecutionError::Disabled(reason.into()).into())
-                } else {
-                    action
-                        .as_ref()
-                        .map(|action| repositories::apply(&transport, action, &token))
-                        .transpose()
-                        .map(|_| {
-                            Payload::Repositories(repositories::list(
-                                &transport,
-                                std::path::Path::new("/"),
-                                &token,
-                            ))
-                        })
-                };
+                let result = action
+                    .as_ref()
+                    .map(|action| repositories::apply(&transport, action, &token))
+                    .transpose()
+                    .map(|_| Payload::Repositories(repositories::list(&transport, root, &token)));
                 send(Reply::Done(result));
                 return;
             }
             if let Job::ImportRepository(import) = &job {
                 let transport = pkgdeck_core::backends::NativeTransport {
-                    host: pkgdeck_core::host::Host::current(),
+                    host: (natives.host)(),
                     authorization,
                 };
-                let result = repository_input::apply(import, authorization, &token).map(|_| {
-                    Payload::Repositories(repositories::list(
-                        &transport,
-                        std::path::Path::new("/"),
-                        &token,
-                    ))
-                });
+                let result = repository_input::apply(import, authorization, &token)
+                    .map(|_| Payload::Repositories(repositories::list(&transport, root, &token)));
                 send(Reply::Done(result));
                 return;
             }
@@ -2863,12 +2865,11 @@ impl ffi::PackageController {
                 send(Reply::Done(inspect_open_input(input, &token)));
                 return;
             }
-            if warm_search {
-                if let Some(mut engine) = cached {
-                    execute(&mut engine, job, &token, &mut send);
-                    send(Reply::Engine(Box::new(engine)));
-                    return;
-                }
+            // A warm search always has the engine its scope describes.
+            if let Some(mut engine) = cached.take_if(|_| warm_search) {
+                execute(&mut engine, job, &token, &mut send);
+                send(Reply::Engine(Box::new(engine)));
+                return;
             }
             // Fast path: Details against a warm engine reuse detected state
             // outright. A filter change since discovery surfaces as
@@ -2888,7 +2889,7 @@ impl ffi::PackageController {
                     }
                 }
             }
-            match pkgdeck_core::backends::native_engine(
+            match (natives.engine)(
                 &engine_source(&job, &source_filter),
                 sources_view,
                 authorization,
@@ -3872,9 +3873,6 @@ impl ffi::PackageController {
             }
             Ok(Payload::Packages(report)) => {
                 let sudo = self.rust().sudo;
-                if matches!(self.rust().queued, Some(Job::Load(..))) {
-                    return;
-                }
                 // Only the terminal report enables the upgrade action.
                 // Partial rows and failures can still change while reading.
                 if self.rust().worker.is_none() {
@@ -3974,9 +3972,6 @@ impl ffi::PackageController {
                 self.set_status("Repositories loaded.".into());
             }
             Ok(Payload::Sources(sources)) => {
-                if matches!(self.rust().queued, Some(Job::Load(..))) {
-                    return;
-                }
                 self.as_mut().rust_mut().catalog_checked = true;
                 let rows: Vec<_> = sources.iter().map(source_row).collect();
                 let failures: Vec<_> = rows
@@ -4089,8 +4084,9 @@ impl ffi::PackageController {
             .insert(key, (Instant::now(), Payload::Packages(report)));
     }
     pub fn check_sources(mut self: Pin<&mut Self>) {
-        self.as_mut().begin_catalog_check(|token| {
-            pkgdeck_core::backends::native_engine(&[], true, Authorization::Polkit, token)
+        let engine = self.rust().natives.engine;
+        self.as_mut().begin_catalog_check(move |token| {
+            engine(&[], true, Authorization::Polkit, token)
                 .map(|mut engine| engine.discover(token))
                 .unwrap_or_default()
         });
@@ -4129,6 +4125,7 @@ impl ffi::PackageController {
         };
         let job = Job::Details(id.clone());
         let scope = engine_source(&job, &self.rust().source_filter);
+        let natives = self.rust().natives;
         let cancel = Cancellation::default();
         let token = cancel.clone();
         let (sender, receiver) = mpsc::channel();
@@ -4143,7 +4140,7 @@ impl ffi::PackageController {
                     let _ = sender.send(reply);
                 }
             };
-            match pkgdeck_core::backends::native_engine(&scope, false, authorization, &token) {
+            match (natives.engine)(&scope, false, authorization, &token) {
                 Ok(mut engine) => execute(&mut engine, job, &token, &mut send),
                 Err(error) => send(Reply::Done(Err(error))),
             }
@@ -4185,11 +4182,8 @@ impl ffi::PackageController {
     /// and say why the rest of its details are missing. Do not cache the
     /// failure: choosing the package again tries the lookup once more.
     fn show_details_error(mut self: Pin<&mut Self>, id: &PackageId, error: &EngineError) {
-        if matches!(
-            error,
-            EngineError::Cancelled
-                | EngineError::Execution(pkgdeck_core::process::ExecutionError::Cancelled)
-        ) || matches!(self.rust().queued, Some(Job::Load(..)))
+        if failure_kind(error) == "cancelled"
+            || matches!(self.rust().queued, Some(Job::Load(..)))
             || self.rust().selected.as_ref() != Some(id)
         {
             return;
@@ -4221,6 +4215,7 @@ impl ffi::PackageController {
         let job = Job::Load(view.clone(), String::new());
         let scope = engine_source(&job, &sources);
         let sources_view = view == "Sources";
+        let natives = self.rust().natives;
         let cancel = Cancellation::default();
         let token = cancel.clone();
         let (sender, receiver) = mpsc::channel();
@@ -4236,8 +4231,7 @@ impl ffi::PackageController {
                     let _ = sender.send(reply);
                 }
             };
-            match pkgdeck_core::backends::native_engine(&scope, sources_view, authorization, &token)
-            {
+            match (natives.engine)(&scope, sources_view, authorization, &token) {
                 Ok(mut engine) => execute(&mut engine, job, &token, &mut send),
                 Err(error) => send(Reply::Done(Err(error))),
             }
@@ -4382,10 +4376,22 @@ impl ffi::PackageController {
         let Some(worker) = &self.rust().worker else {
             return;
         };
-        let replies: Vec<_> = worker.receiver.try_iter().collect();
+        let mut replies: Vec<_> = worker.receiver.try_iter().collect();
         let complete =
             replies.iter().any(|r| matches!(r, Reply::Done(_))) || worker.handle.is_finished();
         let cancelled = worker.cancel.requested();
+        // A finished worker's thread may still have sent its last replies.
+        let finished = complete.then(|| {
+            let Worker {
+                handle,
+                receiver,
+                cancel,
+                job,
+            } = self.as_mut().rust_mut().worker.take().unwrap();
+            let joined = handle.join();
+            replies.extend(receiver.try_iter());
+            (job, cancel, joined)
+        });
         let replies: Vec<_> = replies
             .into_iter()
             .filter_map(|reply| {
@@ -4399,18 +4405,10 @@ impl ffi::PackageController {
                 }
             })
             .collect();
-        if complete {
-            let worker = self.as_mut().rust_mut().worker.take().unwrap();
-            let joined = worker.handle.join();
-            for reply in replies.into_iter().chain(worker.receiver.try_iter()) {
-                if let Reply::Inventory(report) = reply {
-                    if !worker.cancel.requested() {
-                        self.as_mut().warm_inventory(report);
-                    }
-                    continue;
-                }
+        if let Some((job, cancel, joined)) = finished {
+            for reply in replies {
                 if self.rust().background {
-                    if !worker.cancel.requested() {
+                    if !cancel.requested() {
                         match reply {
                             Reply::Done(Ok(Payload::BackgroundUpdates(report))) => {
                                 self.as_mut().finish_background_check(report)
@@ -4419,7 +4417,7 @@ impl ffi::PackageController {
                                 self.as_mut().finish_background_error(&error)
                             }
                             Reply::Done(Ok(payload)) => {
-                                if let Job::Load(view, query) = &worker.job {
+                                if let Job::Load(view, query) = &job {
                                     if let Payload::Sources(sources) = &payload {
                                         let rows: Vec<_> = sources.iter().map(source_row).collect();
                                         self.as_mut().set_source_catalog(encoded(rows));
@@ -4448,16 +4446,14 @@ impl ffi::PackageController {
                         // Remember what this engine detected so the next
                         // search can reuse it. Only reads leave a reusable one.
                         let born = self.as_mut().rust_mut().reused_engine_born.take();
-                        let scope =
-                            matches!(worker.job, Job::Load(ref view, _) if view != "Sources").then(
-                                || {
-                                    (
-                                        engine_source(&worker.job, &self.rust().source_filter),
-                                        self.rust().sudo,
-                                        born.unwrap_or_else(Instant::now),
-                                    )
-                                },
-                            );
+                        let scope = matches!(job, Job::Load(ref view, _) if view != "Sources")
+                            .then(|| {
+                                (
+                                    engine_source(&job, &self.rust().source_filter),
+                                    self.rust().sudo,
+                                    born.unwrap_or_else(Instant::now),
+                                )
+                            });
                         self.as_mut().rust_mut().engine_scope = scope;
                         self.as_mut().rust_mut().engine = Some(*engine);
                     }
@@ -4470,31 +4466,24 @@ impl ffi::PackageController {
                         self.as_mut().apply(Ok(Payload::Details(details)))
                     }
                     Reply::Done(result) => {
-                        if self.rust().discard_revalidation
-                            && matches!(
-                                worker.job,
-                                Job::PlanOperation(..)
-                                    | Job::PlanUpgrade(..)
-                                    | Job::PlanCleanAll(..)
-                            )
-                        {
+                        if self.rust().discard_revalidation && job.reviews() {
                             continue;
                         }
                         if let Err(error) = &result {
                             if let Some(notice) = preflight_notice(
-                                &worker.job,
+                                &job,
                                 error,
                                 self.rust().sudo,
-                                &self.rust().names_for(&worker.job.operations()),
+                                &self.rust().names_for(&job.operations()),
                             ) {
                                 self.as_mut().set_notice(encoded(notice));
                             }
                         }
-                        if worker.job.writes() {
+                        if job.writes() {
                             // A changed plan is not a failure: the new plan
                             // opens for review right after this.
                             let notice = if repreview_changed_plan(
-                                &worker.job,
+                                &job,
                                 &result,
                                 &self.rust().packages,
                             )
@@ -4503,10 +4492,10 @@ impl ffi::PackageController {
                                 json!({"kind": "info", "title": "The planned changes are different now. Review them again."})
                             } else {
                                 write_notice(
-                                    &worker.job,
+                                    &job,
                                     &result,
                                     self.rust().sudo,
-                                    &self.rust().names_for(&worker.job.operations()),
+                                    &self.rust().names_for(&job.operations()),
                                 )
                             };
                             self.as_mut().set_notice(encoded(notice));
@@ -4514,20 +4503,17 @@ impl ffi::PackageController {
                                 if let Some(store) = self.rust().activity_store.clone() {
                                     let outcomes = match &result {
                                         Ok(Payload::Batch(_, outcomes)) => outcomes.clone(),
-                                        Ok(_) => worker
-                                            .job
+                                        Ok(_) => job
                                             .operations()
                                             .iter()
                                             .map(|_| Outcome::Finished)
                                             .collect(),
-                                        Err(EngineError::Cancelled) => worker
-                                            .job
+                                        Err(EngineError::Cancelled) => job
                                             .operations()
                                             .iter()
                                             .map(|_| Outcome::Cancelled)
                                             .collect(),
-                                        Err(_) => worker
-                                            .job
+                                        Err(_) => job
                                             .operations()
                                             .iter()
                                             .map(|_| Outcome::Failed)
@@ -4541,14 +4527,14 @@ impl ffi::PackageController {
                         // A reviewed native plan can change between review and write.
                         // Stop the write, compute the new plan, and ask again.
                         if let Some(next) =
-                            repreview_changed_plan(&worker.job, &result, &self.rust().packages)
+                            repreview_changed_plan(&job, &result, &self.rust().packages)
                         {
                             self.as_mut().rust_mut().queued = Some(next);
                         }
                         // Snapshot terminal view reports for instant
                         // switching back, unless a newer load already
                         // superseded this one (its guard in apply skips it).
-                        let key = match &worker.job {
+                        let key = match &job {
                             Job::Load(view, query) | Job::RetrySource(view, query, _)
                                 if !matches!(self.rust().queued, Some(Job::Load(..))) =>
                             {
@@ -4589,9 +4575,9 @@ impl ffi::PackageController {
                                 self.as_mut().stash_current(key);
                             }
                         }
-                        if matches!(worker.job, Job::RetryFailedUpdates(_))
+                        if matches!(job, Job::RetryFailedUpdates(_))
                             && self.rust().queued.is_none()
-                            && !worker.cancel.requested()
+                            && !cancel.requested()
                             && self.rust().active_view == "Updates"
                         {
                             let operations = upgrade_plan(&self.rust().packages);
@@ -4629,7 +4615,7 @@ impl ffi::PackageController {
             }
             // The quiet reload of the section on screen has landed.
             if !self.rust().background
-                && matches!(&worker.job, Job::Load(view, _) if *view == self.rust().active_view)
+                && matches!(&job, Job::Load(view, _) if *view == self.rust().active_view)
             {
                 self.as_mut().set_refreshing(false);
             }
@@ -4682,6 +4668,15 @@ impl ffi::PackageController {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// What `$pattern` binds in `$value`; any other value fails the test.
+    macro_rules! expect {
+        ($value:expr, $pattern:pat => $bound:expr) => {
+            match $value {
+                $pattern => $bound,
+                _ => panic!("expected {}", stringify!($pattern)),
+            }
+        };
+    }
     #[test]
     fn write_progress_tracks_real_steps_and_transfer_totals() {
         let first = Operation::Refresh {
@@ -4723,8 +4718,54 @@ mod tests {
             scope: Scope::System,
             change: repositories::Change::Remove,
         };
-        let state = ProgressState::new(&Job::Repositories(Some(repository)), None, &Names::new());
+        let state = ProgressState::new(
+            &Job::Repositories(Some(repository.clone())),
+            None,
+            &Names::new(),
+        );
         assert_eq!(state.label, "Remove synthetic repository");
+        for (change, label) in [
+            (
+                repositories::Change::Add {
+                    url: "https://example.invalid/repo".into(),
+                },
+                "Add synthetic repository",
+            ),
+            (
+                repositories::Change::SetEnabled { enabled: true },
+                "Enable synthetic repository",
+            ),
+            (
+                repositories::Change::SetEnabled { enabled: false },
+                "Disable synthetic repository",
+            ),
+            (
+                repositories::Change::SetPriority { priority: 5 },
+                "Change synthetic priority",
+            ),
+            (repositories::Change::OpenEditor, "Open software sources"),
+        ] {
+            let action = RepositoryAction {
+                change,
+                ..repository.clone()
+            };
+            let state = ProgressState::new(&Job::Repositories(Some(action)), None, &Names::new());
+            assert_eq!(state.label, label);
+        }
+        let mut state = ProgressState::new(
+            &Job::Load("installed".into(), String::new()),
+            None,
+            &Names::new(),
+        );
+        assert_eq!(state.label, "Working");
+        let before = state.snapshot().to_string();
+        state.apply(&Event::Progress {
+            operation: Operation::Refresh {
+                backend: "apt".into(),
+            },
+            progress: Progress::Message("Reading lists".into()),
+        });
+        assert_eq!(state.snapshot().to_string(), before);
     }
     #[test]
     fn file_urls_preserve_spaces_and_unicode_and_reject_remote_hosts() {
@@ -4770,11 +4811,8 @@ mod tests {
                 .env("PATH", &base)
                 .output()
                 .unwrap();
-            assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(output.status.success(), "{stderr}");
             std::fs::remove_dir_all(base).unwrap();
             return;
         }
@@ -4783,22 +4821,17 @@ mod tests {
             "https://example.invalid/synthetic.flatpakref",
             "flatpak+https://example.invalid/synthetic.flatpakref",
         ] {
-            let Payload::OpenPackage(package) = inspect_open_input(link, &cancel).unwrap() else {
-                panic!("Flatpak reference must preview as a package");
-            };
+            let preview = inspect_open_input(link, &cancel).unwrap();
+            let package = expect!(preview, Payload::OpenPackage(package) => package);
             assert_eq!(package.id.name, "org.example.Synthetic");
         }
-        let Payload::OpenRepository(import) =
-            inspect_open_input("https://example.invalid/synthetic.flatpakrepo", &cancel).unwrap()
-        else {
-            panic!("Flatpak repository must preview as a source");
-        };
+        let preview =
+            inspect_open_input("https://example.invalid/synthetic.flatpakrepo", &cancel).unwrap();
+        let import = expect!(preview, Payload::OpenRepository(import) => import);
         assert_eq!(import.name, "synthetic");
-        let Payload::OpenPackage(package) =
-            inspect_open_input("https://example.invalid/synthetic.flatpak", &cancel).unwrap()
-        else {
-            panic!("Flatpak bundle must preview as a package");
-        };
+        let preview =
+            inspect_open_input("https://example.invalid/synthetic.flatpak", &cancel).unwrap();
+        let package = expect!(preview, Payload::OpenPackage(package) => package);
         assert_eq!(package.id.backend, "flatpak");
         assert!(inspect_open_input("https://example.invalid/unsupported.bin", &cancel).is_err());
     }
@@ -4911,11 +4944,8 @@ mod tests {
                 .env("PATH", &base)
                 .output()
                 .unwrap();
-            assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(output.status.success(), "{stderr}");
             std::fs::remove_dir_all(base).unwrap();
             return;
         }
@@ -5018,10 +5048,10 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         let preview = controller.confirmation().to_string();
+        let status = controller.status();
         assert!(
             preview.contains("Sample ñ"),
-            "preview: {preview}; status: {}",
-            controller.status()
+            "preview: {preview}; status: {status}"
         );
         assert!(preview.contains("Managed file:"), "{preview}");
         assert!(preview.contains("Desktop entry:"), "{preview}");
@@ -5400,14 +5430,13 @@ mod tests {
                 &mut |reply| replies.push(reply),
             );
             assert_eq!(replies.len(), 1);
-            match replies.pop().unwrap() {
-                Reply::Done(Ok(Payload::RetryPackages(source, report))) => {
-                    assert_eq!(source, "fixture");
-                    assert_eq!(report.packages.len(), count);
-                    assert_eq!(report.successful_sources, ["fixture"]);
-                }
-                _ => panic!("expected a scoped package retry"),
-            }
+            let (source, report) = expect!(
+                replies.pop().unwrap(),
+                Reply::Done(Ok(Payload::RetryPackages(source, report))) => (source, report)
+            );
+            assert_eq!(source, "fixture");
+            assert_eq!(report.packages.len(), count);
+            assert_eq!(report.successful_sources, ["fixture"]);
         }
         let mut replies = Vec::new();
         execute(
@@ -6468,18 +6497,9 @@ mod tests {
             cleanup_preview: vec![],
         });
         assert_eq!(store.entries().unwrap()[0].state, State::Running);
-        for _ in 0..500 {
-            if controller
-                .rust()
-                .worker
-                .as_ref()
-                .is_some_and(|worker| worker.handle.is_finished())
-            {
-                break;
-            }
-            thread::sleep(Duration::from_millis(1));
-        }
-        controller.as_mut().poll();
+        wait_until(&mut controller, |controller| {
+            controller.rust().worker.is_none()
+        });
         let entry = store
             .entries()
             .unwrap()
@@ -6627,6 +6647,171 @@ mod tests {
         let label = confirmation_label(&Operation::Upgrade(target.id.clone()), &[other, target]);
         assert!(label.contains("target-device: synthetic firmware"));
         assert!(!label.contains("other-device: synthetic firmware"));
+    }
+    #[test]
+    fn jobs_route_to_their_own_sources_and_errors_have_a_kind() {
+        let filter = vec!["filtered".to_owned()];
+        let id = synthetic_package("editor", "Editor").id;
+        let upgrade = |backend: &str| Operation::UpgradeAll {
+            backend: backend.into(),
+        };
+        let clean = Operation::Clean(CleanupId {
+            backend: "flatpak".into(),
+            key: "unused".into(),
+        });
+        for (job, sources) in [
+            (Job::RetryFailedUpdates(vec!["snap".into()]), vec!["snap"]),
+            (Job::BackgroundUpdates(vec!["dnf".into()]), vec!["dnf"]),
+            (Job::PlanCleanAll(vec![clean.clone()]), vec!["flatpak"]),
+            (
+                Job::ManifestPreview(PathBuf::from("inventory.json")),
+                vec![],
+            ),
+            (
+                Job::PlanUpgrade(vec![upgrade("flatpak"), upgrade("apt")], 2),
+                vec!["apt"],
+            ),
+            (
+                Job::PlanUpgrade(vec![upgrade("flatpak")], 1),
+                vec!["filtered"],
+            ),
+            (Job::Details(id.clone()), vec!["apt"]),
+        ] {
+            assert_eq!(engine_source(&job, &filter), sources);
+        }
+
+        let install = Operation::Install(id.clone());
+        assert!(same_target(&install, &Operation::Remove(id.clone())));
+        assert!(same_target(&clean, &clean.clone()));
+        assert!(!same_target(
+            &clean,
+            &Operation::Clean(CleanupId {
+                backend: "flatpak".into(),
+                key: "other".into(),
+            })
+        ));
+        assert!(same_target(&upgrade("apt"), &install));
+        assert!(!same_target(&clean, &install));
+
+        let source = |availability| Source {
+            backend: "flatpak".into(),
+            capabilities: vec![],
+            availability,
+        };
+        let restricted = source_row(&source(Ok(Availability::Unavailable(
+            "disabled by the administrator".into(),
+        ))));
+        assert_eq!(restricted["availability_kind"], "restricted");
+        assert_eq!(restricted["available"], false);
+        for (error, kind) in [
+            (
+                EngineError::Unsupported {
+                    backend: "flatpak".into(),
+                    capability: Capability::Search,
+                },
+                "unsupported",
+            ),
+            (
+                EngineError::Execution(ExecutionError::AuthorizationDenied),
+                "authorization",
+            ),
+            (
+                EngineError::Execution(ExecutionError::AuthorizationCancelled),
+                "authorization",
+            ),
+            (EngineError::Execution(ExecutionError::LockBusy), "locked"),
+        ] {
+            assert_eq!(failure_kind(&error), kind);
+            let row = source_row(&source(Err(error)));
+            assert_eq!(row["availability_kind"], kind);
+            assert_eq!(row["check_failed"], true);
+        }
+        assert_eq!(
+            plain_text("host command failed (exit 1):", None),
+            "The package manager reported an error without details."
+        );
+        assert_eq!(
+            plain_text("host command failed (exit 1):", Some("snap")),
+            "Snap reported an error without details."
+        );
+        assert_eq!(
+            plain_text("host command failed (exit 1): E: broken index", None),
+            "Broken index."
+        );
+    }
+    #[test]
+    fn removal_confirmation_lists_the_selected_and_other_native_changes() {
+        let change = |action, name: &str, old: Option<&str>, new: Option<&str>| PlannedChange {
+            action,
+            name: name.into(),
+            installed_version: old.map(Into::into),
+            candidate_version: new.map(Into::into),
+        };
+        let mut editor = synthetic_package("editor", "");
+        editor.candidate_version = Some("2".into());
+        let remove = Operation::Remove(editor.id.clone());
+        let plan = TransactionPlan {
+            operation: remove.clone(),
+            native_preview: String::new(),
+            changes: vec![
+                change(PlannedAction::Remove, "editor", Some("1"), Some("2")),
+                change(PlannedAction::Install, "libnew", None, Some("3")),
+                change(PlannedAction::Upgrade, "libsame", Some("4"), Some("4")),
+                change(PlannedAction::Remove, "libgone", None, None),
+            ],
+            download_bytes: None,
+            disk_bytes: None,
+            restart_required: None,
+            adopts: None,
+        };
+        let preview = confirmation_preview(&remove, &[editor.clone()], &[], Some(&plan));
+        assert_eq!(preview["action"], "Remove editor");
+        assert_eq!(
+            preview["summary"],
+            "Remove editor\nAPT · System\n1\n3 other packages will change\nRemoves: libgone\nApp data may remain after removal."
+        );
+        let body = preview["body"].as_str().unwrap();
+        assert!(body.contains("Selected: Remove editor (1)"), "{body}");
+        assert!(
+            body.contains("Other changes:\nInstall libnew (3)\nUpdate libsame (4)\nRemove libgone"),
+            "{body}"
+        );
+        // A source-wide change has no selected package among the plan.
+        let clean = Operation::Clean(CleanupId {
+            backend: "apt".into(),
+            key: "autoremove".into(),
+        });
+        let preview = confirmation_preview(&clean, &[editor.clone()], &[], Some(&plan));
+        assert!(preview["summary"]
+            .as_str()
+            .unwrap()
+            .contains("4 other packages will change"));
+        assert!(!preview["body"].as_str().unwrap().contains("Selected:"));
+        // A Flatpak reference only offers a system or user scope.
+        let mut reference = editor;
+        reference.id.backend = "flatpak".into();
+        reference.id.reference = Some("flatpakref:https://example.invalid/app.flatpakref".into());
+        reference.id.scope = Scope::Environment {
+            path: "/opt/flatpak".into(),
+        };
+        let install = Operation::Install(reference.id.clone());
+        let preview = confirmation_preview(&install, &[reference], &[], None);
+        assert_eq!(preview["flatpak_ref_scope"], "");
+        assert!(preview["body"]
+            .as_str()
+            .unwrap()
+            .contains("Location: /opt/flatpak"));
+    }
+    #[test]
+    fn activity_reads_report_an_unreadable_lock() {
+        let temp = pkgdeck_tools::Temp::new();
+        let file = temp.0.join("not-a-directory");
+        std::fs::write(&file, "").unwrap();
+        let error = read_activity(&file.join("activity.json")).unwrap_err();
+        assert_ne!(error.kind(), std::io::ErrorKind::NotFound);
+        assert!(read_activity(&temp.0.join("activity.json"))
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -7479,13 +7664,9 @@ mod tests {
                 availability: Ok(Availability::Available),
             }]
         });
-        controller.as_mut().begin_catalog_check(|_| {
-            vec![Source {
-                backend: "unexpected".into(),
-                capabilities: vec![],
-                availability: Ok(Availability::Available),
-            }]
-        });
+        controller
+            .as_mut()
+            .begin_catalog_check(|_| unreachable!("the check is single-flight"));
         for _ in 0..100 {
             controller.as_mut().poll();
             if controller.rust().catalog_checked {
@@ -7508,14 +7689,8 @@ mod tests {
     #[test]
     fn dropping_controller_cancels_source_catalog_check() {
         let cancel = Cancellation::default();
-        let token = cancel.clone();
         let (sender, receiver) = mpsc::channel();
-        let handle = std::thread::spawn(move || {
-            while !token.requested() {
-                std::thread::sleep(Duration::from_millis(1));
-            }
-            let _ = sender.send(Vec::<Source>::new());
-        });
+        let handle = std::thread::spawn(move || drop(sender));
         let mut controller = Controller::default();
         controller.catalog_worker = Some(CatalogWorker {
             handle,
@@ -8110,9 +8285,10 @@ mod tests {
             &Cancellation::default(),
             &mut |reply| replies.push(reply),
         );
-        let Some(Reply::Done(Ok(Payload::ManifestPreview(preview)))) = replies.pop() else {
-            panic!("preview failed");
-        };
+        let preview = expect!(
+            replies.pop(),
+            Some(Reply::Done(Ok(Payload::ManifestPreview(preview)))) => preview
+        );
         assert_eq!(
             preview.packages[0].status,
             manifest::PreviewStatus::AlreadyInstalled
@@ -8125,6 +8301,151 @@ mod tests {
         );
         assert!(matches!(replies.pop(), Some(Reply::Done(Err(_)))));
         std::fs::remove_file(path).unwrap();
+    }
+    /// A source whose installed list always fails and whose writes report
+    /// the given progress before succeeding.
+    struct Scripted {
+        id: &'static str,
+        progress: Vec<Progress>,
+    }
+    impl Backend for Scripted {
+        fn id(&self) -> &str {
+            self.id
+        }
+        fn capabilities(&self) -> &[Capability] {
+            &[Capability::Installed, Capability::Upgrade]
+        }
+        fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
+            Ok(Availability::Available)
+        }
+        fn execute(
+            &mut self,
+            _: &Operation,
+            _: &Cancellation,
+            progress: &mut dyn FnMut(Progress),
+        ) -> Result<OperationOutcome, EngineError> {
+            self.progress.drain(..).for_each(progress);
+            Ok(OperationOutcome::default())
+        }
+    }
+    fn run_job(engine: &mut Engine, job: Job, cancel: &Cancellation) -> Vec<Reply> {
+        let mut replies = Vec::new();
+        execute(engine, job, cancel, &mut |reply| replies.push(reply));
+        replies
+    }
+    #[test]
+    fn jobs_without_a_worker_engine_path_answer_directly() {
+        let mut engine = Engine::default();
+        engine
+            .register(Scripted {
+                id: "fwupd",
+                progress: vec![
+                    Progress::Transfer {
+                        completed: 5,
+                        total: Some(10),
+                    },
+                    Progress::Transfer {
+                        completed: 7,
+                        total: None,
+                    },
+                ],
+            })
+            .unwrap();
+        let cancel = Cancellation::default();
+        let mut firmware = synthetic_package("synthetic-firmware", "Firmware").id;
+        firmware.backend = "fwupd".into();
+        let replies = run_job(
+            &mut engine,
+            Job::Write(Operation::Upgrade(firmware.clone()), None),
+            &cancel,
+        );
+        let texts: Vec<_> = replies
+            .iter()
+            .filter_map(|reply| match reply {
+                Reply::Progress(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts, ["Transferred 5 of 10", "Transferred 7"]);
+        assert!(matches!(
+            replies.last(),
+            Some(Reply::Done(Ok(Payload::Batch(status, outcomes))))
+                if status == "Firmware update finished. Restart or shut down the device if required."
+                    && outcomes == &[Outcome::Finished]
+        ));
+
+        // A failed source makes an export incomplete, so nothing is written.
+        let path = std::env::temp_dir().join(format!(
+            "pkgdeck-gui-partial-export-{}.json",
+            std::process::id()
+        ));
+        let replies = run_job(
+            &mut engine,
+            Job::ManifestExport(path.clone(), vec![]),
+            &cancel,
+        );
+        assert!(matches!(
+            replies.last(),
+            Some(Reply::Done(Err(EngineError::Execution(ExecutionError::Invalid(reason)))))
+                if reason == "some package sources could not be read; retry the export"
+        ));
+        assert!(!path.exists());
+
+        let upgrade = |backend: &str| Operation::UpgradeAll {
+            backend: backend.into(),
+        };
+        let replies = run_job(
+            &mut engine,
+            Job::PlanUpgrade(vec![upgrade("fwupd")], 3),
+            &cancel,
+        );
+        assert!(matches!(
+            replies.last(),
+            Some(Reply::Done(Ok(Payload::UpgradePreview(operations, 3, None))))
+                if operations == &[upgrade("fwupd")]
+        ));
+        let replies = run_job(
+            &mut engine,
+            Job::PlanUpgrade(vec![upgrade("apt")], 1),
+            &cancel,
+        );
+        assert!(matches!(
+            replies.last(),
+            Some(Reply::Done(Err(EngineError::UnknownBackend(backend)))) if backend == "apt"
+        ));
+        let clean = vec![Operation::Clean(CleanupId {
+            backend: "fwupd".into(),
+            key: "cache".into(),
+        })];
+        let replies = run_job(&mut engine, Job::PlanCleanAll(clean.clone()), &cancel);
+        assert!(matches!(
+            replies.last(),
+            Some(Reply::Done(Ok(Payload::CleanPreview(operations, items))))
+                if operations == &clean && items.is_empty()
+        ));
+        for job in [
+            Job::Repositories(None),
+            Job::OpenInput("relative.deb".into()),
+        ] {
+            let replies = run_job(&mut engine, job, &cancel);
+            assert!(matches!(
+                replies.as_slice(),
+                [Reply::Done(Err(
+                    EngineError::NotFound | EngineError::InvalidResponse { .. }
+                ))]
+            ));
+        }
+
+        cancel.cancel();
+        let replies = run_job(
+            &mut engine,
+            Job::UpgradeAll(vec![Operation::Upgrade(firmware)], None),
+            &cancel,
+        );
+        assert!(matches!(
+            replies.last(),
+            Some(Reply::Done(Ok(Payload::Batch(_, outcomes)))) if outcomes == &[Outcome::Cancelled]
+        ));
     }
     #[test]
     fn inventory_picker_rejects_remote_paths_and_bad_selection() {
@@ -8307,10 +8628,7 @@ mod tests {
                 &Cancellation::default(),
                 &mut |r| replies.push(r),
             );
-            match replies.pop().unwrap() {
-                Reply::Done(Ok(Payload::Packages(report))) => report,
-                _ => panic!("expected a package report"),
-            }
+            expect!(replies.pop().unwrap(), Reply::Done(Ok(Payload::Packages(report))) => report)
         }
         let package = Package {
             id: PackageId {
@@ -8367,11 +8685,12 @@ mod tests {
                 &mut engine,
                 Job::Load("Search".into(), "synthetic".into()),
                 &Cancellation::default(),
-                &mut |reply| match reply {
-                    Reply::Partial(report)
-                    | Reply::Inventory(report)
-                    | Reply::Done(Ok(Payload::Packages(report))) => reports.push(report),
-                    _ => {}
+                &mut |reply| {
+                    if let Reply::Partial(report) | Reply::Done(Ok(Payload::Packages(report))) =
+                        reply
+                    {
+                        reports.push(report);
+                    }
                 },
             );
             assert!(reports.len() >= 2);
@@ -8440,6 +8759,13 @@ mod tests {
             checked_upgrades(&[runtime.clone()], &encoded),
             vec![Operation::Upgrade(runtime.id.clone())]
         );
+        // A reference that is not text, or trailing parts, never matches.
+        let mut numbered = identity.clone();
+        numbered[5] = serde_json::json!(7);
+        let mut longer = identity.clone();
+        longer.push(serde_json::json!("extra"));
+        let malformed = serde_json::to_string(&vec![numbered, longer]).unwrap();
+        assert!(checked_upgrades(&[runtime.clone()], &malformed).is_empty());
         identity[5] = serde_json::json!("runtime/org.example.Platform/all/beta");
         assert!(
             checked_upgrades(&[runtime], &serde_json::to_string(&vec![identity]).unwrap())
@@ -8620,14 +8946,10 @@ mod tests {
             &mut |r| replies.push(r),
         );
         assert_eq!(replies.len(), 2);
-        let partial = match replies.remove(0) {
-            Reply::Partial(report) => report,
-            _ => panic!("expected a streaming partial first"),
-        };
-        match replies.remove(0) {
-            Reply::Done(Ok(Payload::Packages(report))) => assert_eq!(report, partial),
-            _ => panic!("expected the terminal report last"),
-        }
+        let partial = expect!(replies.remove(0), Reply::Partial(report) => report);
+        let terminal =
+            expect!(replies.remove(0), Reply::Done(Ok(Payload::Packages(report))) => report);
+        assert_eq!(terminal, partial);
     }
     #[test]
     fn installed_and_updates_loads_stream_filtered_partials() {
@@ -8668,16 +8990,12 @@ mod tests {
                 &mut |r| replies.push(r),
             );
             assert_eq!(replies.len(), 3);
-            let partial = match replies.remove(0) {
-                Reply::Partial(report) => report,
-                _ => panic!("expected a streaming partial first"),
-            };
+            let partial = expect!(replies.remove(0), Reply::Partial(report) => report);
             assert_eq!(partial.packages, vec![package.clone()]);
             assert!(matches!(replies.remove(0), Reply::Inventory(_)));
-            match replies.remove(0) {
-                Reply::Done(Ok(Payload::Packages(report))) => assert_eq!(report, partial),
-                _ => panic!("expected the terminal report last"),
-            }
+            let terminal =
+                expect!(replies.remove(0), Reply::Done(Ok(Payload::Packages(report))) => report);
+            assert_eq!(terminal, partial);
         }
     }
     #[test]
@@ -8758,9 +9076,10 @@ mod tests {
                 &Cancellation::default(),
                 &mut |reply| replies.push(reply),
             );
-            let Reply::Done(Ok(Payload::Batch(status, _))) = replies.pop().unwrap() else {
-                panic!("firmware completion status missing")
-            };
+            let status = expect!(
+                replies.pop().unwrap(),
+                Reply::Done(Ok(Payload::Batch(status, _))) => status
+            );
             assert!(status.contains("Restart or shut down"));
         }
 
@@ -8832,15 +9151,17 @@ mod tests {
                     Reply::Done(Ok(Payload::Written(outcome))) => {
                         assert!(outcome.cancellation_deferred)
                     }
-                    Reply::Done(Err(error)) => assert_eq!(
-                        error,
-                        if matches!(job, Job::Details(_)) {
+                    reply => {
+                        let expected = if matches!(job, Job::Details(_)) {
                             EngineError::NotFound
                         } else {
                             pkgdeck_core::process::ExecutionError::AuthorizationDenied.into()
-                        }
-                    ),
-                    _ => panic!("missing terminal reply"),
+                        };
+                        assert!(
+                            matches!(&reply, Reply::Done(Err(error)) if *error == expected),
+                            "missing terminal reply"
+                        );
+                    }
                 }
             }
         }
@@ -9770,16 +10091,6 @@ mod tests {
         fn search(&mut self, _: &str, _: &Cancellation) -> Result<Vec<Package>, EngineError> {
             Ok(vec![self.package.clone()])
         }
-        fn installed(&mut self, _: &Cancellation) -> Result<Vec<Package>, EngineError> {
-            Ok(vec![])
-        }
-        fn details(
-            &mut self,
-            _: &PackageId,
-            _: &Cancellation,
-        ) -> Result<PackageDetails, EngineError> {
-            Err(EngineError::NotFound)
-        }
         fn operation_plan(
             &mut self,
             operation: &Operation,
@@ -9795,14 +10106,6 @@ mod tests {
                 restart_required: None,
                 adopts: Some(app),
             }))
-        }
-        fn execute(
-            &mut self,
-            _: &Operation,
-            _: &Cancellation,
-            _: &mut dyn FnMut(Progress),
-        ) -> Result<OperationOutcome, EngineError> {
-            panic!("previews never install a cask")
         }
     }
     fn adoptable_app() -> Package {
@@ -9846,29 +10149,30 @@ mod tests {
     #[test]
     fn adoption_resolves_the_real_cask_and_previews_only_this_copy() {
         let cask = obsidian_cask();
-        match plan_adoption_with(
-            cask.clone(),
-            Some("/Applications/Obsidian.app"),
-            adoptable_app(),
-        ) {
-            Reply::Done(Ok(Payload::AdoptionPreview(found, Operation::Install(id), plan))) => {
-                // The identity, scope and prefix come from the cask source.
-                assert_eq!(*found, cask);
-                assert_eq!(id, cask.id);
-                assert_eq!(
-                    plan.adopts.as_deref(),
-                    Some(std::path::Path::new("/Applications/Obsidian.app"))
-                );
-            }
-            _ => panic!("expected an adoption preview"),
-        }
-        let refused = |reply: Reply, words: &str| match reply {
-            Reply::Done(Err(EngineError::InvalidResponse { backend, reason })) => {
-                assert_eq!(backend, "homebrew-cask");
-                assert!(reason.contains(words), "{reason}");
-                assert!(reason.ends_with("Nothing was changed."));
-            }
-            _ => panic!("expected a refusal"),
+        // The identity, scope and prefix come from the cask source.
+        assert!(matches!(
+            plan_adoption_with(
+                cask.clone(),
+                Some("/Applications/Obsidian.app"),
+                adoptable_app(),
+            ),
+            Reply::Done(Ok(Payload::AdoptionPreview(found, Operation::Install(id), plan)))
+                if *found == cask
+                    && id == cask.id
+                    && plan.adopts.as_deref()
+                        == Some(std::path::Path::new("/Applications/Obsidian.app"))
+        ));
+        let refused = |reply: Reply, words: &str| {
+            assert!(
+                matches!(
+                    &reply,
+                    Reply::Done(Err(EngineError::InvalidResponse { backend, reason }))
+                        if backend == "homebrew-cask"
+                            && reason.contains(words)
+                            && reason.ends_with("Nothing was changed.")
+                ),
+                "expected a refusal naming {words:?}"
+            );
         };
         // An install that would add a copy elsewhere, or no copy at all.
         refused(
@@ -9894,6 +10198,29 @@ mod tests {
             ),
             "already has the obsidian cask installed",
         );
+        // An unnamed app is called by its cask.
+        let mut installed = cask.clone();
+        installed.installed_version = Some("1.2.3".into());
+        let mut unnamed = adoptable_app();
+        unnamed.display_name.clear();
+        refused(
+            plan_adoption_with(installed, Some("/Applications/Obsidian.app"), unnamed),
+            "can't take over this copy of obsidian.",
+        );
+        // A cancelled lookup stops before any plan.
+        let mut engine = Engine::default();
+        engine
+            .register(CaskFixture {
+                package: cask.clone(),
+                adopts: None,
+            })
+            .unwrap();
+        let cancel = Cancellation::default();
+        cancel.cancel();
+        assert!(matches!(
+            plan_adoption(&mut engine, &adoptable_app(), &cancel),
+            Err(EngineError::Cancelled)
+        ));
         // Only macOS inventory rows that name a cask are resolved.
         let mut plain = adoptable_app();
         plain.adopt_with = None;
@@ -9940,16 +10267,16 @@ mod tests {
             ));
         }
         controller.as_mut().propose("adopt".into(), 0);
-        if cfg!(target_os = "macos") {
-            assert!(
-                matches!(&controller.rust().queued, Some(Job::PlanAdoption(app)) if **app == adoptable_app())
-            );
-        } else {
-            assert!(!matches!(
-                controller.rust().queued,
-                Some(Job::PlanAdoption(_))
-            ));
-        }
+        // Only macOS offers adoption.
+        let queued = &controller.rust().queued;
+        assert_eq!(
+            matches!(queued, Some(Job::PlanAdoption(_))),
+            cfg!(target_os = "macos")
+        );
+        assert_eq!(
+            matches!(queued, Some(Job::PlanAdoption(app)) if **app == adoptable_app()),
+            cfg!(target_os = "macos")
+        );
         // The read-only row still never offers its own writes.
         controller.as_mut().rust_mut().queued = None;
         for action in ["install", "remove", "upgrade"] {
@@ -10037,5 +10364,1012 @@ mod tests {
         assert!(refusal["detail"].as_str().unwrap().contains("another copy"));
         controller.as_mut().confirm(false);
         assert!(controller.rust().pending.is_none());
+    }
+
+    /// A package from the synthetic system: installed, with an update.
+    fn fixture_row() -> Package {
+        let mut package = synthetic_package("synthetic", "Synthetic");
+        package.id.backend = "fixture".into();
+        package.candidate_version = Some("2".into());
+        package.update = UpdateAvailability::Available;
+        package
+    }
+    fn fixture_engine(
+        _: &[String],
+        _: bool,
+        _: Authorization,
+        _: &Cancellation,
+    ) -> Result<Engine, EngineError> {
+        let mut engine = Engine::default();
+        engine.register(Fixture {
+            package: fixture_row(),
+            fail: false,
+        })?;
+        Ok(engine)
+    }
+    fn missing_engine(
+        sources: &[String],
+        _: bool,
+        _: Authorization,
+        _: &Cancellation,
+    ) -> Result<Engine, EngineError> {
+        Err(EngineError::Unavailable {
+            backend: sources.join(","),
+            reason: "synthetic system has no managers".into(),
+        })
+    }
+    /// A host with no tools on its PATH, so nothing native can run.
+    fn bare_host() -> pkgdeck_core::host::Host {
+        pkgdeck_core::host::Host::new(
+            pkgdeck_core::host::Runtime::Native,
+            BTreeMap::from([("PATH".into(), "/nonexistent/pkgdeck-tests".into())]),
+        )
+    }
+    const SYNTHETIC: Natives = Natives {
+        engine: fixture_engine,
+        host: bare_host,
+        root: "/nonexistent/pkgdeck-tests",
+    };
+    fn synthetic_controller() -> cxx::UniquePtr<ffi::PackageController> {
+        let mut controller = idle_controller();
+        controller.pin_mut().rust_mut().natives = SYNTHETIC;
+        controller
+    }
+    fn settle(controller: &mut Pin<&mut ffi::PackageController>) {
+        wait_until(controller, |controller| {
+            controller.rust().worker.is_none()
+                && controller.rust().details_worker.is_none()
+                && controller.rust().catalog_worker.is_none()
+        });
+    }
+    #[test]
+    fn background_checks_repositories_and_source_catalogs_use_the_system_workers() {
+        let mut controller = synthetic_controller();
+        let mut controller = controller.pin_mut();
+        controller
+            .as_mut()
+            .check_updates("apt,,flatpak".into(), true, false, false, true);
+        assert!(matches!(
+            &controller.rust().worker,
+            Some(worker) if matches!(&worker.job, Job::BackgroundUpdates(sources) if sources == &["apt", "flatpak"])
+        ));
+        assert!(!controller.busy());
+        settle(&mut controller);
+        let state: Value =
+            serde_json::from_str(&controller.background_state().to_string()).unwrap();
+        assert_eq!(state["available"], 1);
+
+        controller.as_mut().load_repositories();
+        settle(&mut controller);
+        let repositories: Value =
+            serde_json::from_str(&controller.repositories().to_string()).unwrap();
+        assert_eq!(repositories["repositories"], json!([]));
+        assert_eq!(controller.status().to_string(), "Repositories loaded.");
+
+        controller.as_mut().check_sources();
+        settle(&mut controller);
+        let catalog: Value =
+            serde_json::from_str(&controller.source_catalog().to_string()).unwrap();
+        assert_eq!(catalog[0]["source"], "fixture");
+        assert_eq!(catalog[0]["availability_kind"], "available");
+        assert!(controller.rust().catalog_checked);
+    }
+    /// Answers details for its one package.
+    struct Described(Package);
+    impl Backend for Described {
+        fn id(&self) -> &str {
+            &self.0.id.backend
+        }
+        fn capabilities(&self) -> &[Capability] {
+            &[Capability::Details]
+        }
+        fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
+            Ok(Availability::Available)
+        }
+        fn details(
+            &mut self,
+            _: &PackageId,
+            _: &Cancellation,
+        ) -> Result<PackageDetails, EngineError> {
+            Ok(PackageDetails {
+                package: self.0.clone(),
+                description: "Described by the warm engine".into(),
+                homepage: None,
+                dependencies: vec!["libsynthetic".into()],
+            })
+        }
+    }
+    #[test]
+    fn details_reuse_a_warm_engine_and_fall_back_to_a_fresh_one() {
+        let mut controller = synthetic_controller();
+        let mut controller = controller.pin_mut();
+        let mut row = fixture_row();
+        row.id.backend = "described".into();
+        let mut warm = Engine::default();
+        warm.register(Described(row.clone())).unwrap();
+        assert_eq!(
+            warm.discover(&Cancellation::default())[0].availability,
+            Ok(Availability::Available)
+        );
+        controller.as_mut().rust_mut().packages = vec![row.clone()];
+        controller.as_mut().rust_mut().selected = Some(row.id.clone());
+        controller.as_mut().rust_mut().engine = Some(warm);
+        controller.as_mut().start(Job::Details(row.id.clone()));
+        settle(&mut controller);
+        let details: Value = serde_json::from_str(&controller.details().to_string()).unwrap();
+        assert_eq!(details["description"], "Described by the warm engine");
+        assert_eq!(details["dependencies"], json!(["libsynthetic"]));
+        // The warm engine goes back for the next lookup.
+        assert!(controller.rust().engine.is_some());
+
+        // The warm engine's own failure is reported as is.
+        let mut warm = Engine::default();
+        warm.register(Fixture {
+            package: fixture_row(),
+            fail: false,
+        })
+        .unwrap();
+        controller.as_mut().rust_mut().engine = Some(warm);
+        controller.as_mut().start(Job::Details(fixture_row().id));
+        settle(&mut controller);
+        assert_eq!(
+            controller.status().to_string(),
+            plain_error(&EngineError::NotFound, None, false)
+        );
+        assert!(controller.rust().engine.is_some());
+
+        // A source it never detected needs a fresh engine.
+        controller.as_mut().rust_mut().natives.engine = missing_engine;
+        controller.as_mut().start(Job::Details(row.id.clone()));
+        settle(&mut controller);
+        assert!(controller
+            .status()
+            .to_string()
+            .contains("synthetic system has no managers"));
+    }
+
+    /// A worker whose thread keeps running until the returned gate drops.
+    fn held_worker(job: Job, replies: Vec<Reply>) -> (Worker, mpsc::Sender<()>) {
+        let (sender, receiver) = mpsc::channel();
+        for reply in replies {
+            sender.send(reply).unwrap();
+        }
+        let (gate, held) = mpsc::channel::<()>();
+        let worker = Worker {
+            handle: thread::spawn(move || {
+                let _ = held.recv();
+                drop(sender);
+            }),
+            receiver,
+            cancel: Cancellation::default(),
+            job,
+        };
+        (worker, gate)
+    }
+    fn failing_worker(job: Job) -> Worker {
+        Worker {
+            handle: thread::spawn(|| panic!("synthetic worker failure")),
+            receiver: mpsc::channel().1,
+            cancel: Cancellation::default(),
+            job,
+        }
+    }
+    fn fixture_details(description: &str) -> Box<PackageDetails> {
+        Box::new(PackageDetails {
+            package: fixture_row(),
+            description: description.into(),
+            homepage: None,
+            dependencies: vec![],
+        })
+    }
+    #[test]
+    fn background_workers_keep_catalogs_and_report_their_own_failure() {
+        let mut controller = synthetic_controller();
+        let mut controller = controller.pin_mut();
+        let source = Source {
+            backend: "fixture".into(),
+            capabilities: vec![],
+            availability: Ok(Availability::Available),
+        };
+        controller.as_mut().rust_mut().background = true;
+        controller.as_mut().rust_mut().worker = Some(fake_worker(
+            Job::Load("Sources".into(), String::new()),
+            vec![
+                Reply::Engine(Box::default()),
+                Reply::Done(Ok(Payload::Sources(vec![source]))),
+            ],
+        ));
+        controller.as_mut().poll();
+        assert!(controller.rust().worker.is_none());
+        assert!(controller.rust().catalog_checked);
+        assert!(controller.source_catalog().to_string().contains("fixture"));
+        // A quiet read never leaves its engine for later searches.
+        assert!(controller.rust().engine.is_none());
+        assert!(controller
+            .rust()
+            .prefetched
+            .contains_key(&cache_key("Sources", "", &[], false)));
+
+        // A quiet result for anything but a section is not kept.
+        controller.as_mut().rust_mut().background = true;
+        controller.as_mut().rust_mut().worker = Some(fake_worker(
+            Job::Details(fixture_row().id),
+            vec![Reply::Done(Ok(Payload::Details(fixture_details("Quiet"))))],
+        ));
+        controller.as_mut().poll();
+        assert!(!controller.details().to_string().contains("Quiet"));
+        assert_eq!(controller.rust().prefetched.len(), 1);
+
+        controller.as_mut().rust_mut().background = true;
+        controller.as_mut().rust_mut().worker =
+            Some(failing_worker(Job::BackgroundUpdates(vec!["apt".into()])));
+        wait_until(&mut controller, |controller| {
+            controller.rust().worker.is_none()
+        });
+        let state: Value =
+            serde_json::from_str(&controller.background_state().to_string()).unwrap();
+        assert_eq!(
+            state["failures"],
+            json!([{"source": "check", "kind": "failed"}])
+        );
+
+        let status = controller.status().to_string();
+        controller.as_mut().rust_mut().worker =
+            Some(failing_worker(Job::Load("Installed".into(), String::new())));
+        wait_until(&mut controller, |controller| {
+            controller.rust().worker.is_none()
+        });
+        assert_ne!(controller.status().to_string(), status);
+        assert_eq!(
+            controller.status().to_string(),
+            "A background task failed. Try again."
+        );
+    }
+    #[test]
+    fn running_and_finished_workers_show_details_previews() {
+        let mut controller = synthetic_controller();
+        let mut controller = controller.pin_mut();
+        let row = fixture_row();
+        controller.as_mut().rust_mut().packages = vec![row.clone()];
+        controller.as_mut().rust_mut().selected = Some(row.id.clone());
+        let (worker, gate) = held_worker(
+            Job::Load("Installed".into(), String::new()),
+            vec![
+                Reply::Partial(PackageReport {
+                    packages: vec![row.clone()],
+                    failures: vec![],
+                    successful_sources: vec![],
+                }),
+                Reply::DetailsPreview(fixture_details("While loading")),
+                Reply::Engine(Box::default()),
+            ],
+        );
+        controller.as_mut().rust_mut().worker = Some(worker);
+        controller.as_mut().poll();
+        assert!(controller.rust().worker.is_some());
+        assert!(controller.details().to_string().contains("While loading"));
+        assert!(controller.rows().to_string().contains("synthetic"));
+        // A running worker's engine is not taken early.
+        assert!(controller.rust().engine.is_none());
+        drop(gate);
+        settle(&mut controller);
+
+        controller.as_mut().rust_mut().detail_cache.clear();
+        controller.as_mut().rust_mut().worker = Some(fake_worker(
+            Job::Details(row.id.clone()),
+            vec![
+                Reply::DetailsPreview(fixture_details("Preview")),
+                Reply::Done(Ok(Payload::Details(fixture_details("Finished")))),
+            ],
+        ));
+        controller.as_mut().poll();
+        assert!(controller.rust().worker.is_none());
+        assert!(controller.details().to_string().contains("Finished"));
+    }
+    #[test]
+    fn finished_reviews_notices_and_activity_follow_the_job() {
+        let mut controller = synthetic_controller();
+        let mut controller = controller.pin_mut();
+        let row = fixture_row();
+        controller.as_mut().rust_mut().packages = vec![row.clone()];
+        let install = Operation::Install(row.id.clone());
+
+        // Only reviews are dropped after their confirmation was cancelled.
+        controller.as_mut().rust_mut().discard_revalidation = true;
+        controller.as_mut().rust_mut().worker = Some(fake_worker(
+            Job::Load("Installed".into(), String::new()),
+            vec![Reply::Done(Ok(Payload::Packages(PackageReport {
+                packages: vec![row.clone()],
+                failures: vec![],
+                successful_sources: vec!["fixture".into()],
+            })))],
+        ));
+        controller.as_mut().poll();
+        assert!(controller.rows().to_string().contains("synthetic"));
+        assert!(!controller.rust().discard_revalidation);
+        controller.as_mut().rust_mut().discard_revalidation = true;
+        controller.as_mut().rust_mut().worker = Some(fake_worker(
+            Job::PlanOperation(install.clone()),
+            vec![Reply::Done(Ok(Payload::OperationPreview(
+                install.clone(),
+                None,
+            )))],
+        ));
+        controller.as_mut().poll();
+        assert!(controller.rust().pending.is_none());
+        assert!(!controller.rust().discard_revalidation);
+
+        // A review that cannot be prepared says so.
+        controller.as_mut().rust_mut().worker = Some(fake_worker(
+            Job::PlanOperation(install.clone()),
+            vec![Reply::Done(Err(ExecutionError::AuthorizationDenied.into()))],
+        ));
+        controller.as_mut().poll();
+        let notice: Value = serde_json::from_str(&controller.notice().to_string()).unwrap();
+        assert_eq!(notice["kind"], "error");
+        assert_eq!(
+            notice["title"],
+            "Install synthetic (fixture) couldn't be prepared"
+        );
+
+        // A cancelled write records a cancelled outcome.
+        let temp = pkgdeck_tools::Temp::new();
+        let store = ActivityStore::at(temp.0.join("activity.json"));
+        let upgrade = Operation::Upgrade(row.id.clone());
+        let id = store
+            .begin("gui", vec![upgrade.clone()], State::Running)
+            .unwrap();
+        controller.as_mut().rust_mut().activity_store = Some(store.clone());
+        controller.as_mut().rust_mut().active_activity_id = Some(id);
+        controller.as_mut().rust_mut().worker = Some(fake_worker(
+            Job::Write(upgrade.clone(), None),
+            vec![Reply::Done(Err(EngineError::Cancelled))],
+        ));
+        controller.as_mut().poll();
+        let entry = store.entries().unwrap().pop().unwrap();
+        assert_eq!(entry.outcomes, [Outcome::Cancelled]);
+        let finished = store
+            .begin("gui", vec![upgrade.clone()], State::Running)
+            .unwrap();
+        controller.as_mut().rust_mut().active_activity_id = Some(finished);
+        controller.as_mut().rust_mut().worker = Some(fake_worker(
+            Job::Write(upgrade.clone(), None),
+            vec![Reply::Done(Ok(Payload::Written(
+                OperationOutcome::default(),
+            )))],
+        ));
+        controller.as_mut().poll();
+        let entry = store.entries().unwrap().pop().unwrap();
+        assert_eq!(
+            (entry.id, entry.outcomes),
+            (finished, vec![Outcome::Finished])
+        );
+        assert!(controller.rust().active_activity_id.is_none());
+
+        // Without a history the finished write only forgets its entry.
+        controller.as_mut().rust_mut().activity_store = None;
+        controller.as_mut().rust_mut().active_activity_id = Some(finished + 1);
+        controller.as_mut().rust_mut().worker = Some(fake_worker(
+            Job::Write(upgrade, None),
+            vec![Reply::Done(Ok(Payload::Written(
+                OperationOutcome::default(),
+            )))],
+        ));
+        controller.as_mut().poll();
+        assert!(controller.rust().active_activity_id.is_none());
+        assert_eq!(store.entries().unwrap().len(), 2);
+    }
+    #[test]
+    fn retried_update_sources_plan_the_update_they_were_retried_for() {
+        let mut controller = synthetic_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().rust_mut().active_view = "Updates".into();
+        controller.as_mut().rust_mut().updates_view = true;
+        let retried = |packages: Vec<Package>| {
+            fake_worker(
+                Job::RetryFailedUpdates(vec!["fixture".into()]),
+                vec![Reply::Done(Ok(Payload::RetryFailedUpdates(
+                    vec!["fixture".into()],
+                    PackageReport {
+                        packages,
+                        failures: vec![],
+                        successful_sources: vec!["fixture".into()],
+                    },
+                )))],
+            )
+        };
+        controller.as_mut().rust_mut().worker = Some(retried(vec![]));
+        controller.as_mut().poll();
+        assert_eq!(
+            controller.status().to_string(),
+            "No available updates after retrying source checks."
+        );
+        assert!(controller.rust().worker.is_none());
+
+        controller.as_mut().rust_mut().worker = Some(retried(vec![fixture_row()]));
+        controller.as_mut().poll();
+        let upgrade = Operation::UpgradeAll {
+            backend: "fixture".into(),
+        };
+        assert!(matches!(
+            &controller.rust().worker,
+            Some(worker) if matches!(&worker.job, Job::PlanUpgrade(operations, 1) if operations == std::slice::from_ref(&upgrade))
+        ));
+        settle(&mut controller);
+        assert!(matches!(
+            &controller.rust().pending,
+            Some(Job::UpgradeAll(operations, None)) if operations == &[upgrade]
+        ));
+    }
+    #[test]
+    fn finished_workers_start_confirmed_reviewed_and_deferred_jobs() {
+        let mut controller = synthetic_controller();
+        let mut controller = controller.pin_mut();
+        let row = fixture_row();
+        controller.as_mut().rust_mut().packages = vec![row.clone()];
+        let upgrade = Operation::Upgrade(row.id.clone());
+        let done = || {
+            fake_worker(
+                Job::Load("Search".into(), "synthetic".into()),
+                vec![Reply::Done(Err(EngineError::Cancelled))],
+            )
+        };
+        let confirmed = || Confirmed {
+            job: Job::Write(upgrade.clone(), None),
+            activity_id: None,
+            cleanup_preview: vec![],
+        };
+
+        controller.as_mut().rust_mut().validated_confirmed = Some(confirmed());
+        controller.as_mut().rust_mut().worker = Some(done());
+        controller.as_mut().poll();
+        assert!(matches!(
+            &controller.rust().worker,
+            Some(worker) if matches!(&worker.job, Job::Write(operation, None) if *operation == upgrade)
+        ));
+        assert!(controller.writing());
+        settle(&mut controller);
+        let notice: Value = serde_json::from_str(&controller.notice().to_string()).unwrap();
+        assert_eq!(notice["kind"], "success");
+
+        controller
+            .as_mut()
+            .rust_mut()
+            .confirmed_queue
+            .push_back(confirmed());
+        controller.as_mut().rust_mut().worker = Some(done());
+        controller.as_mut().poll();
+        assert!(controller.rust().revalidating.is_some());
+        assert!(matches!(
+            &controller.rust().worker,
+            Some(worker) if matches!(&worker.job, Job::PlanOperation(operation) if *operation == upgrade)
+        ));
+        settle(&mut controller);
+
+        controller.as_mut().rust_mut().deferred_load =
+            Some(Job::Load("Installed".into(), String::new()));
+        controller.as_mut().rust_mut().worker = Some(done());
+        controller.as_mut().poll();
+        assert!(matches!(
+            &controller.rust().worker,
+            Some(worker) if matches!(&worker.job, Job::Load(view, _) if view == "Installed")
+        ));
+        settle(&mut controller);
+        assert!(controller.rows().to_string().contains("synthetic"));
+    }
+
+    fn cleanup_item(key: &str) -> CleanupItem {
+        CleanupItem {
+            id: CleanupId {
+                backend: "fixture".into(),
+                key: key.into(),
+            },
+            kind: CleanupKind::OrphanDependencies,
+            title: format!("Remove {key}"),
+            summary: "Synthetic cleanup".into(),
+            preview: format!("would remove {key}"),
+        }
+    }
+    #[test]
+    fn open_reference_scope_changes_only_a_pending_flatpak_reference_install() {
+        let mut controller = synthetic_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().set_open_flatpak_scope(false);
+        assert!(controller.rust().pending.is_none());
+        let mut native = fixture_row();
+        native.id.backend = "apt".into();
+        controller.as_mut().rust_mut().pending =
+            Some(Job::Write(Operation::Install(native.id.clone()), None));
+        controller.as_mut().set_open_flatpak_scope(false);
+        assert!(matches!(
+            &controller.rust().pending,
+            Some(Job::Write(Operation::Install(id), None)) if *id == native.id
+        ));
+        let mut reference = native.clone();
+        reference.id.backend = "flatpak".into();
+        reference.id.reference = Some("flatpakref:https://example.invalid/app.flatpakref".into());
+        controller.as_mut().rust_mut().pending =
+            Some(Job::Write(Operation::Install(reference.id.clone()), None));
+        // The same scope, or a row that is no longer listed, keeps the plan.
+        controller.as_mut().set_open_flatpak_scope(true);
+        controller.as_mut().set_open_flatpak_scope(false);
+        assert!(matches!(
+            &controller.rust().pending,
+            Some(Job::Write(Operation::Install(id), None)) if id.scope == Scope::System
+        ));
+    }
+    #[test]
+    fn confirmed_changes_queue_behind_running_work_and_can_be_cancelled() {
+        let mut controller = synthetic_controller();
+        let mut controller = controller.pin_mut();
+        let items = vec![cleanup_item("orphans"), cleanup_item("cache")];
+        controller.as_mut().rust_mut().cleanup = items.clone();
+        let upgrade = Operation::Upgrade(fixture_row().id);
+        // A running write is never cancelled for a queued change.
+        controller.as_mut().rust_mut().worker =
+            Some(fake_worker(Job::Write(upgrade.clone(), None), vec![]));
+        controller
+            .as_mut()
+            .accept_confirmed(Job::CleanAll(vec![Operation::Clean(items[1].id.clone())]));
+        assert!(!controller
+            .rust()
+            .worker
+            .as_ref()
+            .unwrap()
+            .cancel
+            .requested());
+        assert_eq!(
+            controller.rust().confirmed_queue[0].cleanup_preview,
+            [items[1].clone()]
+        );
+        assert_eq!(controller.status().to_string(), "Operation queued.");
+        controller.as_mut().rust_mut().worker = None;
+        // Changes wait behind earlier queued ones even with nothing running.
+        controller
+            .as_mut()
+            .accept_confirmed(Job::CleanAll(vec![Operation::Clean(items[0].id.clone())]));
+        assert_eq!(controller.rust().confirmed_queue.len(), 2);
+        assert!(controller.rust().worker.is_none());
+        controller.as_mut().rust_mut().validated_confirmed = Some(Confirmed {
+            job: Job::Write(upgrade.clone(), None),
+            activity_id: None,
+            cleanup_preview: vec![],
+        });
+        controller.as_mut().cancel_queued();
+        assert!(controller.rust().confirmed_queue.is_empty());
+        assert!(controller.rust().validated_confirmed.is_none());
+
+        // A running write keeps a new request waiting, not queued.
+        controller.as_mut().rust_mut().worker =
+            Some(fake_worker(Job::Write(upgrade, None), vec![]));
+        controller
+            .as_mut()
+            .start(Job::Load("Installed".into(), String::new()));
+        assert!(controller.rust().queued.is_none());
+        controller.as_mut().rust_mut().worker = None;
+
+        // Source changes run without a separate review. The bare host has
+        // no editor, so nothing opens.
+        let action = RepositoryAction {
+            backend: "apt".into(),
+            name: "sources".into(),
+            scope: Scope::System,
+            change: repositories::Change::OpenEditor,
+        };
+        controller.as_mut().validate_confirmed(Confirmed {
+            job: Job::Repositories(Some(action)),
+            activity_id: None,
+            cleanup_preview: vec![],
+        });
+        assert!(matches!(
+            &controller.rust().worker,
+            Some(worker) if matches!(worker.job, Job::Repositories(Some(_)))
+        ));
+        settle(&mut controller);
+        assert!(controller.status().to_string().contains("unavailable"));
+    }
+    #[test]
+    fn reads_report_unsupported_sources_and_ignore_invalid_requests() {
+        let mut controller = synthetic_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().set_package_report_state(
+            &PackageReport {
+                packages: vec![],
+                failures: vec![BackendFailure {
+                    backend: "fixture".into(),
+                    error: EngineError::Unsupported {
+                        backend: "fixture".into(),
+                        capability: Capability::Installed,
+                    },
+                }],
+                successful_sources: vec![],
+            },
+            false,
+        );
+        let state: Value = serde_json::from_str(&controller.report_state().to_string()).unwrap();
+        assert_eq!(state["phase"], "unsupported");
+
+        let status = controller.status().to_string();
+        controller.as_mut().load(
+            "Bogus".into(),
+            String::new().as_str().into(),
+            String::new().as_str().into(),
+            false,
+            false,
+        );
+        assert!(controller.rust().worker.is_none());
+        assert_eq!(controller.status().to_string(), status);
+
+        // Nothing starts beside a foreground read.
+        controller.as_mut().rust_mut().worker = Some(fake_worker(
+            Job::Load("Installed".into(), String::new()),
+            vec![],
+        ));
+        controller
+            .as_mut()
+            .retry_source("Installed".into(), "".into(), "flatpak".into());
+        let path = std::env::temp_dir().join("pkgdeck-never-written.json");
+        let url = QUrl::from_local_file(&path.to_string_lossy().as_ref().into());
+        controller
+            .as_mut()
+            .export_inventory(url.clone(), "[]".into());
+        controller.as_mut().preview_inventory(url);
+        assert!(matches!(
+            &controller.rust().worker,
+            Some(worker) if matches!(worker.job, Job::Load(..))
+        ));
+        assert!(controller.rust().queued.is_none());
+        controller.as_mut().rust_mut().worker = None;
+
+        controller
+            .as_mut()
+            .retry_source("Search".into(), "synthetic".into(), "flatpak".into());
+        assert!(matches!(
+            &controller.rust().worker,
+            Some(worker) if matches!(&worker.job, Job::RetrySource(view, query, source)
+                if view == "Search" && query == "synthetic" && source == "flatpak")
+        ));
+        settle(&mut controller);
+        assert!(controller.rows().to_string().contains("synthetic"));
+    }
+    #[test]
+    fn reviewed_plans_travel_to_the_write_engine() {
+        let mut controller = synthetic_controller();
+        let mut controller = controller.pin_mut();
+        let row = fixture_row();
+        controller.as_mut().rust_mut().packages = vec![row.clone()];
+        controller.as_mut().rust_mut().cleanup = vec![cleanup_item("orphans")];
+        let upgrade_all = Operation::UpgradeAll {
+            backend: "fixture".into(),
+        };
+        let apt_plan = AptUpgradePlan {
+            preview: "Inst synthetic".into(),
+            upgrades: vec!["synthetic".into()],
+            installs: vec![],
+            removals: vec![],
+        };
+        controller
+            .as_mut()
+            .start(Job::UpgradeAll(vec![upgrade_all], Some(apt_plan)));
+        settle(&mut controller);
+        let notice: Value = serde_json::from_str(&controller.notice().to_string()).unwrap();
+        assert_eq!(notice["kind"], "success");
+        let upgrade = Operation::Upgrade(row.id.clone());
+        let plan = TransactionPlan {
+            operation: upgrade.clone(),
+            native_preview: "Upgrade synthetic".into(),
+            changes: vec![],
+            download_bytes: None,
+            disk_bytes: None,
+            restart_required: None,
+            adopts: None,
+        };
+        controller
+            .as_mut()
+            .start(Job::Write(upgrade, Some(Box::new(plan))));
+        settle(&mut controller);
+        let notice: Value = serde_json::from_str(&controller.notice().to_string()).unwrap();
+        // The fixture now plans nothing, so the reviewed plan is stale.
+        assert!(notice["detail"]
+            .as_str()
+            .unwrap()
+            .contains("The planned changes are different now."));
+    }
+    #[test]
+    fn details_workers_replace_older_lookups_and_report_failures() {
+        let mut controller = synthetic_controller();
+        let mut controller = controller.pin_mut();
+        let first = fixture_row();
+        let mut second = fixture_row();
+        second.id.name = "second".into();
+        controller.as_mut().rust_mut().packages = vec![first.clone(), second.clone()];
+        controller.as_mut().select(0);
+        let older = controller
+            .rust()
+            .details_worker
+            .as_ref()
+            .unwrap()
+            .cancel
+            .clone();
+        controller.as_mut().select(1);
+        assert!(older.requested());
+        // Choosing the package that is loading does not start it again.
+        let current = controller
+            .rust()
+            .details_worker
+            .as_ref()
+            .unwrap()
+            .cancel
+            .clone();
+        controller.as_mut().select(1);
+        assert!(!current.requested());
+        settle(&mut controller);
+        let (worker, gate) = held_worker(Job::Details(first.id.clone()), vec![]);
+        controller.as_mut().rust_mut().worker = Some(worker);
+        controller.as_mut().select(0);
+        assert!(!controller
+            .rust()
+            .worker
+            .as_ref()
+            .unwrap()
+            .cancel
+            .requested());
+        assert!(controller.rust().queued.is_none());
+        assert!(controller.rust().details_worker.is_none());
+        drop(gate);
+        settle(&mut controller);
+        // The fixture has no details; the row preview stays with the reason.
+        let details: Value = serde_json::from_str(&controller.details().to_string()).unwrap();
+        assert_eq!(details["package"]["name"], "second");
+        let status = controller.status().to_string();
+        assert_eq!(status, "No package matches the selection.");
+
+        controller.as_mut().rust_mut().natives.engine = missing_engine;
+        controller.as_mut().select(0);
+        settle(&mut controller);
+        assert!(controller
+            .status()
+            .to_string()
+            .contains("synthetic system has no managers"));
+
+        // Replies other than details are ignored.
+        let (sender, receiver) = mpsc::channel();
+        sender.send(Reply::Engine(Box::default())).unwrap();
+        controller.as_mut().rust_mut().details_worker = Some(DetailsWorker {
+            handle: thread::spawn(move || drop(sender)),
+            receiver,
+            cancel: Cancellation::default(),
+            id: first.id.clone(),
+        });
+        let before = controller.details().to_string();
+        settle(&mut controller);
+        assert_eq!(controller.details().to_string(), before);
+    }
+    #[test]
+    fn failed_preloads_leave_their_section_unloaded() {
+        let mut controller = synthetic_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().rust_mut().natives.engine = missing_engine;
+        let key = cache_key("Installed", "", &[], false);
+        controller
+            .as_mut()
+            .start_prefetch("Installed".into(), key.clone());
+        wait_until(&mut controller, |controller| {
+            controller.rust().prefetch_worker.is_none()
+        });
+        assert!(!controller.rust().prefetched.contains_key(&key));
+    }
+
+    #[test]
+    fn proposals_review_native_plans_and_retry_failed_sources_first() {
+        let mut controller = synthetic_controller();
+        let mut controller = controller.pin_mut();
+        let row = fixture_row();
+        let mut apt = fixture_row();
+        apt.id.backend = "apt".into();
+        controller.as_mut().rust_mut().packages = vec![row.clone()];
+        // Updating everything is offered only in the Updates section.
+        controller.as_mut().propose("upgrade-all".into(), -1);
+        assert!(controller.rust().worker.is_none());
+        assert!(controller.rust().pending.is_none());
+
+        controller.as_mut().rust_mut().updates_view = true;
+        controller.as_mut().rust_mut().failures = vec![BackendFailure {
+            backend: "fixture".into(),
+            error: EngineError::Cancelled,
+        }];
+        controller.as_mut().propose("upgrade-all".into(), -1);
+        assert_eq!(
+            controller.status().to_string(),
+            "Retrying failed source checks before updating."
+        );
+        assert!(matches!(
+            &controller.rust().worker,
+            Some(worker) if matches!(&worker.job, Job::RetryFailedUpdates(sources) if sources == &["fixture"])
+        ));
+        settle(&mut controller);
+
+        // APT updates and APT changes to one package get a native plan first.
+        controller.as_mut().rust_mut().failures.clear();
+        controller.as_mut().rust_mut().packages = vec![apt.clone()];
+        controller.as_mut().propose("upgrade-all".into(), -1);
+        assert!(matches!(
+            &controller.rust().worker,
+            Some(worker) if matches!(&worker.job, Job::PlanUpgrade(operations, 1)
+                if operations == &[Operation::UpgradeAll { backend: "apt".into() }])
+        ));
+        settle(&mut controller);
+        controller.as_mut().rust_mut().packages = vec![apt.clone()];
+        controller.as_mut().propose("remove".into(), 0);
+        assert!(matches!(
+            &controller.rust().worker,
+            Some(worker) if matches!(&worker.job, Job::PlanOperation(Operation::Remove(id)) if *id == apt.id)
+        ));
+        settle(&mut controller);
+
+        // Other managers confirm without a native plan.
+        controller.as_mut().rust_mut().packages = vec![row.clone()];
+        controller.as_mut().propose("remove".into(), 0);
+        assert!(controller.rust().worker.is_none());
+        assert!(matches!(
+            &controller.rust().pending,
+            Some(Job::Write(Operation::Remove(id), None)) if *id == row.id
+        ));
+
+        let mut second = row.clone();
+        second.id.name = "second".into();
+        controller.as_mut().rust_mut().packages = vec![row, second];
+        controller.as_mut().propose_checked(
+            r#"[["fixture","synthetic","all",null,"system",null],["fixture","second","all",null,"system",null]]"#.into(),
+        );
+        let data: Value =
+            serde_json::from_str(&controller.confirmation_data().to_string()).unwrap();
+        assert_eq!(
+            data["summary"],
+            "Update 2 selected packages\nIf one update fails, the others can still finish."
+        );
+
+        // The Software Sources editor opens without a confirmation.
+        controller.as_mut().rust_mut().pending = None;
+        controller.as_mut().change_repository(
+            r#"{"backend":"apt","name":"sources","scope":"system","action":"open_editor"}"#.into(),
+        );
+        assert!(controller.rust().pending.is_none());
+        assert!(matches!(
+            &controller.rust().worker,
+            Some(worker) if matches!(&worker.job, Job::Repositories(Some(action))
+                if matches!(action.change, repositories::Change::OpenEditor))
+        ));
+        settle(&mut controller);
+        assert!(controller.status().to_string().contains("unavailable"));
+    }
+    #[test]
+    fn applied_results_change_only_what_they_describe() {
+        let mut controller = synthetic_controller();
+        let mut controller = controller.pin_mut();
+        let row = fixture_row();
+        controller
+            .as_mut()
+            .apply(Ok(Payload::BackgroundUpdates(PackageReport {
+                packages: vec![row.clone()],
+                failures: vec![],
+                successful_sources: vec!["fixture".into()],
+            })));
+        let state: Value =
+            serde_json::from_str(&controller.background_state().to_string()).unwrap();
+        assert_eq!(state["available"], 1);
+
+        // An opened APT package is reviewed with its native plan.
+        let mut apt = fixture_row();
+        apt.id.backend = "apt".into();
+        apt.installed_version = None;
+        controller
+            .as_mut()
+            .apply(Ok(Payload::OpenPackage(Box::new(apt.clone()))));
+        assert!(matches!(
+            &controller.rust().worker,
+            Some(worker) if matches!(&worker.job, Job::PlanOperation(Operation::Install(id)) if *id == apt.id)
+        ));
+        settle(&mut controller);
+
+        // A queued update whose plan is unchanged may run.
+        let operations = vec![Operation::UpgradeAll {
+            backend: "fixture".into(),
+        }];
+        let queued = |job| Confirmed {
+            job,
+            activity_id: None,
+            cleanup_preview: vec![],
+        };
+        controller.as_mut().rust_mut().revalidating =
+            Some(queued(Job::UpgradeAll(operations.clone(), None)));
+        controller
+            .as_mut()
+            .apply(Ok(Payload::UpgradePreview(operations.clone(), 1, None)));
+        assert!(controller.rust().validated_confirmed.is_some());
+        assert!(controller.rust().pending.is_none());
+        controller.as_mut().rust_mut().validated_confirmed = None;
+
+        // A changed one asks again, naming what could not be checked.
+        controller.as_mut().rust_mut().revalidating = Some(queued(Job::UpgradeAll(vec![], None)));
+        controller.as_mut().rust_mut().packages = vec![row.clone()];
+        controller.as_mut().rust_mut().failures = ["apt", "dnf"]
+            .map(|backend| BackendFailure {
+                backend: backend.into(),
+                error: EngineError::Cancelled,
+            })
+            .into();
+        let plan = AptUpgradePlan {
+            preview: String::new(),
+            upgrades: vec!["synthetic".into()],
+            installs: vec![],
+            removals: vec![],
+        };
+        controller.as_mut().apply(Ok(Payload::UpgradePreview(
+            operations.clone(),
+            1,
+            Some(plan.clone()),
+        )));
+        assert!(controller.rust().revalidating.is_none());
+        assert!(controller.rust().validated_confirmed.is_none());
+        assert!(matches!(
+            &controller.rust().pending,
+            Some(Job::UpgradeAll(pending, Some(reviewed))) if *pending == operations && *reviewed == plan
+        ));
+        let data: Value =
+            serde_json::from_str(&controller.confirmation_data().to_string()).unwrap();
+        assert_eq!(
+            data["summary"],
+            "Update 1 package\n2 sources could not be checked. Updates from them are not included."
+        );
+
+        // A queued cleanup whose tasks changed is confirmed again.
+        let items = vec![cleanup_item("orphans"), cleanup_item("cache")];
+        let cleanups: Vec<_> = items
+            .iter()
+            .map(|item| Operation::Clean(item.id.clone()))
+            .collect();
+        controller.as_mut().rust_mut().pending = None;
+        controller.as_mut().rust_mut().revalidating = Some(queued(Job::CleanAll(cleanups.clone())));
+        controller
+            .as_mut()
+            .apply(Ok(Payload::CleanPreview(cleanups.clone(), items.clone())));
+        let data: Value =
+            serde_json::from_str(&controller.confirmation_data().to_string()).unwrap();
+        assert_eq!(data["action"], "Clean 2 tasks");
+        assert!(
+            matches!(&controller.rust().pending, Some(Job::CleanAll(pending)) if *pending == cleanups)
+        );
+        // Without a queued cleanup a preview only refreshes nothing.
+        controller.as_mut().rust_mut().pending = None;
+        controller
+            .as_mut()
+            .apply(Ok(Payload::CleanPreview(cleanups, items)));
+        assert!(controller.rust().pending.is_none());
+
+        // Every source failing is a failed read.
+        controller.as_mut().apply(Ok(Payload::Sources(vec![Source {
+            backend: "fixture".into(),
+            capabilities: vec![],
+            availability: Err(EngineError::Cancelled),
+        }])));
+        let state: Value = serde_json::from_str(&controller.report_state().to_string()).unwrap();
+        assert_eq!(state["phase"], "failed");
+
+        // The details cache stays bounded.
+        for index in 0..128 {
+            let mut id = row.id.clone();
+            id.name = format!("cached-{index}");
+            controller
+                .as_mut()
+                .rust_mut()
+                .detail_cache
+                .insert(id, "{}".into());
+        }
+        controller
+            .as_mut()
+            .apply(Ok(Payload::Details(fixture_details("Fresh"))));
+        assert_eq!(controller.rust().detail_cache.len(), 1);
+        assert!(controller.rust().detail_cache.contains_key(&row.id));
     }
 }
