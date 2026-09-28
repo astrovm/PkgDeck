@@ -95,7 +95,9 @@ The workflow is called `CI`. Check names follow `Category / Scope (architecture)
 | `Test / Terminal (x86_64, aarch64)` | All core/CLI tests and Qt-free builds; both architectures test real sudo/polkit and APT locks |
 | `Test / macOS native (x86_64, aarch64)` | All core/CLI tests, real Homebrew cask install/remove and native CLI inventory checks |
 | `Lint / Workspace (x86_64, aarch64)` | Clippy for the whole workspace |
-| `Coverage / Workspace (x86_64)` | Workspace tests with the 95% coverage gate |
+| `Coverage / Workspace (x86_64)` | Workspace tests measured for line coverage on Linux |
+| `Coverage / Core (macos-aarch64)` | Core and CLI tests measured for line coverage on macOS, where the macOS-only code runs |
+| `Coverage / Combined` | The 95% gate: a line counts once and is covered when a test ran it on any platform |
 | `Test / Workspace (aarch64)` | Workspace tests without coverage |
 | `Test / Podman (x86_64, aarch64)` | CLI build in the development container and CLI APT/Homebrew install/remove tests |
 | `Test / Backends / native (linux-x86_64, linux-aarch64)` | Real DNF, Zypper, apk, XBPS and Snap lifecycle tests, plus Pacman and the AUR on x86_64 |
