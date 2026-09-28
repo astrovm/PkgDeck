@@ -143,6 +143,7 @@ impl<T: Transport> Rustup<T> {
             icon: None,
             component_ids: vec![],
             homepages: vec!["https://rust-lang.github.io/rustup/".into()],
+            adopt_with: None,
         }
     }
 

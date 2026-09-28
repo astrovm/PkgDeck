@@ -561,6 +561,7 @@ fn inspect_staged(
         icon: None,
         component_ids: vec![],
         homepages: vec![],
+        adopt_with: None,
     })
 }
 pub fn stage(id: &PackageId, cancel: &Cancellation) -> Result<Option<Staged>, EngineError> {

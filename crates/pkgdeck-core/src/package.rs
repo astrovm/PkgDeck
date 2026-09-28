@@ -57,6 +57,12 @@ pub struct Package {
     /// as component ids; normalized only while grouping. Empty when unknown.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub homepages: Vec<String>,
+    /// Homebrew cask token that can take over this exact app copy
+    /// (`brew install --cask --adopt`), set only by the macOS application
+    /// inventory for allowlisted apps with no App Store receipt and no
+    /// Homebrew owner. Installing that cask re-checks everything first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adopt_with: Option<String>,
 }
 /// Normalize a homepage for grouping: case-insensitive, no scheme, no
 /// `www.` prefix, no query/fragment, no trailing slash. Empty or
@@ -162,6 +168,10 @@ pub struct TransactionPlan {
     pub download_bytes: Option<u64>,
     pub disk_bytes: Option<i64>,
     pub restart_required: Option<bool>,
+    /// The app already in place that this install hands to the manager
+    /// instead of installing another copy. `None` for ordinary installs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub adopts: Option<PathBuf>,
 }
 
 #[derive(serde::Serialize, Clone, Copy, Debug, Eq, PartialEq)]
@@ -437,6 +447,7 @@ mod tests {
             icon: None,
             component_ids: components.iter().map(ToString::to_string).collect(),
             homepages: vec![],
+            adopt_with: None,
         }
     }
     fn firefox_id() -> PackageId {

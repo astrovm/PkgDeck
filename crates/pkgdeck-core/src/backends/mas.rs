@@ -123,6 +123,7 @@ impl<T: Transport> MacAppStore<T> {
             icon: None,
             component_ids: vec![],
             homepages: vec![],
+            adopt_with: None,
         }
     }
 

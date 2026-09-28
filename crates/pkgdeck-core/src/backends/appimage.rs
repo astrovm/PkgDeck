@@ -325,6 +325,7 @@ impl AppImage {
             icon: None,
             component_ids: vec![],
             homepages: vec![],
+            adopt_with: None,
         })
     }
     fn installed_packages(&self) -> Result<Vec<Package>, EngineError> {
@@ -474,6 +475,7 @@ impl AppImage {
                             .into_iter()
                             .collect(),
                         homepages: vec![],
+                        adopt_with: None,
                     },
                     desktop,
                 ))
@@ -704,6 +706,7 @@ impl Backend for AppImage {
                 icon: None,
                 component_ids: vec![],
                 homepages: vec![],
+adopt_with: None,
             }]);
         }
         let query = query.to_ascii_lowercase();

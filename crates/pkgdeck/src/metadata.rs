@@ -864,6 +864,7 @@ mod tests {
             icon: None,
             component_ids: vec![],
             homepages: vec![],
+            adopt_with: None,
         }
     }
     #[test]

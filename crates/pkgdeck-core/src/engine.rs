@@ -1395,6 +1395,7 @@ mod operation_plan_tests {
                 download_bytes: None,
                 disk_bytes: None,
                 restart_required: None,
+                adopts: None,
             }))
         }
         fn execute(

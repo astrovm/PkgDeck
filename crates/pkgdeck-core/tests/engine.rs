@@ -52,6 +52,7 @@ fn package(id: PackageId) -> Package {
         icon: None,
         component_ids: vec![],
         homepages: vec![],
+        adopt_with: None,
     }
 }
 fn selector() -> Selector {
@@ -1146,6 +1147,7 @@ impl Backend for ChangingPreview {
             download_bytes: None,
             disk_bytes: None,
             restart_required: None,
+            adopts: None,
         }))
     }
 }

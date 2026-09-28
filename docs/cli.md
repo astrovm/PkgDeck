@@ -46,7 +46,7 @@ pkd completions bash                     # print a shell completion script
 
 Sources for `--from`: `fwupd`, `apt`, `dnf`, `pacman`, `aur`, `zypper`, `apk`,
 `xbps`, `snap`, `system-image`, `homebrew`, `homebrew-cask`, `macos-apps`,
-`mas`, `macports`, `appimage`, `flatpak`, `docker`, `podman`, `cargo`,
+`mas`, `macports`, `appimage`, `flatpak`, `docker`, `podman`, `toolbox`, `distrobox`, `cargo`,
 `rustup`, `npm`, `pnpm`, `bun`, `pip`, `pipx`, `uv`, `mise`, `pixi`, `conda`,
 `nix`, `composer`, `gem`,
 `codex`, `claude`, `grok`, `opencode`, `cursor`, `copilot`, `kiro`,
@@ -313,6 +313,26 @@ pkd upgrade --from fwupd                 # update all firmware
 To update one device, use the device ID from `pkd list --from fwupd --json`.
 Power and restart requirements are shown before you confirm. PkgDeck never
 restarts your computer, downgrades firmware, or forces an update.
+
+## Toolbx and Distrobox containers
+
+```sh
+pkd list --from toolbox
+pkd info fedora-toolbox-43 --from distrobox
+pkd upgrade fedora-toolbox-43 --from toolbox
+```
+
+On image-based systems such as Fedora Silverblue, development tools live
+inside Toolbx and Distrobox containers. Each source lists the containers its
+tool made (a container never appears under both), with the image and whether
+it is running; details also name the apps and commands a Distrobox container
+exports to the host. Updating a container upgrades the packages inside it:
+Distrobox runs `distrobox upgrade`, and Toolbx runs the container's own
+package manager (dnf, apt, pacman, zypper, apk or XBPS) through
+`toolbox run`. That starts a stopped container. If sudo inside a Toolbx
+container asks for a password, update it from a terminal with
+`toolbox enter`. PkgDeck never creates or removes containers, and update
+status stays unknown, so `pkd upgrade` without names leaves them alone.
 
 ## Image-based Linux systems
 

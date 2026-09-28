@@ -27,7 +27,7 @@ pub struct Args {
     /// Only use this source, such as apt or flatpak. Repeat to pick
     /// several; omit to use every available source. `pkd sources` lists
     /// them.
-    #[arg(long, global = true, value_name = "SOURCE", hide_possible_values = true, value_parser = ["fwupd", "apt", "dnf", "pacman", "zypper", "snap", "homebrew", "homebrew-cask", "macos-apps", "mas", "aur", "apk", "xbps", "system-image", "macports", "rustup", "nix", "go", "dotnet", "appimage", "flatpak", "docker", "podman", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "mise", "pixi", "conda", "composer", "gem", "codex", "claude", "grok", "opencode", "cursor", "copilot", "kiro", "antigravity", "amp", "droid"])]
+    #[arg(long, global = true, value_name = "SOURCE", hide_possible_values = true, value_parser = ["fwupd", "apt", "dnf", "pacman", "zypper", "snap", "homebrew", "homebrew-cask", "macos-apps", "mas", "aur", "apk", "xbps", "system-image", "macports", "rustup", "nix", "go", "dotnet", "appimage", "flatpak", "docker", "podman", "toolbox", "distrobox", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "mise", "pixi", "conda", "composer", "gem", "codex", "claude", "grok", "opencode", "cursor", "copilot", "kiro", "antigravity", "amp", "droid"])]
     pub from: Vec<String>,
     /// Pick a package architecture when the same name exists for several.
     #[arg(long, global = true)]
@@ -1434,6 +1434,7 @@ mod tests {
                 icon: None,
                 component_ids: vec![],
                 homepages: vec![],
+                adopt_with: None,
             }
         }
     }

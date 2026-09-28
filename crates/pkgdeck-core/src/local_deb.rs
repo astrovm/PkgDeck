@@ -134,6 +134,7 @@ pub fn inspect(path: &Path, cancel: &Cancellation) -> Result<Package, EngineErro
         icon: None,
         component_ids: vec![],
         homepages: vec![],
+        adopt_with: None,
     })
 }
 

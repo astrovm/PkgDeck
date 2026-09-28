@@ -207,6 +207,9 @@ enum Job {
     RetryFailedUpdates(Vec<String>),
     Details(PackageId),
     PlanOperation(Operation),
+    /// Resolve the Homebrew cask that can take over a macOS app row and
+    /// preview that adoption.
+    PlanAdoption(Box<Package>),
     PlanCleanAll(Vec<Operation>),
     Write(Operation, Option<Box<TransactionPlan>>),
     PlanUpgrade(Vec<Operation>, usize),
@@ -256,6 +259,8 @@ enum Payload {
     Cleanup(CleanupReport),
     UpgradePreview(Vec<Operation>, usize, Option<AptUpgradePlan>),
     OperationPreview(Operation, Option<Box<TransactionPlan>>),
+    /// The cask package that adopts an app, its install and the adoption plan.
+    AdoptionPreview(Box<Package>, Operation, Box<TransactionPlan>),
     ManifestExport(usize),
     ManifestPreview(manifest::Preview),
     CleanPreview(Vec<Operation>, Vec<CleanupItem>),
@@ -439,6 +444,75 @@ fn inspect_open_input(input: &str, cancel: &Cancellation) -> Result<Payload, Eng
     };
     package.map(|package| Payload::OpenPackage(Box::new(package)))
 }
+/// Resolve the cask a macOS app row names through the real Homebrew Casks
+/// source, as `pkd install --from homebrew-cask` does, and preview installing
+/// it. Only a plan that adopts this very copy is offered: an installed cask,
+/// or an install that would add a second copy elsewhere, is refused.
+fn plan_adoption(
+    engine: &mut Engine,
+    app: &Package,
+    cancel: &Cancellation,
+) -> Result<Payload, EngineError> {
+    const CASK: &str = "homebrew-cask";
+    let refuse = |reason: String| EngineError::InvalidResponse {
+        backend: CASK.into(),
+        reason: format!("{reason} Nothing was changed."),
+    };
+    let token = app
+        .adopt_with
+        .as_deref()
+        .filter(|_| app.id.backend == "macos-apps")
+        .ok_or(EngineError::NotFound)?;
+    let report = engine.lookup_for_mutation(token, cancel);
+    if cancel.requested() {
+        return Err(EngineError::Cancelled);
+    }
+    let id = report.select(&Selector {
+        name: token.into(),
+        backend: Some(CASK.into()),
+        architecture: None,
+        scope: None,
+    })?;
+    let cask = report
+        .packages
+        .into_iter()
+        .find(|package| package.id == id)
+        .ok_or(EngineError::NotFound)?;
+    let name = if app.display_name.is_empty() {
+        token
+    } else {
+        app.display_name.as_str()
+    };
+    if cask.installed_version.is_some() {
+        return Err(refuse(format!(
+            "Homebrew already has the {token} cask installed, so it can't take over this copy of {name}."
+        )));
+    }
+    let operation = Operation::Install(cask.id.clone());
+    let plan = engine.plan_operation(&operation, cancel)?;
+    let same = |a: &std::path::Path, b: &std::path::Path| {
+        a == b
+            || matches!((std::fs::canonicalize(a), std::fs::canonicalize(b)), (Ok(a), Ok(b)) if a == b)
+    };
+    match plan {
+        Some(plan)
+            if plan
+                .adopts
+                .as_deref()
+                .is_some_and(|adopted| same(adopted, std::path::Path::new(&app.id.name))) =>
+        {
+            Ok(Payload::AdoptionPreview(
+                Box::new(cask),
+                operation,
+                Box::new(plan),
+            ))
+        }
+        _ => Err(refuse(format!(
+            "The {token} cask would install another copy instead of managing {}.",
+            app.id.name
+        ))),
+    }
+}
 fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn FnMut(Reply)) {
     fn filter_updates(report: &mut PackageReport) {
         report
@@ -563,6 +637,7 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
         }
         Job::PlanOperation(operation) => engine.plan_operation(&operation, cancel)
             .map(|plan| Payload::OperationPreview(operation, plan.map(Box::new))),
+        Job::PlanAdoption(app) => plan_adoption(engine, &app, cancel),
         Job::PlanCleanAll(operations) => {
             let report = engine.cleanup(cancel);
             Ok(Payload::CleanPreview(operations, report.items))
@@ -1035,6 +1110,7 @@ fn engine_source(job: &Job, filter: &[String]) -> Vec<String> {
         Job::RetrySource(_, _, source) => vec![source.clone()],
         Job::RetryFailedUpdates(sources) => sources.clone(),
         Job::PlanOperation(operation) => vec![operation.backend().into()],
+        Job::PlanAdoption(_) => vec!["homebrew-cask".into()],
         Job::Write(operation, _) => vec![operation.backend().into()],
         Job::BackgroundUpdates(sources) => sources.clone(),
         Job::UpgradeAll(operations, _) | Job::CleanAll(operations) => operations.iter().map(|op| op.backend().to_owned()).collect(),
@@ -1145,6 +1221,8 @@ fn source_display_name(id: &str) -> String {
         "flatpak" => "Flatpak",
         "docker" => "Docker images",
         "podman" => "Podman images",
+        "toolbox" => "Toolbx containers",
+        "distrobox" => "Distrobox containers",
         "cargo" => "Cargo",
         "npm" => "npm",
         "pnpm" => "pnpm",
@@ -1555,6 +1633,10 @@ fn preflight_notice(job: &Job, error: &EngineError, sudo: bool, names: &Names) -
             vec![operation.clone()],
         ),
         Job::PlanUpgrade(operations, _) => ("The update".to_owned(), operations.clone()),
+        Job::PlanAdoption(app) => (
+            format!("Managing {} with Homebrew", app.display_name),
+            vec![],
+        ),
         Job::PlanCleanAll(operations) => ("The cleanup".to_owned(), operations.clone()),
         _ => return None,
     };
@@ -1688,7 +1770,13 @@ fn write_notice(
         Ok(_) => true,
         Err(_) => false,
     };
-    let subject = notice_subject(&operations, names, succeeded);
+    let mut subject = notice_subject(&operations, names, succeeded);
+    // Removing an adopted cask would delete the app the user already had,
+    // so a finished adoption offers no Undo.
+    if matches!(job, Job::Write(_, Some(plan)) if plan.adopts.is_some()) {
+        subject["undo"] = json!(false);
+        subject["undo_action"] = json!("");
+    }
     let notice = match result {
         Err(
             EngineError::Cancelled
@@ -2208,7 +2296,7 @@ fn package_row(p: &Package, same_from: &[String], same_group: Option<&str>) -> V
     json!({"name": p.id.name, "display_name": p.display_name, "source": p.id.backend, "architecture": p.id.architecture,
         "remote": p.id.remote, "reference": p.id.reference, "scope": p.id.scope, "scope_label": scope_label(&p.id.scope), "summary": p.summary, "installed": p.installed_version,
         "candidate": p.candidate_version, "update": p.update, "kind": "package", "icon": p.icon,
-        "same_app_from": same_from, "same_app_group": same_group})
+        "same_app_from": same_from, "same_app_group": same_group, "adopt_with": p.adopt_with})
 }
 fn update_detail_name(
     packages: &mut [Package],
@@ -3351,6 +3439,28 @@ impl ffi::PackageController {
             self.rust_mut().pending = Some(Job::CleanAll(operations));
             return;
         }
+        if action == "adopt" {
+            // A macOS app a curated cask can take over. The cask's exact
+            // identity and the adoption check come from Homebrew itself.
+            let app = usize::try_from(index)
+                .ok()
+                .and_then(|i| self.rust().packages.get(i))
+                .filter(|p| {
+                    cfg!(target_os = "macos")
+                        && p.id.backend == "macos-apps"
+                        && p.adopt_with.is_some()
+                })
+                .cloned();
+            match app {
+                Some(app) => self.start(Job::PlanAdoption(Box::new(app))),
+                None => {
+                    self.as_mut().set_confirmation(QString::default());
+                    self.as_mut().set_confirmation_data("{}".into());
+                    self.rust_mut().pending = None;
+                }
+            }
+            return;
+        }
         let operation = usize::try_from(index).ok().and_then(|i| {
             if action == "refresh" {
                 self.rust()
@@ -3620,6 +3730,43 @@ impl ffi::PackageController {
                 self.as_mut().set_confirmation_data(encoded(data));
                 self.as_mut().set_confirmation(body.as_str().into());
                 self.rust_mut().pending = Some(Job::Write(operation, plan));
+            }
+            Ok(Payload::AdoptionPreview(cask, operation, plan)) => {
+                let mut data = confirmation_preview(
+                    &operation,
+                    std::slice::from_ref(&*cask),
+                    &[],
+                    Some(&plan),
+                );
+                // Say what happens in people's words: the checked copy stays
+                // where it is and Homebrew takes it over.
+                let app = self
+                    .rust()
+                    .packages
+                    .iter()
+                    .find(|row| {
+                        row.id.backend == "macos-apps"
+                            && plan.adopts.as_deref() == Some(std::path::Path::new(&row.id.name))
+                    })
+                    .map(|row| row.display_name.clone())
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or_else(|| cask.display_name.clone());
+                data["action"] = json!("Manage with Homebrew");
+                data["body"] = json!(format!(
+                    "{}\n\n{}",
+                    plan.native_preview,
+                    data["body"].as_str().unwrap_or_default()
+                ));
+                data["summary"] = json!(format!(
+                    "Manage {app} with Homebrew\n{}\n{}",
+                    source_display_name(&cask.id.backend),
+                    plan.native_preview
+                ));
+                let body = data["body"].as_str().unwrap_or_default().to_owned();
+                self.as_mut().rust_mut().names.insert(cask.id.clone(), app);
+                self.as_mut().set_confirmation_data(encoded(data));
+                self.as_mut().set_confirmation(body.as_str().into());
+                self.rust_mut().pending = Some(Job::Write(operation, Some(plan)));
             }
             Ok(Payload::ManifestExport(count)) => {
                 self.set_status(format!("Exported {count} packages.").as_str().into());
@@ -4500,7 +4647,10 @@ impl ffi::PackageController {
             } else if let Some(entry) = self.as_mut().rust_mut().confirmed_queue.pop_front() {
                 self.as_mut().rust_mut().queued = queued;
                 self.validate_confirmed(entry);
-            } else if matches!(&queued, Some(Job::PlanOperation(..) | Job::PlanUpgrade(..))) {
+            } else if matches!(
+                &queued,
+                Some(Job::PlanOperation(..) | Job::PlanAdoption(..) | Job::PlanUpgrade(..))
+            ) {
                 self.start(queued.expect("review job"));
             } else if let Some(job) = self.as_mut().rust_mut().deferred_load.take() {
                 self.start(job);
@@ -5007,6 +5157,7 @@ mod tests {
             download_bytes: None,
             disk_bytes: None,
             restart_required: None,
+            adopts: None,
         };
         let preview =
             confirmation_preview(&operation, std::slice::from_ref(&package), &[], Some(&plan));
@@ -5381,6 +5532,7 @@ mod tests {
             download_bytes: None,
             disk_bytes: None,
             restart_required: None,
+            adopts: None,
         };
         let drift = Err(EngineError::InvalidResponse {
             backend: "apt".into(),
@@ -6351,6 +6503,7 @@ mod tests {
             download_bytes: None,
             disk_bytes: None,
             restart_required: None,
+            adopts: None,
         };
         let (sender, receiver) = mpsc::channel();
         sender
@@ -6467,6 +6620,7 @@ mod tests {
             icon: None,
             component_ids: vec![],
             homepages: vec![],
+            adopt_with: None,
         };
         let other = firmware("other-device");
         let target = firmware("target-device");
@@ -6542,6 +6696,7 @@ mod tests {
             icon: None,
             component_ids: vec![],
             homepages: vec![],
+            adopt_with: None,
         }
     }
     fn wait_until(
@@ -7259,6 +7414,7 @@ mod tests {
                 icon: None,
                 component_ids: vec![],
                 homepages: vec![],
+                adopt_with: None,
             });
             report.successful_sources.push("apt".into());
             let _ = sender.send(Reply::Done(Ok(Payload::Packages(report))));
@@ -7550,6 +7706,7 @@ mod tests {
             icon: None,
             component_ids: vec![],
             homepages: vec![],
+            adopt_with: None,
         };
         controller.as_mut().rust_mut().packages = vec![package.clone()];
         controller.as_mut().rust_mut().detail_cache.insert(
@@ -7649,6 +7806,7 @@ mod tests {
             icon: None,
             component_ids: vec![],
             homepages: vec![],
+            adopt_with: None,
         };
         controller.as_mut().rust_mut().packages = vec![package];
         controller.as_mut().propose("upgrade".into(), 0);
@@ -7760,6 +7918,7 @@ mod tests {
             icon: None,
             component_ids: vec![],
             homepages: vec![],
+            adopt_with: None,
         };
         controller.as_mut().rust_mut().packages = vec![package.clone()];
         controller.as_mut().rust_mut().selected = Some(package.id.clone());
@@ -8170,6 +8329,7 @@ mod tests {
             icon: None,
             component_ids: vec![],
             homepages: vec![],
+            adopt_with: None,
         };
         let mut engine = Engine::default();
         engine
@@ -8240,6 +8400,7 @@ mod tests {
                 icon: None,
                 component_ids: vec![],
                 homepages: vec![],
+                adopt_with: None,
             }
         }
         let packages = vec![
@@ -8305,6 +8466,7 @@ mod tests {
                 icon: None,
                 component_ids: vec![],
                 homepages: vec![],
+                adopt_with: None,
             }
         }
         // Identity shape mirrors QML rowIdentity: [source, name, arch, remote, scope, reference].
@@ -8412,6 +8574,7 @@ mod tests {
                 icon: None,
                 component_ids: vec![],
                 homepages: vec![],
+                adopt_with: None,
             },
             description: String::new(),
             homepage: None,
@@ -8440,6 +8603,7 @@ mod tests {
             icon: None,
             component_ids: vec![],
             homepages: vec![],
+            adopt_with: None,
         };
         let mut engine = Engine::default();
         engine
@@ -8484,6 +8648,7 @@ mod tests {
             icon: None,
             component_ids: vec![],
             homepages: vec![],
+            adopt_with: None,
         };
         let mut engine = Engine::default();
         engine
@@ -8535,6 +8700,7 @@ mod tests {
             icon: None,
             component_ids: vec![],
             homepages: vec![],
+            adopt_with: None,
         };
         assert_eq!(package_row(&package, &[], None)["source"], "fixture");
         assert!(encoded(package_row(&package, &[], None))
@@ -8721,6 +8887,8 @@ mod tests {
             ("flatpak", "Flatpak"),
             ("docker", "Docker images"),
             ("podman", "Podman images"),
+            ("toolbox", "Toolbx containers"),
+            ("distrobox", "Distrobox containers"),
             ("cargo", "Cargo"),
             ("npm", "npm"),
             ("pnpm", "pnpm"),
@@ -9577,5 +9745,297 @@ mod tests {
             .confirmation()
             .to_string()
             .contains("flathub · Flatpak · System"));
+    }
+
+    /// A Homebrew Casks stand-in: `adopts` is the app its install would
+    /// take over, `None` for an ordinary install.
+    struct CaskFixture {
+        package: Package,
+        adopts: Option<PathBuf>,
+    }
+    impl Backend for CaskFixture {
+        fn id(&self) -> &str {
+            "homebrew-cask"
+        }
+        fn capabilities(&self) -> &[Capability] {
+            &[
+                Capability::Search,
+                Capability::Installed,
+                Capability::Install,
+            ]
+        }
+        fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
+            Ok(Availability::Available)
+        }
+        fn search(&mut self, _: &str, _: &Cancellation) -> Result<Vec<Package>, EngineError> {
+            Ok(vec![self.package.clone()])
+        }
+        fn installed(&mut self, _: &Cancellation) -> Result<Vec<Package>, EngineError> {
+            Ok(vec![])
+        }
+        fn details(
+            &mut self,
+            _: &PackageId,
+            _: &Cancellation,
+        ) -> Result<PackageDetails, EngineError> {
+            Err(EngineError::NotFound)
+        }
+        fn operation_plan(
+            &mut self,
+            operation: &Operation,
+            _: &Cancellation,
+        ) -> Result<Option<TransactionPlan>, EngineError> {
+            Ok(self.adopts.clone().map(|app| TransactionPlan {
+                operation: operation.clone(),
+                native_preview:
+                    "Obsidian is already in /Applications (version 1.2.3, signed by TEAM).".into(),
+                changes: vec![],
+                download_bytes: None,
+                disk_bytes: None,
+                restart_required: None,
+                adopts: Some(app),
+            }))
+        }
+        fn execute(
+            &mut self,
+            _: &Operation,
+            _: &Cancellation,
+            _: &mut dyn FnMut(Progress),
+        ) -> Result<OperationOutcome, EngineError> {
+            panic!("previews never install a cask")
+        }
+    }
+    fn adoptable_app() -> Package {
+        let mut app = synthetic_package("/Applications/Obsidian.app", "Obsidian");
+        app.id.backend = "macos-apps".into();
+        app.id.architecture = "unknown".into();
+        app.id.reference = Some(app.id.name.clone());
+        app.installed_version = Some("1.2.3".into());
+        app.adopt_with = Some("obsidian".into());
+        app
+    }
+    fn obsidian_cask() -> Package {
+        let mut cask = synthetic_package("obsidian", "Obsidian");
+        cask.id.backend = "homebrew-cask".into();
+        cask.id.architecture = std::env::consts::ARCH.into();
+        cask.id.scope = Scope::Environment {
+            path: "/opt/homebrew".into(),
+        };
+        cask.installed_version = None;
+        cask.candidate_version = Some("1.2.3".into());
+        cask
+    }
+    fn plan_adoption_with(cask: Package, adopts: Option<&str>, app: Package) -> Reply {
+        let mut engine = Engine::default();
+        engine
+            .register(CaskFixture {
+                package: cask,
+                adopts: adopts.map(PathBuf::from),
+            })
+            .unwrap();
+        let mut replies = Vec::new();
+        execute(
+            &mut engine,
+            Job::PlanAdoption(Box::new(app)),
+            &Cancellation::default(),
+            &mut |reply| replies.push(reply),
+        );
+        assert_eq!(replies.len(), 1);
+        replies.pop().unwrap()
+    }
+    #[test]
+    fn adoption_resolves_the_real_cask_and_previews_only_this_copy() {
+        let cask = obsidian_cask();
+        match plan_adoption_with(
+            cask.clone(),
+            Some("/Applications/Obsidian.app"),
+            adoptable_app(),
+        ) {
+            Reply::Done(Ok(Payload::AdoptionPreview(found, Operation::Install(id), plan))) => {
+                // The identity, scope and prefix come from the cask source.
+                assert_eq!(*found, cask);
+                assert_eq!(id, cask.id);
+                assert_eq!(
+                    plan.adopts.as_deref(),
+                    Some(std::path::Path::new("/Applications/Obsidian.app"))
+                );
+            }
+            _ => panic!("expected an adoption preview"),
+        }
+        let refused = |reply: Reply, words: &str| match reply {
+            Reply::Done(Err(EngineError::InvalidResponse { backend, reason })) => {
+                assert_eq!(backend, "homebrew-cask");
+                assert!(reason.contains(words), "{reason}");
+                assert!(reason.ends_with("Nothing was changed."));
+            }
+            _ => panic!("expected a refusal"),
+        };
+        // An install that would add a copy elsewhere, or no copy at all.
+        refused(
+            plan_adoption_with(
+                cask.clone(),
+                Some("/Applications/Other/Obsidian.app"),
+                adoptable_app(),
+            ),
+            "would install another copy instead of managing /Applications/Obsidian.app",
+        );
+        refused(
+            plan_adoption_with(cask.clone(), None, adoptable_app()),
+            "would install another copy",
+        );
+        // Homebrew already has the cask: nothing to hand over.
+        let mut installed = cask.clone();
+        installed.installed_version = Some("1.2.3".into());
+        refused(
+            plan_adoption_with(
+                installed,
+                Some("/Applications/Obsidian.app"),
+                adoptable_app(),
+            ),
+            "already has the obsidian cask installed",
+        );
+        // Only macOS inventory rows that name a cask are resolved.
+        let mut plain = adoptable_app();
+        plain.adopt_with = None;
+        let mut foreign = adoptable_app();
+        foreign.id.backend = "apt".into();
+        for app in [plain, foreign] {
+            assert!(matches!(
+                plan_adoption_with(cask.clone(), Some("/Applications/Obsidian.app"), app),
+                Reply::Done(Err(EngineError::NotFound))
+            ));
+        }
+        assert_eq!(
+            engine_source(&Job::PlanAdoption(Box::new(adoptable_app())), &[]),
+            ["homebrew-cask"]
+        );
+    }
+    #[test]
+    fn adoption_is_proposed_only_for_rows_a_cask_can_manage() {
+        let mut controller = idle_controller();
+        let mut controller = controller.pin_mut();
+        let mut plain = adoptable_app();
+        plain.adopt_with = None;
+        let mut other = synthetic_package("obsidian", "Obsidian");
+        other.adopt_with = Some("obsidian".into());
+        controller.as_mut().rust_mut().packages = vec![adoptable_app(), plain, other];
+        assert_eq!(
+            package_row(&adoptable_app(), &[], None)["adopt_with"],
+            "obsidian"
+        );
+        assert!(package_row(&controller.rust().packages[1], &[], None)["adopt_with"].is_null());
+        // A quiet background read keeps the job queued, so no real Homebrew
+        // is asked.
+        controller.as_mut().rust_mut().background = true;
+        controller.as_mut().rust_mut().worker = Some(fake_worker(
+            Job::Load("Installed".into(), "".into()),
+            vec![],
+        ));
+        for index in [1, 2, 3, -1] {
+            controller.as_mut().propose("adopt".into(), index);
+            assert!(controller.rust().pending.is_none());
+            assert!(!matches!(
+                controller.rust().queued,
+                Some(Job::PlanAdoption(_))
+            ));
+        }
+        controller.as_mut().propose("adopt".into(), 0);
+        if cfg!(target_os = "macos") {
+            assert!(
+                matches!(&controller.rust().queued, Some(Job::PlanAdoption(app)) if **app == adoptable_app())
+            );
+        } else {
+            assert!(!matches!(
+                controller.rust().queued,
+                Some(Job::PlanAdoption(_))
+            ));
+        }
+        // The read-only row still never offers its own writes.
+        controller.as_mut().rust_mut().queued = None;
+        for action in ["install", "remove", "upgrade"] {
+            controller.as_mut().propose(action.into(), 0);
+            assert!(controller.rust().pending.is_none());
+            assert!(controller.rust().queued.is_none());
+        }
+        controller.as_mut().rust_mut().worker = None;
+    }
+    #[test]
+    fn adoption_confirms_in_plain_words_and_offers_no_undo() {
+        let mut controller = idle_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().rust_mut().packages = vec![adoptable_app()];
+        let cask = obsidian_cask();
+        let operation = Operation::Install(cask.id.clone());
+        let plan = TransactionPlan {
+            operation: operation.clone(),
+            native_preview: "Obsidian is already in /Applications (version 1.2.3, signed by TEAM)."
+                .into(),
+            changes: vec![],
+            download_bytes: None,
+            disk_bytes: None,
+            restart_required: None,
+            adopts: Some("/Applications/Obsidian.app".into()),
+        };
+        controller.as_mut().apply(Ok(Payload::AdoptionPreview(
+            Box::new(cask.clone()),
+            operation.clone(),
+            Box::new(plan.clone()),
+        )));
+        let data: Value =
+            serde_json::from_str(&controller.confirmation_data().to_string()).unwrap();
+        assert_eq!(data["action"], "Manage with Homebrew");
+        let summary = data["summary"].as_str().unwrap();
+        assert!(
+            summary.starts_with("Manage Obsidian with Homebrew\nHomebrew Casks\n"),
+            "{summary}"
+        );
+        assert!(summary.contains("already in /Applications"));
+        assert!(controller
+            .confirmation()
+            .to_string()
+            .contains("already in /Applications"));
+        assert!(
+            matches!(&controller.rust().pending, Some(Job::Write(op, Some(reviewed))) if *op == operation && **reviewed == plan)
+        );
+        assert_eq!(
+            controller.rust().names.get(&cask.id).map(String::as_str),
+            Some("Obsidian")
+        );
+        // Removing the cask afterwards would delete the app the user had.
+        let job = Job::Write(operation.clone(), Some(Box::new(plan)));
+        let notice = write_notice(
+            &job,
+            &Ok(Payload::Written(OperationOutcome::default())),
+            false,
+            &controller.rust().names,
+        );
+        assert_eq!(notice["kind"], "success");
+        assert_eq!(notice["undo"], false);
+        assert_eq!(notice["undo_action"], "");
+        let plain = write_notice(
+            &Job::Write(operation, None),
+            &Ok(Payload::Written(OperationOutcome::default())),
+            false,
+            &controller.rust().names,
+        );
+        assert_eq!(plain["undo"], true);
+        // A refused adoption explains itself before anything runs.
+        let refusal = preflight_notice(
+            &Job::PlanAdoption(Box::new(adoptable_app())),
+            &EngineError::InvalidResponse {
+                backend: "homebrew-cask".into(),
+                reason: "The obsidian cask would install another copy instead of managing /Applications/Obsidian.app. Nothing was changed.".into(),
+            },
+            false,
+            &Names::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            refusal["title"],
+            "Managing Obsidian with Homebrew couldn't be prepared"
+        );
+        assert!(refusal["detail"].as_str().unwrap().contains("another copy"));
+        controller.as_mut().confirm(false);
+        assert!(controller.rust().pending.is_none());
     }
 }

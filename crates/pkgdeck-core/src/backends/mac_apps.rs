@@ -641,6 +641,11 @@ impl MacApps {
             .filter(|_| !receipt && !has_owner);
         let suggestion =
             candidate.map(|token| format!("Available through Homebrew: {token} (candidate)"));
+        // Only casks PkgDeck can check an existing copy against may take it
+        // over, and only once Homebrew's records were read: a failed check
+        // could hide an owner. Installing the cask re-checks this copy first.
+        let adopt_with =
+            candidate.filter(|token| ownership.is_ok() && super::adopt::rule(token).is_some());
         let mut description = vec![format!("Location: {}", path.display()), owner.clone()];
         if let Some(id) = bundle_id {
             description.push(format!("Bundle identifier: {id}"));
@@ -659,7 +664,7 @@ impl MacApps {
         } else if let Some(suggestion) = &suggestion {
             description.push(suggestion.clone());
             description.push("Matching evidence: the bundle identifier matches PkgDeck's curated cask catalog. Publisher signature, edition/channel, architecture, and artifact equality have not been verified here.".into());
-            if let Some(token) = candidate.filter(|token| super::adopt::rule(token).is_some()) {
+            if let Some(token) = adopt_with {
                 description.push(format!("To let Homebrew manage this copy, install the {token} cask. PkgDeck first checks the publisher signature, version, architecture, and every file the cask adds, and keeps a copy of the app until Homebrew finishes."));
             }
         }
@@ -695,6 +700,7 @@ impl MacApps {
                 icon: None,
                 component_ids: vec![],
                 homepages: vec![],
+                adopt_with: adopt_with.map(str::to_owned),
             },
             description: description.join("\n\n"),
             homepage: candidate.map(|token| format!("https://formulae.brew.sh/cask/{token}")),
@@ -1227,6 +1233,17 @@ mod tests {
             })
             .unwrap();
         assert!(!managed.summary.contains("Available through Homebrew"));
+        // Homebrew already owns that copy: nothing to hand over.
+        assert_eq!(managed.adopt_with, None);
+        assert_eq!(external.adopt_with.as_deref(), Some("visual-studio-code"));
+        assert_eq!(
+            serde_json::to_value(external).unwrap()["adopt_with"],
+            "visual-studio-code"
+        );
+        assert!(serde_json::to_value(managed)
+            .unwrap()
+            .get("adopt_with")
+            .is_none());
         assert_eq!(backend.search("renamed editor", &cancel).unwrap().len(), 1);
         let mut wrong = external.id.clone();
         wrong.scope = Scope::System;
@@ -1266,9 +1283,14 @@ mod tests {
             let details = backend.details(&package.id, &cancel).unwrap();
             if package.id.name.ends_with("Known Firefox.app") {
                 assert!(details.homepage.unwrap().ends_with("/firefox"));
+                assert_eq!(package.adopt_with.as_deref(), Some("firefox"));
             } else if package.id.name.ends_with("Renamed.app") {
                 assert!(details.homepage.unwrap().ends_with("/obsidian"));
+                assert_eq!(package.adopt_with.as_deref(), Some("obsidian"));
             } else {
+                // Unknown publishers, other editions and App Store copies
+                // are never offered to Homebrew.
+                assert_eq!(package.adopt_with, None);
                 assert!(details.homepage.is_none());
                 assert!(!details.description.contains("Available through Homebrew"));
             }
@@ -1290,7 +1312,7 @@ mod tests {
         assert_eq!(apps.len(), 2);
         assert!(apps
             .iter()
-            .all(|p| p.summary.contains("could not be checked")));
+            .all(|p| p.summary.contains("could not be checked") && p.adopt_with.is_none()));
         let broken = apps.iter().find(|p| p.display_name == "Broken").unwrap();
         assert_eq!(broken.installed_version.as_deref(), Some("unknown"));
         let details = backend.details(&broken.id, &cancel).unwrap();

@@ -727,6 +727,7 @@ mod tests {
             icon: None,
             component_ids: vec![component.into()],
             homepages: vec![],
+            adopt_with: None,
         }
     }
     struct Fixture(BTreeMap<PathBuf, Vec<(String, String)>>);

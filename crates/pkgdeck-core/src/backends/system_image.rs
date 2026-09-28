@@ -207,6 +207,7 @@ impl<T: Transport> SystemImage<T> {
             icon: None,
             component_ids: vec![],
             homepages: vec![],
+            adopt_with: None,
         }
     }
 }

@@ -393,6 +393,7 @@ fn build_details(
             icon: None,
             component_ids: vec![],
             homepages: vec![],
+            adopt_with: None,
         },
         description: record
             .map(|record| record.description.clone())

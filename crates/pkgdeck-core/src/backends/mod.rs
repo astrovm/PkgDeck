@@ -7,6 +7,7 @@ mod aur;
 mod cleanup;
 mod conda;
 mod container;
+mod dev_containers;
 mod dotnet;
 mod firmware;
 mod go_bin;
@@ -27,6 +28,7 @@ pub use appimage::AppImage;
 pub use aur::Aur;
 pub use conda::Conda;
 pub use container::{Container, ContainerKind};
+pub use dev_containers::DevContainers;
 pub use dotnet::DotnetTools;
 pub use firmware::Firmware;
 pub use go_bin::GoBinaries;
@@ -83,6 +85,8 @@ pub const BACKEND_IDS: &[&str] = &[
     "flatpak",
     "docker",
     "podman",
+    "toolbox",
+    "distrobox",
     "cargo",
     "rustup",
     "go",
@@ -113,8 +117,10 @@ pub const BACKEND_IDS: &[&str] = &[
 
 /// These sources update existing installations but do not install or remove them.
 pub fn update_only(id: &str) -> bool {
-    matches!(id, "fwupd" | "mas" | "conda" | "system-image" | "aur")
-        || StandaloneTool::ALL.iter().any(|tool| tool.id() == id)
+    matches!(
+        id,
+        "fwupd" | "mas" | "conda" | "system-image" | "aur" | "toolbox" | "distrobox"
+    ) || StandaloneTool::ALL.iter().any(|tool| tool.id() == id)
 }
 
 /// Sources upgraded package by package: they have no single "upgrade
@@ -154,6 +160,8 @@ pub fn display_name(id: &str) -> &str {
         "flatpak" => "Flatpak",
         "docker" => "Docker images",
         "podman" => "Podman images",
+        "toolbox" => "Toolbx containers",
+        "distrobox" => "Distrobox containers",
         "cargo" => "Cargo",
         "bun" => "Bun",
         "conda" => "Conda",
@@ -887,6 +895,7 @@ impl<T: Transport> Flatpak<T> {
                 icon: None,
                 component_ids: vec![],
                 homepages: vec![],
+                adopt_with: None,
             });
         }
         if packages.is_empty() || !updates {
@@ -996,6 +1005,7 @@ impl<T: Transport> Flatpak<T> {
                     icon: None,
                     component_ids: vec![],
                     homepages: vec![],
+                    adopt_with: None,
                 })
             })
             .collect()
@@ -1671,6 +1681,7 @@ fn parse_apt_transaction_plan(
         download_bytes: None,
         disk_bytes: None,
         restart_required: None,
+        adopts: None,
     })
 }
 
@@ -2114,6 +2125,7 @@ impl<T: Transport> Homebrew<T> {
                         } else {
                             vec![f.homepage.clone()]
                         },
+                        adopt_with: None,
                     },
                     description: f.desc.unwrap_or_default(),
                     homepage: (!f.homepage.is_empty()).then_some(f.homepage),
@@ -2346,6 +2358,7 @@ impl<T: Transport> HomebrewCask<T> {
                         } else {
                             vec![c.homepage.clone()]
                         },
+                        adopt_with: None,
                     },
                     description: c.desc.unwrap_or_default(),
                     homepage: (!c.homepage.is_empty()).then_some(c.homepage),
@@ -2415,6 +2428,7 @@ impl<T: Transport> Backend for HomebrewCask<T> {
                 download_bytes: None,
                 disk_bytes: None,
                 restart_required: None,
+                adopts: Some(plan.app.clone()),
             }))
     }
     fn id(&self) -> &str {
@@ -2857,6 +2871,7 @@ impl<T: Transport> SystemManager<T> {
             icon: None,
             component_ids: vec![],
             homepages: vec![],
+            adopt_with: None,
         })
     }
     fn parse(&self, value: Vec<u8>, installed: bool) -> Result<Vec<Package>, EngineError> {
@@ -3978,6 +3993,7 @@ impl<T: Transport> DevTool<T> {
                 // Manifest homepages (bun, composer, …) double as grouping
                 // keys so dev tools group with native builds of the same app.
                 homepages: homepage.clone().into_iter().collect(),
+                adopt_with: None,
             },
             description: summary,
             homepage,
@@ -4631,6 +4647,7 @@ impl<T: Transport> DevTool<T> {
                         icon: None,
                         component_ids: vec![],
                         homepages: vec![],
+                        adopt_with: None,
                     },
                 }
             })
@@ -4785,6 +4802,7 @@ impl<T: Transport> DevTool<T> {
             icon: None,
             component_ids: vec![],
             homepages: vec![],
+            adopt_with: None,
         })
     }
     fn inventory(&self, cancel: &Cancellation) -> Result<Vec<PackageDetails>, EngineError> {
@@ -5110,6 +5128,7 @@ impl<T: Transport> Backend for DevTool<T> {
                 icon: None,
                 component_ids: vec![],
                 homepages: vec![],
+                adopt_with: None,
             });
         }
         // PyPI cannot be searched, and npm search ranks product names poorly,
@@ -5149,6 +5168,7 @@ impl<T: Transport> Backend for DevTool<T> {
                 icon: None,
                 component_ids: vec![],
                 homepages: vec![],
+                adopt_with: None,
             });
         }
         // A catalog alias must not hide the exact name the user typed:
@@ -5469,6 +5489,18 @@ pub fn native_engine(
     // Both check the platform first, so probing is cheap elsewhere.
     if allowed("aur") {
         candidates.push((Box::new(Aur::new(transport())), true));
+    }
+    // Detection checks the platform first, so probing is cheap elsewhere.
+    for (id, make) in [
+        (
+            "toolbox",
+            DevContainers::toolbox as fn(NativeTransport) -> DevContainers<NativeTransport>,
+        ),
+        ("distrobox", DevContainers::distrobox),
+    ] {
+        if allowed(id) {
+            candidates.push((Box::new(make(transport())), true));
+        }
     }
     if allowed("system-image") {
         candidates.push((Box::new(SystemImage::new(transport())), true));
@@ -6267,6 +6299,10 @@ mod tests {
             plan.native_preview
         );
         assert!(plan.native_preview.contains("brew install --cask --adopt"));
+        assert_eq!(
+            plan.adopts.as_deref(),
+            Some(std::path::Path::new("/Applications/Visual Studio Code.app"))
+        );
         // Without an app in place there is no special preview.
         let mut plain = HomebrewCask::new(brew.clone());
         plain.detect(&cancel).unwrap();

@@ -381,6 +381,47 @@ TestCase {
         browser.choose(0);
         compare(fake.selection, 0, "Read-only app details remain accessible");
     }
+    function test_adoptable_macos_apps_offer_manage_with_homebrew() {
+        browser.homebrewAdoptionSupported = true;
+        browser.openView("Installed");
+        const row = {kind: "package", name: "/Applications/Obsidian.app", display_name: "Obsidian", source: "macos-apps", architecture: "unknown", scope: "system", installed: "1.2.3", update: "unknown", summary: "Available through Homebrew: obsidian (candidate)", adopt_with: "obsidian"};
+        fake.rows = JSON.stringify([row]);
+        const list = findChild(browser, "packageResults");
+        tryCompare(list, "count", 1);
+        compare(browser.rowActionName(row), "adopt");
+        waitForRendering(browser.contentItem);
+        const action = findChild(list.itemAtIndex(0), "rowPackageAction");
+        verify(action.visible);
+        verify(action.enabled);
+        compare(action.symbol, "install");
+        compare(action.Accessible.name, "Manage Obsidian with Homebrew");
+        compare(action.tooltipText, "Manage Obsidian with Homebrew");
+        browser.choose(0);
+        const panel = findChild(browser, "detailsPanel");
+        tryCompare(panel, "visible", true);
+        compare(panel.actionText, "Manage with Homebrew");
+        compare(panel.actionTone, "accent");
+        const button = findChild(panel, "detailsActionButton");
+        verify(button.visible);
+        compare(button.Accessible.name, "Manage Obsidian with Homebrew");
+        // The action goes through the normal confirmation.
+        mouseClick(action);
+        compare(fake.selection, 0);
+        verify(fake.confirmation.indexOf("adopt") === 0, fake.confirmation);
+        fake.confirm(false);
+        // Never offered off macOS, without a cask, or while Homebrew Casks
+        // is unavailable.
+        browser.homebrewAdoptionSupported = false;
+        compare(browser.rowActionName(row), "");
+        browser.homebrewAdoptionSupported = true;
+        compare(browser.rowActionName(Object.assign({}, row, {adopt_with: null})), "");
+        compare(browser.rowActionName(Object.assign({}, row, {source: "homebrew-cask"})), "remove");
+        fake.source_catalog = JSON.stringify([{source: "homebrew-cask", availability_kind: "unavailable", capabilities: []}]);
+        compare(browser.rowActionName(row), "");
+        tryCompare(action, "visible", false);
+        fake.source_catalog = "[]";
+        compare(browser.rowActionName(row), "");
+    }
     function test_reads_never_lock_navigation_and_results_fit_small_windows() {
         for (const view of ["Search", "Installed", "Updates", "Clean", "Sources", "Settings"]) {
             browser.openView(view);

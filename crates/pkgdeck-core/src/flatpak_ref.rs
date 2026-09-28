@@ -171,6 +171,7 @@ fn inspect_bytes(source: &str, bytes: &[u8]) -> Result<Package, EngineError> {
         icon: None,
         component_ids: vec![name.into()],
         homepages: vec![],
+        adopt_with: None,
     })
 }
 pub fn inspect(source: &str, cancel: &Cancellation) -> Result<Package, EngineError> {

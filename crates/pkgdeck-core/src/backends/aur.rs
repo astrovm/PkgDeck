@@ -242,6 +242,7 @@ impl<T: Transport> Aur<T> {
             icon: None,
             component_ids: vec![],
             homepages: info.and_then(|info| info.url.clone()).into_iter().collect(),
+            adopt_with: None,
         }
     }
 
@@ -440,6 +441,7 @@ impl<T: Transport> Backend for Aur<T> {
             download_bytes: None,
             disk_bytes: None,
             restart_required: None,
+adopts: None,
         }))
     }
     fn execute(

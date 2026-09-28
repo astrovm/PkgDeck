@@ -393,11 +393,11 @@ Controls.ApplicationWindow {
     // development runs can still pass --auth sudo.
     readonly property bool useSudo: argument("--auth", "polkit") === "sudo"
     function updateOnly(source) {
-        return ["fwupd", "mas", "conda", "system-image", "aur", "codex", "claude", "grok", "opencode", "cursor", "copilot", "kiro", "antigravity", "amp", "droid"].indexOf(source) >= 0;
+        return ["fwupd", "mas", "conda", "system-image", "aur", "toolbox", "distrobox", "codex", "claude", "grok", "opencode", "cursor", "copilot", "kiro", "antigravity", "amp", "droid"].indexOf(source) >= 0;
     }
-    readonly property var knownSourceIds: ["apt", "dnf", "pacman", "zypper", "snap", "homebrew", "homebrew-cask", "macos-apps", "mas", "aur", "apk", "xbps", "system-image", "macports", "rustup", "nix", "go", "dotnet", "appimage", "flatpak", "docker", "podman", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "mise", "pixi", "conda", "composer", "gem", "fwupd", "codex", "claude", "grok", "opencode", "cursor", "copilot", "kiro", "antigravity", "amp", "droid"]
+    readonly property var knownSourceIds: ["apt", "dnf", "pacman", "zypper", "snap", "homebrew", "homebrew-cask", "macos-apps", "mas", "aur", "apk", "xbps", "system-image", "macports", "rustup", "nix", "go", "dotnet", "appimage", "flatpak", "docker", "podman", "toolbox", "distrobox", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "mise", "pixi", "conda", "composer", "gem", "fwupd", "codex", "claude", "grok", "opencode", "cursor", "copilot", "kiro", "antigravity", "amp", "droid"]
     readonly property var sourceIds: knownSourceIds.concat(sourceCatalog.map((row) => row.source).filter((id) => knownSourceIds.indexOf(id) < 0))
-    readonly property var sourceNames: ["APT", "DNF", "Pacman", "Zypper", "Snap", "Homebrew", "Homebrew Casks", "macOS Applications", "Mac App Store", "AUR", "apk", "XBPS", "System image", "MacPorts", "rustup", "Nix", "Go", ".NET tools", "AppImage", "Flatpak", "Docker images", "Podman images", "Cargo", "npm", "pnpm", "Bun", "pip", "pipx", "uv", "mise", "pixi", "Conda", "Composer", "RubyGems", "Firmware", "Codex (standalone)", "Claude Code (standalone)", "Grok (standalone)", "OpenCode (standalone)", "Cursor CLI (standalone)", "GitHub Copilot CLI (standalone)", "Kiro CLI (standalone)", "Antigravity CLI (standalone)", "Amp (standalone)", "Factory Droid (standalone)"]
+    readonly property var sourceNames: ["APT", "DNF", "Pacman", "Zypper", "Snap", "Homebrew", "Homebrew Casks", "macOS Applications", "Mac App Store", "AUR", "apk", "XBPS", "System image", "MacPorts", "rustup", "Nix", "Go", ".NET tools", "AppImage", "Flatpak", "Docker images", "Podman images", "Toolbx containers", "Distrobox containers", "Cargo", "npm", "pnpm", "Bun", "pip", "pipx", "uv", "mise", "pixi", "Conda", "Composer", "RubyGems", "Firmware", "Codex (standalone)", "Claude Code (standalone)", "Grok (standalone)", "OpenCode (standalone)", "Cursor CLI (standalone)", "GitHub Copilot CLI (standalone)", "Kiro CLI (standalone)", "Antigravity CLI (standalone)", "Amp (standalone)", "Factory Droid (standalone)"]
     function containerSource(source) {
         return source === "docker" || source === "podman";
     }
@@ -1156,8 +1156,17 @@ Controls.ApplicationWindow {
             retainingResults = false;
     }
     readonly property var listViews: ["Search", "Installed", "Updates", "Clean", "Sources"]
+    // Homebrew can take over (adopt) an app someone installed themselves
+    // only on macOS. Tests override this to check both platforms.
+    property bool homebrewAdoptionSupported: Qt.platform.os === "osx"
+    // A macOS app a curated Homebrew cask can manage in place, while the
+    // Homebrew Casks source is available.
+    function canAdopt(row) {
+        return !!row && row.kind === "package" && row.source === "macos-apps" && !!row.adopt_with
+            && homebrewAdoptionSupported && sourceInfo("homebrew-cask").availability_kind === "available";
+    }
     // The action a row's button runs: "install", "remove", "upgrade",
-    // "clean", or "" when the row has none.
+    // "clean", "adopt", or "" when the row has none.
     function rowActionName(row) {
         if (!row)
             return "";
@@ -1166,7 +1175,7 @@ Controls.ApplicationWindow {
         if (row.kind !== "package")
             return "";
         if (row.source === "macos-apps")
-            return "";
+            return canAdopt(row) ? "adopt" : "";
         if (updateOnly(row.source))
             return row.update === "available" ? "upgrade" : "";
         if (currentView === "Updates")
@@ -2743,13 +2752,14 @@ Controls.ApplicationWindow {
                                     objectName: "rowPackageAction"
                                     visible: packageRow.rowAction.length > 0
                                     enabled: packageRow.active || ((!backend.busy || backend.writing) && !root.retainingResults)
-                                    readonly property string verb: ({install: "Install ", remove: "Remove ", upgrade: "Update ", clean: "Run cleanup "})[packageRow.rowAction] || ""
+                                    readonly property string verb: ({install: "Install ", remove: "Remove ", upgrade: "Update ", clean: "Run cleanup ", adopt: "Manage "})[packageRow.rowAction] || ""
                                     text: ""
-                                    symbol: packageRow.active ? "cancel" : packageRow.rowAction === "upgrade" ? "updates" : packageRow.rowAction === "install" ? "install" : "remove"
+                                    symbol: packageRow.active ? "cancel" : packageRow.rowAction === "upgrade" ? "updates" : ["install", "adopt"].indexOf(packageRow.rowAction) >= 0 ? "install" : "remove"
                                     flat: true
-                                    glyphColor: !enabled ? root.muted : packageRow.active ? root.muted : packageRow.rowAction === "upgrade" ? root.accent : packageRow.rowAction === "install" ? root.success : root.danger
+                                    glyphColor: !enabled ? root.muted : packageRow.active ? root.muted : ["upgrade", "adopt"].indexOf(packageRow.rowAction) >= 0 ? root.accent : packageRow.rowAction === "install" ? root.success : root.danger
                                     Accessible.name: packageRow.active ? "Cancel " + (backend.status || "the change")
-                                        : verb + (packageRow.modelData.display_name || packageRow.modelData.name) + (packageRow.modelData.kind === "cleanup" ? "" : " from " + root.sourceLine(packageRow.modelData))
+                                        : verb + (packageRow.modelData.display_name || packageRow.modelData.name)
+                                            + (packageRow.modelData.kind === "cleanup" ? "" : packageRow.rowAction === "adopt" ? " with Homebrew" : " from " + root.sourceLine(packageRow.modelData))
                                     tooltipText: Accessible.name
                                     Layout.preferredWidth: 38
                                     horizontalPadding: 8
@@ -2928,9 +2938,10 @@ Controls.ApplicationWindow {
                 sourceName: root.sourceDisplayName
                 installed: root.selected !== null && root.selected.kind === "package" && root.isInstalled(root.selected)
                 readonly property string rowAction: root.rowActionName(root.selected)
-                actionText: ({install: "Install", remove: "Remove", upgrade: "Update", clean: "Clean"})[rowAction] || ""
-                actionSymbol: rowAction === "upgrade" ? "updates" : rowAction === "install" ? "install" : "remove"
-                actionTone: rowAction === "upgrade" ? "accent" : rowAction === "install" ? "success" : "danger"
+                actionText: ({install: "Install", remove: "Remove", upgrade: "Update", clean: "Clean", adopt: "Manage with Homebrew"})[rowAction] || ""
+                actionAccessibleName: rowAction === "adopt" && root.selected ? "Manage " + (root.selected.display_name || root.selected.name) + " with Homebrew" : ""
+                actionSymbol: rowAction === "upgrade" ? "updates" : ["install", "adopt"].indexOf(rowAction) >= 0 ? "install" : "remove"
+                actionTone: ["upgrade", "adopt"].indexOf(rowAction) >= 0 ? "accent" : rowAction === "install" ? "success" : "danger"
                 actionEnabled: (!backend.busy || backend.writing) && !root.retainingResults
                 onActionRequested: root.runRowAction(results.currentIndex)
                 Behavior on Layout.preferredHeight {

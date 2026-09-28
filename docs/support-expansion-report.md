@@ -174,6 +174,7 @@ or a dedicated design.
 | P2 | AUR | Broader Arch application availability | L | Implemented: `pacman -Qm` checked against the AUR RPC with `vercmp`; Pacman no longer lists these packages, and unsynced databases are an error. Updates only, through the user's helper (paru, then yay), after a preview linking the PKGBUILD history; PkgDeck never builds itself |
 | P2 | apk and XBPS | Extends distro coverage | M each | Implemented: search, install, remove, upgrade and refresh, with updates from `apk list --upgradable` and `xbps-install -Mun`; writes use the fixed system paths only |
 | P3 | Go binaries, .NET tools | Covers developer tools outside package managers | M | Implemented: Go programs in `GOBIN`/`GOPATH/bin` with module build info (`go version -m`), updates from the module proxy and `go install`, removal only of those Go programs; global .NET tools through `dotnet tool … --global`, updates from the user's NuGet sources |
+| P3 | Toolbx and Distrobox containers | Development tools on image-based systems | M | Implemented: containers per tool (never both), image, state and exported apps; updates run the container's own package manager; never created or removed |
 
 Skipped: Volta (unmaintained), Deno and Yarn globals (no inventory command),
 asdf, proto and aqua (covered by mise or too small), and Distrobox (containers,
