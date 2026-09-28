@@ -32,6 +32,8 @@ Rectangle {
     property string actionSymbol: "install"       // DeckIcon: install | remove | updates
     property string actionTone: "accent"          // success | danger | accent
     property bool actionEnabled: true
+    // Spoken name for the action; empty means the action text plus the package.
+    property string actionAccessibleName: ""
     // Maps a raw source id to its display name for the header.
     property var sourceName: (id) => id
     property color canvas: Theme.canvas
@@ -209,7 +211,7 @@ Rectangle {
                 visible: panel.actionText.length > 0
                 enabled: panel.actionEnabled
                 text: panel.compact ? "" : panel.actionText
-                Accessible.name: panel.actionText + (panel.selected ? " " + (panel.selected.display_name || panel.selected.name || "") : "")
+                Accessible.name: panel.actionAccessibleName || (panel.actionText + (panel.selected ? " " + (panel.selected.display_name || panel.selected.name || "") : ""))
                 Controls.ToolTip.visible: hovered && panel.compact
                 Controls.ToolTip.delay: 500
                 Controls.ToolTip.text: panel.actionText

@@ -242,6 +242,7 @@ impl<T: Transport> Aur<T> {
             icon: None,
             component_ids: vec![],
             homepages: info.and_then(|info| info.url.clone()).into_iter().collect(),
+            adopt_with: None,
         }
     }
 
@@ -334,12 +335,14 @@ impl<T: Transport> Backend for Aur<T> {
     fn capabilities(&self) -> &[Capability] {
         CAPABILITIES
     }
+    #[cfg(not(target_os = "linux"))]
+    fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
+        Ok(Availability::Unavailable(
+            "The AUR is for Arch Linux".into(),
+        ))
+    }
+    #[cfg(target_os = "linux")]
     fn detect(&mut self, cancel: &Cancellation) -> Result<Availability, EngineError> {
-        if !cfg!(target_os = "linux") {
-            return Ok(Availability::Unavailable(
-                "The AUR is for Arch Linux".into(),
-            ));
-        }
         match self.pacman(&["-Qmq"], cancel) {
             Ok(_) => Ok(Availability::Available),
             Err(EngineError::Execution(ExecutionError::Disabled(reason))) => {
@@ -438,6 +441,7 @@ impl<T: Transport> Backend for Aur<T> {
             download_bytes: None,
             disk_bytes: None,
             restart_required: None,
+adopts: None,
         }))
     }
     fn execute(
@@ -503,7 +507,6 @@ impl<T: Transport> Backend for Aur<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::host::AptAction;
     use std::sync::{Arc, Mutex};
 
     #[derive(Clone, Default)]
@@ -514,9 +517,21 @@ mod tests {
         offline: bool,
         helper: Option<&'static str>,
         sudo_fails: bool,
+        /// The helper's build fails with this exit code and error output.
+        build_fails: Option<(i32, &'static str)>,
+        /// The helper's build succeeds without installing anything.
+        builds_nothing: bool,
         /// The installed yay version, which a helper run updates.
         yay: Arc<Mutex<Option<String>>>,
         calls: Arc<Mutex<Vec<String>>>,
+        /// Every pacman query fails, as with a locked or broken database.
+        pacman_broken: bool,
+        /// Replaces the AUR RPC answer.
+        rpc: Option<Result<Completion, ExecutionError>>,
+        /// Replaces vercmp's answer.
+        vercmp: Option<Result<Completion, ExecutionError>>,
+        /// Probing for the helper is interrupted.
+        helper_cancelled: bool,
     }
     impl Fake {
         fn yay(&self) -> String {
@@ -537,36 +552,8 @@ mod tests {
             cancellation_deferred: false,
         }
     }
+    fn ignore(_: Progress) {}
     impl Transport for Fake {
-        fn apt_query(
-            &self,
-            _: &str,
-            _: &str,
-            _: &str,
-            _: &Cancellation,
-        ) -> Result<Completion, ExecutionError> {
-            unreachable!()
-        }
-        fn apt_write(&self, _: AptAction, _: &Cancellation) -> Result<Completion, ExecutionError> {
-            unreachable!()
-        }
-        fn brew(
-            &self,
-            _: &[OsString],
-            _: &Cancellation,
-            _: bool,
-        ) -> Result<Completion, ExecutionError> {
-            unreachable!()
-        }
-        fn flatpak(
-            &self,
-            _: &[OsString],
-            _: &Cancellation,
-            _: bool,
-            _: bool,
-        ) -> Result<Completion, ExecutionError> {
-            unreachable!()
-        }
         fn system_manager(
             &self,
             executable: &str,
@@ -581,6 +568,11 @@ mod tests {
                 .unwrap()
                 .push(format!("{executable} {}", args.join(" ")));
             match (executable, args[0].as_str()) {
+                ("pacman", _) if self.pacman_broken => Err(ExecutionError::Failed(Completion {
+                    code: Some(2),
+                    stderr: b"error: failed to init transaction (unable to lock database)".to_vec(),
+                    ..done("")
+                })),
                 ("pacman", "-Qm" | "-Qmq") if self.none_foreign => {
                     Err(ExecutionError::Failed(Completion {
                         code: Some(1),
@@ -594,6 +586,7 @@ mod tests {
                 ))),
                 ("pacman", "-Qmq") => Ok(done("yay\n")),
                 ("pacman", "-Q") => Ok(done("bash 5.3-1\nyay 12.0.0-1\n")),
+                ("curl", _) if self.rpc.is_some() => self.rpc.clone().unwrap(),
                 ("curl", _) if self.offline => Err(ExecutionError::Failed(Completion {
                     code: Some(6),
                     ..done("")
@@ -611,12 +604,16 @@ mod tests {
                     ],"type":"multiinfo","version":5}"#,
                     ))
                 }
-                ("vercmp", _) => Ok(done(if args[0] == "13.0.1-1" && args[1] != "13.0.1-1" {
-                    "1\n"
-                } else {
-                    "-1\n"
-                })),
-                other => panic!("unexpected {other:?}"),
+                _ if self.vercmp.is_some() => self.vercmp.clone().unwrap(),
+                _ => {
+                    assert_eq!(executable, "vercmp");
+                    // Only the 12.x yay is older than the AUR's 13.0.1-1.
+                    Ok(done(if args[1].starts_with("12.") {
+                        "1\n"
+                    } else {
+                        "-1\n"
+                    }))
+                }
             }
         }
         fn dev_tool(
@@ -626,6 +623,9 @@ mod tests {
             _: &Cancellation,
             write: bool,
         ) -> Result<Completion, ExecutionError> {
+            if self.helper_cancelled {
+                return Err(ExecutionError::Cancelled);
+            }
             if Some(executable) != self.helper {
                 return Err(ExecutionError::Disabled(format!("{executable} not found")));
             }
@@ -644,7 +644,16 @@ mod tests {
                     ..done("")
                 }));
             }
-            *self.yay.lock().unwrap() = Some("13.0.1-1".into());
+            if let Some((code, stderr)) = self.build_fails {
+                return Err(ExecutionError::Failed(Completion {
+                    code: Some(code),
+                    stderr: stderr.as_bytes().to_vec(),
+                    ..done("")
+                }));
+            }
+            if !self.builds_nothing {
+                *self.yay.lock().unwrap() = Some("13.0.1-1".into());
+            }
             Ok(done(""))
         }
     }
@@ -690,7 +699,7 @@ mod tests {
             .execute(
                 &Operation::Upgrade(rows[2].id.clone()),
                 &Cancellation::default(),
-                &mut |_| {},
+                &mut ignore,
             )
             .unwrap_err()
             .to_string();
@@ -699,7 +708,7 @@ mod tests {
             .execute(
                 &Operation::Remove(rows[2].id.clone()),
                 &Cancellation::default(),
-                &mut |_| {}
+                &mut ignore
             )
             .is_err());
     }
@@ -726,7 +735,7 @@ mod tests {
         assert!(plan
             .native_preview
             .contains("https://aur.archlinux.org/cgit/aur.git/log/?h=yay"));
-        aur.execute(&yay, &Cancellation::default(), &mut |_| {})
+        aur.execute(&yay, &Cancellation::default(), &mut ignore)
             .unwrap();
         assert!(fake
             .calls
@@ -819,5 +828,256 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("aren't synced"), "{error}");
+    }
+
+    #[test]
+    fn only_outdated_aur_packages_can_be_updated() {
+        let fake = Fake {
+            helper: Some("paru"),
+            ..Fake::default()
+        };
+        let mut aur = Aur::new(fake.clone());
+        assert!(aur.may_have("yay-bin") && !aur.may_have("-Syu"));
+        // PkgDeck never builds a new AUR package or removes one.
+        assert!(aur.capabilities().contains(&Capability::Upgrade));
+        assert!(!aur.capabilities().contains(&Capability::Install));
+        assert!(!aur.capabilities().contains(&Capability::Remove));
+        let cancel = Cancellation::default();
+        let rows = aur.installed(&cancel).unwrap();
+        let details = aur.details(&rows[0].id, &cancel).unwrap();
+        assert!(details
+            .description
+            .starts_with("This package isn't in the AUR"));
+        assert_eq!(details.package.update, UpdateAvailability::Current);
+        let update = |aur: &mut Aur<Fake>, id: &PackageId, cancel: &Cancellation| {
+            aur.execute(&Operation::Upgrade(id.clone()), cancel, &mut |_| {})
+        };
+        let error = update(&mut aur, &rows[0].id, &cancel).unwrap_err();
+        assert!(
+            error.to_string().contains("local-tool isn't in the AUR"),
+            "{error}"
+        );
+        let mut foreign = rows[2].id.clone();
+        foreign.backend = "pacman".into();
+        assert!(matches!(
+            update(&mut aur, &foreign, &cancel),
+            Err(EngineError::NotFound)
+        ));
+        assert!(matches!(
+            aur.details(&foreign, &cancel),
+            Err(EngineError::NotFound)
+        ));
+        let mut absent = rows[2].id.clone();
+        absent.name = "absent".into();
+        assert!(matches!(
+            update(&mut aur, &absent, &cancel),
+            Err(EngineError::NotFound)
+        ));
+        let cancelled = Cancellation::default();
+        cancelled.cancel();
+        assert!(matches!(
+            update(&mut aur, &rows[2].id, &cancelled),
+            Err(EngineError::Cancelled)
+        ));
+        assert!(!fake.calls.lock().unwrap().iter().any(|c| c.contains("-S")));
+        // Other operations have no plan and never run.
+        assert!(aur
+            .operation_plan(&Operation::Remove(rows[2].id.clone()), &cancel)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn helper_failures_keep_their_meaning() {
+        for (build_fails, expected) in [
+            (
+                (127, "==> ERROR: Not authorized"),
+                ExecutionError::AuthorizationDenied,
+            ),
+            ((126, ""), ExecutionError::AuthorizationCancelled),
+        ] {
+            let mut aur = Aur::new(Fake {
+                helper: Some("paru"),
+                build_fails: Some(build_fails),
+                ..Fake::default()
+            });
+            let rows = aur.installed(&Cancellation::default()).unwrap();
+            let error = aur
+                .execute(
+                    &Operation::Upgrade(rows[2].id.clone()),
+                    &Cancellation::default(),
+                    &mut |_| {},
+                )
+                .unwrap_err();
+            assert_eq!(error, EngineError::Execution(expected));
+        }
+        // A failed build is reported with its own output.
+        let mut aur = Aur::new(Fake {
+            helper: Some("paru"),
+            build_fails: Some((1, "error: failed to build 'yay-13.0.1-1'")),
+            ..Fake::default()
+        });
+        let rows = aur.installed(&Cancellation::default()).unwrap();
+        assert!(matches!(
+            aur.execute(
+                &Operation::Upgrade(rows[2].id.clone()),
+                &Cancellation::default(),
+                &mut |_| {}
+            ),
+            Err(EngineError::Execution(ExecutionError::Failed(result))) if result.code == Some(1)
+        ));
+        // A build that installed nothing is not a success.
+        let mut aur = Aur::new(Fake {
+            helper: Some("paru"),
+            builds_nothing: true,
+            ..Fake::default()
+        });
+        let rows = aur.installed(&Cancellation::default()).unwrap();
+        let error = aur
+            .execute(
+                &Operation::Upgrade(rows[2].id.clone()),
+                &Cancellation::default(),
+                &mut |_| {},
+            )
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("paru finished, but yay is still 12.0.0-1"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn aur_rpc_failures_are_reported_not_hidden() {
+        let cancel = Cancellation::default();
+        let mut aur = Aur::new(Fake {
+            rpc: Some(Ok(done(
+                r#"{"error":"Too many package results.","results":[]}"#,
+            ))),
+            ..Fake::default()
+        });
+        let rows = aur.installed(&cancel).unwrap();
+        assert!(rows
+            .iter()
+            .all(|row| row.update == UpdateAvailability::Unknown));
+        assert_eq!(
+            aur.query_errors(),
+            [invalid(ID, "AUR: Too many package results.")]
+        );
+        assert_eq!(
+            aur.details(&rows[0].id, &cancel),
+            Err(invalid(ID, "AUR: Too many package results."))
+        );
+
+        let mut aur = Aur::new(Fake {
+            rpc: Some(Ok(Completion {
+                truncated: true,
+                ..done("{}")
+            })),
+            ..Fake::default()
+        });
+        let row = aur.search("yay", &cancel).unwrap().remove(0);
+        assert_eq!(
+            aur.details(&row.id, &cancel),
+            Err(invalid(ID, "metadata exceeded output limit"))
+        );
+
+        // Cancelling the check cancels the listing instead of hiding updates.
+        let mut aur = Aur::new(Fake {
+            rpc: Some(Err(ExecutionError::Cancelled)),
+            ..Fake::default()
+        });
+        assert_eq!(aur.installed(&cancel), Err(EngineError::Cancelled));
+        assert!(aur.query_errors().is_empty());
+    }
+
+    #[test]
+    fn version_comparison_failures_fail_the_listing() {
+        let cancel = Cancellation::default();
+        for (answer, expected) in [
+            (
+                Err(ExecutionError::Io("vercmp crashed".into())),
+                EngineError::Execution(ExecutionError::Io("vercmp crashed".into())),
+            ),
+            (
+                Ok(Completion {
+                    truncated: true,
+                    ..done("1\n")
+                }),
+                invalid(ID, "metadata exceeded output limit"),
+            ),
+        ] {
+            let mut aur = Aur::new(Fake {
+                vercmp: Some(answer),
+                ..Fake::default()
+            });
+            assert_eq!(aur.installed(&cancel), Err(expected));
+        }
+        let mut aur = Aur::new(Fake {
+            vercmp: Some(Ok(done("newer\n"))),
+            ..Fake::default()
+        });
+        assert!(matches!(
+            aur.installed(&cancel),
+            Err(EngineError::InvalidResponse { backend, .. }) if backend == ID
+        ));
+    }
+
+    #[test]
+    fn a_locally_newer_build_is_current() {
+        let fake = Fake::default();
+        *fake.yay.lock().unwrap() = Some("14.0.0-1".into());
+        let mut aur = Aur::new(fake);
+        let rows = aur.installed(&Cancellation::default()).unwrap();
+        assert_eq!(rows[2].id.name, "yay");
+        assert_eq!(rows[2].update, UpdateAvailability::Current);
+        assert_eq!(rows[2].candidate_version, None);
+    }
+
+    #[test]
+    fn cancelling_the_helper_probe_builds_nothing() {
+        let fake = Fake {
+            helper: Some("paru"),
+            helper_cancelled: true,
+            ..Fake::default()
+        };
+        let mut aur = Aur::new(fake.clone());
+        let cancel = Cancellation::default();
+        let rows = aur.installed(&cancel).unwrap();
+        assert_eq!(
+            aur.execute(
+                &Operation::Upgrade(rows[2].id.clone()),
+                &cancel,
+                &mut ignore
+            ),
+            Err(EngineError::Cancelled)
+        );
+        assert_eq!(
+            aur.operation_plan(&Operation::Upgrade(rows[2].id.clone()), &cancel),
+            Err(EngineError::Cancelled)
+        );
+        assert!(!fake.calls.lock().unwrap().iter().any(|c| c.contains("-S")));
+    }
+
+    #[test]
+    fn a_broken_pacman_is_an_error_not_an_empty_list() {
+        let cancel = Cancellation::default();
+        let mut healthy = Aur::new(Fake::default());
+        let mut broken = Aur::new(Fake {
+            pacman_broken: true,
+            ..Fake::default()
+        });
+        if cfg!(target_os = "linux") {
+            assert_eq!(healthy.detect(&cancel), Ok(Availability::Available));
+            assert!(matches!(
+                broken.detect(&cancel),
+                Err(EngineError::Execution(ExecutionError::Failed(result))) if result.code == Some(2)
+            ));
+        }
+        assert!(matches!(
+            broken.installed(&cancel),
+            Err(EngineError::Execution(ExecutionError::Failed(result))) if result.code == Some(2)
+        ));
     }
 }

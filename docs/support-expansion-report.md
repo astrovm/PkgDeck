@@ -173,7 +173,8 @@ or a dedicated design.
 | P2 | rpm-ostree and bootc | Supports immutable desktops | L | Implemented: one update-only `system` row from bootc status (rpm-ostree as fallback) with staged, rollback and layered-package details; upgrades stage a deployment and PkgDeck never restarts |
 | P2 | AUR | Broader Arch application availability | L | Implemented: `pacman -Qm` checked against the AUR RPC with `vercmp`; Pacman no longer lists these packages, and unsynced databases are an error. Updates only, through the user's helper (paru, then yay), after a preview linking the PKGBUILD history; PkgDeck never builds itself |
 | P2 | apk and XBPS | Extends distro coverage | M each | Implemented: search, install, remove, upgrade and refresh, with updates from `apk list --upgradable` and `xbps-install -Mun`; writes use the fixed system paths only |
-| P3 | Go binaries, .NET tools | Covers developer tools outside package managers | M | Only with reliable metadata (`go version -m`, `dotnet tool list -g`) |
+| P3 | Go binaries, .NET tools | Covers developer tools outside package managers | M | Implemented: Go programs in `GOBIN`/`GOPATH/bin` with module build info (`go version -m`), updates from the module proxy and `go install`, removal only of those Go programs; global .NET tools through `dotnet tool … --global`, updates from the user's NuGet sources |
+| P3 | Toolbx and Distrobox containers | Development tools on image-based systems | M | Implemented: containers per tool (never both), image, state and exported apps; updates run the container's own package manager; never created or removed |
 
 Skipped: Volta (unmaintained), Deno and Yarn globals (no inventory command),
 asdf, proto and aqua (covered by mise or too small), and Distrobox (containers,
@@ -499,7 +500,7 @@ source**, so this is not only an unreleased-main observation.
 1. **Validate the foundation:** PR #114 now runs on an actual Mac (see
    [Validation on a Mac](#validation-on-a-mac)), including active-prefix
    ownership, broken Caskroom records, duplicate copies, unreadable bundles and
-   scan timing, and matches `.pkg` casks and renamed casks. Still open: cold-boot timing. Missing ownership evidence must
+   scan timing, and matches `.pkg` casks and renamed casks. Timing measured 53 minutes after a restart (2026-09-28, 43 apps): about 3.5 s, nearly all of it Homebrew's own `brew info --installed` (3.8 s alone); reading the bundles is near-instant. Missing ownership evidence must
    stay unknown. Add publisher/channel/architecture verification before migration.
    Introduce the AI catalog using existing package routes; prototype Linux casks
    and mise inventory separately. These are separate work items, not one P0
@@ -538,7 +539,11 @@ Required behavioral checks:
 - New managers preserve environment pins, configuration sources, and full
   dependency plans; “Update all” does not escape the selected scope.
 - Absent sources remain cheap to detect. Benchmark startup and background
-  checks so new adapters do not undo the recent performance work.
+  checks so new adapters do not undo the recent performance work. Measured on
+  a Mac (2026-09-28, release build): `pkd sources` takes 1.8–2.3 s with all 45
+  sources against 1.7–2.6 s with the earlier 29, and `pkd list` 3.1–4.1 s
+  against 3.4–3.6 s: detection runs in parallel, so the new sources add no
+  measurable time.
 
 The inventory in PR #114 now has native macOS CI coverage on both architectures.
 The delivery gate is a passing complete matrix for the reviewed commit. Adoption

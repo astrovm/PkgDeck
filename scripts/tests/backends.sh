@@ -3,23 +3,26 @@
 # backend spent most of its time waiting for a runner and setting up, not
 # testing. Each backend still gets its own log group and result, and every
 # backend runs even after another fails, so one job reports all failures.
-# Usage: scripts/tests/backends.sh native|dev|macports <pkd> [musl pkd]
+# Usage: scripts/tests/backends.sh native|dev <pkd> [musl pkd]
 # Alpine (musl) and Void need the static musl pkd from the third argument.
 set -uo pipefail
-group=${1:?Usage: scripts/tests/backends.sh native|dev|macports <pkd> [musl pkd]}
-pkd=${2:?Usage: scripts/tests/backends.sh native|dev|macports <pkd> [musl pkd]}
+group=${1:?Usage: scripts/tests/backends.sh native|dev <pkd> [musl pkd]}
+pkd=${2:?Usage: scripts/tests/backends.sh native|dev <pkd> [musl pkd]}
 musl=${3:-$pkd}
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 case $group in
 native)
     [[ $(uname -s) == Linux ]] || { echo 'Native managers are tested on Linux only' >&2; exit 2; }
-    backends=(dnf zypper apk xbps snap)
+    backends=(dnf zypper apk xbps snap toolbox distrobox)
     # Arch's official container (Pacman and the AUR) is x86_64-only.
-    [[ $(uname -m) == x86_64 ]] && backends=(dnf pacman aur zypper apk xbps snap)
+    [[ $(uname -m) == x86_64 ]] && backends=(dnf pacman aur zypper apk xbps snap toolbox distrobox)
     ;;
-dev) backends=(cargo rustup go dotnet npm pnpm bun pip pipx uv mise pixi conda nix composer gem) ;;
-macports) backends=(macports) ;;
-*) echo "Expected native, dev or macports, got $group" >&2; exit 2 ;;
+dev)
+    backends=(cargo rustup go dotnet npm pnpm bun pip pipx uv mise pixi conda nix composer gem)
+    # MacPorts rides along on macOS rather than taking another macOS runner.
+    [[ $(uname -s) == Darwin ]] && backends+=(macports)
+    ;;
+*) echo "Expected native or dev, got $group" >&2; exit 2 ;;
 esac
 
 failed=()
@@ -33,6 +36,7 @@ for backend in "${backends[@]}"; do
     apk | xbps) "$here/native-manager.sh" "$backend" "$musl" ;;
     aur) "$here/aur-manager.sh" "$pkd" ;;
     snap) "$here/snap-manager.sh" "$pkd" ;;
+    toolbox | distrobox) "$here/dev-containers.sh" "$backend" "$pkd" ;;
     macports) "$here/macports-manager.sh" "$pkd" ;;
     *) "$here/dev-manager.sh" "$backend" "$pkd" ;;
     esac

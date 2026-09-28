@@ -277,6 +277,7 @@ impl<T: Transport> Conda<T> {
             icon: None,
             component_ids: vec![],
             homepages: vec![],
+            adopt_with: None,
         })
     }
 
@@ -452,8 +453,13 @@ impl<T: Transport> Backend for Conda<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::host::AptAction;
+    use crate::backends::dev_tools::{DevTool, DevTools};
     use std::sync::{Arc, Mutex};
+
+    fn backend(fake: Fake) -> Conda<DevTools<Fake>> {
+        Conda::new(DevTools(fake))
+    }
+    fn ignore(_: Progress) {}
 
     #[test]
     fn conda_versions_order_like_conda() {
@@ -483,6 +489,12 @@ mod tests {
         ripgrep: Arc<Mutex<String>>,
         calls: Arc<Mutex<Vec<String>>>,
         updates: bool,
+        /// How the manager's `--version` fails, if it does.
+        broken: Option<fn() -> ExecutionError>,
+        /// How `update` fails, if it does.
+        write_error: Option<fn() -> ExecutionError>,
+        /// The tools environment can't be listed once `update` ran.
+        unreadable_after_update: bool,
     }
     fn done(value: Value) -> Completion {
         Completion {
@@ -494,36 +506,7 @@ mod tests {
             cancellation_deferred: false,
         }
     }
-    impl Transport for Fake {
-        fn apt_query(
-            &self,
-            _: &str,
-            _: &str,
-            _: &str,
-            _: &Cancellation,
-        ) -> Result<Completion, ExecutionError> {
-            unreachable!()
-        }
-        fn apt_write(&self, _: AptAction, _: &Cancellation) -> Result<Completion, ExecutionError> {
-            unreachable!()
-        }
-        fn brew(
-            &self,
-            _: &[OsString],
-            _: &Cancellation,
-            _: bool,
-        ) -> Result<Completion, ExecutionError> {
-            unreachable!()
-        }
-        fn flatpak(
-            &self,
-            _: &[OsString],
-            _: &Cancellation,
-            _: bool,
-            _: bool,
-        ) -> Result<Completion, ExecutionError> {
-            unreachable!()
-        }
+    impl DevTool for Fake {
         fn dev_tool(
             &self,
             executable: &str,
@@ -535,6 +518,9 @@ mod tests {
                 return Err(ExecutionError::Disabled(format!("{executable} not found")));
             }
             let args: Vec<String> = args.iter().map(|a| a.to_string_lossy().into()).collect();
+            if let (Some(error), "--version") = (self.broken, args[0].as_str()) {
+                return Err(error());
+            }
             let line = args.join(" ");
             self.calls.lock().unwrap().push(line.clone());
             let micromamba = self.manager != "conda";
@@ -548,9 +534,11 @@ mod tests {
                 "--version" => Value::String("26.7.2".into()),
                 "info" if micromamba => serde_json::json!({"base environment": "/c"}),
                 "info" => serde_json::json!({"root_prefix": "/c"}),
-                "env" if args[1] == "list" => {
-                    serde_json::json!({"envs": ["/c", "/c/envs/tools", "/work/project/.conda"]})
-                }
+                // Also a malformed entry, a path without a name, and an
+                // environment where nothing was requested: none is a row.
+                "env" if args[1] == "list" => serde_json::json!({"envs": [
+                    "/c", "/c/envs/tools", "/work/project/.conda", 7, "/c/envs/..", "/c/envs/empty"
+                ]}),
                 "env" => {
                     assert_ne!(
                         prefix, "/work/project/.conda",
@@ -558,10 +546,13 @@ mod tests {
                     );
                     if prefix == "/c" {
                         serde_json::json!({"dependencies": ["python=3.12"]})
+                    } else if prefix == "/c/envs/empty" {
+                        serde_json::json!({"name": "empty"})
                     } else {
                         serde_json::json!({"dependencies": ["conda-forge::ripgrep=14.1.0", "jq", "gone"]})
                     }
                 }
+                "list" if ripgrep == "unreadable" => return Err(ExecutionError::TimedOut),
                 "list" => {
                     let packages = if prefix == "/c" {
                         serde_json::json!([{"name": "python", "version": "3.12.1"}, {"name": "zlib", "version": "1"}])
@@ -582,14 +573,19 @@ mod tests {
                         serde_json::json!({"success": true, "message": "All requested packages already installed."})
                     }
                 }
-                "update" => {
+                _ => {
+                    assert_eq!(args[0], "update");
                     assert!(write);
-                    if self.updates {
+                    if let Some(error) = self.write_error {
+                        return Err(error());
+                    }
+                    if self.unreadable_after_update {
+                        *self.ripgrep.lock().unwrap() = "unreadable".into();
+                    } else if self.updates {
                         *self.ripgrep.lock().unwrap() = "15.2.0".into();
                     }
                     serde_json::json!({"success": true})
                 }
-                other => panic!("unexpected {other}"),
             }))
         }
     }
@@ -617,7 +613,7 @@ mod tests {
     fn named_environments_list_requested_packages_with_planned_updates() {
         for manager in ["conda", "micromamba"] {
             let fake = fake(manager);
-            let mut conda = Conda::new(fake.clone());
+            let mut conda = backend(fake.clone());
             assert_eq!(
                 conda.detect(&Cancellation::default()).unwrap(),
                 Availability::Available
@@ -670,13 +666,13 @@ mod tests {
     fn updates_are_planned_run_and_verified() {
         let mut fake = fake("conda");
         fake.updates = true;
-        let mut conda = Conda::new(fake.clone());
+        let mut conda = backend(fake.clone());
         conda.detect(&Cancellation::default()).unwrap();
         conda
             .execute(
                 &Operation::Upgrade(ripgrep()),
                 &Cancellation::default(),
-                &mut |_| {},
+                &mut ignore,
             )
             .unwrap();
         assert!(fake
@@ -690,7 +686,7 @@ mod tests {
             .execute(
                 &Operation::Upgrade(ripgrep()),
                 &Cancellation::default(),
-                &mut |_| {},
+                &mut ignore,
             )
             .unwrap();
         assert!(!fake
@@ -706,7 +702,7 @@ mod tests {
             conda.execute(
                 &Operation::Upgrade(libgcc),
                 &Cancellation::default(),
-                &mut |_| {}
+                &mut ignore
             ),
             Err(EngineError::NotFound)
         ));
@@ -714,7 +710,7 @@ mod tests {
             conda.execute(
                 &Operation::Remove(ripgrep()),
                 &Cancellation::default(),
-                &mut |_| {}
+                &mut ignore
             ),
             Err(EngineError::Unsupported { .. })
         ));
@@ -723,13 +719,13 @@ mod tests {
     #[test]
     fn an_update_that_changes_nothing_is_an_error() {
         let fake = fake("mamba");
-        let mut conda = Conda::new(fake);
+        let mut conda = backend(fake);
         conda.detect(&Cancellation::default()).unwrap();
         let error = conda
             .execute(
                 &Operation::Upgrade(ripgrep()),
                 &Cancellation::default(),
-                &mut |_| {},
+                &mut ignore,
             )
             .unwrap_err();
         assert!(
@@ -742,10 +738,108 @@ mod tests {
 
     #[test]
     fn no_manager_is_unavailable() {
-        let mut conda = Conda::new(fake("none"));
+        let mut conda = backend(fake("none"));
         assert!(matches!(
             conda.detect(&Cancellation::default()).unwrap(),
             Availability::Unavailable(_)
         ));
+        // A manager that is there but fails is an error, not a missing one.
+        let detect = |broken: fn() -> ExecutionError| {
+            let mut fake = fake("mamba");
+            fake.broken = Some(broken);
+            backend(fake).detect(&Cancellation::default())
+        };
+        assert!(matches!(
+            detect(|| ExecutionError::Cancelled),
+            Err(EngineError::Cancelled)
+        ));
+        assert!(matches!(
+            detect(|| ExecutionError::TimedOut),
+            Err(EngineError::Execution(ExecutionError::TimedOut))
+        ));
+    }
+
+    #[test]
+    fn details_name_the_environment_and_its_manager() {
+        let mut conda = backend(fake("micromamba"));
+        conda.detect(&Cancellation::default()).unwrap();
+        let details = conda.details(&ripgrep(), &Cancellation::default()).unwrap();
+        assert_eq!(
+            details.description,
+            "Requested in the tools environment\n\nLocation: /c/envs/tools\n\nManaged with micromamba. PkgDeck updates requested packages; install and remove them with the manager."
+        );
+        assert_eq!(details.package.installed_version.as_deref(), Some("14.1.0"));
+        let mut libgcc = ripgrep();
+        libgcc.name = "libgcc".into();
+        assert!(matches!(
+            conda.details(&libgcc, &Cancellation::default()),
+            Err(EngineError::NotFound)
+        ));
+        // Conda rows always live in an environment.
+        let mut user = ripgrep();
+        user.scope = Scope::User { uid: 0 };
+        assert!(matches!(
+            conda.details(&user, &Cancellation::default()),
+            Err(EngineError::NotFound)
+        ));
+        assert_eq!(conda.id(), "conda");
+        assert!(conda.capabilities().contains(&Capability::Upgrade));
+        assert!(!conda.capabilities().contains(&Capability::Install));
+    }
+
+    #[test]
+    fn failed_updates_and_unverifiable_results_are_errors() {
+        let mut fake = fake("conda");
+        fake.write_error = Some(|| ExecutionError::TimedOut);
+        let mut conda = backend(fake.clone());
+        conda.detect(&Cancellation::default()).unwrap();
+        let mut messages = vec![];
+        assert!(matches!(
+            conda.execute(
+                &Operation::Upgrade(ripgrep()),
+                &Cancellation::default(),
+                &mut |progress| messages.push(progress)
+            ),
+            Err(EngineError::Execution(ExecutionError::TimedOut))
+        ));
+        assert_eq!(
+            messages,
+            vec![Progress::Message(
+                "Updating ripgrep 14.1.0 → 15.2.0 in the tools environment".into()
+            )]
+        );
+        // The update ran, but the environment can't be read back.
+        fake.write_error = None;
+        fake.unreadable_after_update = true;
+        let mut conda = backend(fake.clone());
+        conda.detect(&Cancellation::default()).unwrap();
+        assert!(matches!(
+            conda.execute(
+                &Operation::Upgrade(ripgrep()),
+                &Cancellation::default(),
+                &mut ignore
+            ),
+            Err(EngineError::Execution(ExecutionError::TimedOut))
+        ));
+        assert!(fake
+            .calls
+            .lock()
+            .unwrap()
+            .contains(&"update ripgrep -p /c/envs/tools --yes --json".into()));
+    }
+
+    #[test]
+    fn a_cancelled_update_stops_after_planning() {
+        let mut fake = fake("conda");
+        fake.updates = true;
+        let mut conda = backend(fake.clone());
+        conda.detect(&Cancellation::default()).unwrap();
+        let cancel = Cancellation::default();
+        cancel.cancel();
+        assert!(matches!(
+            conda.execute(&Operation::Upgrade(ripgrep()), &cancel, &mut ignore),
+            Err(EngineError::Cancelled)
+        ));
+        assert_eq!(fake.ripgrep.lock().unwrap().as_str(), "14.1.0");
     }
 }

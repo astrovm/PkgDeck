@@ -10,9 +10,14 @@ use std::{
 const ID: &str = "macos-apps";
 const MAX_ENTRIES: usize = 4096;
 
+/// A folder's entries, each read as the listing goes.
+type Entries = Box<dyn Iterator<Item = std::io::Result<PathBuf>>>;
+
 trait AppIo: Send {
-    fn read_dir(&self, path: &Path) -> std::io::Result<fs::ReadDir> {
-        fs::read_dir(path)
+    fn read_dir(&self, path: &Path) -> std::io::Result<Entries> {
+        Ok(Box::new(
+            fs::read_dir(path)?.map(|entry| entry.map(|entry| entry.path())),
+        ))
     }
     fn symlink_metadata(&self, path: &Path) -> std::io::Result<fs::Metadata> {
         fs::symlink_metadata(path)
@@ -27,9 +32,63 @@ trait AppIo: Send {
     ) -> Result<BTreeMap<PathBuf, Vec<String>>, EngineError>;
 }
 
-struct NativeApps(Host);
+/// plutil, pkgutil and Homebrew's Caskroom.
+#[cfg(target_os = "macos")]
+struct NativeApps<R = Host>(R);
 
+/// The commands [`NativeApps`] runs; tests answer them instead.
+#[cfg(target_os = "macos")]
+trait Commands: Send {
+    fn read(
+        &self,
+        executable: &Path,
+        args: &[OsString],
+        limits: Limits,
+        cancel: &Cancellation,
+    ) -> Result<Completion, ExecutionError>;
+    fn brew(&self, args: &[OsString], cancel: &Cancellation) -> Result<Completion, ExecutionError>;
+}
+
+#[cfg(target_os = "macos")]
+impl Commands for Host {
+    fn read(
+        &self,
+        executable: &Path,
+        args: &[OsString],
+        limits: Limits,
+        cancel: &Cancellation,
+    ) -> Result<Completion, ExecutionError> {
+        Host::read(self, executable, args, limits, cancel)
+    }
+    fn brew(&self, args: &[OsString], cancel: &Cancellation) -> Result<Completion, ExecutionError> {
+        Host::brew(self, args, cancel, false)
+    }
+}
+
+/// Elsewhere there are no app bundles to read and no casks that own them.
+#[cfg(not(target_os = "macos"))]
+struct NativeApps;
+
+#[cfg(not(target_os = "macos"))]
 impl AppIo for NativeApps {
+    fn plist(&self, _: &Path, _: &Cancellation) -> Result<Value, EngineError> {
+        Err(macos_only())
+    }
+    fn ownership(&self, _: &Cancellation) -> Result<BTreeMap<PathBuf, Vec<String>>, EngineError> {
+        Err(macos_only())
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn macos_only() -> EngineError {
+    EngineError::Unavailable {
+        backend: ID.into(),
+        reason: "Application bundle discovery requires macOS".into(),
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl<R: Commands> AppIo for NativeApps<R> {
     fn plist(&self, path: &Path, cancel: &Cancellation) -> Result<Value, EngineError> {
         let metadata = fs::metadata(path).map_err(ExecutionError::from)?;
         if !metadata.is_file() || metadata.len() > 1024 * 1024 {
@@ -59,7 +118,7 @@ impl AppIo for NativeApps {
         &self,
         cancel: &Cancellation,
     ) -> Result<BTreeMap<PathBuf, Vec<String>>, EngineError> {
-        let root = bytes(ID, self.0.brew(&["--caskroom".into()], cancel, false)?)?;
+        let root = bytes(ID, self.0.brew(&["--caskroom".into()], cancel)?)?;
         let root = PathBuf::from(
             std::str::from_utf8(&root)
                 .map_err(|e| invalid(ID, e))?
@@ -78,7 +137,6 @@ impl AppIo for NativeApps {
                     "--installed".into(),
                 ],
                 cancel,
-                false,
             )?,
         )?;
         let mut owners = cask_owners(&root, &installed)?;
@@ -103,7 +161,8 @@ impl AppIo for NativeApps {
     }
 }
 
-impl NativeApps {
+#[cfg(target_os = "macos")]
+impl<R: Commands> NativeApps<R> {
     fn pkgutil(&self, args: &[&str], cancel: &Cancellation) -> Result<Completion, EngineError> {
         Ok(self.0.read(
             Path::new("/usr/sbin/pkgutil"),
@@ -154,6 +213,7 @@ impl NativeApps {
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn receipt_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 255
@@ -165,6 +225,7 @@ fn receipt_id(id: &str) -> bool {
 /// The receipt patterns each installed cask names in `uninstall pkgutil:`.
 /// A cask that runs an installer package leaves no app link, but its uninstall
 /// step names the receipts the package wrote.
+#[cfg(any(target_os = "macos", test))]
 fn receipt_patterns(data: &[u8]) -> Result<Vec<(String, Vec<String>)>, EngineError> {
     #[derive(Deserialize)]
     struct InstalledCask {
@@ -210,6 +271,7 @@ fn receipt_patterns(data: &[u8]) -> Result<Vec<(String, Vec<String>)>, EngineErr
 
 /// App bundles a receipt installed: its location when that is a bundle, or
 /// each listed `.app` that is not inside another bundle.
+#[cfg(any(target_os = "macos", test))]
 fn receipt_bundles(info: &str, files: &str) -> Vec<PathBuf> {
     let field = |name: &str| {
         info.lines()
@@ -253,6 +315,7 @@ fn relative_artifact(path: &Path) -> bool {
 /// cask keeps its Caskroom folder under an old token, and its current
 /// definition may no longer list the app it installed, so its installed
 /// version folder is also searched for app links under each old token.
+#[cfg(any(target_os = "macos", test))]
 fn cask_owners(root: &Path, data: &[u8]) -> Result<BTreeMap<PathBuf, Vec<String>>, EngineError> {
     #[derive(Deserialize)]
     struct InstalledCask {
@@ -373,7 +436,10 @@ impl MacApps {
         }
         Self {
             roots,
+            #[cfg(target_os = "macos")]
             io: Box::new(NativeApps(host)),
+            #[cfg(not(target_os = "macos"))]
+            io: Box::new(NativeApps),
             snapshot: None,
             scan_errors: vec![],
             exact_query: false,
@@ -495,7 +561,7 @@ impl MacApps {
                 .checked_sub(1)
                 .ok_or_else(|| invalid(ID, "application inventory exceeds 4096 entries"))?;
             match entry {
-                Ok(entry) => paths.push(entry.path()),
+                Ok(path) => paths.push(path),
                 Err(error) => errors.push(invalid(
                     ID,
                     format!("skipped entry in {}: {error}", root.display()),
@@ -608,6 +674,11 @@ impl MacApps {
             .filter(|_| !receipt && !has_owner);
         let suggestion =
             candidate.map(|token| format!("Available through Homebrew: {token} (candidate)"));
+        // Only casks PkgDeck can check an existing copy against may take it
+        // over, and only once Homebrew's records were read: a failed check
+        // could hide an owner. Installing the cask re-checks this copy first.
+        let adopt_with =
+            candidate.filter(|token| ownership.is_ok() && super::adopt::rule(token).is_some());
         let mut description = vec![format!("Location: {}", path.display()), owner.clone()];
         if let Some(id) = bundle_id {
             description.push(format!("Bundle identifier: {id}"));
@@ -626,7 +697,7 @@ impl MacApps {
         } else if let Some(suggestion) = &suggestion {
             description.push(suggestion.clone());
             description.push("Matching evidence: the bundle identifier matches PkgDeck's curated cask catalog. Publisher signature, edition/channel, architecture, and artifact equality have not been verified here.".into());
-            if let Some(token) = candidate.filter(|token| super::adopt::rule(token).is_some()) {
+            if let Some(token) = adopt_with {
                 description.push(format!("To let Homebrew manage this copy, install the {token} cask. PkgDeck first checks the publisher signature, version, architecture, and every file the cask adds, and keeps a copy of the app until Homebrew finishes."));
             }
         }
@@ -662,6 +733,7 @@ impl MacApps {
                 icon: None,
                 component_ids: vec![],
                 homepages: vec![],
+                adopt_with: adopt_with.map(str::to_owned),
             },
             description: description.join("\n\n"),
             homepage: candidate.map(|token| format!("https://formulae.brew.sh/cask/{token}")),
@@ -961,11 +1033,11 @@ mod tests {
     fn unreadable_nested_folders_preserve_siblings_and_report_the_skipped_path() {
         struct UnreadableFolder(PathBuf);
         impl AppIo for UnreadableFolder {
-            fn read_dir(&self, path: &Path) -> std::io::Result<fs::ReadDir> {
+            fn read_dir(&self, path: &Path) -> std::io::Result<Entries> {
                 if path == self.0 {
                     return Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
                 }
-                fs::read_dir(path)
+                FakeIo(Ok(BTreeMap::new())).read_dir(path)
             }
             fn plist(&self, path: &Path, cancel: &Cancellation) -> Result<Value, EngineError> {
                 FakeIo(Ok(BTreeMap::new())).plist(path, cancel)
@@ -1028,6 +1100,126 @@ mod tests {
         backend.io = Box::new(UnreadableFolder(f.0.clone()));
         assert!(backend.installed(&cancel).is_err());
         assert!(backend.snapshot.is_none());
+    }
+
+    #[test]
+    fn cancellation_anywhere_in_a_scan_stops_it_and_bad_entries_are_reported() {
+        #[derive(Clone, Copy, PartialEq)]
+        enum Step {
+            Listing,
+            Entry,
+            Folder,
+            Metadata,
+        }
+        struct Interrupting {
+            cancel: Cancellation,
+            at: Option<Step>,
+            bad_entry: bool,
+        }
+        impl AppIo for Interrupting {
+            fn read_dir(&self, path: &Path) -> std::io::Result<Entries> {
+                if self.at == Some(Step::Listing) {
+                    self.cancel.cancel();
+                }
+                let mut entries: Vec<_> = FakeIo(Ok(BTreeMap::new())).read_dir(path)?.collect();
+                if self.bad_entry {
+                    entries.push(Err(std::io::Error::other("disk read failed")));
+                }
+                Ok(Box::new(entries.into_iter()))
+            }
+            fn symlink_metadata(&self, path: &Path) -> std::io::Result<fs::Metadata> {
+                if self.at == Some(Step::Entry)
+                    || (self.at == Some(Step::Folder) && path.ends_with("Utilities"))
+                {
+                    self.cancel.cancel();
+                }
+                fs::symlink_metadata(path)
+            }
+            fn plist(&self, path: &Path, cancel: &Cancellation) -> Result<Value, EngineError> {
+                if self.at == Some(Step::Metadata) {
+                    return Err(EngineError::Cancelled);
+                }
+                FakeIo(Ok(BTreeMap::new())).plist(path, cancel)
+            }
+            fn ownership(
+                &self,
+                _: &Cancellation,
+            ) -> Result<BTreeMap<PathBuf, Vec<String>>, EngineError> {
+                Ok(BTreeMap::new())
+            }
+        }
+        let f = Fixture::new();
+        // A plain file sorts first, so the next entry notices a cancellation.
+        fs::write(f.0.join("0-readme.txt"), "").unwrap();
+        f.bundle("Utilities/Tool.app", "md.obsidian");
+        f.bundle("Z.app", "md.obsidian");
+        for step in [Step::Listing, Step::Entry, Step::Folder, Step::Metadata] {
+            let cancel = Cancellation::default();
+            let mut backend = f.backend(Ok(BTreeMap::new()));
+            backend.io = Box::new(Interrupting {
+                cancel: cancel.clone(),
+                at: Some(step),
+                bad_entry: false,
+            });
+            assert!(matches!(
+                backend.installed(&cancel),
+                Err(EngineError::Cancelled)
+            ));
+            assert!(backend.snapshot.is_none());
+        }
+        let cancel = Cancellation::default();
+        let mut backend = f.backend(Ok(BTreeMap::new()));
+        backend.io = Box::new(Interrupting {
+            cancel: cancel.clone(),
+            at: None,
+            bad_entry: true,
+        });
+        assert_eq!(backend.installed(&cancel).unwrap().len(), 2);
+        let errors = backend.query_errors();
+        // Once for the root and once for the nested folder.
+        assert_eq!(errors.len(), 2);
+        assert!(errors.iter().all(|error| {
+            let text = error.to_string();
+            text.contains("skipped entry in") && text.contains("disk read failed")
+        }));
+    }
+
+    #[test]
+    fn exact_lookups_stay_inside_the_roots_and_report_shared_ownership() {
+        let f = Fixture::new();
+        let app = f.bundle("Shared.app", "com.example.shared");
+        let name = app.to_str().unwrap();
+        let cancel = Cancellation::default();
+        let mut backend = f.backend(Ok(BTreeMap::from([(
+            fs::canonicalize(&app).unwrap(),
+            vec!["first".into(), "second".into()],
+        )])));
+        let found = backend.lookup(name, &cancel).unwrap();
+        assert_eq!(found.len(), 1);
+        assert!(found[0]
+            .summary
+            .starts_with("Homebrew ownership is ambiguous (first, second)"));
+        assert_eq!(found[0].adopt_with, None);
+        assert!(backend
+            .lookup("/elsewhere/App.app", &cancel)
+            .unwrap()
+            .is_empty());
+        let missing = f.0.join("Missing.app");
+        assert!(backend
+            .lookup(missing.to_str().unwrap(), &cancel)
+            .unwrap()
+            .is_empty());
+        // A cancelled Homebrew check is never downgraded to "not found".
+        let mut cancelled = f.backend(Err(EngineError::Cancelled));
+        assert!(matches!(
+            cancelled.lookup(name, &cancel),
+            Err(EngineError::Cancelled)
+        ));
+        cancel.cancel();
+        assert!(matches!(
+            backend.lookup(name, &cancel),
+            Err(EngineError::Cancelled)
+        ));
     }
 
     #[test]
@@ -1194,6 +1386,17 @@ mod tests {
             })
             .unwrap();
         assert!(!managed.summary.contains("Available through Homebrew"));
+        // Homebrew already owns that copy: nothing to hand over.
+        assert_eq!(managed.adopt_with, None);
+        assert_eq!(external.adopt_with.as_deref(), Some("visual-studio-code"));
+        assert_eq!(
+            serde_json::to_value(external).unwrap()["adopt_with"],
+            "visual-studio-code"
+        );
+        assert!(serde_json::to_value(managed)
+            .unwrap()
+            .get("adopt_with")
+            .is_none());
         assert_eq!(backend.search("renamed editor", &cancel).unwrap().len(), 1);
         let mut wrong = external.id.clone();
         wrong.scope = Scope::System;
@@ -1233,9 +1436,14 @@ mod tests {
             let details = backend.details(&package.id, &cancel).unwrap();
             if package.id.name.ends_with("Known Firefox.app") {
                 assert!(details.homepage.unwrap().ends_with("/firefox"));
+                assert_eq!(package.adopt_with.as_deref(), Some("firefox"));
             } else if package.id.name.ends_with("Renamed.app") {
                 assert!(details.homepage.unwrap().ends_with("/obsidian"));
+                assert_eq!(package.adopt_with.as_deref(), Some("obsidian"));
             } else {
+                // Unknown publishers, other editions and App Store copies
+                // are never offered to Homebrew.
+                assert_eq!(package.adopt_with, None);
                 assert!(details.homepage.is_none());
                 assert!(!details.description.contains("Available through Homebrew"));
             }
@@ -1257,7 +1465,7 @@ mod tests {
         assert_eq!(apps.len(), 2);
         assert!(apps
             .iter()
-            .all(|p| p.summary.contains("could not be checked")));
+            .all(|p| p.summary.contains("could not be checked") && p.adopt_with.is_none()));
         let broken = apps.iter().find(|p| p.display_name == "Broken").unwrap();
         assert_eq!(broken.installed_version.as_deref(), Some("unknown"));
         let details = backend.details(&broken.id, &cancel).unwrap();
@@ -1320,6 +1528,10 @@ mod tests {
         );
         assert!(!records.contains_key(&fs::canonicalize(copied).unwrap()));
         assert!(owners(&root, vec![renamed(json!([]))]).unwrap().is_empty());
+        // An old token with nothing left under it owns nothing.
+        assert!(owners(&root, vec![renamed(json!(["never-installed"]))])
+            .unwrap()
+            .is_empty());
         assert!(owners(&root, vec![renamed(json!(["../old-viewer"]))])
             .unwrap()
             .is_empty());
@@ -1332,7 +1544,7 @@ mod tests {
                 {"pkg": ["Drive.pkg"]},
                 {"uninstall": [{"pkgutil": ["com.example.drive", "com.example.drive\\..*"], "delete": null}]}]},
             {"full_token": "vpn", "installed": "1.0", "artifacts": [
-                {"uninstall": [{"pkgutil": "com.example.vpn"}]}]},
+                {"uninstall": [{"pkgutil": "com.example.vpn"}, {"pkgutil": 5}]}]},
             {"full_token": "gone", "installed": null, "artifacts": [
                 {"uninstall": [{"pkgutil": "com.example.gone"}]}]},
             {"full_token": "plain", "installed": "2.0", "artifacts": [{"app": ["Plain.app"]}]}
@@ -1429,6 +1641,14 @@ mod tests {
             backend.detect(&cancel),
             Err(EngineError::Cancelled)
         ));
+        assert_eq!(
+            backend.capabilities(),
+            [
+                Capability::Search,
+                Capability::Installed,
+                Capability::Details
+            ]
+        );
     }
 
     #[test]
@@ -1471,7 +1691,7 @@ mod tests {
             "md.obsidian"
         );
         let mut cold = f.backend(Ok(BTreeMap::new()));
-        cold.io = Box::new(NativeApps(Host::current()));
+        cold.io = Box::new(NativeApps(Scripted::new(&f.0.join("Caskroom"), json!([]))));
         let id = PackageId {
             backend: ID.into(),
             name: app.to_string_lossy().into(),
@@ -1505,5 +1725,285 @@ mod tests {
             native.plist(&path, &cancel).unwrap()["CFBundleIdentifier"],
             "md.obsidian"
         );
+    }
+
+    /// Answers Homebrew and pkgutil from fixtures; plutil runs for real on
+    /// the fixture's own files.
+    #[cfg(target_os = "macos")]
+    struct Scripted {
+        host: Host,
+        caskroom: Vec<u8>,
+        casks: Value,
+        /// `pkgutil` arguments joined by spaces → its output.
+        pkgutil: BTreeMap<String, String>,
+        calls: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+    #[cfg(target_os = "macos")]
+    impl Scripted {
+        fn new(caskroom: &Path, casks: Value) -> Self {
+            Self {
+                host: Host::current(),
+                caskroom: format!("{}\n", caskroom.display()).into_bytes(),
+                casks,
+                pkgutil: BTreeMap::new(),
+                calls: Default::default(),
+            }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    fn completion(code: i32, stdout: impl Into<Vec<u8>>) -> Completion {
+        Completion {
+            code: Some(code),
+            signal: None,
+            stdout: stdout.into(),
+            stderr: vec![],
+            truncated: false,
+            cancellation_deferred: false,
+        }
+    }
+    #[cfg(target_os = "macos")]
+    impl Commands for Scripted {
+        fn read(
+            &self,
+            executable: &Path,
+            args: &[OsString],
+            limits: Limits,
+            cancel: &Cancellation,
+        ) -> Result<Completion, ExecutionError> {
+            if executable == Path::new("/usr/bin/plutil") {
+                return self.host.read(executable, args, limits, cancel);
+            }
+            assert_eq!(executable, Path::new("/usr/sbin/pkgutil"));
+            let line = args
+                .iter()
+                .map(|arg| arg.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join(" ");
+            self.calls.lock().unwrap().push(format!("pkgutil {line}"));
+            match line.as_str() {
+                "--pkg-info com.example.broken" => Err(ExecutionError::TimedOut),
+                "--files com.example.truncated" => {
+                    let mut result = completion(0, "VPN.app\n");
+                    result.truncated = true;
+                    Ok(result)
+                }
+                _ => Ok(self
+                    .pkgutil
+                    .get(&line)
+                    .map_or_else(|| completion(1, ""), |out| completion(0, out.as_str()))),
+            }
+        }
+        fn brew(&self, args: &[OsString], _: &Cancellation) -> Result<Completion, ExecutionError> {
+            let args: Vec<_> = args.iter().map(|arg| arg.to_string_lossy()).collect();
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("brew {}", args.join(" ")));
+            if args[0] == "--caskroom" {
+                return Ok(completion(0, self.caskroom.clone()));
+            }
+            assert_eq!(args, ["info", "--json=v2", "--cask", "--installed"]);
+            // `null` stands for a failed listing, a string for a cut-off one.
+            if self.casks.is_null() {
+                return Err(ExecutionError::TimedOut);
+            }
+            let mut result = completion(0, json!({"casks": self.casks}).to_string());
+            result.truncated = self.casks.is_string();
+            Ok(result)
+        }
+    }
+
+    /// Homebrew's records come from `brew --caskroom` and the installed
+    /// listing; a cask that ran an installer package is matched through
+    /// the pkgutil receipts its uninstall step names.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_ownership_reads_caskroom_links_and_installer_receipts() {
+        let f = Fixture::new();
+        let linked = f.bundle("Applications/Editor.app", "com.microsoft.VSCode");
+        let vpn = f.bundle("Applications/VPN.app", "com.example.vpn");
+        let docs = f.bundle("Applications/Docs.app", "com.example.docs");
+        let root = f.0.join("Caskroom");
+        fs::create_dir_all(root.join("editor/1.0")).unwrap();
+        symlink(&linked, root.join("editor/1.0/Editor.app")).unwrap();
+        let volume = f.0.to_string_lossy().into_owned();
+        let mut commands = Scripted::new(
+            &root,
+            json!([
+                {"token": "editor", "full_token": "editor", "installed": "1.0",
+                 "artifacts": [{"app": ["Editor.app"]},
+                               {"uninstall": [{"pkgutil": "com.example.editor"}]}]},
+                {"token": "vpn", "full_token": "vpn", "installed": "2.0", "artifacts": [
+                    {"uninstall": [{"pkgutil": ["com.example.vpn", "com.example.vpn.*"]}]}]},
+                {"token": "suite", "full_token": "suite", "installed": "3.0", "artifacts": [
+                    {"uninstall": [{"pkgutil": ["com.example.suite", "com.example.missing"]}]}]},
+            ]),
+        );
+        commands.pkgutil = BTreeMap::from([
+            (
+                "--pkgs=com.example.editor".into(),
+                "com.example.editor\n".into(),
+            ),
+            (
+                "--pkg-info com.example.editor".into(),
+                format!("volume: {volume}\nlocation: Applications/Editor.app\n"),
+            ),
+            ("--files com.example.editor".into(), "Contents\n".into()),
+            // Both patterns find the same receipt; bad IDs are dropped.
+            (
+                "--pkgs=com.example.vpn".into(),
+                "com.example.vpn\nnot valid; id\n".into(),
+            ),
+            (
+                "--pkgs=com.example.vpn.*".into(),
+                "com.example.vpn\ncom.example.broken\ncom.example.truncated\n".into(),
+            ),
+            (
+                "--pkg-info com.example.vpn".into(),
+                format!("volume: {volume}\nlocation: Applications/VPN.app\n"),
+            ),
+            ("--files com.example.vpn".into(), "Contents\n".into()),
+            (
+                "--pkg-info com.example.truncated".into(),
+                format!("volume: {volume}\nlocation: Applications\n"),
+            ),
+            (
+                "--pkgs=com.example.suite".into(),
+                "com.example.suite\ncom.example.failed\n".into(),
+            ),
+            (
+                "--pkg-info com.example.suite".into(),
+                format!("volume: {volume}\nlocation: Applications\n"),
+            ),
+            // A listed bundle that is no longer there is skipped.
+            (
+                "--files com.example.suite".into(),
+                "Docs.app\nDocs.app/Contents\nGone.app\n".into(),
+            ),
+            (
+                "--pkg-info com.example.failed".into(),
+                format!("volume: {volume}\nlocation: Applications\n"),
+            ),
+        ]);
+        let calls = commands.calls.clone();
+        let native = NativeApps(commands);
+        let cancel = Cancellation::default();
+        let owners = native.ownership(&cancel).unwrap();
+        let canonical = |path: &Path| fs::canonicalize(path).unwrap();
+        assert_eq!(
+            owners,
+            BTreeMap::from([
+                (canonical(&linked), vec!["editor".to_owned()]),
+                (canonical(&vpn), vec!["vpn".to_owned()]),
+                (canonical(&docs), vec!["suite".to_owned()]),
+            ])
+        );
+        let calls = calls.lock().unwrap().clone();
+        assert_eq!(
+            calls[..2],
+            ["brew --caskroom", "brew info --json=v2 --cask --installed"]
+        );
+        // Each receipt is read once, however many patterns found it.
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| *call == "pkgutil --pkg-info com.example.vpn")
+                .count(),
+            1
+        );
+        assert!(!calls.iter().any(|call| call.contains("not valid")));
+        // A failed pattern lookup is no match, not an error.
+        assert!(calls.contains(&"pkgutil --pkgs=com.example.missing".to_owned()));
+        cancel.cancel();
+        assert!(matches!(
+            native.ownership(&cancel),
+            Err(EngineError::Cancelled)
+        ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_ownership_rejects_a_bad_caskroom_and_brew_failures() {
+        let cancel = Cancellation::default();
+        let relative = Scripted::new(Path::new("Caskroom"), json!([]));
+        assert!(NativeApps(relative)
+            .ownership(&cancel)
+            .unwrap_err()
+            .to_string()
+            .contains("relative Caskroom"));
+        let mut garbled = Scripted::new(Path::new("/opt"), json!([]));
+        garbled.caskroom = b"/opt/\xff\n".to_vec();
+        assert!(NativeApps(garbled).ownership(&cancel).is_err());
+        assert!(matches!(
+            NativeApps(Scripted::new(Path::new("/opt"), Value::Null)).ownership(&cancel),
+            Err(EngineError::Execution(ExecutionError::TimedOut))
+        ));
+        assert!(
+            NativeApps(Scripted::new(Path::new("/opt"), json!("cut off")))
+                .ownership(&cancel)
+                .is_err()
+        );
+        // Without Homebrew on PATH nothing runs, and the check fails.
+        let empty = Fixture::new();
+        let host = Host::new(
+            crate::host::Runtime::Native,
+            BTreeMap::from([("PATH".into(), empty.0.clone().into_os_string())]),
+        );
+        assert!(matches!(
+            NativeApps(host).ownership(&cancel),
+            Err(EngineError::Execution(ExecutionError::Disabled(_)))
+        ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_plists_must_be_small_regular_files() {
+        let f = Fixture::new();
+        let native = NativeApps(Host::current());
+        let cancel = Cancellation::default();
+        assert!(native.plist(&f.0.join("missing.plist"), &cancel).is_err());
+        assert!(native
+            .plist(&f.0, &cancel)
+            .unwrap_err()
+            .to_string()
+            .contains("bounded regular file"));
+        let big = f.0.join("big.plist");
+        fs::write(&big, vec![b' '; 1024 * 1024 + 1]).unwrap();
+        assert!(native
+            .plist(&big, &cancel)
+            .unwrap_err()
+            .to_string()
+            .contains("bounded regular file"));
+        let bad = f.0.join("bad.plist");
+        fs::write(&bad, "not a plist").unwrap();
+        assert!(native.plist(&bad, &cancel).is_err());
+        let cancelled = Cancellation::default();
+        cancelled.cancel();
+        assert!(matches!(
+            native.plist(&bad, &cancelled),
+            Err(EngineError::Cancelled)
+        ));
+    }
+
+    /// Off macOS nothing runs plutil or asks Homebrew for casks: a bundle
+    /// found anyway is listed without metadata or an owner.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn other_systems_read_no_bundles() {
+        let f = Fixture::new();
+        f.bundle("Native.app", "md.obsidian");
+        let mut backend = f.backend(Ok(BTreeMap::new()));
+        backend.io = Box::new(NativeApps);
+        let cancel = Cancellation::default();
+        assert!(matches!(
+            backend.io.ownership(&cancel),
+            Err(EngineError::Unavailable { .. })
+        ));
+        let rows = backend.installed(&cancel).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].installed_version.as_deref(), Some("unknown"));
+        assert!(rows[0]
+            .summary
+            .starts_with("Homebrew ownership could not be checked"));
     }
 }

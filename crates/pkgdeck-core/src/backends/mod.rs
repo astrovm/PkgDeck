@@ -7,6 +7,7 @@ mod aur;
 mod cleanup;
 mod conda;
 mod container;
+mod dev_containers;
 mod dotnet;
 mod firmware;
 mod go_bin;
@@ -27,6 +28,7 @@ pub use appimage::AppImage;
 pub use aur::Aur;
 pub use conda::Conda;
 pub use container::{Container, ContainerKind};
+pub use dev_containers::DevContainers;
 pub use dotnet::DotnetTools;
 pub use firmware::Firmware;
 pub use go_bin::GoBinaries;
@@ -83,6 +85,8 @@ pub const BACKEND_IDS: &[&str] = &[
     "flatpak",
     "docker",
     "podman",
+    "toolbox",
+    "distrobox",
     "cargo",
     "rustup",
     "go",
@@ -113,8 +117,10 @@ pub const BACKEND_IDS: &[&str] = &[
 
 /// These sources update existing installations but do not install or remove them.
 pub fn update_only(id: &str) -> bool {
-    matches!(id, "fwupd" | "mas" | "conda" | "system-image" | "aur")
-        || StandaloneTool::ALL.iter().any(|tool| tool.id() == id)
+    matches!(
+        id,
+        "fwupd" | "mas" | "conda" | "system-image" | "aur" | "toolbox" | "distrobox"
+    ) || StandaloneTool::ALL.iter().any(|tool| tool.id() == id)
 }
 
 /// Sources upgraded package by package: they have no single "upgrade
@@ -154,6 +160,8 @@ pub fn display_name(id: &str) -> &str {
         "flatpak" => "Flatpak",
         "docker" => "Docker images",
         "podman" => "Podman images",
+        "toolbox" => "Toolbx containers",
+        "distrobox" => "Distrobox containers",
         "cargo" => "Cargo",
         "bun" => "Bun",
         "conda" => "Conda",
@@ -187,18 +195,24 @@ pub trait Transport: Send {
             "Software Sources editor unavailable".into(),
         ))
     }
+    // Fixtures only implement the managers their adapter drives; the native
+    // transport overrides every one of these.
     fn apt_query(
         &self,
-        mode: &str,
-        query: &str,
-        arch: &str,
-        cancel: &Cancellation,
-    ) -> Result<Completion, ExecutionError>;
+        _mode: &str,
+        _query: &str,
+        _arch: &str,
+        _cancel: &Cancellation,
+    ) -> Result<Completion, ExecutionError> {
+        Err(ExecutionError::Disabled("APT not found".into()))
+    }
     fn apt_write(
         &self,
-        action: AptAction,
-        cancel: &Cancellation,
-    ) -> Result<Completion, ExecutionError>;
+        _action: AptAction,
+        _cancel: &Cancellation,
+    ) -> Result<Completion, ExecutionError> {
+        Err(ExecutionError::Disabled("APT not found".into()))
+    }
     fn apt_write_group(
         &self,
         _actions: &[AptAction],
@@ -210,17 +224,21 @@ pub trait Transport: Send {
     }
     fn brew(
         &self,
-        args: &[OsString],
-        cancel: &Cancellation,
-        write: bool,
-    ) -> Result<Completion, ExecutionError>;
+        _args: &[OsString],
+        _cancel: &Cancellation,
+        _write: bool,
+    ) -> Result<Completion, ExecutionError> {
+        Err(ExecutionError::Disabled("Homebrew not found".into()))
+    }
     fn flatpak(
         &self,
-        args: &[OsString],
-        cancel: &Cancellation,
-        write: bool,
-        system: bool,
-    ) -> Result<Completion, ExecutionError>;
+        _args: &[OsString],
+        _cancel: &Cancellation,
+        _write: bool,
+        _system: bool,
+    ) -> Result<Completion, ExecutionError> {
+        Err(ExecutionError::Disabled("Flatpak not found".into()))
+    }
     /// An unused-ref preview is only supported by transports with an
     /// authoritative native libflatpak implementation. A CLI approximation
     /// must never authorize `uninstall --unused`.
@@ -302,6 +320,117 @@ pub trait Transport: Send {
         self.dev_tool(executable, args, cancel, write)
     }
 }
+
+/// A test transport for managers that only run development tools: the fake
+/// implements `dev_tool` (and `env` if it needs one), and every system
+/// package manager seam refuses.
+#[cfg(test)]
+pub(crate) mod dev_tools {
+    use super::*;
+
+    pub(crate) trait DevTool: Send {
+        fn dev_tool(
+            &self,
+            executable: &str,
+            args: &[OsString],
+            cancel: &Cancellation,
+            write: bool,
+        ) -> Result<Completion, ExecutionError>;
+        fn env(&self, _name: &str) -> Option<OsString> {
+            None
+        }
+    }
+
+    pub(crate) struct DevTools<F>(pub F);
+
+    fn refused() -> ExecutionError {
+        ExecutionError::Disabled("only development tools run here".into())
+    }
+
+    impl<F: DevTool> Transport for DevTools<F> {
+        fn apt_query(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &Cancellation,
+        ) -> Result<Completion, ExecutionError> {
+            Err(refused())
+        }
+        fn apt_write(&self, _: AptAction, _: &Cancellation) -> Result<Completion, ExecutionError> {
+            Err(refused())
+        }
+        fn brew(
+            &self,
+            _: &[OsString],
+            _: &Cancellation,
+            _: bool,
+        ) -> Result<Completion, ExecutionError> {
+            Err(refused())
+        }
+        fn flatpak(
+            &self,
+            _: &[OsString],
+            _: &Cancellation,
+            _: bool,
+            _: bool,
+        ) -> Result<Completion, ExecutionError> {
+            Err(refused())
+        }
+        fn env(&self, name: &str) -> Option<OsString> {
+            self.0.env(name)
+        }
+        fn dev_tool(
+            &self,
+            executable: &str,
+            args: &[OsString],
+            cancel: &Cancellation,
+            write: bool,
+        ) -> Result<Completion, ExecutionError> {
+            self.0.dev_tool(executable, args, cancel, write)
+        }
+    }
+
+    #[test]
+    fn only_development_tools_run() {
+        struct Echo;
+        impl DevTool for Echo {
+            fn dev_tool(
+                &self,
+                executable: &str,
+                args: &[OsString],
+                _: &Cancellation,
+                write: bool,
+            ) -> Result<Completion, ExecutionError> {
+                Ok(Completion {
+                    code: Some(0),
+                    signal: None,
+                    stdout: format!("{executable} {args:?} {write}").into_bytes(),
+                    stderr: vec![],
+                    truncated: false,
+                    cancellation_deferred: false,
+                })
+            }
+        }
+        let transport = DevTools(Echo);
+        let cancel = Cancellation::default();
+        let ran = transport
+            .dev_tool("go", &["version".into()], &cancel, true)
+            .unwrap();
+        assert_eq!(ran.stdout, b"go [\"version\"] true");
+        assert_eq!(transport.env("HOME"), None);
+        let refusals = [
+            transport.apt_query("search", "x", "amd64", &cancel),
+            transport.apt_write(AptAction::Refresh, &cancel),
+            transport.brew(&[], &cancel, false),
+            transport.flatpak(&[], &cancel, false, false),
+        ];
+        for refusal in refusals {
+            assert!(matches!(refusal, Err(ExecutionError::Disabled(_))));
+        }
+    }
+}
+
 pub struct NativeTransport {
     pub host: Host,
     pub authorization: Authorization,
@@ -379,6 +508,52 @@ fn locale_key(var: impl Fn(&str) -> Option<OsString>) -> Vec<String> {
                 .unwrap_or_default()
         })
         .collect()
+}
+
+impl NativeTransport {
+    /// Flatpak reads, with remote searches answered from `store` while the
+    /// installation's AppStream data is unchanged.
+    fn flatpak_cached(
+        &self,
+        args: &[OsString],
+        cancel: &Cancellation,
+        write: bool,
+        system: bool,
+        store: impl FnOnce() -> Option<crate::cache::Store>,
+    ) -> Result<Completion, ExecutionError> {
+        let run = || {
+            self.host
+                .flatpak(args, cancel, write, system, self.authorization)
+        };
+        // Remote search reads the local AppStream copy and takes about a
+        // second per installation. Other reads are fast or remote.
+        let search = !write
+            && self.host.runtime == crate::host::Runtime::Native
+            && args.get(1).is_some_and(|arg| arg == "search");
+        let Some(installation) = search
+            .then(|| flatpak_installation(system, |name| self.host.var(name)))
+            .flatten()
+        else {
+            return run();
+        };
+        let args_text: Vec<String> = args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        let args_text: Vec<&str> = args_text.iter().map(String::as_str).collect();
+        // Names and descriptions come translated.
+        let locale = locale_key(|name| self.host.var(name));
+        let locale: Vec<&str> = locale.iter().map(String::as_str).collect();
+        crate::cache::completion(
+            store().as_ref(),
+            "flatpak",
+            "search",
+            &args_text,
+            &flatpak_search_watches(&installation),
+            &locale,
+            run,
+        )
+    }
 }
 
 impl Transport for NativeTransport {
@@ -605,38 +780,7 @@ impl Transport for NativeTransport {
         write: bool,
         system: bool,
     ) -> Result<Completion, ExecutionError> {
-        let run = || {
-            self.host
-                .flatpak(args, cancel, write, system, self.authorization)
-        };
-        // Remote search reads the local AppStream copy and takes about a
-        // second per installation. Other reads are fast or remote.
-        let search = !write
-            && self.host.runtime == crate::host::Runtime::Native
-            && args.get(1).is_some_and(|arg| arg == "search");
-        let Some(installation) = search
-            .then(|| flatpak_installation(system, |name| self.host.var(name)))
-            .flatten()
-        else {
-            return run();
-        };
-        let args_text: Vec<String> = args
-            .iter()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect();
-        let args_text: Vec<&str> = args_text.iter().map(String::as_str).collect();
-        // Names and descriptions come translated.
-        let locale = locale_key(|name| self.host.var(name));
-        let locale: Vec<&str> = locale.iter().map(String::as_str).collect();
-        crate::cache::completion(
-            crate::cache::Store::user().as_ref(),
-            "flatpak",
-            "search",
-            &args_text,
-            &flatpak_search_watches(&installation),
-            &locale,
-            run,
-        )
+        self.flatpak_cached(args, cancel, write, system, crate::cache::Store::user)
     }
     fn flatpak_unused(&self, cancel: &Cancellation) -> Result<Completion, ExecutionError> {
         let _ = cancel;
@@ -768,10 +912,13 @@ impl<T: Transport> HomebrewCask<T> {
         }
     }
     /// Casks can take over apps someone installed themselves (macOS only).
-    pub fn with_adoption(mut self) -> Self {
-        if cfg!(target_os = "macos") {
-            self.adoption = Some(Box::new(adopt::NativeAdopt(Host::current())));
-        }
+    pub fn with_adoption(self) -> Self {
+        #[cfg(target_os = "macos")]
+        return Self {
+            adoption: Some(Box::new(adopt::NativeAdopt(Host::current()))),
+            ..self
+        };
+        #[cfg(not(target_os = "macos"))]
         self
     }
 }
@@ -884,6 +1031,7 @@ impl<T: Transport> Flatpak<T> {
                 icon: None,
                 component_ids: vec![],
                 homepages: vec![],
+                adopt_with: None,
             });
         }
         if packages.is_empty() || !updates {
@@ -993,6 +1141,7 @@ impl<T: Transport> Flatpak<T> {
                     icon: None,
                     component_ids: vec![],
                     homepages: vec![],
+                    adopt_with: None,
                 })
             })
             .collect()
@@ -1113,18 +1262,16 @@ impl<T: Transport> Backend for Flatpak<T> {
         let mut result = self.list(cancel, false, true)?;
         result.extend(self.list(cancel, true, true)?);
         for package in &mut result {
-            // Exported icons double as the installed check per scope.
-            let roots: Vec<PathBuf> = match &package.id.scope {
-                Scope::User { .. } => home
-                    .as_ref()
+            // Exported icons double as the installed check per scope; `list`
+            // only reports user and system installations.
+            let root = if package.id.scope == Scope::System {
+                Some(PathBuf::from("/var/lib/flatpak/exports"))
+            } else {
+                home.as_ref()
                     .map(|home| home.join(".local/share/flatpak/exports"))
-                    .into_iter()
-                    .collect(),
-                Scope::System => vec![PathBuf::from("/var/lib/flatpak/exports")],
-                _ => vec![],
             };
-            if !roots.is_empty() {
-                package.icon = flatpak_icon(&roots, &package.id.name);
+            if let Some(root) = root {
+                package.icon = flatpak_icon(&[root], &package.id.name);
             }
             // The Flatpak application id is itself the AppStream component id.
             if package
@@ -1186,8 +1333,7 @@ impl<T: Transport> Backend for Flatpak<T> {
                 .as_deref()
                 .is_some_and(|value| value.starts_with("artifact:flatpak:"))
             {
-                let staged = crate::artifact::stage(id, cancel)?
-                    .ok_or_else(|| invalid("flatpak", "missing bundle"))?;
+                // The scope is checked before the bundle is fetched.
                 let (system, scope) = match id.scope {
                     Scope::System => (true, "--system"),
                     Scope::User { uid } if uid == rustix::process::getuid().as_raw() => {
@@ -1195,6 +1341,8 @@ impl<T: Transport> Backend for Flatpak<T> {
                     }
                     _ => return Err(invalid("flatpak", "invalid Flatpak scope")),
                 };
+                let missing = || invalid("flatpak", "missing bundle");
+                let staged = crate::artifact::stage(id, cancel)?.ok_or_else(missing)?;
                 progress(Progress::Message(format!(
                     "Installing Flatpak bundle {}.",
                     id.name
@@ -1217,10 +1365,11 @@ impl<T: Transport> Backend for Flatpak<T> {
                 });
             }
             if let Some(bytes) = crate::flatpak_ref::verified_source(id, cancel)? {
-                let (system, scope) = match id.scope {
-                    Scope::System => (true, "--system"),
-                    Scope::User { .. } => (false, "--user"),
-                    _ => return Err(invalid("flatpak", "invalid Flatpak scope")),
+                // Verification accepts only system and current-user scopes.
+                let (system, scope) = if id.scope == Scope::System {
+                    (true, "--system")
+                } else {
+                    (false, "--user")
                 };
                 progress(Progress::Message(format!(
                     "Installing Flatpak reference for {}.",
@@ -1240,25 +1389,26 @@ impl<T: Transport> Backend for Flatpak<T> {
                     .open(&temporary)
                     .map_err(|e| invalid("flatpak", e))?;
                 use std::io::Write;
-                if let Err(error) = file.write_all(&bytes) {
-                    let _ = std::fs::remove_file(&temporary);
-                    return Err(invalid("flatpak", error));
-                }
+                let written = file.write_all(&bytes);
                 drop(file);
                 let source = temporary.to_string_lossy().into_owned();
-                let result = self.call(
-                    &[
-                        scope,
-                        "install",
-                        "--noninteractive",
-                        "--assumeyes",
-                        "--from",
-                        &source,
-                    ],
-                    cancel,
-                    true,
-                    system,
-                );
+                let result = written
+                    .map_err(|error| invalid("flatpak", error))
+                    .and_then(|()| {
+                        self.call(
+                            &[
+                                scope,
+                                "install",
+                                "--noninteractive",
+                                "--assumeyes",
+                                "--from",
+                                &source,
+                            ],
+                            cancel,
+                            true,
+                            system,
+                        )
+                    });
                 let _ = std::fs::remove_file(&temporary);
                 let result = result?;
                 return Ok(OperationOutcome {
@@ -1668,6 +1818,7 @@ fn parse_apt_transaction_plan(
         download_bytes: None,
         disk_bytes: None,
         restart_required: None,
+        adopts: None,
     })
 }
 
@@ -2111,6 +2262,7 @@ impl<T: Transport> Homebrew<T> {
                         } else {
                             vec![f.homepage.clone()]
                         },
+                        adopt_with: None,
                     },
                     description: f.desc.unwrap_or_default(),
                     homepage: (!f.homepage.is_empty()).then_some(f.homepage),
@@ -2343,6 +2495,7 @@ impl<T: Transport> HomebrewCask<T> {
                         } else {
                             vec![c.homepage.clone()]
                         },
+                        adopt_with: None,
                     },
                     description: c.desc.unwrap_or_default(),
                     homepage: (!c.homepage.is_empty()).then_some(c.homepage),
@@ -2368,7 +2521,53 @@ impl<T: Transport> HomebrewCask<T> {
         Ok(&id.name)
     }
 }
+impl<T: Transport> HomebrewCask<T> {
+    /// A checked adoption when an app is already in the cask's place.
+    fn adoption_plan(
+        &self,
+        token: &str,
+        cancel: &Cancellation,
+    ) -> Result<Option<adopt::Plan>, EngineError> {
+        let Some(io) = &self.adoption else {
+            return Ok(None);
+        };
+        let info: serde_json::Value = serde_json::from_slice(&bytes(
+            "homebrew-cask",
+            self.call(&["info", "--json=v2", "--cask", "--", token], cancel, false)?,
+        )?)
+        .map_err(|e| invalid("homebrew-cask", e))?;
+        adopt::plan(io.as_ref(), &info["casks"][0], cancel)
+    }
+}
 impl<T: Transport> Backend for HomebrewCask<T> {
+    /// Installing over an app already in place adopts it; the preview says
+    /// so, and names the version and publisher that were checked.
+    fn operation_plan(
+        &mut self,
+        operation: &Operation,
+        cancel: &Cancellation,
+    ) -> Result<Option<TransactionPlan>, EngineError> {
+        let Operation::Install(id) = operation else {
+            return Ok(None);
+        };
+        let token = self.target(id)?;
+        Ok(self
+            .adoption_plan(token, cancel)?
+            .map(|plan| TransactionPlan {
+                operation: operation.clone(),
+                native_preview: plan.preview(),
+                changes: vec![PlannedChange {
+                    action: PlannedAction::Install,
+                    name: token.into(),
+                    installed_version: Some(plan.version.clone()),
+                    candidate_version: Some(plan.version.clone()),
+                }],
+                download_bytes: None,
+                disk_bytes: None,
+                restart_required: None,
+                adopts: Some(plan.app.clone()),
+            }))
+    }
     fn id(&self) -> &str {
         "homebrew-cask"
     }
@@ -2479,35 +2678,35 @@ impl<T: Transport> Backend for HomebrewCask<T> {
             Operation::Refresh { backend } if backend == "homebrew-cask" => vec!["update"],
             Operation::Install(id) => {
                 let token = self.target(id)?;
-                if let Some(io) = &self.adoption {
-                    let info: serde_json::Value = serde_json::from_slice(&bytes(
-                        "homebrew-cask",
-                        self.call(&["info", "--json=v2", "--cask", "--", token], cancel, false)?,
-                    )?)
-                    .map_err(|e| invalid("homebrew-cask", e))?;
-                    if let Some(plan) = adopt::plan(io.as_ref(), &info["casks"][0], cancel)? {
-                        return adopt::run(
-                            io.as_ref(),
-                            &plan,
-                            cancel,
-                            progress,
-                            &mut || {
-                                self.call(
-                                    &["install", "--cask", "--adopt", "--", token],
-                                    cancel,
-                                    true,
-                                )
-                            },
-                            &mut || {
-                                self.call(
-                                    &["list", "--cask", "--versions", "--", token],
-                                    &Cancellation::default(),
-                                    false,
-                                )
-                                .is_ok_and(|done| done.code == Some(0))
-                            },
-                        );
-                    }
+                if let (Some(io), Some(plan)) = (&self.adoption, self.adoption_plan(token, cancel)?)
+                {
+                    return adopt::run(
+                        io.as_ref(),
+                        &plan,
+                        cancel,
+                        progress,
+                        &mut || {
+                            self.call(&["install", "--cask", "--adopt", "--", token], cancel, true)
+                        },
+                        // brew list rejects a tap cask's full name; brew info
+                        // takes both and reports the installed version.
+                        &mut || {
+                            self.call(
+                                &["info", "--json=v2", "--cask", "--", token],
+                                &Cancellation::default(),
+                                false,
+                            )
+                            .ok()
+                            .and_then(|done| {
+                                serde_json::from_slice::<serde_json::Value>(&done.stdout).ok()
+                            })
+                            .is_some_and(|info| {
+                                info["casks"][0]["installed"]
+                                    .as_str()
+                                    .is_some_and(|version| !version.is_empty())
+                            })
+                        },
+                    );
                 }
                 vec!["install", "--cask", "--", token]
             }
@@ -2631,8 +2830,10 @@ impl ManagerKind {
         .map(OsString::from)
         .collect()
     }
-    fn write_args(self, operation: &Operation) -> Vec<&'static str> {
-        match (self, operation) {
+    /// The fixed arguments before the package name; `None` for cleanup,
+    /// which these managers do not offer.
+    fn write_args(self, operation: &Operation) -> Option<Vec<&'static str>> {
+        Some(match (self, operation) {
             (Self::Dnf, Operation::Refresh { .. }) => vec!["-y", "makecache"],
             (Self::Dnf, Operation::Install(_)) => vec!["-y", "install", "--"],
             (Self::Dnf, Operation::Remove(_)) => vec!["-y", "remove", "--"],
@@ -2676,8 +2877,8 @@ impl ManagerKind {
             (Self::MacPorts, Operation::Remove(_)) => vec!["-N", "uninstall"],
             (Self::MacPorts, Operation::Upgrade(_)) => vec!["-N", "upgrade"],
             (Self::MacPorts, Operation::UpgradeAll { .. }) => vec!["-N", "upgrade", "outdated"],
-            (_, Operation::Clean(_)) => vec![],
-        }
+            (_, Operation::Clean(_)) => return None,
+        })
     }
 }
 
@@ -2819,6 +3020,7 @@ impl<T: Transport> SystemManager<T> {
             icon: None,
             component_ids: vec![],
             homepages: vec![],
+            adopt_with: None,
         })
     }
     fn parse(&self, value: Vec<u8>, installed: bool) -> Result<Vec<Package>, EngineError> {
@@ -2989,8 +3191,9 @@ impl<T: Transport> SystemManager<T> {
                     "MacPorts port".into(),
                 ))
             }
+            // MacPorts search, the remaining kind parsed here:
             // name <tab> version <tab> categories <tab> description
-            (ManagerKind::MacPorts, false) => {
+            _ => {
                 let columns: Vec<&str> = line.split('\t').map(str::trim).collect();
                 let [name, version, _, summary, ..] = columns[..] else {
                     // Not a result line, such as "No match for … found".
@@ -3003,7 +3206,6 @@ impl<T: Transport> SystemManager<T> {
                     summary.to_owned(),
                 ))
             }
-            _ => None,
         }
     }
     fn query(
@@ -3182,7 +3384,8 @@ impl<T: Transport> Backend for SystemManager<T> {
                     "--".into(),
                     path,
                 ],
-                ManagerKind::Snap => {
+                // Snap: the other managers were refused before staging.
+                _ => {
                     let assertion = staged
                         .assertion()
                         .ok_or_else(|| invalid("snap", "matching assertion is required"))?;
@@ -3196,9 +3399,6 @@ impl<T: Transport> Backend for SystemManager<T> {
                     )?;
                     vec!["install".into(), path]
                 }
-                ManagerKind::Apk | ManagerKind::Xbps | ManagerKind::MacPorts => {
-                    return Err(invalid(self.kind.id(), "unsupported local archive"))
-                }
             };
             progress(Progress::Message(format!(
                 "Installing local {} package.",
@@ -3210,20 +3410,16 @@ impl<T: Transport> Backend for SystemManager<T> {
                 cancellation_deferred: result.cancellation_deferred,
             });
         }
+        let Some(fixed) = self.kind.write_args(operation) else {
+            return Err(self.unsupported(Capability::Clean));
+        };
         let name = match operation {
-            Operation::Refresh { .. } => None,
             Operation::Install(id) | Operation::Remove(id) | Operation::Upgrade(id) => {
                 Some(self.target(id)?)
             }
-            Operation::UpgradeAll { .. } => None,
-            Operation::Clean(_) => return Err(self.unsupported(Capability::Clean)),
+            _ => None,
         };
-        let mut args: Vec<OsString> = self
-            .kind
-            .write_args(operation)
-            .into_iter()
-            .map(OsString::from)
-            .collect();
+        let mut args: Vec<OsString> = fixed.into_iter().map(OsString::from).collect();
         if let Some(name) = name {
             args.push(name.into());
         }
@@ -3940,6 +4136,7 @@ impl<T: Transport> DevTool<T> {
                 // Manifest homepages (bun, composer, …) double as grouping
                 // keys so dev tools group with native builds of the same app.
                 homepages: homepage.clone().into_iter().collect(),
+                adopt_with: None,
             },
             description: summary,
             homepage,
@@ -3957,11 +4154,7 @@ impl<T: Transport> DevTool<T> {
             None => (rest, true),
         };
         let version = version.strip_prefix('v')?;
-        if !sourced
-            || !dev_name(name)
-            || version.is_empty()
-            || version.chars().any(char::is_whitespace)
-        {
+        if !sourced || version.is_empty() || version.chars().any(char::is_whitespace) {
             return None;
         }
         Some((name, version))
@@ -4272,14 +4465,10 @@ impl<T: Transport> DevTool<T> {
             };
         let mut details = Vec::new();
         for line in text.lines() {
+            // Only tool headers carry versions; executable lines are skipped.
             let Some((name, version, _)) = Self::uv_entry(line) else {
                 continue;
             };
-            // Skip executable continuation lines already filtered; only tool
-            // headers carry versions.
-            if name.is_empty() {
-                continue;
-            }
             let candidate = outdated
                 .get(&name)
                 .cloned()
@@ -4593,6 +4782,7 @@ impl<T: Transport> DevTool<T> {
                         icon: None,
                         component_ids: vec![],
                         homepages: vec![],
+                        adopt_with: None,
                     },
                 }
             })
@@ -4747,6 +4937,7 @@ impl<T: Transport> DevTool<T> {
             icon: None,
             component_ids: vec![],
             homepages: vec![],
+            adopt_with: None,
         })
     }
     fn inventory(&self, cancel: &Cancellation) -> Result<Vec<PackageDetails>, EngineError> {
@@ -5072,6 +5263,7 @@ impl<T: Transport> Backend for DevTool<T> {
                 icon: None,
                 component_ids: vec![],
                 homepages: vec![],
+                adopt_with: None,
             });
         }
         // PyPI cannot be searched, and npm search ranks product names poorly,
@@ -5111,6 +5303,7 @@ impl<T: Transport> Backend for DevTool<T> {
                 icon: None,
                 component_ids: vec![],
                 homepages: vec![],
+                adopt_with: None,
             });
         }
         // A catalog alias must not hide the exact name the user typed:
@@ -5291,21 +5484,24 @@ pub fn native_engine(
     authorization: Authorization,
     cancel: &Cancellation,
 ) -> Result<Engine, EngineError> {
+    native_engine_on(Host::current(), sources, discover, authorization, cancel)
+}
+fn native_engine_on(
+    host: Host,
+    sources: &[String],
+    discover: bool,
+    authorization: Authorization,
+    cancel: &Cancellation,
+) -> Result<Engine, EngineError> {
     if let Some(unknown) = sources.iter().find(|s| !BACKEND_IDS.contains(&s.as_str())) {
         return Err(EngineError::UnknownBackend(unknown.into()));
     }
     let allowed = |id: &str| sources.is_empty() || sources.iter().any(|s| s == id);
     let explicit = !sources.is_empty();
     let mut engine = Engine::default();
-    let host = Host::current();
     engine.enable_batch_authorization(host.clone(), authorization);
-    if !discover && sources.is_empty() {
-        if let Some(reason) = host.runtime.disabled_reason() {
-            return Err(ExecutionError::Disabled(reason.into()).into());
-        }
-    }
     let transport = || NativeTransport {
-        host: Host::current(),
+        host: host.clone(),
         authorization,
     };
     // Every candidate in registration order, with whether it is probed now.
@@ -5381,10 +5577,7 @@ pub fn native_engine(
             // image store. Leave it out of automatic and multi-source views;
             // an explicit Docker-only selection still explains why it cannot
             // be queried.
-            if id == "docker"
-                && Host::current().docker_is_podman_shim()
-                && !(explicit && sources.len() == 1)
-            {
+            if id == "docker" && host.docker_is_podman_shim() && !(explicit && sources.len() == 1) {
                 continue;
             }
             candidates.push((
@@ -5432,6 +5625,18 @@ pub fn native_engine(
     if allowed("aur") {
         candidates.push((Box::new(Aur::new(transport())), true));
     }
+    // Detection checks the platform first, so probing is cheap elsewhere.
+    for (id, make) in [
+        (
+            "toolbox",
+            DevContainers::toolbox as fn(NativeTransport) -> DevContainers<NativeTransport>,
+        ),
+        ("distrobox", DevContainers::distrobox),
+    ] {
+        if allowed(id) {
+            candidates.push((Box::new(make(transport())), true));
+        }
+    }
     if allowed("system-image") {
         candidates.push((Box::new(SystemImage::new(transport())), true));
     }
@@ -5469,6 +5674,10 @@ pub fn native_engine(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        path::Path,
+        sync::{Arc, Mutex},
+    };
 
     #[test]
     fn linux_searches_only_offer_casks_linux_can_install() {
@@ -5878,6 +6087,7 @@ mod tests {
         // Non-gzipped and corrupt files never contribute.
         std::fs::write(base.join("notes.txt"), "ID: fake.desktop\nPackage: fake\n").unwrap();
         std::fs::write(base.join("broken.yml.gz"), b"not gzip data").unwrap();
+        std::os::unix::fs::symlink(base.join("absent"), base.join("dangling.yml.gz")).unwrap();
         let map = dep11_component_ids(&base);
         assert_eq!(
             map.get("firefox"),
@@ -5951,6 +6161,8 @@ mod tests {
         )
         .unwrap();
         std::fs::write(info.join("plain.list"), "/usr/bin/plain\n").unwrap();
+        // An unreadable list is skipped.
+        std::os::unix::fs::symlink(info.join("absent"), info.join("ghost.list")).unwrap();
         // Non-list files never name a package, and duplicate entries for
         // one package resolve exactly once.
         std::fs::write(info.join("README"), "inventory\n").unwrap();
@@ -5976,6 +6188,7 @@ mod tests {
         );
         assert!(!map.contains_key("plain"));
         assert!(!map.contains_key("README"));
+        assert!(!map.contains_key("ghost"));
         assert_eq!(
             map.values()
                 .filter(|p| p.ends_with("brave-browser.desktop"))
@@ -6032,5 +6245,624 @@ mod tests {
             Some(theme.join("pkgdeck-fixture-icon.png"))
         );
         std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    const CODE_APP: &str = "/Applications/Visual Studio Code.app";
+    const CODE_COMMAND: &str =
+        "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code";
+
+    /// `brew` answering for a few casks; any other name is no cask.
+    #[derive(Clone, Default)]
+    struct CaskBrew {
+        version: &'static str,
+        installed: Arc<Mutex<bool>>,
+        calls: Arc<Mutex<Vec<String>>>,
+    }
+    impl Transport for CaskBrew {
+        fn brew(
+            &self,
+            args: &[OsString],
+            _: &Cancellation,
+            write: bool,
+        ) -> Result<Completion, ExecutionError> {
+            let line = args
+                .iter()
+                .map(|arg| arg.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join(" ");
+            self.calls.lock().unwrap().push(line.clone());
+            let installed = (*self.installed.lock().unwrap()).then_some("1.139.1");
+            let cask = |token: &str, artifacts: serde_json::Value| {
+                serde_json::json!({"casks": [{
+                    "full_token": token, "name": [token], "desc": null,
+                    "homepage": "https://example.com", "version": "1.139.1",
+                    "installed": installed, "outdated": false, "auto_updates": true,
+                    "artifacts": artifacts,
+                }]})
+                .to_string()
+            };
+            let stdout = match line.as_str() {
+                "--prefix" => "/home/linuxbrew/.linuxbrew\n".into(),
+                "--version" => format!("Homebrew {}\n", self.version),
+                "info --json=v2 --cask -- visual-studio-code" => cask(
+                    "visual-studio-code",
+                    serde_json::json!([
+                        {"app": ["Visual Studio Code.app"], "target": CODE_APP},
+                        {"binary": [CODE_COMMAND], "target": "/home/linuxbrew/.linuxbrew/bin/code"},
+                    ]),
+                ),
+                "info --json=v2 --cask -- codex" => {
+                    cask("codex", serde_json::json!([{"binary": ["codex"]}]))
+                }
+                "upgrade --cask" => {
+                    assert!(write);
+                    String::new()
+                }
+                "install --cask --adopt -- visual-studio-code" => {
+                    assert!(write);
+                    *self.installed.lock().unwrap() = true;
+                    String::new()
+                }
+                _ => {
+                    return Err(ExecutionError::Failed(Completion {
+                        code: Some(1),
+                        signal: None,
+                        stdout: vec![],
+                        stderr: b"Error: No available cask".to_vec(),
+                        truncated: false,
+                        cancellation_deferred: false,
+                    }))
+                }
+            };
+            Ok(Completion {
+                code: Some(0),
+                signal: None,
+                stdout: stdout.into_bytes(),
+                stderr: vec![],
+                truncated: false,
+                cancellation_deferred: false,
+            })
+        }
+    }
+
+    /// A signed copy of the app already in place, with the cask's command
+    /// already linked where Homebrew would link it.
+    /// The second field makes the app vanish once it is backed up, as when
+    /// Homebrew fails halfway through adopting it.
+    struct Adoptable(Arc<Mutex<Vec<&'static str>>>, bool);
+    impl adopt::AdoptIo for Adoptable {
+        fn occupied(&self, path: &Path) -> bool {
+            path == Path::new(CODE_APP) || path.ends_with("bin/code")
+        }
+        fn is_folder(&self, path: &Path) -> bool {
+            path == Path::new(CODE_APP) && !(self.1 && self.0.lock().unwrap().contains(&"backup"))
+        }
+        fn is_file(&self, path: &Path) -> bool {
+            path == Path::new(CODE_COMMAND)
+        }
+        fn links_to(&self, link: &Path, source: &Path) -> bool {
+            link.starts_with("/home/linuxbrew") && source == Path::new(CODE_COMMAND)
+        }
+        fn plist(&self, _: &Path, _: &Cancellation) -> Result<serde_json::Value, EngineError> {
+            Ok(serde_json::json!({
+                "CFBundleIdentifier": "com.microsoft.VSCode",
+                "CFBundleExecutable": "Electron",
+                "CFBundleShortVersionString": "1.139.1",
+            }))
+        }
+        fn team(&self, _: &Path, _: &Cancellation) -> Result<Option<String>, EngineError> {
+            Ok(Some("UBF8T346G9".into()))
+        }
+        fn architectures(&self, _: &Path, _: &Cancellation) -> Result<Vec<String>, EngineError> {
+            Ok(vec!["x86_64".into(), "arm64".into()])
+        }
+        fn backup(&self, app: &Path, _: &Cancellation) -> Result<PathBuf, EngineError> {
+            self.0.lock().unwrap().push("backup");
+            Ok(Path::new("/backups/1").join(app.file_name().unwrap()))
+        }
+        fn restore(&self, _: &Path, _: &Path, _: &Cancellation) -> Result<(), EngineError> {
+            self.0.lock().unwrap().push("restore");
+            Ok(())
+        }
+        fn discard(&self, _: &Path) {
+            self.0.lock().unwrap().push("discard");
+        }
+    }
+
+    #[test]
+    fn a_cask_install_adopts_the_copy_already_in_place() {
+        let brew = CaskBrew {
+            version: "7.0.6",
+            ..CaskBrew::default()
+        };
+        let log = Arc::new(Mutex::new(vec![]));
+        let mut casks = HomebrewCask::new(brew.clone());
+        casks.adoption = Some(Box::new(Adoptable(log.clone(), false)));
+        let cancel = Cancellation::default();
+        assert_eq!(casks.detect(&cancel).unwrap(), Availability::Available);
+        let id = PackageId {
+            backend: "homebrew-cask".into(),
+            name: "visual-studio-code".into(),
+            architecture: std::env::consts::ARCH.into(),
+            scope: Scope::Environment {
+                path: "/home/linuxbrew/.linuxbrew".into(),
+            },
+            remote: None,
+            reference: None,
+        };
+        let mut messages = vec![];
+        casks
+            .execute(&Operation::Install(id.clone()), &cancel, &mut |progress| {
+                if let Progress::Message(message) = progress {
+                    messages.push(message);
+                }
+            })
+            .unwrap();
+        assert!(brew
+            .calls
+            .lock()
+            .unwrap()
+            .contains(&"install --cask --adopt -- visual-studio-code".into()));
+        assert_eq!(*log.lock().unwrap(), vec!["backup", "discard"]);
+        // The preview says the copy in place is adopted, with what was checked.
+        let plan = casks
+            .operation_plan(&Operation::Install(id.clone()), &cancel)
+            .unwrap()
+            .unwrap();
+        assert!(
+            plan.native_preview
+                .starts_with("Visual Studio Code is already in /Applications (version"),
+            "{}",
+            plan.native_preview
+        );
+        assert!(plan.native_preview.contains("brew install --cask --adopt"));
+        assert_eq!(
+            plan.adopts.as_deref(),
+            Some(std::path::Path::new("/Applications/Visual Studio Code.app"))
+        );
+        // Without an app in place there is no special preview.
+        let mut plain = HomebrewCask::new(brew.clone());
+        plain.detect(&cancel).unwrap();
+        assert!(plain
+            .operation_plan(&Operation::Install(id.clone()), &cancel)
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            messages.last().unwrap(),
+            "Homebrew now manages Visual Studio Code."
+        );
+    }
+
+    #[test]
+    fn a_failed_cask_adoption_puts_the_app_back() {
+        let brew = CaskBrew {
+            version: "7.0.6",
+            ..CaskBrew::default()
+        };
+        let log = Arc::new(Mutex::new(vec![]));
+        let mut casks = HomebrewCask::new(brew.clone());
+        casks.adoption = Some(Box::new(Adoptable(log.clone(), true)));
+        let cancel = Cancellation::default();
+        casks.detect(&cancel).unwrap();
+        let id = |name: &str| PackageId {
+            backend: "homebrew-cask".into(),
+            name: name.into(),
+            architecture: std::env::consts::ARCH.into(),
+            scope: Scope::Environment {
+                path: "/home/linuxbrew/.linuxbrew".into(),
+            },
+            remote: None,
+            reference: None,
+        };
+        let error = casks
+            .execute(
+                &Operation::Install(id("visual-studio-code")),
+                &cancel,
+                &mut |_| {},
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("PkgDeck put it back"), "{error}");
+        assert_eq!(*log.lock().unwrap(), vec!["backup", "restore", "discard"]);
+        // A cask brew doesn't know fails before anything is touched.
+        assert!(matches!(
+            casks.operation_plan(&Operation::Install(id("unknown-cask")), &cancel),
+            Err(EngineError::Execution(ExecutionError::Failed(_)))
+        ));
+        assert_eq!(log.lock().unwrap().len(), 3);
+        // So does a lookup brew answers with a failing exit status.
+        struct Refusing;
+        impl Transport for Refusing {
+            fn brew(
+                &self,
+                _: &[OsString],
+                _: &Cancellation,
+                _: bool,
+            ) -> Result<Completion, ExecutionError> {
+                Ok(Completion {
+                    code: Some(1),
+                    signal: None,
+                    stdout: vec![],
+                    stderr: vec![],
+                    truncated: false,
+                    cancellation_deferred: false,
+                })
+            }
+        }
+        let mut refusing = HomebrewCask::new(Refusing);
+        refusing.adoption = Some(Box::new(Adoptable(log.clone(), false)));
+        refusing.prefix = Some("/opt/homebrew".into());
+        let mut code = id("visual-studio-code");
+        code.scope = Scope::Environment {
+            path: "/opt/homebrew".into(),
+        };
+        assert!(matches!(
+            refusing.operation_plan(&Operation::Install(code), &cancel),
+            Err(EngineError::Execution(ExecutionError::Failed(result))) if result.code == Some(1)
+        ));
+        assert_eq!(log.lock().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn exact_cask_names_are_looked_up_directly() {
+        let brew = CaskBrew {
+            version: "7.0.6",
+            ..CaskBrew::default()
+        };
+        let mut casks = HomebrewCask::new(brew.clone());
+        let cancel = Cancellation::default();
+        casks.detect(&cancel).unwrap();
+        let found = casks.lookup("codex", &cancel).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id.name, "codex");
+        // Not a cask, or not a cask name at all: nothing, without an error.
+        assert!(casks.lookup("no-such-cask", &cancel).unwrap().is_empty());
+        let calls = brew.calls.lock().unwrap().len();
+        assert!(casks.lookup("--help", &cancel).unwrap().is_empty());
+        assert_eq!(brew.calls.lock().unwrap().len(), calls);
+        casks
+            .execute(
+                &Operation::UpgradeAll {
+                    backend: "homebrew-cask".into(),
+                },
+                &cancel,
+                &mut |_| {},
+            )
+            .unwrap();
+        assert!(brew
+            .calls
+            .lock()
+            .unwrap()
+            .contains(&"upgrade --cask".into()));
+    }
+
+    #[test]
+    fn linux_casks_wait_for_homebrew_6() {
+        let mut casks = HomebrewCask::new(CaskBrew {
+            version: "5.1.2",
+            ..CaskBrew::default()
+        });
+        let availability = casks.detect(&Cancellation::default()).unwrap();
+        if cfg!(target_os = "macos") {
+            assert_eq!(availability, Availability::Available);
+        } else {
+            assert_eq!(
+                availability,
+                Availability::Unavailable(
+                    "Homebrew Casks on Linux need Homebrew 6.0 or later".into()
+                )
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod native_transport_tests {
+    use super::*;
+    use crate::host::Runtime;
+    use std::{os::unix::fs::PermissionsExt, path::Path};
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "pkgdeck-native-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+    /// An executable shell script, renamed into place so no writer still
+    /// holds it open when it runs.
+    fn script(path: &Path, body: &str) {
+        let staging = path.with_extension("staging");
+        std::fs::write(&staging, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::rename(staging, path).unwrap();
+    }
+    /// A transport whose host sees only `bin` on PATH and `home` as HOME.
+    fn transport(bin: &Path, home: &Path) -> NativeTransport {
+        NativeTransport {
+            host: Host::new(
+                Runtime::Native,
+                [
+                    ("PATH".into(), bin.as_os_str().to_owned()),
+                    ("HOME".into(), home.as_os_str().to_owned()),
+                ]
+                .into(),
+            ),
+            authorization: Authorization::SudoNonInteractive,
+        }
+    }
+    fn records(result: Result<Completion, ExecutionError>) -> Vec<PackageDetails> {
+        serde_json::from_slice(&result.unwrap().stdout).unwrap()
+    }
+
+    #[test]
+    fn host_probes_report_what_the_sanitized_path_offers() {
+        let base = temp_dir("probes");
+        let bin = base.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let native = transport(&bin, &base);
+        let cancel = Cancellation::default();
+        assert!(matches!(
+            native.authorization(),
+            Authorization::SudoNonInteractive
+        ));
+        // No apt-get on PATH: no Software Sources editor.
+        assert!(!native.repository_editor_available());
+        assert!(matches!(
+            native.repository_editor(),
+            Err(ExecutionError::Disabled(_))
+        ));
+        assert_eq!(
+            native.system_flatpak_writable(),
+            cfg!(target_os = "linux") && Path::new("/usr/bin/flatpak").is_file()
+        );
+        // The CLI cannot preview unused runtimes exactly, so it never offers it.
+        assert!(!native.supports_flatpak_cleanup());
+        assert!(matches!(
+            native.flatpak_unused(&cancel),
+            Err(ExecutionError::Disabled(_))
+        ));
+        // An empty transaction is refused before anything runs.
+        assert!(matches!(
+            native.apt_write_group(&[], &cancel),
+            Err(ExecutionError::Invalid(_))
+        ));
+        // `docker` is Podman's compatibility wrapper only when it links there.
+        assert!(!native.docker_is_podman());
+        script(&bin.join("podman"), "exit 0");
+        std::os::unix::fs::symlink(bin.join("podman"), bin.join("docker")).unwrap();
+        assert!(native.docker_is_podman());
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn native_engine_leaves_out_a_docker_that_is_podman() {
+        let base = temp_dir("engine");
+        let bin = base.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        script(&bin.join("podman"), "exit 0");
+        std::os::unix::fs::symlink(bin.join("podman"), bin.join("docker")).unwrap();
+        let host = transport(&bin, &base).host;
+        let cancel = Cancellation::default();
+        let sources = |ids: &[&str]| {
+            native_engine_on(
+                host.clone(),
+                &ids.iter().map(|id| id.to_string()).collect::<Vec<_>>(),
+                false,
+                Authorization::SudoNonInteractive,
+                &cancel,
+            )
+            .unwrap()
+            .discover(&cancel)
+            .into_iter()
+            .map(|source| source.backend)
+            .collect::<Vec<_>>()
+        };
+        assert_eq!(sources(&["docker", "podman"]), ["podman"]);
+        // Asked for alone, Docker stays so it can explain itself.
+        assert_eq!(sources(&["docker"]), ["docker"]);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn remote_flatpak_searches_are_answered_from_the_cache_until_appstream_changes() {
+        let base = temp_dir("flatpak-search");
+        let bin = base.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let flatpak = bin.join("flatpak");
+        script(&flatpak, "printf 'first\\tresult\\n'");
+        let native = transport(&bin, &base);
+        let store = || Some(crate::cache::Store::new(base.join("cache")));
+        let cancel = Cancellation::default();
+        let search = [
+            "--user",
+            "search",
+            "--columns=name,description,application,version,branch,remotes",
+            "editor",
+        ]
+        .map(OsString::from);
+        let stdout = |result: Result<Completion, ExecutionError>| {
+            String::from_utf8(result.unwrap().stdout).unwrap()
+        };
+        assert_eq!(
+            stdout(native.flatpak_cached(&search, &cancel, false, false, store)),
+            "first\tresult\n"
+        );
+        script(&flatpak, "printf 'second\\tresult\\n'");
+        assert_eq!(
+            stdout(native.flatpak_cached(&search, &cancel, false, false, store)),
+            "first\tresult\n"
+        );
+        // The installation's AppStream data changed: search again.
+        std::fs::create_dir_all(base.join(".local/share/flatpak/appstream/flathub")).unwrap();
+        assert_eq!(
+            stdout(native.flatpak_cached(&search, &cancel, false, false, store)),
+            "second\tresult\n"
+        );
+        // Other reads always run.
+        let cached = || std::fs::read_dir(base.join("cache")).unwrap().count();
+        let entries = cached();
+        let list = ["--user", "list"].map(OsString::from);
+        assert_eq!(
+            stdout(native.flatpak_cached(&list, &cancel, false, false, store)),
+            "second\tresult\n"
+        );
+        assert_eq!(cached(), entries);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn apt_helper_rejects_unknown_query_modes() {
+        let base = temp_dir("apt-helper");
+        let bin = base.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        script(&bin.join("apt-get"), "exit 0");
+        let native = transport(&bin, &base);
+        let error = native
+            .apt_query("erase", "", "", &Cancellation::default())
+            .unwrap_err();
+        // Built with libapt-pkg, the helper refuses the mode itself;
+        // elsewhere there is no helper to run.
+        let refused = matches!(&error, ExecutionError::Failed(result) if result.code == Some(2));
+        let missing = matches!(&error, ExecutionError::Disabled(reason) if reason.starts_with("APT helper is missing"));
+        assert!(refused || missing, "{error:?}");
+        // A cancelled query never starts the helper.
+        let cancel = Cancellation::default();
+        cancel.cancel();
+        let error = native.apt_query("detect", "", "", &cancel).unwrap_err();
+        let cancelled = matches!(error, ExecutionError::Cancelled);
+        assert_eq!(cancelled, refused, "{error:?}");
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    /// `dpkg-query` and `apt-cache` stand-ins; `apt-cache` logs its
+    /// arguments beside itself.
+    fn apt_tools(dpkg: &str, search: &str, cache_exit: i32) -> (PathBuf, NativeTransport) {
+        let base = temp_dir("apt-sandbox");
+        let bin = base.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        script(&bin.join("dpkg-query"), &format!("printf '{dpkg}'"));
+        script(
+            &bin.join("apt-cache"),
+            &format!(
+                "printf '%s\\n' \"$*\" >> \"$0.log\"\ncase \"$1\" in\n\
+                 policy) printf 'tool:\\n  Installed: 1.0\\n  Candidate: 1.0\\n  Version table:\\n *** 1.0 500\\n';;\n\
+                 show) printf 'Package: tool\\nArchitecture: all\\nVersion: 1.0\\nDescription-en: A tool\\n\\n';;\n\
+                 search) printf '{search}';;\nesac\nexit {cache_exit}"
+            ),
+        );
+        let native = transport(&bin, &base);
+        (base, native)
+    }
+    fn cache_log(base: &Path) -> String {
+        std::fs::read_to_string(base.join("bin/apt-cache.log")).unwrap_or_default()
+    }
+
+    #[test]
+    fn sandboxed_apt_queries_handle_empty_and_architecture_independent_rows() {
+        let cancel = Cancellation::default();
+        // No installed rows: no apt-cache round trips.
+        let (base, native) = apt_tools("", "", 0);
+        assert!(records(native.apt_query_sandboxed("installed", "", "", &cancel)).is_empty());
+        assert_eq!(cache_log(&base), "");
+        std::fs::remove_dir_all(base).unwrap();
+        // Architecture-independent packages are named without a suffix.
+        let (base, native) = apt_tools(
+            "tool\\tall\\t1.0\\tinstall ok installed\\n",
+            "tool - A tool\\n",
+            0,
+        );
+        let installed = records(native.apt_query_sandboxed("installed", "", "", &cancel));
+        assert_eq!(installed.len(), 1);
+        assert_eq!(installed[0].package.id.name, "tool");
+        assert_eq!(cache_log(&base), "policy tool\nshow tool\n");
+        let details = records(native.apt_query_sandboxed("details", "tool", "all", &cancel));
+        assert_eq!(details.len(), 1);
+        assert!(cache_log(&base).ends_with("policy tool\nshow tool\n"));
+        // Pattern characters are escaped for apt-cache and matched literally.
+        assert!(records(native.apt_query_sandboxed("search", "c++", "", &cancel)).is_empty());
+        assert!(cache_log(&base).ends_with("search c\\+\\+\n"));
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn sandboxed_apt_queries_report_failed_reads() {
+        let (base, native) = apt_tools("", "", 1);
+        assert!(matches!(
+            native.apt_query_sandboxed("details", "tool", "amd64", &Cancellation::default()),
+            Err(ExecutionError::Failed(result)) if result.code == Some(1)
+        ));
+        assert_eq!(cache_log(&base), "policy tool:amd64\n");
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn installed_apt_packages_show_their_desktop_icons() {
+        #[derive(Clone)]
+        struct Helper(String);
+        impl Transport for Helper {
+            fn apt_query(
+                &self,
+                _: &str,
+                _: &str,
+                _: &str,
+                _: &Cancellation,
+            ) -> Result<Completion, ExecutionError> {
+                Ok(Completion {
+                    code: Some(0),
+                    signal: None,
+                    stdout: self.0.clone().into_bytes(),
+                    stderr: vec![],
+                    truncated: false,
+                    cancellation_deferred: false,
+                })
+            }
+        }
+        let base = temp_dir("apt-icons");
+        let icon = base.join("tool.png");
+        std::fs::write(&icon, "png").unwrap();
+        let desktop = base.join("tool.desktop");
+        std::fs::write(
+            &desktop,
+            format!("[Desktop Entry]\nIcon={}\n", icon.display()),
+        )
+        .unwrap();
+        let id = PackageId {
+            backend: "apt".into(),
+            name: "tool".into(),
+            architecture: "amd64".into(),
+            scope: Scope::System,
+            remote: None,
+            reference: None,
+        };
+        let row = serde_json::json!([{
+            "package": {
+                "id": id, "display_name": "tool", "summary": "A tool",
+                "installed_version": "1.0", "candidate_version": "1.0",
+                "update": "current", "icon": null, "component_ids": [], "homepages": [],
+            },
+            "description": "A tool", "homepage": "https://example.invalid", "dependencies": [],
+        }]);
+        let mut apt = Apt::new(Helper(row.to_string()));
+        apt.desktop_entries = Some([("tool".to_string(), desktop)].into());
+        apt.components = Some([("tool".to_string(), vec!["org.example.Tool".into()])].into());
+        let cancel = Cancellation::default();
+        assert_eq!(
+            apt.search("tool", &cancel).unwrap()[0].icon.as_ref(),
+            Some(&icon)
+        );
+        assert_eq!(
+            apt.installed(&cancel).unwrap()[0].icon.as_ref(),
+            Some(&icon)
+        );
+        let details = apt.details(&id, &cancel).unwrap();
+        assert_eq!(details.package.icon.as_ref(), Some(&icon));
+        assert_eq!(details.package.component_ids, ["org.example.Tool"]);
+        assert_eq!(details.package.homepages, ["https://example.invalid"]);
+        std::fs::remove_dir_all(base).unwrap();
     }
 }

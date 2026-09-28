@@ -13,15 +13,18 @@
 //! version, architecture and every place the cask writes to beforehand, and
 //! keeps an APFS clone of the app (instant, no extra space) until Homebrew
 //! has finished, restoring it if the app went missing.
-use super::{bytes, conda::compare_versions, invalid};
-use crate::{engine::*, host::Host, package::*, process::*};
+use super::{conda::compare_versions, invalid};
+use crate::{engine::*, package::*, process::*};
 use serde_json::Value;
 use std::{
     cmp::Ordering,
-    ffi::OsString,
-    fs,
     path::{Path, PathBuf},
-    time::Duration,
+};
+#[cfg(target_os = "macos")]
+use {
+    super::bytes,
+    crate::host::Host,
+    std::{ffi::OsString, fs, time::Duration},
 };
 
 const ID: &str = "homebrew-cask";
@@ -32,6 +35,9 @@ pub(super) struct Rule {
     pub token: &'static str,
     pub bundle_id: &'static str,
     pub team: Option<&'static str>,
+    /// Cask parts allowed beyond `KNOWN_ARTIFACTS`. Only the recovery test
+    /// fixture uses it, to make Homebrew fail after adopting the app.
+    pub also: &'static [&'static str],
 }
 
 const RULES: &[Rule] = &[
@@ -39,17 +45,20 @@ const RULES: &[Rule] = &[
         token: "visual-studio-code",
         bundle_id: "com.microsoft.VSCode",
         team: Some("UBF8T346G9"),
+        also: &[],
     },
     Rule {
         token: "firefox",
         bundle_id: "org.mozilla.firefox",
         team: Some("43AQ936H96"),
+        also: &[],
     },
     // Read from the signed app in the cask's own DMG (Dynalist Inc.).
     Rule {
         token: "obsidian",
         bundle_id: "md.obsidian",
         team: Some("6JSW4SJWN9"),
+        also: &[],
     },
     // Only test builds know the CI fixture, an ad-hoc signed app in a local tap.
     #[cfg(debug_assertions)]
@@ -57,6 +66,17 @@ const RULES: &[Rule] = &[
         token: "pkgdeck/fixtures/pkgdeck-adopt-fixture",
         bundle_id: "io.github.astrovm.pkgdeck.adopt-fixture",
         team: None,
+        also: &[],
+    },
+    // The same fixture app, whose cask fails in a postflight step after the
+    // app was adopted: Homebrew's rollback then deletes it, and the CI test
+    // checks that PkgDeck puts it back.
+    #[cfg(debug_assertions)]
+    Rule {
+        token: "pkgdeck/fixtures/pkgdeck-adopt-failure",
+        bundle_id: "io.github.astrovm.pkgdeck.adopt-fixture",
+        team: None,
+        also: &["postflight"],
     },
 ];
 
@@ -71,21 +91,12 @@ pub(super) fn rule(token: &str) -> Option<&'static Rule> {
 /// What adoption needs from the system; tests replace it.
 pub(super) trait AdoptIo: Send {
     /// Anything at this path, including a dangling symlink.
-    fn occupied(&self, path: &Path) -> bool {
-        fs::symlink_metadata(path).is_ok()
-    }
+    fn occupied(&self, path: &Path) -> bool;
     /// A real folder, not a symlink to one.
-    fn is_folder(&self, path: &Path) -> bool {
-        fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir())
-    }
-    fn is_file(&self, path: &Path) -> bool {
-        path.is_file()
-    }
+    fn is_folder(&self, path: &Path) -> bool;
+    fn is_file(&self, path: &Path) -> bool;
     /// A symlink at `link` that resolves to the same file as `source`.
-    fn links_to(&self, link: &Path, source: &Path) -> bool {
-        fs::symlink_metadata(link).is_ok_and(|meta| meta.file_type().is_symlink())
-            && matches!((fs::canonicalize(link), fs::canonicalize(source)), (Ok(a), Ok(b)) if a == b)
-    }
+    fn links_to(&self, link: &Path, source: &Path) -> bool;
     fn plist(&self, path: &Path, cancel: &Cancellation) -> Result<Value, EngineError>;
     /// The Developer ID team of a valid signature; `None` for ad-hoc.
     /// An invalid or missing signature is an error.
@@ -107,6 +118,23 @@ pub(super) struct Plan {
     pub token: String,
     pub app: PathBuf,
     pub name: String,
+    /// What was checked, shown before confirming. The engine plans again
+    /// just before running, so a copy that changed since blocks adoption.
+    pub version: String,
+    pub team: Option<String>,
+}
+
+impl Plan {
+    /// The confirmation text: what happens, and what was checked.
+    pub fn preview(&self) -> String {
+        format!(
+            "{} is already in {} (version {}, signed by {}). Homebrew will manage this copy instead of installing another (brew install --cask --adopt). PkgDeck checked its publisher, edition, architecture, version and every file the cask adds, and keeps a copy of the app until Homebrew finishes.",
+            self.name,
+            self.app.parent().unwrap_or(Path::new("/")).display(),
+            self.version,
+            self.team.as_deref().unwrap_or("an ad-hoc signature"),
+        )
+    }
 }
 
 fn refuse(app: &str, reason: impl std::fmt::Display) -> EngineError {
@@ -161,7 +189,7 @@ pub(super) fn plan(
     if let Some(unknown) = artifacts
         .iter()
         .filter_map(artifact_kind)
-        .find(|kind| !KNOWN_ARTIFACTS.contains(kind))
+        .find(|kind| !KNOWN_ARTIFACTS.contains(kind) && !rule.also.contains(kind))
     {
         return Err(refuse(
             &name,
@@ -204,14 +232,11 @@ pub(super) fn plan(
         .as_str()
         .filter(|exe| !exe.is_empty() && !exe.contains('/'))
         .ok_or_else(|| refuse(&name, "its Info.plist names no executable"))?;
-    let host = match std::env::consts::ARCH {
-        "aarch64" => "arm64",
-        other => other,
-    };
+    // lipo names arm64 what Rust calls aarch64.
+    let host = std::env::consts::ARCH.replace("aarch64", "arm64");
     if !io
         .architectures(&target.join("Contents/MacOS").join(executable), cancel)?
-        .iter()
-        .any(|arch| arch == host)
+        .contains(&host)
     {
         return Err(refuse(
             &name,
@@ -277,6 +302,8 @@ pub(super) fn plan(
         token: token.to_owned(),
         app: target,
         name,
+        version: version.to_owned(),
+        team,
     }))
 }
 
@@ -352,16 +379,24 @@ pub(super) fn run(
 }
 
 /// The real system: plutil, codesign, lipo and APFS clones.
+#[cfg(target_os = "macos")]
 pub(super) struct NativeAdopt(pub Host);
 
+#[cfg(target_os = "macos")]
 impl NativeAdopt {
+    /// Run a read-only system tool on one file.
     fn read(
         &self,
         tool: &str,
-        args: &[&OsString],
+        flags: &[&str],
+        file: &Path,
         cancel: &Cancellation,
     ) -> Result<Completion, EngineError> {
-        let args: Vec<OsString> = args.iter().map(|arg| (*arg).clone()).collect();
+        let args: Vec<OsString> = flags
+            .iter()
+            .map(OsString::from)
+            .chain([file.into()])
+            .collect();
         Ok(self.0.read(
             Path::new(tool),
             &args,
@@ -400,37 +435,30 @@ impl NativeAdopt {
     }
 }
 
+#[cfg(target_os = "macos")]
 impl AdoptIo for NativeAdopt {
+    fn occupied(&self, path: &Path) -> bool {
+        fs::symlink_metadata(path).is_ok()
+    }
+    fn is_folder(&self, path: &Path) -> bool {
+        fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir())
+    }
+    fn is_file(&self, path: &Path) -> bool {
+        path.is_file()
+    }
+    fn links_to(&self, link: &Path, source: &Path) -> bool {
+        fs::symlink_metadata(link).is_ok_and(|meta| meta.file_type().is_symlink())
+            && matches!((fs::canonicalize(link), fs::canonicalize(source)), (Ok(a), Ok(b)) if a == b)
+    }
     fn plist(&self, path: &Path, cancel: &Cancellation) -> Result<Value, EngineError> {
-        let result = self.read(
-            "/usr/bin/plutil",
-            &[
-                &"-convert".into(),
-                &"json".into(),
-                &"-o".into(),
-                &"-".into(),
-                &"--".into(),
-                &path.into(),
-            ],
-            cancel,
-        )?;
+        let flags = ["-convert", "json", "-o", "-", "--"];
+        let result = self.read("/usr/bin/plutil", &flags, path, cancel)?;
         serde_json::from_slice(&bytes(ID, result)?).map_err(|error| invalid(ID, error))
     }
     fn team(&self, app: &Path, cancel: &Cancellation) -> Result<Option<String>, EngineError> {
-        let app = OsString::from(app);
-        bytes(
-            ID,
-            self.read(
-                "/usr/bin/codesign",
-                &[&"--verify".into(), &"--strict".into(), &"--".into(), &app],
-                cancel,
-            )?,
-        )?;
-        let details = self.read(
-            "/usr/bin/codesign",
-            &[&"-dv".into(), &"--verbose=2".into(), &"--".into(), &app],
-            cancel,
-        )?;
+        let codesign = |flags: &[&str]| self.read("/usr/bin/codesign", flags, app, cancel);
+        bytes(ID, codesign(&["--verify", "--strict", "--"])?)?;
+        let details = codesign(&["-dv", "--verbose=2", "--"])?;
         let text = String::from_utf8_lossy(&details.stderr).into_owned();
         bytes(ID, details)?;
         let team = text
@@ -448,11 +476,7 @@ impl AdoptIo for NativeAdopt {
     ) -> Result<Vec<String>, EngineError> {
         let output = bytes(
             ID,
-            self.read(
-                "/usr/bin/lipo",
-                &[&"-archs".into(), &executable.into()],
-                cancel,
-            )?,
+            self.read("/usr/bin/lipo", &["-archs"], executable, cancel)?,
         )?;
         Ok(String::from_utf8_lossy(&output)
             .split_whitespace()
@@ -464,12 +488,12 @@ impl AdoptIo for NativeAdopt {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|time| time.as_millis())
             .unwrap_or_default();
+        let name = app
+            .file_name()
+            .ok_or_else(|| invalid(ID, "app path has no name"))?;
         let folder = self.backups()?.join(stamp.to_string());
         fs::create_dir_all(&folder).map_err(ExecutionError::from)?;
-        let copy = folder.join(
-            app.file_name()
-                .ok_or_else(|| invalid(ID, "app path has no name"))?,
-        );
+        let copy = folder.join(name);
         if let Err(error) = self.clone_tree(app, &copy, cancel) {
             let _ = fs::remove_dir_all(&folder);
             return Err(error);
@@ -510,6 +534,7 @@ mod tests {
         present: Arc<Mutex<bool>>,
         receipt: bool,
         bundle: &'static str,
+        executable: &'static str,
         team: Result<Option<&'static str>, &'static str>,
         archs: Vec<&'static str>,
         version: &'static str,
@@ -525,6 +550,7 @@ mod tests {
             present: Arc::new(Mutex::new(true)),
             receipt: false,
             bundle: "com.microsoft.VSCode",
+            executable: "Electron",
             team: Ok(Some("UBF8T346G9")),
             archs: vec!["x86_64", "arm64"],
             version: "1.139.1",
@@ -555,7 +581,7 @@ mod tests {
         fn plist(&self, _: &Path, _: &Cancellation) -> Result<Value, EngineError> {
             Ok(serde_json::json!({
                 "CFBundleIdentifier": self.bundle,
-                "CFBundleExecutable": "Electron",
+                "CFBundleExecutable": self.executable,
                 "CFBundleShortVersionString": self.version,
             }))
         }
@@ -617,13 +643,15 @@ mod tests {
         let mut newer = fake();
         newer.version = "1.140.0";
         newer.links = vec!["/opt/homebrew/bin/code"];
-        newer.archs = vec![if cfg!(target_arch = "aarch64") {
-            "arm64"
-        } else {
-            "x86_64"
-        }];
+        newer.archs = vec![NATIVE_ARCH];
         assert!(plan_ok(&newer));
     }
+    /// What lipo calls this machine's architecture.
+    const NATIVE_ARCH: &str = if cfg!(target_arch = "aarch64") {
+        "arm64"
+    } else {
+        "x86_64"
+    };
     fn plan_ok(io: &Fake) -> bool {
         plan(io, &cask(), &Cancellation::default())
             .unwrap()
@@ -637,6 +665,23 @@ mod tests {
         assert!(plan(&absent, &cask(), &Cancellation::default())
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn only_the_recovery_fixture_may_fail_after_the_app_step() {
+        let mut vscode = cask();
+        vscode["artifacts"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"postflight": null}));
+        let reason = reason(plan(&fake(), &vscode, &Cancellation::default()));
+        assert!(reason.contains("also installs a postflight"), "{reason}");
+        #[cfg(debug_assertions)]
+        assert_eq!(
+            rule("pkgdeck/fixtures/pkgdeck-adopt-failure").unwrap().also,
+            ["postflight"]
+        );
+        assert!(rule("visual-studio-code").unwrap().also.is_empty());
     }
 
     type Change = Box<dyn Fn(&mut Fake, &mut Value)>;
@@ -821,6 +866,89 @@ mod tests {
         fs::remove_dir_all(&root).unwrap();
     }
 
+    /// A failed clone leaves no backup folder behind, and a backup that is
+    /// gone can't be put back.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_backups_that_fail_leave_nothing_behind() {
+        use crate::host::Runtime;
+        let root = std::env::temp_dir().join(format!("pkgdeck-adopt-fail-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let backups = root.join("home/Library/Application Support/PkgDeck/Adoption backups");
+        let env = [(OsString::from("HOME"), root.join("home").into_os_string())]
+            .into_iter()
+            .collect();
+        let io = NativeAdopt(Host::new(Runtime::Native, env));
+        let cancel = Cancellation::default();
+        assert!(io.backup(&root.join("Apps/Missing.app"), &cancel).is_err());
+        assert_eq!(fs::read_dir(&backups).unwrap().count(), 0);
+        // Cancelled before cp starts: nothing is copied, nothing is kept.
+        let app = root.join("Apps/Fixture.app");
+        fs::create_dir_all(&app).unwrap();
+        let cancelled = Cancellation::default();
+        cancelled.cancel();
+        assert!(io.backup(&app, &cancelled).is_err());
+        assert_eq!(fs::read_dir(&backups).unwrap().count(), 0);
+        let gone = backups.join("1/Fixture.app");
+        let restored = root.join("Apps/Restored.app");
+        assert!(io.restore(&gone, &restored, &cancel).is_err());
+        assert!(!restored.exists());
+        assert!(io
+            .backup(Path::new("/"), &cancel)
+            .unwrap_err()
+            .to_string()
+            .contains("no name"));
+        assert_eq!(fs::read_dir(&backups).unwrap().count(), 0);
+        // Without an absolute HOME there is nowhere to keep a backup.
+        let homeless = NativeAdopt(Host::new(Runtime::Native, Default::default()));
+        assert!(homeless
+            .backup(&app, &cancel)
+            .unwrap_err()
+            .to_string()
+            .contains("HOME is not set"));
+        homeless.discard(&app.join("Contents"));
+        assert!(app.exists());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// plutil, codesign and lipo on throwaway files and the system's own
+    /// /bin/ls, which Apple signs without a Developer ID team.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_tools_read_plists_signatures_and_architectures() {
+        use crate::host::Runtime;
+        let root = std::env::temp_dir().join(format!("pkgdeck-adopt-tools-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let plist = root.join("Info.plist");
+        fs::write(&plist, r#"<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>io.github.astrovm.pkgdeck.adopt-fixture</string><key>CFBundleShortVersionString</key><string>1.2.3</string></dict></plist>"#).unwrap();
+        let text = root.join("not-an-app");
+        fs::write(&text, "plain text").unwrap();
+        let io = NativeAdopt(Host::new(Runtime::Native, Default::default()));
+        let cancel = Cancellation::default();
+        let info = io.plist(&plist, &cancel).unwrap();
+        assert_eq!(
+            info["CFBundleIdentifier"],
+            "io.github.astrovm.pkgdeck.adopt-fixture"
+        );
+        assert_eq!(info["CFBundleShortVersionString"], "1.2.3");
+        assert!(io.plist(&text, &cancel).is_err());
+        assert!(io.plist(&root.join("missing.plist"), &cancel).is_err());
+        // An Apple platform binary verifies but names no team.
+        assert_eq!(io.team(Path::new("/bin/ls"), &cancel).unwrap(), None);
+        assert!(io.team(&text, &cancel).is_err());
+        let archs = io.architectures(Path::new("/bin/ls"), &cancel).unwrap();
+        assert!(archs.iter().any(|arch| arch == "x86_64"), "{archs:?}");
+        assert!(archs.iter().all(|arch| !arch.contains(char::is_whitespace)));
+        assert!(io.architectures(&text, &cancel).is_err());
+        let cancelled = Cancellation::default();
+        cancelled.cancel();
+        assert!(io.plist(&plist, &cancelled).is_err());
+        assert!(io.team(Path::new("/bin/ls"), &cancelled).is_err());
+        assert!(io.architectures(Path::new("/bin/ls"), &cancelled).is_err());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
     #[test]
     fn a_copy_that_cannot_be_put_back_is_kept_and_named() {
         let mut io = fake();
@@ -833,5 +961,128 @@ mod tests {
             "{error}"
         );
         assert_eq!(*io.log.lock().unwrap(), vec!["backup", "restore"]);
+    }
+
+    /// The checks that read the file system directly, on throwaway files:
+    /// a symlink never counts as the app folder, and only a link to the
+    /// cask's own command counts as Homebrew's.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn file_system_checks_tell_links_from_real_files() {
+        use crate::host::Runtime;
+        let root = std::env::temp_dir().join(format!("pkgdeck-adopt-fs-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let app = root.join("Fixture.app");
+        let command = app.join("fixture");
+        fs::create_dir_all(&app).unwrap();
+        fs::write(&command, "binary").unwrap();
+        fs::write(root.join("other"), "other").unwrap();
+        let link = |name: &str, to: &Path| {
+            let path = root.join(name);
+            std::os::unix::fs::symlink(to, &path).unwrap();
+            path
+        };
+        let app_link = link("App link.app", &app);
+        let ours = link("ours", &command);
+        let theirs = link("theirs", &root.join("other"));
+        let dangling = link("dangling", &root.join("gone"));
+        let io = NativeAdopt(Host::new(Runtime::Native, Default::default()));
+        assert!(io.is_folder(&app));
+        assert!(!io.is_folder(&app_link));
+        assert!(!io.is_folder(&command));
+        assert!(io.is_file(&command));
+        assert!(!io.is_file(&app));
+        assert!(io.occupied(&dangling));
+        assert!(!io.occupied(&root.join("gone")));
+        assert!(io.links_to(&ours, &command));
+        assert!(!io.links_to(&theirs, &command));
+        assert!(!io.links_to(&dangling, &command));
+        // The command itself is not a link to it.
+        assert!(!io.links_to(&command, &command));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn casks_without_one_placed_app_install_normally() {
+        let io = fake();
+        let cancel = Cancellation::default();
+        let mut no_app = cask();
+        no_app["artifacts"].as_array_mut().unwrap().remove(1);
+        assert!(plan(&io, &no_app, &cancel).unwrap().is_none());
+        let mut two_apps = cask();
+        let second = two_apps["artifacts"][1].clone();
+        two_apps["artifacts"].as_array_mut().unwrap().push(second);
+        assert!(plan(&io, &two_apps, &cancel).unwrap().is_none());
+        let mut no_target = cask();
+        no_target["artifacts"][1] = serde_json::json!({"app": ["Visual Studio Code.app"]});
+        assert!(plan(&io, &no_target, &cancel).unwrap().is_none());
+    }
+
+    #[test]
+    fn unusual_copies_and_casks_are_refused() {
+        let cancel = Cancellation::default();
+        for (executable, version, expected) in [
+            ("", "1.139.1", "names no executable"),
+            ("../Electron", "1.139.1", "names no executable"),
+            ("Electron", "", "version unknown"),
+        ] {
+            let mut io = fake();
+            io.executable = executable;
+            io.version = version;
+            let reason = reason(plan(&io, &cask(), &cancel));
+            assert!(reason.contains(expected), "{expected}: {reason}");
+        }
+        let mut relative = cask();
+        relative["artifacts"][1]["target"] = "Visual Studio Code.app".into();
+        let mut io = fake();
+        io.taken = vec!["Visual Studio Code.app"];
+        assert!(reason(plan(&io, &relative, &cancel)).contains("is not an app folder"));
+        let mut unplaced = cask();
+        unplaced["artifacts"][2] = serde_json::json!({"binary": [CODE]});
+        assert!(
+            reason(plan(&fake(), &unplaced, &cancel)).contains("didn't say where its binary goes")
+        );
+        // A wrapper script Homebrew writes itself must not replace anything.
+        let mut wrapper = cask();
+        wrapper["artifacts"][2] =
+            serde_json::json!({"command_wrapper": [CODE], "target": "/opt/homebrew/bin/code"});
+        assert!(plan(&fake(), &wrapper, &cancel).unwrap().is_some());
+        let mut io = fake();
+        io.taken = vec!["/opt/homebrew/bin/code"];
+        assert!(
+            reason(plan(&io, &wrapper, &cancel)).contains("/opt/homebrew/bin/code already exists")
+        );
+    }
+
+    #[test]
+    fn a_deferred_cancellation_is_reported_and_an_unknown_app_is_never_intact() {
+        let io = fake();
+        let plan = plan(&io, &cask(), &Cancellation::default())
+            .unwrap()
+            .unwrap();
+        let outcome = run(
+            &io,
+            &plan,
+            &Cancellation::default(),
+            &mut |_| {},
+            &mut || {
+                Ok(Completion {
+                    code: Some(0),
+                    signal: None,
+                    stdout: vec![],
+                    stderr: vec![],
+                    truncated: false,
+                    cancellation_deferred: true,
+                })
+            },
+            &mut || true,
+        )
+        .unwrap();
+        assert!(outcome.cancellation_deferred);
+        let stranger = Plan {
+            token: "some-other-app".into(),
+            ..plan
+        };
+        assert!(!intact(&io, &stranger, &Cancellation::default()));
     }
 }

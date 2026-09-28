@@ -47,17 +47,39 @@ pub struct Host {
 /// Why a write refuses to start when the frontend itself runs as root.
 pub const ROOT_REFUSAL: &str = "PkgDeck can't make changes when it runs as root. Run it as your normal user; it asks for permission when needed.";
 
+/// Writes refuse to run as root (see [`ROOT_REFUSAL`]).
+fn refuse_root(write: bool) -> Result<(), ExecutionError> {
+    refuse_root_as(write, rustix::process::geteuid().is_root())
+}
+fn refuse_root_as(write: bool, root: bool) -> Result<(), ExecutionError> {
+    if write && root {
+        return Err(ExecutionError::Invalid(ROOT_REFUSAL.into()));
+    }
+    Ok(())
+}
+
 pub const BACKENDS: &[(&str, &str)] = &[
     ("APT", "apt-get"),
     ("DNF", "dnf"),
     ("Pacman", "pacman"),
     ("Zypper", "zypper"),
+    ("apk", "apk"),
+    ("XBPS", "xbps-install"),
+    ("MacPorts", "port"),
+    ("Nix", "nix"),
     ("Flatpak", "flatpak"),
     ("Snap", "snap"),
+    ("Firmware (fwupd)", "fwupdmgr"),
+    ("Mac App Store (mas)", "mas"),
     ("Homebrew", "brew"),
     ("Docker", "docker"),
     ("Podman", "podman"),
+    ("Toolbx", "toolbox"),
+    ("Distrobox", "distrobox"),
     ("Cargo", "cargo"),
+    ("rustup", "rustup"),
+    ("Go", "go"),
+    (".NET", "dotnet"),
     ("npm", "npm"),
     ("pnpm", "pnpm"),
     ("Bun", "bun"),
@@ -65,6 +87,8 @@ pub const BACKENDS: &[(&str, &str)] = &[
     ("pipx", "pipx"),
     ("uv", "uv"),
     ("mise", "mise"),
+    ("pixi", "pixi"),
+    ("conda", "conda"),
     ("Composer", "composer"),
     ("RubyGems", "gem"),
 ];
@@ -210,14 +234,10 @@ mod repository_install_tests {
         std::fs::rename(prepared, &executable).unwrap();
         let host = Host::new(Runtime::Native, BTreeMap::new());
         let cancel = Cancellation::default();
-        if !Path::new("/usr/sbin/OneClickInstallUI").exists()
-            && !Path::new("/usr/bin/OneClickInstallUI").exists()
-        {
-            assert!(matches!(
-                host.one_click(&source, &cancel),
-                Err(ExecutionError::Disabled(_))
-            ));
-        }
+        let installed = Path::new("/usr/sbin/OneClickInstallUI").exists()
+            || Path::new("/usr/bin/OneClickInstallUI").exists();
+        let one_click = || host.one_click(&source, &cancel);
+        assert!(installed || matches!(one_click(), Err(ExecutionError::Disabled(_))));
         assert!(host
             .one_click_with_candidates(&source, &cancel, &[Path::new("/missing/OneClickInstallUI")])
             .is_err());
@@ -281,14 +301,19 @@ impl Host {
             "MISE_INSTALLS_DIR",
             "MISE_STATE_DIR",
             "MISE_CACHE_DIR",
-            // pixi and the conda family: their homes, and the manager a
-            // `conda init` shell names.
+            // Go and .NET: where their tools install and which proxy to use.
             "GOBIN",
             "GOPATH",
             "GOROOT",
             "GOPROXY",
             "DOTNET_ROOT",
             "DOTNET_CLI_HOME",
+            // A custom Homebrew location (command ownership) and cache
+            // (when cached Homebrew listings expire).
+            "HOMEBREW_PREFIX",
+            "HOMEBREW_CACHE",
+            // pixi and the conda family: their homes, and the manager a
+            // `conda init` shell names.
             "PIXI_HOME",
             "CONDA_EXE",
             "MAMBA_EXE",
@@ -347,11 +372,10 @@ impl Host {
         }
     }
 
-    fn enabled(&self) -> Result<(), ExecutionError> {
-        match self.runtime.disabled_reason() {
-            Some(reason) => Err(ExecutionError::Disabled(reason.into())),
-            None => Ok(()),
-        }
+    /// Point Flatpak host commands at a fake `flatpak-spawn`.
+    #[cfg(test)]
+    pub(crate) fn set_bridge_for_tests(&mut self, bridge: &Path) {
+        self.bridge = bridge.to_owned();
     }
 
     /// Read one sanitized environment value (for example `HOME`) without
@@ -374,20 +398,18 @@ impl Host {
         }
     }
 
-    fn host_file(&self, path: &Path, executable: bool) -> Result<bool, ExecutionError> {
+    /// Whether `path` is an executable file on the host.
+    fn host_file(&self, path: &Path) -> Result<bool, ExecutionError> {
         if self.runtime != Runtime::Flatpak {
-            return Ok(path.is_file()
-                && (!executable || rustix::fs::access(path, rustix::fs::Access::EXEC_OK).is_ok()));
+            return Ok(
+                path.is_file() && rustix::fs::access(path, rustix::fs::Access::EXEC_OK).is_ok()
+            );
         }
         // Validate in the host namespace: sandbox symlinks and runtime files
         // cannot prove that a host executable exists or is runnable.
-        for flag in if executable {
-            &["-f", "-x"][..]
-        } else {
-            &["-f"][..]
-        } {
-            let command = self
-                .flatpak_host_command(Path::new("/usr/bin/test"), &[(*flag).into(), path.into()])?;
+        for flag in ["-f", "-x"] {
+            let command =
+                self.flatpak_host_command(Path::new("/usr/bin/test"), &[flag.into(), path.into()])?;
             let result = process::run(command, Limits::default(), &Cancellation::default(), false)?;
             match result.code {
                 Some(0) => {}
@@ -400,7 +422,6 @@ impl Host {
 
     /// Resolve on the host, never by running a shell or probing a packaged runtime.
     pub fn resolve(&self, name: &str) -> Result<Option<PathBuf>, ExecutionError> {
-        self.enabled()?;
         if name.is_empty() || name.contains('/') {
             return Err(ExecutionError::Invalid(
                 "expected an executable name".into(),
@@ -413,7 +434,7 @@ impl Host {
                 // A cheap mapped filesystem check avoids a host round trip
                 // for absent directories; final validation is always remote.
                 if fs::symlink_metadata(self.filesystem_path(&candidate)).is_ok()
-                    && self.host_file(&candidate, true)?
+                    && self.host_file(&candidate)?
                 {
                     return Ok(Some(candidate));
                 }
@@ -438,7 +459,6 @@ impl Host {
         executable: &Path,
         args: &[OsString],
     ) -> Result<Command, ExecutionError> {
-        self.enabled()?;
         if !executable.is_absolute() {
             return Err(ExecutionError::Invalid(
                 "host executable must be absolute".into(),
@@ -476,9 +496,7 @@ impl Host {
         env: &[(&str, OsString)],
         cancel: &Cancellation,
     ) -> Result<Completion, ExecutionError> {
-        if rustix::process::geteuid().is_root() {
-            return Err(ExecutionError::Invalid(ROOT_REFUSAL.into()));
-        }
+        refuse_root(true)?;
         let mut host = self.clone();
         host.env.extend(
             env.iter()
@@ -503,10 +521,7 @@ impl Host {
         cancel: &Cancellation,
         write: bool,
     ) -> Result<Completion, ExecutionError> {
-        self.enabled()?;
-        if write && rustix::process::geteuid().is_root() {
-            return Err(ExecutionError::Invalid(ROOT_REFUSAL.into()));
-        }
+        refuse_root(write)?;
         let path = self
             .resolve("brew")?
             .ok_or_else(|| ExecutionError::Disabled("Homebrew not found".into()))?;
@@ -520,21 +535,88 @@ impl Host {
         ] {
             host.env.insert(name.into(), "1".into());
         }
-        let command = host.command(&path, args)?;
-        let result = process::run(
-            command,
-            Limits {
-                timeout: std::time::Duration::from_secs(120),
-                output_bytes: 32 * 1024 * 1024,
-            },
-            cancel,
-            write,
-        )?;
+        let run = || {
+            let command = host.command(&path, args)?;
+            process::run(
+                command,
+                Limits {
+                    timeout: std::time::Duration::from_secs(120),
+                    output_bytes: 32 * 1024 * 1024,
+                },
+                cancel,
+                write,
+            )
+        };
+        // The installed listings take seconds of Homebrew's own start-up, and
+        // their answer only changes with what is installed, fetched cask and
+        // formula data, taps, or Homebrew itself.
+        let text: Vec<&str> = args.iter().filter_map(|arg| arg.to_str()).collect();
+        let source = match text.as_slice() {
+            ["info", "--json=v2", "--cask", "--installed"] => Some("homebrew-cask"),
+            ["info", "--json=v2", "--installed"] => Some("homebrew"),
+            _ => None,
+        };
+        let result = match source.filter(|_| !write && self.runtime == Runtime::Native) {
+            Some(source) => crate::cache::completion(
+                crate::cache::Store::user().as_ref(),
+                source,
+                "brew",
+                &text,
+                &self.brew_watches(&path),
+                &[],
+                run,
+            )?,
+            None => run()?,
+        };
         if result.code == Some(0) {
             Ok(result)
         } else {
             Err(ExecutionError::Failed(result))
         }
+    }
+
+    /// Everything a Homebrew installed-package listing depends on.
+    fn brew_watches(&self, brew: &Path) -> Vec<crate::cache::Watch> {
+        use crate::cache::Watch;
+        let brew = fs::canonicalize(brew).unwrap_or_else(|_| brew.to_owned());
+        // bin/brew lives in the Homebrew repository, which is the prefix on
+        // Apple Silicon and a Homebrew folder inside it elsewhere.
+        let Some(repository) = brew.parent().and_then(Path::parent).map(Path::to_owned) else {
+            return vec![];
+        };
+        let prefix = if repository
+            .file_name()
+            .is_some_and(|name| name == "Homebrew")
+        {
+            repository
+                .parent()
+                .map_or_else(|| repository.clone(), Path::to_owned)
+        } else {
+            repository.clone()
+        };
+        let cache = self
+            .var("HOMEBREW_CACHE")
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+            .or_else(|| {
+                let home = self.var("HOME").map(PathBuf::from)?;
+                Some(if cfg!(target_os = "macos") {
+                    home.join("Library/Caches/Homebrew")
+                } else {
+                    self.var("XDG_CACHE_HOME")
+                        .map(PathBuf::from)
+                        .unwrap_or_else(|| home.join(".cache"))
+                        .join("Homebrew")
+                })
+            });
+        let mut watches = vec![
+            Watch::tree(prefix.join("Caskroom"), 2),
+            Watch::tree(prefix.join("Cellar"), 2),
+            Watch::tree(repository.join("Library/Taps"), 4),
+            Watch::file(repository.join(".git/HEAD")),
+        ];
+        watches.extend(cache.map(|cache| Watch::tree(cache.join("api"), 2)));
+        watches
     }
 
     /// Official installers put rustup, Nix, pixi and the conda family outside
@@ -591,7 +673,7 @@ impl Host {
         }
         for candidate in candidates {
             if candidate.file_name().is_some_and(|file| file == name)
-                && self.host_file(&candidate, true)?
+                && self.host_file(&candidate)?
             {
                 return Ok(Some(candidate));
             }
@@ -610,10 +692,7 @@ impl Host {
         cancel: &Cancellation,
         write: bool,
     ) -> Result<Completion, ExecutionError> {
-        self.enabled()?;
-        if write && rustix::process::geteuid().is_root() {
-            return Err(ExecutionError::Invalid(ROOT_REFUSAL.into()));
-        }
+        refuse_root(write)?;
         let path = match self.resolve(executable)? {
             Some(path) => Some(path),
             None => self.user_install(executable)?,
@@ -655,38 +734,30 @@ impl Host {
         }
         // Same file as podman (hardlink or chained symlinks). Path
         // canonicalization is meaningless across the Flatpak host boundary.
-        if self.runtime != Runtime::Flatpak {
-            if let Some(podman) = self.resolve("podman").ok().flatten() {
-                if let (Ok(docker), Ok(podman)) =
-                    (fs::canonicalize(&path), fs::canonicalize(&podman))
-                {
-                    if docker == podman {
-                        return true;
-                    }
-                }
-            }
+        let canonical = |path: &Path| fs::canonicalize(path).ok();
+        if self.runtime != Runtime::Flatpak
+            && self.resolve("podman").ok().flatten().is_some_and(|podman| {
+                canonical(&podman).is_some_and(|p| canonical(&path) == Some(p))
+            })
+        {
+            return true;
         }
         // Wrapper script that execs podman; ELF binaries are never parsed.
-        if fs::metadata(&probe)
+        let script = fs::metadata(&probe)
             .ok()
-            .is_some_and(|meta| meta.len() < 65536)
-        {
-            if let Ok(bytes) = fs::read(&probe) {
-                let text = String::from_utf8_lossy(&bytes);
-                if text.starts_with("#!")
-                    && text.lines().any(|line| {
-                        let line = line.trim();
-                        line.starts_with("exec ")
-                            && line.split_whitespace().any(|word| {
-                                word.trim_matches('"').rsplit('/').next() == Some("podman")
-                            })
-                    })
-                {
-                    return true;
-                }
-            }
-        }
-        false
+            .filter(|meta| meta.len() < 65536)
+            .and_then(|_| fs::read(&probe).ok());
+        script.is_some_and(|bytes| {
+            let text = String::from_utf8_lossy(&bytes);
+            text.starts_with("#!")
+                && text.lines().any(|line| {
+                    let line = line.trim();
+                    line.starts_with("exec ")
+                        && line
+                            .split_whitespace()
+                            .any(|word| word.trim_matches('"').rsplit('/').next() == Some("podman"))
+                })
+        })
     }
 
     /// Run Docker or Podman as the invoking user. Reads use a short deadline so
@@ -700,10 +771,7 @@ impl Host {
         cancel: &Cancellation,
         write: bool,
     ) -> Result<Completion, ExecutionError> {
-        self.enabled()?;
-        if write && rustix::process::geteuid().is_root() {
-            return Err(ExecutionError::Invalid(ROOT_REFUSAL.into()));
-        }
+        refuse_root(write)?;
         let path = self
             .resolve(executable)?
             .ok_or_else(|| ExecutionError::Disabled(format!("{label} not found")))?;
@@ -741,10 +809,7 @@ impl Host {
         cancel: &Cancellation,
         write: bool,
     ) -> Result<Completion, ExecutionError> {
-        self.enabled()?;
-        if write && rustix::process::geteuid().is_root() {
-            return Err(ExecutionError::Invalid(ROOT_REFUSAL.into()));
-        }
+        refuse_root(write)?;
         if !venv.is_absolute() {
             return Err(ExecutionError::Invalid(
                 "virtual environment path must be absolute".into(),
@@ -776,7 +841,7 @@ impl Host {
                 "pip virtual environment not found".to_string(),
             ));
         }
-        if !self.host_file(&python, true)? {
+        if !self.host_file(&python)? {
             return Err(ExecutionError::Disabled(
                 "pip virtual environment not found".to_string(),
             ));
@@ -808,10 +873,7 @@ impl Host {
         authorization: Authorization,
         cancel: &Cancellation,
     ) -> Result<Completion, ExecutionError> {
-        self.enabled()?;
-        if rustix::process::geteuid().is_root() {
-            return Err(ExecutionError::Invalid(ROOT_REFUSAL.into()));
-        }
+        refuse_root(true)?;
         let result = self.privileged(
             Path::new("/usr/bin/apt-get"),
             &action.arguments()?,
@@ -828,10 +890,7 @@ impl Host {
         authorization: Authorization,
         cancel: &Cancellation,
     ) -> Result<Completion, ExecutionError> {
-        self.enabled()?;
-        if rustix::process::geteuid().is_root() {
-            return Err(ExecutionError::Invalid(ROOT_REFUSAL.into()));
-        }
+        refuse_root(true)?;
         classify_apt(self.privileged(
             Path::new("/usr/bin/apt-get"),
             &AptAction::group_arguments(actions)?,
@@ -850,14 +909,11 @@ impl Host {
         system: bool,
         authorization: Authorization,
     ) -> Result<Completion, ExecutionError> {
-        if write && rustix::process::geteuid().is_root() {
-            return Err(ExecutionError::Invalid(ROOT_REFUSAL.into()));
-        }
-        self.enabled()?;
+        refuse_root(write)?;
         let path = if write && system {
             if self.runtime == Runtime::Flatpak {
                 let path = Path::new("/usr/bin/flatpak");
-                if !self.host_file(path, true)? {
+                if !self.host_file(path)? {
                     return Err(ExecutionError::Disabled("system Flatpak not found".into()));
                 }
                 path.to_owned()
@@ -904,7 +960,7 @@ impl Host {
     pub fn system_flatpak_available(&self) -> bool {
         cfg!(target_os = "linux")
             && self
-                .host_file(Path::new("/usr/bin/flatpak"), true)
+                .host_file(Path::new("/usr/bin/flatpak"))
                 .unwrap_or(false)
     }
 
@@ -970,14 +1026,14 @@ impl Host {
     ) -> Result<Option<PathBuf>, ExecutionError> {
         if !cfg!(target_os = "linux")
             || self.resolve("apt-get")?.is_none()
-            || !self.host_file(authenticator, true)?
-            || !self.host_file(env, true)?
+            || !self.host_file(authenticator)?
+            || !self.host_file(env)?
             || self.var("DISPLAY").is_none()
         {
             return Ok(None);
         }
         for path in editors {
-            if self.host_file(path, true)? {
+            if self.host_file(path)? {
                 return Ok(Some((*path).to_owned()));
             }
         }
@@ -1061,10 +1117,7 @@ impl Host {
         digest: &str,
         execute: impl FnOnce(&[OsString]) -> Result<Completion, ExecutionError>,
     ) -> Result<Completion, ExecutionError> {
-        self.enabled()?;
-        if rustix::process::geteuid().is_root() {
-            return Err(ExecutionError::Invalid(ROOT_REFUSAL.into()));
-        }
+        refuse_root(true)?;
         let args = repository_install_args(source, backend, suffix, digest)?;
         execute(&args)
     }
@@ -1091,11 +1144,10 @@ impl Host {
         cancel: &Cancellation,
         candidates: &[&Path],
     ) -> Result<Completion, ExecutionError> {
-        self.enabled()?;
         let executable = candidates
             .iter()
             .map(|path| path.to_path_buf())
-            .find(|path| self.host_file(path, true).unwrap_or(false))
+            .find(|path| self.host_file(path).unwrap_or(false))
             .ok_or_else(|| {
                 ExecutionError::Disabled("openSUSE One Click installer is unavailable".into())
             })?;
@@ -1117,10 +1169,7 @@ impl Host {
         write: bool,
         authorization: Authorization,
     ) -> Result<Completion, ExecutionError> {
-        self.enabled()?;
-        if write && rustix::process::geteuid().is_root() {
-            return Err(ExecutionError::Invalid(ROOT_REFUSAL.into()));
-        }
+        refuse_root(write)?;
         let path = if write {
             // Privileged writes only ever run the manager from its fixed
             // system location, never whatever PATH finds first.
@@ -1132,7 +1181,7 @@ impl Host {
             let mut found = None;
             for dir in dirs {
                 let path = Path::new(dir).join(executable);
-                if self.host_file(&path, true)? {
+                if self.host_file(&path)? {
                     found = Some(path);
                     break;
                 }
@@ -1143,7 +1192,7 @@ impl Host {
                 Some(path) => path,
                 // MacPorts' folder is rarely on a shell's PATH.
                 None if executable == "port"
-                    && self.host_file(Path::new("/opt/local/bin/port"), true)? =>
+                    && self.host_file(Path::new("/opt/local/bin/port"))? =>
                 {
                     PathBuf::from("/opt/local/bin/port")
                 }
@@ -1188,10 +1237,8 @@ impl Host {
         }
         // macOS has no polkit; its system prompt is the administrator
         // password dialog.
-        if cfg!(target_os = "macos")
-            && self.runtime == Runtime::Native
-            && matches!(authorization, Authorization::Polkit)
-        {
+        #[cfg(target_os = "macos")]
+        if self.runtime == Runtime::Native && matches!(authorization, Authorization::Polkit) {
             return self.macos_administrator(executable, args, cancel);
         }
         let (program, mut prefixed) = authorization.prefix(executable);
@@ -1204,6 +1251,7 @@ impl Host {
     }
 }
 
+#[cfg(target_os = "macos")]
 impl Host {
     /// Run one command as root after macOS's own administrator password
     /// dialog. Every argument is shell-quoted and then escaped for AppleScript,
@@ -1218,20 +1266,23 @@ impl Host {
         let mut host = self.clone();
         host.env
             .insert("PATH".into(), "/usr/sbin:/usr/bin:/sbin:/bin".into());
-        let command = host.command(
-            Path::new("/usr/bin/osascript"),
-            &["-e".into(), script.into()],
-        )?;
-        let result = process::run(command, Limits::default(), cancel, true)?;
-        // AppleScript error -128 is the dialog's Cancel button.
-        if result.code != Some(0) && String::from_utf8_lossy(&result.stderr).contains("(-128)") {
-            return Err(ExecutionError::AuthorizationCancelled);
-        }
-        Ok(result)
+        let osascript = Path::new("/usr/bin/osascript");
+        let command = host.command(osascript, &["-e".into(), script.into()])?;
+        administrator_result(process::run(command, Limits::default(), cancel, true)?)
     }
 }
 
+/// AppleScript error -128 is the password dialog's Cancel button.
+#[cfg(any(target_os = "macos", test))]
+fn administrator_result(result: Completion) -> Result<Completion, ExecutionError> {
+    if result.code != Some(0) && String::from_utf8_lossy(&result.stderr).contains("(-128)") {
+        return Err(ExecutionError::AuthorizationCancelled);
+    }
+    Ok(result)
+}
+
 /// One shell command line with every word single-quoted.
+#[cfg(any(target_os = "macos", test))]
 fn shell_command(executable: &Path, args: &[OsString]) -> Result<String, ExecutionError> {
     let quote = |arg: &std::ffi::OsStr| -> Result<String, ExecutionError> {
         let text = arg
@@ -1250,16 +1301,72 @@ fn shell_command(executable: &Path, args: &[OsString]) -> Result<String, Executi
 }
 
 /// An AppleScript string literal.
+#[cfg(any(target_os = "macos", test))]
 fn applescript_string(text: &str) -> String {
     format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
 /// `do shell script "'/opt/local/bin/port' '-N' 'install' 'xz'" …`
+#[cfg(any(target_os = "macos", test))]
 fn administrator_script(executable: &Path, args: &[OsString]) -> Result<String, ExecutionError> {
     Ok(format!(
         "do shell script {} with administrator privileges without altering line endings",
         applescript_string(&shell_command(executable, args)?)
     ))
+}
+
+#[cfg(test)]
+mod brew_cache_tests {
+    use super::*;
+
+    /// A cached Homebrew listing is dropped when an install, a tap or
+    /// fetched Homebrew data changes, on both Homebrew layouts.
+    #[test]
+    fn brew_listings_expire_when_homebrew_changes() {
+        for nested in [false, true] {
+            let root = std::env::temp_dir().join(format!(
+                "pkgdeck-brew-cache-{}-{nested}",
+                std::process::id()
+            ));
+            let _ = fs::remove_dir_all(&root);
+            let repository = if nested {
+                root.join("Homebrew")
+            } else {
+                root.clone()
+            };
+            fs::create_dir_all(repository.join("bin")).unwrap();
+            fs::write(repository.join("bin/brew"), "").unwrap();
+            fs::create_dir_all(root.join("Caskroom")).unwrap();
+            fs::create_dir_all(repository.join("Library/Taps/me/homebrew-tools/Casks")).unwrap();
+            let env = [
+                ("HOME", root.join("home")),
+                ("HOMEBREW_CACHE", root.join("cache")),
+                ("PATH", "/usr/bin:/bin".into()),
+            ]
+            .into_iter()
+            .map(|(key, value)| (OsString::from(key), value.into_os_string()))
+            .collect();
+            let host = Host::new(Runtime::Native, env);
+            let watches = host.brew_watches(&repository.join("bin/brew"));
+            let now = || crate::cache::fingerprint(&watches, &[]).unwrap();
+            let before = now();
+            assert_eq!(before, now(), "nothing changed");
+            fs::create_dir_all(root.join("Caskroom/firefox/1.0")).unwrap();
+            let installed = now();
+            assert_ne!(before, installed, "an installed cask");
+            fs::write(
+                repository.join("Library/Taps/me/homebrew-tools/Casks/tool.rb"),
+                "cask",
+            )
+            .unwrap();
+            let tapped = now();
+            assert_ne!(installed, tapped, "a tap's cask");
+            fs::create_dir_all(root.join("cache/api")).unwrap();
+            fs::write(root.join("cache/api/cask.jws.json"), "{}").unwrap();
+            assert_ne!(tapped, now(), "fetched cask data");
+            fs::remove_dir_all(&root).unwrap();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1395,11 +1502,11 @@ mod flatpak_bridge_tests {
             Path::new("/etc/apt")
         );
         assert!(host
-            .host_file(Path::new("/synthetic-host-executable"), true)
+            .host_file(Path::new("/synthetic-host-executable"))
             .unwrap());
         host.bridge = "/usr/bin/false".into();
         assert!(!host
-            .host_file(Path::new("/synthetic-host-executable"), true)
+            .host_file(Path::new("/synthetic-host-executable"))
             .unwrap());
     }
 
@@ -2115,5 +2222,348 @@ pub fn classify_apt(result: Completion) -> Result<Completion, ExecutionError> {
         _ if stderr.contains("dpkg was interrupted") => Err(ExecutionError::Interrupted),
         None => Err(ExecutionError::Interrupted),
         _ => Err(ExecutionError::Failed(result)),
+    }
+}
+
+#[cfg(test)]
+mod boundary_tests {
+    use super::*;
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    fn scratch(name: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SERIAL: AtomicU64 = AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "pkgdeck-host-{name}-{}-{}",
+            std::process::id(),
+            SERIAL.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+    fn executable(path: &Path, body: &str) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    fn host(runtime: Runtime, env: &[(&str, &Path)]) -> Host {
+        Host::new(
+            runtime,
+            env.iter()
+                .map(|(key, value)| (OsString::from(key), value.as_os_str().to_owned()))
+                .collect(),
+        )
+    }
+    fn cancelled() -> Cancellation {
+        let cancel = Cancellation::default();
+        cancel.cancel();
+        cancel
+    }
+
+    #[test]
+    fn only_writes_as_root_are_refused() {
+        assert!(matches!(
+            refuse_root_as(true, true),
+            Err(ExecutionError::Invalid(reason)) if reason == ROOT_REFUSAL
+        ));
+        assert!(refuse_root_as(false, true).is_ok());
+        assert!(refuse_root_as(true, false).is_ok());
+    }
+
+    #[test]
+    fn a_failing_host_probe_is_an_error_not_a_missing_file() {
+        let root = scratch("probe");
+        let bridge = root.join("spawn");
+        executable(&bridge, "exit 2");
+        let mut host = host(Runtime::Flatpak, &[]);
+        host.bridge = bridge;
+        assert!(matches!(
+            host.host_file(Path::new("/usr/bin/flatpak")),
+            Err(ExecutionError::Failed(result)) if result.code == Some(2)
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn homebrew_listings_go_through_the_cache_and_keep_errors() {
+        let root = scratch("brew");
+        executable(&root.join("bin/brew"), "exit 0");
+        let host = host(
+            Runtime::Native,
+            &[("PATH", &root.join("bin")), ("HOME", &root)],
+        );
+        for args in [
+            &["info", "--json=v2", "--installed"][..],
+            &["info", "--json=v2", "--cask", "--installed"],
+        ] {
+            let args: Vec<OsString> = args.iter().map(OsString::from).collect();
+            assert!(matches!(
+                host.brew(&args, &cancelled(), false),
+                Err(ExecutionError::Cancelled)
+            ));
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn homebrew_watches_need_a_repository_and_follow_the_cache_folder() {
+        let host_without_home = host(Runtime::Native, &[]);
+        assert!(host_without_home
+            .brew_watches(Path::new("/brew"))
+            .is_empty());
+        assert_eq!(
+            host_without_home
+                .brew_watches(Path::new("/synthetic/bin/brew"))
+                .len(),
+            4
+        );
+        let root = scratch("brew-cache");
+        let home = root.join("home");
+        let xdg = root.join("xdg");
+        let cache_watch = |host: &Host| {
+            host.brew_watches(Path::new("/synthetic/bin/brew"))
+                .last()
+                .unwrap()
+                .path
+                .clone()
+        };
+        let plain = host(Runtime::Native, &[("HOME", &home)]);
+        let custom = host(
+            Runtime::Native,
+            &[("HOME", &home), ("XDG_CACHE_HOME", &xdg)],
+        );
+        if cfg!(target_os = "macos") {
+            assert_eq!(
+                cache_watch(&plain),
+                home.join("Library/Caches/Homebrew/api")
+            );
+            assert_eq!(
+                cache_watch(&custom),
+                home.join("Library/Caches/Homebrew/api")
+            );
+        } else {
+            assert_eq!(cache_watch(&plain), home.join(".cache/Homebrew/api"));
+            assert_eq!(cache_watch(&custom), xdg.join("Homebrew/api"));
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn official_installer_locations_are_found_off_path() {
+        let root = scratch("user-install");
+        let home = root.join("home");
+        let tools = root.join("tools");
+        for (name, variable, under_variable, under_home) in [
+            ("pixi", "PIXI_HOME", "bin/pixi", Some(".pixi/bin/pixi")),
+            ("go", "GOROOT", "bin/go", None),
+            ("dotnet", "DOTNET_ROOT", "dotnet", Some(".dotnet/dotnet")),
+            (
+                "rustup",
+                "CARGO_HOME",
+                "bin/rustup",
+                Some(".cargo/bin/rustup"),
+            ),
+            ("nix", "", "", Some(".nix-profile/bin/nix")),
+        ] {
+            let from_variable = tools.join(name).join(under_variable);
+            if !variable.is_empty() {
+                executable(&from_variable, "exit 0");
+                let host = host(
+                    Runtime::Native,
+                    &[(variable, &tools.join(name)), ("HOME", &home)],
+                );
+                assert_eq!(host.user_install(name).unwrap(), Some(from_variable));
+            }
+            if let Some(relative) = under_home {
+                executable(&home.join(relative), "exit 0");
+                let host = host(Runtime::Native, &[("HOME", &home)]);
+                assert_eq!(host.user_install(name).unwrap(), Some(home.join(relative)));
+            }
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn user_tools_stop_before_running_when_cancelled() {
+        let root = scratch("cancel");
+        let bin = root.join("bin");
+        executable(&bin.join("tool"), "exit 0");
+        let host = host(Runtime::Native, &[("PATH", &bin), ("HOME", &root)]);
+        assert!(matches!(
+            host.dev_tool("tool", "Tool", &[], &cancelled(), false),
+            Err(ExecutionError::Cancelled)
+        ));
+        assert!(matches!(
+            host.system_manager("tool", &[], &cancelled(), false, Authorization::Polkit),
+            Err(ExecutionError::Cancelled)
+        ));
+        assert!(matches!(
+            host.container_engine("tool", "Tool", &[], &cancelled(), false),
+            Err(ExecutionError::Cancelled)
+        ));
+        let venv = root.join("venv");
+        executable(&venv.join("bin/python"), "echo broken >&2; exit 3");
+        fs::write(venv.join("pyvenv.cfg"), "home = /usr/bin\n").unwrap();
+        assert!(matches!(
+            host.venv_pip(&venv, &["list".into()], &cancelled(), false),
+            Err(ExecutionError::Cancelled)
+        ));
+        assert!(matches!(
+            host.venv_pip(&venv, &["list".into()], &Cancellation::default(), false),
+            Err(ExecutionError::Failed(result)) if result.code == Some(3) && result.stderr == b"broken\n"
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn docker_is_a_shim_only_when_it_is_podman() {
+        let root = scratch("docker");
+        let bin = root.join("bin");
+        let host = host(Runtime::Native, &[("PATH", &bin)]);
+        executable(&root.join("podman"), "exit 0");
+        symlink(root.join("podman"), root.join("alias")).unwrap();
+        fs::create_dir_all(&bin).unwrap();
+        symlink(root.join("podman"), bin.join("podman")).unwrap();
+        // A chain of links that ends at podman.
+        symlink(root.join("alias"), bin.join("docker")).unwrap();
+        assert!(host.docker_is_podman_shim());
+        fs::remove_file(bin.join("docker")).unwrap();
+        // A large binary is never read as a script.
+        fs::write(bin.join("docker"), vec![b'#'; 70_000]).unwrap();
+        fs::set_permissions(bin.join("docker"), fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(!host.docker_is_podman_shim());
+        fs::remove_file(bin.join("podman")).unwrap();
+        executable(&bin.join("docker"), "exec /usr/bin/podman \"$@\"");
+        assert!(host.docker_is_podman_shim());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn privileged_apt_and_repository_writes_use_fixed_programs() {
+        let root = scratch("privileged");
+        let mut host = host(Runtime::Flatpak, &[]);
+        host.bridge = "/bin/echo".into();
+        let cancel = Cancellation::default();
+        let apt = host
+            .apt(
+                AptAction::Install("fixture".into()),
+                Authorization::SudoNonInteractive,
+                &cancel,
+            )
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&apt.stdout).contains("/usr/bin/sudo -n -- /usr/bin/apt-get")
+        );
+        let source = root.join("fixture.sources");
+        fs::write(&source, "Types: deb\n").unwrap();
+        let digest = "c".repeat(64);
+        let installed = host
+            .install_repository_file(
+                &source,
+                "apt",
+                "sources",
+                &digest,
+                Authorization::Polkit,
+                &cancel,
+            )
+            .unwrap();
+        let output = String::from_utf8_lossy(&installed.stdout).into_owned();
+        assert!(output.contains("/usr/bin/pkexec --disable-internal-agent /usr/bin/install"));
+        assert!(output.contains(&format!("pkgdeck-{digest}.sources")));
+        host.bridge = root.join("missing-spawn");
+        assert!(matches!(
+            host.apt_group(
+                &[AptAction::Install("fixture".into())],
+                Authorization::Polkit,
+                &cancel
+            ),
+            Err(ExecutionError::Disabled(_))
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn macports_is_found_in_its_own_folder_off_path() {
+        let root = scratch("port");
+        let bridge = root.join("spawn");
+        executable(&bridge, "echo \"$@\"");
+        let mut host = host(Runtime::Flatpak, &[("PATH", &root.join("empty"))]);
+        host.bridge = bridge;
+        let result = host
+            .system_manager(
+                "port",
+                &["installed".into()],
+                &Cancellation::default(),
+                false,
+                Authorization::Polkit,
+            )
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&result.stdout).ends_with("/opt/local/bin/port installed\n")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn administrator_dialog_cancel_is_reported() {
+        let completion = |code, stderr: &str| Completion {
+            code: Some(code),
+            signal: None,
+            stdout: vec![],
+            stderr: stderr.as_bytes().to_vec(),
+            truncated: false,
+            cancellation_deferred: false,
+        };
+        assert!(matches!(
+            administrator_result(completion(1, "execution error: User canceled. (-128)")),
+            Err(ExecutionError::AuthorizationCancelled)
+        ));
+        assert_eq!(
+            administrator_result(completion(1, "other failure"))
+                .unwrap()
+                .code,
+            Some(1)
+        );
+        assert_eq!(
+            administrator_result(completion(0, "")).unwrap().code,
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn host_environment_comes_from_the_bridge() {
+        let root = scratch("environment");
+        let bridge = root.join("spawn");
+        executable(&bridge, "printf 'HOME=/home/fixture\\0PATH=/usr/bin\\0'");
+        let env = flatpak_host_environment_from(&bridge).unwrap();
+        assert_eq!(env[&OsString::from("HOME")], "/home/fixture");
+        assert_eq!(env[&OsString::from("PATH")], "/usr/bin");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn source_editor_opens_through_the_host_bridge() {
+        let root = scratch("editor");
+        let record = root.join("record");
+        let bridge = root.join("spawn");
+        executable(&bridge, &format!("echo \"$@\" >> '{}'", record.display()));
+        executable(&root.join("bin/apt-get"), "exit 0");
+        let mut host = host(
+            Runtime::Flatpak,
+            &[("PATH", &root.join("bin")), ("DISPLAY", Path::new(":91"))],
+        );
+        host.bridge = bridge;
+        assert!(host
+            .source_editor_path_with(Path::new("/usr/bin/pkexec"), Path::new("/usr/bin/env"), &[])
+            .unwrap()
+            .is_none());
+        host.open_source_editor(Authorization::Polkit).unwrap();
+        let calls = fs::read_to_string(&record).unwrap();
+        assert!(calls.lines().last().unwrap().ends_with(
+            "/usr/bin/pkexec --disable-internal-agent /usr/bin/env DISPLAY=:91 /usr/bin/software-properties-qt"
+        ));
+        fs::remove_dir_all(root).unwrap();
     }
 }

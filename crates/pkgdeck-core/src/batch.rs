@@ -192,16 +192,26 @@ pub fn protected_commands(operation: &Operation) -> Result<Vec<ProtectedCommand>
         Operation::Upgrade(id) if id.backend == "fwupd" => {
             firmware_command("update", Some(&id.name))?
         }
-        Operation::Refresh { backend } | Operation::UpgradeAll { backend }
+        Operation::Refresh { backend }
             if matches!(backend.as_str(), "dnf" | "pacman" | "zypper" | "snap") =>
         {
-            manager_command(backend, operation, None)?
+            manager_command(backend, "refresh", None)?
+        }
+        Operation::UpgradeAll { backend }
+            if matches!(backend.as_str(), "dnf" | "pacman" | "zypper" | "snap") =>
+        {
+            manager_command(backend, "all", None)?
         }
         Operation::Install(id) | Operation::Remove(id) | Operation::Upgrade(id)
             if matches!(id.backend.as_str(), "dnf" | "pacman" | "zypper" | "snap") =>
         {
             let name = system_id(id, &id.backend)?;
-            manager_command(&id.backend, operation, Some(name))?
+            let verb = match operation {
+                Operation::Install(_) => "install",
+                Operation::Remove(_) => "remove",
+                _ => "upgrade",
+            };
+            manager_command(&id.backend, verb, Some(name))?
         }
         _ => return Ok(vec![]),
     };
@@ -277,19 +287,12 @@ fn firmware_command(verb: &str, id: Option<&str>) -> Result<ProtectedCommand, Ex
     }
     Ok(ProtectedCommand::new("fwupdmgr", args))
 }
+/// `verb` is `refresh`, `install`, `remove`, `upgrade` or `all`.
 fn manager_command(
     backend: &str,
-    operation: &Operation,
+    verb: &str,
     name: Option<&str>,
 ) -> Result<ProtectedCommand, ExecutionError> {
-    let verb = match operation {
-        Operation::Refresh { .. } => "refresh",
-        Operation::Install(_) => "install",
-        Operation::Remove(_) => "remove",
-        Operation::Upgrade(_) => "upgrade",
-        Operation::UpgradeAll { .. } => "all",
-        _ => return Err(invalid("unsupported system manager operation")),
-    };
     let fixed: &[&str] = match (backend, verb) {
         ("dnf", "refresh") => &["-y", "makecache"],
         ("dnf", "install") => &["-y", "install", "--"],
@@ -526,22 +529,46 @@ pub fn begin(
     } else {
         None
     };
-    let Some(path) = appimage.clone().or_else(|| runner_path(host)) else {
+    let runner = appimage
+        .map(|path| (path, true))
+        .or_else(|| runner_path(host).map(|path| (path, false)));
+    let start = |command| begin_session(command, operations, commands, cancel);
+    runner_command(host, authorization, runner)?.map_or(Ok(None), start)
+}
+/// The authorization prompt that starts `runner`, a packaged host runner
+/// or (with `true`) an AppImage launcher that starts its bundled runner.
+fn runner_command(
+    host: &Host,
+    authorization: Authorization,
+    runner: Option<(PathBuf, bool)>,
+) -> Result<Option<Command>, ExecutionError> {
+    let Some((path, appimage)) = runner else {
         return Ok(None);
     };
     let (program, mut args) = authorization.prefix(&path);
-    if appimage.is_some() {
+    if appimage {
         args.push("--batch-runner".into());
     }
     let mut command = host.command(Path::new(program), &args)?;
     command.stderr(Stdio::null()).process_group(0);
-    begin_session(command, operations, commands, cancel)
+    Ok(Some(command))
 }
+/// How long the user has to answer the authorization prompt.
+const AUTHORIZATION_TIMEOUT: Duration = Duration::from_secs(120);
 fn begin_session(
+    command: Command,
+    operations: &[Operation],
+    commands: Vec<Vec<ProtectedCommand>>,
+    cancel: &Cancellation,
+) -> Result<Option<ScopeGuard>, ExecutionError> {
+    begin_session_within(command, operations, commands, cancel, AUTHORIZATION_TIMEOUT)
+}
+fn begin_session_within(
     mut command: Command,
     operations: &[Operation],
     commands: Vec<Vec<ProtectedCommand>>,
     cancel: &Cancellation,
+    timeout: Duration,
 ) -> Result<Option<ScopeGuard>, ExecutionError> {
     if SESSION.with(|cell| cell.borrow().is_some()) {
         return Err(invalid("nested authorization batch"));
@@ -582,7 +609,7 @@ fn begin_session(
         if cancel.requested() {
             return Err(ExecutionError::AuthorizationCancelled);
         }
-        if start.elapsed() > Duration::from_secs(120) {
+        if start.elapsed() > timeout {
             return Err(ExecutionError::AuthorizationDenied);
         }
         if let Some(status) = session.child.try_wait()? {
@@ -594,18 +621,7 @@ fn begin_session(
         // The ready frame is short and written before any native command.
         // stdout is nonblocking so cancellation can dismiss a pending prompt.
         let mut chunk = [0; 8192];
-        match session.output.read(&mut chunk) {
-            Ok(0) => return Err(ExecutionError::AuthorizationDenied),
-            Ok(count) => {
-                frame.extend_from_slice(&chunk[..count]);
-                if frame.len() > MAX_MESSAGE {
-                    return Err(invalid("authorization message too large"));
-                }
-                if let Some(end) = frame.iter().position(|byte| *byte == b'\n') {
-                    break serde_json::from_slice::<Response>(&frame[..end])
-                        .map_err(|e| ExecutionError::Io(e.to_string()))?;
-                }
-            }
+        let count = match session.output.read(&mut chunk) {
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 // Wake as soon as a partial ready frame has more bytes, while
                 // bounding the wait so cancellation and child exit stay responsive.
@@ -617,12 +633,22 @@ fn begin_session(
                     tv_sec: 0,
                     tv_nsec: 20_000_000,
                 };
-                match rustix::event::poll(&mut fds, Some(&timeout)) {
-                    Ok(_) | Err(rustix::io::Errno::INTR) => {}
-                    Err(error) => return Err(ExecutionError::Io(error.to_string())),
-                }
+                unless_interrupted(rustix::event::poll(&mut fds, Some(&timeout)))
+                    .map_err(|error| ExecutionError::Io(error.to_string()))?;
+                continue;
             }
-            Err(error) => return Err(error.into()),
+            result => result?,
+        };
+        if count == 0 {
+            return Err(ExecutionError::AuthorizationDenied);
+        }
+        frame.extend_from_slice(&chunk[..count]);
+        if frame.len() > MAX_MESSAGE {
+            return Err(invalid("authorization message too large"));
+        }
+        if let Some(end) = frame.iter().position(|byte| *byte == b'\n') {
+            break serde_json::from_slice::<Response>(&frame[..end])
+                .map_err(|e| ExecutionError::Io(e.to_string()))?;
         }
     };
     let flags =
@@ -636,6 +662,14 @@ fn begin_session(
         *cell.borrow_mut() = Some(session);
         Ok(Some(ScopeGuard))
     })
+}
+
+/// A wait cut short by a signal is not an error; the caller waits again.
+fn unless_interrupted(result: rustix::io::Result<usize>) -> rustix::io::Result<()> {
+    match result {
+        Ok(_) | Err(rustix::io::Errno::INTR) => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 fn authorization_start_error(mut child: Child, error: ExecutionError) -> ExecutionError {
@@ -724,21 +758,32 @@ pub fn run_in_scope(
 /// Entry point for the elevated binary. No executable path or argument list
 /// is read from the frontend after its typed plan has been validated.
 pub fn serve() -> Result<(), ExecutionError> {
-    if !rustix::process::geteuid().is_root() {
+    serve_as(
+        rustix::process::geteuid().is_root(),
+        &mut std::io::stdin().lock(),
+        &mut std::io::stdout().lock(),
+    )
+}
+fn serve_as(
+    root: bool,
+    input: &mut impl Read,
+    output: &mut impl Write,
+) -> Result<(), ExecutionError> {
+    if !root {
         return Err(invalid("host runner requires root"));
     }
-    let mut input = std::io::stdin().lock();
-    let mut output = std::io::stdout().lock();
-    serve_protocol(&mut input, &mut output, |expected| {
-        let mut native = Command::new(&expected.program);
-        native
-            .args(&expected.args)
-            .env_clear()
-            .env("PATH", SYSTEM_PATH)
-            .env("LC_ALL", "C")
-            .current_dir("/");
-        process::run(native, Limits::default(), &Cancellation::default(), true)
-    })
+    serve_protocol(input, output, run_protected)
+}
+/// Run one approved command with a fixed system environment.
+fn run_protected(expected: &ProtectedCommand) -> Result<Completion, ExecutionError> {
+    let mut native = Command::new(&expected.program);
+    native
+        .args(&expected.args)
+        .env_clear()
+        .env("PATH", SYSTEM_PATH)
+        .env("LC_ALL", "C")
+        .current_dir("/");
+    process::run(native, Limits::default(), &Cancellation::default(), true)
 }
 fn serve_protocol(
     mut input: &mut impl Read,
@@ -824,6 +869,19 @@ mod tests {
             stderr: vec![],
             truncated: false,
             cancellation_deferred: false,
+        }
+    }
+    /// Runs nothing; records every command the runner was asked to run.
+    #[derive(Default)]
+    struct Recorder(Vec<ProtectedCommand>);
+    impl Recorder {
+        fn run(
+            &mut self,
+        ) -> impl FnMut(&ProtectedCommand) -> Result<Completion, ExecutionError> + '_ {
+            |command| {
+                self.0.push(command.clone());
+                Ok(completion())
+            }
         }
     }
 
@@ -922,34 +980,32 @@ mod tests {
                 command: 0,
             },
         ];
-        let mut writes = 0;
-        let result = serve_protocol(&mut Cursor::new(input(&requests)), &mut Vec::new(), |_| {
-            writes += 1;
-            Ok(completion())
-        });
+        let mut recorder = Recorder::default();
+        let result = serve_protocol(
+            &mut Cursor::new(input(&requests)),
+            &mut Vec::new(),
+            recorder.run(),
+        );
         assert!(matches!(result, Err(ExecutionError::Invalid(_))));
-        assert_eq!(writes, 1);
+        assert_eq!(recorder.0.len(), 1);
     }
 
     #[test]
     fn invalid_plan_is_rejected_before_ready_or_write() {
         let operations = vec![Operation::Install(id("apt", "--purge"))];
         let mut output = Vec::new();
-        let mut writes = 0;
+        let mut recorder = Recorder::default();
         let result = serve_protocol(
             &mut Cursor::new(input(&[Request::Start {
                 protocol: PROTOCOL,
                 operations,
             }])),
             &mut output,
-            |_| {
-                writes += 1;
-                Ok(completion())
-            },
+            recorder.run(),
         );
         assert!(matches!(result, Err(ExecutionError::Invalid(_))));
         assert!(output.is_empty());
-        assert_eq!(writes, 0);
+        assert!(recorder.0.is_empty());
     }
 
     #[test]
@@ -1134,11 +1190,8 @@ mod tests {
 
     #[test]
     fn authorization_protocol_rejects_empty_restarts_and_out_of_plan_indices() {
-        let mut writes = 0;
-        let mut run = |_: &ProtectedCommand| {
-            writes += 1;
-            Ok(completion())
-        };
+        let mut recorder = Recorder::default();
+        let mut run = recorder.run();
         for request in [
             Request::Start {
                 protocol: PROTOCOL,
@@ -1193,7 +1246,8 @@ mod tests {
                 serve_protocol(&mut Cursor::new(input(&requests)), &mut output, &mut run).is_err()
             );
         }
-        assert_eq!(writes, 0);
+        drop(run);
+        assert!(recorder.0.is_empty());
     }
 
     #[test]
@@ -1330,12 +1384,12 @@ done"#;
             Err(ExecutionError::Invalid(_))
         ));
         let mut output = Vec::new();
+        let mut recorder = Recorder::default();
         assert!(matches!(
-            serve_protocol(&mut Cursor::new(b"not json\n"), &mut output, |_| Ok(
-                completion()
-            )),
+            serve_protocol(&mut Cursor::new(b"not json\n"), &mut output, recorder.run()),
             Err(ExecutionError::Invalid(_))
         ));
+        assert!(recorder.0.is_empty());
     }
 
     #[test]
@@ -1354,6 +1408,33 @@ done"#;
             assert!(matches!(
                 begin_session(child, &operations, commands.clone(), &Cancellation::default()),
                 Err(ExecutionError::AuthorizationDenied | ExecutionError::AuthorizationCancelled)
+            ));
+        }
+    }
+
+    #[test]
+    fn helper_exit_before_ready_is_cancelled_only_for_a_dismissed_prompt() {
+        let operations = [Operation::Refresh {
+            backend: "apt".into(),
+        }];
+        let commands = batch_commands(&operations).unwrap();
+        // A lingering child keeps stdout open, so the helper's exit status
+        // is observed instead of end of output.
+        for (code, cancelled) in [(126, true), (1, false)] {
+            let mut child = Command::new("/bin/sh");
+            child.arg("-c").arg(format!(
+                "IFS= read -r start; sleep 2 </dev/null & exit {code}"
+            ));
+            let result = begin_session(
+                child,
+                &operations,
+                commands.clone(),
+                &Cancellation::default(),
+            );
+            assert!(matches!(
+                (result, cancelled),
+                (Err(ExecutionError::AuthorizationCancelled), true)
+                    | (Err(ExecutionError::AuthorizationDenied), false)
             ));
         }
     }
@@ -1419,7 +1500,7 @@ done"#;
         let commit = "a".repeat(64);
         for base in ["/var/lib/flatpak", "/home/user/.local/share/flatpak"] {
             let path = format!("{base}/app/io.github.astrovm.PkgDeck/x86_64/master/{commit}/files");
-            let info = format!("[Instance]\napp-path={path}\n");
+            let info = format!("top=level\n[Instance]\nbranch=master\napp-path={path}\n");
             assert_eq!(
                 bundled_runner_path(Runtime::Flatpak, Path::new("/app/bin/pkd"), &info),
                 Some(Path::new(&path).join("libexec/pkgdeck-host-runner"))
@@ -1584,14 +1665,7 @@ done"#;
         app.reference = None;
         app.scope = Scope::User { uid: 1000 };
         assert!(flatpak_ref(&app).is_err());
-        assert!(manager_command(
-            "unsupported",
-            &Operation::Refresh {
-                backend: "unsupported".into()
-            },
-            None
-        )
-        .is_err());
+        assert!(manager_command("unsupported", "refresh", None).is_err());
     }
 
     #[test]
@@ -1605,12 +1679,12 @@ done"#;
         let mut malformed = input(&[start]);
         malformed.extend_from_slice(b"not-json\n");
         let mut output = Vec::new();
+        let mut recorder = Recorder::default();
         assert!(matches!(
-            serve_protocol(&mut Cursor::new(malformed), &mut output, |_| Ok(
-                completion()
-            )),
+            serve_protocol(&mut Cursor::new(malformed), &mut output, recorder.run()),
             Err(ExecutionError::Invalid(_))
         ));
+        assert!(recorder.0.is_empty());
         assert!(matches!(
             serde_json::from_slice::<Response>(output.split(|b| *b == b'\n').next().unwrap())
                 .unwrap(),
@@ -1722,27 +1796,239 @@ done"#;
 
     #[test]
     fn runner_stops_before_dispatch_when_ready_cannot_be_written() {
-        struct BrokenOutput;
-        impl Write for BrokenOutput {
-            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
-                Err(std::io::ErrorKind::BrokenPipe.into())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
         let start = Request::Start {
             protocol: PROTOCOL,
             operations: vec![Operation::Refresh {
                 backend: "apt".into(),
             }],
         };
-        let mut called = false;
-        let result = serve_protocol(&mut Cursor::new(input(&[start])), &mut BrokenOutput, |_| {
-            called = true;
-            Ok(completion())
-        });
+        let mut recorder = Recorder::default();
+        let mut full: &mut [u8] = &mut [];
+        let result = serve_protocol(&mut Cursor::new(input(&[start])), &mut full, recorder.run());
         assert!(matches!(result, Err(ExecutionError::Io(_))));
-        assert!(!called);
+        assert!(recorder.0.is_empty());
+    }
+
+    /// Room for exactly the Ready frame; every later reply fails to write.
+    fn ready_only() -> Vec<u8> {
+        let mut ready = Vec::new();
+        send(&mut ready, &Response::Ready { protocol: PROTOCOL }).unwrap();
+        vec![0; ready.len()]
+    }
+
+    #[test]
+    fn runner_stops_when_a_reply_cannot_be_written() {
+        let refresh = || Request::Start {
+            protocol: PROTOCOL,
+            operations: vec![Operation::Refresh {
+                backend: "apt".into(),
+            }],
+        };
+        // The rejection of an out-of-plan request cannot be delivered.
+        let mut recorder = Recorder::default();
+        let mut buffer = ready_only();
+        let result = serve_protocol(
+            &mut Cursor::new(input(&[
+                refresh(),
+                Request::Run {
+                    operation: 0,
+                    command: 1,
+                },
+            ])),
+            &mut &mut buffer[..],
+            recorder.run(),
+        );
+        assert!(matches!(result, Err(ExecutionError::Io(_))));
+        assert!(recorder.0.is_empty());
+        // Nor can a finished command's completion, after it ran once.
+        let mut buffer = ready_only();
+        let result = serve_protocol(
+            &mut Cursor::new(input(&[
+                refresh(),
+                Request::Run {
+                    operation: 0,
+                    command: 0,
+                },
+            ])),
+            &mut &mut buffer[..],
+            recorder.run(),
+        );
+        assert!(matches!(result, Err(ExecutionError::Io(_))));
+        assert_eq!(recorder.0.len(), 1);
+    }
+
+    #[test]
+    fn only_root_serves_the_protocol() {
+        let invalid_plan = input(&[Request::Start {
+            protocol: PROTOCOL,
+            operations: vec![],
+        }]);
+        let mut input = Cursor::new(invalid_plan);
+        let mut output = Vec::new();
+        assert!(matches!(
+            serve_as(false, &mut input, &mut output),
+            Err(ExecutionError::Invalid(reason)) if reason == "host runner requires root"
+        ));
+        assert_eq!(input.position(), 0);
+        // As root the request is read and validated before anything runs.
+        assert!(matches!(
+            serve_as(true, &mut input, &mut output),
+            Err(ExecutionError::Invalid(reason)) if reason.contains("invalid authorization protocol")
+        ));
+        assert!(output.is_empty());
+        // A root test process would read this process's stdin, so skip it.
+        assert!(
+            rustix::process::geteuid().is_root()
+                || matches!(
+                    serve(),
+                    Err(ExecutionError::Invalid(reason)) if reason == "host runner requires root"
+                )
+        );
+    }
+
+    #[test]
+    fn approved_commands_run_with_a_fixed_system_environment() {
+        let result = run_protected(&ProtectedCommand {
+            program: "/bin/sh".into(),
+            args: vec![
+                "-c".into(),
+                "printf '%s|%s|%s' \"$PATH\" \"$LC_ALL\" \"$PWD\"".into(),
+            ],
+        })
+        .unwrap();
+        assert_eq!(result.code, Some(0));
+        assert_eq!(result.stdout, format!("{SYSTEM_PATH}|C|/").as_bytes());
+    }
+
+    #[test]
+    fn waits_for_authorization_retry_interrupts_and_time_out() {
+        assert_eq!(unless_interrupted(Ok(1)), Ok(()));
+        assert_eq!(unless_interrupted(Err(rustix::io::Errno::INTR)), Ok(()));
+        assert_eq!(
+            unless_interrupted(Err(rustix::io::Errno::BADF)),
+            Err(rustix::io::Errno::BADF)
+        );
+        let operations = [Operation::Refresh {
+            backend: "apt".into(),
+        }];
+        let mut child = Command::new("/bin/sh");
+        child.arg("-c").arg("IFS= read -r start; sleep 5");
+        let started = Instant::now();
+        assert!(matches!(
+            begin_session_within(
+                child,
+                &operations,
+                batch_commands(&operations).unwrap(),
+                &Cancellation::default(),
+                Duration::ZERO
+            ),
+            Err(ExecutionError::AuthorizationDenied)
+        ));
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn a_runner_that_closes_its_input_at_once_is_a_denial() {
+        // A plan larger than a pipe buffer cannot be written to a helper
+        // that stopped reading.
+        let operations = vec![
+            Operation::Refresh {
+                backend: "apt".into(),
+            };
+            4096
+        ];
+        let commands = batch_commands(&operations).unwrap();
+        let mut child = Command::new("/bin/sh");
+        child.arg("-c").arg("exec 0<&-; sleep 5");
+        assert!(matches!(
+            begin_session(child, &operations, commands, &Cancellation::default()),
+            Err(ExecutionError::AuthorizationDenied)
+        ));
+    }
+
+    #[test]
+    fn a_runner_that_stops_reading_requests_fails_the_command() {
+        let operations = [Operation::Refresh {
+            backend: "apt".into(),
+        }];
+        let commands = batch_commands(&operations).unwrap();
+        let mut child = Command::new("/bin/sh");
+        child.arg("-c").arg(
+            "IFS= read -r start; exec 0<&-; printf '%s\\n' '{\"type\":\"ready\",\"protocol\":1}'; sleep 5",
+        );
+        let cancel = Cancellation::default();
+        let scope = begin_session(child, &operations, commands.clone(), &cancel)
+            .unwrap()
+            .unwrap();
+        set_operation(0);
+        let command = &commands[0][0];
+        let args = command.args.iter().map(OsString::from).collect::<Vec<_>>();
+        assert!(matches!(
+            run_in_scope(Path::new(&command.program), &args, &cancel),
+            Some(Err(ExecutionError::Io(_)))
+        ));
+        drop(scope);
+    }
+
+    #[test]
+    fn runner_commands_start_the_runner_through_the_authorization_prompt() {
+        use std::collections::BTreeMap;
+        let host = Host::new(Runtime::Native, BTreeMap::new());
+        let runner = PathBuf::from("/opt/pkgdeck/libexec/pkgdeck-host-runner");
+        assert!(runner_command(&host, Authorization::Polkit, None)
+            .unwrap()
+            .is_none());
+        let args = |command: &Command| {
+            command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+        let command = runner_command(&host, Authorization::Polkit, Some((runner.clone(), true)))
+            .unwrap()
+            .unwrap();
+        assert_eq!(command.get_program(), "/usr/bin/pkexec");
+        assert_eq!(
+            args(&command),
+            [
+                "--disable-internal-agent",
+                "/opt/pkgdeck/libexec/pkgdeck-host-runner",
+                "--batch-runner"
+            ]
+        );
+        let command = runner_command(
+            &host,
+            Authorization::SudoNonInteractive,
+            Some((runner, false)),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(command.get_program(), "/usr/bin/sudo");
+        assert_eq!(
+            args(&command),
+            ["-n", "--", "/opt/pkgdeck/libexec/pkgdeck-host-runner"]
+        );
+        // Outside Flatpak an AppImage without its launcher has no packaged
+        // runner beside the executable either.
+        // (Inside a real AppImage its launcher would be used instead.)
+        let appimage = Host::new(Runtime::AppImage, BTreeMap::new());
+        let refresh = [Operation::Refresh {
+            backend: "apt".into(),
+        }];
+        assert!(
+            std::env::var_os("APPIMAGE").is_some()
+                || begin(
+                    &appimage,
+                    Authorization::Polkit,
+                    &refresh,
+                    &Cancellation::default()
+                )
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            find_runner(Runtime::AppImage, Path::new("/nonexistent/bin/pkd"), ""),
+            None
+        );
     }
 }

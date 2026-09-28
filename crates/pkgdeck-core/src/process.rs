@@ -69,7 +69,8 @@ impl Completion {
 }
 
 /// The stderr line that best explains a failed command: the first line
-/// marked as an error (`E:`, `error:`, `fatal:` …), else the first line that
+/// marked as an error (`E:`, `error:`, `fatal:` …) that says more than the
+/// marker (Nix prints a bare `error:` before the cause), else the first line that
 /// is not a warning or hint, else the first non-empty line. Long lines are
 /// shortened and control characters never pass through.
 pub fn failure_summary(stderr: &[u8]) -> Option<String> {
@@ -85,9 +86,14 @@ pub fn failure_summary(stderr: &[u8]) -> Option<String> {
         let line = line.to_ascii_lowercase();
         markers.iter().any(|marker| line.starts_with(marker))
     };
+    let bare = |line: &str| {
+        line.trim_end_matches(|c: char| c == ':' || c.is_whitespace())
+            .chars()
+            .all(|c| c.is_ascii_alphabetic())
+    };
     let line = lines
         .iter()
-        .find(|line| starts(line, &ERRORS))
+        .find(|line| starts(line, &ERRORS) && !bare(line))
         .or_else(|| lines.iter().find(|line| !starts(line, &NOISE)))
         .or_else(|| lines.first())?;
     let clean: String = line
@@ -145,11 +151,8 @@ impl From<io::Error> for ExecutionError {
 }
 
 fn nonblocking(pipe: &impl AsFd) -> io::Result<()> {
-    let flags = rustix::fs::fcntl_getfl(pipe)?;
-    Ok(rustix::fs::fcntl_setfl(
-        pipe,
-        flags | rustix::fs::OFlags::NONBLOCK,
-    )?)
+    let flags = rustix::fs::fcntl_getfl(pipe)? | rustix::fs::OFlags::NONBLOCK;
+    Ok(rustix::fs::fcntl_setfl(pipe, flags)?)
 }
 
 fn drain(
@@ -222,33 +225,16 @@ pub(crate) fn run(
     let supervise = (|| {
         nonblocking(&stdout)?;
         nonblocking(&stderr)?;
+        let cap = limits.output_bytes;
+        let mut drain_both = |result: &mut Completion| -> io::Result<()> {
+            drain(&mut stdout, &mut result.stdout, cap, &mut result.truncated)?;
+            drain(&mut stderr, &mut result.stderr, cap, &mut result.truncated)
+        };
         loop {
-            drain(
-                &mut stdout,
-                &mut result.stdout,
-                limits.output_bytes,
-                &mut result.truncated,
-            )?;
-            drain(
-                &mut stderr,
-                &mut result.stderr,
-                limits.output_bytes,
-                &mut result.truncated,
-            )?;
+            drain_both(&mut result)?;
             if let Some(status) = child.try_wait()? {
                 reaped = true;
-                drain(
-                    &mut stdout,
-                    &mut result.stdout,
-                    limits.output_bytes,
-                    &mut result.truncated,
-                )?;
-                drain(
-                    &mut stderr,
-                    &mut result.stderr,
-                    limits.output_bytes,
-                    &mut result.truncated,
-                )?;
+                drain_both(&mut result)?;
                 result.code = status.code();
                 result.signal = status.signal();
                 result.cancellation_deferred = write && cancel.requested();
@@ -287,6 +273,35 @@ mod tests {
             cancellation_deferred: false,
         }
     }
+    struct Scripted(Vec<io::Result<&'static [u8]>>);
+    impl Read for Scripted {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            let bytes = self.0.remove(0)?;
+            buffer[..bytes.len()].copy_from_slice(bytes);
+            Ok(bytes.len())
+        }
+    }
+    #[test]
+    fn draining_retries_interrupts_caps_output_and_reports_read_errors() {
+        let mut output = vec![];
+        let mut truncated = false;
+        let mut pipe = Scripted(vec![
+            Err(io::ErrorKind::Interrupted.into()),
+            Ok(b"abc"),
+            Ok(b"def"),
+            Err(io::ErrorKind::WouldBlock.into()),
+        ]);
+        drain(&mut pipe, &mut output, 4, &mut truncated).unwrap();
+        assert_eq!(output, b"abcd");
+        assert!(truncated);
+        let mut broken = Scripted(vec![Err(io::ErrorKind::BrokenPipe.into())]);
+        assert_eq!(
+            drain(&mut broken, &mut output, 4, &mut truncated)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::BrokenPipe
+        );
+    }
     #[test]
     fn failures_read_as_one_plain_sentence() {
         let rustup = "error: rustup could not choose a version of cargo to run\nhelp: run 'rustup default stable'\n";
@@ -307,6 +322,13 @@ mod tests {
             failure_summary(b"warning: only\n").unwrap(),
             "warning: only"
         );
+        let nix = "error:\n       … while calling the 'throw' builtin\n       error: Nixpkgs 26.11 has dropped support for x86_64-darwin.\n";
+        assert_eq!(
+            failure_summary(nix.as_bytes()).unwrap(),
+            "error: Nixpkgs 26.11 has dropped support for x86_64-darwin."
+        );
+        // A bare marker alone is still better than nothing.
+        assert_eq!(failure_summary(b"error:\n").unwrap(), "error:");
         assert_eq!(failure_summary(b"\n  \n"), None);
         assert_eq!(failure_summary(b"bad\x1b[31m").unwrap(), "bad [31m");
         let long = "x".repeat(400);

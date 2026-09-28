@@ -143,6 +143,7 @@ impl<T: Transport> Rustup<T> {
             icon: None,
             component_ids: vec![],
             homepages: vec!["https://rust-lang.github.io/rustup/".into()],
+            adopt_with: None,
         }
     }
 
@@ -345,13 +346,14 @@ impl<T: Transport> Backend for Rustup<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::host::AptAction;
     use std::sync::{Arc, Mutex};
 
     #[derive(Clone)]
     struct Fake {
         list: Arc<Mutex<String>>,
         calls: Arc<Mutex<Vec<String>>>,
+        /// How `rustup --version` fails, if it does.
+        missing: Option<fn() -> ExecutionError>,
     }
     fn done(text: &str, code: i32) -> Completion {
         Completion {
@@ -364,35 +366,6 @@ mod tests {
         }
     }
     impl Transport for Fake {
-        fn apt_query(
-            &self,
-            _: &str,
-            _: &str,
-            _: &str,
-            _: &Cancellation,
-        ) -> Result<Completion, ExecutionError> {
-            unreachable!()
-        }
-        fn apt_write(&self, _: AptAction, _: &Cancellation) -> Result<Completion, ExecutionError> {
-            unreachable!()
-        }
-        fn brew(
-            &self,
-            _: &[OsString],
-            _: &Cancellation,
-            _: bool,
-        ) -> Result<Completion, ExecutionError> {
-            unreachable!()
-        }
-        fn flatpak(
-            &self,
-            _: &[OsString],
-            _: &Cancellation,
-            _: bool,
-            _: bool,
-        ) -> Result<Completion, ExecutionError> {
-            unreachable!()
-        }
         fn dev_tool(
             &self,
             executable: &str,
@@ -406,6 +379,9 @@ mod tests {
             self.calls.lock().unwrap().push(line.clone());
             let mut list = self.list.lock().unwrap();
             match args[0].as_str() {
+                "--version" => self
+                    .missing
+                    .map_or_else(|| Ok(done("rustup 1.29.1", 0)), |error| Err(error())),
                 "toolchain" if args[1] == "list" => Ok(done(&list, 0)),
                 // Newer rustup exits 100 when something can be updated.
                 "check" => Err(ExecutionError::Failed(done(
@@ -423,8 +399,10 @@ mod tests {
                     *list = list.replace("beta-aarch64-apple-darwin\n", "");
                     Ok(done("", 0))
                 }
-                "update" | "self" => Ok(done("", 0)),
-                other => panic!("unexpected {other}"),
+                other => {
+                    assert!(matches!(other, "update" | "self"), "unexpected {other}");
+                    Ok(done("", 0))
+                }
             }
         }
     }
@@ -434,6 +412,7 @@ mod tests {
                 "stable-aarch64-apple-darwin (default)\nbeta-aarch64-apple-darwin\n1.80.0-aarch64-apple-darwin (active)\n".into(),
             )),
             calls: Arc::default(),
+            missing: None,
         }
     }
 
@@ -467,14 +446,14 @@ mod tests {
             .execute(
                 &Operation::Upgrade(rows[0].id.clone()),
                 &Cancellation::default(),
-                &mut |_| {},
+                &mut drop::<Progress>,
             )
             .unwrap();
         rustup
             .execute(
                 &Operation::Upgrade(rows[3].id.clone()),
                 &Cancellation::default(),
-                &mut |_| {},
+                &mut drop::<Progress>,
             )
             .unwrap();
         let calls = fake.calls.lock().unwrap().clone();
@@ -536,7 +515,7 @@ mod tests {
             .execute(
                 &Operation::Install(offers[0].id.clone()),
                 &Cancellation::default(),
-                &mut |_| {},
+                &mut drop::<Progress>,
             )
             .unwrap();
         assert!(fake
@@ -550,7 +529,7 @@ mod tests {
             .execute(
                 &Operation::Remove(rows[0].id.clone()),
                 &Cancellation::default(),
-                &mut |_| {},
+                &mut drop::<Progress>,
             )
             .unwrap_err();
         assert!(error.to_string().contains("default toolchain"), "{error}");
@@ -558,7 +537,7 @@ mod tests {
             .execute(
                 &Operation::Remove(rows[1].id.clone()),
                 &Cancellation::default(),
-                &mut |_| {},
+                &mut drop::<Progress>,
             )
             .unwrap();
         assert!(!fake.list.lock().unwrap().contains("beta"));
@@ -568,8 +547,119 @@ mod tests {
             .execute(
                 &Operation::Install(bad),
                 &Cancellation::default(),
-                &mut |_| {}
+                &mut drop::<Progress>
             )
             .is_err());
+    }
+
+    #[test]
+    fn availability_follows_the_rustup_command() {
+        let detect = |missing: Option<fn() -> ExecutionError>| {
+            Rustup::new(Fake { missing, ..fake() }).detect(&Cancellation::default())
+        };
+        assert_eq!(detect(None).unwrap(), Availability::Available);
+        assert_eq!(
+            detect(Some(|| ExecutionError::Disabled("rustup not found".into()))).unwrap(),
+            Availability::Unavailable("rustup not found".into())
+        );
+        assert!(matches!(
+            detect(Some(|| ExecutionError::Cancelled)),
+            Err(EngineError::Cancelled)
+        ));
+        assert!(matches!(
+            detect(Some(|| ExecutionError::TimedOut)),
+            Err(EngineError::Execution(ExecutionError::TimedOut))
+        ));
+        let rustup = Rustup::new(fake());
+        assert!(rustup.may_have("1.80.0-aarch64-apple-darwin") && !rustup.may_have("--help"));
+        assert_eq!(rustup.capabilities(), CAPABILITIES);
+    }
+
+    #[test]
+    fn details_explain_toolchain_and_self_updates() {
+        let mut rustup = Rustup::new(fake());
+        let cancel = Cancellation::default();
+        let rows = rustup.installed(&cancel).unwrap();
+        let stable = rustup.details(&rows[0].id, &cancel).unwrap();
+        assert!(stable
+            .description
+            .starts_with("Rust toolchain · default. Updates stay on this toolchain's channel"));
+        let own = rustup.details(&rows[3].id, &cancel).unwrap();
+        assert!(own.description.contains("rustup self update"));
+        let mut absent = rows[0].id.clone();
+        absent.name = "nightly-aarch64-apple-darwin".into();
+        assert!(matches!(
+            rustup.details(&absent, &cancel),
+            Err(EngineError::NotFound)
+        ));
+    }
+
+    #[test]
+    fn operations_refuse_before_running_and_verify_after() {
+        let fake = fake();
+        let mut rustup = Rustup::new(fake.clone());
+        let cancel = Cancellation::default();
+        let rows = rustup.installed(&cancel).unwrap();
+        let beta = rows[1].id.clone();
+        let mut run = |operation: Operation, cancel: &Cancellation| {
+            rustup.execute(&operation, cancel, &mut drop::<Progress>)
+        };
+        assert!(matches!(
+            run(Operation::UpgradeAll { backend: ID.into() }, &cancel),
+            Err(EngineError::Unsupported { .. })
+        ));
+        let mut absent = beta.clone();
+        absent.name = "nightly".into();
+        assert!(matches!(
+            run(Operation::Remove(absent), &cancel),
+            Err(EngineError::NotFound)
+        ));
+        let mut foreign = beta.clone();
+        foreign.backend = "cargo".into();
+        let error = run(Operation::Upgrade(foreign), &cancel).unwrap_err();
+        assert!(error.to_string().contains("foreign or invalid toolchain"));
+        let cancelled = Cancellation::default();
+        cancelled.cancel();
+        assert!(matches!(
+            run(Operation::Upgrade(beta.clone()), &cancelled),
+            Err(EngineError::Cancelled)
+        ));
+        // Nothing ran for any refusal.
+        assert!(!fake
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call.starts_with("update") || call.contains("uninstall")));
+        // An update of a toolchain that then isn't listed is an error.
+        *fake.list.lock().unwrap() = "stable-aarch64-apple-darwin (default)\n".into();
+        let error = run(Operation::Upgrade(beta), &cancel).unwrap_err();
+        assert!(
+            error.to_string().contains("not in the expected state"),
+            "{error}"
+        );
+    }
+
+    /// The fake answers only rustup commands it knows.
+    #[test]
+    fn the_fake_refuses_every_other_manager() {
+        let fake = fake();
+        let cancel = Cancellation::default();
+        let refused = |call: &dyn Fn() -> Result<Completion, ExecutionError>| {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(call)).is_err()
+        };
+        assert!(refused(&|| fake.dev_tool("cargo", &[], &cancel, false)));
+        assert!(refused(&|| fake.dev_tool(
+            "rustup",
+            &["frobnicate".into()],
+            &cancel,
+            true
+        )));
+        assert!(fake
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|call| call == "frobnicate"));
     }
 }

@@ -108,88 +108,76 @@ impl Action {
         format!("{change}\n{}, {}, {scope}", self.backend, self.name)
     }
     pub fn validate(&self) -> Result<(), EngineError> {
+        self.plan().map(drop)
+    }
+    /// What an accepted change runs. Validation and execution share it, so
+    /// only a change that passed validation can ever run.
+    fn plan(&self) -> Result<Plan, EngineError> {
         system(&self.scope)?;
         if !valid_name(&self.name) {
             return Err(invalid("invalid repository name"));
         }
+        let name = self.name.as_str();
+        let flatpak = |args: &[&str]| Ok(Plan::Flatpak(args.iter().map(Into::into).collect()));
         match (&*self.backend, &self.change) {
             ("flatpak", Change::Add { url })
                 if url.starts_with("https://")
                     && url.ends_with(".flatpakrepo")
                     && !url.chars().any(char::is_whitespace) =>
             {
-                Ok(())
+                flatpak(&["remote-add", "--from", name, url])
             }
-            ("flatpak", Change::Remove | Change::SetEnabled { .. }) => Ok(()),
+            ("flatpak", Change::Remove) => flatpak(&["remote-delete", name]),
+            ("flatpak", Change::SetEnabled { enabled }) => {
+                let flag = if *enabled { "--enable" } else { "--disable" };
+                flatpak(&["remote-modify", flag, name])
+            }
             ("flatpak", Change::SetPriority { priority }) if (0..=9999).contains(priority) => {
-                Ok(())
+                flatpak(&["remote-modify", &format!("--prio={priority}"), name])
             }
-            ("fwupd", Change::SetEnabled { .. }) if self.scope == Scope::System => Ok(()),
-            ("apt", Change::OpenEditor) if self.scope == Scope::System => Ok(()),
+            ("fwupd", Change::SetEnabled { enabled }) if self.scope == Scope::System => {
+                Ok(Plan::Firmware { enabled: *enabled })
+            }
+            ("apt", Change::OpenEditor) if self.scope == Scope::System => Ok(Plan::Editor),
             _ => Err(invalid("unsupported repository change or invalid value")),
         }
     }
+}
+enum Plan {
+    Editor,
+    Firmware { enabled: bool },
+    Flatpak(Vec<OsString>),
 }
 pub fn apply(
     transport: &impl Transport,
     action: &Action,
     cancel: &Cancellation,
 ) -> Result<(), EngineError> {
-    action.validate()?;
+    let plan = action.plan()?;
     if cancel.requested() {
         return Err(EngineError::Cancelled);
     }
-    let system = system(&action.scope)?;
-    let mut args: Vec<OsString> = vec![];
-    match (&*action.backend, &action.change) {
-        ("apt", Change::OpenEditor) => {
-            transport.repository_editor()?;
-            return Ok(());
-        }
-        ("fwupd", Change::SetEnabled { enabled }) => {
-            args.extend(
-                [
-                    "--assume-yes",
-                    "modify-remote",
-                    &action.name,
-                    "Enabled",
-                    if *enabled { "true" } else { "false" },
-                ]
-                .map(Into::into),
-            );
+    match plan {
+        Plan::Editor => transport.repository_editor()?,
+        Plan::Firmware { enabled } => {
+            let enabled = if enabled { "true" } else { "false" };
+            let args = [
+                "--assume-yes",
+                "modify-remote",
+                &action.name,
+                "Enabled",
+                enabled,
+            ];
+            let args = args.map(Into::into);
             output(transport.system_manager("fwupdmgr", &args, cancel, true))?;
         }
-        ("flatpak", change) => {
-            args.extend(
-                [
-                    if system { "--system" } else { "--user" },
-                    "--noninteractive",
-                ]
-                .map(Into::into),
-            );
-            match change {
-                Change::Add { url } => {
-                    args.extend(["remote-add", "--from", &action.name, url].map(Into::into))
-                }
-                Change::Remove => args.extend(["remote-delete", &action.name].map(Into::into)),
-                Change::SetEnabled { enabled } => args.extend(
-                    [
-                        "remote-modify",
-                        if *enabled { "--enable" } else { "--disable" },
-                        &action.name,
-                    ]
-                    .map(Into::into),
-                ),
-                Change::SetPriority { priority } => args.extend([
-                    "remote-modify".into(),
-                    format!("--prio={priority}").into(),
-                    action.name.clone().into(),
-                ]),
-                _ => return Err(invalid("unsupported Flatpak operation")),
-            }
+        Plan::Flatpak(change) => {
+            let system = system(&action.scope)?;
+            let scope = if system { "--system" } else { "--user" };
+            let mut args: Vec<OsString> = vec![scope.into(), "--noninteractive".into()];
+            args.extend(change);
             output(transport.flatpak(&args, cancel, true, system))?;
         }
-        _ => return Err(invalid("unsupported repository operation")),
     }
     Ok(())
 }
@@ -464,15 +452,13 @@ pub fn list_selected(
         apt
     };
     let mut files = vec![apt.join("sources.list")];
-    match std::fs::read_dir(apt.join("sources.list.d")) {
-        Ok(entries) => {
-            for entry in entries {
-                match entry {
-                    Ok(entry) => files.push(entry.path()),
-                    Err(error) => report.errors.push(format!("APT: {error}")),
-                }
-            }
-        }
+    let entries = std::fs::read_dir(apt.join("sources.list.d")).and_then(|entries| {
+        entries
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<std::io::Result<Vec<_>>>()
+    });
+    match entries {
+        Ok(entries) => files.extend(entries),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
         Err(error) => report.errors.push(format!("APT: {error}")),
     }
@@ -517,7 +503,7 @@ pub fn list_selected(
                     priority: None,
                 });
             }
-        } else if file.extension().is_some_and(|e| e == "list") {
+        } else {
             for (index, line) in text.lines().enumerate() {
                 let line = line.trim();
                 let enabled = !line.starts_with('#');
@@ -551,6 +537,59 @@ mod repository_file_tests {
         backends::NativeTransport,
         host::{Authorization, Host},
     };
+    #[test]
+    fn failed_or_cut_command_output_and_bad_flatpak_rows_are_errors() {
+        let completion = |code, truncated| Completion {
+            code: Some(code),
+            signal: None,
+            stdout: b"partial".to_vec(),
+            stderr: vec![],
+            truncated,
+            cancellation_deferred: false,
+        };
+        assert!(matches!(
+            output(Ok(completion(1, false))),
+            Err(EngineError::Execution(ExecutionError::Failed(result))) if result.code == Some(1)
+        ));
+        assert!(matches!(
+            output(Ok(completion(0, true))),
+            Err(EngineError::InvalidResponse { reason, .. }) if reason.contains("output limit")
+        ));
+        let root = std::env::temp_dir().join(format!("pkgdeck-repos-bad-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let flatpak = root.join("flatpak");
+        std::fs::write(&flatpak, "#!/bin/sh\necho 'not a remote row'\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&flatpak, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let transport = NativeTransport {
+            host: Host::new(
+                crate::host::Runtime::Native,
+                [(OsString::from("PATH"), root.as_os_str().to_owned())].into(),
+            ),
+            authorization: Authorization::Polkit,
+        };
+        let user = Scope::User {
+            uid: rustix::process::getuid().as_raw(),
+        };
+        let report = list_selected(
+            &transport,
+            &root,
+            &Cancellation::default(),
+            &["flatpak".into()],
+            Some(&user),
+        );
+        assert!(report.repositories.is_empty());
+        assert_eq!(report.errors.len(), 1, "{:?}", report.errors);
+        assert!(report.errors[0].contains("invalid Flatpak repository metadata"));
+        std::fs::remove_dir_all(root).unwrap();
+        let system = parse_action(
+            r#"{"backend":"fwupd","name":"lvfs","scope":"system","action":"set_enabled","enabled":false}"#,
+        )
+        .unwrap();
+        assert_eq!(system.scope, Scope::System);
+        assert!(system.validate().is_ok());
+    }
     #[test]
     fn lists_synthetic_dnf_sections() {
         let root = std::env::temp_dir().join(format!("pkgdeck-repos-{}", std::process::id()));

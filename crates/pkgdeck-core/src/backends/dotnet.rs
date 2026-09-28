@@ -361,6 +361,7 @@ impl<T: Transport> DotnetTools<T> {
             component_ids: vec![],
             homepages: vec![format!("https://www.nuget.org/packages/{}", id.name)],
             id,
+            adopt_with: None,
         }
     }
 
@@ -380,6 +381,7 @@ impl<T: Transport> DotnetTools<T> {
             component_ids: vec![],
             homepages: vec![format!("https://www.nuget.org/packages/{}", id.name)],
             id,
+            adopt_with: None,
         }
     }
 
@@ -649,8 +651,13 @@ impl<T: Transport> Backend for DotnetTools<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::host::AptAction;
+    use crate::backends::dev_tools::{DevTool, DevTools};
     use std::sync::{Arc, Mutex};
+
+    fn backend(fake: Fake) -> DotnetTools<DevTools<Fake>> {
+        DotnetTools::new(DevTools(fake))
+    }
+    fn ignore(_: Progress) {}
 
     /// Captured from SDK 10.0.401.
     const SEARCH: &str = "Package ID                          Latest Version      Authors                            Downloads      Verified
@@ -747,6 +754,9 @@ Installed an ASP.NET Core HTTPS development certificate.
         }
     }
 
+    /// A command line (or its start) that fails, and how.
+    type Failure = (&'static str, fn() -> ExecutionError);
+
     #[derive(Clone, Default)]
     struct Fake {
         /// Installed tools: id → version.
@@ -754,6 +764,12 @@ Installed an ASP.NET Core HTTPS development certificate.
         calls: Arc<Mutex<Vec<String>>>,
         old_sdk: bool,
         offline: bool,
+        /// Only the .NET runtime: `dotnet --version` fails without an SDK.
+        runtime_only: bool,
+        /// Tools list no commands.
+        no_commands: bool,
+        /// One command line that fails, and how.
+        fail: Option<Failure>,
     }
     fn done(stdout: &str, code: i32) -> Completion {
         Completion {
@@ -768,36 +784,7 @@ Installed an ASP.NET Core HTTPS development certificate.
     fn failed(stdout: &str) -> Result<Completion, ExecutionError> {
         Err(ExecutionError::Failed(done(stdout, 1)))
     }
-    impl Transport for Fake {
-        fn apt_query(
-            &self,
-            _: &str,
-            _: &str,
-            _: &str,
-            _: &Cancellation,
-        ) -> Result<Completion, ExecutionError> {
-            unreachable!()
-        }
-        fn apt_write(&self, _: AptAction, _: &Cancellation) -> Result<Completion, ExecutionError> {
-            unreachable!()
-        }
-        fn brew(
-            &self,
-            _: &[OsString],
-            _: &Cancellation,
-            _: bool,
-        ) -> Result<Completion, ExecutionError> {
-            unreachable!()
-        }
-        fn flatpak(
-            &self,
-            _: &[OsString],
-            _: &Cancellation,
-            _: bool,
-            _: bool,
-        ) -> Result<Completion, ExecutionError> {
-            unreachable!()
-        }
+    impl DevTool for Fake {
         fn dev_tool(
             &self,
             executable: &str,
@@ -807,10 +794,15 @@ Installed an ASP.NET Core HTTPS development certificate.
         ) -> Result<Completion, ExecutionError> {
             assert_eq!(executable, "dotnet");
             let args: Vec<String> = args.iter().map(|a| a.to_string_lossy().into()).collect();
-            self.calls.lock().unwrap().push(args.join(" "));
+            let line = args.join(" ");
+            self.calls.lock().unwrap().push(line.clone());
+            if let Some((_, error)) = self.fail.filter(|(failing, _)| *failing == line) {
+                return Err(error());
+            }
             let mut tools = self.tools.lock().unwrap();
             let words: Vec<&str> = args.iter().map(String::as_str).collect();
             match words.as_slice() {
+                ["--version"] if self.runtime_only => failed(""),
                 ["--version"] => Ok(done("10.0.401\n", 0)),
                 ["tool", "list", "--global", "--format", "json"] if self.old_sdk => failed(
                     "Unrecognized command or argument '--format'.\nUnrecognized command or argument 'json'.\n",
@@ -819,8 +811,13 @@ Installed an ASP.NET Core HTTPS development certificate.
                     let data: Vec<String> = tools
                         .iter()
                         .map(|(id, version)| {
+                            let commands = if self.no_commands {
+                                String::new()
+                            } else {
+                                format!(r#""{id}""#)
+                            };
                             format!(
-                                r#"{{"packageId":"{id}","version":"{version}","commands":["{id}"]}}"#
+                                r#"{{"packageId":"{id}","version":"{version}","commands":[{commands}]}}"#
                             )
                         })
                         .collect();
@@ -868,24 +865,26 @@ Installed an ASP.NET Core HTTPS development certificate.
                     },
                     0,
                 )),
-                ["tool", verb, "--global", "--", id] => {
-                    assert!(write);
-                    match *verb {
+                other => {
+                    assert!(matches!(other, ["tool", _, "--global", "--", _]) && write, "{other:?}");
+                    let (verb, id) = (other[1], other[4]);
+                    match verb {
                         "install" => tools.push((id.to_string(), "3.0.3".into())),
                         "update" => {
                             for tool in tools.iter_mut().filter(|(name, _)| name == id) {
                                 tool.1 = "3.0.3".into();
                             }
                         }
-                        "uninstall" => tools.retain(|(name, _)| name != id),
-                        other => panic!("unexpected {other}"),
+                        _ => {
+                            assert_eq!(verb, "uninstall");
+                            tools.retain(|(name, _)| name != id);
+                        }
                     }
                     Ok(done(
                         &format!("Skipping NuGet package signature verification.\nTool '{id}' was successfully {verb}ed.\n"),
                         0,
                     ))
                 }
-                other => panic!("unexpected {other:?}"),
             }
         }
     }
@@ -900,16 +899,19 @@ Installed an ASP.NET Core HTTPS development certificate.
             ..Fake::default()
         }
     }
-    fn run(backend: &mut DotnetTools<Fake>, operation: Operation) -> Result<(), EngineError> {
+    fn run(
+        backend: &mut DotnetTools<DevTools<Fake>>,
+        operation: Operation,
+    ) -> Result<(), EngineError> {
         backend
-            .execute(&operation, &Cancellation::default(), &mut |_| {})
+            .execute(&operation, &Cancellation::default(), &mut ignore)
             .map(|_| ())
     }
 
     #[test]
     fn inventory_with_update_checks() {
         let fake = fake(&[("dotnet-ef", "10.0.12"), ("dotnetsay", "2.1.7")]);
-        let mut dotnet = DotnetTools::new(fake.clone());
+        let mut dotnet = backend(fake.clone());
         assert_eq!(
             dotnet.detect(&Cancellation::default()).unwrap(),
             Availability::Available
@@ -944,7 +946,7 @@ Installed an ASP.NET Core HTTPS development certificate.
     fn failed_checks_keep_the_rows() {
         let mut fake = fake(&[("dotnet-ef", "9.0.0"), ("dotnetsay", "2.1.7")]);
         fake.offline = true;
-        let mut dotnet = DotnetTools::new(fake.clone());
+        let mut dotnet = backend(fake.clone());
         let rows = dotnet.installed(&Cancellation::default()).unwrap();
         assert_eq!(rows.len(), 2);
         assert!(rows
@@ -953,11 +955,8 @@ Installed an ASP.NET Core HTTPS development certificate.
         // One shared failure is reported once, and checks stop there.
         let errors = dotnet.query_errors();
         assert_eq!(errors.len(), 1);
-        assert!(
-            errors[0].to_string().contains("service index"),
-            "{}",
-            errors[0]
-        );
+        let error = errors[0].to_string();
+        assert!(error.contains("service index"), "{error}");
         let checks = fake
             .calls
             .lock()
@@ -972,7 +971,7 @@ Installed an ASP.NET Core HTTPS development certificate.
     fn old_sdks_list_through_the_table() {
         let mut fake = fake(&[("dotnetsay", "2.1.7")]);
         fake.old_sdk = true;
-        let mut dotnet = DotnetTools::new(fake);
+        let mut dotnet = backend(fake);
         let rows = dotnet.installed(&Cancellation::default()).unwrap();
         assert_eq!(rows[0].installed_version.as_deref(), Some("2.1.7"));
         assert_eq!(rows[0].summary, ".NET global tool · dotnetsay");
@@ -981,7 +980,7 @@ Installed an ASP.NET Core HTTPS development certificate.
     #[test]
     fn search_install_remove_are_verified() {
         let fake = fake(&[("dotnet-ef", "10.0.12")]);
-        let mut dotnet = DotnetTools::new(fake.clone());
+        let mut dotnet = backend(fake.clone());
         let found = dotnet
             .search("DotNetSay", &Cancellation::default())
             .unwrap();
@@ -1056,7 +1055,7 @@ Installed an ASP.NET Core HTTPS development certificate.
     #[test]
     fn upgrade_all_updates_each_tool_behind() {
         let fake = fake(&[("dotnet-ef", "10.0.12"), ("dotnetsay", "2.1.7")]);
-        let mut dotnet = DotnetTools::new(fake.clone());
+        let mut dotnet = backend(fake.clone());
         run(
             &mut dotnet,
             Operation::UpgradeAll {
@@ -1067,5 +1066,214 @@ Installed an ASP.NET Core HTTPS development certificate.
         let calls = fake.calls.lock().unwrap().clone();
         assert!(calls.contains(&"tool update --global -- dotnetsay".into()));
         assert!(!calls.contains(&"tool update --global -- dotnet-ef".into()));
+    }
+
+    #[test]
+    fn an_empty_search_lists_installed_tools_without_the_catalog() {
+        let fake = fake(&[("dotnet-ef", "10.0.12")]);
+        let mut dotnet = backend(fake.clone());
+        assert!(dotnet.may_have("dotnet-ef") && !dotnet.may_have("--global"));
+        let rows = dotnet.search("  ", &Cancellation::default()).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(!fake
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call.starts_with("tool search")));
+        // Update checks stop at cancellation.
+        let cancel = Cancellation::default();
+        cancel.cancel();
+        assert!(matches!(
+            dotnet.installed(&cancel),
+            Err(EngineError::Cancelled)
+        ));
+    }
+
+    #[test]
+    fn a_runtime_without_the_sdk_is_unavailable() {
+        let mut fake = fake(&[]);
+        fake.runtime_only = true;
+        assert_eq!(
+            backend(fake).detect(&Cancellation::default()).unwrap(),
+            Availability::Unavailable(
+                ".NET SDK not found; global tools need the SDK, not only the runtime".into()
+            )
+        );
+    }
+
+    #[test]
+    fn prerelease_labels_compare_part_by_part() {
+        for (a, b, order) in [
+            ("2.0.0", "2.0.0-rc.1", Ordering::Greater),
+            ("2.0.0-rc.1", "2.0.0-rc", Ordering::Greater),
+            ("2.0.0-rc.1", "2.0.0-rc.1", Ordering::Equal),
+            ("2.0.0-1", "2.0.0-alpha", Ordering::Less),
+            ("2.0.0-alpha", "2.0.0-1", Ordering::Greater),
+            ("2.0.0-Beta", "2.0.0-alpha", Ordering::Greater),
+        ] {
+            assert_eq!(compare_versions(a, b), order, "{a} {b}");
+        }
+    }
+
+    #[test]
+    fn offline_details_and_updates_stay_honest() {
+        let mut fake = fake(&[("dotnetsay", "4.0.0")]);
+        fake.offline = true;
+        let mut dotnet = backend(fake.clone());
+        let rows = dotnet.installed(&Cancellation::default()).unwrap();
+        let details = dotnet
+            .details(&rows[0].id, &Cancellation::default())
+            .unwrap();
+        assert!(
+            details.description.contains("Update check failed"),
+            "{}",
+            details.description
+        );
+        assert_eq!(details.package.update, UpdateAvailability::Unknown);
+        let mut foreign = rows[0].id.clone();
+        foreign.backend = "nuget".into();
+        assert!(matches!(
+            dotnet.details(&foreign, &Cancellation::default()),
+            Err(EngineError::NotFound)
+        ));
+        // Without a check the update runs, and an older result is an error.
+        let error = run(&mut dotnet, Operation::Upgrade(rows[0].id.clone())).unwrap_err();
+        assert!(
+            error.to_string().contains("not in the expected state"),
+            "{error}"
+        );
+        // Cancelled before anything is written.
+        let cancel = Cancellation::default();
+        cancel.cancel();
+        fake.calls.lock().unwrap().clear();
+        assert!(matches!(
+            dotnet.execute(&Operation::Remove(rows[0].id.clone()), &cancel, &mut ignore),
+            Err(EngineError::Cancelled)
+        ));
+        assert!(matches!(
+            dotnet.execute(
+                &Operation::UpgradeAll { backend: ID.into() },
+                &cancel,
+                &mut ignore
+            ),
+            Err(EngineError::Cancelled)
+        ));
+        assert!(!fake
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call.starts_with("tool uninstall") || call.starts_with("tool update")));
+        assert!(matches!(
+            run(&mut dotnet, Operation::Refresh { backend: ID.into() }),
+            Err(EngineError::Unsupported { .. })
+        ));
+    }
+
+    #[test]
+    fn searches_without_an_authors_column_offer_plain_installs() {
+        let offers = parse_search("Package ID    Latest Version\n---\ndotnetsay     3.0.3\n");
+        assert_eq!(
+            offers,
+            vec![Offer {
+                id: "dotnetsay".into(),
+                version: "3.0.3".into(),
+                authors: String::new()
+            }]
+        );
+        let offer = DotnetTools::<DevTools<Fake>>::offer(&offers[0]);
+        assert_eq!(offer.summary, "Install as a .NET global tool");
+        assert_eq!(offer.candidate_version.as_deref(), Some("3.0.3"));
+    }
+
+    #[test]
+    fn tools_without_commands_or_a_feed_entry() {
+        let mut fake = fake(&[("private-tool", "1.0.0")]);
+        fake.no_commands = true;
+        let mut dotnet = backend(fake);
+        let rows = dotnet.installed(&Cancellation::default()).unwrap();
+        assert_eq!(rows[0].summary, ".NET global tool");
+        // No configured feed has it: nothing to compare, and no error.
+        assert_eq!(rows[0].update, UpdateAvailability::Unknown);
+        assert!(dotnet.query_errors().is_empty());
+        let details = dotnet
+            .details(&rows[0].id, &Cancellation::default())
+            .unwrap();
+        assert!(
+            details.description.contains("Commands: none listed"),
+            "{}",
+            details.description
+        );
+        // Nothing in the catalog either.
+        assert!(dotnet
+            .search("zzz", &Cancellation::default())
+            .unwrap()
+            .is_empty());
+        assert_eq!(dotnet.id(), "dotnet");
+        assert!(dotnet.capabilities().contains(&Capability::Upgrade));
+    }
+
+    #[test]
+    fn failed_commands_surface_as_errors() {
+        let failing = |line: &'static str, error: fn() -> ExecutionError| {
+            let mut fake = fake(&[("dotnetsay", "2.1.7")]);
+            fake.fail = Some((line, error));
+            backend(fake)
+        };
+        let cancel = Cancellation::default();
+        let detect = |error| failing("--version", error).detect(&cancel);
+        assert_eq!(
+            detect(|| ExecutionError::Disabled("dotnet not found".into())).unwrap(),
+            Availability::Unavailable("dotnet not found".into())
+        );
+        assert!(matches!(
+            detect(|| ExecutionError::Cancelled),
+            Err(EngineError::Cancelled)
+        ));
+        assert!(matches!(
+            detect(|| ExecutionError::TimedOut),
+            Err(EngineError::Execution(ExecutionError::TimedOut))
+        ));
+        // A listing that fails without mentioning `--format` is not an old SDK.
+        let mut dotnet = failing("tool list --global --format json", || {
+            ExecutionError::TimedOut
+        });
+        assert!(matches!(
+            dotnet.installed(&cancel),
+            Err(EngineError::Execution(ExecutionError::TimedOut))
+        ));
+        // An old SDK whose table listing fails too.
+        let mut fake = fake(&[]);
+        fake.old_sdk = true;
+        fake.fail = Some(("tool list --global", || ExecutionError::TimedOut));
+        assert!(matches!(
+            backend(fake).installed(&cancel),
+            Err(EngineError::Execution(ExecutionError::TimedOut))
+        ));
+        // A failed update check keeps the row and reports the failure.
+        let check = "package search --exact-match --format json -- dotnetsay";
+        let mut dotnet = failing(check, || ExecutionError::TimedOut);
+        let rows = dotnet.installed(&cancel).unwrap();
+        assert_eq!(rows[0].update, UpdateAvailability::Unknown);
+        assert!(matches!(
+            dotnet.query_errors().as_slice(),
+            [EngineError::Execution(ExecutionError::TimedOut)]
+        ));
+        // Cancelling during a check stops the inventory and the details.
+        let mut dotnet = failing(check, || ExecutionError::Cancelled);
+        assert!(matches!(
+            dotnet.installed(&cancel),
+            Err(EngineError::Cancelled)
+        ));
+        assert!(matches!(
+            dotnet.details(&rows[0].id, &cancel),
+            Err(EngineError::Cancelled)
+        ));
+        let mut dotnet = failing("tool search -- dotnetsay", || ExecutionError::TimedOut);
+        assert!(matches!(
+            dotnet.search("dotnetsay", &cancel),
+            Err(EngineError::Execution(ExecutionError::TimedOut))
+        ));
     }
 }

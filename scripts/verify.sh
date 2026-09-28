@@ -3,7 +3,7 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 mode=${1:-fast}
 if (($#)); then shift; fi
-usage='Usage: scripts/verify.sh [fast|full|containers] [--engine native|podman] [--only lint,coverage,release,tests]'
+usage='Usage: scripts/verify.sh [fast|full|containers] [--engine native|podman] [--only checks,lint,coverage,release,tests]'
 if [[ "$mode" == --help ]]; then echo "$usage"; exit 0; fi
 engine=native
 only=all
@@ -22,7 +22,7 @@ if [[ "$mode" != full && "$only" != all ]]; then
     echo "--only applies to full mode" >&2
     exit 2
 fi
-if [[ ! "$only" =~ ^(all|(lint|coverage|release|tests)(,(lint|coverage|release|tests))*)$ ]]; then
+if [[ ! "$only" =~ ^(all|(checks|lint|coverage|release|tests)(,(checks|lint|coverage|release|tests))*)$ ]]; then
     echo "$usage" >&2
     exit 2
 fi
@@ -66,10 +66,9 @@ if [[ "$engine" == podman ]]; then
     stage "verify-podman-$mode" scripts/container.sh development "$mode" --only "$only"
     exit 0
 fi
-# Stage-selected full runs (parallel CI jobs) skip the shared prefix: the
-# terminal job already covers it, and repeating it in every split job would
-# cost more than it signals.
-if [[ $only == all ]]; then
+# The shared checks (format, infrastructure, the APT helper) run once per
+# job that selects them; other stage-selected runs skip them.
+if want checks; then
     stage format cargo fmt --all --check
     stage test-infrastructure scripts/tests/infrastructure.sh
     stage check-no-python scripts/check-no-python.sh
@@ -96,7 +95,10 @@ else
     if want coverage; then
         mkdir -p coverage
         stage test-coverage cargo llvm-cov --workspace --include-build-script --ignore-filename-regex pkgdeck-tools --locked --lcov --output-path coverage/lcov.info
-        stage check-coverage cargo llvm-cov report --summary-only --include-build-script --ignore-filename-regex pkgdeck-tools --fail-under-lines 95
+        # The 100% gate counts every platform together (CI's Coverage /
+        # Combined); code for other platforms is not built here, so this one
+        # report is shown, not gated.
+        stage coverage-summary cargo llvm-cov report --summary-only --include-build-script --ignore-filename-regex pkgdeck-tools
     fi
     want release && stage build-release cargo build --workspace --release --locked
     # Plain debug test run without coverage instrumentation; the aarch64 CI

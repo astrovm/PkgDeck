@@ -143,6 +143,7 @@ impl<T: Transport> Nix<T> {
             icon: None,
             component_ids: vec![],
             homepages: vec![],
+            adopt_with: None,
         }
     }
 
@@ -310,8 +311,13 @@ impl<T: Transport> Backend for Nix<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::host::AptAction;
+    use crate::backends::dev_tools::{DevTool, DevTools};
     use std::sync::{Arc, Mutex};
+
+    fn backend(fake: Fake) -> Nix<DevTools<Fake>> {
+        Nix::new(DevTools(fake))
+    }
+    fn ignore(_: Progress) {}
 
     #[test]
     fn versions_come_from_store_paths() {
@@ -343,6 +349,14 @@ mod tests {
         profile: Arc<Mutex<String>>,
         calls: Arc<Mutex<Vec<String>>>,
         old_nix: bool,
+        /// How every nix command fails, if it does.
+        missing: Option<fn() -> ExecutionError>,
+        /// The profile format version `profile list` reports.
+        format: Option<u32>,
+        /// Writes succeed without changing the profile.
+        inert: bool,
+        /// `profile list` output is cut off.
+        truncated: bool,
     }
     fn done(text: &str) -> Completion {
         Completion {
@@ -356,36 +370,7 @@ mod tests {
     }
     const HELLO: &str = r#""hello":{"active":true,"attrPath":"legacyPackages.aarch64-linux.hello","originalUrl":"flake:nixpkgs","outputs":null,"priority":5,"storePaths":["/nix/store/kwhxkl8yn5y8wqiq11jsybagw3fbc4iv-hello-2.12.3"],"url":"https://releases.nixos.org/nixpkgs/x/nixexprs.tar.zst"}"#;
     const CURL: &str = r#""curl":{"active":true,"priority":5,"storePaths":["/nix/store/8gdgwydsf6gia9j178nymxwm2bl0z3m3-curl-8.20.0-bin"]}"#;
-    impl Transport for Fake {
-        fn apt_query(
-            &self,
-            _: &str,
-            _: &str,
-            _: &str,
-            _: &Cancellation,
-        ) -> Result<Completion, ExecutionError> {
-            unreachable!()
-        }
-        fn apt_write(&self, _: AptAction, _: &Cancellation) -> Result<Completion, ExecutionError> {
-            unreachable!()
-        }
-        fn brew(
-            &self,
-            _: &[OsString],
-            _: &Cancellation,
-            _: bool,
-        ) -> Result<Completion, ExecutionError> {
-            unreachable!()
-        }
-        fn flatpak(
-            &self,
-            _: &[OsString],
-            _: &Cancellation,
-            _: bool,
-            _: bool,
-        ) -> Result<Completion, ExecutionError> {
-            unreachable!()
-        }
+    impl DevTool for Fake {
         fn dev_tool(
             &self,
             executable: &str,
@@ -395,6 +380,9 @@ mod tests {
         ) -> Result<Completion, ExecutionError> {
             assert_eq!(executable, "nix");
             let args: Vec<String> = args.iter().map(|a| a.to_string_lossy().into()).collect();
+            if let Some(error) = self.missing {
+                return Err(error());
+            }
             if args[0] == "--version" {
                 return Ok(done("nix (Nix) 2.35.2"));
             }
@@ -403,9 +391,14 @@ mod tests {
             self.calls.lock().unwrap().push(line.clone());
             let mut profile = self.profile.lock().unwrap();
             match line.as_str() {
-                "profile list --json" => Ok(done(&format!(
-                    r#"{{"elements":{{{profile}}},"version":3}}"#
-                ))),
+                "profile list --json" => Ok(Completion {
+                    truncated: self.truncated,
+                    ..done(&format!(
+                        r#"{{"elements":{{{profile}}},"version":{}}}"#,
+                        self.format.unwrap_or(3)
+                    ))
+                }),
+                _ if self.inert => Ok(done("")),
                 "profile add nixpkgs#hello" if self.old_nix => {
                     Err(ExecutionError::Failed(Completion {
                         code: Some(1),
@@ -421,8 +414,10 @@ mod tests {
                     *profile = CURL.into();
                     Ok(done(""))
                 }
-                "profile upgrade hello" => Ok(done("")),
-                other => panic!("unexpected {other}"),
+                _ => {
+                    assert_eq!(line, "profile upgrade hello");
+                    Ok(done(""))
+                }
             }
         }
     }
@@ -433,7 +428,7 @@ mod tests {
             profile: Arc::new(Mutex::new(format!("{CURL},{HELLO}"))),
             ..Fake::default()
         };
-        let mut nix = Nix::new(fake.clone());
+        let mut nix = backend(fake.clone());
         let rows = nix.installed(&Cancellation::default()).unwrap();
         assert_eq!(rows.len(), 2);
         assert!(rows
@@ -448,21 +443,21 @@ mod tests {
         nix.execute(
             &Operation::Upgrade(rows[1].id.clone()),
             &Cancellation::default(),
-            &mut |_| {},
+            &mut ignore,
         )
         .unwrap();
         let error = nix
             .execute(
                 &Operation::Upgrade(rows[0].id.clone()),
                 &Cancellation::default(),
-                &mut |_| {},
+                &mut ignore,
             )
             .unwrap_err();
         assert!(error.to_string().contains("store path"), "{error}");
         nix.execute(
             &Operation::Remove(rows[1].id.clone()),
             &Cancellation::default(),
-            &mut |_| {},
+            &mut ignore,
         )
         .unwrap();
         assert!(!fake.profile.lock().unwrap().contains("hello"));
@@ -476,14 +471,14 @@ mod tests {
                 old_nix,
                 ..Fake::default()
             };
-            let mut nix = Nix::new(fake.clone());
+            let mut nix = backend(fake.clone());
             let offers = nix.search("hello", &Cancellation::default()).unwrap();
             assert_eq!(offers.len(), 1);
             assert!(unverified_search_offer(&offers[0]));
             nix.execute(
                 &Operation::Install(offers[0].id.clone()),
                 &Cancellation::default(),
-                &mut |_| {},
+                &mut ignore,
             )
             .unwrap();
             assert!(fake.profile.lock().unwrap().contains("hello"));
@@ -502,10 +497,161 @@ mod tests {
     fn other_profile_formats_are_refused() {
         let fake = Fake::default();
         *fake.profile.lock().unwrap() = String::new();
-        let mut nix = Nix::new(fake);
+        let mut nix = backend(fake);
         assert!(nix.installed(&Cancellation::default()).unwrap().is_empty());
         // Nix 2.19 and older wrote version 2, a list without names.
-        let old: Profile = serde_json::from_str(r#"{"version":2}"#).unwrap();
-        assert_eq!(old.version, 2);
+        let mut nix = backend(Fake {
+            format: Some(2),
+            ..Fake::default()
+        });
+        let error = nix.installed(&Cancellation::default()).unwrap_err();
+        assert!(
+            error.to_string().contains("version 2 isn't supported"),
+            "{error}"
+        );
+        // A listing cut off at the output limit is never parsed.
+        let mut nix = backend(Fake {
+            truncated: true,
+            ..Fake::default()
+        });
+        let error = nix.installed(&Cancellation::default()).unwrap_err();
+        assert!(
+            error.to_string().contains("exceeded output limit"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn availability_follows_the_nix_command() {
+        let detect = |missing: Option<fn() -> ExecutionError>| {
+            backend(Fake {
+                missing,
+                ..Fake::default()
+            })
+            .detect(&Cancellation::default())
+        };
+        assert_eq!(detect(None).unwrap(), Availability::Available);
+        assert_eq!(
+            detect(Some(|| ExecutionError::Disabled("nix not found".into()))).unwrap(),
+            Availability::Unavailable("nix not found".into())
+        );
+        assert!(matches!(
+            detect(Some(|| ExecutionError::Cancelled)),
+            Err(EngineError::Cancelled)
+        ));
+        assert!(matches!(
+            detect(Some(|| ExecutionError::TimedOut)),
+            Err(EngineError::Execution(ExecutionError::TimedOut))
+        ));
+        let nix = backend(Fake::default());
+        assert!(nix.may_have("python3.12") && !nix.may_have("--impure"));
+        assert_eq!(nix.id(), "nix");
+        assert!(nix.capabilities().contains(&Capability::Upgrade));
+        // A profile that can't be read fails the inventory.
+        let mut nix = backend(Fake {
+            missing: Some(|| ExecutionError::TimedOut),
+            ..Fake::default()
+        });
+        assert!(matches!(
+            nix.installed(&Cancellation::default()),
+            Err(EngineError::Execution(ExecutionError::TimedOut))
+        ));
+    }
+
+    #[test]
+    fn only_active_elements_are_rows() {
+        // Elements are active unless the profile says otherwise.
+        let fake = Fake {
+            profile: Arc::new(Mutex::new(
+                r#""jq":{"storePaths":["/nix/store/aaaa-jq-1.8.1-bin"]},"old":{"active":false,"storePaths":[]}"#.into(),
+            )),
+            ..Fake::default()
+        };
+        let rows = backend(fake).installed(&Cancellation::default()).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id.name, "jq");
+        assert_eq!(rows[0].installed_version.as_deref(), Some("1.8.1"));
+    }
+
+    #[test]
+    fn details_say_whether_an_upgrade_can_change_anything() {
+        let fake = Fake {
+            profile: Arc::new(Mutex::new(format!("{CURL},{HELLO}"))),
+            ..Fake::default()
+        };
+        let mut nix = backend(fake);
+        let rows = nix.installed(&Cancellation::default()).unwrap();
+        let cancel = Cancellation::default();
+        let hello = nix.details(&rows[1].id, &cancel).unwrap();
+        assert!(hello
+            .description
+            .contains("Store path: /nix/store/kwhxkl8yn5y8wqiq11jsybagw3fbc4iv-hello-2.12.3"));
+        assert!(hello.description.contains("re-evaluates its flake"));
+        let curl = nix.details(&rows[0].id, &cancel).unwrap();
+        assert!(curl.description.contains("nothing to upgrade from"));
+        let mut foreign = rows[1].id.clone();
+        foreign.backend = "homebrew".into();
+        assert!(matches!(
+            nix.details(&foreign, &cancel),
+            Err(EngineError::NotFound)
+        ));
+        foreign.backend = ID.into();
+        foreign.name = "absent".into();
+        assert!(matches!(
+            nix.details(&foreign, &cancel),
+            Err(EngineError::NotFound)
+        ));
+    }
+
+    #[test]
+    fn operations_check_the_profile_before_and_after() {
+        let fake = Fake {
+            profile: Arc::new(Mutex::new(format!("{CURL},{HELLO}"))),
+            ..Fake::default()
+        };
+        let mut nix = backend(fake.clone());
+        let cancel = Cancellation::default();
+        let rows = nix.installed(&cancel).unwrap();
+        let hello = rows[1].id.clone();
+        let run = |nix: &mut Nix<DevTools<Fake>>, operation: Operation| {
+            nix.execute(&operation, &cancel, &mut ignore)
+        };
+        // Already there: nothing runs.
+        fake.calls.lock().unwrap().clear();
+        run(&mut nix, Operation::Install(hello.clone())).unwrap();
+        assert_eq!(*fake.calls.lock().unwrap(), vec!["profile list --json"]);
+        assert!(matches!(
+            run(&mut nix, Operation::UpgradeAll { backend: ID.into() }),
+            Err(EngineError::Unsupported { .. })
+        ));
+        for name in ["-rf", ""] {
+            let mut bad = hello.clone();
+            bad.name = name.into();
+            let error = run(&mut nix, Operation::Remove(bad)).unwrap_err();
+            assert!(error.to_string().contains("invalid profile element"));
+        }
+        let mut foreign = hello.clone();
+        foreign.backend = "homebrew".into();
+        assert!(run(&mut nix, Operation::Remove(foreign)).is_err());
+        let mut absent = hello.clone();
+        absent.name = "absent".into();
+        assert!(matches!(
+            run(&mut nix, Operation::Remove(absent.clone())),
+            Err(EngineError::NotFound)
+        ));
+        assert!(matches!(
+            run(&mut nix, Operation::Upgrade(absent)),
+            Err(EngineError::NotFound)
+        ));
+        // A write that leaves the profile unchanged is caught.
+        let mut nix = backend(Fake {
+            inert: true,
+            ..fake
+        });
+        let error = run(&mut nix, Operation::Remove(hello)).unwrap_err();
+        assert!(
+            error.to_string().contains("not in the expected state"),
+            "{error}"
+        );
     }
 }

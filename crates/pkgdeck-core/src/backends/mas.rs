@@ -45,6 +45,7 @@ fn records(output: &[u8]) -> Result<Vec<MasApp>, EngineError> {
 }
 
 /// mas 7 added the JSON output this adapter reads.
+#[cfg(any(target_os = "macos", test))]
 fn supported_version(text: &str) -> bool {
     text.trim()
         .split('.')
@@ -122,26 +123,21 @@ impl<T: Transport> MacAppStore<T> {
             icon: None,
             component_ids: vec![],
             homepages: vec![],
+            adopt_with: None,
         }
     }
 
-    fn inventory(&self, check: bool, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
+    fn inventory(&self, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
         let installed = self.list(cancel)?;
-        let outdated = if check {
-            Some(self.outdated(cancel)?)
-        } else {
-            None
-        };
+        let outdated = self.outdated(cancel)?;
         Ok(installed
             .iter()
             .map(|app| {
-                let candidate = outdated.as_ref().map(|outdated| {
-                    outdated
-                        .iter()
-                        .find(|update| update.adam_id == app.adam_id)
-                        .and_then(|update| update.new_version.as_deref())
-                });
-                Self::package(app, candidate)
+                let candidate = outdated
+                    .iter()
+                    .find(|update| update.adam_id == app.adam_id)
+                    .and_then(|update| update.new_version.as_deref());
+                Self::package(app, Some(candidate))
             })
             .collect())
     }
@@ -248,12 +244,14 @@ impl<T: Transport> Backend for MacAppStore<T> {
     fn capabilities(&self) -> &[Capability] {
         CAPABILITIES
     }
+    #[cfg(not(target_os = "macos"))]
+    fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
+        Ok(Availability::Unavailable(
+            "The Mac App Store requires macOS".into(),
+        ))
+    }
+    #[cfg(target_os = "macos")]
     fn detect(&mut self, cancel: &Cancellation) -> Result<Availability, EngineError> {
-        if !cfg!(target_os = "macos") {
-            return Ok(Availability::Unavailable(
-                "The Mac App Store requires macOS".into(),
-            ));
-        }
         let version = match self.run(&["version"], cancel, false) {
             Ok(output) => String::from_utf8_lossy(&output).into_owned(),
             Err(EngineError::Execution(ExecutionError::Disabled(reason))) => {
@@ -292,7 +290,7 @@ impl<T: Transport> Backend for MacAppStore<T> {
             .collect())
     }
     fn installed(&mut self, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
-        self.inventory(true, cancel)
+        self.inventory(cancel)
     }
     fn details(
         &mut self,
@@ -356,17 +354,39 @@ impl<T: Transport> Backend for MacAppStore<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::host::AptAction;
     use std::sync::{Arc, Mutex};
 
     /// Answers `mas` with canned output and records every command it ran.
-    #[derive(Clone, Default)]
+    #[derive(Clone)]
     struct Fake {
         list: Arc<Mutex<Vec<String>>>,
         outdated: Arc<Mutex<Vec<String>>>,
         calls: Arc<Mutex<Vec<String>>>,
         update_error: Option<&'static str>,
         update_installs: bool,
+        /// What `mas version` prints, or how it fails.
+        version: Result<&'static str, fn() -> ExecutionError>,
+        /// stderr of a failing `mas list`.
+        list_error: Option<&'static str>,
+    }
+    impl Default for Fake {
+        fn default() -> Self {
+            Self {
+                list: Arc::default(),
+                outdated: Arc::default(),
+                calls: Arc::default(),
+                update_error: None,
+                update_installs: false,
+                version: Ok("7.0.0\n"),
+                list_error: None,
+            }
+        }
+    }
+    fn failed(stderr: &str) -> ExecutionError {
+        let mut result = done(String::new());
+        result.code = Some(1);
+        result.stderr = stderr.as_bytes().to_vec();
+        ExecutionError::Failed(result)
     }
     fn done(stdout: String) -> Completion {
         Completion {
@@ -379,35 +399,6 @@ mod tests {
         }
     }
     impl Transport for Fake {
-        fn apt_query(
-            &self,
-            _: &str,
-            _: &str,
-            _: &str,
-            _: &Cancellation,
-        ) -> Result<Completion, ExecutionError> {
-            unreachable!()
-        }
-        fn apt_write(&self, _: AptAction, _: &Cancellation) -> Result<Completion, ExecutionError> {
-            unreachable!()
-        }
-        fn brew(
-            &self,
-            _: &[OsString],
-            _: &Cancellation,
-            _: bool,
-        ) -> Result<Completion, ExecutionError> {
-            unreachable!()
-        }
-        fn flatpak(
-            &self,
-            _: &[OsString],
-            _: &Cancellation,
-            _: bool,
-            _: bool,
-        ) -> Result<Completion, ExecutionError> {
-            unreachable!()
-        }
         fn dev_tool(
             &self,
             executable: &str,
@@ -426,25 +417,26 @@ mod tests {
             assert_eq!(executable, "mas");
             self.calls.lock().unwrap().push(args.join(" "));
             match args[0].as_str() {
-                "version" => Ok(done("7.0.0\n".into())),
-                "list" => Ok(done(self.list.lock().unwrap().join("\n"))),
+                "version" => self.version.map(|text| done(text.into())).map_err(|e| e()),
+                "list" => match self.list_error {
+                    Some(stderr) => Err(failed(stderr)),
+                    None => Ok(done(self.list.lock().unwrap().join("\n"))),
+                },
                 "outdated" => Ok(done(self.outdated.lock().unwrap().join("\n"))),
-                "update" => {
+                _ => {
+                    assert_eq!(args[0], "update");
                     assert!(write);
                     if let Some(stderr) = self.update_error {
-                        let mut result = done(String::new());
-                        result.code = Some(1);
-                        result.stderr = stderr.as_bytes().to_vec();
-                        return Err(ExecutionError::Failed(result));
+                        return Err(failed(stderr));
                     }
-                    if self.update_installs {
-                        *self.list.lock().unwrap() =
-                            vec![app(1, "Alpha", "2.0"), app(2, "Beta", "1.0")];
-                        self.outdated.lock().unwrap().clear();
+                    if !self.update_installs {
+                        return Ok(done(String::new()));
                     }
-                    Ok(done(String::new()))
+                    *self.list.lock().unwrap() =
+                        vec![app(1, "Alpha", "2.0"), app(2, "Beta", "1.0")];
+                    self.outdated.lock().unwrap().clear();
+                    Ok(done("==> Installed Alpha (2.0)\n".into()))
                 }
-                other => panic!("unexpected mas {other}"),
             }
         }
     }
@@ -522,11 +514,24 @@ mod tests {
         fake.update_installs = true;
         let mut store = MacAppStore::new(fake.clone());
         let operations = [Operation::Upgrade(id("1")), Operation::Upgrade(id("2"))];
+        let mut messages = vec![];
         let outcomes = store
-            .execute_group(&operations, &Cancellation::default(), &mut |_| {})
+            .execute_group(&operations, &Cancellation::default(), &mut |progress| {
+                if let Progress::Message(text) = progress {
+                    messages.push(text);
+                }
+            })
             .unwrap()
             .unwrap();
         assert_eq!(outcomes.len(), 2);
+        // mas's own output is shown as it reports it.
+        assert_eq!(
+            messages,
+            [
+                "Updating Alpha from the App Store",
+                "==> Installed Alpha (2.0)\n"
+            ]
+        );
         // Beta is current, so only Alpha is passed to mas.
         let calls = fake.calls.lock().unwrap().clone();
         assert_eq!(
@@ -542,7 +547,7 @@ mod tests {
             .execute(
                 &Operation::Upgrade(id("1")),
                 &Cancellation::default(),
-                &mut |_| {},
+                &mut drop::<Progress>,
             )
             .unwrap();
         assert!(!fake
@@ -556,7 +561,7 @@ mod tests {
             store.execute(
                 &Operation::Upgrade(id("9")),
                 &Cancellation::default(),
-                &mut |_| {}
+                &mut drop::<Progress>
             ),
             Err(EngineError::NotFound)
         ));
@@ -564,7 +569,7 @@ mod tests {
             store.execute(
                 &Operation::Remove(id("1")),
                 &Cancellation::default(),
-                &mut |_| {}
+                &mut drop::<Progress>
             ),
             Err(EngineError::Unsupported { .. })
         ));
@@ -578,7 +583,7 @@ mod tests {
             .execute(
                 &Operation::Upgrade(id("1")),
                 &Cancellation::default(),
-                &mut |_| {},
+                &mut drop::<Progress>,
             )
             .unwrap_err();
         assert!(
@@ -598,7 +603,7 @@ mod tests {
             store.execute(
                 &Operation::Upgrade(id("1")),
                 &Cancellation::default(),
-                &mut |_| {}
+                &mut drop::<Progress>
             ),
             Err(EngineError::Execution(ExecutionError::AuthorizationDenied))
         ));
@@ -616,5 +621,105 @@ mod tests {
         assert!(supported_version("12.1"));
         assert!(!supported_version("6.9.0"));
         assert!(!supported_version("garbage"));
+    }
+
+    #[test]
+    fn the_app_store_is_only_offered_on_macos() {
+        let availability = MacAppStore::new(fake())
+            .detect(&Cancellation::default())
+            .unwrap();
+        if cfg!(target_os = "macos") {
+            assert_eq!(availability, Availability::Available);
+        } else {
+            assert_eq!(
+                availability,
+                Availability::Unavailable("The Mac App Store requires macOS".into())
+            );
+        }
+    }
+
+    #[test]
+    fn details_link_the_store_page_and_never_offer_installs() {
+        let mut store = MacAppStore::new(fake());
+        // Any app name can be an installed App Store app.
+        assert!(store.may_have("Final Cut Pro") && !store.may_have(""));
+        // Updates only: installs and removals stay with the App Store.
+        assert_eq!(store.capabilities(), CAPABILITIES);
+        let details = store.details(&id("2"), &Cancellation::default()).unwrap();
+        assert_eq!(details.package.display_name, "Beta");
+        assert_eq!(
+            details.homepage.as_deref(),
+            Some("https://apps.apple.com/app/id2")
+        );
+        assert!(details
+            .description
+            .starts_with("Location: /Applications/Beta.app\n\nApp Store ID: 2\n\nBundle identifier: com.example.Beta"));
+        assert!(details.description.contains("does not install or remove"));
+        let mut foreign = id("2");
+        foreign.backend = "homebrew-cask".into();
+        assert!(matches!(
+            store.details(&foreign, &Cancellation::default()),
+            Err(EngineError::NotFound)
+        ));
+    }
+
+    #[test]
+    fn groups_take_only_updates_and_cancellation_stops_before_mas_runs() {
+        let fake = fake();
+        let mut store = MacAppStore::new(fake.clone());
+        let mixed = [Operation::Upgrade(id("1")), Operation::Remove(id("2"))];
+        assert!(store
+            .execute_group(&mixed, &Cancellation::default(), &mut drop::<Progress>)
+            .is_none());
+        let cancel = Cancellation::default();
+        cancel.cancel();
+        assert!(matches!(
+            store.execute(&Operation::Upgrade(id("1")), &cancel, &mut drop::<Progress>),
+            Err(EngineError::Cancelled)
+        ));
+        assert!(!fake
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call.starts_with("update")));
+    }
+
+    #[test]
+    fn a_password_prompt_while_listing_is_an_authorization_failure() {
+        let mut fake = fake();
+        fake.list_error = Some("sudo: a password is required\n");
+        let mut store = MacAppStore::new(fake.clone());
+        assert!(matches!(
+            store.installed(&Cancellation::default()),
+            Err(EngineError::Execution(ExecutionError::AuthorizationDenied))
+        ));
+        // Any other failure is reported as it is.
+        fake.list_error = Some("mas: not signed in\n");
+        let mut store = MacAppStore::new(fake);
+        assert!(matches!(
+            store.installed(&Cancellation::default()),
+            Err(EngineError::Execution(ExecutionError::Failed(_)))
+        ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn detection_needs_mas_seven() {
+        let detect = |version: Result<&'static str, fn() -> ExecutionError>| {
+            MacAppStore::new(Fake { version, ..fake() }).detect(&Cancellation::default())
+        };
+        assert_eq!(
+            detect(Ok("6.3.0\n")).unwrap(),
+            Availability::Unavailable("mas 6.3.0 is too old; PkgDeck needs mas 7 or newer".into())
+        );
+        assert_eq!(
+            detect(Err(|| ExecutionError::Disabled("mas not found".into()))).unwrap(),
+            Availability::Unavailable("mas not found".into())
+        );
+        assert!(matches!(
+            detect(Err(|| ExecutionError::TimedOut)),
+            Err(EngineError::Execution(ExecutionError::TimedOut))
+        ));
     }
 }

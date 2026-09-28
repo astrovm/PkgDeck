@@ -227,6 +227,10 @@ mod tests {
             live.clear();
             assert_eq!(live.state.lock().unwrap().drawn, 0);
         }
+        // Nothing to draw without a status.
+        let mut idle = State::default();
+        draw(&mut idle, 0, 80, true);
+        assert_eq!(idle.drawn, 0);
         let quiet = Live::off();
         assert!(!quiet.animated());
         quiet.status("ignored");

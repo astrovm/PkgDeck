@@ -183,6 +183,13 @@ listed under Pacman. It's read-only: building an AUR package runs its
 PKGBUILD, so review it and update with your AUR helper. See the
 [CLI guide](cli.md#arch-user-repository-aur).
 
+### Toolbx and Distrobox
+
+On Fedora Silverblue and similar systems, the **Toolbx containers** and
+**Distrobox containers** sources list your development containers and update
+the packages inside them with each container's own package manager. Containers
+are never created or removed.
+
 ### Image-based systems
 
 On Fedora Atomic, CoreOS, and other bootc or rpm-ostree systems, the
@@ -222,8 +229,15 @@ App Store receipt-bearing copies get no suggestion. For VS Code, Firefox and Obs
 installing the suggested cask lets Homebrew manage the copy you already have,
 after PkgDeck checks its signature, version, architecture, and files, and keeps
 a copy until Homebrew finishes (see the [CLI guide](cli.md#letting-homebrew-manage-an-app-you-installed)).
+Such a copy, with no App Store receipt and no Homebrew owner, gets a **Manage
+with Homebrew** button on its row and in its details while the Homebrew Casks
+source is available. It looks the cask up through Homebrew Casks, runs these
+checks, and opens the usual confirmation with what Homebrew will take over. It
+is offered only when that cask would manage this exact copy, never a second
+install, and a finished handover has no Undo, since removing the cask would
+delete the app.
 
-This source is read-only: no install, remove, update, or adoption buttons. Copies
+This source is otherwise read-only: no install, remove, or update buttons. Copies
 already listed under Homebrew also appear in this inventory with their ownership
 label. Helper apps inside bundles are excluded; aliases to the same bundle are
 listed once. Discovery covers up to four levels of subfolders and does not follow

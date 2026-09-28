@@ -280,4 +280,43 @@ mod tests {
         assert!(entries[0].finished_at.is_some());
         fs::remove_dir_all(path).unwrap();
     }
+
+    #[test]
+    fn state_changes_stamp_only_terminal_states_and_skip_unknown_entries() {
+        let path = std::env::temp_dir().join(format!(
+            "pkgdeck-state-activity-{}-{}",
+            std::process::id(),
+            now()
+        ));
+        let store = History::new(path.join("activity.json"));
+        let id = store.begin("gui", vec![], State::Queued).unwrap();
+        store.state(id, State::Authorizing).unwrap();
+        let entry = store.entries().unwrap().remove(0);
+        assert_eq!((entry.state, entry.finished_at), (State::Authorizing, None));
+        store.state(id, State::Cancelled).unwrap();
+        let entry = store.entries().unwrap().remove(0);
+        assert_eq!(entry.state, State::Cancelled);
+        assert!(entry.finished_at.is_some());
+        store.state(id + 1, State::Running).unwrap();
+        store.finish(id + 1, vec![Outcome::Finished]).unwrap();
+        let second = store.begin("cli", vec![], State::Running).unwrap();
+        store
+            .finish(second, vec![Outcome::Finished, Outcome::Cancelled])
+            .unwrap();
+        let states: Vec<_> = store
+            .entries()
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.state)
+            .collect();
+        assert_eq!(states, [State::Cancelled, State::Cancelled]);
+        assert_eq!(
+            History::new(PathBuf::from("/"))
+                .entries()
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+        fs::remove_dir_all(path).unwrap();
+    }
 }

@@ -82,7 +82,12 @@ impl Entry {
             && self.reference == id.reference
             && matches!(
                 (&self.scope, &id.scope),
-                (PortableScope::System, Scope::System) | (PortableScope::User, Scope::User { .. })
+                (PortableScope::System, Scope::System)
+                    | (PortableScope::User, Scope::User { .. })
+                    // The path is not exported, so the entry means this machine's
+                    // environment for that source (the Homebrew prefix, the npm
+                    // global folder).
+                    | (PortableScope::Environment, Scope::Environment { .. })
             )
     }
 }
@@ -310,12 +315,7 @@ pub fn preview(
         .packages
         .iter()
         .map(|entry| {
-            let (status, reason) = if entry.scope == PortableScope::Environment {
-                (
-                    PreviewStatus::Unsupported,
-                    "Select an environment on this machine before installing".into(),
-                )
-            } else if installed.iter().any(|package| entry.matches(&package.id)) {
+            let (status, reason) = if installed.iter().any(|package| entry.matches(&package.id)) {
                 (PreviewStatus::AlreadyInstalled, String::new())
             } else if failures
                 .iter()
@@ -430,11 +430,10 @@ pub fn inspect(
                 "Preview cancelled. Nothing was changed.".into(),
             ));
         }
-        if entry.scope == PortableScope::Environment
-            || installed
-                .packages
-                .iter()
-                .any(|package| entry.matches(&package.id))
+        if installed
+            .packages
+            .iter()
+            .any(|package| entry.matches(&package.id))
             || !searched.insert((&entry.backend, &entry.name))
         {
             continue;
@@ -514,6 +513,7 @@ mod tests {
             icon: None,
             component_ids: vec![],
             homepages: vec![],
+            adopt_with: None,
         }
     }
 
@@ -644,7 +644,7 @@ mod tests {
     }
 
     #[test]
-    fn environment_export_omits_path_and_requires_local_choice() {
+    fn environment_export_omits_path_and_matches_this_machines_environment() {
         let package = package(
             "virtual-tool",
             Scope::Environment {
@@ -655,8 +655,60 @@ mod tests {
         let manifest = export(std::slice::from_ref(&package), &[]).unwrap();
         let text = serde_json::to_string(&manifest).unwrap();
         assert!(!text.contains("/home/private"));
-        let preview = preview(&manifest, &[], &[], &[], &[]).unwrap();
-        assert_eq!(preview.packages[0].status, PreviewStatus::Unsupported);
+        // Installed here in another folder: the same tool, already installed.
+        let mut here = package.clone();
+        here.id.scope = Scope::Environment {
+            path: "/home/other/.venv".into(),
+        };
+        let result = preview(&manifest, &[here.clone()], &[], &[], &[]).unwrap();
+        assert_eq!(result.packages[0].status, PreviewStatus::AlreadyInstalled);
+        // Not installed, and the source is missing here.
+        let result = preview(&manifest, &[], &[], &[], &[]).unwrap();
+        assert_eq!(result.packages[0].status, PreviewStatus::Unavailable);
+        // Not installed, but this machine's environment offers it.
+        let source = Source {
+            backend: "flatpak".into(),
+            availability: Ok(Availability::Available),
+            capabilities: vec![Capability::Install],
+        };
+        here.installed_version = None;
+        let result = preview(&manifest, &[], &[here], &[source], &[]).unwrap();
+        assert_eq!(result.packages[0].status, PreviewStatus::Installable);
+    }
+
+    #[test]
+    fn scope_must_match_and_uninstalled_rows_are_not_exported() {
+        let system = package("org.example.App", Scope::System, None);
+        let mut offered = package("org.example.Offer", Scope::System, None);
+        offered.installed_version = None;
+        let manifest = export(&[system.clone(), offered], &[]).unwrap();
+        assert_eq!(manifest.packages.len(), 1);
+        // The same identity installed for a user is a different installation.
+        let mut user = system;
+        user.id.scope = Scope::User { uid: 1000 };
+        let result = preview(&manifest, &[user], &[], &[], &[]).unwrap();
+        assert_ne!(result.packages[0].status, PreviewStatus::AlreadyInstalled);
+    }
+
+    #[test]
+    fn lists_too_large_to_save_are_refused_before_writing() {
+        let entry = Entry::from_package(&package("org.example.App", Scope::System, None));
+        let long = "x".repeat(500);
+        let manifest = Manifest {
+            schema_version: SCHEMA_VERSION,
+            packages: (0..MAX_PACKAGES)
+                .map(|index| Entry {
+                    name: format!("{index}-{long}"),
+                    reference: Some(long.clone()),
+                    ..entry.clone()
+                })
+                .collect(),
+        };
+        let path =
+            std::env::temp_dir().join(format!("pkgdeck-huge-list-{}.json", std::process::id()));
+        let error = write_new(&path, &manifest).unwrap_err();
+        assert!(error.to_string().contains("larger than 8 MB"), "{error}");
+        assert!(!path.exists());
     }
 
     #[test]

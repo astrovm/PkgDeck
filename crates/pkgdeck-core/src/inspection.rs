@@ -114,12 +114,12 @@ pub fn inspect_with(
             "Owners come from package manager databases. PkgDeck never guesses an owner for a file none of them claim."
                 .into(),
     };
-    for directory in std::env::split_paths(&path).take(256) {
+    for directory in std::env::split_paths(&path)
+        .filter(|directory| directory.is_absolute())
+        .take(256)
+    {
         if cancel.requested() {
             return Err(ExecutionError::Cancelled);
-        }
-        if !directory.is_absolute() {
-            continue;
         }
         let candidate = directory.join(command);
         let mapped = host.filesystem_path(&candidate);
@@ -137,8 +137,8 @@ pub fn inspect_with(
                     {
                         CandidateState::Executable
                     }
-                    Ok(_) => CandidateState::NotExecutable,
-                    Err(_) => CandidateState::Unavailable,
+                    // A file that vanished after it resolved can't run either.
+                    _ => CandidateState::NotExecutable,
                 };
                 (
                     link.file_type()
@@ -579,19 +579,21 @@ pub fn dpkg_residuals(status: &str, root: &Path) -> Vec<LeftoverData> {
 }
 
 pub fn native_leftovers(host: &Host) -> Vec<LeftoverData> {
-    let status = host.filesystem_path(Path::new("/var/lib/dpkg/status"));
-    let Ok(bytes) = fs::read(status) else {
-        return vec![];
-    };
-    if bytes.len() > 64 * 1024 * 1024 {
-        return vec![];
-    }
     let root = if host.runtime == Runtime::Flatpak {
         Path::new("/run/host")
     } else {
         Path::new("/")
     };
-    dpkg_residuals(&String::from_utf8_lossy(&bytes), root)
+    dpkg_leftovers(root)
+}
+/// Residual configuration recorded in the dpkg database under `root`.
+fn dpkg_leftovers(root: &Path) -> Vec<LeftoverData> {
+    match fs::read(root.join("var/lib/dpkg/status")) {
+        Ok(bytes) if bytes.len() <= 64 * 1024 * 1024 => {
+            dpkg_residuals(&String::from_utf8_lossy(&bytes), root)
+        }
+        _ => vec![],
+    }
 }
 
 #[cfg(test)]
@@ -649,6 +651,39 @@ mod tests {
         fs::remove_dir_all(&root).unwrap();
     }
 
+    #[test]
+    fn manager_folders_follow_the_session_and_stay_off_in_sandboxes() {
+        let env: BTreeMap<OsString, OsString> = [
+            ("HOME", "/nonexistent-home"),
+            ("PIPX_HOME", "/nonexistent-pipx"),
+            ("CARGO_HOME", "/nonexistent-cargo"),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.into(), value.into()))
+        .collect();
+        let native = Layout::native(&Host::new(Runtime::Native, env.clone()));
+        let root = |manager: &str| {
+            native
+                .roots
+                .iter()
+                .find(|(_, name)| *name == manager)
+                .map(|(root, _)| root.clone())
+        };
+        assert_eq!(root("pipx"), Some("/nonexistent-pipx/venvs".into()));
+        assert_eq!(
+            root("uv"),
+            Some("/nonexistent-home/.local/share/uv/tools".into())
+        );
+        assert_eq!(
+            root("mise"),
+            Some("/nonexistent-home/.local/share/mise/installs".into())
+        );
+        assert_eq!(native.cargo_home, Some("/nonexistent-cargo".into()));
+        // Inside a sandbox these paths are not the host's.
+        let flatpak = Layout::native(&Host::new(Runtime::Flatpak, env));
+        assert!(flatpak.roots.is_empty() && flatpak.cargo_home.is_none());
+    }
+
     use super::*;
     use crate::package::UpdateAvailability;
     use std::{
@@ -694,6 +729,7 @@ mod tests {
             icon: None,
             component_ids: vec![component.into()],
             homepages: vec![],
+            adopt_with: None,
         }
     }
     struct Fixture(BTreeMap<PathBuf, Vec<(String, String)>>);
@@ -891,6 +927,167 @@ mod tests {
         for invalid in ["", ".", "..", "a/b", "line\nbreak", &"x".repeat(256)] {
             assert!(inspect_with(&host, invalid, &[], &owners, &Cancellation::default()).is_err());
         }
+    }
+    fn flatpak_host(path: &Path, bridge: &Path) -> Host {
+        let mut host = Host::new(
+            Runtime::Flatpak,
+            BTreeMap::from([(OsString::from("PATH"), path.as_os_str().to_owned())]),
+        );
+        host.set_bridge_for_tests(bridge);
+        host
+    }
+    #[test]
+    fn sandbox_paths_map_back_to_the_host() {
+        let host = flatpak_host(Path::new("/usr/bin"), Path::new("/usr/bin/true"));
+        assert_eq!(
+            host_path(
+                &host,
+                Path::new("/usr/bin/x"),
+                Path::new("/run/host/usr/lib/x")
+            ),
+            Path::new("/usr/lib/x")
+        );
+        assert_eq!(
+            host_path(&host, Path::new("/usr/bin/x"), Path::new("/app/bin/x")),
+            Path::new("/usr/bin/x")
+        );
+    }
+    #[test]
+    fn unreadable_plain_and_sandbox_local_candidates_keep_their_state() {
+        let temp = Temp::new();
+        let bin = temp.0.join("bin");
+        let locked = temp.0.join("locked");
+        fs::create_dir(&bin).unwrap();
+        fs::create_dir(&locked).unwrap();
+        fs::write(bin.join("data"), b"not executable").unwrap();
+        symlink(locked.join("tool"), bin.join("hidden")).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        let host = host(&bin.display().to_string());
+        let source = Fixture(BTreeMap::new());
+        let cancel = Cancellation::default();
+        let state = |command: &str| {
+            inspect_with(&host, command, &[], &source, &cancel)
+                .unwrap()
+                .candidates[0]
+                .state
+                .clone()
+        };
+        assert_eq!(state("data"), CandidateState::NotExecutable);
+        let root = rustix::process::geteuid().is_root();
+        let hidden = state("hidden");
+        assert!(
+            hidden == CandidateState::Unavailable || root && hidden == CandidateState::BrokenLink
+        );
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        // In a sandbox, a link that resolves inside the sandbox names itself.
+        fs::write(temp.0.join("real"), b"never executed").unwrap();
+        fs::set_permissions(temp.0.join("real"), fs::Permissions::from_mode(0o755)).unwrap();
+        symlink(temp.0.join("real"), bin.join("tool")).unwrap();
+        let sandboxed = flatpak_host(&bin, Path::new("/usr/bin/true"));
+        let report = inspect_with(&sandboxed, "tool", &[], &source, &cancel).unwrap();
+        assert_eq!(report.candidates[0].target, Some(bin.join("tool")));
+        assert_eq!(report.candidates[0].owners[0].state, OwnerState::Unknown);
+    }
+    #[test]
+    fn homebrew_prefix_names_the_only_homebrew_folders() {
+        let host = Host::new(
+            Runtime::Native,
+            BTreeMap::from([(
+                OsString::from("HOMEBREW_PREFIX"),
+                OsString::from("/nonexistent-brew"),
+            )]),
+        );
+        let roots: Vec<_> = Layout::native(&host)
+            .roots
+            .into_iter()
+            .filter(|(_, manager)| manager.starts_with("homebrew"))
+            .collect();
+        assert_eq!(
+            roots,
+            [
+                (PathBuf::from("/nonexistent-brew/Cellar"), "homebrew"),
+                (PathBuf::from("/nonexistent-brew/Caskroom"), "homebrew-cask")
+            ]
+        );
+    }
+    #[test]
+    fn native_owner_databases_are_read_through_the_host() {
+        let temp = Temp::new();
+        let bin = temp.0.join("bin");
+        fs::create_dir(&bin).unwrap();
+        let tool = bin.join("tool");
+        fs::write(&tool, b"never executed").unwrap();
+        fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).unwrap();
+        let bridge = temp.0.join("spawn");
+        fs::write(
+            &bridge,
+            "#!/bin/sh\ncase \"$*\" in\n  */usr/bin/dpkg-query*) echo \"apt-tool: $tool\" ;;\n  */usr/bin/rpm*) echo 'tool|x86_64' ;;\n  */usr/bin/pacman*) echo pacman-tool ;;\nesac\n",
+        )
+        .unwrap();
+        fs::set_permissions(&bridge, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut dnf = package("dnf", "tool", "tool");
+        dnf.id.architecture = "x86_64".into();
+        let report = inspect_native(
+            &flatpak_host(&bin, &bridge),
+            "tool",
+            &[dnf.clone()],
+            &Cancellation::default(),
+        )
+        .unwrap();
+        let owners = &report.candidates[0].owners;
+        assert_eq!(owners.len(), 1);
+        assert_eq!(owners[0].state, OwnerState::Known);
+        assert_eq!(owners[0].packages, [dnf.id]);
+        let unmatched = inspect_native(
+            &flatpak_host(&bin, &bridge),
+            "tool",
+            &[],
+            &Cancellation::default(),
+        )
+        .unwrap();
+        let records: Vec<_> = unmatched.candidates[0]
+            .owners
+            .iter()
+            .map(|owner| (owner.manager.as_str(), owner.native_name.as_str()))
+            .collect();
+        assert_eq!(
+            records,
+            [
+                ("apt", "apt-tool"),
+                ("pacman", "pacman-tool"),
+                ("rpm", "tool:x86_64")
+            ]
+        );
+    }
+    #[test]
+    fn dpkg_leftovers_need_a_bounded_status_and_existing_files() {
+        let temp = Temp::new();
+        assert!(dpkg_leftovers(&temp.0).is_empty());
+        fs::create_dir_all(temp.0.join("var/lib/dpkg")).unwrap();
+        fs::create_dir_all(temp.0.join("etc")).unwrap();
+        fs::write(temp.0.join("etc/kept.conf"), b"x").unwrap();
+        let status = temp.0.join("var/lib/dpkg/status");
+        fs::write(
+            &status,
+            "Package: gone\nStatus: deinstall ok config-files\nConffiles:\n /etc/kept.conf abc\n /etc/missing.conf def\n etc/relative.conf 0\n /etc/../kept.conf 1\n",
+        )
+        .unwrap();
+        let rows = dpkg_leftovers(&temp.0);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].path, Path::new("/etc/kept.conf"));
+        assert_eq!(rows[0].size_bytes, Some(1));
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&status)
+            .unwrap()
+            .set_len(64 * 1024 * 1024 + 1)
+            .unwrap();
+        assert!(dpkg_leftovers(&temp.0).is_empty());
+        let sandboxed = flatpak_host(Path::new("/usr/bin"), Path::new("/usr/bin/true"));
+        assert_eq!(
+            native_leftovers(&sandboxed),
+            dpkg_leftovers(Path::new("/run/host"))
+        );
     }
     #[test]
     fn audit_locations_require_an_explicit_appimage_identity() {

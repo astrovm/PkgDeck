@@ -3,24 +3,24 @@ use pkgdeck_core::process::Cancellation;
 
 #[cxx::bridge(namespace = "pkgdeck")]
 pub mod ffi {
+    // The GUI entry point (native/main.cpp) calls the network and opening
+    // setup directly; Rust only needs the metadata download.
     unsafe extern "C++" {
-        include!("cxx-qt-lib/qqmlapplicationengine.h");
         include!("cxx-qt-lib/qstring.h");
-        include!("pkgdeck/native/network.h");
         include!("pkgdeck/native/providers.h");
-        include!("pkgdeck/native/opening.h");
-        #[namespace = ""]
-        type QQmlApplicationEngine = cxx_qt_lib::QQmlApplicationEngine;
         #[namespace = ""]
         type QString = cxx_qt_lib::QString;
-        fn configure_network(engine: Pin<&mut QQmlApplicationEngine>);
-        fn register_open_handler(engine: Pin<&mut QQmlApplicationEngine>, input: &QString) -> bool;
         fn fetch_metadata(url: &QString, cancel: &LookupCancellation) -> QString;
     }
     extern "Rust" {
         type LookupCancellation;
         fn cancelled(&self) -> bool;
     }
+}
+/// Downloads a provider's JSON over HTTPS through Qt; any other scheme, a
+/// failure, or a cancellation returns an empty string.
+pub fn fetch(url: &str, cancel: &Cancellation) -> String {
+    ffi::fetch_metadata(&url.into(), &LookupCancellation(cancel.clone())).to_string()
 }
 pub struct LookupCancellation(pub Cancellation);
 impl LookupCancellation {
@@ -40,5 +40,15 @@ mod tests {
         assert!(!lookup.cancelled());
         cancel.cancel();
         assert!(lookup.cancelled());
+    }
+    #[test]
+    fn fetch_refuses_plain_http_and_cancelled_lookups_before_connecting() {
+        // Neither address is ever contacted: the scheme and the cancellation
+        // are checked before Qt creates a request.
+        let cancel = Cancellation::default();
+        assert_eq!(fetch("http://127.0.0.1:9/app.json", &cancel), "");
+        assert_eq!(fetch("file:///etc/hostname", &cancel), "");
+        cancel.cancel();
+        assert_eq!(fetch("https://127.0.0.1:9/app.json", &cancel), "");
     }
 }

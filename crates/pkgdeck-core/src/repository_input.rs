@@ -88,11 +88,13 @@ fn source_bytes(source: &str, cancel: &Cancellation, host: &Host) -> Result<Vec<
         if !path.is_absolute() {
             return Err(invalid("choose an absolute repository file"));
         }
-        let meta = fs::symlink_metadata(path).map_err(invalid)?;
-        if !meta.file_type().is_file() || meta.len() > MAX_BYTES as u64 {
-            return Err(invalid(
-                "expected a regular repository file smaller than 1 MiB",
-            ));
+        let too_big = || invalid("expected a regular repository file smaller than 1 MiB");
+        if !fs::symlink_metadata(path)
+            .map_err(invalid)?
+            .file_type()
+            .is_file()
+        {
+            return Err(too_big());
         }
         let mut bytes = Vec::new();
         fs::File::open(path)
@@ -101,7 +103,7 @@ fn source_bytes(source: &str, cancel: &Cancellation, host: &Host) -> Result<Vec<
             .read_to_end(&mut bytes)
             .map_err(invalid)?;
         if bytes.len() > MAX_BYTES {
-            return Err(invalid("repository file exceeds 1 MiB"));
+            return Err(too_big());
         }
         Ok(bytes)
     }
@@ -307,6 +309,14 @@ fn inspect_with_host(
     cancel: &Cancellation,
     host: &Host,
 ) -> Result<Import, EngineError> {
+    Ok(read_import(source, cancel, host)?.0)
+}
+/// The preview of `source` and the exact bytes it describes.
+fn read_import(
+    source: &str,
+    cancel: &Cancellation,
+    host: &Host,
+) -> Result<(Import, Vec<u8>), EngineError> {
     if !supported(source) {
         return Err(invalid("unsupported repository format"));
     }
@@ -320,14 +330,15 @@ fn inspect_with_host(
     let bytes = source_bytes(source, cancel, host)?;
     let text = std::str::from_utf8(&bytes).map_err(invalid)?;
     let (backend, name, description) = validate(suffix, text, host)?;
-    Ok(Import {
+    let import = Import {
         source: source.into(),
         backend,
         suffix: suffix.into(),
         name,
         description,
         digest: hex::encode(Sha256::digest(&bytes)),
-    })
+    };
+    Ok((import, bytes))
 }
 struct Staged(PathBuf);
 impl Drop for Staged {
@@ -348,14 +359,11 @@ fn apply_with_host(
     cancel: &Cancellation,
     host: &Host,
 ) -> Result<(), EngineError> {
-    let fresh = inspect_with_host(&import.source, cancel, host)?;
+    // Stage the bytes this check read, so nothing can change in between.
+    let (fresh, bytes) = read_import(&import.source, cancel, host)?;
     if fresh.digest != import.digest || fresh.backend != import.backend || fresh.name != import.name
     {
         return Err(invalid("repository file changed since preview"));
-    }
-    let bytes = source_bytes(&import.source, cancel, host)?;
-    if hex::encode(Sha256::digest(&bytes)) != import.digest {
-        return Err(invalid("repository file changed during staging"));
     }
     let path = std::env::temp_dir().join(format!(
         "pkgdeck-repo-{}-{}.{}",
@@ -644,22 +652,114 @@ mod tests {
     }
     #[test]
     fn one_click_file_requires_the_native_opensuse_installer() {
-        if Path::new("/usr/sbin/OneClickInstallUI").exists()
-            || Path::new("/usr/bin/OneClickInstallUI").exists()
-        {
-            return;
-        }
         let source = std::env::temp_dir().join(format!(
             "pkgdeck-one-click-input-{}.ymp",
             std::process::id()
         ));
         fs::write(&source, "<metapackage><group/></metapackage>\n").unwrap();
-        let host = Host::current();
+        let mut host = Host::new(Runtime::Flatpak, BTreeMap::new());
+        host.set_bridge_for_tests(Path::new("/usr/bin/false"));
         let cancel = Cancellation::default();
         let import = inspect_with_host(source.to_str().unwrap(), &cancel, &host).unwrap();
         assert!(apply_with_host(&import, Authorization::Polkit, &cancel, &host).is_err());
         assert!(source.exists());
         fs::remove_file(source).unwrap();
+    }
+    #[test]
+    fn reviewed_files_reach_their_native_installer_and_report_its_failure() {
+        let base = std::env::temp_dir().join(format!("pkgdeck-repo-apply-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        fs::write(base.join("dnf"), "").unwrap();
+        let record = base.join("record");
+        let bridge = base.join("spawn");
+        fs::write(
+            &bridge,
+            format!(
+                "#!/bin/sh\ncase \"$*\" in *' /usr/bin/test '*) exit 0 ;; esac\necho \"$@\" >> '{}'\n[ -e '{}' ] || exit 0\nexit 3\n",
+                record.display(),
+                base.join("fail").display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&bridge, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut env = BTreeMap::new();
+        env.insert(OsString::from("PATH"), base.as_os_str().to_os_string());
+        let mut host = Host::new(Runtime::Flatpak, env);
+        host.set_bridge_for_tests(&bridge);
+        let cancel = Cancellation::default();
+        let preview = |name: &str, content: &str| {
+            let path = base.join(name);
+            fs::write(&path, content).unwrap();
+            inspect_with_host(path.to_str().unwrap(), &cancel, &host).unwrap()
+        };
+        let repo = preview(
+            "synthetic.repo",
+            "[synthetic]\nbaseurl=https://example.invalid/repo\ngpgcheck=1\n",
+        );
+        apply_with_host(&repo, Authorization::Polkit, &cancel, &host).unwrap();
+        let one_click = preview("synthetic.ymp", "<metapackage><group/></metapackage>\n");
+        apply_with_host(&one_click, Authorization::Polkit, &cancel, &host).unwrap();
+        let calls = fs::read_to_string(&record).unwrap();
+        let calls: Vec<_> = calls.lines().collect();
+        assert!(calls[0].contains("/usr/bin/pkexec --disable-internal-agent /usr/bin/install"));
+        assert!(calls[0].contains(&format!("/etc/yum.repos.d/pkgdeck-{}.repo", repo.digest)));
+        assert!(calls[1].contains("/usr/sbin/OneClickInstallUI"));
+        let cancelled = Cancellation::default();
+        cancelled.cancel();
+        assert!(matches!(
+            apply_with_host(&repo, Authorization::Polkit, &cancelled, &host),
+            Err(EngineError::Cancelled)
+        ));
+        fs::write(base.join("fail"), "").unwrap();
+        assert!(matches!(
+            apply_with_host(&repo, Authorization::Polkit, &cancel, &host),
+            Err(EngineError::Execution(crate::process::ExecutionError::Failed(result)))
+                if result.code == Some(3)
+        ));
+        // Flatpak repositories need Flatpak itself.
+        let remote = preview(
+            "synthetic.flatpakrepo",
+            "[Flatpak Repo]\nName=synthetic\nUrl=https://example.invalid/repo\nGPGKey=c3ludGhldGlj\n",
+        );
+        assert!(matches!(
+            apply_with_host(&remote, Authorization::Polkit, &cancel, &host),
+            Err(EngineError::Execution(
+                crate::process::ExecutionError::Disabled(_)
+            ))
+        ));
+        fs::remove_dir_all(base).unwrap();
+    }
+    #[test]
+    fn public_entry_points_check_the_source_first() {
+        let cancel = Cancellation::default();
+        assert!(matches!(
+            inspect("https://example.invalid/notes.txt", &cancel),
+            Err(EngineError::InvalidResponse { reason, .. }) if reason == "unsupported repository format"
+        ));
+        let missing = Import {
+            source: "/nonexistent-pkgdeck/synthetic.repo".into(),
+            backend: "dnf".into(),
+            suffix: "repo".into(),
+            name: "synthetic".into(),
+            description: String::new(),
+            digest: String::new(),
+        };
+        assert!(apply(&missing, Authorization::Polkit, &cancel).is_err());
+        let cancelled = Cancellation::default();
+        cancelled.cancel();
+        let base = std::env::temp_dir().join(format!("pkgdeck-repo-cancel-{}", std::process::id()));
+        fs::create_dir_all(&base).unwrap();
+        fs::write(base.join("curl"), "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(base.join("curl"), fs::Permissions::from_mode(0o755)).unwrap();
+        let mut env = BTreeMap::new();
+        env.insert(OsString::from("PATH"), base.as_os_str().to_os_string());
+        let host = Host::new(Runtime::Native, env);
+        assert!(matches!(
+            source_bytes("https://example.invalid/synthetic.repo", &cancelled, &host),
+            Err(EngineError::Cancelled)
+        ));
+        fs::remove_dir_all(base).unwrap();
     }
     #[test]
     fn repo_preview_selects_zypper_and_rejects_missing_or_failed_tools() {

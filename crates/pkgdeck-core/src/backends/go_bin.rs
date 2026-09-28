@@ -88,9 +88,7 @@ fn valid_name(name: &str) -> bool {
 /// lowercase domain-like first element, then conservative path elements.
 fn valid_path(path: &str) -> bool {
     let elements: Vec<&str> = path.split('/').collect();
-    let Some(first) = elements.first() else {
-        return false;
-    };
+    let first = elements[0];
     path.len() <= 256
         && elements.len() >= 2
         && elements.len() <= 16
@@ -344,6 +342,7 @@ impl<T: Transport> GoBinaries<T> {
             icon: None,
             component_ids: vec![],
             homepages: binary.path.iter().map(|path| pkg_go_dev(path)).collect(),
+            adopt_with: None,
         }
     }
 
@@ -444,6 +443,7 @@ impl<T: Transport> GoBinaries<T> {
             icon: None,
             component_ids: vec![],
             homepages: vec![pkg_go_dev(path)],
+            adopt_with: None,
         }))
     }
 
@@ -705,9 +705,6 @@ impl<T: Transport> Backend for GoBinaries<T> {
                 progress(Progress::Message(format!("Removing {}", file.display())));
                 std::fs::remove_file(&file)
                     .map_err(|error| ExecutionError::Io(format!("{}: {error}", file.display())))?;
-                if std::fs::symlink_metadata(&file).is_ok() {
-                    return Err(invalid(ID, format!("{} is still present", file.display())));
-                }
                 false
             }
         };
@@ -720,8 +717,13 @@ impl<T: Transport> Backend for GoBinaries<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::host::AptAction;
+    use crate::backends::dev_tools::{DevTool, DevTools};
     use std::sync::{Arc, Mutex};
+
+    fn backend(fake: Fake) -> GoBinaries<DevTools<Fake>> {
+        GoBinaries::new(DevTools(fake))
+    }
+    fn ignore(_: Progress) {}
 
     /// `go version -m ~/go/bin` from Go 1.27.1 on linux/arm64 (some build
     /// lines dropped), plus a program in a subdirectory, which is skipped.
@@ -762,6 +764,9 @@ mod tests {
 
     /// A fake `go` over a real temporary bin directory: files the fake
     /// "built" carry build info, anything else is not a Go program.
+    /// A command line (or its start) that fails, and how.
+    type Failure = (&'static str, fn() -> ExecutionError);
+
     #[derive(Clone)]
     struct Fake {
         dir: PathBuf,
@@ -770,6 +775,12 @@ mod tests {
         /// module → latest version
         latest: Arc<Mutex<BTreeMap<String, String>>>,
         calls: Arc<Mutex<Vec<String>>>,
+        /// GOBIN is unset, so programs go to GOPATH's first entry.
+        gopath_only: bool,
+        /// `go install` succeeds without writing anything.
+        inert: bool,
+        /// Commands starting with this fail, and how.
+        fail: Option<Failure>,
     }
     impl Fake {
         fn new(tag: &str) -> Self {
@@ -783,6 +794,9 @@ mod tests {
                 built: Arc::default(),
                 latest: Arc::default(),
                 calls: Arc::default(),
+                gopath_only: false,
+                inert: false,
+                fail: None,
             }
         }
         fn build(&self, name: &str, path: &str, module: &str, version: &str) {
@@ -796,8 +810,25 @@ mod tests {
             let built = self.built.lock().unwrap();
             let (path, module, version) = built.get(name)?;
             self.dir.join(name).is_file().then(|| {
+                // An empty path or module stands for a build without it.
+                let line = |key: &str, value: String| {
+                    if value.is_empty() {
+                        String::new()
+                    } else {
+                        format!("\t{key}\t{value}\n")
+                    }
+                };
+                let path = line("path", path.clone());
+                let module = line(
+                    "mod",
+                    if module.is_empty() {
+                        String::new()
+                    } else {
+                        format!("{module}\t{version}\th1:x=")
+                    },
+                );
                 format!(
-                    "{}/{name}: go1.25.1\n\tpath\t{path}\n\tmod\t{module}\t{version}\th1:x=\n\tbuild\t-compiler=gc\n",
+                    "{}/{name}: go1.25.1\n{path}{module}\tbuild\t-compiler=gc\n",
                     self.dir.display()
                 )
             })
@@ -813,36 +844,7 @@ mod tests {
             }
         }
     }
-    impl Transport for Fake {
-        fn apt_query(
-            &self,
-            _: &str,
-            _: &str,
-            _: &str,
-            _: &Cancellation,
-        ) -> Result<Completion, ExecutionError> {
-            unreachable!()
-        }
-        fn apt_write(&self, _: AptAction, _: &Cancellation) -> Result<Completion, ExecutionError> {
-            unreachable!()
-        }
-        fn brew(
-            &self,
-            _: &[OsString],
-            _: &Cancellation,
-            _: bool,
-        ) -> Result<Completion, ExecutionError> {
-            unreachable!()
-        }
-        fn flatpak(
-            &self,
-            _: &[OsString],
-            _: &Cancellation,
-            _: bool,
-            _: bool,
-        ) -> Result<Completion, ExecutionError> {
-            unreachable!()
-        }
+    impl DevTool for Fake {
         fn dev_tool(
             &self,
             executable: &str,
@@ -852,8 +854,12 @@ mod tests {
         ) -> Result<Completion, ExecutionError> {
             assert_eq!(executable, "go");
             let args: Vec<String> = args.iter().map(|a| a.to_string_lossy().into()).collect();
-            self.calls.lock().unwrap().push(args.join(" "));
+            let line = args.join(" ");
+            self.calls.lock().unwrap().push(line.clone());
             assert_eq!(write, args[0] == "install", "{args:?}");
+            if let Some((_, error)) = self.fail.filter(|(failing, _)| line.starts_with(failing)) {
+                return Err(error());
+            }
             let dir = self.dir.display().to_string();
             match args
                 .iter()
@@ -862,6 +868,13 @@ mod tests {
                 .as_slice()
             {
                 ["version"] => Ok(done("go version go1.25.1 linux/arm64\n", 0)),
+                ["env", "-json", "GOBIN", "GOPATH"] if self.gopath_only => Ok(done(
+                    &format!(
+                        "{{\n\t\"GOBIN\": \"\",\n\t\"GOPATH\": \"{}:/else\"\n}}\n",
+                        self.dir.parent().unwrap().display()
+                    ),
+                    0,
+                )),
                 ["env", "-json", "GOBIN", "GOPATH"] => Ok(done(
                     &format!(
                         "{{\n\t\"GOBIN\": \"{dir}/\",\n\t\"GOPATH\": \"/nowhere:/else\"\n}}\n"
@@ -903,8 +916,12 @@ mod tests {
                         .collect();
                     Ok(done(&text, 0))
                 }
-                ["install", "--", target] => {
-                    let path = target.strip_suffix("@latest").unwrap();
+                other => {
+                    assert!(matches!(other, ["install", "--", _]), "{other:?}");
+                    let path = other[2].strip_suffix("@latest").unwrap();
+                    if self.inert {
+                        return Ok(done("", 0));
+                    }
                     let latest = self.latest.lock().unwrap().clone();
                     let (module, version) = latest
                         .iter()
@@ -916,7 +933,6 @@ mod tests {
                     self.build(binary_name(path).unwrap(), path, module, version);
                     Ok(done("", 0))
                 }
-                other => panic!("unexpected go {other:?}"),
             }
         }
     }
@@ -1045,7 +1061,7 @@ mod tests {
     #[test]
     fn inventory_with_updates_devel_pseudo_and_failures() {
         let fake = installed_fake("inventory");
-        let mut go = GoBinaries::new(fake.clone());
+        let mut go = backend(fake.clone());
         let rows = go.installed(&Cancellation::default()).unwrap();
         let summary: Vec<_> = rows
             .iter()
@@ -1108,13 +1124,13 @@ mod tests {
     #[test]
     fn upgrade_is_verified_and_local_builds_refused() {
         let fake = installed_fake("upgrade");
-        let mut go = GoBinaries::new(fake.clone());
+        let mut go = backend(fake.clone());
         let rows = go.installed(&Cancellation::default()).unwrap();
         let stringer = rows.iter().find(|r| r.id.name == "stringer").unwrap();
         go.execute(
             &Operation::Upgrade(stringer.id.clone()),
             &Cancellation::default(),
-            &mut |_| {},
+            &mut ignore,
         )
         .unwrap();
         assert!(fake
@@ -1126,7 +1142,7 @@ mod tests {
             .execute(
                 &Operation::Upgrade(hello.id.clone()),
                 &Cancellation::default(),
-                &mut |_| {},
+                &mut ignore,
             )
             .unwrap_err();
         assert!(
@@ -1138,14 +1154,14 @@ mod tests {
             .lock()
             .unwrap()
             .insert("github.com/a/gone".into(), "v1.0.0".into());
-        let mut go = GoBinaries::new(fake.clone());
+        let mut go = backend(fake.clone());
         let rows = go.installed(&Cancellation::default()).unwrap();
         let gone = rows.iter().find(|r| r.id.name == "gone").unwrap();
         // Current already: a reinstall at the same version is fine.
         go.execute(
             &Operation::Upgrade(gone.id.clone()),
             &Cancellation::default(),
-            &mut |_| {},
+            &mut ignore,
         )
         .unwrap();
     }
@@ -1157,7 +1173,7 @@ mod tests {
             .lock()
             .unwrap()
             .insert("github.com/rakyll/hey".into(), "v0.1.4".into());
-        let mut go = GoBinaries::new(fake.clone());
+        let mut go = backend(fake.clone());
         // A plain name only filters what's installed, without the network.
         let found = go.search("STRING", &Cancellation::default()).unwrap();
         assert_eq!(found.len(), 1);
@@ -1182,7 +1198,7 @@ mod tests {
         go.execute(
             &Operation::Install(offers[0].id.clone()),
             &Cancellation::default(),
-            &mut |_| {},
+            &mut ignore,
         )
         .unwrap();
         assert!(fake.dir.join("hey").is_file());
@@ -1197,7 +1213,7 @@ mod tests {
             .execute(
                 &Operation::Install(clash),
                 &Cancellation::default(),
-                &mut |_| {},
+                &mut ignore,
             )
             .unwrap_err();
         assert!(error.to_string().contains("not replacing"), "{error}");
@@ -1208,7 +1224,7 @@ mod tests {
             .execute(
                 &Operation::Install(bad),
                 &Cancellation::default(),
-                &mut |_| {}
+                &mut ignore
             )
             .is_err());
         let mut bad = offers[0].id.clone();
@@ -1217,7 +1233,7 @@ mod tests {
             .execute(
                 &Operation::Install(bad),
                 &Cancellation::default(),
-                &mut |_| {}
+                &mut ignore
             )
             .is_err());
     }
@@ -1225,7 +1241,7 @@ mod tests {
     #[test]
     fn remove_deletes_only_go_programs_in_the_bin_dir() {
         let fake = installed_fake("remove");
-        let mut go = GoBinaries::new(fake.clone());
+        let mut go = backend(fake.clone());
         let rows = go.installed(&Cancellation::default()).unwrap();
         let stringer = rows.iter().find(|r| r.id.name == "stringer").unwrap();
         let mut script = stringer.id.clone();
@@ -1235,7 +1251,7 @@ mod tests {
             .execute(
                 &Operation::Remove(script),
                 &Cancellation::default(),
-                &mut |_| {},
+                &mut ignore,
             )
             .unwrap_err();
         assert!(error.to_string().contains("not a Go program"), "{error}");
@@ -1247,7 +1263,7 @@ mod tests {
             .execute(
                 &Operation::Remove(link),
                 &Cancellation::default(),
-                &mut |_| {}
+                &mut ignore
             )
             .is_err());
         assert!(fake.dir.join("link").exists());
@@ -1257,7 +1273,7 @@ mod tests {
             .execute(
                 &Operation::Remove(traversal),
                 &Cancellation::default(),
-                &mut |_| {}
+                &mut ignore
             )
             .is_err());
         let cancelled = Cancellation::default();
@@ -1266,17 +1282,327 @@ mod tests {
             go.execute(
                 &Operation::Remove(stringer.id.clone()),
                 &cancelled,
-                &mut |_| {}
+                &mut ignore
             ),
             Err(EngineError::Cancelled)
         ));
         go.execute(
             &Operation::Remove(stringer.id.clone()),
             &Cancellation::default(),
-            &mut |_| {},
+            &mut ignore,
         )
         .unwrap();
         assert!(!fake.dir.join("stringer").exists());
         assert!(fake.dir.join("hello").exists());
+    }
+
+    #[test]
+    fn details_explain_local_builds_and_refuse_other_rows() {
+        let fake = installed_fake("details");
+        let mut go = backend(fake.clone());
+        let cancel = Cancellation::default();
+        assert_eq!(go.detect(&cancel).unwrap(), Availability::Available);
+        assert!(go.may_have("stringer") && go.may_have("golang.org/x/tools/cmd/stringer"));
+        assert!(!go.may_have("-rf"));
+        let rows = go.installed(&cancel).unwrap();
+        let hello = rows.iter().find(|r| r.id.name == "hello").unwrap();
+        assert_eq!(
+            hello.summary,
+            "Go program built from local source · example.com/hello"
+        );
+        let details = go.details(&hello.id, &cancel).unwrap();
+        assert!(details
+            .description
+            .contains("It wasn't installed from a published module version"));
+        assert_eq!(
+            details.homepage.as_deref(),
+            Some("https://pkg.go.dev/example.com/hello")
+        );
+        let mut foreign = hello.id.clone();
+        foreign.backend = "cargo".into();
+        assert!(matches!(
+            go.details(&foreign, &cancel),
+            Err(EngineError::NotFound)
+        ));
+        let mut script = hello.id.clone();
+        script.name = "script".into();
+        assert!(matches!(
+            go.details(&script, &cancel),
+            Err(EngineError::NotFound)
+        ));
+        assert!(matches!(
+            go.execute(
+                &Operation::UpgradeAll { backend: ID.into() },
+                &cancel,
+                &mut ignore
+            ),
+            Err(EngineError::Unsupported { .. })
+        ));
+    }
+
+    #[test]
+    fn stale_or_renamed_programs_are_left_alone() {
+        let fake = installed_fake("stale");
+        // Built from a package whose program would be named differently.
+        fake.build("renamed", "example.com/tool", "example.com/tool", "v1.0.0");
+        let mut go = backend(fake.clone());
+        let cancel = Cancellation::default();
+        let rows = go.installed(&cancel).unwrap();
+        let renamed = rows.iter().find(|r| r.id.name == "renamed").unwrap();
+        let error = go
+            .execute(
+                &Operation::Upgrade(renamed.id.clone()),
+                &cancel,
+                &mut ignore,
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("was renamed"), "{error}");
+        // A row listed from another package path than what is there now.
+        let stringer = rows.iter().find(|r| r.id.name == "stringer").unwrap();
+        let mut stale = stringer.id.clone();
+        stale.reference = Some("golang.org/x/tools/cmd/other".into());
+        let error = go
+            .execute(&Operation::Remove(stale), &cancel, &mut ignore)
+            .unwrap_err();
+        assert!(error.to_string().contains("changed; refresh"), "{error}");
+        assert!(fake.dir.join("stringer").exists());
+        assert!(!fake.calls().iter().any(|c| c.starts_with("install")));
+    }
+
+    #[test]
+    fn programs_are_found_in_gopath_without_gobin() {
+        let mut fake = installed_fake("gopath");
+        fake.gopath_only = true;
+        let mut go = backend(fake.clone());
+        let rows = go.search("stringer", &Cancellation::default()).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(fake
+            .calls()
+            .contains(&format!("version -m -- {}", fake.dir.display())));
+        // A cancelled install never runs go install.
+        let cancel = Cancellation::default();
+        cancel.cancel();
+        let mut offer = rows[0].id.clone();
+        offer.name = "hey".into();
+        offer.reference = Some("github.com/rakyll/hey".into());
+        assert!(matches!(
+            go.execute(&Operation::Install(offer), &cancel, &mut ignore),
+            Err(EngineError::Cancelled)
+        ));
+        assert!(!fake.calls().iter().any(|c| c.starts_with("install")));
+    }
+
+    #[test]
+    fn foreign_lines_and_missing_module_info() {
+        let found = parse_build_info(
+            "/elsewhere/x: go1.22.0\n\tpath\tx.org/x\n\n/b/y: go1.22.0\n\tpath\ty.org/y\n",
+            Path::new("/b"),
+        );
+        assert_eq!(
+            found,
+            vec![Binary {
+                name: "y".into(),
+                toolchain: "go1.22.0".into(),
+                path: Some("y.org/y".into()),
+                ..Binary::default()
+            }]
+        );
+        assert!(!is_pseudo(DEVEL));
+        let replaced = Binary {
+            name: "x".into(),
+            module: Some("x.org/x".into()),
+            version: Some("v1.0.0".into()),
+            replaced: true,
+            ..Binary::default()
+        };
+        let row = GoBinaries::<DevTools<Fake>>::package(&replaced, None);
+        assert_eq!(row.summary, "Go program · x.org/x (replaced)");
+        let bare = GoBinaries::<DevTools<Fake>>::package(&Binary::default(), None);
+        assert_eq!(bare.summary, "Go program without module information");
+        assert_eq!(bare.installed_version.as_deref(), Some("unknown"));
+        assert!(bare.homepages.is_empty());
+    }
+
+    #[test]
+    fn a_missing_bin_dir_lists_nothing() {
+        let fake = Fake::new("missing");
+        std::fs::remove_dir(&fake.dir).unwrap();
+        let mut go = backend(fake.clone());
+        assert!(go.installed(&Cancellation::default()).unwrap().is_empty());
+        assert!(go.query_errors().is_empty());
+        assert_eq!(fake.calls(), vec!["env -json GOBIN GOPATH"]);
+        assert_eq!(go.id(), "go");
+        assert!(go.capabilities().contains(&Capability::Install));
+    }
+
+    #[test]
+    fn detection_follows_the_go_command() {
+        let detect = |error: fn() -> ExecutionError| {
+            let mut fake = Fake::new("detect");
+            fake.fail = Some(("version", error));
+            backend(fake).detect(&Cancellation::default())
+        };
+        assert_eq!(
+            detect(|| ExecutionError::Disabled("go not found".into())).unwrap(),
+            Availability::Unavailable("go not found".into())
+        );
+        assert!(matches!(
+            detect(|| ExecutionError::Cancelled),
+            Err(EngineError::Cancelled)
+        ));
+        assert!(matches!(
+            detect(|| ExecutionError::TimedOut),
+            Err(EngineError::Execution(ExecutionError::TimedOut))
+        ));
+    }
+
+    #[test]
+    fn failed_update_checks_keep_the_inventory() {
+        let fake = installed_fake("checks");
+        // The proxy answers without a usable version.
+        fake.latest
+            .lock()
+            .unwrap()
+            .insert("github.com/a/gone".into(), "master".into());
+        let mut go = backend(fake.clone());
+        let cancel = Cancellation::default();
+        let rows = go.installed(&cancel).unwrap();
+        let gone = rows.iter().find(|r| r.id.name == "gone").unwrap();
+        assert_eq!(gone.update, UpdateAvailability::Unknown);
+        let errors: Vec<String> = go.query_errors().iter().map(|e| e.to_string()).collect();
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("no version reported"), "{errors:?}");
+        let details = go.details(&gone.id, &cancel).unwrap();
+        assert_eq!(details.package.update, UpdateAvailability::Unknown);
+        let stringer = rows.iter().find(|r| r.id.name == "stringer").unwrap();
+
+        // The proxy can't be reached at all: rows stay, updates are unknown.
+        let mut offline = fake.clone();
+        offline.fail = Some(("list", || ExecutionError::TimedOut));
+        let mut go = backend(offline);
+        let rows = go.installed(&cancel).unwrap();
+        assert_eq!(rows.len(), 4);
+        assert!(rows
+            .iter()
+            .all(|row| row.update == UpdateAvailability::Unknown));
+        assert!(matches!(
+            go.query_errors().as_slice(),
+            [EngineError::Execution(ExecutionError::TimedOut)]
+        ));
+        let found = go.search("github.com/rakyll/hey", &cancel).unwrap();
+        assert!(found.is_empty());
+        assert_eq!(go.query_errors().len(), 1);
+        let details = go.details(&stringer.id, &cancel).unwrap();
+        assert_eq!(details.package.update, UpdateAvailability::Unknown);
+
+        // Cancelled during a check: nothing is returned.
+        let mut cancelled = fake.clone();
+        cancelled.fail = Some(("list", || ExecutionError::Cancelled));
+        let mut go = backend(cancelled);
+        assert!(matches!(go.installed(&cancel), Err(EngineError::Cancelled)));
+        assert!(matches!(
+            go.search("github.com/rakyll/hey", &cancel),
+            Err(EngineError::Cancelled)
+        ));
+        assert!(matches!(
+            go.details(&stringer.id, &cancel),
+            Err(EngineError::Cancelled)
+        ));
+    }
+
+    #[test]
+    fn details_of_builds_without_module_info_or_another_path() {
+        let fake = installed_fake("plain");
+        fake.build("plain", "example.com/plain", "", "");
+        let mut go = backend(fake.clone());
+        let cancel = Cancellation::default();
+        let rows = go.installed(&cancel).unwrap();
+        let plain = rows.iter().find(|r| r.id.name == "plain").unwrap();
+        assert_eq!(plain.summary, "Go program without module information");
+        let details = go.details(&plain.id, &cancel).unwrap();
+        assert!(
+            details.description.ends_with(
+                " Package example.com/plain. It wasn't installed from a published module version, so it isn't updated here."
+            ),
+            "{}",
+            details.description
+        );
+        // A row listed from another package path than what is there now.
+        let mut stale = rows
+            .iter()
+            .find(|r| r.id.name == "stringer")
+            .unwrap()
+            .id
+            .clone();
+        stale.reference = Some("golang.org/x/tools/cmd/other".into());
+        assert!(matches!(
+            go.details(&stale, &cancel),
+            Err(EngineError::NotFound)
+        ));
+        // Nothing embedded at all: only where it is and how it was built.
+        fake.build("bare", "", "", "");
+        let bare = go
+            .installed(&cancel)
+            .unwrap()
+            .into_iter()
+            .find(|r| r.id.name == "bare")
+            .unwrap();
+        let details = go.details(&bare.id, &cancel).unwrap();
+        assert_eq!(
+            details.description,
+            format!(
+                "bare in {}, built with go1.25.1. It wasn't installed from a published module version, so it isn't updated here.",
+                fake.dir.display()
+            )
+        );
+        assert_eq!(details.homepage, None);
+        // A path whose program name isn't a valid file name is not offered.
+        fake.calls.lock().unwrap().clear();
+        assert!(go.search("x.org/a~b", &cancel).unwrap().is_empty());
+        assert!(!fake.calls().iter().any(|c| c.starts_with("list")));
+    }
+
+    #[test]
+    fn installs_and_upgrades_that_change_nothing_are_errors() {
+        let mut fake = installed_fake("inert");
+        fake.latest
+            .lock()
+            .unwrap()
+            .insert("github.com/rakyll/hey".into(), "v0.1.4".into());
+        fake.inert = true;
+        let mut go = backend(fake.clone());
+        let cancel = Cancellation::default();
+        let offers = go.search("github.com/rakyll/hey", &cancel).unwrap();
+        let error = go
+            .execute(
+                &Operation::Install(offers[0].id.clone()),
+                &cancel,
+                &mut ignore,
+            )
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("go install finished, but hey is not in"),
+            "{error}"
+        );
+        let rows = go.installed(&cancel).unwrap();
+        let stringer = rows.iter().find(|r| r.id.name == "stringer").unwrap();
+        let error = go
+            .execute(
+                &Operation::Upgrade(stringer.id.clone()),
+                &cancel,
+                &mut ignore,
+            )
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("go install finished, but stringer is still at v0.20.0"),
+            "{error}"
+        );
+        assert!(fake
+            .calls()
+            .contains(&"install -- golang.org/x/tools/cmd/stringer@latest".into()));
     }
 }

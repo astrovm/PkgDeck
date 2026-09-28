@@ -207,6 +207,7 @@ impl<T: Transport> SystemImage<T> {
             icon: None,
             component_ids: vec![],
             homepages: vec![],
+            adopt_with: None,
         }
     }
 }
@@ -218,12 +219,14 @@ impl<T: Transport> Backend for SystemImage<T> {
     fn capabilities(&self) -> &[Capability] {
         CAPABILITIES
     }
+    #[cfg(not(target_os = "linux"))]
+    fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
+        Ok(Availability::Unavailable(
+            "Image-based systems are Linux".into(),
+        ))
+    }
+    #[cfg(target_os = "linux")]
     fn detect(&mut self, cancel: &Cancellation) -> Result<Availability, EngineError> {
-        if !cfg!(target_os = "linux") {
-            return Ok(Availability::Unavailable(
-                "Image-based systems are Linux".into(),
-            ));
-        }
         Ok(match self.status(cancel)? {
             Some(_) => Availability::Available,
             None => Availability::Unavailable(
@@ -327,7 +330,6 @@ impl<T: Transport> Backend for SystemImage<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::host::AptAction;
     use std::sync::{Arc, Mutex};
 
     const BOOTC_UPDATE: &str = r#"{"apiVersion":"org.containers.bootc/v1","kind":"BootcHost","spec":{"image":{"image":"quay.io/fedora/fedora-bootc:44","transport":"registry"}},
@@ -346,9 +348,15 @@ mod tests {
 
     #[derive(Clone)]
     struct Fake {
-        bootc: Option<&'static str>,
+        bootc: Arc<Mutex<Option<&'static str>>>,
         ostree: Arc<Mutex<Option<&'static str>>>,
         calls: Arc<Mutex<Vec<String>>>,
+        /// Every status read is cancelled.
+        interrupted: bool,
+        /// An upgrade finds nothing new and stages nothing.
+        current: bool,
+        /// bootc's status output is cut off at the output limit.
+        truncated_bootc: bool,
     }
     fn done(text: &str) -> Completion {
         Completion {
@@ -361,35 +369,6 @@ mod tests {
         }
     }
     impl Transport for Fake {
-        fn apt_query(
-            &self,
-            _: &str,
-            _: &str,
-            _: &str,
-            _: &Cancellation,
-        ) -> Result<Completion, ExecutionError> {
-            unreachable!()
-        }
-        fn apt_write(&self, _: AptAction, _: &Cancellation) -> Result<Completion, ExecutionError> {
-            unreachable!()
-        }
-        fn brew(
-            &self,
-            _: &[OsString],
-            _: &Cancellation,
-            _: bool,
-        ) -> Result<Completion, ExecutionError> {
-            unreachable!()
-        }
-        fn flatpak(
-            &self,
-            _: &[OsString],
-            _: &Cancellation,
-            _: bool,
-            _: bool,
-        ) -> Result<Completion, ExecutionError> {
-            unreachable!()
-        }
         fn system_manager(
             &self,
             executable: &str,
@@ -402,34 +381,45 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(format!("{executable} {} write={write}", args.join(" ")));
-            match (executable, write) {
-                ("bootc", false) => self
-                    .bootc
-                    .map(done)
-                    .ok_or_else(|| ExecutionError::Disabled("bootc not found".into())),
-                ("rpm-ostree", false) => match *self.ostree.lock().unwrap() {
-                    Some(json) => Ok(done(json)),
-                    None => Err(ExecutionError::Failed(Completion {
-                        code: Some(1),
-                        stderr: b"error: This system was not booted via libostree.".to_vec(),
-                        ..done("")
-                    })),
-                },
-                ("rpm-ostree", true) => {
-                    *self.ostree.lock().unwrap() = Some(RPM_OSTREE);
-                    Ok(done(""))
+            if self.interrupted {
+                return Err(ExecutionError::Cancelled);
+            }
+            let (state, staged) = if executable == "bootc" {
+                (&self.bootc, BOOTC_STAGED)
+            } else {
+                assert_eq!(executable, "rpm-ostree");
+                (&self.ostree, RPM_OSTREE)
+            };
+            if write {
+                if !self.current {
+                    *state.lock().unwrap() = Some(staged);
                 }
-                other => panic!("unexpected {other:?}"),
+                return Ok(done(""));
+            }
+            match *state.lock().unwrap() {
+                Some(json) => Ok(Completion {
+                    truncated: self.truncated_bootc && executable == "bootc",
+                    ..done(json)
+                }),
+                None => Err(ExecutionError::Failed(Completion {
+                    code: Some(1),
+                    stderr: b"error: This system was not booted via libostree.".to_vec(),
+                    ..done("")
+                })),
             }
         }
     }
     fn fake(bootc: Option<&'static str>, ostree: Option<&'static str>) -> Fake {
         Fake {
-            bootc,
+            bootc: Arc::new(Mutex::new(bootc)),
             ostree: Arc::new(Mutex::new(ostree)),
             calls: Arc::default(),
+            interrupted: false,
+            current: false,
+            truncated_bootc: false,
         }
     }
+    fn ignore(_: Progress) {}
 
     #[test]
     fn bootc_shows_available_and_staged_updates() {
@@ -480,11 +470,7 @@ mod tests {
             .execute(
                 &Operation::Upgrade(row.id.clone()),
                 &Cancellation::default(),
-                &mut |p| {
-                    if let Progress::Message(m) = p {
-                        messages.push(m)
-                    }
-                },
+                &mut |progress| messages.push(progress),
             )
             .unwrap();
         assert!(fake
@@ -492,17 +478,17 @@ mod tests {
             .lock()
             .unwrap()
             .contains(&"rpm-ostree upgrade write=true".into()));
-        assert!(messages
-            .last()
-            .unwrap()
-            .contains("Restart your computer to use 44.20260927.0"));
+        assert!(matches!(
+            messages.last(),
+            Some(Progress::Message(m)) if m.contains("Restart your computer to use 44.20260927.0")
+        ));
         // A second update while one waits for a restart does nothing.
         fake.calls.lock().unwrap().clear();
         image
             .execute(
                 &Operation::Upgrade(row.id),
                 &Cancellation::default(),
-                &mut |_| {},
+                &mut ignore,
             )
             .unwrap();
         assert!(!fake
@@ -521,10 +507,209 @@ mod tests {
             assert!(
                 matches!(availability, Availability::Unavailable(reason) if reason.contains("Not an image-based system"))
             );
+        } else {
+            assert_eq!(
+                availability,
+                Availability::Unavailable("Image-based systems are Linux".into())
+            );
         }
         assert!(image
             .installed(&Cancellation::default())
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn a_cancelled_status_read_stops_instead_of_trying_the_next_tool() {
+        let mut fake = fake(Some(BOOTC_UPDATE), Some(RPM_OSTREE));
+        fake.interrupted = true;
+        let mut image = SystemImage::new(fake.clone());
+        assert!(matches!(
+            image.installed(&Cancellation::default()),
+            Err(EngineError::Cancelled)
+        ));
+        assert_eq!(fake.calls.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn only_the_system_row_can_be_updated() {
+        let mut image = SystemImage::new(fake(Some(BOOTC_UPDATE), None));
+        if cfg!(target_os = "linux") {
+            assert_eq!(
+                image.detect(&Cancellation::default()).unwrap(),
+                Availability::Available
+            );
+        }
+        // The whole OS updates as one; nothing is installed or removed here.
+        assert_eq!(
+            image.capabilities(),
+            [
+                Capability::Installed,
+                Capability::Details,
+                Capability::Upgrade
+            ]
+        );
+        let row = image.installed(&Cancellation::default()).unwrap().remove(0);
+        let mut other = row.id.clone();
+        other.name = "kernel".into();
+        let cancel = Cancellation::default();
+        assert!(matches!(
+            image.execute(&Operation::Upgrade(other.clone()), &cancel, &mut |_| {}),
+            Err(EngineError::NotFound)
+        ));
+        assert!(matches!(
+            image.details(&other, &cancel),
+            Err(EngineError::NotFound)
+        ));
+        assert!(matches!(
+            image.execute(&Operation::Remove(row.id.clone()), &cancel, &mut |_| {}),
+            Err(EngineError::Unsupported { .. })
+        ));
+        assert!(matches!(
+            image.execute(
+                &Operation::UpgradeAll {
+                    backend: "flatpak".into()
+                },
+                &cancel,
+                &mut ignore
+            ),
+            Err(EngineError::Unsupported { .. })
+        ));
+        // Without an image-based system there is nothing to describe or update.
+        let mut ordinary = SystemImage::new(fake(None, None));
+        assert!(matches!(
+            ordinary.details(&row.id, &cancel),
+            Err(EngineError::NotFound)
+        ));
+        assert!(matches!(
+            ordinary.execute(
+                &Operation::UpgradeAll { backend: ID.into() },
+                &cancel,
+                &mut ignore
+            ),
+            Err(EngineError::NotFound)
+        ));
+    }
+
+    #[test]
+    fn sparse_status_still_names_the_deployment() {
+        let bootc = parse_bootc(&serde_json::json!({"status": {"booted": {"image": {}}}})).unwrap();
+        assert_eq!(bootc.booted.source, "bootc image");
+        assert_eq!(bootc.booted.version, None);
+        // The cached update is known by digest when it has no version.
+        let digest = parse_bootc(&serde_json::json!({"status": {"booted": {
+            "image": {"version": "44.1"},
+            "cachedUpdate": {"imageDigest": "sha256:bbb"}
+        }}}))
+        .unwrap();
+        assert_eq!(digest.available.as_deref(), Some("sha256:bbb"));
+        let ostree = parse_rpm_ostree(&serde_json::json!({"deployments": [
+            {"booted": true, "osname": "fedora"},
+            {"booted": false, "requested-packages": ["htop", ""]}
+        ]}))
+        .unwrap();
+        assert_eq!(ostree.booted.source, "fedora");
+        let rollback = ostree.rollback.unwrap();
+        assert_eq!(rollback.source, "ostree deployment");
+        assert_eq!(rollback.packages, vec!["htop"]);
+        assert!(
+            parse_rpm_ostree(&serde_json::json!({"deployments": [{"booted": false}]})).is_none()
+        );
+        // An update check that found the running version is no update.
+        let status = Status {
+            booted: Deployment {
+                source: "fedora".into(),
+                version: Some("44.1".into()),
+                packages: vec![],
+            },
+            available: Some("44.1".into()),
+            ..Status::default()
+        };
+        let row = SystemImage::<Fake>::package(Tool::RpmOstree, &status);
+        assert_eq!(row.update, UpdateAvailability::Current);
+        assert_eq!(row.summary, "fedora");
+    }
+
+    #[test]
+    fn an_update_that_stages_nothing_says_the_system_is_current() {
+        let current = r#"{"deployments":[{"booted":true,"version":"44.20260920.0","origin":"fedora:fedora/44/x86_64/silverblue"}],"cached-update":null}"#;
+        let mut fake = fake(None, Some(current));
+        fake.current = true;
+        let mut image = SystemImage::new(fake);
+        let row = image.installed(&Cancellation::default()).unwrap().remove(0);
+        let mut messages = vec![];
+        image
+            .execute(
+                &Operation::Upgrade(row.id),
+                &Cancellation::default(),
+                &mut |progress| messages.push(progress),
+            )
+            .unwrap();
+        assert_eq!(
+            messages.last(),
+            Some(&Progress::Message("The system is up to date.".into()))
+        );
+    }
+
+    #[test]
+    fn bootc_updates_stage_its_image_and_say_so() {
+        let fake = fake(Some(BOOTC_UPDATE), None);
+        let mut image = SystemImage::new(fake.clone());
+        let row = image.installed(&Cancellation::default()).unwrap().remove(0);
+        let mut messages = vec![];
+        image
+            .execute(
+                &Operation::UpgradeAll { backend: ID.into() },
+                &Cancellation::default(),
+                &mut |progress| messages.push(progress),
+            )
+            .unwrap();
+        assert!(fake
+            .calls
+            .lock()
+            .unwrap()
+            .contains(&"bootc upgrade write=true".into()));
+        assert!(matches!(
+            messages.first(),
+            Some(Progress::Message(m)) if m.starts_with("Downloading the system update with bootc.")
+        ));
+        assert_eq!(
+            messages.last(),
+            Some(&Progress::Message(
+                "Restart your computer to use 44.20260927.0. PkgDeck doesn't restart it for you."
+                    .into()
+            ))
+        );
+        // Waiting for a restart, a second update says so and runs nothing.
+        messages.clear();
+        image
+            .execute(
+                &Operation::Upgrade(row.id),
+                &Cancellation::default(),
+                &mut |progress| messages.push(progress),
+            )
+            .unwrap();
+        assert_eq!(
+            messages,
+            [Progress::Message(
+                "An update is already waiting for a restart.".into()
+            )]
+        );
+    }
+
+    #[test]
+    fn a_truncated_bootc_status_falls_back_to_rpm_ostree() {
+        let mut fake = fake(Some(BOOTC_UPDATE), Some(RPM_OSTREE));
+        fake.truncated_bootc = true;
+        let mut image = SystemImage::new(fake.clone());
+        let row = image.installed(&Cancellation::default()).unwrap().remove(0);
+        assert_eq!(row.display_name, "System image (rpm-ostree)");
+        assert_eq!(
+            *fake.calls.lock().unwrap(),
+            [
+                "bootc status --format json write=false",
+                "rpm-ostree status --json write=false"
+            ]
+        );
     }
 }

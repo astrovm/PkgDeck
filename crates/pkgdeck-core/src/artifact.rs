@@ -40,16 +40,6 @@ impl Kind {
             Self::AppImage => "appimage",
         }
     }
-    fn backend(self) -> &'static str {
-        match self {
-            Self::Deb => "apt",
-            Self::Rpm => "dnf",
-            Self::Arch => "pacman",
-            Self::Flatpak => "flatpak",
-            Self::Snap => "snap",
-            Self::AppImage => "appimage",
-        }
-    }
     fn suffix(self) -> &'static str {
         match self {
             Self::Deb => ".deb",
@@ -62,16 +52,16 @@ impl Kind {
     }
 }
 fn selected_backend(kind: Kind, host: &Host) -> Result<&'static str, EngineError> {
-    if kind != Kind::Rpm {
-        return Ok(kind.backend());
-    }
-    if host.resolve("dnf")?.is_some() {
-        Ok("dnf")
-    } else if host.resolve("zypper")?.is_some() {
-        Ok("zypper")
-    } else {
-        Err(invalid("DNF or Zypper is required for RPM files"))
-    }
+    Ok(match kind {
+        Kind::Deb => "apt",
+        Kind::Rpm if host.resolve("dnf")?.is_some() => "dnf",
+        Kind::Rpm if host.resolve("zypper")?.is_some() => "zypper",
+        Kind::Rpm => return Err(invalid("DNF or Zypper is required for RPM files")),
+        Kind::Arch => "pacman",
+        Kind::Flatpak => "flatpak",
+        Kind::Snap => "snap",
+        Kind::AppImage => "appimage",
+    })
 }
 pub fn kind(source: &str) -> Option<Kind> {
     let name = source.split(['?', '#']).next().unwrap_or(source);
@@ -163,7 +153,6 @@ fn hash(path: &Path, cancel: &Cancellation) -> Result<String, EngineError> {
     }
     let mut file = fs::File::open(path).map_err(invalid)?;
     let mut hash = Sha256::new();
-    let mut size = 0_u64;
     let mut buffer = [0_u8; 64 * 1024];
     loop {
         if cancel.requested() {
@@ -172,10 +161,6 @@ fn hash(path: &Path, cancel: &Cancellation) -> Result<String, EngineError> {
         let count = file.read(&mut buffer).map_err(invalid)?;
         if count == 0 {
             break;
-        }
-        size += count as u64;
-        if size > MAX_BYTES {
-            return Err(invalid("package file exceeds 2 GiB"));
         }
         hash.update(&buffer[..count]);
     }
@@ -213,21 +198,23 @@ fn download(
         .args(["--connect-timeout", "5", "--max-time", "300", "--output"])
         .arg(destination)
         .arg(source);
-    let result = process::run(
-        command,
-        Limits {
-            timeout: Duration::from_secs(305),
-            output_bytes: 16 * 1024,
-        },
-        cancel,
-        false,
-    )?;
+    let limits = Limits {
+        timeout: Duration::from_secs(305),
+        output_bytes: 16 * 1024,
+    };
+    let result = process::run(command, limits, cancel, false)?;
     if result.code != Some(0) || result.truncated {
         return Err(invalid("package download failed"));
     }
     Ok(())
 }
-fn copy(source: &Path, destination: &Path, cancel: &Cancellation) -> Result<(), EngineError> {
+/// Copy at most `limit` bytes, even if `source` grows while it is read.
+fn copy(
+    source: &Path,
+    destination: &Path,
+    limit: u64,
+    cancel: &Cancellation,
+) -> Result<(), EngineError> {
     let mut input = fs::File::open(source).map_err(invalid)?;
     let mut output = fs::OpenOptions::new()
         .write(true)
@@ -245,8 +232,8 @@ fn copy(source: &Path, destination: &Path, cancel: &Cancellation) -> Result<(), 
             break;
         }
         total += count as u64;
-        if total > MAX_BYTES {
-            return Err(invalid("package file exceeds 2 GiB"));
+        if total > limit {
+            return Err(invalid("package file grew past its size limit"));
         }
         output.write_all(&buffer[..count]).map_err(invalid)?;
     }
@@ -297,7 +284,7 @@ fn materialize(
         if meta.len() > MAX_BYTES {
             return Err(invalid("package file exceeds 2 GiB"));
         }
-        copy(path, &staged.path, cancel)?;
+        copy(path, &staged.path, MAX_BYTES, cancel)?;
     }
     if kind == Kind::Snap {
         let (base, suffix) = source
@@ -312,13 +299,8 @@ fn materialize(
         let assertion = temporary(".assert")?;
         staged.assertion = Some(assertion.clone());
         if https_source(source) {
-            download(
-                &assertion_source,
-                &assertion,
-                MAX_ASSERTION_BYTES,
-                cancel,
-                host,
-            )?;
+            let limit = MAX_ASSERTION_BYTES;
+            download(&assertion_source, &assertion, limit, cancel, host)?;
         } else {
             let meta = fs::symlink_metadata(&assertion_source).map_err(invalid)?;
             if !meta.file_type().is_file() || meta.len() == 0 || meta.len() > MAX_ASSERTION_BYTES {
@@ -326,7 +308,8 @@ fn materialize(
                     "Snap assertion must be a regular file smaller than 1 MiB",
                 ));
             }
-            copy(Path::new(&assertion_source), &assertion, cancel)?;
+            let source = Path::new(&assertion_source);
+            copy(source, &assertion, MAX_ASSERTION_BYTES, cancel)?;
         }
         let meta = fs::metadata(&assertion).map_err(invalid)?;
         if meta.len() == 0 || meta.len() > MAX_ASSERTION_BYTES {
@@ -344,15 +327,11 @@ fn metadata(
     let executable = host
         .resolve(executable)?
         .ok_or_else(|| invalid("package metadata tool is unavailable"))?;
-    let result = host.read(
-        &executable,
-        &args,
-        Limits {
-            timeout: Duration::from_secs(20),
-            output_bytes: 64 * 1024,
-        },
-        cancel,
-    )?;
+    let limits = Limits {
+        timeout: Duration::from_secs(20),
+        output_bytes: 64 * 1024,
+    };
+    let result = host.read(&executable, &args, limits, cancel)?;
     if result.code != Some(0) || result.truncated {
         return Err(invalid("could not inspect package metadata"));
     }
@@ -561,6 +540,7 @@ fn inspect_staged(
         icon: None,
         component_ids: vec![],
         homepages: vec![],
+        adopt_with: None,
     })
 }
 pub fn stage(id: &PackageId, cancel: &Cancellation) -> Result<Option<Staged>, EngineError> {
@@ -827,11 +807,8 @@ mod tests {
         elf[..4].copy_from_slice(b"\x7fELF");
         elf[4..7].copy_from_slice(&[2, 1, 1]);
         elf[8..11].copy_from_slice(b"AI\x02");
-        let machine = if std::env::consts::ARCH == "aarch64" {
-            183_u16
-        } else {
-            62_u16
-        };
+        let aarch64 = std::env::consts::ARCH == "aarch64";
+        let machine = if aarch64 { 183_u16 } else { 62 };
         elf[18..20].copy_from_slice(&machine.to_le_bytes());
         elf[20..24].copy_from_slice(&1_u32.to_le_bytes());
         elf[52..54].copy_from_slice(&64_u16.to_le_bytes());
@@ -946,6 +923,58 @@ mod tests {
         let mut plain = package.id;
         plain.reference = None;
         assert!(stage_with_host(&plain, &cancel, &host).unwrap().is_none());
+        fs::remove_dir_all(base).unwrap();
+    }
+    #[test]
+    fn copies_stop_at_their_limit_and_previews_need_their_metadata_tool() {
+        let base = std::env::temp_dir().join(format!(
+            "pkgdeck-artifact-limits-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&base).unwrap();
+        let cancel = Cancellation::default();
+        let source = base.join("source");
+        let copied = base.join("copied");
+        fs::write(&source, b"0123456789").unwrap();
+        fs::write(&copied, b"").unwrap();
+        assert!(matches!(
+            copy(&source, &copied, 4, &cancel),
+            Err(EngineError::InvalidResponse { reason, .. }) if reason.contains("size limit")
+        ));
+        copy(&source, &copied, 10, &cancel).unwrap();
+        assert_eq!(fs::read(&copied).unwrap(), b"0123456789");
+        // Each format needs its own metadata tool.
+        let host = fixture_host(&base);
+        tool(&base, "dnf", "exit 0");
+        for file in ["sample.rpm", "sample.pkg.tar.zst", "sample.snap"] {
+            let path = base.join(file);
+            fs::write(&path, b"synthetic package payload").unwrap();
+            fs::write(base.join("sample.assert"), b"synthetic assertion").unwrap();
+            assert!(matches!(
+                inspect_with_host(path.to_str().unwrap(), &cancel, &host),
+                Err(EngineError::InvalidResponse { reason, .. })
+                    if reason == "package metadata tool is unavailable"
+            ));
+        }
+        // A downloaded assertion must not be empty.
+        fs::write(base.join("payload"), b"synthetic remote snap").unwrap();
+        tool(&base, "curl", &format!("output=''\nsource=''\nwhile [ \"$#\" -gt 0 ]; do\n if [ \"$1\" = '--output' ]; then shift; output=\"$1\"; else source=\"$1\"; fi\n shift\ndone\ncase \"$source\" in\n *.assert) : > \"$output\" ;;\n *) /bin/cp '{}' \"$output\" ;;\nesac", base.join("payload").display()));
+        let url = "https://example.invalid/remote.snap";
+        assert!(matches!(
+            materialize(url, Kind::Snap, &cancel, &host),
+            Err(EngineError::InvalidResponse { reason, .. })
+                if reason == "Snap assertion must be smaller than 1 MiB"
+        ));
+        let cancelled = Cancellation::default();
+        cancelled.cancel();
+        assert!(matches!(
+            download(url, &base.join("unused"), MAX_BYTES, &cancelled, &host),
+            Err(EngineError::Cancelled)
+        ));
         fs::remove_dir_all(base).unwrap();
     }
 }

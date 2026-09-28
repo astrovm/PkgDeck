@@ -1278,6 +1278,24 @@ mod apt_upgrade_tests {
                 .count(),
             2
         );
+        // With the reviewed plan still current, both writes run.
+        let mut engine = Engine::default();
+        engine.register(UserFixture(writes.clone())).unwrap();
+        engine
+            .register(AptFixture {
+                reads: 0,
+                drift: false,
+                writes: writes.clone(),
+            })
+            .unwrap();
+        engine.enable_batch_authorization(
+            Host::new(Runtime::Native, Default::default()),
+            Authorization::Polkit,
+        );
+        engine.plan_apt_upgrade(&cancel).unwrap();
+        let results = engine.execute_batch(&operations, &cancel, &mut |_| {});
+        assert!(results.iter().all(Result::is_ok));
+        assert_eq!(writes.load(Ordering::SeqCst), 2);
     }
 
     #[test]
@@ -1302,14 +1320,6 @@ mod apt_upgrade_tests {
                 assert_eq!(operations.len(), 2);
                 self.0.fetch_add(1, Ordering::SeqCst);
                 Some(Ok(vec![OperationOutcome::default(); 2]))
-            }
-            fn execute(
-                &mut self,
-                _: &Operation,
-                _: &Cancellation,
-                _: &mut dyn FnMut(Progress),
-            ) -> Result<OperationOutcome, EngineError> {
-                panic!("separate transaction")
             }
         }
         let calls = Arc::new(AtomicUsize::new(0));
@@ -1395,6 +1405,7 @@ mod operation_plan_tests {
                 download_bytes: None,
                 disk_bytes: None,
                 restart_required: None,
+                adopts: None,
             }))
         }
         fn execute(

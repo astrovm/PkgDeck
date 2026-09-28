@@ -188,6 +188,7 @@ impl Standalone {
             icon: None,
             component_ids: vec![],
             homepages: vec![],
+            adopt_with: None,
         }
     }
 }
@@ -411,10 +412,6 @@ impl StandaloneIo for NativeStandalone {
         if cancel.requested() {
             return Err(EngineError::Cancelled);
         }
-        // Enforce the same runtime boundary even though discovery starts with files.
-        if let Some(reason) = self.host.runtime.disabled_reason() {
-            return Err(ExecutionError::Disabled(reason.into()).into());
-        }
         let home = self.home()?;
         let (launcher, root) = match tool {
             StandaloneTool::Codex => (
@@ -466,13 +463,12 @@ impl StandaloneIo for NativeStandalone {
             return Ok(None);
         };
         if tool == StandaloneTool::Codex {
-            let Some(manifest) = binary
-                .parent()
-                .and_then(Path::parent)
-                .map(|p| p.join("codex-package.json"))
-            else {
-                return Ok(None);
-            };
+            // bin/codex sits two levels below its release folder.
+            let manifest = binary
+                .ancestors()
+                .nth(2)
+                .map(|release| release.join("codex-package.json"))
+                .unwrap_or_default();
             let Some(text) = read_text(&manifest)? else {
                 return Ok(None);
             };
@@ -583,16 +579,10 @@ impl StandaloneIo for NativeStandalone {
             let url = if tool == StandaloneTool::Kiro {
                 "https://prod.download.cli.kiro.dev/stable/latest/manifest.json".to_owned()
             } else {
-                let os = if cfg!(target_os = "macos") {
-                    "darwin"
-                } else {
-                    "linux"
-                };
-                let arch = if cfg!(target_arch = "aarch64") {
-                    "arm64"
-                } else {
-                    "amd64"
-                };
+                let os = std::env::consts::OS.replace("macos", "darwin");
+                let arch = std::env::consts::ARCH
+                    .replace("aarch64", "arm64")
+                    .replace("x86_64", "amd64");
                 format!("https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/{os}_{arch}.json")
             };
             let data: Value = serde_json::from_str(&self.fetch(&url, cancel)?)
@@ -613,15 +603,8 @@ impl StandaloneIo for NativeStandalone {
             StandaloneTool::OpenCode => {
                 "https://api.github.com/repos/anomalyco/opencode/releases/latest".into()
             }
-            StandaloneTool::Copilot => {
-                "https://api.github.com/repos/github/copilot-cli/releases/latest".into()
-            }
-            StandaloneTool::Grok
-            | StandaloneTool::Cursor
-            | StandaloneTool::Kiro
-            | StandaloneTool::Antigravity
-            | StandaloneTool::Amp
-            | StandaloneTool::Droid => unreachable!(),
+            // Copilot; every other tool returned above.
+            _ => "https://api.github.com/repos/github/copilot-cli/releases/latest".into(),
         };
         let text = self.fetch(&url, cancel)?;
         if tool == StandaloneTool::Claude {
@@ -660,34 +643,8 @@ impl StandaloneIo for NativeStandalone {
                 cancellation_deferred: false,
             });
         }
-        if tool == StandaloneTool::Codex {
-            // Download to private storage, then run the official pinned-version
-            // installer. No network bytes are piped into a shell.
-            let script = self.fetch("https://chatgpt.com/codex/install.sh", cancel)?;
-            let temporary = InstallerFile::create(script.as_bytes())?;
-            let sh = self
-                .host
-                .resolve("sh")?
-                .ok_or_else(|| ExecutionError::Disabled("sh not found".into()))?;
-            let parent = installation
-                .launcher
-                .parent()
-                .ok_or(EngineError::NotFound)?;
-            return Ok(self.host.standalone_write(
-                &sh,
-                &[
-                    temporary.0.join("install.sh").into(),
-                    "--release".into(),
-                    candidate.to_string().into(),
-                ],
-                &[
-                    ("CODEX_NON_INTERACTIVE", "1".into()),
-                    ("CODEX_INSTALL_DIR", parent.as_os_str().into()),
-                ],
-                cancel,
-            )?);
-        }
         let args: Vec<OsString> = match tool {
+            StandaloneTool::Codex => return self.install_codex(installation, candidate, cancel),
             StandaloneTool::Claude => vec!["update".into()],
             StandaloneTool::Grok => vec![
                 "update".into(),
@@ -708,11 +665,45 @@ impl StandaloneIo for NativeStandalone {
             | StandaloneTool::Amp
             | StandaloneTool::Droid => vec!["update".into()],
             StandaloneTool::Kiro => vec!["update".into(), "--non-interactive".into()],
-            StandaloneTool::Codex => unreachable!(),
         };
         Ok(self
             .host
             .standalone_write(&installation.launcher, &args, &[], cancel)?)
+    }
+}
+
+impl NativeStandalone {
+    /// Download to private storage, then run the official pinned-version
+    /// installer. No network bytes are piped into a shell.
+    fn install_codex(
+        &self,
+        installation: &Installation,
+        candidate: &Version,
+        cancel: &Cancellation,
+    ) -> Result<Completion, EngineError> {
+        let script = self.fetch("https://chatgpt.com/codex/install.sh", cancel)?;
+        let temporary = InstallerFile::create(script.as_bytes())?;
+        let sh = self
+            .host
+            .resolve("sh")?
+            .ok_or_else(|| ExecutionError::Disabled("sh not found".into()))?;
+        let parent = installation
+            .launcher
+            .parent()
+            .ok_or(EngineError::NotFound)?;
+        Ok(self.host.standalone_write(
+            &sh,
+            &[
+                temporary.0.join("install.sh").into(),
+                "--release".into(),
+                candidate.to_string().into(),
+            ],
+            &[
+                ("CODEX_NON_INTERACTIVE", "1".into()),
+                ("CODEX_INSTALL_DIR", parent.as_os_str().into()),
+            ],
+            cancel,
+        )?)
     }
 }
 
@@ -965,6 +956,8 @@ mod tests {
         writes: Arc<Mutex<usize>>,
         change: bool,
         deferred: bool,
+        /// Cancel while checking for the newer version.
+        cancel_on_check: bool,
     }
     impl Fixture {
         fn new() -> Self {
@@ -978,6 +971,7 @@ mod tests {
                 writes: Arc::default(),
                 change: true,
                 deferred: false,
+                cancel_on_check: false,
             }
         }
     }
@@ -996,8 +990,11 @@ mod tests {
             &self,
             _: StandaloneTool,
             _: &Installation,
-            _: &Cancellation,
+            cancel: &Cancellation,
         ) -> Result<Version, EngineError> {
+            if self.cancel_on_check {
+                cancel.cancel();
+            }
             self.latest.clone()
         }
         fn update(
@@ -1025,6 +1022,16 @@ mod tests {
                 io: Box::new(fixture.clone()),
             };
             let cancel = Cancellation::default();
+            assert_eq!(backend.id(), tool.id());
+            assert_eq!(
+                backend.capabilities(),
+                [
+                    Capability::Search,
+                    Capability::Installed,
+                    Capability::Details,
+                    Capability::Upgrade
+                ]
+            );
             assert_eq!(backend.detect(&cancel).unwrap(), Availability::Available);
             assert!(backend.search("nonexistent", &cancel).unwrap().is_empty());
             assert_eq!(
@@ -1091,6 +1098,21 @@ mod tests {
                 .unwrap()
                 .cancellation_deferred
         );
+        // A cancellation during the version check stops before the updater.
+        fixture.cancel_on_check = true;
+        fixture.latest = Ok(Version::new(3, 0, 0));
+        backend.io = Box::new(fixture.clone());
+        let writes = *fixture.writes.lock().unwrap();
+        assert!(matches!(
+            backend.execute(
+                &Operation::Upgrade(id.clone()),
+                &Cancellation::default(),
+                &mut drop::<Progress>
+            ),
+            Err(EngineError::Cancelled)
+        ));
+        assert_eq!(*fixture.writes.lock().unwrap(), writes);
+        fixture.cancel_on_check = false;
         fixture.latest = Ok(Version::new(1, 0, 0));
         backend.io = Box::new(fixture.clone());
         assert_eq!(
@@ -1130,6 +1152,16 @@ mod tests {
             assert_eq!(installation.launcher, launcher);
             assert_eq!(installation.version, Version::new(1, 0, 0));
         }
+        // Settings without a channel keep the default one.
+        temp.write(".claude/settings.json", r#"{"theme":"dark"}"#);
+        assert_eq!(
+            native
+                .locate(StandaloneTool::Claude, &cancel)
+                .unwrap()
+                .unwrap()
+                .channel,
+            "latest"
+        );
         temp.write(
             ".claude/settings.json",
             r#"{"autoUpdatesChannel":"stable"}"#,
@@ -1248,6 +1280,11 @@ mod tests {
             .is_gt());
         assert!(version(StandaloneTool::Cursor, "2026.09").is_err());
         assert!(version(StandaloneTool::Cursor, "2026.09.26.1").is_err());
+        assert!(version(StandaloneTool::Cursor, "2026.09.26-bad!build").is_err());
+        assert_eq!(
+            version(StandaloneTool::Cursor, "2026.09.26").unwrap(),
+            Version::new(2026, 9, 26)
+        );
         assert_eq!(
             installed_version(StandaloneTool::Copilot, "GitHub Copilot CLI 1.0.88.").unwrap(),
             Version::new(1, 0, 88)
@@ -1332,11 +1369,10 @@ mod tests {
             temp.network(r#"{"tag_name":"v2.0.0"}"#);
             temp.write("installer", "#!/bin/sh\n[ \"$CODEX_NON_INTERACTIVE\" = 1 ] || exit 8\n[ \"$1\" = --release ] || exit 9\nprintf '%s' \"$2\" > \"$CODEX_INSTALL_DIR/codex.version\"\n");
             let result = native.update(tool, &installation, &Version::new(2, 0, 0), &cancel);
-            if rustix::process::geteuid().is_root() {
-                assert!(result.is_err());
-                continue;
-            }
-            assert_eq!(result.unwrap().code, Some(0));
+            // Updaters never run as root.
+            assert_eq!(result.is_err(), rustix::process::geteuid().is_root());
+            let Ok(result) = result else { continue };
+            assert_eq!(result.code, Some(0));
             assert_eq!(
                 native.locate(tool, &cancel).unwrap().unwrap().version,
                 Version::new(2, 0, 0)
@@ -1390,5 +1426,159 @@ mod tests {
         assert!(native
             .setting_path("CODEX_HOME", "/fallback".into())
             .is_err());
+    }
+    #[test]
+    fn native_discovery_refuses_unreadable_settings_and_foreign_layouts() {
+        let cancel = Cancellation::default();
+        // Each check refuses before anything runs, so a bare Mach-O header
+        // stands in for a tool.
+        let binary = |temp: &Temp, path: &str| {
+            let path = temp.write(path, [0xcf, 0xfa, 0xed, 0xfe]);
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        };
+        // Claude's settings must be a readable, bounded UTF-8 file.
+        let temp = Temp::new();
+        let native = temp.native();
+        let claude = binary(&temp, ".local/share/claude/versions/1.0.0");
+        fs::create_dir_all(temp.0.join(".local/bin")).unwrap();
+        symlink(&claude, temp.0.join(".local/bin/claude")).unwrap();
+        let settings = temp.write(".claude/settings.json", vec![b' '; 1024 * 1024 + 1]);
+        assert!(native
+            .locate(StandaloneTool::Claude, &cancel)
+            .unwrap_err()
+            .to_string()
+            .contains("too large"));
+        fs::write(&settings, b"\xff").unwrap();
+        assert!(native.locate(StandaloneTool::Claude, &cancel).is_err());
+        fs::remove_dir_all(temp.0.join(".claude")).unwrap();
+        temp.write(".claude", "not a folder");
+        assert!(native.locate(StandaloneTool::Claude, &cancel).is_err());
+        // Codex needs its release manifest, and only its own.
+        let codex = binary(&temp, ".codex/packages/standalone/releases/1.0.0/bin/codex");
+        symlink(&codex, temp.0.join(".local/bin/codex")).unwrap();
+        let manifest = temp
+            .0
+            .join(".codex/packages/standalone/releases/1.0.0/codex-package.json");
+        assert!(native
+            .locate(StandaloneTool::Codex, &cancel)
+            .unwrap()
+            .is_none());
+        for text in [
+            r#"{"layoutVersion":1,"entrypoint":"bin/codex","variant":"other"}"#,
+            r#"{"layoutVersion":2,"entrypoint":"bin/codex","variant":"codex"}"#,
+        ] {
+            fs::write(&manifest, text).unwrap();
+            assert!(native
+                .locate(StandaloneTool::Codex, &cancel)
+                .unwrap()
+                .is_none());
+        }
+        fs::write(&manifest, "not json").unwrap();
+        assert!(native.locate(StandaloneTool::Codex, &cancel).is_err());
+        // A private folder that really lives in an npm tree is not adopted.
+        binary(&temp, "lib/node_modules/amp/bin/amp");
+        symlink(temp.0.join("lib/node_modules/amp"), temp.0.join(".amp")).unwrap();
+        assert!(native
+            .locate(StandaloneTool::Amp, &cancel)
+            .unwrap()
+            .is_none());
+        // Only an executable native binary counts.
+        temp.write(".local/bin/droid", [0xcf, 0xfa, 0xed, 0xfe]);
+        assert!(native
+            .locate(StandaloneTool::Droid, &cancel)
+            .unwrap()
+            .is_none());
+        fs::remove_file(temp.0.join(".local/bin/droid")).unwrap();
+        temp.script(".local/bin/droid", "ab");
+        assert!(native
+            .locate(StandaloneTool::Droid, &cancel)
+            .unwrap()
+            .is_none());
+        // A path through a file is an error, not a missing tool.
+        let temp = Temp::new();
+        let native = temp.native();
+        temp.write(".opencode", "not a folder");
+        assert!(native.locate(StandaloneTool::OpenCode, &cancel).is_err());
+        temp.script(".local/bin/claude", "#!/bin/sh\n");
+        temp.write(".local/share", "not a folder");
+        assert!(native.locate(StandaloneTool::Claude, &cancel).is_err());
+    }
+
+    #[test]
+    fn native_checks_and_updates_fail_without_running_anything_unexpected() {
+        let temp = Temp::new();
+        let native = temp.native();
+        let cancel = Cancellation::default();
+        let cancelled = Cancellation::default();
+        cancelled.cancel();
+        temp.install(StandaloneTool::Amp);
+        let amp = native
+            .locate(StandaloneTool::Amp, &cancel)
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            native.latest(StandaloneTool::Amp, &amp, &cancelled),
+            Err(EngineError::Cancelled)
+        ));
+        temp.install(StandaloneTool::Grok);
+        let grok = native
+            .locate(StandaloneTool::Grok, &cancel)
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            native.latest(StandaloneTool::Grok, &grok, &cancelled),
+            Err(EngineError::Cancelled)
+        ));
+        // Another copy than the one checked is never updated.
+        let moved = Installation {
+            launcher: temp.0.join("elsewhere/amp"),
+            ..amp.clone()
+        };
+        assert!(matches!(
+            native.update(StandaloneTool::Amp, &moved, &Version::new(2, 0, 0), &cancel),
+            Err(EngineError::NotFound)
+        ));
+        assert!(!temp.0.join(".amp/bin/amp.args").exists());
+        // Without curl there is no update check.
+        let offline = NativeStandalone {
+            host: Host::new(
+                Runtime::Native,
+                BTreeMap::from([
+                    ("HOME".into(), temp.0.as_os_str().into()),
+                    ("PATH".into(), temp.0.join("empty").into_os_string()),
+                ]),
+            ),
+        };
+        assert!(matches!(
+            offline.latest(StandaloneTool::Amp, &amp, &cancel),
+            Err(EngineError::Execution(ExecutionError::Disabled(_)))
+        ));
+        // An installer shell that can't start fails the Codex update.
+        let temp = Temp::new();
+        let native = temp.native();
+        temp.install(StandaloneTool::Codex);
+        let codex = native
+            .locate(StandaloneTool::Codex, &cancel)
+            .unwrap()
+            .unwrap();
+        temp.write("installer", "#!/bin/sh\nexit 0\n");
+        temp.script("bin/sh", "#!/nonexistent/interpreter\n");
+        assert!(native
+            .update(
+                StandaloneTool::Codex,
+                &codex,
+                &Version::new(2, 0, 0),
+                &cancel
+            )
+            .is_err());
+        assert_eq!(
+            native
+                .locate(StandaloneTool::Codex, &cancel)
+                .unwrap()
+                .unwrap()
+                .version,
+            Version::new(1, 0, 0)
+        );
     }
 }

@@ -27,7 +27,7 @@ pub struct Args {
     /// Only use this source, such as apt or flatpak. Repeat to pick
     /// several; omit to use every available source. `pkd sources` lists
     /// them.
-    #[arg(long, global = true, value_name = "SOURCE", hide_possible_values = true, value_parser = ["fwupd", "apt", "dnf", "pacman", "zypper", "snap", "homebrew", "homebrew-cask", "macos-apps", "mas", "aur", "apk", "xbps", "system-image", "macports", "rustup", "nix", "go", "dotnet", "appimage", "flatpak", "docker", "podman", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "mise", "pixi", "conda", "composer", "gem", "codex", "claude", "grok", "opencode", "cursor", "copilot", "kiro", "antigravity", "amp", "droid"])]
+    #[arg(long, global = true, value_name = "SOURCE", hide_possible_values = true, value_parser = ["fwupd", "apt", "dnf", "pacman", "zypper", "snap", "homebrew", "homebrew-cask", "macos-apps", "mas", "aur", "apk", "xbps", "system-image", "macports", "rustup", "nix", "go", "dotnet", "appimage", "flatpak", "docker", "podman", "toolbox", "distrobox", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "mise", "pixi", "conda", "composer", "gem", "codex", "claude", "grok", "opencode", "cursor", "copilot", "kiro", "antigravity", "amp", "droid"])]
     pub from: Vec<String>,
     /// Pick a package architecture when the same name exists for several.
     #[arg(long, global = true)]
@@ -84,21 +84,30 @@ Examples:
 #[derive(Subcommand)]
 pub enum Commands {
     /// Search packages by name or description. Best matches come first.
-    Search { query: String },
+    Search {
+        /// Words to look for.
+        query: String,
+    },
     /// Show details for one package, by exact name.
-    Info { name: String },
+    Info {
+        /// The exact package name, as `pkd search` shows it.
+        name: String,
+    },
     /// Install packages, by exact name.
     Install {
+        /// Exact package names, as `pkd search` shows them.
         #[arg(required = true)]
         names: Vec<String>,
     },
     /// Remove installed packages.
     Remove {
+        /// Installed package names, as `pkd list` shows them.
         #[arg(required = true)]
         names: Vec<String>,
     },
     /// Update the named packages, or everything if no names are given.
     Upgrade {
+        /// Installed packages to update. Omit to update everything.
         names: Vec<String>,
         /// Allow an APT full upgrade to remove packages.
         #[arg(long)]
@@ -127,7 +136,10 @@ pub enum Commands {
         command: Option<RepoCommand>,
     },
     /// Show which file runs for a command and which package installed it. Never runs the command.
-    Inspect { command: String },
+    Inspect {
+        /// A command name, such as `python3`, or a path.
+        command: String,
+    },
     /// Find apps installed more than once, and config files left behind by removed packages.
     Audit,
     /// Save your installed software to a file, or check a saved list on this machine.
@@ -170,9 +182,17 @@ fn completions(shell: Shell, out: &mut dyn Write) {
 #[derive(Subcommand)]
 pub enum InventoryCommand {
     /// Save the named installed packages, or all of them if no names are given.
-    Export { path: PathBuf, names: Vec<String> },
+    Export {
+        /// New file to write. An existing file is never overwritten.
+        path: PathBuf,
+        /// Installed packages to save. Omit to save everything.
+        names: Vec<String>,
+    },
     /// Check a saved list against this machine. Changes nothing.
-    Preview { path: PathBuf },
+    Preview {
+        /// A list saved with `pkd inventory export`.
+        path: PathBuf,
+    },
 }
 #[derive(Subcommand)]
 pub enum RepoCommand {
@@ -191,7 +211,29 @@ pub enum RepoCommand {
     /// Open the Software Sources editor for APT.
     Edit,
 }
+impl Args {
+    /// For `pkd repos`, its subcommand, if any.
+    fn repos(&self) -> Option<Option<&RepoCommand>> {
+        match &self.command {
+            Some(Commands::Repos { command }) => Some(command.as_ref()),
+            _ => None,
+        }
+    }
+}
 impl Commands {
+    /// Package queries and changes; `--scope` means nothing to the rest.
+    fn takes_scope(&self) -> bool {
+        !matches!(
+            self,
+            Self::Refresh
+                | Self::Sources
+                | Self::Doctor
+                | Self::Clean { .. }
+                | Self::Inventory {
+                    command: InventoryCommand::Preview { .. }
+                }
+        )
+    }
     /// Commands that change installed software and so need approval.
     /// Refreshing package lists changes nothing you would review, so it runs
     /// without asking, like the app's background refresh.
@@ -201,7 +243,14 @@ impl Commands {
                 self,
                 Self::Install { .. } | Self::Remove { .. } | Self::Upgrade { .. }
             )
-            || matches!(self, Self::Clean { targets, all, .. } if *all || !targets.is_empty())
+            || matches!(self.cleanup_request(), (targets, all) if all || !targets.is_empty())
+    }
+    /// The cleanup task keys asked for, and whether every task was.
+    fn cleanup_request(&self) -> (&[String], bool) {
+        match self {
+            Self::Clean { targets, all } => (targets, *all),
+            _ => (&[], false),
+        }
     }
 }
 fn error_code(error: &EngineError) -> u8 {
@@ -329,31 +378,22 @@ pub fn dispatch(
     confirm: &mut dyn FnMut(&[Operation]) -> bool,
     events: &mut dyn FnMut(Event),
 ) -> (Value, u8) {
-    dispatch_with(engine, args, cancel, confirm, &mut |_| Ok(()), events)
+    dispatch_with(engine, args, None, cancel, confirm, &mut |_| Ok(()), events)
 }
 /// `authorize` runs once approved changes are about to start, so a password
 /// prompt comes after the review and never before it.
+/// Changes are recorded in `history`, when there is one.
 pub fn dispatch_with(
     engine: &mut Engine,
     args: &Args,
+    history: Option<&History>,
     cancel: &Cancellation,
     confirm: &mut dyn FnMut(&[Operation]) -> bool,
     authorize: &mut dyn FnMut(&[Operation]) -> Result<(), EngineError>,
     events: &mut dyn FnMut(Event),
 ) -> (Value, u8) {
     let command = args.command.as_ref().expect("CLI command");
-    if args.scope.is_some()
-        && matches!(
-            command,
-            Commands::Refresh
-                | Commands::Sources
-                | Commands::Doctor
-                | Commands::Clean { .. }
-                | Commands::Inventory {
-                    command: InventoryCommand::Preview { .. }
-                }
-        )
-    {
+    if args.scope.is_some() && !command.takes_scope() {
         return (
             json!({"error": "--scope applies to package queries and operations, not source or cleanup operations"}),
             2,
@@ -486,26 +526,23 @@ pub fn dispatch_with(
                     .collect::<std::collections::BTreeSet<_>>()
                     .into_iter()
                     .collect();
-                if !extra.is_empty() {
-                    if let Ok(mut more) = pkgdeck_core::backends::native_engine(
-                        &extra,
-                        false,
-                        args.auth.into(),
-                        cancel,
-                    ) {
-                        let more = more.installed(cancel);
-                        inventory
-                            .packages
-                            .extend(more.packages.into_iter().filter(|p| {
-                                args.scope.is_none_or(|scope| scope.native() == p.id.scope)
-                            }));
-                        inventory
-                            .failures
-                            .extend(more.failures.into_iter().filter(|failure| {
-                                !matches!(failure.error, EngineError::Unavailable { .. })
-                            }));
-                        result = inspect_native(&host, command, &inventory.packages, cancel);
-                    }
+                let auth = args.auth.into();
+                let more = (!extra.is_empty())
+                    .then(|| pkgdeck_core::backends::native_engine(&extra, false, auth, cancel))
+                    .and_then(Result::ok);
+                if let Some(mut more) = more {
+                    let more = more.installed(cancel);
+                    inventory.packages.extend(
+                        more.packages.into_iter().filter(|p| {
+                            args.scope.is_none_or(|scope| scope.native() == p.id.scope)
+                        }),
+                    );
+                    inventory
+                        .failures
+                        .extend(more.failures.into_iter().filter(|failure| {
+                            !matches!(failure.error, EngineError::Unavailable { .. })
+                        }));
+                    result = inspect_native(&host, command, &inventory.packages, cancel);
                 }
             }
             let code = if inventory.failures.is_empty() { 0 } else { 8 };
@@ -663,7 +700,9 @@ pub fn dispatch_with(
                 }
                 Ok(operations)
             }
-            Commands::Clean { targets, all } => {
+            // Only cleanup with named tasks, or --all, is left.
+            _ => {
+                let (targets, all) = command.cleanup_request();
                 let report = engine.cleanup(cancel);
                 let hard_failures: Vec<_> = report
                     .failures
@@ -678,16 +717,15 @@ pub fn dispatch_with(
                     .items
                     .into_iter()
                     .filter(|item| {
-                        *all || requested.contains(&format!("{}:{}", item.id.backend, item.id.key))
+                        all || requested.contains(&format!("{}:{}", item.id.backend, item.id.key))
                     })
                     .map(|item| Operation::Clean(item.id))
                     .collect();
-                if !*all && operations.len() != requested.len() {
+                if !all && operations.len() != requested.len() {
                     return Err(EngineError::NotFound);
                 }
                 Ok(operations)
             }
-            _ => unreachable!(),
         }
     })();
     let operations = match planned {
@@ -797,12 +835,10 @@ pub fn dispatch_with(
             return failure(error);
         }
     }
-    let history = History::default_store();
-    let activity_id = history
-        .as_ref()
-        .and_then(|store| store.begin("cli", operations.clone(), State::Running).ok());
+    let activity_id =
+        history.and_then(|store| store.begin("cli", operations.clone(), State::Running).ok());
     let results = engine.execute_batch(&operations, cancel, events);
-    if let (Some(store), Some(id)) = (&history, activity_id) {
+    if let (Some(store), Some(id)) = (history, activity_id) {
         let outcomes = results
             .iter()
             .map(|result| match result {
@@ -835,7 +871,7 @@ pub fn dispatch_with(
         .collect::<Vec<_>>();
     (json!({ "operations": operations }), code)
 }
-fn color_for(stream: &impl IsTerminal) -> bool {
+pub(crate) fn color_for(stream: &impl IsTerminal) -> bool {
     stream.is_terminal()
         && std::env::var_os("NO_COLOR").is_none()
         && std::env::var("TERM").is_ok_and(|term| term != "dumb")
@@ -893,17 +929,13 @@ fn working_label(command: &Commands) -> Option<String> {
 }
 fn repository_command(
     args: &Args,
-    command: &Option<RepoCommand>,
+    command: Option<&RepoCommand>,
     cancel: &Cancellation,
     live: &Live,
 ) -> (Value, u8) {
     use pkgdeck_core::{backends::NativeTransport, host::Host};
-    let host = Host::current();
-    if let Some(reason) = host.runtime.disabled_reason() {
-        return (json!({"error": reason}), 1);
-    }
     let transport = NativeTransport {
-        host,
+        host: Host::current(),
         authorization: args.auth.into(),
     };
     repository_dispatch(
@@ -923,41 +955,42 @@ fn repository_dispatch(
     transport: &impl pkgdeck_core::backends::Transport,
     root: &std::path::Path,
     args: &Args,
-    command: &Option<RepoCommand>,
+    command: Option<&RepoCommand>,
     cancel: &Cancellation,
     confirm: &mut dyn FnMut(&str) -> bool,
 ) -> (Value, u8) {
     use pkgdeck_core::repositories::{self, Action, Change};
-    if matches!(command, None | Some(RepoCommand::List)) {
-        let report = repositories::list_selected(
-            transport,
-            root,
-            cancel,
-            &args.from,
-            args.scope.map(InstallScope::native).as_ref(),
-        );
-        let code = if report.errors.is_empty() { 0 } else { 8 };
-        return (json!(report), code);
-    }
-    let [backend] = args.from.as_slice() else {
-        return (
-            json!({"error": "choose one package manager with --from"}),
-            2,
-        );
-    };
-    let (name, change) = match command.as_ref().unwrap() {
-        RepoCommand::Add { name, url } => (name.clone(), Change::Add { url: url.clone() }),
-        RepoCommand::Remove { name } => (name.clone(), Change::Remove),
-        RepoCommand::Enable { name } => (name.clone(), Change::SetEnabled { enabled: true }),
-        RepoCommand::Disable { name } => (name.clone(), Change::SetEnabled { enabled: false }),
-        RepoCommand::Priority { name, priority } => (
+    let (name, change) = match command {
+        None | Some(RepoCommand::List) => {
+            let report = repositories::list_selected(
+                transport,
+                root,
+                cancel,
+                &args.from,
+                args.scope.map(InstallScope::native).as_ref(),
+            );
+            let code = if report.errors.is_empty() { 0 } else { 8 };
+            return (json!(report), code);
+        }
+        Some(RepoCommand::Add { name, url }) => (name.clone(), Change::Add { url: url.clone() }),
+        Some(RepoCommand::Remove { name }) => (name.clone(), Change::Remove),
+        Some(RepoCommand::Enable { name }) => (name.clone(), Change::SetEnabled { enabled: true }),
+        Some(RepoCommand::Disable { name }) => {
+            (name.clone(), Change::SetEnabled { enabled: false })
+        }
+        Some(RepoCommand::Priority { name, priority }) => (
             name.clone(),
             Change::SetPriority {
                 priority: *priority,
             },
         ),
-        RepoCommand::Edit => ("sources".into(), Change::OpenEditor),
-        RepoCommand::List => unreachable!(),
+        Some(RepoCommand::Edit) => ("sources".into(), Change::OpenEditor),
+    };
+    let [backend] = args.from.as_slice() else {
+        return (
+            json!({"error": "choose one package manager with --from"}),
+            2,
+        );
     };
     let scope = args.scope.map(InstallScope::native).unwrap_or_else(|| {
         if backend == "flatpak" {
@@ -1007,10 +1040,9 @@ pub fn run(args: &Args) -> u8 {
         );
     }
     let cancel = Cancellation::default();
-    let signal = match signal_hook::flag::register(signal_hook::consts::SIGINT, cancel.flag()) {
-        Ok(id) => id,
-        Err(e) => return emit(args, json!({"error":e.to_string()}), 1, false),
-    };
+    // Registration only fails for signals a process may not handle.
+    let signal = signal_hook::flag::register(signal_hook::consts::SIGINT, cancel.flag())
+        .expect("SIGINT can be handled");
     let command = args.command.as_ref().expect("CLI command");
     // JSON output stays machine-only: no spinner or result lines on stderr.
     let live = if args.json {
@@ -1023,8 +1055,8 @@ pub fn run(args: &Args) -> u8 {
             live.status(label);
         }
     }
-    if let Commands::Repos { command } = command {
-        let (data, code) = repository_command(args, command, &cancel, &live);
+    if let Some(repos) = args.repos() {
+        let (data, code) = repository_command(args, repos, &cancel, &live);
         signal_hook::low_level::unregister(signal);
         drop(live);
         return emit(args, data, code, false);
@@ -1057,9 +1089,11 @@ pub fn run(args: &Args) -> u8 {
         }
     };
     let session = Session::new(&live);
+    let history = History::default_store();
     let (data, code) = dispatch_with(
         &mut engine,
         args,
+        history.as_ref(),
         &cancel,
         &mut |operations| session.confirm(operations, &mut io::stdin().lock()),
         &mut |operations| {
@@ -1101,69 +1135,38 @@ fn inspection_sources(requested: &[String]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pkgdeck_core::process::Completion;
-    struct RepoFixture;
-    impl pkgdeck_core::backends::Transport for RepoFixture {
-        fn apt_query(
-            &self,
-            _: &str,
-            _: &str,
-            _: &str,
-            _: &Cancellation,
-        ) -> Result<Completion, ExecutionError> {
-            unreachable!()
-        }
-        fn apt_write(
-            &self,
-            _: pkgdeck_core::host::AptAction,
-            _: &Cancellation,
-        ) -> Result<Completion, ExecutionError> {
-            unreachable!()
-        }
-        fn brew(
-            &self,
-            _: &[std::ffi::OsString],
-            _: &Cancellation,
-            _: bool,
-        ) -> Result<Completion, ExecutionError> {
-            unreachable!()
-        }
-        fn flatpak(
-            &self,
-            _: &[std::ffi::OsString],
-            _: &Cancellation,
-            write: bool,
-            _: bool,
-        ) -> Result<Completion, ExecutionError> {
-            Ok(Completion {
-                code: Some(0),
-                signal: None,
-                stdout: if write {
-                    vec![]
-                } else {
-                    b"fixture\tFixture\thttps://example.invalid\t1\t\n".to_vec()
-                },
-                stderr: vec![],
-                truncated: false,
-                cancellation_deferred: false,
-            })
-        }
-    }
     #[test]
     fn repository_cli_scopes_validation_and_confirmation() {
+        use std::os::unix::fs::PermissionsExt;
         let root = std::env::temp_dir().join(format!("pkgdeck-repos-cli-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
+        // Lists one remote per installation; changes succeed silently.
+        let flatpak = root.join("flatpak");
+        std::fs::write(
+            &flatpak,
+            "#!/bin/sh\ncase \"$*\" in *remotes*) printf 'fixture\\tFixture\\thttps://example.invalid\\t1\\t\\n' ;; esac\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&flatpak, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let transport = pkgdeck_core::backends::NativeTransport {
+            host: Host::new(
+                pkgdeck_core::host::Runtime::Native,
+                [
+                    ("PATH".into(), root.as_os_str().to_owned()),
+                    ("HOME".into(), root.as_os_str().to_owned()),
+                ]
+                .into(),
+            ),
+            authorization: Authorization::Polkit,
+        };
         let invoke = |words: &[&str], approve: bool| {
             let args =
                 Args::try_parse_from(std::iter::once("pkd").chain(words.iter().copied())).unwrap();
-            let Some(Commands::Repos { command }) = &args.command else {
-                panic!()
-            };
             repository_dispatch(
-                &RepoFixture,
+                &transport,
                 &root,
                 &args,
-                command,
+                args.repos().unwrap(),
                 &Cancellation::default(),
                 &mut |_| approve,
             )
@@ -1201,9 +1204,17 @@ mod tests {
         );
         assert_ne!(invoke(&["--from", "apt", "repos", "edit"], true).1, 0);
         assert_ne!(
-            invoke(&["--from", "fwupd", "repos", "enable", "fixture"], true).1,
+            invoke(
+                &["--scope", "user", "--from", "fwupd", "repos", "enable", "fixture"],
+                true
+            )
+            .1,
             0
         );
+        assert!(Args::try_parse_from(["pkd", "list"])
+            .unwrap()
+            .repos()
+            .is_none());
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
@@ -1231,7 +1242,7 @@ mod tests {
                     );
                     false
                 },
-                &mut |_| {},
+                &mut ignore,
             );
             assert_eq!(code, 7);
         }
@@ -1318,8 +1329,8 @@ mod tests {
             &mut installed,
             &export_args,
             &Cancellation::default(),
-            &mut |_| panic!("inventory export must not request package confirmation"),
-            &mut |_| {},
+            &mut decline,
+            &mut ignore,
         );
         assert_eq!(code, 0, "{exported}");
         assert_eq!(exported["manifest_export"]["packages"], 1);
@@ -1341,8 +1352,8 @@ mod tests {
             &mut target,
             &preview_args,
             &Cancellation::default(),
-            &mut |_| panic!("inventory preview must not request package confirmation"),
-            &mut |_| {},
+            &mut decline,
+            &mut ignore,
         );
         assert_eq!(code, 0, "{preview}");
         assert_eq!(
@@ -1353,8 +1364,8 @@ mod tests {
             &mut engine(),
             &export_args,
             &Cancellation::default(),
-            &mut |_| panic!("inventory export must not request confirmation"),
-            &mut |_| {},
+            &mut decline,
+            &mut ignore,
         );
         assert_eq!(duplicate_code, 1);
         let missing_args = Args::try_parse_from([
@@ -1369,8 +1380,8 @@ mod tests {
             &mut engine(),
             &missing_args,
             &Cancellation::default(),
-            &mut |_| panic!("inventory export must not request confirmation"),
-            &mut |_| {},
+            &mut decline,
+            &mut ignore,
         );
         assert_eq!(missing_code, 3);
         let mut failed_target = Engine::default();
@@ -1390,8 +1401,8 @@ mod tests {
             &mut failed_target,
             &preview_args,
             &Cancellation::default(),
-            &mut |_| panic!("inventory preview must not request confirmation"),
-            &mut |_| {},
+            &mut decline,
+            &mut ignore,
         );
         assert_eq!(incomplete_code, 8);
         assert_eq!(
@@ -1403,8 +1414,8 @@ mod tests {
             &mut engine(),
             &preview_args,
             &Cancellation::default(),
-            &mut |_| panic!("inventory preview must not request confirmation"),
-            &mut |_| {},
+            &mut decline,
+            &mut ignore,
         );
         assert_eq!(absent_code, 1);
     }
@@ -1434,6 +1445,7 @@ mod tests {
                 icon: None,
                 component_ids: vec![],
                 homepages: vec![],
+                adopt_with: None,
             }
         }
     }
@@ -1545,12 +1557,24 @@ mod tests {
             &args,
             &Cancellation::default(),
             &mut |_| approve,
-            &mut |_| {},
+            &mut ignore,
         )
+    }
+    fn ignore(_: Event) {}
+    fn decline(_: &[Operation]) -> bool {
+        false
+    }
+    fn record(events: &mut Vec<Event>) -> impl FnMut(Event) + '_ {
+        |event| events.push(event)
     }
     #[test]
     fn read_only_inventory_cannot_block_or_ambiguate_mutation_planning() {
-        struct Inventory;
+        use std::sync::{
+            atomic::{AtomicU32, Ordering},
+            Arc,
+        };
+        /// Counts every read, which mutation planning must never make.
+        struct Inventory(Arc<AtomicU32>);
         impl Backend for Inventory {
             fn id(&self) -> &str {
                 "macos-apps"
@@ -1559,15 +1583,19 @@ mod tests {
                 &[Capability::Search, Capability::Installed]
             }
             fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
-                panic!("mutations must not detect inventory-only sources")
+                self.0.fetch_add(1, Ordering::Relaxed);
+                Ok(Availability::Available)
             }
             fn installed(&mut self, _: &Cancellation) -> Result<Vec<Package>, EngineError> {
-                panic!("mutations must not scan inventory-only sources")
+                self.0.fetch_add(1, Ordering::Relaxed);
+                Ok(vec![])
             }
             fn search(&mut self, _: &str, _: &Cancellation) -> Result<Vec<Package>, EngineError> {
-                panic!("mutations must not search inventory-only sources")
+                self.0.fetch_add(1, Ordering::Relaxed);
+                Ok(vec![])
             }
         }
+        let reads = Arc::new(AtomicU32::new(0));
         for words in [
             vec!["install", "fixture"],
             vec!["remove", "fixture"],
@@ -1575,7 +1603,7 @@ mod tests {
             vec!["upgrade"],
         ] {
             let mut engine = Engine::default();
-            engine.register(Inventory).unwrap();
+            engine.register(Inventory(Arc::clone(&reads))).unwrap();
             engine
                 .register(Fixture {
                     backend: "homebrew".into(),
@@ -1597,11 +1625,19 @@ mod tests {
                     confirmed = true;
                     false
                 },
-                &mut |_| {},
+                &mut ignore,
             );
             assert!(confirmed, "{data}");
             assert_eq!(code, 7, "{data}");
         }
+        assert_eq!(reads.load(Ordering::Relaxed), 0);
+        // Reading commands do use it.
+        let mut engine = Engine::default();
+        engine.register(Inventory(Arc::clone(&reads))).unwrap();
+        for words in [&["sources"][..], &["list"], &["search", "fixture"]] {
+            assert_eq!(call(&mut engine, words, false).1, 0);
+        }
+        assert!(reads.load(Ordering::Relaxed) >= 3);
     }
     #[test]
     fn read_only_mutations_fail_before_confirmation_or_activity_events() {
@@ -1622,12 +1658,13 @@ mod tests {
                     argv.push("--yes");
                 }
                 let args = Args::try_parse_from(argv).unwrap();
+                let mut events = vec![];
                 let (data, code) = dispatch(
                     &mut engine,
                     &args,
                     &Cancellation::default(),
-                    &mut |_| panic!("read-only mutation requested confirmation"),
-                    &mut |_| panic!("read-only mutation emitted activity"),
+                    &mut decline,
+                    &mut record(&mut events),
                 );
                 assert_ne!(code, 0);
                 assert_eq!(
@@ -1635,6 +1672,7 @@ mod tests {
                     "{data}"
                 );
                 assert!(data.get("operations").is_none(), "{data}");
+                assert!(events.is_empty());
             }
         }
     }
@@ -2068,8 +2106,8 @@ mod tests {
             &mut engine,
             &args,
             &Cancellation::default(),
-            &mut |_| panic!("refreshing package lists must not ask for approval"),
-            &mut |_| {},
+            &mut decline,
+            &mut ignore,
         );
         assert_eq!(code, 0, "{data}");
         assert_eq!(
@@ -2106,5 +2144,221 @@ mod tests {
             })
             .unwrap();
         assert_eq!(call(&mut failed, &["upgrade"], true).1, 1);
+    }
+    /// Installed with an update, but its plan and details can't be read,
+    /// and, when the flag is false, it can't even be detected.
+    struct Faulty(&'static str, bool);
+    impl Backend for Faulty {
+        fn id(&self) -> &str {
+            self.0
+        }
+        fn capabilities(&self) -> &[Capability] {
+            &[
+                Capability::Installed,
+                Capability::Details,
+                Capability::Upgrade,
+                Capability::Refresh,
+            ]
+        }
+        fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
+            let failure = EngineError::InvalidResponse {
+                backend: self.0.into(),
+                reason: "synthetic detection failure".into(),
+            };
+            self.1.then_some(Availability::Available).ok_or(failure)
+        }
+        fn installed(&mut self, _: &Cancellation) -> Result<Vec<Package>, EngineError> {
+            let mut package = Fixture {
+                backend: self.0.into(),
+                installed: true,
+                fail: None,
+                read_failure: None,
+                verified: true,
+            }
+            .package();
+            package.update = UpdateAvailability::Available;
+            Ok(vec![package])
+        }
+        fn details(
+            &mut self,
+            _: &PackageId,
+            _: &Cancellation,
+        ) -> Result<PackageDetails, EngineError> {
+            Err(EngineError::NotFound)
+        }
+        fn apt_upgrade_plan(&mut self, _: &Cancellation) -> Result<AptUpgradePlan, EngineError> {
+            Err(ExecutionError::LockBusy.into())
+        }
+    }
+    #[test]
+    fn plans_stop_on_unreadable_sources_plans_and_details() {
+        let mut apt = Engine::default();
+        apt.register(Faulty("apt", true)).unwrap();
+        // The APT plan is read before anything runs.
+        assert_eq!(call(&mut apt, &["--yes", "upgrade"], true).1, 6);
+        let mut firmware = Engine::default();
+        firmware.register(Faulty("fwupd", true)).unwrap();
+        assert_eq!(call(&mut firmware, &["--yes", "upgrade"], true).1, 3);
+        // A source asked for by name must be readable to refresh it.
+        let mut broken = Engine::default();
+        broken.register(Faulty("dnf", false)).unwrap();
+        let (data, code) = call(&mut broken, &["--from", "dnf", "refresh"], true);
+        assert_eq!(code, 1);
+        assert_eq!(data["error"]["InvalidResponse"]["backend"], "dnf");
+        assert_eq!(
+            call(&mut broken, &["refresh"], true).0["operations"],
+            json!([])
+        );
+    }
+    #[test]
+    fn repository_and_read_only_cleanup_requests_are_refused() {
+        let mut engine = engine();
+        let (data, code) = call(&mut engine, &["repos"], false);
+        assert_eq!(code, 2);
+        assert_eq!(
+            data["error"],
+            "repository commands use the native repository service"
+        );
+        let mut inventory = Engine::default();
+        inventory
+            .register(Fixture {
+                backend: "macos-apps".into(),
+                installed: true,
+                fail: None,
+                read_failure: None,
+                verified: true,
+            })
+            .unwrap();
+        let (data, code) = call(&mut inventory, &["--yes", "clean", "--all"], true);
+        assert_eq!(code, 1);
+        assert_eq!(data["error"]["Unsupported"]["backend"], "macos-apps");
+        assert_eq!(data["error"]["Unsupported"]["capability"], "clean");
+        let args = Args::try_parse_from(["pkd", "install", "fixture"]).unwrap();
+        let mut events = vec![];
+        let (data, code) = dispatch(
+            &mut engine,
+            &args,
+            &Cancellation::default(),
+            &mut decline,
+            &mut record(&mut events),
+        );
+        assert_eq!((code, &data["error"]), (7, &json!("confirmation_declined")));
+        assert!(events.is_empty());
+        let (_, code) = dispatch(
+            &mut engine,
+            &args,
+            &Cancellation::default(),
+            &mut |_| true,
+            &mut record(&mut events),
+        );
+        assert_eq!(code, 0);
+        assert!(matches!(events.last(), Some(Event::Finished { .. })));
+    }
+    #[test]
+    fn inventory_export_needs_a_complete_inventory_and_honors_one_source() {
+        let path = std::env::temp_dir().join(format!(
+            "pkgdeck inventory from {} {:?}.json",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let path_text = path.to_str().unwrap();
+        let mut failed = Engine::default();
+        failed
+            .register(Fixture {
+                backend: "apt".into(),
+                installed: true,
+                fail: None,
+                read_failure: Some(ExecutionError::TimedOut.into()),
+                verified: true,
+            })
+            .unwrap();
+        let (data, code) = call(&mut failed, &["inventory", "export", path_text], false);
+        assert_eq!(code, 4, "{data}");
+        assert!(!path.exists());
+        let (data, code) = call(
+            &mut engine(),
+            &["--from", "apt", "inventory", "export", path_text, "fixture"],
+            false,
+        );
+        assert_eq!(code, 0, "{data}");
+        assert_eq!(manifest::read(&path).unwrap().packages[0].backend, "apt");
+        std::fs::remove_file(path).unwrap();
+    }
+    #[test]
+    fn approval_errors_stop_changes_and_history_records_each_outcome() {
+        let root = std::env::temp_dir().join(format!(
+            "pkgdeck-cli-history-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let history = History::new(root.join("activity.json"));
+        let args = Args::try_parse_from(["pkd", "--yes", "install", "fixture"]).unwrap();
+        let mut authorized = vec![];
+        let (data, code) = dispatch_with(
+            &mut engine(),
+            &args,
+            Some(&history),
+            &Cancellation::default(),
+            &mut decline,
+            &mut |operations| {
+                authorized.push(operations.len());
+                Err(ExecutionError::AuthorizationDenied.into())
+            },
+            &mut ignore,
+        );
+        assert_eq!(code, 5, "{data}");
+        assert_eq!(authorized, [1]);
+        assert!(history.entries().unwrap().is_empty());
+        for (fail, state) in [
+            (None, State::Finished),
+            (Some(EngineError::Cancelled), State::Cancelled),
+            (Some(ExecutionError::LockBusy.into()), State::Failed),
+        ] {
+            let mut engine = Engine::default();
+            engine
+                .register(Fixture {
+                    backend: "apt".into(),
+                    installed: false,
+                    fail,
+                    read_failure: None,
+                    verified: true,
+                })
+                .unwrap();
+            dispatch_with(
+                &mut engine,
+                &args,
+                Some(&history),
+                &Cancellation::default(),
+                &mut decline,
+                &mut |_| Ok(()),
+                &mut ignore,
+            );
+            let entry = history.entries().unwrap().pop().unwrap();
+            assert_eq!((entry.frontend.as_str(), entry.state), ("cli", state));
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn a_source_the_engine_cannot_build_is_reported() {
+        let mut args = Args::try_parse_from(["pkd", "--json", "list"]).unwrap();
+        args.from = vec!["synthetic-unknown".into()];
+        assert_eq!(run(&args), 1);
+    }
+    #[test]
+    fn scope_applies_only_to_package_queries_and_changes() {
+        for (words, scoped) in [
+            (&["list"][..], true),
+            (&["install", "vim"], true),
+            (&["inventory", "export", "saved.json"], true),
+            (&["refresh"], false),
+            (&["sources"], false),
+            (&["doctor"], false),
+            (&["clean"], false),
+            (&["inventory", "preview", "saved.json"], false),
+        ] {
+            let args =
+                Args::try_parse_from(std::iter::once("pkd").chain(words.iter().copied())).unwrap();
+            assert_eq!(args.command.unwrap().takes_scope(), scoped, "{words:?}");
+        }
     }
 }

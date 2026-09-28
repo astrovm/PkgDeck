@@ -57,6 +57,12 @@ pub struct Package {
     /// as component ids; normalized only while grouping. Empty when unknown.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub homepages: Vec<String>,
+    /// Homebrew cask token that can take over this exact app copy
+    /// (`brew install --cask --adopt`), set only by the macOS application
+    /// inventory for allowlisted apps with no App Store receipt and no
+    /// Homebrew owner. Installing that cask re-checks everything first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adopt_with: Option<String>,
 }
 /// Normalize a homepage for grouping: case-insensitive, no scheme, no
 /// `www.` prefix, no query/fragment, no trailing slash. Empty or
@@ -162,6 +168,10 @@ pub struct TransactionPlan {
     pub download_bytes: Option<u64>,
     pub disk_bytes: Option<i64>,
     pub restart_required: Option<bool>,
+    /// The app already in place that this install hands to the manager
+    /// instead of installing another copy. `None` for ordinary installs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub adopts: Option<PathBuf>,
 }
 
 #[derive(serde::Serialize, Clone, Copy, Debug, Eq, PartialEq)]
@@ -437,6 +447,7 @@ mod tests {
             icon: None,
             component_ids: components.iter().map(ToString::to_string).collect(),
             homepages: vec![],
+            adopt_with: None,
         }
     }
     fn firefox_id() -> PackageId {
@@ -514,6 +525,8 @@ mod tests {
             package
         }
         let mut packages = vec![
+            row("unrelated", "nothing in common"),
+            row("yyy", "a campfire tool"),
             row("zzz", "fire starter"),
             row("x-fire-helper", "helper"),
             row("firefox", "browser"),
@@ -521,7 +534,17 @@ mod tests {
         ];
         rank_search_matches(&mut packages, "fire");
         let names: Vec<_> = packages.iter().map(|p| p.id.name.as_str()).collect();
-        assert_eq!(names, vec!["fire", "firefox", "x-fire-helper", "zzz"]);
+        assert_eq!(
+            names,
+            vec![
+                "fire",
+                "firefox",
+                "x-fire-helper",
+                "zzz",
+                "yyy",
+                "unrelated"
+            ]
+        );
         // Empty queries keep engine order.
         let mut same = packages.clone();
         rank_search_matches(&mut same, "   ");
@@ -611,6 +634,22 @@ mod tests {
         assert_eq!(groups[0], groups[1]);
         assert_eq!(groups[0], groups[3]);
         assert_eq!(groups[2], None);
+    }
+    #[test]
+    fn linked_groups_settle_on_their_smallest_key() {
+        // "c:b" links apt and flatpak; "c:a" links snap and npm; one flatpak
+        // row carries both, so every row ends up in the "c:a" group.
+        let packages = vec![
+            package("apt", "one", true, &["b"]),
+            package("flatpak", "two", true, &["b", "a"]),
+            package("snap", "three", true, &["a"]),
+            package("npm", "four", true, &["a"]),
+            package("cargo", "remote", false, &["unshared"]),
+        ];
+        let groups = same_app_group_keys_all(&packages);
+        assert_eq!(&groups[..4], vec![Some("c:a".to_string()); 4]);
+        assert_eq!(groups[4], None);
+        assert!(same_app_sources_all(&packages)[4].is_empty());
     }
     #[test]
     fn empty_component_stems_never_group() {

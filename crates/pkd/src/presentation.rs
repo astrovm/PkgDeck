@@ -1296,6 +1296,43 @@ mod tests {
         assert!(empty.contains("No leftover files from removed packages."));
         assert!(output.contains("/etc/old.conf"));
         assert!(output.contains("Unknown data remains unknown."));
+        // Several rows, and rows with parts missing, still render.
+        let many = human(
+            &json!({"audit":{"groups":[{"key":"one"},{"key":"two","copies":[]}],
+                "leftovers":[{"path":"/etc/a"},{"path":"/etc/b"}],"data_note":"Note."}}),
+            100,
+            false,
+        );
+        assert!(many.contains("2 apps installed more than once"), "{many}");
+        assert!(
+            many.contains("\none\n") && many.contains("\ntwo\n"),
+            "{many}"
+        );
+        assert!(
+            many.contains("2 leftover files from removed packages"),
+            "{many}"
+        );
+        let bare = human(&json!({"audit":{"data_note":"Only the note."}}), 100, false);
+        assert_eq!(bare.trim(), "Only the note.");
+        let sparse = human(
+            &json!({"inspection":{"command":"tool","ownership_note":"Note.","candidates":[
+                {"path":"/first/tool","state":"broken_link"},
+                {"path":"/second/tool","state":"executable","owners":[
+                    {"manager":"","native_name":"","state":"unknown"}]}]}}),
+            100,
+            false,
+        );
+        assert!(sparse.contains("/first/tool"), "{sparse}");
+        assert!(sparse.contains("/second/tool"), "{sparse}");
+        let no_candidates = human(
+            &json!({"inspection":{"command":"tool","ownership_note":"Nothing found."}}),
+            100,
+            false,
+        );
+        assert!(
+            no_candidates.trim_end().ends_with("Nothing found."),
+            "{no_candidates}"
+        );
     }
     #[test]
     fn cleanup_plans_and_failures_are_concise_and_actionable() {
