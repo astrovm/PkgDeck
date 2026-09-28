@@ -171,22 +171,37 @@ jobs:
           name: logs-podman-${{ matrix.arch }}
           path: build/verification
 
-  build-backend-cli:
-    name: Build / Backend CLI (${{ matrix.platform }})
+  test-backends:
+    # One job per platform and group: separate per-backend jobs spent most of
+    # their time queued for runners (5 concurrent macOS jobs per account) and
+    # setting up. scripts/tests/backends.sh still reports each backend.
+    name: Test / Backends / ${{ matrix.group }} (${{ matrix.platform }})
     if: github.event_name != 'push' && !inputs.homebrew_only
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { platform: linux-x86_64, runner: ubuntu-26.04, arch: x86_64 }
-          - { platform: linux-aarch64, runner: ubuntu-26.04-arm, arch: aarch64 }
-          - { platform: macos-x86_64, runner: macos-26-intel, arch: x86_64 }
-          - { platform: macos-aarch64, runner: macos-26, arch: aarch64 }
+          - { group: native, platform: linux-x86_64, runner: ubuntu-26.04, arch: x86_64 }
+          - { group: native, platform: linux-aarch64, runner: ubuntu-26.04-arm, arch: aarch64 }
+          - { group: dev, platform: linux-x86_64, runner: ubuntu-26.04, arch: x86_64 }
+          - { group: dev, platform: linux-aarch64, runner: ubuntu-26.04-arm, arch: aarch64 }
+          - { group: dev, platform: macos-x86_64, runner: macos-26-intel, arch: x86_64 }
+          - { group: dev, platform: macos-aarch64, runner: macos-26, arch: aarch64 }
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 10
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+      HOMEBREW_NO_INSTALL_CLEANUP: '1'
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Podman and Snap
+        if: matrix.group == 'native'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y podman snapd
+          sudo systemctl enable --now snapd.socket
+          sudo snap wait system seed.loaded
       - name: Restore terminal build outputs
         uses: ./.github/actions/rust-cache
         with:
@@ -195,101 +210,8 @@ jobs:
           save: 'false'
       - name: Build CLI
         run: cargo build --locked -p pkd
-      - name: Upload CLI for backend tests
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: backend-pkd-${{ matrix.platform }}
-          path: target/debug/pkd
-          if-no-files-found: error
-          retention-days: 1
-
-  test-backend:
-    name: Test / Backend / ${{ matrix.backend }} (${{ matrix.platform }})
-    if: github.event_name != 'push' && !inputs.homebrew_only
-    needs: build-backend-cli
-    timeout-minutes: 25
-    strategy:
-      fail-fast: false
-      matrix:
-        platform: [linux-x86_64, linux-aarch64, macos-x86_64, macos-aarch64]
-        backend: [dnf, pacman, zypper, snap, cargo, npm, pnpm, bun, pip, pipx, uv, mise, composer, gem]
-        include:
-          - { platform: linux-x86_64, runner: ubuntu-26.04 }
-          - { platform: linux-aarch64, runner: ubuntu-26.04-arm }
-          - { platform: macos-x86_64, runner: macos-26-intel }
-          - { platform: macos-aarch64, runner: macos-26 }
-          - backend: dnf
-            kind: native
-          - backend: pacman
-            kind: native
-          - backend: zypper
-            kind: native
-          - backend: snap
-            kind: snap
-          - backend: cargo
-            kind: dev
-          - backend: npm
-            kind: dev
-          - backend: pnpm
-            kind: dev
-          - backend: bun
-            kind: dev
-          - backend: pip
-            kind: dev
-          - backend: pipx
-            kind: dev
-          - backend: uv
-            kind: dev
-          - backend: composer
-            kind: dev
-          - backend: gem
-            kind: dev
-          - backend: mise
-            kind: dev
-        exclude:
-          # Arch's official container is x86_64-only. Distro managers are Linux-only.
-          - { platform: linux-aarch64, backend: pacman }
-          - { platform: macos-x86_64, backend: dnf }
-          - { platform: macos-x86_64, backend: pacman }
-          - { platform: macos-x86_64, backend: zypper }
-          - { platform: macos-x86_64, backend: snap }
-          - { platform: macos-aarch64, backend: dnf }
-          - { platform: macos-aarch64, backend: pacman }
-          - { platform: macos-aarch64, backend: zypper }
-          - { platform: macos-aarch64, backend: snap }
-    runs-on: ${{ matrix.runner }}
-    env:
-      HOMEBREW_NO_AUTO_UPDATE: '1'
-      HOMEBREW_NO_INSTALL_CLEANUP: '1'
-    steps:
-      - name: Check out source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install Podman dependencies
-        if: matrix.kind == 'native'
-        run: sudo apt-get update && sudo apt-get install -y podman
-      - name: Install Snap dependencies
-        if: matrix.kind == 'snap'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y snapd
-          sudo systemctl enable --now snapd.socket
-          sudo snap wait system seed.loaded
-      - name: Download CLI for backend tests
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: backend-pkd-${{ matrix.platform }}
-          path: target/debug
-      - name: Restore CLI executable permission
-        run: chmod +x target/debug/pkd
-      - name: Run native backend lifecycle tests
-        if: matrix.kind == 'native'
-        run: scripts/tests/native-manager.sh ${{ matrix.backend }} "$PWD/target/debug/pkd"
-      - name: Run Snap backend lifecycle tests
-        if: matrix.kind == 'snap'
-        run: scripts/tests/snap-manager.sh "$PWD/target/debug/pkd"
-      - name: Run development backend lifecycle tests
-        if: matrix.kind == 'dev'
-        run: scripts/tests/dev-manager.sh ${{ matrix.backend }} "$PWD/target/debug/pkd"
+      - name: Run backend lifecycle tests
+        run: scripts/tests/backends.sh ${{ matrix.group }} "$PWD/target/debug/pkd"
 
   lint-workspace:
     name: Lint / Workspace (${{ matrix.arch }})
@@ -398,6 +320,10 @@ jobs:
           rustup show
           # Kirigami uses Qt private API, so its build is only reusable with the same Qt.
           echo "qt=$(brew list --versions qtbase qtdeclarative | tr ' \n' '--')" >> "$GITHUB_OUTPUT"
+          # Only the Kirigami recipe (version, checksums, build flags) decides
+          # whether its 6-minute build can be reused, not the rest of the script.
+          recipe=$(grep -E 'kf_version=|fetch |kde_build |-D[A-Z]' scripts/bundle-macos.sh | shasum -a 256 | cut -c1-16)
+          echo "kirigami=$recipe" >> "$GITHUB_OUTPUT"
       - name: Cache Rust build outputs
         uses: ./.github/actions/rust-cache
         with:
@@ -408,13 +334,13 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: build/macos/kde
-          key: kirigami-v1-${{ matrix.arch }}-${{ steps.deps.outputs.qt }}-${{ hashFiles('scripts/bundle-macos.sh') }}
+          key: kirigami-v2-${{ matrix.arch }}-${{ steps.deps.outputs.qt }}-${{ steps.deps.outputs.kirigami }}
       - name: Restore Kirigami build
         if: github.ref != 'refs/heads/main'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: build/macos/kde
-          key: kirigami-v1-${{ matrix.arch }}-${{ steps.deps.outputs.qt }}-${{ hashFiles('scripts/bundle-macos.sh') }}
+          key: kirigami-v2-${{ matrix.arch }}-${{ steps.deps.outputs.qt }}-${{ steps.deps.outputs.kirigami }}
       - name: Build app bundle
         run: scripts/bundle-macos.sh
       - name: Check bundle requirements
@@ -432,7 +358,9 @@ jobs:
           export QMAKE="$(brew --prefix qtbase)/bin/qmake"
           export QML_IMPORT_PATH="$PWD/build/macos/kde/lib/qml"
           export QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=software
-          cargo test --locked -p pkgdeck --no-fail-fast -- --test-threads=1
+          # The bundle step already built the release profile; testing it
+          # reuses those outputs instead of compiling everything again.
+          cargo test --locked --release -p pkgdeck --no-fail-fast -- --test-threads=1
       - name: Upload macOS startup diagnostics
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -739,6 +667,30 @@ jobs:
           name: packages-linux-flatpak-${{ matrix.arch }}
           path: build/artifacts/PkgDeck-v*-${{ matrix.arch }}.flatpak
           if-no-files-found: error
+
+  prune-caches:
+    # Main saves each cache under a new key per commit, and the repository's
+    # 10 GB limit then evicts the caches pull requests need. Keep only the
+    # newest copy of each cache once this run has saved its own.
+    name: Prune superseded caches
+    needs: [test-terminal, test-macos, test-podman, lint-workspace, coverage-workspace, test-workspace, package-macos, package-linux-cli, package-bundles]
+    if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Delete older copies of each cache
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh cache list --ref refs/heads/main --limit 1000 --json id,key,createdAt \
+            --jq 'map(. + {prefix: (.key | sub("-[0-9a-f]{40}$"; ""))}) | group_by(.prefix)[] | sort_by(.createdAt) | .[:-1][] | "\(.id) \(.key)"' |
+            while read -r id key; do
+              echo "Deleting $key"
+              gh cache delete "$id"
+            done
 
   release-gate:
     name: Release / Verify reviewed commit
