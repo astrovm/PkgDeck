@@ -44,10 +44,11 @@ pkd completions bash                     # print a shell completion script
 | `--auth sudo\|polkit` | How to get permission for system changes. Default: `sudo`. |
 | `--json` | Print machine-readable JSON. See [JSON output](#json-output). |
 
-Sources for `--from`: `fwupd`, `apt`, `dnf`, `pacman`, `zypper`, `snap`,
-`homebrew`, `homebrew-cask`, `macos-apps`, `mas`, `appimage`, `flatpak`,
-`docker`, `podman`, `cargo`, `npm`, `pnpm`, `bun`, `pip`, `pipx`, `uv`, `mise`,
-`pixi`, `conda`, `composer`, `gem`,
+Sources for `--from`: `fwupd`, `apt`, `dnf`, `pacman`, `aur`, `zypper`, `apk`,
+`xbps`, `snap`, `system-image`, `homebrew`, `homebrew-cask`, `macos-apps`,
+`mas`, `macports`, `appimage`, `flatpak`, `docker`, `podman`, `cargo`,
+`rustup`, `npm`, `pnpm`, `bun`, `pip`, `pipx`, `uv`, `mise`, `pixi`, `conda`,
+`nix`, `composer`, `gem`,
 `codex`, `claude`, `grok`, `opencode`, `cursor`, `copilot`, `kiro`,
 `antigravity`, `amp`, and `droid`.
 
@@ -114,6 +115,21 @@ fuzzy matching or aliases.
   (those in an `envs` folder), not their dependencies. It updates them after
   a dry-run solve; install and remove them with the manager itself. Project
   prefixes elsewhere are left alone.
+- rustup lists each installed toolchain, plus a separate `rustup` row for
+  rustup itself. Channels (`stable`, `beta`, `nightly`) update within their
+  channel; pinned versions such as `1.85.0` never show updates. Search offers a
+  channel or version that isn't installed yet. `install` adds a toolchain with
+  the minimal profile. Toolchain installs and updates pass `--no-self-update`,
+  so only the `rustup` row updates rustup (`rustup self update`). The default
+  toolchain can't be removed; pick another default with `rustup default` first.
+- nix covers your user profile (`nix profile`), never NixOS or Home Manager
+  configuration. It needs the version 3 profile format. `install NAME` adds
+  `nixpkgs#NAME`; searching offers that exact attribute instead of searching
+  all of nixpkgs. Versions come from store paths and are for display only:
+  whether an upgrade changes anything depends on evaluating the flake, so Nix
+  rows never show an update and `pkd upgrade` without names skips them. Run
+  `pkd upgrade NAME --from nix` to upgrade one. Entries installed from a store
+  path have no flake to upgrade from, so upgrading them is refused.
 - If a source fails to answer, PkgDeck won't guess which package you meant.
   Retry, or pick a working source with `--from`.
 
@@ -145,6 +161,8 @@ your password:
   changes start. In scripts, it only works with a cached login or a
   password-free rule.
 - `--auth polkit` uses your desktop's password prompt.
+
+The desktop app has no such option: it always uses the system password prompt.
 
 Homebrew always runs as your user.
 
@@ -293,6 +311,64 @@ pkd upgrade --from fwupd                 # update all firmware
 To update one device, use the device ID from `pkd list --from fwupd --json`.
 Power and restart requirements are shown before you confirm. PkgDeck never
 restarts your computer, downgrades firmware, or forces an update.
+
+## Image-based Linux systems
+
+```sh
+pkd list --from system-image
+pkd info system --from system-image
+pkd upgrade --from system-image
+```
+
+On Fedora Atomic desktops, CoreOS, and other bootc or rpm-ostree systems, the
+`system-image` source shows one row, `system`, for the whole OS. It reads
+`bootc status` first and falls back to `rpm-ostree status`. Details list the
+running deployment, the one waiting for a restart, the rollback, and layered
+packages.
+
+It can only update. `pkd upgrade` runs `bootc upgrade` or `rpm-ostree upgrade`,
+which downloads a new deployment that applies on the next restart. PkgDeck
+never restarts your computer. If an update is already waiting for a restart,
+it does nothing and says so. Ordinary systems report the source as
+unavailable.
+
+## Arch User Repository (AUR)
+
+```sh
+pkd list --from aur
+pkd info yay --from aur
+```
+
+The `aur` source lists installed packages that Pacman's repositories don't
+have (`pacman -Qm`) and checks them against the AUR's current versions, using
+Pacman's own version order. Pacman no longer lists these packages, so each
+appears once. Details show the AUR version, maintainer, and whether it's
+flagged out of date. Packages missing from the AUR are shown as built locally
+or removed from the AUR.
+
+This source is read-only. In June 2026 malicious commits reached about 1,500
+AUR packages, and building one runs its PKGBUILD. PkgDeck shows what's
+outdated; review the PKGBUILD and update with your AUR helper. Search only
+matches installed AUR packages.
+
+If Pacman's repository databases aren't synced, every package looks foreign,
+so the source reports an error instead: run `pkd refresh --from pacman`. When
+the AUR can't be reached, packages are still listed with unknown updates.
+
+## apk, XBPS, and MacPorts
+
+`apk` (Alpine), `xbps` (Void), and `macports` work like the other system
+package managers: search, list, install, remove, update, and refresh. Updates
+come from `apk list --upgradable`, `xbps-install -Mun`, and `port outdated`,
+which only report. Changes need admin rights and always run the manager from
+its fixed location (`/sbin` or `/usr/sbin` for apk, `/usr/bin` for XBPS,
+`/opt/local/bin/port` for MacPorts), never whatever `PATH` finds first.
+
+- MacPorts keeps each port's variants when it upgrades. Only active ports are
+  listed; inactive versions stay installed but aren't rows. `pkd refresh` runs
+  `port selfupdate`. The Mac app adds `/opt/local/bin` to its `PATH`, so it
+  finds MacPorts when started from Finder.
+- Local package files aren't supported for these three.
 
 ## Mac App Store apps
 

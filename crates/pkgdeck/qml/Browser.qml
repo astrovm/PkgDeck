@@ -85,7 +85,6 @@ Controls.ApplicationWindow {
     readonly property var repositoryReport: JSON.parse(backend.repositories || "{}")
     readonly property var repositoryFeatures: repositoryReport.features || ({})
     property bool desktopAutostartSupported: Qt.platform.os !== "osx"
-    property bool systemAuthorizationSupported: Qt.platform.os !== "osx"
     function managerAvailable(id) { return sourceInfo(id).availability_kind === "available"; }
     function supportedFilePatterns() {
         // AppImage is always available on Linux, including before source discovery.
@@ -390,13 +389,15 @@ Controls.ApplicationWindow {
     // one source. Session-only like the text filter: view state, not a
     // persisted preference.
     property bool multiSourceOnly: false
-    property bool useSudo: argument("--auth", preferences.authorization) === "sudo"
+    // The app always asks through the system password prompt; tests and
+    // development runs can still pass --auth sudo.
+    readonly property bool useSudo: argument("--auth", "polkit") === "sudo"
     function updateOnly(source) {
-        return ["fwupd", "mas", "conda", "codex", "claude", "grok", "opencode", "cursor", "copilot", "kiro", "antigravity", "amp", "droid"].indexOf(source) >= 0;
+        return ["fwupd", "mas", "conda", "system-image", "aur", "codex", "claude", "grok", "opencode", "cursor", "copilot", "kiro", "antigravity", "amp", "droid"].indexOf(source) >= 0;
     }
-    readonly property var knownSourceIds: ["apt", "dnf", "pacman", "zypper", "snap", "homebrew", "homebrew-cask", "macos-apps", "mas", "appimage", "flatpak", "docker", "podman", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "mise", "pixi", "conda", "composer", "gem", "fwupd", "codex", "claude", "grok", "opencode", "cursor", "copilot", "kiro", "antigravity", "amp", "droid"]
+    readonly property var knownSourceIds: ["apt", "dnf", "pacman", "zypper", "snap", "homebrew", "homebrew-cask", "macos-apps", "mas", "aur", "apk", "xbps", "system-image", "macports", "rustup", "nix", "appimage", "flatpak", "docker", "podman", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "mise", "pixi", "conda", "composer", "gem", "fwupd", "codex", "claude", "grok", "opencode", "cursor", "copilot", "kiro", "antigravity", "amp", "droid"]
     readonly property var sourceIds: knownSourceIds.concat(sourceCatalog.map((row) => row.source).filter((id) => knownSourceIds.indexOf(id) < 0))
-    readonly property var sourceNames: ["APT", "DNF", "Pacman", "Zypper", "Snap", "Homebrew", "Homebrew Casks", "macOS Applications", "Mac App Store", "AppImage", "Flatpak", "Docker images", "Podman images", "Cargo", "npm", "pnpm", "Bun", "pip", "pipx", "uv", "mise", "pixi", "Conda", "Composer", "RubyGems", "Firmware", "Codex (standalone)", "Claude Code (standalone)", "Grok (standalone)", "OpenCode (standalone)", "Cursor CLI (standalone)", "GitHub Copilot CLI (standalone)", "Kiro CLI (standalone)", "Antigravity CLI (standalone)", "Amp (standalone)", "Factory Droid (standalone)"]
+    readonly property var sourceNames: ["APT", "DNF", "Pacman", "Zypper", "Snap", "Homebrew", "Homebrew Casks", "macOS Applications", "Mac App Store", "AUR", "apk", "XBPS", "System image", "MacPorts", "rustup", "Nix", "AppImage", "Flatpak", "Docker images", "Podman images", "Cargo", "npm", "pnpm", "Bun", "pip", "pipx", "uv", "mise", "pixi", "Conda", "Composer", "RubyGems", "Firmware", "Codex (standalone)", "Claude Code (standalone)", "Grok (standalone)", "OpenCode (standalone)", "Cursor CLI (standalone)", "GitHub Copilot CLI (standalone)", "Kiro CLI (standalone)", "Antigravity CLI (standalone)", "Amp (standalone)", "Factory Droid (standalone)"]
     function containerSource(source) {
         return source === "docker" || source === "podman";
     }
@@ -459,7 +460,7 @@ Controls.ApplicationWindow {
         return sourceCatalog.find((row) => row.source === id) || {source: id, summary: sourceCatalog.length ? "Unsupported on this platform" : "Checking availability…", availability_kind: sourceCatalog.length ? "platform" : "checking", capabilities: []};
     }
     function sourceCategory(id) {
-        if (["apt", "dnf", "pacman", "zypper", "fwupd"].indexOf(id) >= 0)
+        if (["apt", "dnf", "pacman", "aur", "zypper", "apk", "xbps", "macports", "system-image", "fwupd"].indexOf(id) >= 0)
             return "System";
         if (["snap", "homebrew", "homebrew-cask", "macos-apps", "mas", "appimage", "flatpak"].indexOf(id) >= 0)
             return "Applications";
@@ -1242,7 +1243,6 @@ Controls.ApplicationWindow {
         property bool reduceMotion: false
         property string sourceList: ""
         property string source: ""
-        property string authorization: "polkit"
         property int nameWidth: 202
         property int versionWidth: 150
         property string sortColumn: ""
@@ -2112,14 +2112,6 @@ Controls.ApplicationWindow {
                             wrapMode: Text.WordWrap
                             Layout.fillWidth: true
                         }
-                    }
-                    ActionButton {
-                        objectName: "changeNoticeSettings"
-                        visible: noticeBanner.notice.action === "settings" && root.systemAuthorizationSupported
-                        text: "Settings"
-                        symbol: "settings"
-                        flat: true
-                        onClicked: root.openView("Settings")
                     }
                     ClearFieldButton {
                         objectName: "dismissChangeNotice"

@@ -190,6 +190,9 @@ jobs:
           - { group: dev, platform: linux-aarch64, runner: ubuntu-26.04-arm, arch: aarch64 }
           - { group: dev, platform: macos-x86_64, runner: macos-26-intel, arch: x86_64 }
           - { group: dev, platform: macos-aarch64, runner: macos-26, arch: aarch64 }
+          # Installing MacPorts itself takes a while, so it has its own job.
+          - { group: macports, platform: macos-x86_64, runner: macos-26-intel, arch: x86_64 }
+          - { group: macports, platform: macos-aarch64, runner: macos-26, arch: aarch64 }
     runs-on: ${{ matrix.runner }}
     env:
       HOMEBREW_NO_AUTO_UPDATE: '1'
@@ -212,8 +215,24 @@ jobs:
           save: 'false'
       - name: Build CLI
         run: cargo build --locked -p pkd
+      # Alpine uses musl and Void an older glibc, so their tests get a static CLI.
+      - name: Build static CLI for musl distributions
+        if: matrix.group == 'native'
+        run: |
+          sudo apt-get install -y musl-tools
+          rustup target add ${{ matrix.arch }}-unknown-linux-musl
+          cargo build --locked -p pkd --target ${{ matrix.arch }}-unknown-linux-musl
       - name: Run backend lifecycle tests
-        run: scripts/tests/backends.sh ${{ matrix.group }} "$PWD/target/debug/pkd"
+        run: |
+          scripts/tests/backends.sh ${{ matrix.group }} "$PWD/target/debug/pkd" \
+            "$PWD/target/${{ matrix.arch }}-unknown-linux-musl/debug/pkd"
+      - name: Upload MacPorts logs
+        if: always() && matrix.group == 'macports'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: macports-${{ matrix.platform }}
+          path: build/macports
+          if-no-files-found: ignore
 
   lint-workspace:
     name: Lint / Workspace (${{ matrix.arch }})

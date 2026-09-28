@@ -98,7 +98,8 @@ The workflow is called `CI`. Check names follow `Category / Scope (architecture)
 | `Coverage / Workspace (x86_64)` | Workspace tests with the 95% coverage gate |
 | `Test / Workspace (aarch64)` | Workspace tests without coverage |
 | `Test / Podman (x86_64, aarch64)` | CLI build in the development container and CLI APT/Homebrew install/remove tests |
-| `Test / Backends / native (linux-x86_64, linux-aarch64)` | Real DNF, Pacman (x86_64 only), Zypper and Snap lifecycle tests |
+| `Test / Backends / native (linux-x86_64, linux-aarch64)` | Real DNF, Zypper, apk, XBPS and Snap lifecycle tests, plus Pacman and the AUR on x86_64 |
+| `Test / Backends / macports (macos-x86_64, macos-aarch64)` | Installs MacPorts, then a real port lifecycle with variants |
 | `Test / Backends / dev (<platform>)` | Real lifecycle tests for every development manager on Linux and macOS, x86_64 and aarch64; the job summary lists each backend's result |
 | `Package / AppImage + Snap (x86_64, aarch64)` | Release build, packages, and GUI tests on the packaged app |
 | `Package / Flatpak (x86_64, aarch64)` | Flatpak build, installed GUI, and host bridge tests |

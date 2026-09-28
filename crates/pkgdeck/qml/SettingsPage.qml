@@ -148,28 +148,6 @@ DeckScrollView {
             }
         }
         SettingsCard {
-            title: "Authentication"
-            visible: page.app.systemAuthorizationSupported
-            SettingRow {
-                label: "Ask for permission with"
-                hint: page.app.useSudo
-                    ? "Uses a sudo login you already started in a terminal (for example with sudo -v)."
-                    : "Your desktop asks for your password when a change needs it."
-                ThemedComboBox {
-                    objectName: "authorizationSetting"
-                    Layout.fillWidth: page.stacked
-                    Layout.preferredWidth: page.controlWidth()
-                    model: ["System prompt", "Existing sudo session"]
-                    currentIndex: page.app.useSudo ? 1 : 0
-                    onActivated: {
-                        page.app.useSudo = currentIndex === 1;
-                        page.store.authorization = page.app.useSudo ? "sudo" : "polkit";
-                    }
-                    Accessible.name: "Authentication"
-                }
-            }
-        }
-        SettingsCard {
             title: "About"
             GridLayout {
                 Layout.fillWidth: true

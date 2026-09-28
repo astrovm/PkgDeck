@@ -1132,6 +1132,13 @@ fn source_display_name(id: &str) -> String {
         "homebrew-cask" => "Homebrew Casks",
         "macos-apps" => "macOS Applications",
         "mas" => "Mac App Store",
+        "aur" => "AUR",
+        "apk" => "apk",
+        "xbps" => "XBPS",
+        "system-image" => "System image",
+        "macports" => "MacPorts",
+        "rustup" => "rustup",
+        "nix" => "Nix",
         "appimage" => "AppImage",
         "flatpak" => "Flatpak",
         "docker" => "Docker images",
@@ -1324,8 +1331,8 @@ fn plain_error(error: &EngineError, backend: Option<&str>, sudo: bool) -> String
     match error {
         // mas asks for the Mac password through sudo, which needs a terminal.
         EngineError::Execution(E::AuthorizationDenied) if backend == Some("mas") => "App Store updates need your Mac password, and mas can only ask for it in a terminal. Run `pkd upgrade --from mas` in Terminal, or update in the App Store app.".into(),
-        EngineError::Execution(E::AuthorizationDenied) if sudo => "PkgDeck couldn't get administrator access. \"Existing sudo session\" needs a recent sudo login in a terminal, or pick the system prompt in Settings.".into(),
-        EngineError::Execution(E::AuthorizationDenied) => "PkgDeck couldn't get administrator access. Make sure your desktop's password prompt is running, or pick another option in Settings.".into(),
+        EngineError::Execution(E::AuthorizationDenied) if sudo => "PkgDeck couldn't get administrator access. The sudo option needs a recent sudo login in the same terminal.".into(),
+        EngineError::Execution(E::AuthorizationDenied) => "PkgDeck couldn't get administrator access. Make sure your desktop's password prompt is running, then try again.".into(),
         EngineError::Execution(E::AuthorizationCancelled) => "The password prompt was closed. Nothing was changed.".into(),
         EngineError::Execution(E::LockBusy) => "Another package manager is running. Wait for it to finish, then try again.".into(),
         EngineError::Execution(E::Interrupted) => "The package manager was interrupted. Check its state before trying again.".into(),
@@ -1560,7 +1567,6 @@ fn preflight_notice(job: &Job, error: &EngineError, sudo: bool, names: &Names) -
         "kind": "error",
         "title": format!("{title} couldn't be prepared"),
         "detail": write_error_text(error, job_backend(&operations), sudo),
-        "action": if is_denied(error) { "settings" } else { "" },
     }))
 }
 /// A batch reports each error as text on its own line. A denial keeps the
@@ -1692,8 +1698,6 @@ fn write_notice(
             "kind": "error",
             "title": format!("{title} failed"),
             "detail": write_error_text(error, job_backend(&operations), sudo),
-            // Only a denial is fixed by another permission option.
-            "action": if is_denied(error) { "settings" } else { "" },
         }),
         Ok(Payload::Batch(_, outcomes))
             if !outcomes.contains(&Outcome::Failed) && outcomes.contains(&Outcome::Cancelled) =>
@@ -1705,8 +1709,6 @@ fn write_notice(
             })
         }
         Ok(Payload::Batch(status, outcomes)) if outcomes.contains(&Outcome::Failed) => {
-            // A denial gets the same Settings action as one change.
-            let denied = status.lines().any(|line| line.ends_with(DENIED));
             let detail = batch_status_text(
                 &status
                     .lines()
@@ -1720,7 +1722,6 @@ fn write_notice(
                 "kind": "error",
                 "title": format!("{} of {} changes failed", outcomes.iter().filter(|o| **o == Outcome::Failed).count(), outcomes.len()),
                 "detail": detail,
-                "action": if denied { "settings" } else { "" },
             })
         }
         Ok(payload) => {
@@ -6637,7 +6638,6 @@ mod tests {
         );
         assert_eq!(denied["kind"], "error");
         assert_eq!(denied["title"], "Install htop (APT) failed");
-        assert_eq!(denied["action"], "settings");
         assert!(denied["detail"]
             .as_str()
             .unwrap()
@@ -6682,7 +6682,6 @@ mod tests {
                 notice["detail"].as_str().unwrap().contains(expected),
                 "{notice}"
             );
-            assert_eq!(notice["action"], "");
         }
         let cancelled = write_notice(&job, &Err(EngineError::Cancelled), false, &Names::new());
         assert_eq!(cancelled["kind"], "info");
@@ -6731,7 +6730,6 @@ mod tests {
             &Names::new(),
         );
         assert_eq!(mixed["kind"], "error");
-        assert_eq!(partial["action"], "");
         let denied_batch = write_notice(
             &batch,
             &Ok(Payload::Batch(
@@ -6741,7 +6739,6 @@ mod tests {
             false, &Names::new(),
         );
         assert_eq!(denied_batch["kind"], "error");
-        assert_eq!(denied_batch["action"], "settings");
         assert!(denied_batch["detail"]
             .as_str()
             .unwrap()
@@ -6754,7 +6751,6 @@ mod tests {
             )),
             true, &Names::new(),
         );
-        assert_eq!(denied_sudo["action"], "settings");
         assert!(denied_sudo["detail"]
             .as_str()
             .unwrap()
@@ -6763,7 +6759,6 @@ mod tests {
         let plan = Job::PlanOperation(install.clone());
         let prepared = preflight_notice(&plan, &E::LockBusy.into(), false, &Names::new()).unwrap();
         assert_eq!(prepared["title"], "Install htop (APT) couldn't be prepared");
-        assert_eq!(prepared["action"], "");
         let denied_plan = preflight_notice(
             &Job::PlanUpgrade(vec![], 0),
             &E::AuthorizationDenied.into(),
@@ -6772,7 +6767,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(denied_plan["title"], "The update couldn't be prepared");
-        assert_eq!(denied_plan["action"], "settings");
         assert_eq!(
             preflight_notice(
                 &Job::PlanCleanAll(vec![]),
@@ -8712,6 +8706,13 @@ mod tests {
             ("homebrew-cask", "Homebrew Casks"),
             ("macos-apps", "macOS Applications"),
             ("mas", "Mac App Store"),
+            ("aur", "AUR"),
+            ("apk", "apk"),
+            ("xbps", "XBPS"),
+            ("system-image", "System image"),
+            ("macports", "MacPorts"),
+            ("rustup", "rustup"),
+            ("nix", "Nix"),
             ("appimage", "AppImage"),
             ("flatpak", "Flatpak"),
             ("docker", "Docker images"),

@@ -4913,3 +4913,244 @@ fn flatpak_refresh_does_not_hide_failed_privileged_completion() {
         Err(EngineError::Execution(ExecutionError::Failed(_)))
     ));
 }
+
+/// Answers each system manager command by the longest matching prefix of
+/// "executable args…" and records what ran.
+#[derive(Clone, Default)]
+struct Script {
+    replies: Arc<Mutex<Vec<(String, String)>>>,
+    calls: Arc<Mutex<Vec<String>>>,
+}
+impl Script {
+    fn new(replies: &[(&str, &str)]) -> Self {
+        let script = Self::default();
+        *script.replies.lock().unwrap() = replies
+            .iter()
+            .map(|(command, reply)| ((*command).into(), (*reply).into()))
+            .collect();
+        script
+    }
+}
+impl Transport for Script {
+    fn apt_query(
+        &self,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: &Cancellation,
+    ) -> Result<Completion, ExecutionError> {
+        unreachable!()
+    }
+    fn apt_write(&self, _: AptAction, _: &Cancellation) -> Result<Completion, ExecutionError> {
+        unreachable!()
+    }
+    fn brew(
+        &self,
+        _: &[OsString],
+        _: &Cancellation,
+        _: bool,
+    ) -> Result<Completion, ExecutionError> {
+        unreachable!()
+    }
+    fn flatpak(
+        &self,
+        _: &[OsString],
+        _: &Cancellation,
+        _: bool,
+        _: bool,
+    ) -> Result<Completion, ExecutionError> {
+        unreachable!()
+    }
+    fn system_manager(
+        &self,
+        executable: &str,
+        args: &[OsString],
+        _: &Cancellation,
+        write: bool,
+    ) -> Result<Completion, ExecutionError> {
+        let line = std::iter::once(executable.to_owned())
+            .chain(args.iter().map(|arg| arg.to_string_lossy().into_owned()))
+            .collect::<Vec<_>>()
+            .join(" ");
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("{line}{}", if write { " (write)" } else { "" }));
+        self.replies
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(command, _)| line.starts_with(command.as_str()))
+            .max_by_key(|(command, _)| command.len())
+            .map(|(_, reply)| output(reply))
+            .ok_or_else(|| {
+                ExecutionError::Failed(Completion {
+                    code: Some(1),
+                    ..output("")
+                })
+            })
+    }
+}
+
+#[test]
+fn apk_lists_updates_and_writes_with_its_own_verbs() {
+    let cancel = Cancellation::default();
+    let script = Script::new(&[
+        ("apk list --installed", "busybox-1.37.0-r12 aarch64 {busybox} (GPL-2.0-only) [installed]\njq-1.8.2-r0 aarch64 {jq} (MIT) [installed]\n"),
+        ("apk list --upgradable", "busybox-1.37.0-r13 aarch64 {busybox} (GPL-2.0-only) [upgradable from: busybox-1.37.0-r12]\n"),
+        ("apk search -v jq", "gojq-0.12.19-r3 - Pure Go implementation of jq\njq-1.8.2-r0 - A lightweight and flexible command-line JSON processor\n"),
+        ("apk add", ""),
+        ("apk del", ""),
+    ]);
+    let mut apk = SystemManager::apk(script.clone());
+    let installed = apk.installed(&cancel).unwrap();
+    assert_eq!(installed.len(), 2);
+    assert_eq!(installed[0].id.name, "busybox");
+    assert_eq!(installed[0].id.architecture, "aarch64");
+    assert_eq!(
+        installed[0].installed_version.as_deref(),
+        Some("1.37.0-r12")
+    );
+    assert_eq!(
+        installed[0].candidate_version.as_deref(),
+        Some("1.37.0-r13")
+    );
+    assert_eq!(installed[0].update, UpdateAvailability::Available);
+    assert_eq!(installed[1].update, UpdateAvailability::Current);
+    let found = apk.search("jq", &cancel).unwrap();
+    assert_eq!(found[1].id.name, "jq");
+    assert_eq!(
+        found[1].summary,
+        "A lightweight and flexible command-line JSON processor"
+    );
+    assert_eq!(found[1].installed_version.as_deref(), Some("1.8.2-r0"));
+    apk.execute(
+        &Operation::Remove(installed[1].id.clone()),
+        &cancel,
+        &mut |_| {},
+    )
+    .unwrap();
+    assert!(script
+        .calls
+        .lock()
+        .unwrap()
+        .contains(&"apk del -- jq (write)".into()));
+}
+
+#[test]
+fn xbps_reads_with_xbps_query_and_writes_with_install_and_remove() {
+    let cancel = Cancellation::default();
+    let script = Script::new(&[
+        ("xbps-query -l", "ii acl-2.4.0_1                      Access Control List filesystem support\nii jq-1.8.2_1                       Command-line JSON processor\n"),
+        ("xbps-install -Mun", "acl-2.4.1_1 update aarch64 https://repo-default.voidlinux.org/current/aarch64 6112808 2556855\njq-1.8.2_1 install aarch64 https://repo 1 1\n"),
+        ("xbps-query -Rs jq", "[-] ijq-1.4.0_1                        Interactive jq tool for the terminal\n[*] jq-1.8.2_1                         Command-line JSON processor\n"),
+        ("xbps-remove", ""),
+        ("xbps-install -yu", ""),
+    ]);
+    let mut xbps = SystemManager::xbps(script.clone());
+    let installed = xbps.installed(&cancel).unwrap();
+    assert_eq!(installed[0].id.name, "acl");
+    assert_eq!(
+        installed[0].summary,
+        "Access Control List filesystem support"
+    );
+    assert_eq!(installed[0].candidate_version.as_deref(), Some("2.4.1_1"));
+    assert_eq!(installed[1].update, UpdateAvailability::Current);
+    let found = xbps.search("jq", &cancel).unwrap();
+    assert_eq!(
+        found.iter().map(|p| p.id.name.as_str()).collect::<Vec<_>>(),
+        ["ijq", "jq"]
+    );
+    xbps.execute(
+        &Operation::Remove(installed[1].id.clone()),
+        &cancel,
+        &mut |_| {},
+    )
+    .unwrap();
+    xbps.execute(
+        &Operation::Upgrade(installed[0].id.clone()),
+        &cancel,
+        &mut |_| {},
+    )
+    .unwrap();
+    let calls = script.calls.lock().unwrap().clone();
+    assert!(
+        calls.contains(&"xbps-remove -y jq (write)".into()),
+        "{calls:?}"
+    );
+    assert!(
+        calls.contains(&"xbps-install -yu acl (write)".into()),
+        "{calls:?}"
+    );
+}
+
+#[test]
+fn macports_keeps_variants_and_lists_only_active_ports() {
+    let cancel = Cancellation::default();
+    let script = Script::new(&[
+        (
+            "port -q installed",
+            "  xz @5.8.1_0 (active)\n  xz @5.6.3_0\n  wget @1.25.0_0+ssl (active)\n",
+        ),
+        (
+            "port -q outdated",
+            "xz                             5.8.1_0 < 5.8.2_0\n",
+        ),
+        (
+            "port -q search --name --line wget",
+            "wget\t1.25.0\tnet www\tinternet file retriever\n",
+        ),
+        ("port -N", ""),
+    ]);
+    let mut ports = SystemManager::macports(script.clone());
+    let installed = ports.installed(&cancel).unwrap();
+    assert_eq!(installed.len(), 2, "inactive versions are not rows");
+    assert_eq!(installed[0].installed_version.as_deref(), Some("5.8.1_0"));
+    assert_eq!(installed[0].candidate_version.as_deref(), Some("5.8.2_0"));
+    assert_eq!(
+        installed[1].installed_version.as_deref(),
+        Some("1.25.0_0+ssl")
+    );
+    let found = ports.search("wget", &cancel).unwrap();
+    assert_eq!(found[0].summary, "internet file retriever");
+    ports
+        .execute(
+            &Operation::UpgradeAll {
+                backend: "macports".into(),
+            },
+            &cancel,
+            &mut |_| {},
+        )
+        .unwrap();
+    assert!(script
+        .calls
+        .lock()
+        .unwrap()
+        .contains(&"port -N upgrade outdated (write)".into()));
+}
+
+#[test]
+fn pacman_leaves_aur_packages_to_the_aur_source() {
+    let cancel = Cancellation::default();
+    let script = Script::new(&[
+        ("pacman -Q", "bash 5.3-1\nyay 12.0.0-1\n"),
+        ("pacman -Qmq", "yay\n"),
+    ]);
+    let mut pacman = Pacman::pacman(script.clone());
+    let names: Vec<String> = pacman
+        .installed(&cancel)
+        .unwrap()
+        .into_iter()
+        .map(|p| p.id.name)
+        .collect();
+    assert_eq!(names, ["bash"]);
+    // Without synced databases every package looks foreign; keep them all.
+    let unsynced = Script::new(&[
+        ("pacman -Q", "bash 5.3-1\nyay 12.0.0-1\n"),
+        ("pacman -Qmq", "bash\nyay\n"),
+    ]);
+    assert_eq!(
+        Pacman::pacman(unsynced).installed(&cancel).unwrap().len(),
+        2
+    );
+}
