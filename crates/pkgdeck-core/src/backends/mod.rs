@@ -1,4 +1,5 @@
 //! Native package-manager, container image, Homebrew formula/cask, and local AppImage adapters.
+mod adopt;
 mod ai_catalog;
 mod appimage;
 mod apt_cli;
@@ -696,6 +697,9 @@ pub struct Homebrew<T = NativeTransport> {
 pub struct HomebrewCask<T = NativeTransport> {
     pub transport: T,
     prefix: Option<PathBuf>,
+    /// Checks and backs up an app already in the cask's place before
+    /// Homebrew adopts it; `None` never adopts (fixture transports).
+    adoption: Option<Box<dyn adopt::AdoptIo>>,
 }
 pub struct Flatpak<T = NativeTransport> {
     transport: T,
@@ -724,7 +728,15 @@ impl<T: Transport> HomebrewCask<T> {
         Self {
             transport,
             prefix: None,
+            adoption: None,
         }
+    }
+    /// Casks can take over apps someone installed themselves (macOS only).
+    pub fn with_adoption(mut self) -> Self {
+        if cfg!(target_os = "macos") {
+            self.adoption = Some(Box::new(adopt::NativeAdopt(Host::current())));
+        }
+        self
     }
 }
 
@@ -2408,7 +2420,40 @@ impl<T: Transport> Backend for HomebrewCask<T> {
             // brew update refreshes formulae and casks together; both Homebrew
             // backends run it so each Refresh honestly refreshes its metadata.
             Operation::Refresh { backend } if backend == "homebrew-cask" => vec!["update"],
-            Operation::Install(id) => vec!["install", "--cask", "--", self.target(id)?],
+            Operation::Install(id) => {
+                let token = self.target(id)?;
+                if let Some(io) = &self.adoption {
+                    let info: serde_json::Value = serde_json::from_slice(&bytes(
+                        "homebrew-cask",
+                        self.call(&["info", "--json=v2", "--cask", "--", token], cancel, false)?,
+                    )?)
+                    .map_err(|e| invalid("homebrew-cask", e))?;
+                    if let Some(plan) = adopt::plan(io.as_ref(), &info["casks"][0], cancel)? {
+                        return adopt::run(
+                            io.as_ref(),
+                            &plan,
+                            cancel,
+                            progress,
+                            &mut || {
+                                self.call(
+                                    &["install", "--cask", "--adopt", "--", token],
+                                    cancel,
+                                    true,
+                                )
+                            },
+                            &mut || {
+                                self.call(
+                                    &["list", "--cask", "--versions", "--", token],
+                                    &Cancellation::default(),
+                                    false,
+                                )
+                                .is_ok_and(|done| done.code == Some(0))
+                            },
+                        );
+                    }
+                }
+                vec!["install", "--cask", "--", token]
+            }
             Operation::Remove(id) => {
                 vec!["uninstall", "--cask", "--force", "--", self.target(id)?]
             }
@@ -4991,7 +5036,10 @@ pub fn native_engine(
     }
     // Homebrew 6+ installs Linux casks too (AppImages, binaries and fonts).
     if allowed("homebrew-cask") {
-        candidates.push((Box::new(HomebrewCask::new(transport())), true));
+        candidates.push((
+            Box::new(HomebrewCask::new(transport()).with_adoption()),
+            true,
+        ));
     }
     if allowed("macos-apps") {
         candidates.push((Box::new(MacApps::native()), true));

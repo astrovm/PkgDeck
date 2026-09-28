@@ -325,16 +325,37 @@ This read-only source scans `/Applications` and `~/Applications`. The exact
 bundle path is the package name and reference, so two copies keep separate
 identities. Details include location, observed version/build, Homebrew ownership
 evidence, and curated cask candidates for VS Code, Firefox, and Obsidian.
-Candidates are matched by bundle identifier, not by filename. They do not verify
-publisher or release channel and never authorize migration. App Store copies
-with receipts receive no cask suggestion.
+Candidates are matched by bundle identifier, not by filename. On their own they
+do not verify publisher or release channel. App Store copies with receipts
+receive no cask suggestion.
+
+### Letting Homebrew manage an app you installed
+
+```sh
+pkd install --from homebrew-cask visual-studio-code
+```
+
+When VS Code or Firefox is already in `/Applications`, installing its cask hands
+that copy to Homebrew (`brew install --cask --adopt`) instead of failing. The app
+stays where it is. Before running Homebrew, PkgDeck checks that the copy:
+
+- is signed by the expected publisher (Microsoft or Mozilla) and the signature verifies,
+- is the stable edition (by bundle identifier), didn't come from the App Store,
+  runs natively on this Mac, and isn't older than the cask,
+- leaves every place the cask writes to free, or already linked to this app.
+
+If any check fails, nothing changes and PkgDeck says why. Homebrew undoes a
+failed adoption by deleting the app, so PkgDeck keeps an instant APFS copy until
+Homebrew finishes and puts the app back if it went missing. Obsidian and other
+apps aren't adopted yet. After adoption, removing the cask removes the app, as
+for any cask.
 
 Ownership covers the active Homebrew prefix and requires an installed app-artifact
 symlink to the exact bundle. Failed checks stay unknown. Missing ownership
 records do not prove that an app is unmanaged. Apps with unreadable metadata
 remain visible, with an unknown version. Architecture and update status are
-unknown in this first inventory implementation. Install, remove, update, and
-adoption are unsupported. On other platforms the source reports that macOS is
+unknown in this first inventory implementation. This source itself can't
+install, remove, or update; adoption runs through the cask, as above. On other platforms the source reports that macOS is
 required. See the [GUI guide](gui.md#macos-application-inventory) for scan limits.
 Unreadable subfolders produce a partial inventory: readable apps remain listed,
 and source errors identify the skipped folders (also in JSON `failures`).
