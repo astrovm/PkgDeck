@@ -44,7 +44,7 @@ case "$(sw_vers -productVersion | cut -d. -f1)" in
 *) echo "No pinned MacPorts $release package for macOS $(sw_vers -productVersion)" >&2; exit 1 ;;
 esac
 installer_pkg="$RUNNER_TEMP/MacPorts-$release-$flavor.pkg"
-curl -fsSL --retry 3 -o "$installer_pkg" \
+curl -fsSL --retry 6 --retry-delay 10 -o "$installer_pkg" \
     "https://github.com/macports/macports-base/releases/download/v$release/MacPorts-$release-$flavor.pkg"
 echo "$sha256  $installer_pkg" | shasum -a 256 -c -
 # The package's postflight already runs `port selfupdate`.
