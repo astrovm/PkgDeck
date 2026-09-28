@@ -6,6 +6,7 @@ mod cleanup;
 mod container;
 mod firmware;
 mod mac_apps;
+mod mas;
 mod standalone;
 use crate::{
     engine::*,
@@ -17,6 +18,7 @@ pub use appimage::AppImage;
 pub use container::{Container, ContainerKind};
 pub use firmware::Firmware;
 pub use mac_apps::MacApps;
+pub use mas::MacAppStore;
 use serde::Deserialize;
 pub use standalone::{Standalone, StandaloneTool};
 use std::{ffi::OsString, path::PathBuf, time::Duration};
@@ -54,6 +56,7 @@ pub const BACKEND_IDS: &[&str] = &[
     "homebrew",
     "homebrew-cask",
     "macos-apps",
+    "mas",
     "appimage",
     "flatpak",
     "docker",
@@ -82,7 +85,7 @@ pub const BACKEND_IDS: &[&str] = &[
 
 /// These sources update existing installations but do not install or remove them.
 pub fn update_only(id: &str) -> bool {
-    id == "fwupd" || StandaloneTool::ALL.iter().any(|tool| tool.id() == id)
+    id == "fwupd" || id == "mas" || StandaloneTool::ALL.iter().any(|tool| tool.id() == id)
 }
 
 /// Inventory sources whose rows must never offer package mutations.
@@ -104,6 +107,7 @@ pub fn display_name(id: &str) -> &str {
         "homebrew" => "Homebrew",
         "homebrew-cask" => "Homebrew Casks",
         "macos-apps" => "macOS Applications",
+        "mas" => "Mac App Store",
         "appimage" => "AppImage",
         "flatpak" => "Flatpak",
         "docker" => "Docker images",
@@ -4977,6 +4981,9 @@ pub fn native_engine(
     }
     if allowed("macos-apps") {
         candidates.push((Box::new(MacApps::native()), true));
+    }
+    if allowed("mas") {
+        candidates.push((Box::new(MacAppStore::new(transport())), true));
     }
     for (backend, make) in [
         (

@@ -45,7 +45,7 @@ pkd completions bash                     # print a shell completion script
 | `--json` | Print machine-readable JSON. See [JSON output](#json-output). |
 
 Sources for `--from`: `fwupd`, `apt`, `dnf`, `pacman`, `zypper`, `snap`,
-`homebrew`, `homebrew-cask`, `appimage`, `flatpak`, `docker`, `podman`,
+`homebrew`, `homebrew-cask`, `macos-apps`, `mas`, `appimage`, `flatpak`, `docker`, `podman`,
 `cargo`, `npm`, `pnpm`, `bun`, `pip`, `pipx`, `uv`, `mise`, `composer`, `gem`,
 `codex`, `claude`, `grok`, `opencode`, `cursor`, `copilot`, `kiro`,
 `antigravity`, `amp`, and `droid`.
@@ -283,6 +283,25 @@ pkd upgrade --from fwupd                 # update all firmware
 To update one device, use the device ID from `pkd list --from fwupd --json`.
 Power and restart requirements are shown before you confirm. PkgDeck never
 restarts your computer, downgrades firmware, or forces an update.
+
+## Mac App Store apps
+
+```sh
+pkd list --from mas
+pkd info Keynote --from mas
+pkd upgrade --from mas              # update every App Store app with an update
+pkd upgrade Keynote --from mas
+```
+
+The `mas` source uses [mas](https://github.com/mas-cli/mas) 7 or newer
+(`brew install mas`) to list apps installed from the App Store and check them
+for updates. The check compares versions with the App Store catalog and never
+starts a download. Name an app by its name or its App Store ID.
+
+Updates run `mas update`. mas asks for your Mac password through sudo, which
+needs a terminal, so update from `pkd` in Terminal or from the App Store app.
+You must be signed in to the App Store. PkgDeck checks that each app's version
+changed afterwards. It never installs, removes, or moves App Store apps.
 
 ## macOS application inventory
 

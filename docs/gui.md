@@ -156,6 +156,15 @@ If a Flatpak system installation is read-only, it's shown without edit
 controls. Controls that can't work on this computer are hidden. Repository
 changes use the package manager's normal signature checks and password prompt.
 
+### Mac App Store
+
+With [mas](https://github.com/mas-cli/mas) 7 or newer installed, the **Mac App
+Store** source lists apps installed from the App Store and shows which have
+updates. Updates need your Mac password, which mas can only ask for in a
+terminal. If PkgDeck can't get it, it says so; run `pkd upgrade --from mas` in
+Terminal, or update in the App Store app. PkgDeck never installs or removes
+App Store apps.
+
 ### macOS application inventory
 
 On macOS, the **macOS Applications** source lists bundles in `/Applications`
