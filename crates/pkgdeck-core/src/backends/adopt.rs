@@ -101,6 +101,23 @@ pub(super) struct Plan {
     pub token: String,
     pub app: PathBuf,
     pub name: String,
+    /// What was checked, shown before confirming. The engine plans again
+    /// just before running, so a copy that changed since blocks adoption.
+    pub version: String,
+    pub team: Option<String>,
+}
+
+impl Plan {
+    /// The confirmation text: what happens, and what was checked.
+    pub fn preview(&self) -> String {
+        format!(
+            "{} is already in {} (version {}, signed by {}). Homebrew will manage this copy instead of installing another (brew install --cask --adopt). PkgDeck checked its publisher, edition, architecture, version and every file the cask adds, and keeps a copy of the app until Homebrew finishes.",
+            self.name,
+            self.app.parent().unwrap_or(Path::new("/")).display(),
+            self.version,
+            self.team.as_deref().unwrap_or("an ad-hoc signature"),
+        )
+    }
 }
 
 fn refuse(app: &str, reason: impl std::fmt::Display) -> EngineError {
@@ -271,6 +288,8 @@ pub(super) fn plan(
         token: token.to_owned(),
         app: target,
         name,
+        version: version.to_owned(),
+        team,
     }))
 }
 

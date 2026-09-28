@@ -2371,7 +2371,52 @@ impl<T: Transport> HomebrewCask<T> {
         Ok(&id.name)
     }
 }
+impl<T: Transport> HomebrewCask<T> {
+    /// A checked adoption when an app is already in the cask's place.
+    fn adoption_plan(
+        &self,
+        token: &str,
+        cancel: &Cancellation,
+    ) -> Result<Option<adopt::Plan>, EngineError> {
+        let Some(io) = &self.adoption else {
+            return Ok(None);
+        };
+        let info: serde_json::Value = serde_json::from_slice(&bytes(
+            "homebrew-cask",
+            self.call(&["info", "--json=v2", "--cask", "--", token], cancel, false)?,
+        )?)
+        .map_err(|e| invalid("homebrew-cask", e))?;
+        adopt::plan(io.as_ref(), &info["casks"][0], cancel)
+    }
+}
 impl<T: Transport> Backend for HomebrewCask<T> {
+    /// Installing over an app already in place adopts it; the preview says
+    /// so, and names the version and publisher that were checked.
+    fn operation_plan(
+        &mut self,
+        operation: &Operation,
+        cancel: &Cancellation,
+    ) -> Result<Option<TransactionPlan>, EngineError> {
+        let Operation::Install(id) = operation else {
+            return Ok(None);
+        };
+        let token = self.target(id)?;
+        Ok(self
+            .adoption_plan(token, cancel)?
+            .map(|plan| TransactionPlan {
+                operation: operation.clone(),
+                native_preview: plan.preview(),
+                changes: vec![PlannedChange {
+                    action: PlannedAction::Install,
+                    name: token.into(),
+                    installed_version: Some(plan.version.clone()),
+                    candidate_version: Some(plan.version.clone()),
+                }],
+                download_bytes: None,
+                disk_bytes: None,
+                restart_required: None,
+            }))
+    }
     fn id(&self) -> &str {
         "homebrew-cask"
     }
@@ -2482,35 +2527,25 @@ impl<T: Transport> Backend for HomebrewCask<T> {
             Operation::Refresh { backend } if backend == "homebrew-cask" => vec!["update"],
             Operation::Install(id) => {
                 let token = self.target(id)?;
-                if let Some(io) = &self.adoption {
-                    let info: serde_json::Value = serde_json::from_slice(&bytes(
-                        "homebrew-cask",
-                        self.call(&["info", "--json=v2", "--cask", "--", token], cancel, false)?,
-                    )?)
-                    .map_err(|e| invalid("homebrew-cask", e))?;
-                    if let Some(plan) = adopt::plan(io.as_ref(), &info["casks"][0], cancel)? {
-                        return adopt::run(
-                            io.as_ref(),
-                            &plan,
-                            cancel,
-                            progress,
-                            &mut || {
-                                self.call(
-                                    &["install", "--cask", "--adopt", "--", token],
-                                    cancel,
-                                    true,
-                                )
-                            },
-                            &mut || {
-                                self.call(
-                                    &["list", "--cask", "--versions", "--", token],
-                                    &Cancellation::default(),
-                                    false,
-                                )
-                                .is_ok_and(|done| done.code == Some(0))
-                            },
-                        );
-                    }
+                if let (Some(io), Some(plan)) = (&self.adoption, self.adoption_plan(token, cancel)?)
+                {
+                    return adopt::run(
+                        io.as_ref(),
+                        &plan,
+                        cancel,
+                        progress,
+                        &mut || {
+                            self.call(&["install", "--cask", "--adopt", "--", token], cancel, true)
+                        },
+                        &mut || {
+                            self.call(
+                                &["list", "--cask", "--versions", "--", token],
+                                &Cancellation::default(),
+                                false,
+                            )
+                            .is_ok_and(|done| done.code == Some(0))
+                        },
+                    );
                 }
                 vec!["install", "--cask", "--", token]
             }
@@ -6208,7 +6243,7 @@ mod tests {
         };
         let mut messages = vec![];
         casks
-            .execute(&Operation::Install(id), &cancel, &mut |progress| {
+            .execute(&Operation::Install(id.clone()), &cancel, &mut |progress| {
                 if let Progress::Message(message) = progress {
                     messages.push(message);
                 }
@@ -6220,6 +6255,25 @@ mod tests {
             .unwrap()
             .contains(&"install --cask --adopt -- visual-studio-code".into()));
         assert_eq!(*log.lock().unwrap(), vec!["backup", "discard"]);
+        // The preview says the copy in place is adopted, with what was checked.
+        let plan = casks
+            .operation_plan(&Operation::Install(id.clone()), &cancel)
+            .unwrap()
+            .unwrap();
+        assert!(
+            plan.native_preview
+                .starts_with("Visual Studio Code is already in /Applications (version"),
+            "{}",
+            plan.native_preview
+        );
+        assert!(plan.native_preview.contains("brew install --cask --adopt"));
+        // Without an app in place there is no special preview.
+        let mut plain = HomebrewCask::new(brew.clone());
+        plain.detect(&cancel).unwrap();
+        assert!(plain
+            .operation_plan(&Operation::Install(id.clone()), &cancel)
+            .unwrap()
+            .is_none());
         assert_eq!(
             messages.last().unwrap(),
             "Homebrew now manages Visual Studio Code."
