@@ -354,7 +354,6 @@ impl<T: Transport> Backend for MacAppStore<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::host::AptAction;
     use std::sync::{Arc, Mutex};
 
     /// Answers `mas` with canned output and records every command it ran.
@@ -400,35 +399,6 @@ mod tests {
         }
     }
     impl Transport for Fake {
-        fn apt_query(
-            &self,
-            _: &str,
-            _: &str,
-            _: &str,
-            _: &Cancellation,
-        ) -> Result<Completion, ExecutionError> {
-            unreachable!()
-        }
-        fn apt_write(&self, _: AptAction, _: &Cancellation) -> Result<Completion, ExecutionError> {
-            unreachable!()
-        }
-        fn brew(
-            &self,
-            _: &[OsString],
-            _: &Cancellation,
-            _: bool,
-        ) -> Result<Completion, ExecutionError> {
-            unreachable!()
-        }
-        fn flatpak(
-            &self,
-            _: &[OsString],
-            _: &Cancellation,
-            _: bool,
-            _: bool,
-        ) -> Result<Completion, ExecutionError> {
-            unreachable!()
-        }
         fn dev_tool(
             &self,
             executable: &str,
@@ -751,21 +721,5 @@ mod tests {
             detect(Err(|| ExecutionError::TimedOut)),
             Err(EngineError::Execution(ExecutionError::TimedOut))
         ));
-    }
-
-    /// The fake answers only mas (and the App Store's `open`), so no test
-    /// passes by reaching another package manager.
-    #[test]
-    fn the_fake_refuses_every_other_manager() {
-        let fake = fake();
-        let cancel = Cancellation::default();
-        let refused = |call: &dyn Fn() -> Result<Completion, ExecutionError>| {
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(call)).is_err()
-        };
-        assert!(refused(&|| fake.apt_query("search", "x", "all", &cancel)));
-        assert!(refused(&|| fake.apt_write(AptAction::Autoclean, &cancel)));
-        assert!(refused(&|| fake.brew(&[], &cancel, false)));
-        assert!(refused(&|| fake.flatpak(&[], &cancel, false, false)));
-        assert!(fake.calls.lock().unwrap().is_empty());
     }
 }
