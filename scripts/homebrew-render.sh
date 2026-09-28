@@ -14,6 +14,11 @@ for pair in LINUX_AARCH64:linux-aarch64-cli.tar.gz LINUX_X86_64:linux-x86_64-cli
     MACOS_AARCH64:macos-aarch64.zip MACOS_X86_64:macos-x86_64.zip; do
     name="PkgDeck-v$version-${pair#*:}"
     sum=$(awk -v name="$name" '$2 == name || $2 == "*" name {print $1}' "$sums")
+    # CI jobs that build one package test only that one; the other URLs are
+    # never downloaded there, so their checksums may be placeholders.
+    if [[ -z $sum && ${PKGDECK_RENDER_PLACEHOLDERS:-} == 1 ]]; then
+        sum=$(printf '0%.0s' {1..64})
+    fi
     [[ $sum =~ ^[0-9a-f]{64}$ ]] || { echo "Missing checksum for $name" >&2; exit 1; }
     substitutions+=(-e "s|@SHA256_${pair%%:*}@|$sum|")
 done

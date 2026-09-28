@@ -92,22 +92,17 @@ The workflow is called `CI`. Check names follow `Category / Scope (architecture)
 
 | Check | What it does |
 | --- | --- |
-| `Test / Terminal (x86_64, aarch64)` | All core/CLI tests and Qt-free builds; both architectures test real sudo/polkit and APT locks |
-| `Test / macOS native (x86_64, aarch64)` | All core/CLI tests, real Homebrew cask install/remove and native CLI inventory checks |
-| `Lint / Workspace (x86_64, aarch64)` | Clippy for the whole workspace |
-| `Coverage / Workspace (x86_64)` | Workspace tests measured for line coverage on Linux |
-| `Coverage / Core (macos-aarch64)` | Core and CLI tests measured for line coverage on macOS, where the macOS-only code runs |
-| `Coverage / Combined` | The 95% gate: a line counts once and is covered when a test ran it on any platform |
-| `Test / Workspace (aarch64)` | Workspace tests without coverage |
+| `Test / Linux (x86_64, aarch64)` | Everything on Linux once per architecture: format and infrastructure checks, the APT helper, clippy (x86_64), all workspace tests (measured for coverage on x86_64), and real sudo/polkit and APT lock tests |
+| `Test / macOS native (x86_64, aarch64)` | All core/CLI tests (measured for coverage on Apple Silicon), real app inventory, Homebrew cask ownership and adoption, including recovery from a failed adoption |
+| `Coverage / Combined` | The 95% gate: merges the Linux and macOS reports; a line counts once and is covered when a test ran it on any platform |
 | `Test / Podman (x86_64, aarch64)` | CLI build in the development container and CLI APT/Homebrew install/remove tests |
-| `Test / Backends / native (linux-x86_64, linux-aarch64)` | Real DNF, Zypper, apk, XBPS and Snap lifecycle tests, plus Pacman and the AUR on x86_64 |
-| `Test / Backends / macports (macos-x86_64, macos-aarch64)` | Installs MacPorts, then a real port lifecycle with variants |
-| `Test / Backends / dev (<platform>)` | Real lifecycle tests for every development manager on Linux and macOS, x86_64 and aarch64; the job summary lists each backend's result |
+| `Test / Backends / native (linux-x86_64, linux-aarch64)` | Real DNF, Zypper, apk, XBPS, Snap, Toolbx and Distrobox lifecycle tests, plus Pacman and the AUR on x86_64 |
+| `Test / Backends / dev (<platform>)` | Real lifecycle tests for every development manager on Linux and macOS, x86_64 and aarch64, and MacPorts on macOS; the job summary lists each backend's result |
 | `Package / AppImage + Snap (x86_64, aarch64)` | Release build, packages, and GUI tests on the packaged app |
 | `Package / Flatpak (x86_64, aarch64)` | Flatpak build, installed GUI, and host bridge tests |
-| `Package / macOS app (x86_64, aarch64)` | Self-contained `PkgDeck.app` build, bundle checks, and GUI/controller, QML, startup and media tests |
+| `Package / macOS app (x86_64, aarch64)` | Self-contained `PkgDeck.app` build, bundle checks, GUI/controller, QML, startup and media tests, then installs that app through a Homebrew cask and checks it starts |
 | `Package / Linux CLI (x86_64, aarch64)` | Static `pkd` and host runner archive, tested on Alpine |
-| `Test / Homebrew (Linux, macOS)` | Renders the tap from those packages, installs the cask or formula, and tests the installed commands and Cocoa startup |
+| `Test / Homebrew (Linux)` | Renders the tap from the Linux packages and installs and tests the formula; published recipes are checked on macOS too |
 | `Prune superseded caches` | On main only: keeps the newest copy of each build cache so the 10 GB limit never evicts the ones pull requests restore |
 
 The macOS native job uses real `plutil` with XML and binary bundles, system and

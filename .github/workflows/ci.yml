@@ -25,36 +25,49 @@ jobs:
   # a targeted manual run; tags reuse the PR run after release-gate verifies it.
   # Pushes to main rerun only the jobs that save caches, so every pull request
   # starts from main's build outputs instead of compiling from scratch.
-  test-terminal:
-    name: Test / Terminal (${{ matrix.arch }})
+  test-linux:
+    # One job per architecture runs the whole Linux suite once: the shared
+    # checks, lint, every workspace test (measured for coverage on x86_64),
+    # and the real sudo/polkit authorization tests.
+    name: Test / Linux (${{ matrix.arch }})
     if: (github.event_name != 'push' || github.ref == 'refs/heads/main') && !inputs.homebrew_only
-    timeout-minutes: 15
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         include:
-          - runner: ubuntu-26.04
-            arch: x86_64
-          - runner: ubuntu-26.04-arm
-            arch: aarch64
+          - { runner: ubuntu-26.04, arch: x86_64, suite: 'checks,lint,coverage', coverage: 'true' }
+          - { runner: ubuntu-26.04-arm, arch: aarch64, suite: 'checks,tests', coverage: 'false' }
     runs-on: ${{ matrix.runner }}
+    env:
+      QT_QPA_PLATFORM: offscreen
+      QT_QUICK_BACKEND: software
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install terminal dependencies
+      - name: Install authorization test dependencies
         run: |
-          packages=(libapt-pkg-dev jq pkexec polkitd)
           sudo apt-get update
-          sudo apt-get install -y "${packages[@]}"
-      - name: Set up Rust
-        run: rustup show
+          sudo apt-get install -y libapt-pkg-dev jq pkexec polkitd
       - name: Cache Rust build outputs
         uses: ./.github/actions/rust-cache
         with:
           arch: ${{ matrix.arch }}
-          scope: terminal
-      - name: Run terminal checks
-        run: scripts/verify.sh fast
+          scope: linux
+      - name: Set up desktop dependencies
+        uses: ./.github/actions/setup-desktop
+        with:
+          coverage: ${{ matrix.coverage }}
+      - name: Run checks, lint and workspace tests
+        # The 95% gate applies to all platforms together (Coverage / Combined).
+        run: PKGDECK_COVERAGE_GATE=0 scripts/verify.sh full --only ${{ matrix.suite }}
+      - name: Upload coverage report
+        if: matrix.coverage == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-linux-${{ matrix.arch }}
+          path: coverage/lcov.info
+          if-no-files-found: error
       - name: Build authorization probes
         run: |
           cargo build --locked -p pkgdeck-core --example apt-probe
@@ -74,7 +87,7 @@ jobs:
   test-macos:
     name: Test / macOS native (${{ matrix.arch }})
     if: (github.event_name != 'push' || github.ref == 'refs/heads/main') && !inputs.homebrew_only
-    timeout-minutes: 25
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
@@ -101,8 +114,26 @@ jobs:
         with:
           arch: ${{ matrix.arch }}
           scope: macos-native
+      - name: Install coverage tool
+        if: matrix.arch == 'aarch64'
+        run: command -v cargo-llvm-cov >/dev/null || cargo install cargo-llvm-cov --version 0.9.1 --locked
+      # Apple Silicon measures coverage while testing: macOS-only code runs
+      # only here, and Coverage / Combined adds it to the Linux report.
       - name: Run all core and CLI tests
-        run: cargo test --locked -p pkgdeck-core -p pkd --no-fail-fast
+        run: |
+          if [[ ${{ matrix.arch }} == aarch64 ]]; then
+            mkdir -p coverage
+            cargo llvm-cov -p pkgdeck-core -p pkd --locked --no-fail-fast --lcov --output-path coverage/lcov.info
+          else
+            cargo test --locked -p pkgdeck-core -p pkd --no-fail-fast
+          fi
+      - name: Upload coverage report
+        if: matrix.arch == 'aarch64'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-macos-aarch64
+          path: coverage/lcov.info
+          if-no-files-found: error
       - name: Build CLI
         run: cargo build --locked -p pkd
       - name: Test real bundles and Homebrew cask lifecycle
@@ -192,9 +223,6 @@ jobs:
           - { group: dev, platform: linux-aarch64, runner: ubuntu-26.04-arm, arch: aarch64 }
           - { group: dev, platform: macos-x86_64, runner: macos-26-intel, arch: x86_64 }
           - { group: dev, platform: macos-aarch64, runner: macos-26, arch: aarch64 }
-          # Installing MacPorts itself takes a while, so it has its own job.
-          - { group: macports, platform: macos-x86_64, runner: macos-26-intel, arch: x86_64 }
-          - { group: macports, platform: macos-aarch64, runner: macos-26, arch: aarch64 }
     runs-on: ${{ matrix.runner }}
     env:
       HOMEBREW_NO_AUTO_UPDATE: '1'
@@ -213,7 +241,7 @@ jobs:
         uses: ./.github/actions/rust-cache
         with:
           arch: ${{ matrix.arch }}
-          scope: terminal
+          scope: ${{ startsWith(matrix.platform, 'linux-') && 'linux' || 'macos-native' }}
           save: 'false'
       - name: Build CLI
         run: cargo build --locked -p pkd
@@ -229,115 +257,18 @@ jobs:
           scripts/tests/backends.sh ${{ matrix.group }} "$PWD/target/debug/pkd" \
             "$PWD/target/${{ matrix.arch }}-unknown-linux-musl/debug/pkd"
       - name: Upload MacPorts logs
-        if: always() && matrix.group == 'macports'
+        if: always() && startsWith(matrix.platform, 'macos-')
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: macports-${{ matrix.platform }}
           path: build/macports
           if-no-files-found: ignore
 
-  lint-workspace:
-    name: Lint / Workspace (${{ matrix.arch }})
-    if: (github.event_name != 'push' || github.ref == 'refs/heads/main') && !inputs.homebrew_only
-    timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: ubuntu-26.04
-            arch: x86_64
-          - runner: ubuntu-26.04-arm
-            arch: aarch64
-    runs-on: ${{ matrix.runner }}
-    env:
-      QT_QPA_PLATFORM: offscreen
-      QT_QUICK_BACKEND: software
-    steps:
-      - name: Check out source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Cache Rust build outputs
-        uses: ./.github/actions/rust-cache
-        with:
-          arch: ${{ matrix.arch }}
-          scope: lint
-      - name: Set up desktop dependencies
-        uses: ./.github/actions/setup-desktop
-      - name: Run workspace lint
-        run: scripts/verify.sh full --only lint
-
-  coverage-workspace:
-    name: Coverage / Workspace (x86_64)
-    if: (github.event_name != 'push' || github.ref == 'refs/heads/main') && !inputs.homebrew_only
-    timeout-minutes: 20
-    runs-on: ubuntu-26.04
-    env:
-      QT_QPA_PLATFORM: offscreen
-      QT_QUICK_BACKEND: software
-    steps:
-      - name: Check out source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Cache Rust build outputs
-        uses: ./.github/actions/rust-cache
-        with:
-          arch: x86_64
-          scope: coverage
-      - name: Set up desktop dependencies
-        uses: ./.github/actions/setup-desktop
-        with:
-          coverage: 'true'
-      - name: Run workspace coverage
-        # The 95% gate applies to all platforms together (Coverage / Combined).
-        run: PKGDECK_COVERAGE_GATE=0 scripts/verify.sh full --only coverage
-      - name: Upload coverage report
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: coverage-workspace-x86_64
-          path: coverage/lcov.info
-          if-no-files-found: error
-
-  coverage-macos:
-    # macOS-only code (adoption, the administrator dialog, the app inventory,
-    # the Mac App Store) only runs here. The GUI crate is shared code that the
-    # Linux job already measures, so this run covers the core and CLI.
-    name: Coverage / Core (macos-aarch64)
-    if: (github.event_name != 'push' || github.ref == 'refs/heads/main') && !inputs.homebrew_only
-    timeout-minutes: 25
-    runs-on: macos-26
-    env:
-      HOMEBREW_NO_AUTO_UPDATE: '1'
-      HOMEBREW_NO_INSTALL_CLEANUP: '1'
-      HOMEBREW_NO_ANALYTICS: '1'
-    steps:
-      - name: Check out source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Set up Rust and JSON assertions
-        run: |
-          rustup show
-          brew install jq coreutils
-          echo "$(brew --prefix coreutils)/libexec/gnubin" >> "$GITHUB_PATH"
-      - name: Cache Rust build outputs
-        uses: ./.github/actions/rust-cache
-        with:
-          arch: aarch64
-          scope: coverage-macos
-      - name: Install coverage tool
-        run: command -v cargo-llvm-cov >/dev/null || cargo install cargo-llvm-cov --version 0.9.1 --locked
-      - name: Run core and CLI coverage
-        run: |
-          mkdir -p coverage
-          cargo llvm-cov -p pkgdeck-core -p pkd --locked --lcov --output-path coverage/lcov.info
-      - name: Upload coverage report
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: coverage-core-macos-aarch64
-          path: coverage/lcov.info
-          if-no-files-found: error
-
   coverage-combined:
     # One number for all the code: a line counts once and is covered when a
     # test ran it on any platform.
     name: Coverage / Combined
-    needs: [coverage-workspace, coverage-macos]
+    needs: [test-linux, test-macos]
     if: (github.event_name != 'push' || github.ref == 'refs/heads/main') && !inputs.homebrew_only
     runs-on: ubuntu-26.04
     timeout-minutes: 5
@@ -352,29 +283,8 @@ jobs:
       - name: Require 95% of all lines
         run: |
           python3 scripts/coverage-merge.py --fail-under 95 --summary "$GITHUB_STEP_SUMMARY" \
-            "Linux (workspace)=coverage/coverage-workspace-x86_64/lcov.info" \
-            "macOS (core and CLI)=coverage/coverage-core-macos-aarch64/lcov.info"
-
-  test-workspace:
-    name: Test / Workspace (aarch64)
-    if: (github.event_name != 'push' || github.ref == 'refs/heads/main') && !inputs.homebrew_only
-    timeout-minutes: 20
-    runs-on: ubuntu-26.04-arm
-    env:
-      QT_QPA_PLATFORM: offscreen
-      QT_QUICK_BACKEND: software
-    steps:
-      - name: Check out source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Cache Rust build outputs
-        uses: ./.github/actions/rust-cache
-        with:
-          arch: aarch64
-          scope: tests
-      - name: Set up desktop dependencies
-        uses: ./.github/actions/setup-desktop
-      - name: Run workspace tests
-        run: scripts/verify.sh full --only tests
+            "Linux (workspace)=coverage/coverage-linux-x86_64/lcov.info" \
+            "macOS (core and CLI)=coverage/coverage-macos-aarch64/lcov.info"
 
   package-macos:
     name: Package / macOS app (${{ matrix.arch }})
@@ -453,6 +363,10 @@ jobs:
           name: macos-startup-${{ matrix.arch }}
           path: ${{ runner.temp }}/pkgdeck-macos-startup
           if-no-files-found: ignore
+      - name: Test Homebrew cask install
+        # Installs this job's own package, instead of a separate job waiting
+        # for a macOS runner and downloading it again.
+        run: bash scripts/tests/homebrew-cask.sh build/artifacts
       - name: Upload app
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -508,18 +422,20 @@ jobs:
 
   test-homebrew:
     name: Test / Homebrew (${{ matrix.runner }})
-    needs: [package-macos, package-linux-cli]
+    needs: [package-linux-cli]
     # Release formula PRs and homebrew_only runs test the committed recipes
     # against published assets; other runs test this checkout's packages.
     if: >-
       !cancelled() && (github.event_name != 'push' || github.ref == 'refs/heads/main') &&
-      (inputs.homebrew_only || (needs.package-macos.result == 'success' && needs.package-linux-cli.result == 'success'))
+      (inputs.homebrew_only || needs.package-linux-cli.result == 'success')
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-26.04, ubuntu-26.04-arm, macos-26, macos-26-intel]
+        # The Mac packaging jobs test the cask with the app they built.
+        # Published recipes are still checked on every runner.
+        runner: ${{ fromJSON((inputs.homebrew_only || startsWith(github.head_ref, 'release/homebrew-')) && '["ubuntu-26.04","ubuntu-26.04-arm","macos-26","macos-26-intel"]' || '["ubuntu-26.04","ubuntu-26.04-arm"]') }}
     env:
       HOMEBREW_NO_AUTO_UPDATE: '1'
       HOMEBREW_NO_INSTALL_CLEANUP: '1'
@@ -544,7 +460,7 @@ jobs:
         if: env.PUBLISHED != 'true'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          pattern: packages-{macos,linux-cli}-*
+          pattern: packages-linux-cli-*
           path: dist
           merge-multiple: true
       - name: Prepare tap
@@ -560,7 +476,8 @@ jobs:
           else
             version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)
             (cd dist && shasum -a 256 PkgDeck-v* > SHA256SUMS)
-            scripts/homebrew-render.sh "$version" dist/SHA256SUMS "file://$PWD/dist" "$tap"
+            # The Mac packages are tested in their own jobs.
+            PKGDECK_RENDER_PLACEHOLDERS=1 scripts/homebrew-render.sh "$version" dist/SHA256SUMS "file://$PWD/dist" "$tap"
           fi
       - name: Check formula and cask style
         run: |
@@ -758,7 +675,7 @@ jobs:
     # 10 GB limit then evicts the caches pull requests need. Keep only the
     # newest copy of each cache once this run has saved its own.
     name: Prune superseded caches
-    needs: [test-terminal, test-macos, test-podman, lint-workspace, coverage-workspace, coverage-macos, test-workspace, package-macos, package-linux-cli, package-bundles]
+    needs: [test-linux, test-macos, test-podman, package-macos, package-linux-cli, package-bundles]
     if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 5
