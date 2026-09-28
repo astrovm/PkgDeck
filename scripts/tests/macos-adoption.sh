@@ -98,8 +98,12 @@ inode=$(/usr/bin/stat -f %i "$app")
 
 # 3. Checked adoption: Homebrew manages the same folder, links the command,
 # and the temporary copy is gone.
-output=$(install)
-grep -q '"exit_code":0' <<<"$output" || { echo "Adoption failed: $output" >&2; exit 1; }
+output=$(install) || true
+grep -q '"exit_code":0' <<<"$output" || {
+    echo "Adoption failed: $output" >&2
+    brew list --cask --versions "$cask" || true
+    exit 1
+}
 installed
 [[ $(/usr/bin/stat -f %i "$app") == "$inode" ]] || { echo 'The app was replaced instead of adopted' >&2; exit 1; }
 [[ $("$command_link") == adopted ]]
