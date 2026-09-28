@@ -3453,11 +3453,8 @@ impl ffi::PackageController {
             let app = usize::try_from(index)
                 .ok()
                 .and_then(|i| self.rust().packages.get(i))
-                .filter(|p| {
-                    cfg!(target_os = "macos")
-                        && p.id.backend == "macos-apps"
-                        && p.adopt_with.is_some()
-                })
+                // Only the macOS Applications inventory produces such rows.
+                .filter(|p| p.id.backend == "macos-apps" && p.adopt_with.is_some())
                 .cloned();
             match app {
                 Some(app) => self.start(Job::PlanAdoption(Box::new(app))),
@@ -5004,12 +5001,8 @@ mod tests {
             .status()
             .unwrap();
         assert!(status.success());
-        let package = match inspect_open_input(archive.to_str().unwrap(), &Cancellation::default())
-            .unwrap()
-        {
-            Payload::OpenPackage(package) => package,
-            _ => panic!("local archive inspection must return a package"),
-        };
+        let preview = inspect_open_input(archive.to_str().unwrap(), &Cancellation::default());
+        let package = expect!(preview.unwrap(), Payload::OpenPackage(package) => package);
         assert_eq!(package.id.backend, "apt");
         assert_eq!(package.id.name, "pkgdeck-open-synthetic");
         assert_eq!(package.candidate_version.as_deref(), Some("1.2.3"));
@@ -10296,16 +10289,10 @@ mod tests {
             ));
         }
         controller.as_mut().propose("adopt".into(), 0);
-        // Only macOS offers adoption.
-        let queued = &controller.rust().queued;
-        assert_eq!(
-            matches!(queued, Some(Job::PlanAdoption(_))),
-            cfg!(target_os = "macos")
-        );
-        assert_eq!(
-            matches!(queued, Some(Job::PlanAdoption(app)) if **app == adoptable_app()),
-            cfg!(target_os = "macos")
-        );
+        assert!(matches!(
+            &controller.rust().queued,
+            Some(Job::PlanAdoption(app)) if **app == adoptable_app()
+        ));
         // The read-only row still never offers its own writes.
         controller.as_mut().rust_mut().queued = None;
         for action in ["install", "remove", "upgrade"] {
@@ -10477,6 +10464,12 @@ mod tests {
         ));
         let empty = (NO_MANAGERS.engine)(&["apt".into()], true, Authorization::Polkit, &cancel);
         assert!(empty.unwrap().discover(&cancel).is_empty());
+        // Every provider lookup from a test answers nothing.
+        assert!((NO_MANAGERS.metadata.fetch)(
+            "https://flathub.org/api/v2/appstream/org.example.App",
+            &cancel
+        )
+        .is_empty());
     }
     const SYNTHETIC: Natives = Natives {
         engine: fixture_engine,

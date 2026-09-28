@@ -868,7 +868,7 @@ mod tests {
         catalog.xml(r#"<component type="desktop-application"><id>org.example.Player</id><name>Player</name><icon type="cached">player.png</icon></component>"#);
         let mut app = package("flatpak", "org.example.Player");
         catalog.enrich(&mut app);
-        assert_eq!(app.icon, Some(icon));
+        assert_eq!(app.icon.as_ref(), Some(&icon));
         assert!(catalog.resolve_icon("../player.png", "cached").is_none());
         assert!(catalog.resolve_icon("missing.png", "cached").is_none());
         assert!(catalog
@@ -878,6 +878,41 @@ mod tests {
             catalog.resolve_icon("https://example.invalid/icon.png", "remote"),
             Some(PathBuf::from("https://example.invalid/icon.png"))
         );
+        // DEP-11 prefers a stock icon and falls back to the first cached
+        // entry that names a file present in the metadata directory.
+        let stock = dir.join("stock.png");
+        fs::write(&stock, "synthetic stock icon").unwrap();
+        catalog.yaml(&format!(
+            r#"---
+Type: desktop-application
+ID: org.example.Stock
+Name: {{C: Stock}}
+Icon: {{stock: '{}', cached: [{{name: player.png}}]}}
+---
+Type: desktop-application
+ID: org.example.Cached
+Name: {{C: Cached}}
+Icon: {{stock: '{}', cached: [{{width: 64}}, {{name: missing.png}}, {{name: player.png}}]}}
+---
+Type: desktop-application
+ID: org.example.Bare
+Name: {{C: Bare}}
+Icon: {{stock: '{}', cached: [{{name: missing.png}}]}}
+"#,
+            stock.display(),
+            dir.join("absent.png").display(),
+            dir.join("absent.png").display(),
+        ));
+        let icon_of = |name: &str| {
+            catalog
+                .find(&package("flatpak", name))
+                .unwrap()
+                .icon
+                .clone()
+        };
+        assert_eq!(icon_of("org.example.Stock"), Some(stock));
+        assert_eq!(icon_of("org.example.Cached"), Some(icon));
+        assert_eq!(icon_of("org.example.Bare"), None);
         fs::remove_dir_all(dir).unwrap();
     }
 

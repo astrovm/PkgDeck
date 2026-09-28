@@ -30,4 +30,18 @@ fn fixtures_without_a_manager_report_it_missing_instead_of_running_it() {
         disabled(Bare.flatpak(&["list".into()], &cancel, false, true)),
         "Flatpak not found"
     );
+    assert_eq!(
+        disabled(Bare.system_manager("fwupdmgr", &["get-remotes".into()], &cancel, false)),
+        "fwupdmgr not found"
+    );
+}
+
+#[test]
+fn fixtures_offer_no_software_sources_editor_but_a_writable_system_flatpak() {
+    assert!(Bare.system_flatpak_writable());
+    assert!(!Bare.repository_editor_available());
+    assert!(matches!(
+        Bare.repository_editor(),
+        Err(ExecutionError::Disabled(reason)) if reason == "Software Sources editor unavailable"
+    ));
 }

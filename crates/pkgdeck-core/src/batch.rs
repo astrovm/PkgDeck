@@ -1413,6 +1413,33 @@ done"#;
     }
 
     #[test]
+    fn helper_exit_before_ready_is_cancelled_only_for_a_dismissed_prompt() {
+        let operations = [Operation::Refresh {
+            backend: "apt".into(),
+        }];
+        let commands = batch_commands(&operations).unwrap();
+        // A lingering child keeps stdout open, so the helper's exit status
+        // is observed instead of end of output.
+        for (code, cancelled) in [(126, true), (1, false)] {
+            let mut child = Command::new("/bin/sh");
+            child.arg("-c").arg(format!(
+                "IFS= read -r start; sleep 2 </dev/null & exit {code}"
+            ));
+            let result = begin_session(
+                child,
+                &operations,
+                commands.clone(),
+                &Cancellation::default(),
+            );
+            assert!(matches!(
+                (result, cancelled),
+                (Err(ExecutionError::AuthorizationCancelled), true)
+                    | (Err(ExecutionError::AuthorizationDenied), false)
+            ));
+        }
+    }
+
+    #[test]
     fn authorization_start_failure_uses_helper_exit_status() {
         for (script, cancelled) in [("exit 126", true), ("exit 1", false)] {
             let mut child = Command::new("/bin/sh")

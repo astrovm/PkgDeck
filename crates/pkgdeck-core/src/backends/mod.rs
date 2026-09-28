@@ -6730,6 +6730,12 @@ mod native_transport_tests {
         let refused = matches!(&error, ExecutionError::Failed(result) if result.code == Some(2));
         let missing = matches!(&error, ExecutionError::Disabled(reason) if reason.starts_with("APT helper is missing"));
         assert!(refused || missing, "{error:?}");
+        // A cancelled query never starts the helper.
+        let cancel = Cancellation::default();
+        cancel.cancel();
+        let error = native.apt_query("detect", "", "", &cancel).unwrap_err();
+        let cancelled = matches!(error, ExecutionError::Cancelled);
+        assert_eq!(cancelled, refused, "{error:?}");
         std::fs::remove_dir_all(base).unwrap();
     }
 

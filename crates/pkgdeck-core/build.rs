@@ -9,15 +9,17 @@ fn main() {
     }
     // Keep non-APT platforms and cross builds independent of libapt-pkg.
     // Distribution bundles provide their own adjacent helper.
-    if env::var("HOST") == env::var("TARGET")
-        && Path::new("/usr/include/apt-pkg/cachefile.h").is_file()
-    {
-        let output = env::var("OUT_DIR").expect("Cargo supplies OUT_DIR");
-        let status = Command::new("bash")
-            .args(["../../scripts/build-apt.sh", &output])
-            .status()
-            .expect("run APT helper compiler");
-        assert!(status.success(), "APT helper compilation failed");
-        println!("cargo:rustc-env=PKGDECK_BUILT_APT_QUERY={output}/pkgdeck-apt-query");
-    }
+    let native_apt = env::var("HOST") == env::var("TARGET")
+        && Path::new("/usr/include/apt-pkg/cachefile.h").is_file();
+    native_apt.then(build_apt_helper);
+}
+
+fn build_apt_helper() {
+    let output = env::var("OUT_DIR").expect("Cargo supplies OUT_DIR");
+    let status = Command::new("bash")
+        .args(["../../scripts/build-apt.sh", &output])
+        .status()
+        .expect("run APT helper compiler");
+    assert!(status.success(), "APT helper compilation failed");
+    println!("cargo:rustc-env=PKGDECK_BUILT_APT_QUERY={output}/pkgdeck-apt-query");
 }
