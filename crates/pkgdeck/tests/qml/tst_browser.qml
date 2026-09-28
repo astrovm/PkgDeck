@@ -1578,7 +1578,13 @@ TestCase {
         fake.busy = true;
         browser.openView("Installed");
         compare(browser.currentView, "Installed");
-        verify(findChild(findChild(browser, "packageResults").itemAtIndex(0), "rowPackageAction").enabled);
+        // Delegates are created after layout, which a slow runner may not
+        // have finished yet.
+        tryVerify(() => {
+            const row = findChild(browser, "packageResults").itemAtIndex(0);
+            const action = row ? findChild(row, "rowPackageAction") : null;
+            return action !== null && action.enabled;
+        });
         verify(findChild(browser, "activityIndicator").visible);
         browser.openView("Activity");
         // Activity opens as a drawer over the current page.
@@ -1586,7 +1592,10 @@ TestCase {
         verify(browser.activityOpen);
         const list = findChild(browser, "activityList");
         tryCompare(list, "count", 1);
-        verify(findChild(browser, "cancelQueuedButton").enabled);
+        tryVerify(() => {
+            const cancel = findChild(browser, "cancelQueuedButton");
+            return cancel !== null && cancel.enabled;
+        });
         fake.writing = false;
         fake.busy = false;
     }
