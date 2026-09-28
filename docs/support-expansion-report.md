@@ -164,7 +164,7 @@ or a dedicated design.
 | P0 | AI CLI catalog using current managers | Easier discovery without duplicate backends | S–M | Implemented: npm and PyPI searches offer exact packages for 13 tools; Homebrew already finds the casks and formulae by name. npm, crates.io, RubyGems and Packagist searches now also query the registry |
 | P1 | Standalone AI CLI adapters | Covers official installers outside package managers | M each | Implemented for Antigravity, Cursor, Copilot and Kiro CLIs, Amp and Factory Droid |
 | P1 | Manage existing Mac apps with Homebrew | Converts manual installs into tracked installations | L | Independently verified adoption and recovery for an allowlist |
-| P1 | Mac App Store via mas | Covers apps that should retain App Store ownership | M | mas 7 has JSON `list` and `outdated`; inventory first, then updates with a privilege prompt |
+| P1 | Mac App Store via mas | Covers apps that should retain App Store ownership | M | Implemented: inventory, update checks that never download, and verified `mas update` runs; mas asks for the password itself, so updates need a terminal |
 | P1 | Conda, mamba/micromamba and pixi | Scientific and data-development environments | L | Named environments and `pixi global` only, not project prefixes; solver previews; one adapter switches the conda-family binary |
 | P2 | Rustup | Toolchain coverage beyond Cargo-installed executables | S–M | Installed toolchains; `rustup check` exits 100 when updates exist |
 | P2 | MacPorts | Completes another macOS package ecosystem | M | Native package lifecycle with variants preserved |
@@ -213,7 +213,9 @@ users to Miniforge, so do not assume the `defaults` channel.
 apps, with Apple Account and privilege requirements for mutations. Its accurate
 outdated check initiates a download to read metadata; do not describe that as a
 purely local read. Start with inventory and clearly labeled update checking;
-let Apple handle authentication. mas 7 added `--json` to `list`, `outdated`,
+let Apple handle authentication. mas runs sudo itself, and sudo only asks
+for a password in a terminal, so GUI updates explain that instead of prompting.
+mas 7 added `--json` to `list`, `outdated`,
 `lookup` and `search`, and mas 4 fixed installs on macOS 26.1; installs and
 upgrades need root. [mas documentation](https://github.com/mas-cli/mas),
 [releases](https://github.com/mas-cli/mas/releases).

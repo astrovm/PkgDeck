@@ -1131,6 +1131,7 @@ fn source_display_name(id: &str) -> String {
         "homebrew" => "Homebrew",
         "homebrew-cask" => "Homebrew Casks",
         "macos-apps" => "macOS Applications",
+        "mas" => "Mac App Store",
         "appimage" => "AppImage",
         "flatpak" => "Flatpak",
         "docker" => "Docker images",
@@ -1319,6 +1320,8 @@ fn plain_error(error: &EngineError, backend: Option<&str>, sudo: bool) -> String
         );
     }
     match error {
+        // mas asks for the Mac password through sudo, which needs a terminal.
+        EngineError::Execution(E::AuthorizationDenied) if backend == Some("mas") => "App Store updates need your Mac password, and mas can only ask for it in a terminal. Run `pkd upgrade --from mas` in Terminal, or update in the App Store app.".into(),
         EngineError::Execution(E::AuthorizationDenied) if sudo => "PkgDeck couldn't get administrator access. \"Existing sudo session\" needs a recent sudo login in a terminal, or pick the system prompt in Settings.".into(),
         EngineError::Execution(E::AuthorizationDenied) => "PkgDeck couldn't get administrator access. Make sure your desktop's password prompt is running, or pick another option in Settings.".into(),
         EngineError::Execution(E::AuthorizationCancelled) => "The password prompt was closed. Nothing was changed.".into(),
@@ -8706,6 +8709,7 @@ mod tests {
             ("homebrew", "Homebrew"),
             ("homebrew-cask", "Homebrew Casks"),
             ("macos-apps", "macOS Applications"),
+            ("mas", "Mac App Store"),
             ("appimage", "AppImage"),
             ("flatpak", "Flatpak"),
             ("docker", "Docker images"),
@@ -8938,6 +8942,12 @@ mod tests {
     "Couldn't read /Users/me/Applications/Locked (permission denied). The other apps are still listed."
 );
         assert_eq!(failure_kind(&skipped), "partial");
+        // mas asks for the password itself, whatever PkgDeck's setting is.
+        let denied =
+            EngineError::Execution(pkgdeck_core::process::ExecutionError::AuthorizationDenied);
+        for sudo in [false, true] {
+            assert!(plain_error(&denied, Some("mas"), sudo).contains("pkd upgrade --from mas"));
+        }
         let elsewhere = EngineError::InvalidResponse {
             backend: "snap".into(),
             reason: "skipped folder /x: denied".into(),

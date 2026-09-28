@@ -622,7 +622,7 @@ impl MacApps {
             description.push(format!("Homebrew check: {error}"));
         }
         if receipt {
-            description.push("App Store receipt present. Keep App Store management; no cask suggestion is offered.".into());
+            description.push("App Store receipt present. Keep App Store management (the Mac App Store source updates it through mas); no cask suggestion is offered.".into());
         } else if let Some(suggestion) = &suggestion {
             description.push(suggestion.clone());
             description.push("Matching evidence: the bundle identifier matches PkgDeck's curated cask catalog. Publisher signature, edition/channel, architecture, and artifact equality have not been verified. This is a discovery suggestion, not an adoption plan.".into());
