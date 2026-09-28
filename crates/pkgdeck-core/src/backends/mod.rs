@@ -2551,13 +2551,23 @@ impl<T: Transport> Backend for HomebrewCask<T> {
                         &mut || {
                             self.call(&["install", "--cask", "--adopt", "--", token], cancel, true)
                         },
+                        // brew list rejects a tap cask's full name; brew info
+                        // takes both and reports the installed version.
                         &mut || {
                             self.call(
-                                &["list", "--cask", "--versions", "--", token],
+                                &["info", "--json=v2", "--cask", "--", token],
                                 &Cancellation::default(),
                                 false,
                             )
-                            .is_ok_and(|done| done.code == Some(0))
+                            .ok()
+                            .and_then(|done| {
+                                serde_json::from_slice::<serde_json::Value>(&done.stdout).ok()
+                            })
+                            .is_some_and(|info| {
+                                info["casks"][0]["installed"]
+                                    .as_str()
+                                    .is_some_and(|version| !version.is_empty())
+                            })
                         },
                     );
                 }
@@ -6153,11 +6163,12 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join(" ");
             self.calls.lock().unwrap().push(line.clone());
+            let installed = (*self.installed.lock().unwrap()).then_some("1.139.1");
             let cask = |token: &str, artifacts: serde_json::Value| {
                 serde_json::json!({"casks": [{
                     "full_token": token, "name": [token], "desc": null,
                     "homepage": "https://example.com", "version": "1.139.1",
-                    "installed": null, "outdated": false, "auto_updates": true,
+                    "installed": installed, "outdated": false, "auto_updates": true,
                     "artifacts": artifacts,
                 }]})
                 .to_string()
@@ -6183,11 +6194,6 @@ mod tests {
                     assert!(write);
                     *self.installed.lock().unwrap() = true;
                     String::new()
-                }
-                "list --cask --versions -- visual-studio-code"
-                    if *self.installed.lock().unwrap() =>
-                {
-                    "visual-studio-code 1.139.1\n".into()
                 }
                 _ => {
                     return Err(ExecutionError::Failed(Completion {
