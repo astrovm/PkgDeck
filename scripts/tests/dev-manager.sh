@@ -139,13 +139,15 @@ setup_rustup() {
 
 # Nix stays off PATH, the way a desktop app starts, so pkd has to find it
 # in the profile the installer made. Linux gets the official single-user
-# install; macOS needs the multi-user daemon, which the Determinate
-# installer sets up without prompts.
+# install; macOS needs the multi-user daemon. The Determinate installer
+# dropped Intel Macs, so macOS uses the official one too.
 setup_nix() {
     if [[ $(uname -s) == Darwin ]]; then
         nix_bin=/nix/var/nix/profiles/default/bin/nix
-        [[ -x $nix_bin ]] || curl --proto '=https' --tlsv1.2 -fsSL https://install.determinate.systems/nix |
-            sh -s -- install --no-confirm
+        if [[ ! -x $nix_bin ]]; then
+            curl --proto '=https' --tlsv1.2 -fsSL -o "$HOME/nix-install" https://nixos.org/nix/install
+            sh "$HOME/nix-install" --daemon --yes --no-modify-profile
+        fi
     else
         nix_bin=$HOME/.nix-profile/bin/nix
         if [[ ! -x $nix_bin ]]; then
