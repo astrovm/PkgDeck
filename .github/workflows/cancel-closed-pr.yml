@@ -1,0 +1,35 @@
+name: Cancel closed pull request CI
+# CI's concurrency group only cancels a run when a newer one starts, and a
+# merged or closed pull request starts none, so its last run kept holding
+# runners until it finished. Cancel it as soon as the pull request closes.
+on:
+  # pull_request_target gets a token that can cancel runs for pull requests
+  # from forks too. It checks out nothing and runs no pull request code.
+  pull_request_target:
+    types: [closed]
+
+permissions: {}
+
+jobs:
+  cancel:
+    name: Cancel unfinished CI runs
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Cancel this pull request's queued and running CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+        run: |
+          gh api --method GET --paginate "repos/$GH_REPO/actions/workflows/ci.yml/runs" \
+            -f event=pull_request -f "branch=$BRANCH" -f per_page=100 |
+            jq -r --arg repo "$HEAD_REPO" \
+              '.workflow_runs[] | select(.head_repository.full_name == $repo and .status != "completed") | .id' |
+            while read -r id; do
+              echo "Cancelling run $id"
+              gh run cancel "$id" || true
+            done
