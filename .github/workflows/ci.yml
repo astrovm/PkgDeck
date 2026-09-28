@@ -14,9 +14,11 @@ on:
 permissions:
   contents: read
 
+# A newer push, to a pull request or main, replaces the run for the older
+# commit. Release tags always finish.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
   # PR and ordinary manual runs validate the full matrix. Formula updates use

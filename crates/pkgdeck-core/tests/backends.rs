@@ -4995,9 +4995,13 @@ impl Transport for Script {
 #[test]
 fn apk_lists_updates_and_writes_with_its_own_verbs() {
     let cancel = Cancellation::default();
+    // apk reports the machine's own architecture, which search rows use too.
+    let arch = std::env::consts::ARCH;
+    let installed_lines = format!("busybox-1.37.0-r12 {arch} {{busybox}} (GPL-2.0-only) [installed]\njq-1.8.2-r0 {arch} {{jq}} (MIT) [installed]\n");
+    let upgradable_lines = format!("busybox-1.37.0-r13 {arch} {{busybox}} (GPL-2.0-only) [upgradable from: busybox-1.37.0-r12]\n");
     let script = Script::new(&[
-        ("apk list --installed", "busybox-1.37.0-r12 aarch64 {busybox} (GPL-2.0-only) [installed]\njq-1.8.2-r0 aarch64 {jq} (MIT) [installed]\n"),
-        ("apk list --upgradable", "busybox-1.37.0-r13 aarch64 {busybox} (GPL-2.0-only) [upgradable from: busybox-1.37.0-r12]\n"),
+        ("apk list --installed", installed_lines.as_str()),
+        ("apk list --upgradable", upgradable_lines.as_str()),
         ("apk search -v jq", "gojq-0.12.19-r3 - Pure Go implementation of jq\njq-1.8.2-r0 - A lightweight and flexible command-line JSON processor\n"),
         ("apk add", ""),
         ("apk del", ""),
@@ -5006,7 +5010,7 @@ fn apk_lists_updates_and_writes_with_its_own_verbs() {
     let installed = apk.installed(&cancel).unwrap();
     assert_eq!(installed.len(), 2);
     assert_eq!(installed[0].id.name, "busybox");
-    assert_eq!(installed[0].id.architecture, "aarch64");
+    assert_eq!(installed[0].id.architecture, arch);
     assert_eq!(
         installed[0].installed_version.as_deref(),
         Some("1.37.0-r12")
@@ -5097,8 +5101,8 @@ fn macports_keeps_variants_and_lists_only_active_ports() {
             "xz                             5.8.1_0 < 5.8.2_0\n",
         ),
         (
-            "port -q search --name --line wget",
-            "wget\t1.25.0\tnet www\tinternet file retriever\n",
+            "port search --name --line wget",
+            "wget\t1.25.0\tnet www\tinternet file retriever\nNo match for wgetx found\n",
         ),
         ("port -N", ""),
     ]);
