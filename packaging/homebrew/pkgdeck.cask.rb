@@ -26,5 +26,7 @@ cask "pkgdeck" do
     "~/.cache/pkgdeck",
     "~/.local/state/pkgdeck",
     "~/Library/Caches/astrovm/PkgDeck",
+    "~/Library/Caches/pkgdeck",
+    "~/Library/Preferences/io.github.astrovm.PkgDeck.plist",
   ]
 end

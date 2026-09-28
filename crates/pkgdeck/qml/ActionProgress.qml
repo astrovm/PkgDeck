@@ -20,7 +20,12 @@ GridLayout {
     property string cancelText: "Cancel"
     // Below this width the label sits above the bar.
     property real stackWidth: 460
-    readonly property bool stacked: width > 0 && width < stackWidth
+    // The width the cells are arranged for. It trails the real width by one
+    // event loop turn: changing cell positions or sizes while a layout pass
+    // is setting this width would make Qt Quick Layouts abort the pass.
+    property real arrangedWidth: 0
+    Binding on arrangedWidth { value: progress.width; delayed: true }
+    readonly property bool stacked: arrangedWidth > 0 && arrangedWidth < stackWidth
     readonly property bool indeterminate: bar.indeterminate
     readonly property string countText: transferTotal > 0
         ? Math.round(100 * Math.min(1, transferred / transferTotal)) + "%"
@@ -43,7 +48,7 @@ GridLayout {
         Layout.column: 0
         Layout.fillWidth: progress.stacked
         // Wide: the label takes what it needs, up to a share of the line.
-        Layout.maximumWidth: progress.stacked ? -1 : Math.max(120, progress.width * 0.45)
+        Layout.maximumWidth: progress.stacked ? -1 : Math.max(120, progress.arrangedWidth * 0.45)
     }
     Controls.ProgressBar {
         id: bar
