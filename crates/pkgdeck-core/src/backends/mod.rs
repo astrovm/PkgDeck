@@ -3213,6 +3213,35 @@ struct ComposerPackage {
 }
 
 #[derive(Deserialize)]
+struct NpmSearchHit {
+    name: String,
+    version: Option<String>,
+    description: Option<String>,
+}
+#[derive(Deserialize)]
+struct ComposerSearchHit {
+    name: String,
+    description: Option<String>,
+}
+/// Registry search results kept per source; engines rank them afterwards.
+const REGISTRY_RESULTS: usize = 20;
+/// `cargo search` rows: `name = "version"    # description`.
+fn cargo_search_hit(line: &str) -> Option<(&str, &str, &str)> {
+    let (name, rest) = line.split_once(" = \"")?;
+    let (version, rest) = rest.split_once('"')?;
+    let summary = rest.trim().strip_prefix('#').unwrap_or_default().trim();
+    Some((name.trim(), version, summary))
+}
+/// `gem search --remote` rows: `name (version[ platforms][, older versions])`,
+/// such as `nokogiri (1.19.4 ruby aarch64-linux-gnu, 1.17.2 x86_64-linux)`.
+fn gem_search_hit(line: &str) -> Option<(&str, &str)> {
+    let (name, rest) = line.trim().split_once(" (")?;
+    let versions = rest.strip_suffix(')')?;
+    let version = versions.split([',', ' ']).next()?.trim();
+    (!version.is_empty()).then_some((name, version))
+}
+
+#[derive(Deserialize)]
 struct MiseInstall {
     version: String,
     requested_version: Option<String>,
@@ -4207,6 +4236,132 @@ impl<T: Transport> DevTool<T> {
             })
             .collect())
     }
+    /// Packages matching `query` in the source's registry, using the manager's
+    /// own search command: npm (also for pnpm and Bun, which share the npm
+    /// registry but have no search command), crates.io, RubyGems and
+    /// Packagist. PyPI has had no search API since 2020. A registry that
+    /// cannot be reached (offline) leaves only installed matches.
+    fn registry_hits(
+        &self,
+        query: &str,
+        cancel: &Cancellation,
+    ) -> Result<Vec<(String, String, String)>, EngineError> {
+        let limit = REGISTRY_RESULTS.to_string();
+        // Cancellation propagates; any other failure (offline, npm not
+        // installed) leaves only the installed matches.
+        let text = |result: Result<Completion, ExecutionError>| match result {
+            Err(ExecutionError::Cancelled) => Err(EngineError::Cancelled),
+            result => Ok(result
+                .ok()
+                .filter(|result| !result.truncated)
+                .map(|result| String::from_utf8_lossy(&result.stdout).into_owned())),
+        };
+        Ok(match self.kind {
+            DevKind::Npm | DevKind::Pnpm | DevKind::Bun => {
+                let limit = format!("--searchlimit={limit}");
+                // Without these caps an unreachable registry holds npm for
+                // about 70 seconds of retries; with them it fails at once.
+                let args = [
+                    "search",
+                    "--json",
+                    &limit,
+                    "--fetch-retries=0",
+                    "--fetch-timeout=15000",
+                    "--",
+                    query,
+                ]
+                .map(OsString::from);
+                text(self.transport.dev_tool("npm", &args, cancel, false))?
+                    .and_then(|json| serde_json::from_str::<Vec<NpmSearchHit>>(&json).ok())
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|hit| {
+                        Some((hit.name, hit.version?, hit.description.unwrap_or_default()))
+                    })
+                    .collect()
+            }
+            DevKind::Cargo => {
+                // Offline, cargo retries for about 10 seconds without these.
+                text(self.call(
+                    &[
+                        "--config",
+                        "net.retry=0",
+                        "--config",
+                        "http.timeout=15",
+                        "search",
+                        "--limit",
+                        &limit,
+                        "--",
+                        query,
+                    ],
+                    cancel,
+                    false,
+                ))?
+                .into_iter()
+                .flat_map(|output| {
+                    output
+                        .lines()
+                        .filter_map(cargo_search_hit)
+                        .map(|(name, version, summary)| {
+                            (name.into(), version.into(), summary.into())
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect()
+            }
+            // `gem search` takes a regular expression and ignores `--`, so only
+            // plain gem names are sent, with their dots escaped.
+            DevKind::Gem if gem_name(query) && query.len() >= 3 => {
+                let pattern = query.replace('.', "\\.");
+                let mut hits: Vec<(String, String, String)> =
+                    text(self.call(&["search", "--remote", &pattern], cancel, false))?
+                        .into_iter()
+                        .flat_map(|output| {
+                            output
+                                .lines()
+                                .filter_map(gem_search_hit)
+                                .map(|(name, version)| (name.into(), version.into(), String::new()))
+                                .collect::<Vec<_>>()
+                        })
+                        .collect();
+                // RubyGems lists matches alphabetically, so rank exact and
+                // prefix matches first before keeping only the first few.
+                let lowered = query.to_ascii_lowercase();
+                hits.sort_by_key(|(name, ..)| {
+                    let name = name.to_ascii_lowercase();
+                    if name == lowered {
+                        0
+                    } else if name.starts_with(&lowered) {
+                        1
+                    } else {
+                        2
+                    }
+                });
+                hits.truncate(REGISTRY_RESULTS);
+                hits
+            }
+            // Packagist reports no version; `global require` takes the latest.
+            // `global` searches the same COMPOSER_HOME repositories it installs from.
+            DevKind::Composer => text(self.call(
+                &["global", "search", "--format=json", "--", query],
+                cancel,
+                false,
+            ))?
+            .and_then(|json| serde_json::from_str::<Vec<ComposerSearchHit>>(&json).ok())
+            .into_iter()
+            .flatten()
+            .take(REGISTRY_RESULTS)
+            .map(|hit| {
+                (
+                    hit.name,
+                    "latest".into(),
+                    hit.description.unwrap_or_default(),
+                )
+            })
+            .collect(),
+            _ => vec![],
+        })
+    }
     /// An offer to install exactly `query` by name, for registries PkgDeck
     /// cannot search. It has no version, so searches never list it as a
     /// match; it only lets an exact `install NAME` reach the manager.
@@ -4421,6 +4576,30 @@ impl<T: Transport> Backend for DevTool<T> {
     fn may_have(&self, name: &str) -> bool {
         self.kind.valid_name(name)
     }
+    /// Exact names never query the open registries. npm, crates.io, RubyGems
+    /// and Packagist accept any name, so a hit only proves some package has it,
+    /// not that it is the tool meant; `install ripgrep` must not become
+    /// ambiguous because npm has an unrelated `ripgrep`. An installed match is
+    /// confirmed; otherwise the manager can only try the name. mise's registry
+    /// lists the same tools other managers ship, so it is used as usual.
+    fn lookup(&mut self, name: &str, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
+        if self.kind == DevKind::Mise {
+            return self.search(name, cancel);
+        }
+        let home = self
+            .home
+            .clone()
+            .ok_or_else(|| invalid(self.kind.id(), "manager home not detected"))?;
+        let installed = self
+            .inventory(cancel)?
+            .into_iter()
+            .map(|d| d.package)
+            .find(|package| package.id.name == name);
+        Ok(installed
+            .or_else(|| self.exact_offer(&home, name))
+            .into_iter()
+            .collect())
+    }
     fn capabilities(&self) -> &[Capability] {
         if matches!(self.kind, DevKind::Npm | DevKind::Pip | DevKind::Uv) {
             cleanup::DEV_CLEAN_CAPABILITIES
@@ -4505,9 +4684,37 @@ impl<T: Transport> Backend for DevTool<T> {
             }
             return Ok(results);
         }
-        // npm and PyPI cannot be searched, so offer the exact packages of
-        // known AI command-line tools that match the query. One already
-        // installed comes back as its installed row.
+        for (name, version, summary) in self.registry_hits(query, cancel)? {
+            if !self.kind.valid_name(&name) || results.iter().any(|package| package.id.name == name)
+            {
+                continue;
+            }
+            if let Some(installed) = inventory.iter().find(|package| package.id.name == name) {
+                results.push(installed.clone());
+                continue;
+            }
+            results.push(Package {
+                id: PackageId {
+                    backend: self.kind.id().into(),
+                    name: name.clone(),
+                    architecture: std::env::consts::ARCH.into(),
+                    scope: Scope::Environment { path: home.clone() },
+                    remote: None,
+                    reference: None,
+                },
+                display_name: name,
+                summary,
+                installed_version: None,
+                candidate_version: Some(version),
+                update: UpdateAvailability::Unknown,
+                icon: None,
+                component_ids: vec![],
+                homepages: vec![],
+            });
+        }
+        // PyPI cannot be searched, and npm search ranks product names poorly,
+        // so also offer the exact packages of known AI command-line tools that
+        // match the query. One already installed comes back as its installed row.
         for tool in ai_catalog::matching(query) {
             let package = match self.kind {
                 DevKind::Npm | DevKind::Pnpm | DevKind::Bun => tool.npm,

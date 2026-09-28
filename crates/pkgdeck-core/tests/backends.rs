@@ -1668,6 +1668,21 @@ impl Transport for DevFixture {
                 cancellation_deferred: true,
             });
         }
+        // Registry searches, however the command is spelled (`cargo --config
+        // … search`, `composer global search`).
+        if !write && rendered.iter().any(|arg| arg == "search") {
+            return match &self.registry {
+                Some(text) => Ok(output(text)),
+                None => Err(ExecutionError::Failed(Completion {
+                    code: Some(1),
+                    signal: None,
+                    stdout: vec![],
+                    stderr: b"network unreachable".to_vec(),
+                    truncated: false,
+                    cancellation_deferred: false,
+                })),
+            };
+        }
         match (executable, first) {
             (_, Some("--version")) => Ok(output(&self.version)),
             (_, Some("root")) => match &self.root {
@@ -1897,6 +1912,213 @@ fn cargo_lifecycle() {
             .count(),
         4
     );
+}
+
+#[test]
+fn searches_reach_each_registry_through_the_managers_own_search() {
+    let cancel = Cancellation::default();
+    let listed = |packages: Vec<Package>| {
+        packages
+            .into_iter()
+            .filter(|p| p.installed_version.is_some() || p.candidate_version.is_some())
+            .map(|p| {
+                (
+                    p.id.name,
+                    p.candidate_version.unwrap_or_default(),
+                    p.installed_version.is_some(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    // npm: JSON from `npm search`; pnpm and Bun use npm's search too.
+    let npm_hits = r#"[
+      {"name": "ripgrep", "version": "0.3.1", "description": "ripgrep in npm"},
+      {"name": "left-pad", "version": "1.3.0", "description": "Installed already"},
+      {"name": "typescript", "version": "7.0.2", "description": "Installed with pnpm"},
+      {"name": "../evil", "version": "1.0.0"}
+    ]"#;
+    for (make, list, installed) in [
+        (
+            DevTool::npm as fn(DevFixture) -> DevTool<DevFixture>,
+            NPM_LIST,
+            "left-pad",
+        ),
+        (DevTool::pnpm, PNPM_LIST, "typescript"),
+    ] {
+        let fixture = DevFixture {
+            version: "12.0.2\n".into(),
+            root: Some("/home/test/lib/node_modules".into()),
+            list: list.into(),
+            registry: Some(npm_hits.into()),
+            ..DevFixture::default()
+        };
+        let mut backend = make(fixture.clone());
+        backend.detect(&cancel).unwrap();
+        let found = listed(backend.search("pad", &cancel).unwrap());
+        assert!(
+            found.contains(&("ripgrep".into(), "0.3.1".into(), false)),
+            "{found:?}"
+        );
+        // A registry hit that is installed is the installed row, listed once.
+        assert_eq!(
+            found.iter().filter(|(name, ..)| name == installed).count(),
+            1
+        );
+        assert!(found
+            .iter()
+            .any(|(name, _, is_installed)| name == installed && *is_installed));
+        assert!(found.iter().all(|(name, ..)| name != "../evil"));
+        assert!(fixture.calls().iter().any(|(exe, args, write)| exe == "npm"
+            && !write
+            && args
+                == &[
+                    "search",
+                    "--json",
+                    "--searchlimit=20",
+                    "--fetch-retries=0",
+                    "--fetch-timeout=15000",
+                    "--",
+                    "pad"
+                ]));
+        // Exact names stay offers and never query the registry, so an
+        // unrelated npm package cannot make an install ambiguous.
+        let before = fixture.calls().len();
+        let exact = backend.lookup("ripgrep", &cancel).unwrap();
+        assert_eq!(exact.len(), 1);
+        assert!(exact[0].candidate_version.is_none() && exact[0].installed_version.is_none());
+        assert!(fixture.calls()[before..]
+            .iter()
+            .all(|(_, args, _)| args.first().map(String::as_str) != Some("search")));
+    }
+    // crates.io through `cargo search`.
+    let fixture = DevFixture {
+        home: Some("/home/test".into()),
+        version: "cargo 1.98.1\n".into(),
+        list: CARGO_LIST.into(),
+        registry: Some("fd-find = \"10.3.0\"       # A simple, fast alternative to find\n... and 680 crates more (use --limit N to see more)\nnote: to learn more about a package, run `cargo info <name>`\n".into()),
+        ..DevFixture::default()
+    };
+    let mut cargo = DevTool::cargo(fixture.clone());
+    cargo.detect(&cancel).unwrap();
+    assert_eq!(
+        listed(cargo.search("fd-find", &cancel).unwrap()),
+        [("fd-find".into(), "10.3.0".into(), false)]
+    );
+    assert!(fixture.calls().iter().any(|(_, args, _)| args
+        == &[
+            "--config",
+            "net.retry=0",
+            "--config",
+            "http.timeout=15",
+            "search",
+            "--limit",
+            "20",
+            "--",
+            "fd-find"
+        ]));
+    // RubyGems through `gem search --remote`, only for plain gem names.
+    let gem_home = std::env::temp_dir().join(format!("pkgdeck-gem-search-{}", std::process::id()));
+    std::fs::create_dir_all(gem_home.join("specifications")).unwrap();
+    let fixture = DevFixture {
+        version: "4.0.20\n".into(),
+        root: Some(gem_home.display().to_string()),
+        registry: Some("rubocop-rspec (3.10.2)\nrubocop-rails (2.30.0, 2.29.1)\nnokogiri (1.19.4 ruby aarch64-linux-gnu x86_64-darwin, 1.17.2 x86_64-linux)\n".into()),
+        ..DevFixture::default()
+    };
+    let mut gem = DevTool::gem(fixture.clone());
+    gem.detect(&cancel).unwrap();
+    let found = listed(gem.search("rubocop", &cancel).unwrap());
+    assert!(found.contains(&("rubocop-rails".into(), "2.30.0".into(), false)));
+    // Platform labels after the version are not part of it.
+    assert!(found.contains(&("nokogiri".into(), "1.19.4".into(), false)));
+    // Dots are literal, not regular expression wildcards.
+    gem.search("rack.test", &cancel).unwrap();
+    assert!(fixture
+        .calls()
+        .iter()
+        .any(|(_, args, _)| args == &["search", "--remote", r"rack\.test"]));
+    let before = fixture.calls().len();
+    gem.search("a(b", &cancel).unwrap();
+    gem.search("ab", &cancel).unwrap();
+    assert!(fixture.calls()[before..]
+        .iter()
+        .all(|(_, args, _)| args.first().map(String::as_str) != Some("search")));
+    // RubyGems lists matches alphabetically; the exact name survives the cap.
+    let rows: String = (0..25)
+        .map(|n| format!("a-rack-helper-{n:02} (1.0.{n})\n"))
+        .chain(["rack (3.2.1)\n".to_string()])
+        .collect();
+    let mut many = DevTool::gem(DevFixture {
+        version: "4.0.20\n".into(),
+        root: Some(gem_home.display().to_string()),
+        registry: Some(rows),
+        ..DevFixture::default()
+    });
+    many.detect(&cancel).unwrap();
+    let found = listed(many.search("rack", &cancel).unwrap());
+    assert_eq!(found.len(), 20);
+    assert_eq!(found[0], ("rack".into(), "3.2.1".into(), false));
+    std::fs::remove_dir_all(&gem_home).unwrap();
+    // Packagist through `composer search`, which reports no version.
+    let fixture = DevFixture {
+        version: "Composer version 2.10.2\n".into(),
+        root: Some("/home/test/.config/composer".into()),
+        list: "{}".into(),
+        registry: Some(r#"[{"name": "monolog/monolog", "description": "Logging", "url": "https://packagist.org/packages/monolog/monolog"}]"#.into()),
+        ..DevFixture::default()
+    };
+    let mut composer = DevTool::composer(fixture.clone());
+    composer.detect(&cancel).unwrap();
+    assert_eq!(
+        listed(composer.search("monolog", &cancel).unwrap()),
+        [("monolog/monolog".into(), "latest".into(), false)]
+    );
+    // Searches in the global context that `global require` installs from.
+    assert!(fixture
+        .calls()
+        .iter()
+        .any(|(_, args, _)| args == &["global", "search", "--format=json", "--", "monolog"]));
+    // Offline: installed matches remain and the search does not fail.
+    let mut offline = DevTool::npm(DevFixture {
+        version: "12.0.2\n".into(),
+        root: Some("/home/test/lib/node_modules".into()),
+        list: NPM_LIST.into(),
+        ..DevFixture::default()
+    });
+    offline.detect(&cancel).unwrap();
+    assert_eq!(
+        listed(offline.search("left", &cancel).unwrap()),
+        [("left-pad".into(), "1.3.0".into(), true)]
+    );
+    // Cancelling a registry search cancels the search.
+    let mut cancelled = DevTool::npm(DevFixture {
+        version: "12.0.2\n".into(),
+        root: Some("/home/test/lib/node_modules".into()),
+        list: NPM_LIST.into(),
+        registry: Some("[]".into()),
+        cancel_on: Some("search".into()),
+        ..DevFixture::default()
+    });
+    cancelled.detect(&cancel).unwrap();
+    assert_eq!(
+        cancelled.search("left", &cancel),
+        Err(EngineError::Cancelled)
+    );
+    // PyPI has no search: pipx and uv never run one.
+    let fixture = DevFixture {
+        version: "uv 0.12.11\n".into(),
+        root: Some("/home/test/.local/share/uv/tools".into()),
+        list: UV_LIST.into(),
+        registry: Some("unexpected".into()),
+        ..DevFixture::default()
+    };
+    let mut uv = DevTool::uv(fixture.clone());
+    uv.detect(&cancel).unwrap();
+    uv.search("cowsay", &cancel).unwrap();
+    assert!(fixture
+        .calls()
+        .iter()
+        .all(|(_, args, _)| args.first().map(String::as_str) != Some("search")));
 }
 
 #[test]
