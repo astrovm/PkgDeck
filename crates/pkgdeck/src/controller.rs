@@ -7367,10 +7367,26 @@ mod tests {
             handle: thread::spawn(|| {}),
             receiver,
             cancel: Cancellation::default(),
-            id: package.id,
+            id: package.id.clone(),
         });
         controller.as_mut().poll();
         assert_eq!(controller.details().to_string(), "{}");
+        // A failure for a package that left the list has no row to explain.
+        controller.as_mut().rust_mut().packages.clear();
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(Reply::Done(Err(EngineError::NotFound)))
+            .unwrap();
+        controller.as_mut().rust_mut().details_worker = Some(DetailsWorker {
+            handle: thread::spawn(|| {}),
+            receiver,
+            cancel: Cancellation::default(),
+            id: package.id,
+        });
+        let status = controller.status().to_string();
+        controller.as_mut().poll();
+        assert_eq!(controller.details().to_string(), "{}");
+        assert_eq!(controller.status().to_string(), status);
     }
     #[test]
     fn finished_preloads_fill_sections_and_the_source_catalog() {
