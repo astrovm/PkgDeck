@@ -1,11 +1,13 @@
 //! AUR packages on Arch: installed packages Pacman's repositories don't have
 //! (`pacman -Qm`), checked against the AUR's current versions.
 //!
-//! Updates only, and only through the user's own AUR helper (paru, then
-//! yay): PkgDeck never builds a PKGBUILD itself and never installs or
-//! removes AUR packages. Building one runs its PKGBUILD, and in June 2026
-//! malicious commits reached about 1,500 AUR packages, so every update's
-//! preview links the PKGBUILD's change history to review before confirming.
+//! Updates go only through the user's own AUR helper (paru, then yay):
+//! PkgDeck never builds a PKGBUILD itself and never installs AUR packages.
+//! Removing one needs no build, so it runs Pacman's own removal, the same
+//! way the Pacman source does. Building one runs its PKGBUILD, and in June
+//! 2026 malicious commits reached about 1,500 AUR packages, so every
+//! update's preview links the PKGBUILD's change history to review before
+//! confirming.
 //! These packages are not listed under Pacman, so each appears once.
 use super::{bytes, invalid, NativeTransport, Transport};
 use crate::{engine::*, host::Authorization, package::*, process::*};
@@ -18,6 +20,7 @@ const CAPABILITIES: &[Capability] = &[
     Capability::Installed,
     Capability::Details,
     Capability::Upgrade,
+    Capability::Remove,
 ];
 /// Helpers tried in order, with the flags that make them build without
 /// asking questions. How they get root follows PkgDeck's permission setting
@@ -326,6 +329,52 @@ impl<T: Transport> Aur<T> {
         }
         Ok(rows)
     }
+
+    /// Removes an AUR package with Pacman's own flags (`-Rns`), run as root
+    /// the way the Pacman source runs it, then checks it's gone.
+    fn remove(
+        &self,
+        id: &PackageId,
+        cancel: &Cancellation,
+        progress: &mut dyn FnMut(Progress),
+    ) -> Result<OperationOutcome, EngineError> {
+        if id.backend != ID || !valid_name(&id.name) {
+            return Err(EngineError::NotFound);
+        }
+        let installed = self
+            .foreign(cancel)?
+            .remove(&id.name)
+            .ok_or(EngineError::NotFound)?;
+        if cancel.requested() {
+            return Err(EngineError::Cancelled);
+        }
+        progress(Progress::Message(format!(
+            "Removing {} {installed} with Pacman. If you cancel, PkgDeck waits for it to finish.",
+            id.name
+        )));
+        let args: Vec<OsString> = ["-Rns", "--noconfirm", "--", &id.name]
+            .iter()
+            .map(OsString::from)
+            .collect();
+        let completion = self
+            .transport
+            .system_manager("pacman", &args, cancel, true)?;
+        let deferred = completion.cancellation_deferred;
+        bytes(ID, completion)?;
+        // Writes may finish after cancellation; check with a fresh read.
+        if self
+            .foreign(&Cancellation::default())?
+            .contains_key(&id.name)
+        {
+            return Err(invalid(
+                ID,
+                format!("Pacman finished, but {} is still installed", id.name),
+            ));
+        }
+        Ok(OperationOutcome {
+            cancellation_deferred: deferred,
+        })
+    }
 }
 
 impl<T: Transport> Backend for Aur<T> {
@@ -398,7 +447,7 @@ impl<T: Transport> Backend for Aur<T> {
                     .into(),
             );
         }
-        description.push("Updates run your AUR helper (paru or yay), which builds the new PKGBUILD. Review what changed in it before updating: building runs it.".into());
+        description.push("Updates run your AUR helper (paru or yay), which builds the new PKGBUILD. Review what changed in it before updating: building runs it. Removing runs Pacman, like removing any other package.".into());
         let candidate = match found {
             Some(found) => Some(
                 self.newer(&found.version, installed, cancel)?
@@ -450,8 +499,10 @@ adopts: None,
         cancel: &Cancellation,
         progress: &mut dyn FnMut(Progress),
     ) -> Result<OperationOutcome, EngineError> {
-        let Operation::Upgrade(id) = operation else {
-            return Err(self.unsupported(operation.capability()));
+        let id = match operation {
+            Operation::Upgrade(id) => id,
+            Operation::Remove(id) => return self.remove(id, cancel, progress),
+            _ => return Err(self.unsupported(operation.capability())),
         };
         let Some((installed, found)) = self.update_of(id, cancel)? else {
             return Ok(OperationOutcome::default());
@@ -532,6 +583,12 @@ mod tests {
         vercmp: Option<Result<Completion, ExecutionError>>,
         /// Probing for the helper is interrupted.
         helper_cancelled: bool,
+        /// Packages `pacman -Rns` took out.
+        removed: Arc<Mutex<Vec<String>>>,
+        /// `pacman -Rns` succeeds without removing anything.
+        removes_nothing: bool,
+        /// `pacman -Rns` fails the way it does when another package needs it.
+        remove_fails: bool,
     }
     impl Fake {
         fn yay(&self) -> String {
@@ -561,12 +618,32 @@ mod tests {
             _: &Cancellation,
             write: bool,
         ) -> Result<Completion, ExecutionError> {
-            assert!(!write, "only the AUR helper writes");
             let args: Vec<String> = args.iter().map(|a| a.to_string_lossy().into()).collect();
-            self.calls
-                .lock()
-                .unwrap()
-                .push(format!("{executable} {}", args.join(" ")));
+            self.calls.lock().unwrap().push(format!(
+                "{}{executable} {}",
+                if write { "write: " } else { "" },
+                args.join(" ")
+            ));
+            // Besides the AUR helper, only Pacman's removal writes.
+            if write {
+                assert_eq!((executable, args[0].as_str()), ("pacman", "-Rns"));
+                if self.remove_fails {
+                    return Err(ExecutionError::Failed(Completion {
+                        code: Some(1),
+                        stderr:
+                            b"error: failed to prepare transaction (could not satisfy dependencies)"
+                                .to_vec(),
+                        ..done("")
+                    }));
+                }
+                if !self.removes_nothing {
+                    self.removed
+                        .lock()
+                        .unwrap()
+                        .push(args.last().unwrap().clone());
+                }
+                return Ok(done(""));
+            }
             match (executable, args[0].as_str()) {
                 ("pacman", _) if self.pacman_broken => Err(ExecutionError::Failed(Completion {
                     code: Some(2),
@@ -580,12 +657,26 @@ mod tests {
                     }))
                 }
                 ("pacman", "-Qm") if self.unsynced => Ok(done("bash 5.3-1\nyay 12.0.0-1\n")),
-                ("pacman", "-Qm") => Ok(done(&format!(
-                    "yay {}\nlocal-tool 1.0-1\nparu 2.1.0-1\n",
-                    self.yay()
-                ))),
+                ("pacman", "-Qm") => {
+                    let removed = self.removed.lock().unwrap();
+                    let listed = format!("yay {}\nlocal-tool 1.0-1\nparu 2.1.0-1\n", self.yay());
+                    Ok(done(
+                        &listed
+                            .lines()
+                            .filter(|line| {
+                                !removed
+                                    .iter()
+                                    .any(|name| line.starts_with(&format!("{name} ")))
+                            })
+                            .map(|line| format!("{line}\n"))
+                            .collect::<String>(),
+                    ))
+                }
                 ("pacman", "-Qmq") => Ok(done("yay\n")),
-                ("pacman", "-Q") => Ok(done("bash 5.3-1\nyay 12.0.0-1\n")),
+                ("pacman", "-Q") if self.unsynced => Ok(done("bash 5.3-1\nyay 12.0.0-1\n")),
+                ("pacman", "-Q") => Ok(done(
+                    "bash 5.3-1\nglibc 2.42-1\npacman 7.0.0-1\nyay 12.0.0-1\n",
+                )),
                 ("curl", _) if self.rpc.is_some() => self.rpc.clone().unwrap(),
                 ("curl", _) if self.offline => Err(ExecutionError::Failed(Completion {
                     code: Some(6),
@@ -706,7 +797,7 @@ mod tests {
         assert!(error.contains("install paru or yay"), "{error}");
         assert!(aur
             .execute(
-                &Operation::Remove(rows[2].id.clone()),
+                &Operation::Install(rows[2].id.clone()),
                 &Cancellation::default(),
                 &mut ignore
             )
@@ -838,10 +929,10 @@ mod tests {
         };
         let mut aur = Aur::new(fake.clone());
         assert!(aur.may_have("yay-bin") && !aur.may_have("-Syu"));
-        // PkgDeck never builds a new AUR package or removes one.
+        // PkgDeck never builds a new AUR package, but removes installed ones.
         assert!(aur.capabilities().contains(&Capability::Upgrade));
         assert!(!aur.capabilities().contains(&Capability::Install));
-        assert!(!aur.capabilities().contains(&Capability::Remove));
+        assert!(aur.capabilities().contains(&Capability::Remove));
         let cancel = Cancellation::default();
         let rows = aur.installed(&cancel).unwrap();
         let details = aur.details(&rows[0].id, &cancel).unwrap();
@@ -1079,5 +1170,101 @@ mod tests {
             broken.installed(&cancel),
             Err(EngineError::Execution(ExecutionError::Failed(result))) if result.code == Some(2)
         ));
+    }
+
+    #[test]
+    fn removals_run_pacman_as_root_and_are_verified() {
+        // No AUR helper is needed: nothing is built.
+        let fake = Fake::default();
+        let mut aur = Aur::new(fake.clone());
+        let cancel = Cancellation::default();
+        let rows = aur.installed(&cancel).unwrap();
+        assert_eq!(rows[0].id.name, "local-tool");
+        let mut messages = vec![];
+        aur.execute(&Operation::Remove(rows[0].id.clone()), &cancel, &mut |p| {
+            messages.push(p)
+        })
+        .unwrap();
+        assert!(fake
+            .calls
+            .lock()
+            .unwrap()
+            .contains(&"write: pacman -Rns --noconfirm -- local-tool".into()));
+        assert_eq!(
+            messages,
+            [Progress::Message(
+                "Removing local-tool 1.0-1 with Pacman. If you cancel, PkgDeck waits for it to finish."
+                    .into()
+            )]
+        );
+        let names: Vec<String> = aur
+            .installed(&cancel)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.id.name)
+            .collect();
+        assert_eq!(names, ["paru", "yay"]);
+        // Already gone: nothing to remove.
+        assert_eq!(
+            aur.execute(&Operation::Remove(rows[0].id.clone()), &cancel, &mut ignore),
+            Err(EngineError::NotFound)
+        );
+    }
+
+    #[test]
+    fn failed_unverified_foreign_or_cancelled_removals_are_errors() {
+        let cancel = Cancellation::default();
+        let rows = Aur::new(Fake::default()).installed(&cancel).unwrap();
+        let yay = Operation::Remove(rows[2].id.clone());
+        // Pacman's own refusal is reported with its output.
+        let mut aur = Aur::new(Fake {
+            remove_fails: true,
+            ..Fake::default()
+        });
+        assert!(matches!(
+            aur.execute(&yay, &cancel, &mut ignore),
+            Err(EngineError::Execution(ExecutionError::Failed(result))) if result.code == Some(1)
+        ));
+        // Pacman finished, but the package is still installed.
+        let mut aur = Aur::new(Fake {
+            removes_nothing: true,
+            ..Fake::default()
+        });
+        let error = aur.execute(&yay, &cancel, &mut ignore).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Pacman finished, but yay is still installed"),
+            "{error}"
+        );
+        // Repository packages, invalid names, missing packages and
+        // cancelled removals never run Pacman's removal.
+        let fake = Fake::default();
+        let mut aur = Aur::new(fake.clone());
+        let mut repository = rows[2].id.clone();
+        repository.backend = "pacman".into();
+        let mut option = rows[2].id.clone();
+        option.name = "-Rdd".into();
+        let mut absent = rows[2].id.clone();
+        absent.name = "bash".into();
+        for id in [repository, option, absent] {
+            assert_eq!(
+                aur.execute(&Operation::Remove(id), &cancel, &mut ignore),
+                Err(EngineError::NotFound)
+            );
+        }
+        let cancelled = Cancellation::default();
+        cancelled.cancel();
+        assert_eq!(
+            aur.execute(&yay, &cancelled, &mut ignore),
+            Err(EngineError::Cancelled)
+        );
+        assert!(!fake
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|c| c.starts_with("write:")));
+        assert!(aur.operation_plan(&yay, &cancel).unwrap().is_none());
     }
 }

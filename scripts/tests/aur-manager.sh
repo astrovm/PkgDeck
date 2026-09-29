@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # The AUR source against real foreign packages on Arch Linux: listing,
-# update checks against the real AUR, and an update through the AUR helper.
+# update checks against the real AUR, an update through the AUR helper, and
+# a removal through Pacman.
 # No AUR PKGBUILD is ever downloaded or run: the fixtures are empty packages
 # built here, two of them under real AUR names so the AUR RPC has versions
 # to compare against, and the helper is a stand-in that builds another one.
@@ -61,11 +62,9 @@ script='
     ok aur search fixture | row pkgdeck-fixture-foreign >/dev/null
     ok aur info yay | jq -e "tostring | contains(\"AUR version\")" >/dev/null
 
-    # Installing and removing stay with the AUR helper; PkgDeck only updates.
-    for action in install remove; do
-        out=$(run aur --yes "$action" yay || true)
-        jq -e ".exit_code != 0" <<<"$out" >/dev/null || { echo "AUR $action was not refused: $out" >&2; exit 1; }
-    done
+    # Installing stays with the AUR helper: it would build a PKGBUILD.
+    out=$(run aur --yes install yay || true)
+    jq -e ".exit_code != 0" <<<"$out" >/dev/null || { echo "AUR install was not refused: $out" >&2; exit 1; }
     # Without a helper there is nothing to build with, and nothing changes.
     out=$(run aur --yes upgrade yay || true)
     grep -q "install paru or yay" <<<"$out" || { echo "Expected a missing-helper error: $out" >&2; exit 1; }
@@ -94,6 +93,17 @@ STANDIN
     grep -q -- "--needed --noconfirm --skipreview --sudoflags=-n -- yay" /tmp/paru-args
     [[ $(pacman -Q yay) == "yay $(cat /etc/pkgdeck-aur-latest)" ]]
     ok aur list | row yay | jq -e '\''.update == "current"'\'' >/dev/null
+
+    # Removing builds nothing, so no helper runs: Pacman removes the package
+    # as root, the same sudo -n way. Not retried: a second try finds nothing.
+    rm /usr/local/bin/paru
+    out=$(run aur --yes remove pkgdeck-fixture-foreign || true)
+    jq -e ".exit_code == 0" <<<"$out" >/dev/null || { echo "AUR remove failed: $out" >&2; exit 1; }
+    if pacman -Q pkgdeck-fixture-foreign >/dev/null 2>&1; then echo "pkgdeck-fixture-foreign is still installed" >&2; exit 1; fi
+    aur=$(ok aur list)
+    if row pkgdeck-fixture-foreign <<<"$aur" >/dev/null; then echo "Removed package still listed" >&2; exit 1; fi
+    row yay <<<"$aur" >/dev/null
+    [[ $(pacman -Q yay) == "yay $(cat /etc/pkgdeck-aur-latest)" ]]
     echo "PASS real aur lifecycle"
 '
 # Arch's official image is x86_64 only. Emulated elsewhere, Pacman's download

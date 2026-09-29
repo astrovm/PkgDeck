@@ -120,8 +120,9 @@ fuzzy matching or aliases.
 - conda uses conda, mamba, or micromamba, whichever it finds first. It lists the
   packages you asked for in the base environment and in each named environment
   (those in an `envs` folder), not their dependencies. It updates them after
-  a dry-run solve; install and remove them with the manager itself. Project
-  prefixes elsewhere are left alone.
+  a dry-run solve, and `remove` runs the manager's own `remove` in that
+  environment, which keeps the environment itself. Install them with the
+  manager. Project prefixes elsewhere are left alone.
 - rustup lists each installed toolchain, plus a separate `rustup` row for
   rustup itself. Channels (`stable`, `beta`, `nightly`) update within their
   channel; pinned versions such as `1.85.0` never show updates. Search offers a
@@ -327,6 +328,7 @@ restarts your computer, downgrades firmware, or forces an update.
 pkd list --from toolbox
 pkd info fedora-toolbox-43 --from distrobox
 pkd upgrade fedora-toolbox-43 --from toolbox
+pkd remove old-box --from distrobox
 ```
 
 On image-based systems such as Fedora Silverblue, development tools live
@@ -338,8 +340,14 @@ Distrobox runs `distrobox upgrade`, and Toolbx runs the container's own
 package manager (dnf, apt, pacman, zypper, apk or XBPS) through
 `toolbox run`. That starts a stopped container. If sudo inside a Toolbx
 container asks for a password, update it from a terminal with
-`toolbox enter`. PkgDeck never creates or removes containers, and update
-status stays unknown, so `pkd upgrade` without names leaves them alone.
+`toolbox enter`. Update status stays unknown, so `pkd upgrade` without names
+leaves them alone.
+
+`pkd remove` deletes a container with `toolbox rm --force` or
+`distrobox rm --force`, even while it runs, and everything installed in it
+goes with it. Your home folder is shared with the host and stays. Distrobox
+also deletes the apps and commands the container exported. PkgDeck never
+creates containers.
 
 ## Image-based Linux systems
 
@@ -347,6 +355,7 @@ status stays unknown, so `pkd upgrade` without names leaves them alone.
 pkd list --from system-image
 pkd info system --from system-image
 pkd upgrade --from system-image
+pkd remove htop --from system-image
 ```
 
 On Fedora Atomic desktops, CoreOS, and other bootc or rpm-ostree systems, the
@@ -355,17 +364,23 @@ On Fedora Atomic desktops, CoreOS, and other bootc or rpm-ostree systems, the
 running deployment, the one waiting for a restart, the rollback, and layered
 packages.
 
-It can only update. `pkd upgrade` runs `bootc upgrade` or `rpm-ostree upgrade`,
-which downloads a new deployment that applies on the next restart. PkgDeck
-never restarts your computer. If an update is already waiting for a restart,
-it does nothing and says so. Ordinary systems report the source as
-unavailable.
+`pkd upgrade` runs `bootc upgrade` or `rpm-ostree upgrade`, which downloads a
+new deployment that applies on the next restart. PkgDeck never restarts your
+computer. If an update is already waiting for a restart, it does nothing and
+says so. Ordinary systems report the source as unavailable.
+
+Packages layered on top of the image with `rpm-ostree install` get a row of
+their own, from the deployment the next restart uses. They update along with
+the system, so they can't be updated on their own. `pkd remove` runs
+`rpm-ostree uninstall`, which also makes a new deployment: the package is gone
+after the next restart. The `system` row itself can't be removed.
 
 ## Arch User Repository (AUR)
 
 ```sh
 pkd list --from aur
 pkd info yay --from aur
+pkd remove yay --from aur
 ```
 
 The `aur` source lists installed packages that Pacman's repositories don't
@@ -375,10 +390,15 @@ appears once. Details show the AUR version, maintainer, and whether it's
 flagged out of date. Packages missing from the AUR are shown as built locally
 or removed from the AUR.
 
-This source is read-only. In June 2026 malicious commits reached about 1,500
-AUR packages, and building one runs its PKGBUILD. PkgDeck shows what's
-outdated; review the PKGBUILD and update with your AUR helper. Search only
-matches installed AUR packages.
+In June 2026 malicious commits reached about 1,500 AUR packages, and building
+one runs its PKGBUILD. PkgDeck never builds one itself: `pkd upgrade` runs
+your AUR helper (paru, then yay), and its preview links the PKGBUILD's change
+history so you can review it first. It never installs AUR packages. Search
+only matches installed AUR packages.
+
+`pkd remove` builds nothing, so it needs no helper: it runs `pacman -Rns`,
+exactly as the Pacman source removes a package, with the same password
+prompt.
 
 If Pacman's repository databases aren't synced, every package looks foreign,
 so the source reports an error instead: run `pkd refresh --from pacman`. When

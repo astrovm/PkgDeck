@@ -178,7 +178,8 @@ changes use the package manager's normal signature checks and password prompt.
 **pixi** lists your `pixi global` tools and can install, update and remove them.
 Updates stay within the version the global manifest records. **Conda** lists
 the packages you asked for in each named conda, mamba, or micromamba
-environment and updates them; install and remove them with the manager.
+environment and can update and remove them; the environment itself stays.
+Install them with the manager.
 Project environments are never touched.
 
 ### Rustup and Nix
@@ -196,23 +197,29 @@ upgrade an entry with `pkd upgrade NAME --from nix`. See the
 
 On Arch, the **AUR** source lists installed packages that aren't in Pacman's
 repositories and shows which have a newer AUR version. They're no longer
-listed under Pacman. It's read-only: building an AUR package runs its
-PKGBUILD, so review it and update with your AUR helper. See the
-[CLI guide](cli.md#arch-user-repository-aur).
+listed under Pacman. Updating runs your AUR helper (paru or yay), and the
+confirmation links what changed in the PKGBUILD: building one runs it, so
+review it first. Removing builds nothing: Pacman removes the package, with
+the same password prompt as any other. PkgDeck never installs AUR packages.
+See the [CLI guide](cli.md#arch-user-repository-aur).
 
 ### Toolbx and Distrobox
 
 On Fedora Silverblue and similar systems, the **Toolbx containers** and
 **Distrobox containers** sources list your development containers and update
-the packages inside them with each container's own package manager. Containers
-are never created or removed.
+the packages inside them with each container's own package manager. Removing
+one deletes the container and everything installed in it, even while it runs;
+your home folder stays. Containers are never created.
 
 ### Image-based systems
 
 On Fedora Atomic, CoreOS, and other bootc or rpm-ostree systems, the
 **System image** source shows the whole OS as one row, including an update
 waiting for a restart. Updating downloads the new deployment; it applies on
-the next restart. PkgDeck never restarts your computer.
+the next restart. PkgDeck never restarts your computer. Packages layered with
+`rpm-ostree install` have rows of their own: they update with the system,
+and removing one takes it out of the next deployment. The system image
+itself can't be removed.
 
 ### apk, XBPS, and MacPorts
 
