@@ -22,7 +22,7 @@ concurrency:
 
 jobs:
   # PR and ordinary manual runs validate the full matrix. Formula updates use
-  # a targeted manual run; tags reuse the PR run after release-gate verifies it.
+  # a targeted manual run; tags reuse PR proof or revalidate if it expired.
   # Pushes to main rerun only the jobs that save caches, so every pull request
   # starts from main's build outputs instead of compiling from scratch.
   reviewed:
@@ -54,13 +54,40 @@ jobs:
             echo tested=false >> "$GITHUB_OUTPUT"
           fi
 
+  release-proof:
+    # Expiring PR artifacts are an optimization, never a requirement to release.
+    name: Release / Check tested pull request
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+    outputs:
+      tested: ${{ steps.check.outputs.tested }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Match this commit to a passing pull request run
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if scripts/reviewed-pr.sh "$GITHUB_SHA"; then
+            echo tested=true >> "$GITHUB_OUTPUT"
+          else
+            echo '::notice::Release proof unavailable; running the full validation matrix.'
+            echo tested=false >> "$GITHUB_OUTPUT"
+          fi
+
   test-linux:
     # One job per architecture runs the whole Linux suite once: the shared
     # checks, lint, every workspace test (measured for coverage on x86_64),
     # and the real sudo/polkit authorization tests.
     name: Test / Linux (${{ matrix.arch }})
-    needs: [reviewed]
-    if: "!cancelled() && (github.event_name != 'push' || github.ref == 'refs/heads/main') && !inputs.homebrew_only"
+    needs: [reviewed, release-proof]
+    if: "!cancelled() && (github.event_name != 'push' || github.ref == 'refs/heads/main' || (startsWith(github.ref, 'refs/tags/v') && needs.release-proof.outputs.tested != 'true')) && !inputs.homebrew_only"
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -127,8 +154,8 @@ jobs:
     # then the development manager lifecycles. The account gets 5 concurrent
     # macOS runners, so separate jobs for each queued behind one another.
     name: Test / macOS (${{ matrix.arch }})
-    needs: [reviewed]
-    if: "!cancelled() && (github.event_name != 'push' || github.ref == 'refs/heads/main') && !inputs.homebrew_only"
+    needs: [reviewed, release-proof]
+    if: "!cancelled() && (github.event_name != 'push' || github.ref == 'refs/heads/main' || (startsWith(github.ref, 'refs/tags/v') && needs.release-proof.outputs.tested != 'true')) && !inputs.homebrew_only"
     timeout-minutes: 70
     strategy:
       fail-fast: false
@@ -210,8 +237,8 @@ jobs:
 
   test-podman:
     name: Test / Podman (${{ matrix.arch }})
-    needs: [reviewed]
-    if: "!cancelled() && (github.event_name != 'push' || github.ref == 'refs/heads/main') && !inputs.homebrew_only"
+    needs: [reviewed, release-proof]
+    if: "!cancelled() && (github.event_name != 'push' || github.ref == 'refs/heads/main' || (startsWith(github.ref, 'refs/tags/v') && needs.release-proof.outputs.tested != 'true')) && !inputs.homebrew_only"
     timeout-minutes: 35
     strategy:
       fail-fast: false
@@ -273,11 +300,12 @@ jobs:
           path: build/verification
 
   test-backends:
+    needs: release-proof
     # One job per platform and group: separate per-backend jobs spent most of
     # their time queued for runners and setting up. scripts/tests/backends.sh
     # still reports each backend. The macOS managers run in Test / macOS.
     name: Test / Backends / ${{ matrix.group }} (${{ matrix.platform }})
-    if: github.event_name != 'push' && !inputs.homebrew_only
+    if: "!cancelled() && (github.event_name != 'push' || (startsWith(github.ref, 'refs/tags/v') && needs.release-proof.outputs.tested != 'true')) && !inputs.homebrew_only"
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -325,10 +353,10 @@ jobs:
     # One number for all the code: a line counts once and is covered when a
     # test ran it on any platform.
     name: Coverage / Combined
-    needs: [reviewed, test-linux, test-macos]
+    needs: [reviewed, release-proof, test-linux, test-macos]
     # Main skips it when the pull request already passed it.
     if: >-
-      !cancelled() && (github.event_name != 'push' || github.ref == 'refs/heads/main') && !inputs.homebrew_only &&
+      !cancelled() && (github.event_name != 'push' || github.ref == 'refs/heads/main' || (startsWith(github.ref, 'refs/tags/v') && needs.release-proof.outputs.tested != 'true')) && !inputs.homebrew_only &&
       needs.test-linux.result == 'success' && needs.test-macos.result == 'success' && needs.reviewed.outputs.tested != 'true'
     runs-on: ubuntu-26.04
     timeout-minutes: 5
@@ -495,11 +523,11 @@ jobs:
 
   test-homebrew:
     name: Test / Homebrew (${{ matrix.runner }})
-    needs: [reviewed, package-linux-cli]
+    needs: [reviewed, release-proof, package-linux-cli]
     # Release formula PRs and homebrew_only runs test the committed recipes
     # against published assets; other runs test this checkout's packages.
     if: >-
-      !cancelled() && (github.event_name != 'push' || github.ref == 'refs/heads/main') &&
+      !cancelled() && (github.event_name != 'push' || github.ref == 'refs/heads/main' || (startsWith(github.ref, 'refs/tags/v') && needs.release-proof.outputs.tested != 'true')) &&
       (inputs.homebrew_only || (needs.package-linux-cli.result == 'success' && needs.reviewed.outputs.tested != 'true'))
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
@@ -778,13 +806,23 @@ jobs:
 
   release-gate:
     name: Release / Verify reviewed commit
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [release-proof, test-linux, test-macos, test-podman, test-backends, coverage-combined, test-homebrew]
+    if: "!cancelled() && startsWith(github.ref, 'refs/tags/v')"
     runs-on: ubuntu-26.04
     permissions:
       actions: read
       contents: read
       pull-requests: read
     steps:
+      - name: Require reviewed proof or fresh release validation
+        env:
+          TESTED: ${{ needs.release-proof.outputs.tested }}
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          jq --exit-status --arg tested "$TESTED" '
+            .["release-proof"].result == "success" and
+            (del(.["release-proof"]) | all(.[]; .result == (if $tested == "true" then "skipped" else "success" end)))
+          ' <<< "$RESULTS"
       - name: Check out tagged source and main history
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -802,12 +840,15 @@ jobs:
             exit 1
           fi
 
-          scripts/reviewed-pr.sh "$GITHUB_SHA"
+          # Both reused proof and freshly validated tags must identify a merged PR.
+          gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls" |
+            jq --exit-status --arg sha "$GITHUB_SHA" '
+              any(.[]; .merged_at != null and .base.ref == "main" and .merge_commit_sha == $sha)
+            ' > /dev/null
 
   release:
     name: Publish / Release
-    # The package jobs need `reviewed`, which tags skip, so an implicit
-    # success() would skip the release too; check the direct needs instead.
+    # Verify both release validation and packaging before publication.
     if: >-
       !cancelled() && startsWith(github.ref, 'refs/tags/v') &&
       needs.release-gate.result == 'success' &&
