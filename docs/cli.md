@@ -88,6 +88,11 @@ installs that package, never a guess from the name.
 fuzzy matching or aliases.
 
 - If the same name exists in more than one source, pick one with `--from`.
+- `remove` finds an app from macOS Applications by its full path, for example
+  `pkd remove /Applications/Example.app --from macos-apps`. `install` and
+  `upgrade` never use that source.
+- If a source can't do what you asked, such as removing firmware, PkgDeck
+  says so before asking you to confirm.
 - npm, pnpm, Bun, Cargo, RubyGems, Composer, pip, pipx and uv install any
   name their registry has, and a registry name alone doesn't prove it's the
   package you mean (npm has an unrelated `ripgrep`). So for exact names

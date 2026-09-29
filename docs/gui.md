@@ -19,6 +19,9 @@ architecture, and scope (User or System), so you always act on one exact
 package. For Flatpak, pick the User or System row to choose where it installs.
 
 - The button on the right of a row installs, removes, or updates that package.
+  Some sources only keep what's already installed up to date, such as
+  firmware and the standalone tools. Their rows show **Remove** only when
+  the source can uninstall, and only when no update is waiting.
 - Click a row to see its description, screenshots, publisher, license,
   homepage, and dependencies, when the source provides them. Close details
   with **×**.
@@ -127,7 +130,8 @@ if a later step fails. Click **Reload** to see the current state.
 While a change runs, its row shows a progress bar and its button turns into
 **Cancel**. When it finishes, a short message at the bottom of the window says
 so; for a single install or remove it offers **Undo**, which asks before
-reversing the change.
+reversing the change. Removing something PkgDeck can't install again, such as
+a standalone tool or an app from macOS Applications, has no Undo.
 
 ## Clean
 
