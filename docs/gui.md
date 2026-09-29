@@ -296,11 +296,13 @@ Settings shows when the last check ran, how many updates it found, and
 whether your desktop supports notifications. **Test
 notification** sends a sample message.
 
-On macOS, the Dock icon shows the number of updates found. Notification
-Center only accepts notifications from apps signed with a Developer ID; the
-Homebrew build is ad-hoc signed, so its notifications are posted through
-AppleScript and appear under Script Editor, and clicking one doesn't open
-PkgDeck. A signed build asks for permission on first launch and posts its own.
+On macOS, the Dock icon shows the number of updates found. macOS lists
+PkgDeck in System Settings > Notifications with notifications turned off,
+because the Homebrew build isn't signed with a Developer ID. Until you turn
+them on, PkgDeck's notifications are posted through AppleScript: they appear
+under Script Editor's icon, and clicking one doesn't open PkgDeck. Settings
+says so and has a **Notification settings** button that opens PkgDeck's page
+there. Once allowed, notifications show PkgDeck's icon, without a restart.
 
 ## Performance
 
