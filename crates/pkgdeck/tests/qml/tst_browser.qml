@@ -526,10 +526,10 @@ TestCase {
             {kind: "cleanup", name: "Unused dependencies", source: "apt", summary: "One package", cleanup_key: "autoremove"},
             {kind: "cleanup", name: "Cached downloads", source: "apt", summary: "Two files", cleanup_key: "autoclean"}
         ]);
-        wait(20);
-        verify(all.visible);
+        tryCompare(all, "visible", true);
+        waitForRendering(browser.contentItem);
         mouseClick(all);
-        verify(fake.confirmation.indexOf("clean-all") >= 0);
+        tryVerify(() => fake.confirmation.indexOf("clean-all") >= 0);
         verify(!findChild(browser, "sourceFailureNotice").visible);
         fake.rows = "[]";
         wait(20);
