@@ -3,8 +3,9 @@
 //! Rows are the packages someone asked for in each named environment (the
 //! environment's request history), not every dependency. Project prefixes
 //! outside an `envs` folder are left alone. Updates are previewed with the
-//! manager's own dry-run solve and confirmed afterwards; PkgDeck never
-//! installs or removes conda packages.
+//! manager's own dry-run solve and confirmed afterwards. Removing runs the
+//! manager's own `remove` in that environment and checks the package is
+//! gone; PkgDeck never installs conda packages.
 use super::{bytes, invalid, NativeTransport, Transport};
 use crate::{engine::*, package::*, process::*};
 use serde_json::Value;
@@ -21,6 +22,7 @@ const CAPABILITIES: &[Capability] = &[
     Capability::Installed,
     Capability::Details,
     Capability::Upgrade,
+    Capability::Remove,
 ];
 /// Tried in order. mamba 2 and micromamba share libmamba's output.
 const MANAGERS: [&str; 3] = ["conda", "mamba", "micromamba"];
@@ -374,7 +376,7 @@ impl<T: Transport> Backend for Conda<T> {
         let package = Self::package(&environment, &id.name, None).ok_or(EngineError::NotFound)?;
         Ok(PackageDetails {
             description: format!(
-                "Requested in the {} environment\n\nLocation: {}\n\nManaged with {}. PkgDeck updates requested packages; install and remove them with the manager.",
+                "Requested in the {} environment\n\nLocation: {}\n\nManaged with {}. PkgDeck updates and removes requested packages; install them with the manager.",
                 environment.name,
                 environment.prefix.display(),
                 self.manager.unwrap_or("conda")
@@ -390,27 +392,39 @@ impl<T: Transport> Backend for Conda<T> {
         cancel: &Cancellation,
         progress: &mut dyn FnMut(Progress),
     ) -> Result<OperationOutcome, EngineError> {
-        let Operation::Upgrade(id) = operation else {
-            return Err(self.unsupported(operation.capability()));
+        let (id, remove) = match operation {
+            Operation::Upgrade(id) => (id, false),
+            Operation::Remove(id) => (id, true),
+            _ => return Err(self.unsupported(operation.capability())),
         };
         let environment = self.environment_of(id, cancel)?;
         let before = environment.installed[&id.name].clone();
-        let plan = self.plan(&environment.prefix, &[&id.name], cancel)?;
-        let Some(target) = plan
-            .get(&id.name)
-            .filter(|new| compare_versions(new, &before) == Ordering::Greater)
-        else {
-            return Ok(OperationOutcome::default());
-        };
-        if cancel.requested() {
-            return Err(EngineError::Cancelled);
+        if remove {
+            if cancel.requested() {
+                return Err(EngineError::Cancelled);
+            }
+            progress(Progress::Message(format!(
+                "Removing {} {before} from the {} environment",
+                id.name, environment.name
+            )));
+        } else {
+            let plan = self.plan(&environment.prefix, &[&id.name], cancel)?;
+            let Some(target) = plan
+                .get(&id.name)
+                .filter(|new| compare_versions(new, &before) == Ordering::Greater)
+            else {
+                return Ok(OperationOutcome::default());
+            };
+            if cancel.requested() {
+                return Err(EngineError::Cancelled);
+            }
+            progress(Progress::Message(format!(
+                "Updating {} {before} → {target} in the {} environment",
+                id.name, environment.name
+            )));
         }
-        progress(Progress::Message(format!(
-            "Updating {} {before} → {target} in the {} environment",
-            id.name, environment.name
-        )));
         let args: Vec<OsString> = vec![
-            "update".into(),
+            if remove { "remove" } else { "update" }.into(),
             id.name.clone().into(),
             "-p".into(),
             environment.prefix.clone().into(),
@@ -432,7 +446,17 @@ impl<T: Transport> Backend for Conda<T> {
             Some(&environment.prefix),
             &Cancellation::default(),
         )?);
-        if after
+        if remove {
+            if after.contains_key(&id.name) {
+                return Err(invalid(
+                    ID,
+                    format!(
+                        "{} is still installed in the {} environment",
+                        id.name, environment.name
+                    ),
+                ));
+            }
+        } else if after
             .get(&id.name)
             .is_none_or(|now| compare_versions(now, &before) != Ordering::Greater)
         {
@@ -495,6 +519,8 @@ mod tests {
         write_error: Option<fn() -> ExecutionError>,
         /// The tools environment can't be listed once `update` ran.
         unreadable_after_update: bool,
+        /// `remove` takes ripgrep out of the tools environment.
+        removes: bool,
     }
     fn done(value: Value) -> Completion {
         Completion {
@@ -557,7 +583,15 @@ mod tests {
                     let packages = if prefix == "/c" {
                         serde_json::json!([{"name": "python", "version": "3.12.1"}, {"name": "zlib", "version": "1"}])
                     } else {
-                        serde_json::json!([{"name": "ripgrep", "version": ripgrep}, {"name": "jq", "version": "1.8.2"}, {"name": "libgcc", "version": "15"}])
+                        let mut packages = vec![
+                            serde_json::json!({"name": "jq", "version": "1.8.2"}),
+                            serde_json::json!({"name": "libgcc", "version": "15"}),
+                        ];
+                        if ripgrep != "removed" {
+                            packages
+                                .push(serde_json::json!({"name": "ripgrep", "version": ripgrep}));
+                        }
+                        Value::from(packages)
                     };
                     if micromamba {
                         serde_json::json!({"packages": packages})
@@ -574,11 +608,17 @@ mod tests {
                     }
                 }
                 _ => {
-                    assert_eq!(args[0], "update");
                     assert!(write);
                     if let Some(error) = self.write_error {
                         return Err(error());
                     }
+                    if args[0] == "remove" {
+                        if self.removes {
+                            *self.ripgrep.lock().unwrap() = "removed".into();
+                        }
+                        return Ok(done(serde_json::json!({"success": true})));
+                    }
+                    assert_eq!(args[0], "update");
                     if self.unreadable_after_update {
                         *self.ripgrep.lock().unwrap() = "unreadable".into();
                     } else if self.updates {
@@ -708,7 +748,7 @@ mod tests {
         ));
         assert!(matches!(
             conda.execute(
-                &Operation::Remove(ripgrep()),
+                &Operation::Install(ripgrep()),
                 &Cancellation::default(),
                 &mut ignore
             ),
@@ -766,7 +806,7 @@ mod tests {
         let details = conda.details(&ripgrep(), &Cancellation::default()).unwrap();
         assert_eq!(
             details.description,
-            "Requested in the tools environment\n\nLocation: /c/envs/tools\n\nManaged with micromamba. PkgDeck updates requested packages; install and remove them with the manager."
+            "Requested in the tools environment\n\nLocation: /c/envs/tools\n\nManaged with micromamba. PkgDeck updates and removes requested packages; install them with the manager."
         );
         assert_eq!(details.package.installed_version.as_deref(), Some("14.1.0"));
         let mut libgcc = ripgrep();
@@ -841,5 +881,115 @@ mod tests {
             Err(EngineError::Cancelled)
         ));
         assert_eq!(fake.ripgrep.lock().unwrap().as_str(), "14.1.0");
+    }
+
+    #[test]
+    fn removals_run_in_the_environment_and_are_verified() {
+        let mut fake = fake("micromamba");
+        fake.removes = true;
+        let mut conda = backend(fake.clone());
+        conda.detect(&Cancellation::default()).unwrap();
+        assert!(conda.capabilities().contains(&Capability::Remove));
+        let mut messages = vec![];
+        conda
+            .execute(
+                &Operation::Remove(ripgrep()),
+                &Cancellation::default(),
+                &mut |progress| messages.push(progress),
+            )
+            .unwrap();
+        assert_eq!(
+            messages,
+            vec![Progress::Message(
+                "Removing ripgrep 14.1.0 from the tools environment".into()
+            )]
+        );
+        let calls = fake.calls.lock().unwrap().clone();
+        assert!(calls.contains(&"remove ripgrep -p /c/envs/tools --yes --json".into()));
+        // Removing never solves an update first.
+        assert!(!calls.iter().any(|call| call.contains("--dry-run")));
+        assert!(!conda
+            .installed(&Cancellation::default())
+            .unwrap()
+            .iter()
+            .any(|row| row.id.name == "ripgrep"));
+        // Now gone, there is nothing left to remove.
+        assert!(matches!(
+            conda.execute(
+                &Operation::Remove(ripgrep()),
+                &Cancellation::default(),
+                &mut ignore
+            ),
+            Err(EngineError::NotFound)
+        ));
+    }
+
+    #[test]
+    fn failed_unverified_foreign_or_cancelled_removals_are_errors() {
+        // The manager finished, but the package is still there.
+        let fake = fake("conda");
+        let mut conda = backend(fake.clone());
+        conda.detect(&Cancellation::default()).unwrap();
+        let error = conda
+            .execute(
+                &Operation::Remove(ripgrep()),
+                &Cancellation::default(),
+                &mut ignore,
+            )
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("ripgrep is still installed in the tools environment"),
+            "{error}"
+        );
+        // The manager's own failure is reported as is.
+        let mut failing = fake.clone();
+        failing.write_error = Some(|| ExecutionError::TimedOut);
+        let mut conda = backend(failing);
+        conda.detect(&Cancellation::default()).unwrap();
+        assert!(matches!(
+            conda.execute(
+                &Operation::Remove(ripgrep()),
+                &Cancellation::default(),
+                &mut ignore
+            ),
+            Err(EngineError::Execution(ExecutionError::TimedOut))
+        ));
+        // Dependencies, other environments, other sources and cancelled
+        // removals never run `remove`.
+        fake.calls.lock().unwrap().clear();
+        let mut conda = backend(fake.clone());
+        conda.detect(&Cancellation::default()).unwrap();
+        let mut libgcc = ripgrep();
+        libgcc.name = "libgcc".into();
+        let mut project = ripgrep();
+        project.scope = Scope::Environment {
+            path: "/work/project/.conda".into(),
+        };
+        let mut foreign = ripgrep();
+        foreign.backend = "pixi".into();
+        for id in [libgcc, project, foreign] {
+            assert!(matches!(
+                conda.execute(
+                    &Operation::Remove(id),
+                    &Cancellation::default(),
+                    &mut ignore
+                ),
+                Err(EngineError::NotFound)
+            ));
+        }
+        let cancel = Cancellation::default();
+        cancel.cancel();
+        assert!(matches!(
+            conda.execute(&Operation::Remove(ripgrep()), &cancel, &mut ignore),
+            Err(EngineError::Cancelled)
+        ));
+        assert!(!fake
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call.starts_with("remove")));
     }
 }
