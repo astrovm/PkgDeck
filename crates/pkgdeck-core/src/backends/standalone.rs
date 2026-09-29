@@ -21,9 +21,12 @@ pub enum StandaloneTool {
     Antigravity,
     Amp,
     Droid,
+    Solana,
+    Anchor,
+    Foundry,
 }
 impl StandaloneTool {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 13] = [
         Self::Codex,
         Self::Claude,
         Self::Grok,
@@ -34,6 +37,9 @@ impl StandaloneTool {
         Self::Antigravity,
         Self::Amp,
         Self::Droid,
+        Self::Solana,
+        Self::Anchor,
+        Self::Foundry,
     ];
     pub fn id(self) -> &'static str {
         match self {
@@ -47,6 +53,9 @@ impl StandaloneTool {
             Self::Antigravity => "antigravity",
             Self::Amp => "amp",
             Self::Droid => "droid",
+            Self::Solana => "solana",
+            Self::Anchor => "anchor",
+            Self::Foundry => "foundry",
         }
     }
     fn name(self) -> &'static str {
@@ -61,6 +70,9 @@ impl StandaloneTool {
             Self::Antigravity => "Antigravity CLI",
             Self::Amp => "Amp",
             Self::Droid => "Factory Droid",
+            Self::Solana => "Solana CLI (Agave)",
+            Self::Anchor => "Anchor (AVM)",
+            Self::Foundry => "Foundry",
         }
     }
     /// Text a tool's `--version` output must contain, where it names itself.
@@ -69,6 +81,8 @@ impl StandaloneTool {
         match self {
             Self::Copilot => Some("GitHub Copilot CLI"),
             Self::Kiro => Some("kiro-cli"),
+            Self::Solana => Some("agave-install"),
+            Self::Foundry => Some("forge"),
             _ => None,
         }
     }
@@ -76,6 +90,9 @@ impl StandaloneTool {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Installation {
     launcher: PathBuf,
+    /// What installs a new release: the launcher itself, or the toolchain's
+    /// own installer beside it (`avm`, `foundryup`).
+    updater: PathBuf,
     version: Version,
     channel: String,
 }
@@ -120,10 +137,13 @@ fn invalid_data(tool: StandaloneTool, reason: impl std::fmt::Display) -> EngineE
     invalid(tool.id(), reason)
 }
 fn version(tool: StandaloneTool, text: &str) -> Result<Version, EngineError> {
+    // Foundry marks its stable builds `1.3.5-stable`; the suffix is not a
+    // pre-release.
     let text = text
         .trim()
         .trim_start_matches("rust-v")
-        .trim_start_matches('v');
+        .trim_start_matches('v')
+        .trim_end_matches("-stable");
     Version::parse(text)
         .or_else(|error| date_version(text).ok_or(error))
         .map_err(|error| invalid_data(tool, format!("invalid version: {error}")))
@@ -403,6 +423,151 @@ impl NativeStandalone {
     }
 }
 
+impl NativeStandalone {
+    /// Agave's installer keeps releases in its data folder and records the
+    /// release channel it follows in its config.
+    fn locate_solana(
+        &self,
+        home: &Path,
+        cancel: &Cancellation,
+    ) -> Result<Option<Installation>, EngineError> {
+        let tool = StandaloneTool::Solana;
+        let install = home.join(".local/share/solana/install");
+        let launcher = install.join("active_release/bin/agave-install");
+        if native_binary(tool, &launcher, &install.join("releases"))?.is_none() {
+            return Ok(None);
+        }
+        let Some(config) = read_text(&home.join(".config/solana/install/config.yml"))? else {
+            return Ok(None);
+        };
+        let Some(channel) = solana_channel(&config) else {
+            return Ok(None);
+        };
+        let Some(version) = self.version_at(tool, &launcher, cancel)? else {
+            return Ok(None);
+        };
+        Ok(Some(Installation {
+            updater: launcher.clone(),
+            launcher,
+            version,
+            channel,
+        }))
+    }
+    /// AVM keeps each Anchor release as `bin/anchor-<version>` and names the
+    /// active one in `.version`.
+    fn locate_anchor(&self, home: &Path) -> Result<Option<Installation>, EngineError> {
+        let tool = StandaloneTool::Anchor;
+        let avm = self.setting_path("AVM_HOME", home.join(".avm"))?;
+        let bin = avm.join("bin");
+        let launcher = bin.join("avm");
+        if native_binary(tool, &launcher, &bin)?.is_none() {
+            return Ok(None);
+        }
+        let Some(active) = read_text(&avm.join(".version"))? else {
+            return Ok(None);
+        };
+        let active = active.trim();
+        let version = version(tool, active)?;
+        if native_binary(tool, &bin.join(format!("anchor-{active}")), &bin)?.is_none() {
+            return Ok(None);
+        }
+        Ok(Some(Installation {
+            updater: launcher.clone(),
+            launcher,
+            version,
+            channel: "latest".into(),
+        }))
+    }
+    /// foundryup installs each release under `versions` and links forge,
+    /// cast, anvil and chisel into `bin`, beside itself.
+    fn locate_foundry(
+        &self,
+        home: &Path,
+        cancel: &Cancellation,
+    ) -> Result<Option<Installation>, EngineError> {
+        let tool = StandaloneTool::Foundry;
+        let root = self.setting_path("FOUNDRY_DIR", home.join(".foundry"))?;
+        let launcher = root.join("bin/forge");
+        let updater = root.join("bin/foundryup");
+        if native_binary(tool, &launcher, &root)?.is_none()
+            || native_binary(tool, &updater, &root.join("bin"))?.is_none()
+        {
+            return Ok(None);
+        }
+        let Some(version) = self.version_at(tool, &launcher, cancel)? else {
+            return Ok(None);
+        };
+        Ok(Some(Installation {
+            channel: if version.pre.as_str() == "nightly" {
+                "nightly"
+            } else {
+                "stable"
+            }
+            .into(),
+            launcher,
+            updater,
+            version,
+        }))
+    }
+    /// The newest release on an Agave channel: the channel names a commit,
+    /// and the workspace version at that commit is its release.
+    fn solana_latest(
+        &self,
+        installation: &Installation,
+        cancel: &Cancellation,
+    ) -> Result<Version, EngineError> {
+        let tool = StandaloneTool::Solana;
+        let target = match (std::env::consts::ARCH, std::env::consts::OS) {
+            (arch, "macos") => format!("{arch}-apple-darwin"),
+            (arch, _) => format!("{arch}-unknown-linux-gnu"),
+        };
+        let manifest = self.fetch(
+            &format!(
+                "https://release.anza.xyz/{}/solana-release-{target}.yml",
+                installation.channel
+            ),
+            cancel,
+        )?;
+        let commit = manifest
+            .lines()
+            .find_map(|line| line.strip_prefix("commit:"))
+            .map(str::trim)
+            .filter(|commit| commit.len() == 40 && commit.bytes().all(|b| b.is_ascii_hexdigit()))
+            .ok_or_else(|| invalid_data(tool, "channel names no release commit"))?;
+        let cargo = self.fetch(
+            &format!("https://raw.githubusercontent.com/anza-xyz/agave/{commit}/Cargo.toml"),
+            cancel,
+        )?;
+        let release = cargo
+            .split("[workspace.package]")
+            .nth(1)
+            .and_then(|section| {
+                section
+                    .lines()
+                    .find_map(|line| line.trim().strip_prefix("version = \""))
+            })
+            .and_then(|rest| rest.split('"').next())
+            .ok_or_else(|| invalid_data(tool, "release names no version"))?;
+        version(tool, release)
+    }
+}
+
+/// The channel an Agave config follows (`explicit_release: !Channel
+/// stable`), or `pinned` for a fixed release; anything else isn't Agave's.
+fn solana_channel(config: &str) -> Option<String> {
+    let release = config
+        .lines()
+        .find_map(|line| line.strip_prefix("explicit_release:"))?
+        .trim();
+    if release.starts_with("!Semver ") {
+        return Some("pinned".into());
+    }
+    release
+        .strip_prefix("!Channel ")
+        .filter(|channel| matches!(*channel, "stable" | "beta" | "edge"))
+        .map(Into::into)
+}
+
 impl StandaloneIo for NativeStandalone {
     fn locate(
         &self,
@@ -458,6 +623,9 @@ impl StandaloneIo for NativeStandalone {
                 (root.join("amp"), root)
             }
             StandaloneTool::Droid => (home.join(".local/bin/droid"), home.join(".local/bin")),
+            StandaloneTool::Solana => return self.locate_solana(&home, cancel),
+            StandaloneTool::Anchor => return self.locate_anchor(&home),
+            StandaloneTool::Foundry => return self.locate_foundry(&home, cancel),
         };
         let Some(binary) = native_binary(tool, &launcher, &root)? else {
             return Ok(None);
@@ -509,6 +677,7 @@ impl StandaloneIo for NativeStandalone {
         };
         Ok(Some(Installation {
             version,
+            updater: launcher.clone(),
             launcher,
             channel,
         }))
@@ -519,6 +688,15 @@ impl StandaloneIo for NativeStandalone {
         installation: &Installation,
         cancel: &Cancellation,
     ) -> Result<Version, EngineError> {
+        match (tool, installation.channel.as_str()) {
+            // A pinned Agave release and Foundry's nightly builds have
+            // no newer release to offer.
+            (StandaloneTool::Solana, "pinned") | (StandaloneTool::Foundry, "nightly") => {
+                return Ok(installation.version.clone());
+            }
+            (StandaloneTool::Solana, _) => return self.solana_latest(installation, cancel),
+            _ => {}
+        }
         if tool == StandaloneTool::Grok {
             let output = self.host.read(
                 &installation.launcher,
@@ -603,6 +781,12 @@ impl StandaloneIo for NativeStandalone {
             StandaloneTool::OpenCode => {
                 "https://api.github.com/repos/anomalyco/opencode/releases/latest".into()
             }
+            StandaloneTool::Anchor => {
+                "https://api.github.com/repos/solana-foundation/anchor/releases/latest".into()
+            }
+            StandaloneTool::Foundry => {
+                "https://api.github.com/repos/foundry-rs/foundry/releases/latest".into()
+            }
             // Copilot; every other tool returned above.
             _ => "https://api.github.com/repos/github/copilot-cli/releases/latest".into(),
         };
@@ -665,10 +849,16 @@ impl StandaloneIo for NativeStandalone {
             | StandaloneTool::Amp
             | StandaloneTool::Droid => vec!["update".into()],
             StandaloneTool::Kiro => vec!["update".into(), "--non-interactive".into()],
+            // `agave-install update` follows the configured channel.
+            StandaloneTool::Solana => vec!["update".into()],
+            // `avm install` activates the release it installs. `avm update`
+            // is not used: older AVMs pick pre-releases without binaries.
+            StandaloneTool::Anchor => vec!["install".into(), candidate.to_string().into()],
+            StandaloneTool::Foundry => vec!["--install".into(), "stable".into()],
         };
         Ok(self
             .host
-            .standalone_write(&installation.launcher, &args, &[], cancel)?)
+            .standalone_write(&installation.updater, &args, &[], cancel)?)
     }
 }
 
@@ -849,7 +1039,7 @@ mod tests {
             // The curl shim is invariant, so install it once before any spawn:
             // rewriting an executable right before executing it trips an
             // ETXTBSY race under parallel test churn (see tests/host.rs).
-            self.script("bin/curl", "#!/bin/sh\nfor arg do url=$arg; done\nprintf '%s' \"$url\" > \"$HOME/request\"\ncase \"$url\" in */install.sh) cat \"$HOME/installer\";; *) cat \"$HOME/release\";; esac\n");
+            self.script("bin/curl", "#!/bin/sh\nfor arg do url=$arg; done\nprintf '%s' \"$url\" > \"$HOME/request\"\ncase \"$url\" in */install.sh) cat \"$HOME/installer\";; *.yml) cat \"$HOME/channel\";; *) cat \"$HOME/release\";; esac\n");
             NativeStandalone {
                 host: Host::new(
                     Runtime::Native,
@@ -900,6 +1090,15 @@ mod tests {
                 StandaloneTool::Antigravity => (".local/bin/agy", ".local/bin/agy"),
                 StandaloneTool::Amp => (".amp/bin/amp", ".amp/bin/amp"),
                 StandaloneTool::Droid => (".local/bin/droid", ".local/bin/droid"),
+                StandaloneTool::Solana => (
+                    ".local/share/solana/install/active_release/bin/agave-install",
+                    ".local/share/solana/install/releases/stable-test/solana-release/bin/agave-install",
+                ),
+                StandaloneTool::Anchor => (".avm/bin/avm", ".avm/bin/avm"),
+                StandaloneTool::Foundry => (
+                    ".foundry/bin/forge",
+                    ".foundry/versions/foundry-rs/foundry/v1.0.0/forge",
+                ),
             };
             let target_path = self.0.join(target);
             fs::create_dir_all(target_path.parent().unwrap()).unwrap();
@@ -915,10 +1114,29 @@ mod tests {
             if tool == StandaloneTool::Cursor {
                 self.write(".local/share/cursor-agent/versions/1.0.0/index.js", "");
             }
+            match tool {
+                StandaloneTool::Solana => {
+                    self.write(
+                        ".config/solana/install/config.yml",
+                        "---\ncurrent_update_manifest: null\nexplicit_release: !Channel stable\n",
+                    );
+                }
+                // AVM's active Anchor, and foundryup beside Foundry's links.
+                StandaloneTool::Anchor => {
+                    self.write(".avm/.version", "1.0.0");
+                    fs::hard_link(fixture, self.0.join(".avm/bin/anchor-1.0.0")).unwrap();
+                }
+                StandaloneTool::Foundry => {
+                    fs::hard_link(fixture, self.0.join(".foundry/bin/foundryup")).unwrap();
+                }
+                _ => {}
+            }
             // Tools that name themselves in --version keep doing so after updates.
             if let Some(prefix) = match tool {
                 StandaloneTool::Copilot => Some("GitHub Copilot CLI "),
                 StandaloneTool::Kiro => Some("kiro-cli "),
+                StandaloneTool::Solana => Some("agave-install "),
+                StandaloneTool::Foundry => Some("forge Version: "),
                 _ => None,
             } {
                 self.write(
@@ -964,6 +1182,7 @@ mod tests {
             Self {
                 installed: Arc::new(Mutex::new(Some(Installation {
                     launcher: "/synthetic/bin/tool".into(),
+                    updater: "/synthetic/bin/tool".into(),
                     version: Version::new(1, 0, 0),
                     channel: "latest".into(),
                 }))),
@@ -1270,6 +1489,124 @@ mod tests {
             .is_none());
     }
     #[test]
+    fn blockchain_toolchains_follow_their_own_installers() {
+        let cancel = Cancellation::default();
+        // Agave: the channel comes from its config; a pinned release has no
+        // newer one, and only Agave's own channels are followed.
+        assert_eq!(
+            solana_channel("explicit_release: !Channel beta\n").as_deref(),
+            Some("beta")
+        );
+        assert_eq!(
+            solana_channel("explicit_release: !Semver 2.2.21\n").as_deref(),
+            Some("pinned")
+        );
+        assert_eq!(solana_channel("explicit_release: !Channel nightly\n"), None);
+        assert_eq!(solana_channel("json_rpc_url: http://localhost\n"), None);
+        let temp = Temp::new();
+        let native = temp.native();
+        temp.install(StandaloneTool::Solana);
+        let config = temp.0.join(".config/solana/install/config.yml");
+        fs::write(&config, "explicit_release: !Semver 1.0.0\n").unwrap();
+        let pinned = native
+            .locate(StandaloneTool::Solana, &cancel)
+            .unwrap()
+            .unwrap();
+        assert_eq!(pinned.channel, "pinned");
+        temp.network("never fetched");
+        assert_eq!(
+            native
+                .latest(StandaloneTool::Solana, &pinned, &cancel)
+                .unwrap(),
+            Version::new(1, 0, 0)
+        );
+        assert!(!temp.0.join("request").exists());
+        // A stable channel whose manifest names no commit is an error.
+        let stable = Installation {
+            channel: "stable".into(),
+            ..pinned
+        };
+        for manifest in ["channel: stable\n", "commit: 44b42d4\n", "commit: zz\n"] {
+            temp.write("channel", manifest);
+            assert!(native
+                .latest(StandaloneTool::Solana, &stable, &cancel)
+                .unwrap_err()
+                .to_string()
+                .contains("no release commit"));
+        }
+        fs::write(&config, "explicit_release: !Channel nightly\n").unwrap();
+        assert!(native
+            .locate(StandaloneTool::Solana, &cancel)
+            .unwrap()
+            .is_none());
+        fs::remove_file(&config).unwrap();
+        assert!(native
+            .locate(StandaloneTool::Solana, &cancel)
+            .unwrap()
+            .is_none());
+        // Another program answering as agave-install isn't Agave's.
+        temp.write(
+            ".config/solana/install/config.yml",
+            "explicit_release: !Channel stable\n",
+        );
+        temp.write(
+            ".local/share/solana/install/active_release/bin/agave-install.version",
+            "something else 1.0.0",
+        );
+        assert!(native
+            .locate(StandaloneTool::Solana, &cancel)
+            .unwrap()
+            .is_none());
+        // AVM: the active Anchor must be one AVM installed.
+        temp.install(StandaloneTool::Anchor);
+        assert_eq!(
+            native
+                .locate(StandaloneTool::Anchor, &cancel)
+                .unwrap()
+                .unwrap()
+                .version,
+            Version::new(1, 0, 0)
+        );
+        temp.write(".avm/.version", "1.1.0\n");
+        assert!(native
+            .locate(StandaloneTool::Anchor, &cancel)
+            .unwrap()
+            .is_none());
+        temp.write(".avm/.version", "../../bin/other");
+        assert!(native.locate(StandaloneTool::Anchor, &cancel).is_err());
+        fs::remove_file(temp.0.join(".avm/.version")).unwrap();
+        assert!(native
+            .locate(StandaloneTool::Anchor, &cancel)
+            .unwrap()
+            .is_none());
+        // Foundry: forge counts only beside its own foundryup, and nightly
+        // builds are not compared with stable releases.
+        temp.install(StandaloneTool::Foundry);
+        temp.write(".foundry/bin/forge.version", "forge Version: 1.4.0-nightly");
+        let nightly = native
+            .locate(StandaloneTool::Foundry, &cancel)
+            .unwrap()
+            .unwrap();
+        assert_eq!(nightly.channel, "nightly");
+        assert_eq!(
+            native
+                .latest(StandaloneTool::Foundry, &nightly, &cancel)
+                .unwrap(),
+            nightly.version
+        );
+        temp.write(".foundry/bin/forge.version", "cast Version: 1.4.0");
+        assert!(native
+            .locate(StandaloneTool::Foundry, &cancel)
+            .unwrap()
+            .is_none());
+        temp.write(".foundry/bin/forge.version", "forge Version: 1.4.0");
+        fs::remove_file(temp.0.join(".foundry/bin/foundryup")).unwrap();
+        assert!(native
+            .locate(StandaloneTool::Foundry, &cancel)
+            .unwrap()
+            .is_none());
+    }
+    #[test]
     fn date_versions_compare_by_date() {
         let cursor = version(StandaloneTool::Cursor, "2026.09.26-dd393fe").unwrap();
         assert_eq!((cursor.major, cursor.minor, cursor.patch), (2026, 9, 26));
@@ -1315,7 +1652,13 @@ mod tests {
         for tool in StandaloneTool::ALL {
             temp.install(tool);
             let installation = native.locate(tool, &cancel).unwrap().unwrap();
+            // An Agave channel names a commit; its Cargo.toml has the release.
+            temp.write(
+                "channel",
+                "channel: \ncommit: 44b42d45ec7e555b26ca15ad924a7432d18aaa9f\n",
+            );
             temp.network(match tool {
+                StandaloneTool::Solana => "[workspace]\nversion = \"9.0.0\"\n[workspace.package]\nversion = \"2.0.0\"\n",
                 StandaloneTool::Claude | StandaloneTool::Amp => "2.0.0",
                 StandaloneTool::Droid => "#!/bin/sh\nbinary_name=\"droid\"\nVER=\"2.0.0\"\n",
                 StandaloneTool::Cursor => "DOWNLOAD_URL=\"https://downloads.cursor.com/lab/2.0.0/${OS}/${ARCH}/agent-cli-package.tar.gz\"",
@@ -1373,19 +1716,31 @@ mod tests {
             assert_eq!(result.is_err(), rustix::process::geteuid().is_root());
             let Ok(result) = result else { continue };
             assert_eq!(result.code, Some(0));
+            // AVM and foundryup switch the release the launcher runs; the
+            // fixture only records their arguments, so switch as they would.
+            match tool {
+                StandaloneTool::Anchor => {
+                    temp.write(".avm/.version", "2.0.0");
+                    fs::hard_link(&launcher, temp.0.join(".avm/bin/anchor-2.0.0")).unwrap();
+                }
+                StandaloneTool::Foundry => {
+                    temp.write(".foundry/bin/forge.version", "forge Version: 2.0.0-stable");
+                }
+                _ => {}
+            }
             assert_eq!(
                 native.locate(tool, &cancel).unwrap().unwrap().version,
                 Version::new(2, 0, 0)
             );
             if tool != StandaloneTool::Codex {
-                let args = fs::read_to_string(launcher.with_extension("args")).unwrap();
-                assert!(args.starts_with(if tool == StandaloneTool::OpenCode {
-                    "upgrade\n"
-                } else {
-                    "update\n"
-                }));
-                if tool == StandaloneTool::OpenCode {
-                    assert_eq!(args, "upgrade\n2.0.0\n--method\ncurl\n");
+                let args = fs::read_to_string(installation.updater.with_extension("args")).unwrap();
+                match tool {
+                    StandaloneTool::OpenCode => {
+                        assert_eq!(args, "upgrade\n2.0.0\n--method\ncurl\n")
+                    }
+                    StandaloneTool::Anchor => assert_eq!(args, "install\n2.0.0\n"),
+                    StandaloneTool::Foundry => assert_eq!(args, "--install\nstable\n"),
+                    _ => assert!(args.starts_with("update\n")),
                 }
             }
             assert_eq!(

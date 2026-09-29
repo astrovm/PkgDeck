@@ -94,6 +94,10 @@ Updates lists package updates and, if `fwupdmgr` is installed, firmware updates.
   packages one at a time itself. For managers that don't say (npm, for
   one), all of their rows show progress until they finish.
 
+Cargo and Bun have no command that lists outdated tools, so PkgDeck asks
+crates.io and the npm registry about each installed tool when it lists them.
+Tools Cargo installed from Git or a local folder aren't checked.
+
 Versions appear as `installed → new` when the source provides both. Some
 Flatpak runtimes only report a branch or commit. PkgDeck shows what the
 source reports and never makes up a version.
@@ -257,7 +261,8 @@ apps remain visible in the partial inventory.
 ### Standalone CLI tools
 
 Codex, Claude Code, Grok, OpenCode, Cursor CLI, GitHub Copilot CLI, Kiro CLI,
-Antigravity CLI, Amp and Factory Droid installed with their official installers show up in Installed and Updates. PkgDeck updates them with their
+Antigravity CLI, Amp and Factory Droid installed with their official installers show up in Installed and Updates,
+and so do the Solana CLI (Agave), Anchor through AVM, and Foundry. PkgDeck updates them with their
 own updaters, without admin rights. It can't install or remove them. Copies
 installed with npm or Homebrew are managed by that package manager instead.
 See [supported install layouts](cli.md#standalone-cli-tools).

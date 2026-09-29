@@ -50,7 +50,7 @@ Sources for `--from`: `fwupd`, `apt`, `dnf`, `pacman`, `aur`, `zypper`, `apk`,
 `rustup`, `go`, `dotnet`, `npm`, `pnpm`, `bun`, `pip`, `pipx`, `uv`, `mise`, `pixi`,
 `conda`, `nix`, `composer`, `gem`,
 `codex`, `claude`, `grok`, `opencode`, `cursor`, `copilot`, `kiro`,
-`antigravity`, `amp`, and `droid`.
+`antigravity`, `amp`, `droid`, `solana`, `anchor`, and `foundry`.
 
 Without `--from`, PkgDeck uses every package manager it finds. Package managers
 that aren't installed are skipped. Sources that fail are reported, not
@@ -465,6 +465,11 @@ and source errors identify the skipped folders (also in JSON `failures`).
 PkgDeck finds Codex, Claude Code, Grok, OpenCode, Cursor CLI, GitHub Copilot
 CLI, Kiro CLI, Antigravity CLI, Amp, and Factory Droid when they were installed
 with their official installers. They appear in `pkd list` and `pkd upgrade`.
+So do the blockchain toolchains the [Anchor](https://www.anchor-lang.com/docs/installation)
+and [Foundry](https://getfoundry.sh/introduction/installation) guides install:
+the Solana CLI (Agave), Anchor through AVM, and Foundry (forge, cast, anvil
+and chisel). Rust comes from the `rustup` source, and Node.js and Yarn from
+Homebrew or npm. Node.js versions installed with nvm aren't covered.
 
 ```sh
 pkd list --from codex --json
@@ -489,6 +494,9 @@ program must be owned by you and installed in the official location:
 | Antigravity CLI | `~/.local/bin/agy` | |
 | Amp | `~/.amp/bin/amp` | `AMP_HOME` |
 | Factory Droid | `~/.local/bin/droid` | |
+| Solana CLI (Agave) | `~/.local/share/solana/install/active_release/bin/agave-install`, linking into its `releases` folder, with the release channel in `~/.config/solana/install/config.yml` | |
+| Anchor (AVM) | `~/.avm/bin/avm`, with the active Anchor named in `~/.avm/.version` and installed as `~/.avm/bin/anchor-VERSION` | `AVM_HOME` |
+| Foundry | `~/.foundry/bin/forge`, linking into `~/.foundry/versions`, next to `foundryup` | `FOUNDRY_DIR` |
 
 How updates are checked and installed:
 
@@ -504,6 +512,9 @@ How updates are checked and installed:
 | Antigravity CLI | Antigravity's release manifest for your platform | `agy update` |
 | Amp | Amp's published CLI version | `amp update` |
 | Factory Droid | The release Droid's installer names | `droid update` |
+| Solana CLI (Agave) | The release on your channel (stable, beta or edge). A pinned release (`agave-install init VERSION`) is never updated | `agave-install update` |
+| Anchor (AVM) | Latest stable Anchor release | `avm install VERSION`, which also switches to it. AVM also rebuilds its `solana-verify` helper from source, so this takes a few minutes |
+| Foundry | Latest stable release. Nightly builds aren't checked | `foundryup --install stable` |
 
 `curl` is needed for the release checks and the Codex installer. If a check
 fails, it's reported as an error, never as "up to date". Updates need

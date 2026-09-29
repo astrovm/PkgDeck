@@ -1398,6 +1398,9 @@ fn source_display_name(id: &str) -> String {
         "antigravity" => "Antigravity CLI (standalone)",
         "amp" => "Amp (standalone)",
         "droid" => "Factory Droid (standalone)",
+        "solana" => "Solana CLI (Agave)",
+        "anchor" => "Anchor (AVM)",
+        "foundry" => "Foundry",
         other => other,
     }
     .to_owned()
@@ -9450,6 +9453,9 @@ mod tests {
             ("antigravity", "Antigravity CLI (standalone)"),
             ("amp", "Amp (standalone)"),
             ("droid", "Factory Droid (standalone)"),
+            ("solana", "Solana CLI (Agave)"),
+            ("anchor", "Anchor (AVM)"),
+            ("foundry", "Foundry"),
             ("fixture", "fixture"),
         ] {
             assert_eq!(source_display_name(id), name);
