@@ -1726,11 +1726,24 @@ TestCase {
         // Sources that could not be checked are not listed as a warning.
         verify(findChild(browser, "backgroundCheckFailures") === null);
         compare(availability.text, "Notifications available");
+        const settings = findChild(browser, "notificationSettingsButton");
+        verify(!settings.visible);
         verify(button.enabled);
         let requested = 0;
         browser.testNotificationRequested.connect(() => requested++);
         button.clicked();
         compare(requested, 1);
+        // The Mac app before macOS allows its notifications: they still go
+        // out, and Settings says why they lack PkgDeck's icon.
+        browser.notificationPermissionNeeded = true;
+        verify(availability.text.indexOf("Script Editor") >= 0);
+        verify(button.enabled);
+        verify(settings.visible);
+        let opened = 0;
+        browser.notificationSettingsRequested.connect(() => opened++);
+        settings.clicked();
+        compare(opened, 1);
+        browser.notificationPermissionNeeded = false;
         const history = JSON.stringify({notified: {fixture: []}});
         fake.notification_history = history;
         browser.destroy();

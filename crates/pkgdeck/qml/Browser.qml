@@ -130,7 +130,11 @@ Controls.ApplicationWindow {
     readonly property int queuedCount: activityRows.filter(row => row.state === "queued").length
     readonly property var backgroundState: JSON.parse(backend.background_state && backend.background_state !== "{}" ? backend.background_state : preferences.lastBackgroundState)
     property bool notificationAvailable: false
+    // The Mac app can notify, but macOS hasn't allowed PkgDeck's own
+    // notifications yet, so they show Script Editor's icon.
+    property bool notificationPermissionNeeded: false
     signal testNotificationRequested()
+    signal notificationSettingsRequested()
     property bool startHidden: Qt.application.arguments.indexOf("--background") >= 0
     property bool forceQuit: false
     property bool trayAvailable: false

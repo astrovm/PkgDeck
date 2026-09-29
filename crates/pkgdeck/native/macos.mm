@@ -39,20 +39,55 @@ MacNative::MacNative(QObject *parent) : QObject(parent) {
     delegate.owner = this;
     // The center keeps only a weak reference; this one lives as long as the app.
     center.delegate = delegate;
-    [center requestAuthorizationWithOptions:(UNAuthorizationOptionAlert | UNAuthorizationOptionSound | UNAuthorizationOptionBadge)
-                          completionHandler:^(BOOL granted, NSError *error) {
-                              if (error)
-                                  qInfo("Notification Center: %s Using AppleScript notifications instead.", error.localizedDescription.UTF8String);
-                              QMetaObject::invokeMethod(this, [this, granted] { setAllowed(granted); }, Qt::QueuedConnection);
-                          }];
+    requestPermission();
 }
 
 void MacNative::setAllowed(bool value) {
+    if (allowed == value) return;
     allowed = value;
+    emit authorizedChanged();
 }
 
+void MacNative::requestPermission() {
+    if (!bundled) return;
+    [[UNUserNotificationCenter currentNotificationCenter]
+        requestAuthorizationWithOptions:(UNAuthorizationOptionAlert | UNAuthorizationOptionSound | UNAuthorizationOptionBadge)
+                      completionHandler:^(BOOL granted, NSError *error) {
+                          if (error)
+                              qInfo("Notification Center: %s Using AppleScript notifications instead.", error.localizedDescription.UTF8String);
+                          QMetaObject::invokeMethod(this, [this, granted] { setAllowed(granted); }, Qt::QueuedConnection);
+                      }];
+}
+
+void MacNative::refreshPermission() {
+    if (!bundled) return;
+    [[UNUserNotificationCenter currentNotificationCenter] getNotificationSettingsWithCompletionHandler:^(UNNotificationSettings *settings) {
+        const bool granted = settings.authorizationStatus == UNAuthorizationStatusAuthorized
+            || settings.authorizationStatus == UNAuthorizationStatusProvisional;
+        QMetaObject::invokeMethod(this, [this, granted] { setAllowed(granted); }, Qt::QueuedConnection);
+    }];
+}
+
+void MacNative::openNotificationSettings() {
+    NSURL *url = [NSURL URLWithString:@"x-apple.systempreferences:com.apple.Notifications-Settings.extension?id=io.github.astrovm.PkgDeck"];
+    [[NSWorkspace sharedWorkspace] openURL:url];
+}
+
+// The permission can change in System Settings at any time, so it is read
+// again right before each notification.
 void MacNative::notify(const QString &title, const QString &body) {
     if (!bundled) return;
+    [[UNUserNotificationCenter currentNotificationCenter] getNotificationSettingsWithCompletionHandler:^(UNNotificationSettings *settings) {
+        const bool granted = settings.authorizationStatus == UNAuthorizationStatusAuthorized
+            || settings.authorizationStatus == UNAuthorizationStatusProvisional;
+        QMetaObject::invokeMethod(this, [this, granted, title, body] {
+            setAllowed(granted);
+            post(title, body);
+        }, Qt::QueuedConnection);
+    }];
+}
+
+void MacNative::post(const QString &title, const QString &body) {
     if (!allowed) {
         // The text travels as arguments, never as script source.
         QProcess::startDetached(QStringLiteral("/usr/bin/osascript"),

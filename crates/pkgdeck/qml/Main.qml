@@ -10,13 +10,28 @@ Browser {
     readonly property var mac: typeof macNative !== "undefined" ? macNative : null
     trayAvailable: tray.available
     notificationAvailable: mac ? mac.notificationsAllowed : tray.available && tray.supportsMessages
+    notificationPermissionNeeded: mac ? mac.notificationsAllowed && !mac.authorized : false
     function notify(title, body) {
         if (mac)
             mac.notify(title, body);
         else
             tray.showMessage(title, body, Platform.SystemTrayIcon.Information, 8000);
     }
-    onTestNotificationRequested: notify("PkgDeck test", "Desktop notifications are working.")
+    onTestNotificationRequested: {
+        // Shows the system prompt again while the person hasn't decided.
+        if (mac && !mac.authorized)
+            mac.requestPermission();
+        notify("PkgDeck test", "Desktop notifications are working.");
+    }
+    onNotificationSettingsRequested: if (mac) mac.openNotificationSettings()
+    // Notification permission can change in System Settings while PkgDeck runs.
+    Connections {
+        target: Qt.application
+        function onStateChanged() {
+            if (browser.mac && Qt.application.state === Qt.ApplicationActive)
+                browser.mac.refreshPermission();
+        }
+    }
     Platform.SystemTrayIcon {
         id: tray
         visible: browser.backgroundMode && available
