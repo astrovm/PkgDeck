@@ -87,10 +87,17 @@ jobs:
       - name: Set up desktop dependencies
         uses: ./.github/actions/setup-desktop
         with:
-          coverage: ${{ matrix.coverage }}
+          coverage: ${{ needs.reviewed.outputs.tested != 'true' && matrix.coverage || 'false' }}
       - name: Run checks, lint and workspace tests
+        if: needs.reviewed.outputs.tested != 'true'
         # The 100% gate applies to all platforms together (Coverage / Combined).
         run: scripts/verify.sh full --only ${{ matrix.suite }}
+      # A verified passing PR needs only build outputs on main to refresh caches.
+      - name: Build workspace to refresh main caches
+        if: needs.reviewed.outputs.tested == 'true'
+        run: |
+          source scripts/dev-env.sh
+          cargo build --workspace --locked
       - name: Upload coverage report
         if: ${{ matrix.coverage == 'true' && needs.reviewed.outputs.tested != 'true' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -150,11 +157,12 @@ jobs:
           arch: ${{ matrix.arch }}
           scope: macos-native
       - name: Install coverage tool
-        if: matrix.arch == 'aarch64'
+        if: matrix.arch == 'aarch64' && needs.reviewed.outputs.tested != 'true'
         run: command -v cargo-llvm-cov >/dev/null || cargo install cargo-llvm-cov --version 0.9.1 --locked
       # Apple Silicon measures coverage while testing: macOS-only code runs
       # only here, and Coverage / Combined adds it to the Linux report.
       - name: Run all core and CLI tests
+        if: needs.reviewed.outputs.tested != 'true'
         run: |
           if [[ ${{ matrix.arch }} == aarch64 ]]; then
             mkdir -p coverage
