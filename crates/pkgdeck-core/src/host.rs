@@ -48,7 +48,7 @@ pub struct Host {
 pub const ROOT_REFUSAL: &str = "PkgDeck can't make changes when it runs as root. Run it as your normal user; it asks for permission when needed.";
 
 /// Writes refuse to run as root (see [`ROOT_REFUSAL`]).
-fn refuse_root(write: bool) -> Result<(), ExecutionError> {
+pub(crate) fn refuse_root(write: bool) -> Result<(), ExecutionError> {
     refuse_root_as(write, rustix::process::geteuid().is_root())
 }
 fn refuse_root_as(write: bool, root: bool) -> Result<(), ExecutionError> {
