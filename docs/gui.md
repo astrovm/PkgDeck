@@ -263,9 +263,11 @@ apps remain visible in the partial inventory.
 Codex, Claude Code, Grok, OpenCode, Cursor CLI, GitHub Copilot CLI, Kiro CLI,
 Antigravity CLI, Amp and Factory Droid installed with their official installers show up in Installed and Updates,
 and so do the Solana CLI (Agave), Anchor through AVM, and Foundry. PkgDeck updates them with their
-own updaters, without admin rights. It can't install or remove them. Copies
+own updaters and can remove them, without admin rights. Removing takes away
+only what the tool's installer put there and keeps your settings, sign-ins and
+keys; on macOS the files go to the Trash. It can't install them. Copies
 installed with npm or Homebrew are managed by that package manager instead.
-See [supported install layouts](cli.md#standalone-cli-tools).
+See [supported install layouts and what removal keeps](cli.md#standalone-cli-tools).
 
 ## Update notifications
 

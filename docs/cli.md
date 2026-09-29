@@ -476,9 +476,10 @@ pkd list --from codex --json
 pkd info codex --from codex
 pkd upgrade codex --from codex
 pkd upgrade --from claude --from grok --from opencode
+pkd remove codex --from codex
 ```
 
-PkgDeck only updates these tools. It can't install or remove them. Copies
+PkgDeck updates and removes these tools. It can't install them. Copies
 installed with npm or Homebrew are handled by that package manager. The
 program must be owned by you and installed in the official location:
 
@@ -521,6 +522,34 @@ fails, it's reported as an error, never as "up to date". Updates need
 confirmation, run without admin rights, and never downgrade a newer version.
 PkgDeck checks the version after updating. Restart open sessions of the tool
 to use the new version.
+
+Removing a tool takes away only what its installer put there. Your settings,
+sign-ins and keys stay:
+
+| Tool | Removes | Keeps |
+| --- | --- | --- |
+| Codex | `~/.local/bin/codex` and `codex-code-mode-host`, `~/.codex/packages/standalone` | The rest of `~/.codex`: settings, sign-in and history |
+| Claude Code | `~/.local/bin/claude`, `~/.local/share/claude` | `~/.claude` and `~/.claude.json` |
+| Grok | The `grok` and `agent` links in `~/.grok/bin` and `~/.local/bin`, `~/.grok/downloads` | The rest of `~/.grok`, including your sign-in. Links the installer made in `/usr/local/bin` are left for you to remove |
+| OpenCode | `~/.opencode/bin` | The rest of `~/.opencode` (plugins) and `~/.config/opencode` |
+| Cursor CLI | `~/.local/bin/agent` and `cursor-agent`, `~/.local/share/cursor-agent` | `~/.cursor` |
+| GitHub Copilot CLI | `~/.local/bin/copilot` | `~/.copilot` |
+| Kiro CLI | `~/.local/bin/kiro-cli` and `kiro-cli-chat` | Kiro's settings |
+| Antigravity CLI | `~/.local/bin/agy` | Antigravity's settings |
+| Amp | `~/.amp/bin`, the installer's download checks in `~/.amp`, and the `~/.local/bin/amp` link | `~/.config/amp` |
+| Factory Droid | `~/.local/bin/droid` | `~/.factory` |
+| Solana CLI (Agave) | `~/.local/share/solana/install`, with every installed release | `~/.config/solana`: your keypairs and the CLI and installer settings |
+| Anchor (AVM) | In `~/.avm`: `bin` (avm, anchor, every `anchor-VERSION` and `solana-verify`), `.version`, and Cargo's records of AVM (`.crates.toml`, `.crates2.json`) | Your Anchor projects |
+| Foundry | `~/.foundry/bin`, `~/.foundry/versions` and `~/.foundry/share/man` | `~/.foundry/keystores` (cast wallets) and `~/.foundry/cache` |
+
+The same overrides as above apply. Folders left empty are removed too. On
+macOS everything goes to the Trash, so you can put it back; on Linux it's
+deleted. A launcher is removed only while it still points into the tool's own
+folder, so a link another tool took over stays. PkgDeck refuses to remove a
+folder that is a link to somewhere else, isn't yours, or holds your home
+folder. Removal needs confirmation, runs without admin rights, and PkgDeck
+checks afterwards that the tool is gone. Lines the installer added to your
+shell setup (`~/.zshrc`, `~/.bashrc`) stay; remove them yourself if you like.
 
 Official docs: [Codex](https://learn.chatgpt.com/docs/codex/cli),
 [Claude Code](https://code.claude.com/docs/en/setup),
