@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Real plutil, permissions, Homebrew receipts and CLI reads on disposable Macs.
+# Real plutil, permissions, Homebrew receipts, CLI reads and app removal on
+# disposable Macs.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 [[ ${GITHUB_ACTIONS:-} == true && ${GITHUB_REPOSITORY:-} == astrovm/PkgDeck &&
@@ -25,7 +26,15 @@ user_root="$HOME/Applications/PkgDeck CI Inventory"
 owned="$HOME/Applications/PkgDeck CI Owned.app"
 tap=pkgdeck-ci/inventory
 cask="$tap/pkgdeck-ci-owned"
-for path in "$system_root" "$user_root" "$owned"; do
+# Removal fixtures and where the Trash receives them.
+user_trashed="$user_root/PkgDeck CI Trash User.app"
+root_trashed="$system_root/PkgDeck CI Trash Root.app"
+store_trashed="$system_root/PkgDeck CI Trash Store.app"
+open_app="$system_root/PkgDeck CI Open.app"
+trash="$HOME/.Trash"
+in_trash=("$trash/PkgDeck CI Trash User.app" "$trash/PkgDeck CI Trash Root.app"
+    "$trash/PkgDeck CI Trash Store.app")
+for path in "$system_root" "$user_root" "$owned" "${in_trash[@]}"; do
     [[ ! -e $path && ! -L $path ]] || { echo "Fixture already exists: $path"; exit 1; }
 done
 if brew tap | grep -Fxq "$tap"; then
@@ -35,9 +44,11 @@ fi
 cleanup() {
     set +e
     chmod 755 "$system_root/Restricted" 2>/dev/null
+    [[ -z ${sleeper:-} ]] || kill "$sleeper" 2>/dev/null
     brew uninstall --cask "$cask"
     brew untap "$tap"
-    rm -rf "$system_root" "$user_root" "$owned" "$work"
+    sudo rm -rf "$system_root" "${in_trash[@]}"
+    rm -rf "$user_root" "$owned" "$work"
 }
 trap cleanup EXIT
 mkdir -p "$system_root" "$user_root"
@@ -127,8 +138,8 @@ jq -e --arg root "$system_root/" '
 "$pkd" --json --from macos-apps info "$owned" > "$logs/partial-exact-details.json"
 jq -e --arg path "$owned" '.data | .package.id.name == $path and .package.installed_version == "1.2.3"' "$logs/partial-exact-details.json"
 
-# Unsupported writes must never request approval or touch installed bundles.
-for verb in install remove upgrade; do
+# Installs and updates are unsupported: never approved, bundles untouched.
+for verb in install upgrade; do
     for approval in no yes; do
         args=(--json --from macos-apps "$verb" "$owned")
         if [[ $approval == yes ]]; then args+=(--yes); fi
@@ -140,8 +151,71 @@ for verb in install remove upgrade; do
 done
 [[ -d $owned && ! -e $work/launched ]]
 chmod 755 "$system_root/Restricted"
-brew uninstall --cask "$cask"
+
+# Removal moves apps to the Trash; Homebrew uninstalls the casks it manages.
+remove() { "$pkd" --json --yes --from macos-apps remove "$1" > "$logs/$2.json" 2>&1; }
+removed() { grep -q '"exit_code":0' "$logs/$1.json" || { cat "$logs/$1.json" >&2; exit 1; }; }
+refused() {
+    local path=$1 name=$2 reason=$3 code=0
+    remove "$path" "$name" || code=$?
+    if [[ $code == 0 ]] || ! grep -q "$reason" "$logs/$name.json"; then
+        echo "Expected a refusal ($reason):" >&2
+        cat "$logs/$name.json" >&2
+        exit 1
+    fi
+}
+# An app the runner user owns: /usr/bin/trash, no password.
+bundle "$user_trashed" io.github.astrovm.pkgdeck.ci-trash-user
+remove "$user_trashed" remove-user || true
+removed remove-user
+[[ ! -e $user_trashed && -f "$trash/PkgDeck CI Trash User.app/Contents/Info.plist" ]]
+# A root-owned app, as App Store apps are: the system's mv through sudo
+# (passwordless on the runner), into the runner user's own Trash.
+bundle "$work/PkgDeck CI Trash Root.app" io.github.astrovm.pkgdeck.ci-trash-root
+sudo ditto "$work/PkgDeck CI Trash Root.app" "$root_trashed"
+sudo chown -R root:wheel "$root_trashed"
+remove "$root_trashed" remove-root || true
+removed remove-root
+[[ ! -e $root_trashed && -d "$trash/PkgDeck CI Trash Root.app" ]]
+[[ $(/usr/bin/stat -f %u "$trash/PkgDeck CI Trash Root.app") == 0 ]]
+# An App Store receipt changes nothing for a bundle the user owns.
+bundle "$store_trashed" io.github.astrovm.pkgdeck.ci-trash-store
+mkdir -p "$store_trashed/Contents/_MASReceipt"
+touch "$store_trashed/Contents/_MASReceipt/receipt"
+remove "$store_trashed" remove-store || true
+removed remove-store
+[[ ! -e $store_trashed && -d "$trash/PkgDeck CI Trash Store.app" ]]
+# Refused: an open app, an alias, and an app that comes with macOS.
+bundle "$open_app" io.github.astrovm.pkgdeck.ci-open
+printf '#include <unistd.h>\nint main(void) { sleep(300); return 0; }\n' |
+    clang -x c - -o "$open_app/Contents/MacOS/sleeper"
+"$open_app/Contents/MacOS/sleeper" &
+sleeper=$!
+sleep 1
+refused "$open_app" remove-open 'is open. Quit it'
+kill "$sleeper"
+wait "$sleeper" 2>/dev/null || true
+sleeper=
+[[ -d $open_app ]]
+refused "$system_root/Z-alias.app" remove-alias 'is an alias'
+[[ -L $system_root/Z-alias.app && -d $system_root/XML.app ]]
+if [[ -L /Applications/Safari.app || -d /Applications/Safari.app ]]; then
+    refused /Applications/Safari.app remove-safari 'part of macOS'
+    [[ -d /Applications/Safari.app ]]
+fi
+# Now closed, the app goes.
+remove "$open_app" remove-closed || true
+removed remove-closed
+[[ ! -e $open_app ]]
+# The Homebrew-managed copy: brew uninstalls the cask; the unmanaged
+# second copy stays.
+remove "$owned" remove-cask || true
+removed remove-cask
 [[ ! -e $owned && -d $system_root/Second\ Copy.app ]]
+if brew info --json=v2 --cask "$cask" | jq -e '.casks[0].installed // "" | length > 0' >/dev/null; then
+    echo 'The cask is still installed after removing its app' >&2
+    exit 1
+fi
 "$pkd" --json --from macos-apps info "$system_root/Second Copy.app" > "$logs/after-uninstall.json"
 jq -e '.data | (.package.summary | contains("Managed by Homebrew") | not) and (.package.summary | contains("obsidian (candidate)"))' "$logs/after-uninstall.json"
-echo 'PASS native bundle discovery, details, scopes, real cask ownership, permissions and read-only CLI'
+echo 'PASS native bundle discovery, details, scopes, real cask ownership, permissions and removal'

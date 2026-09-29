@@ -426,6 +426,7 @@ pkd list --from mas
 pkd info Keynote --from mas
 pkd upgrade --from mas              # update every App Store app with an update
 pkd upgrade Keynote --from mas
+pkd remove Keynote --from mas       # move it to the Trash
 ```
 
 The `mas` source uses [mas](https://github.com/mas-cli/mas) 7 or newer
@@ -436,7 +437,17 @@ starts a download. Name an app by its name or its App Store ID.
 Updates run `mas update`. mas asks for your Mac password through sudo, which
 needs a terminal, so update from `pkd` in Terminal or from the App Store app.
 You must be signed in to the App Store. PkgDeck checks that each app's version
-changed afterwards. It never installs, removes, or moves App Store apps.
+changed afterwards. It never installs App Store apps.
+
+Removing an app moves its bundle to your Trash (`~/.Trash`), where you can put
+it back. App Store apps belong to root, so PkgDeck moves them with the system's
+`/bin/mv` as root: `pkd` uses an existing sudo login (`sudo -n`), the Mac app
+shows the macOS administrator password dialog. The app stays owned by root in
+the Trash, like one Finder moved there. PkgDeck doesn't run `mas uninstall`,
+because that needs sudo's terminal prompt. Before moving, PkgDeck checks that
+the App Store receipt is in the bundle and that the app isn't open; afterwards
+it checks that the bundle left and that `mas list` no longer shows it there.
+It refuses to run as root, since root's Trash isn't yours.
 
 ## macOS application inventory
 
@@ -444,9 +455,10 @@ changed afterwards. It never installs, removes, or moves App Store apps.
 pkd list --from macos-apps
 pkd list --from macos-apps --json
 pkd info '/Applications/Visual Studio Code.app' --from macos-apps
+pkd remove '/Applications/Visual Studio Code.app' --from macos-apps
 ```
 
-This read-only source scans `/Applications` and `~/Applications`. The exact
+This source scans `/Applications` and `~/Applications`. The exact
 bundle path is the package name and reference, so two copies keep separate
 identities. Details include location, observed version/build, Homebrew ownership
 evidence, and curated cask candidates for VS Code, Firefox, and Obsidian.
@@ -480,8 +492,29 @@ symlink to the exact bundle. Failed checks stay unknown. Missing ownership
 records do not prove that an app is unmanaged. Apps with unreadable metadata
 remain visible, with an unknown version. Architecture and update status are
 unknown in this first inventory implementation. This source itself can't
-install, remove, or update; adoption runs through the cask, as above. On other platforms the source reports that macOS is
-required. See the [GUI guide](gui.md#macos-application-inventory) for scan limits.
+install or update; adoption runs through the cask, as above. On other platforms the source reports that macOS is
+required.
+
+### Removing an app
+
+`pkd remove <bundle path> --from macos-apps` takes the app off the Mac, by
+what the inventory knows about it:
+
+- **Managed by Homebrew:** `brew uninstall --cask` for its cask, which deletes
+  the app as removing the cask would.
+- **Anything else you own**, in a folder you can change: `/usr/bin/trash` moves
+  it to your Trash, with no prompt.
+- **Anything else** (App Store apps belong to root): the system's `/bin/mv`
+  moves it into your Trash as root, after `sudo -n` in `pkd` or the macOS
+  administrator password dialog in the Mac app. Cancel changes nothing.
+
+PkgDeck refuses, with the reason, apps that come with macOS (anything on the
+system volume, such as Safari through its alias in `/Applications`, or guarded
+by System Integrity Protection), aliases, open apps, apps whose Homebrew records
+couldn't be checked, and apps two casks claim. Right before removing it re-reads
+the bundle: if the bundle at that path changed identity since it was listed,
+nothing happens. Afterwards it checks that the bundle is gone. A second app with
+the same name in the Trash is kept; the new one gets a number (`Name 2.app`). See the [GUI guide](gui.md#macos-application-inventory) for scan limits.
 Unreadable subfolders produce a partial inventory: readable apps remain listed,
 and source errors identify the skipped folders (also in JSON `failures`).
 

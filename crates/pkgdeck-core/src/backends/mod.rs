@@ -399,6 +399,20 @@ pub trait Transport: Send {
         let _ = (args, cancel, write);
         Err(ExecutionError::Disabled(format!("{executable} not found")))
     }
+    /// Run `/bin/ps` or `/usr/bin/trash` as the invoking user, for removing
+    /// Mac apps. Fixtures override it; elsewhere nothing runs.
+    fn macos_tool(
+        &self,
+        executable: &std::path::Path,
+        _args: &[OsString],
+        _cancel: &Cancellation,
+        _write: bool,
+    ) -> Result<Completion, ExecutionError> {
+        Err(ExecutionError::Disabled(format!(
+            "{} is unavailable",
+            executable.display()
+        )))
+    }
     fn container(
         &self,
         executable: &str,
@@ -927,6 +941,15 @@ impl Transport for NativeTransport {
     ) -> Result<Completion, ExecutionError> {
         self.host
             .system_manager(executable, args, cancel, write, self.authorization)
+    }
+    fn macos_tool(
+        &self,
+        executable: &std::path::Path,
+        args: &[OsString],
+        cancel: &Cancellation,
+        write: bool,
+    ) -> Result<Completion, ExecutionError> {
+        self.host.macos_tool(executable, args, cancel, write)
     }
     fn container(
         &self,
@@ -5727,7 +5750,7 @@ fn native_engine_on(
         ));
     }
     if allowed("macos-apps") {
-        candidates.push((Box::new(MacApps::native()), true));
+        candidates.push((Box::new(MacApps::native(transport())), true));
     }
     if allowed("mas") {
         candidates.push((Box::new(MacAppStore::new(transport())), true));
