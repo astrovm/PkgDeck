@@ -1,6 +1,12 @@
 use cxx_qt_build::{CxxQtBuilder, QmlModule};
 
 fn main() {
+    // Native notifications and the Dock badge for the Mac app; src/lib.rs
+    // links the frameworks they use.
+    let macos = std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos");
+    let mac_files = ["native/macos.h", "native/macos.mm"]
+        .into_iter()
+        .filter(|_| macos);
     CxxQtBuilder::new_qml_module(
         QmlModule::new("io.github.astrovm.PkgDeck")
             .qml_file("qml/Main.qml")
@@ -30,12 +36,16 @@ fn main() {
     .file("src/network.rs")
     .qt_module("Network")
     .qt_module("Widgets")
-    .cpp_files([
-        "native/main.cpp",
-        "native/network.cpp",
-        "native/providers.cpp",
-        "native/controller.cpp",
-        "native/opening.cpp",
-    ])
+    .cpp_files(
+        [
+            "native/main.cpp",
+            "native/network.cpp",
+            "native/providers.cpp",
+            "native/controller.cpp",
+            "native/opening.cpp",
+        ]
+        .into_iter()
+        .chain(mac_files),
+    )
     .build();
 }

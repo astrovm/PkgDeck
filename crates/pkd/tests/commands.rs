@@ -27,6 +27,9 @@ impl Fixture {
         command
             .env("PATH", &self.0)
             .env("HOME", &self.0)
+            .env("XDG_STATE_HOME", &self.0)
+            .env("XDG_CACHE_HOME", &self.0)
+            .env("XDG_CONFIG_HOME", &self.0)
             .env_remove("SNAP")
             .env_remove("FLATPAK_ID")
             .args(["--from", "homebrew"]);
@@ -51,6 +54,9 @@ impl Fixture {
             .env("TERM", "xterm-256color")
             .env("PATH", &self.0)
             .env("HOME", &self.0)
+            .env("XDG_STATE_HOME", &self.0)
+            .env("XDG_CACHE_HOME", &self.0)
+            .env("XDG_CONFIG_HOME", &self.0)
             .env_remove("SNAP")
             .env_remove("FLATPAK_ID")
             .stdin(Stdio::piped())
@@ -172,6 +178,9 @@ esac
     let output = Command::new(env!("CARGO_BIN_EXE_pkd"))
         .env("PATH", &fixture.0)
         .env("HOME", &fixture.0)
+        .env("XDG_STATE_HOME", &fixture.0)
+        .env("XDG_CACHE_HOME", &fixture.0)
+        .env("XDG_CONFIG_HOME", &fixture.0)
         .env_remove("SNAP")
         .env_remove("FLATPAK_ID")
         .args(["--json", "--from", "docker", "list"])
@@ -191,12 +200,17 @@ esac
 }
 #[test]
 fn flatpak_fails_closed_without_host_bridge() {
+    let fixture = Fixture::new();
     for args in [
         vec!["--json", "--from", "apt", "search", "fixture"],
         vec!["--json", "--from", "homebrew", "list"],
         vec!["--json", "--yes", "--from", "apt", "install", "fixture"],
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_pkd"))
+            .env("HOME", &fixture.0)
+            .env("XDG_STATE_HOME", &fixture.0)
+            .env("XDG_CACHE_HOME", &fixture.0)
+            .env("XDG_CONFIG_HOME", &fixture.0)
             .env("FLATPAK_ID", "io.github.astrovm.PkgDeck")
             .env(
                 "DBUS_SESSION_BUS_ADDRESS",
@@ -258,6 +272,9 @@ esac
         let output = Command::new(env!("CARGO_BIN_EXE_pkd"))
             .env("PATH", &fixture.0)
             .env("HOME", &fixture.0)
+            .env("XDG_STATE_HOME", &fixture.0)
+            .env("XDG_CACHE_HOME", &fixture.0)
+            .env("XDG_CONFIG_HOME", &fixture.0)
             .env_remove("SNAP")
             .env_remove("FLATPAK_ID")
             .args(["--json", "--from", "dnf", "search", "synthetic-player"])
@@ -305,6 +322,9 @@ esac
         command
             .env("PATH", &fixture.0)
             .env("HOME", &fixture.0)
+            .env("XDG_STATE_HOME", &fixture.0)
+            .env("XDG_CACHE_HOME", &fixture.0)
+            .env("XDG_CONFIG_HOME", &fixture.0)
             .env_remove("SNAP")
             .env_remove("FLATPAK_ID")
             .args(["--json", "--from", "flatpak", "--scope", "user"]);

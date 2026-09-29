@@ -9,18 +9,47 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
-#[derive(Clone, Debug, Default)]
-pub struct Cancellation(Arc<AtomicBool>);
+/// Receives each line a package manager prints while it runs.
+pub type OutputObserver = Arc<dyn Fn(&str) + Send + Sync>;
+
+/// Cancels a running job, and can follow its output: it reaches every
+/// command a job runs, so an observer set here sees their output live.
+#[derive(Clone, Default)]
+pub struct Cancellation {
+    flag: Arc<AtomicBool>,
+    output: Option<OutputObserver>,
+}
+impl std::fmt::Debug for Cancellation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Cancellation")
+            .field("requested", &self.requested())
+            .field("observed", &self.output.is_some())
+            .finish()
+    }
+}
 impl Cancellation {
     /// Shared signal flag; handlers only request cancellation.
     pub fn flag(&self) -> Arc<AtomicBool> {
-        self.0.clone()
+        self.flag.clone()
     }
     pub fn cancel(&self) {
-        self.0.store(true, Ordering::Relaxed);
+        self.flag.store(true, Ordering::Relaxed);
     }
     pub fn requested(&self) -> bool {
-        self.0.load(Ordering::Relaxed)
+        self.flag.load(Ordering::Relaxed)
+    }
+    /// The same cancellation, with `observer` seeing every line of output
+    /// the job's commands print, as they print it.
+    pub fn with_output(&self, observer: OutputObserver) -> Self {
+        Self {
+            flag: self.flag.clone(),
+            output: Some(observer),
+        }
+    }
+    pub(crate) fn observe(&self, line: &str) {
+        if let Some(observer) = &self.output {
+            observer(line);
+        }
     }
 }
 
@@ -180,10 +209,25 @@ fn drain(
 }
 
 pub(crate) fn run(
+    command: Command,
+    limits: Limits,
+    cancel: &Cancellation,
+    write: bool,
+) -> Result<Completion, ExecutionError> {
+    run_observed(command, limits, cancel, write, &mut |line| {
+        cancel.observe(line)
+    })
+}
+
+/// Like [`run`], and hands each complete line of standard output to
+/// `on_line` as soon as it arrives, so a long command can be followed
+/// (which package Homebrew is upgrading now, for one).
+pub(crate) fn run_observed(
     mut command: Command,
     limits: Limits,
     cancel: &Cancellation,
     write: bool,
+    on_line: &mut dyn FnMut(&str),
 ) -> Result<Completion, ExecutionError> {
     if cancel.requested() {
         return Err(ExecutionError::Cancelled);
@@ -222,6 +266,17 @@ pub(crate) fn run(
         cancellation_deferred: false,
     };
     let mut reaped = false;
+    // Standard output up to here was already handed out line by line.
+    let mut reported = 0;
+    let mut report = |output: &[u8], last: bool| {
+        while let Some(end) = output[reported..].iter().position(|byte| *byte == b'\n') {
+            on_line(&String::from_utf8_lossy(&output[reported..reported + end]));
+            reported += end + 1;
+        }
+        if last && reported < output.len() {
+            on_line(&String::from_utf8_lossy(&output[reported..]));
+        }
+    };
     let supervise = (|| {
         nonblocking(&stdout)?;
         nonblocking(&stderr)?;
@@ -232,9 +287,11 @@ pub(crate) fn run(
         };
         loop {
             drain_both(&mut result)?;
+            report(&result.stdout, false);
             if let Some(status) = child.try_wait()? {
                 reaped = true;
                 drain_both(&mut result)?;
+                report(&result.stdout, true);
                 result.code = status.code();
                 result.signal = status.signal();
                 result.cancellation_deferred = write && cancel.requested();
@@ -387,6 +444,28 @@ mod tests {
         assert_eq!(result.code, Some(0));
         assert_eq!(result.stdout, b"committed\n");
         assert!(result.cancellation_deferred);
+    }
+    #[test]
+    fn output_lines_arrive_while_the_program_runs() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "printf 'first\\n'; sleep 0.2; printf 'second\\nlast'"]);
+        let started = Instant::now();
+        let lines = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = lines.clone();
+        let cancel = Cancellation::default().with_output(Arc::new(move |line: &str| {
+            seen.lock()
+                .unwrap()
+                .push((line.to_owned(), started.elapsed()));
+        }));
+        assert!(format!("{cancel:?}").contains("observed: true"));
+        let result = run(command, Limits::default(), &cancel, false).unwrap();
+        let lines = lines.lock().unwrap();
+        assert_eq!(result.stdout, b"first\nsecond\nlast");
+        let names: Vec<_> = lines.iter().map(|(line, _)| line.as_str()).collect();
+        assert_eq!(names, ["first", "second", "last"]);
+        // The first line came before the program finished.
+        assert!(lines[0].1 < lines[1].1);
+        assert!(lines[1].1 - lines[0].1 >= Duration::from_millis(150));
     }
     #[test]
     fn a_program_still_open_for_writing_runs_once_it_is_closed() {

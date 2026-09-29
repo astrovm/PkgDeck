@@ -100,6 +100,10 @@ impl<'a> Session<'a> {
                 progress: Progress::Transfer { completed, total },
                 ..
             } => self.live.detail(&transfer(completed, total)),
+            Event::Progress {
+                progress: Progress::Package(name),
+                ..
+            } => self.live.detail(&format!("Updating {name}")),
             Event::Finished { operation, result } => {
                 if !self.show_results {
                     return;
@@ -272,6 +276,10 @@ mod tests {
                 completed: 512,
                 total: Some(1024),
             },
+        });
+        session.event(Event::Progress {
+            operation: operations[0].clone(),
+            progress: Progress::Package("fixture".into()),
         });
         session.event(Event::Finished {
             operation: operations[0].clone(),

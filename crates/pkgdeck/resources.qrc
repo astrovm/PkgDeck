@@ -1,5 +1,6 @@
 <RCC><qresource prefix="/pkgdeck">
   <file alias="logo.svg">assets/logo.svg</file>
+  <file alias="logo-template.svg">assets/logo-template.svg</file>
   <file alias="github.svg">assets/github.svg</file>
   <file alias="github-dark.svg">assets/github-dark.svg</file>
   <file alias="github.png">assets/github.png</file>

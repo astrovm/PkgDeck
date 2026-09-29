@@ -56,6 +56,8 @@ rm -rf "$app"
 mkdir -p "$contents/MacOS" "$contents/Resources" "$contents/Resources/licenses"
 cp "$target/pkgdeck" "$target/pkd" "$contents/MacOS/"
 cp LICENSE "$contents/Resources/licenses/PkgDeck"
+# sudo's password prompt for Homebrew casks that need administrator access.
+install -m 755 packaging/macos/pkgdeck-askpass "$contents/Resources/pkgdeck-askpass"
 cp -R "$kde/share/licenses/kirigami" "$contents/Resources/licenses/kirigami"
 iconset=$work/PkgDeck.iconset
 rm -rf "$iconset"

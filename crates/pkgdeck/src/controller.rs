@@ -275,6 +275,8 @@ enum Payload {
 enum Reply {
     Progress(String),
     ProgressEvent(Event),
+    /// A line of output from an Update all step that names a package.
+    Output(String),
     Partial(PackageReport),
     Inventory(PackageReport),
     DetailsPreview(Box<PackageDetails>),
@@ -294,9 +296,85 @@ struct ProgressState {
     /// The operation running now; before the first one starts, the job's
     /// only operation, if it has just one.
     current: Option<Operation>,
+    /// Rows a whole-source step is expected to update, by source, from
+    /// the Updates list (see `with_rows`).
+    rows: BTreeMap<String, Vec<PackageId>>,
+    /// The package a whole-source step reported it is working on now.
+    item: Option<PackageId>,
+    /// Packages already done, successfully or not.
+    finished: Vec<PackageId>,
     names: Names,
 }
 impl ProgressState {
+    /// Counts each package a whole-source step updates as a step of its
+    /// own, using the rows with updates in `packages`, so "Update all"
+    /// reads "3 of 12" packages instead of "1 of 2" sources.
+    fn with_rows(mut self, packages: &[Package]) -> Self {
+        for operation in &self.operations {
+            if let Operation::UpgradeAll { backend } = operation {
+                let rows: Vec<_> = packages
+                    .iter()
+                    .filter(|p| {
+                        p.id.backend == *backend
+                            && p.installed_version.is_some()
+                            && p.update == UpdateAvailability::Available
+                    })
+                    .map(|p| p.id.clone())
+                    .collect();
+                for package in packages.iter().filter(|p| rows.contains(&p.id)) {
+                    self.names
+                        .entry(package.id.clone())
+                        .or_insert_with(|| package.display_name.clone());
+                }
+                if !rows.is_empty() {
+                    self.total += rows.len() - 1;
+                }
+                self.rows.insert(backend.clone(), rows);
+            }
+        }
+        self
+    }
+    /// A whole-source step moved on to the package `name` (as its source
+    /// names it: the row's name or the name people see). The package
+    /// before it is done. False when no row of that source matches.
+    fn move_to(&mut self, backend: &str, name: &str) -> bool {
+        let Some(id) = self.rows.get(backend).and_then(|rows| {
+            rows.iter()
+                .find(|id| {
+                    id.name == name || self.names.get(*id).is_some_and(|shown| shown == name)
+                })
+                .cloned()
+        }) else {
+            return false;
+        };
+        if let Some(previous) = self.item.take().filter(|previous| *previous != id) {
+            self.finish(previous);
+        }
+        self.label = format!(
+            "Update {}",
+            self.names
+                .get(&id)
+                .cloned()
+                .unwrap_or_else(|| id.name.clone())
+        );
+        self.item = Some(id);
+        true
+    }
+    /// Follows a line of output from the running whole-source step.
+    fn observe(&mut self, line: &str) -> bool {
+        let Some(Operation::UpgradeAll { backend }) = self.current.clone() else {
+            return false;
+        };
+        pkgdeck_core::backends::output_package(&backend, line)
+            .is_some_and(|name| self.move_to(&backend, &name))
+    }
+    /// Marks a package done and counts it, once.
+    fn finish(&mut self, id: PackageId) {
+        if !self.finished.contains(&id) {
+            self.finished.push(id);
+            self.done = (self.done + 1).min(self.total);
+        }
+    }
     fn new(job: &Job, activity_id: Option<u64>, names: &Names) -> Self {
         let operations = job.operations();
         let label = operations
@@ -333,6 +411,9 @@ impl ProgressState {
             transfer_total: None,
             operations,
             current,
+            rows: BTreeMap::new(),
+            item: None,
+            finished: vec![],
             names: names.clone(),
         }
     }
@@ -341,8 +422,15 @@ impl ProgressState {
             Event::Started(operation) => {
                 self.label = operation_title_named(operation, &self.names);
                 self.current = Some(operation.clone());
+                self.item = None;
                 self.transferred = 0;
                 self.transfer_total = None;
+            }
+            Event::Progress {
+                operation: Operation::UpgradeAll { backend },
+                progress: Progress::Package(name),
+            } => {
+                self.move_to(backend, name);
             }
             Event::Progress {
                 progress: Progress::Transfer { completed, total },
@@ -351,8 +439,20 @@ impl ProgressState {
                 self.transferred = *completed;
                 self.transfer_total = (*total).filter(|total| *total > 0);
             }
-            Event::Finished { .. } => {
-                self.done = (self.done + 1).min(self.total);
+            Event::Finished { operation, .. } => {
+                let rows = match operation {
+                    Operation::UpgradeAll { backend } => {
+                        self.rows.get(backend).cloned().unwrap_or_default()
+                    }
+                    _ => package_target(operation).cloned().into_iter().collect(),
+                };
+                if rows.is_empty() {
+                    self.done = (self.done + 1).min(self.total);
+                }
+                for id in rows {
+                    self.finish(id);
+                }
+                self.item = None;
                 self.transferred = 0;
                 self.transfer_total = None;
             }
@@ -378,8 +478,13 @@ impl ProgressState {
         let targets: Vec<_> = self
             .operations
             .iter()
-            .filter_map(package_target)
-            .map(target_row)
+            .flat_map(|operation| match operation {
+                Operation::UpgradeAll { backend } => {
+                    self.rows.get(backend).cloned().unwrap_or_default()
+                }
+                _ => package_target(operation).cloned().into_iter().collect(),
+            })
+            .map(|id| target_row(&id))
             .collect();
         let sources: Vec<_> = self
             .operations
@@ -401,7 +506,8 @@ impl ProgressState {
             "targets": targets,
             "sources": sources,
             "action": current.map_or("", operation_kind),
-            "current": current.and_then(package_target).map(target_row),
+            "current": self.item.as_ref().or_else(|| current.and_then(package_target)).map(target_row),
+            "finished": self.finished.iter().map(target_row).collect::<Vec<_>>(),
             "current_source": current.map(Operation::backend),
         }))
     }
@@ -701,6 +807,7 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
                             Some(total) => format!("Transferred {completed} of {total}"),
                             None => format!("Transferred {completed}"),
                         },
+                        Progress::Package(name) => format!("Updating {name}"),
                     }));
                 }
                 if !matches!(&event, Event::Progress { progress: Progress::Message(_), .. }) {
@@ -1092,26 +1199,43 @@ impl Controller {
         }
     }
 }
+/// Update all: one command for each source that can update everything at
+/// once, and one update per package for sources that can't (rustup, Nix,
+/// firmware, ...). Progress still names each package: sources report which
+/// one they are on (see `Progress::Package`).
 fn upgrade_plan(packages: &[Package]) -> Vec<Operation> {
-    let backends: std::collections::BTreeSet<_> = packages
+    let (each, whole): (Vec<_>, Vec<_>) = packages
         .iter()
         .filter(|p| p.installed_version.is_some() && p.update == UpdateAvailability::Available)
-        .filter(|p| !pkgdeck_core::backends::update_only(&p.id.backend))
-        .map(|p| p.id.backend.clone())
-        .collect();
+        .partition(|p| pkgdeck_core::backends::per_package_upgrades(&p.id.backend));
+    let backends: std::collections::BTreeSet<_> =
+        whole.iter().map(|p| p.id.backend.clone()).collect();
+    // A package listed twice is still updated once, in list order.
+    let mut seen = std::collections::BTreeSet::new();
     backends
         .into_iter()
         .map(|backend| Operation::UpgradeAll { backend })
         .chain(
-            packages
-                .iter()
-                .filter(|p| {
-                    pkgdeck_core::backends::update_only(&p.id.backend)
-                        && p.update == UpdateAvailability::Available
-                })
+            each.into_iter()
+                .filter(|p| seen.insert(&p.id))
                 .map(|p| Operation::Upgrade(p.id.clone())),
         )
         .collect()
+}
+/// Passes on the lines of output that name a package one of `backends` is
+/// updating; everything else a manager prints stays in the worker.
+fn output_follower(
+    backends: Vec<String>,
+    sender: mpsc::Sender<Reply>,
+) -> pkgdeck_core::process::OutputObserver {
+    std::sync::Arc::new(move |line: &str| {
+        if backends
+            .iter()
+            .any(|backend| pkgdeck_core::backends::output_package(backend, line).is_some())
+        {
+            let _ = sender.send(Reply::Output(line.to_owned()));
+        }
+    })
 }
 fn epoch_seconds() -> u64 {
     SystemTime::now()
@@ -1441,6 +1565,14 @@ fn plain_error(error: &EngineError, backend: Option<&str>, sudo: bool) -> String
         EngineError::Execution(E::Interrupted) => "The package manager was interrupted. Check its state before trying again.".into(),
         EngineError::Execution(E::TimedOut) => "The package manager took too long to answer. Try again.".into(),
         EngineError::Cancelled | EngineError::Execution(E::Cancelled) => "Cancelled.".into(),
+        // A cask script ran sudo and got no password: the dialog was
+        // cancelled, or this build has no dialog to show.
+        EngineError::Execution(E::Failed(result))
+            if matches!(backend, Some("homebrew" | "homebrew-cask"))
+                && String::from_utf8_lossy(&result.stderr).contains("/usr/bin/sudo") =>
+        {
+            "Homebrew needed your administrator password to finish this change and didn't get one. Try again and enter your password when asked.".into()
+        }
         EngineError::Execution(E::Failed(result)) => {
             let output = String::from_utf8_lossy(&result.stderr);
             let output = if output.trim().is_empty() {
@@ -2802,8 +2934,22 @@ impl ffi::PackageController {
             controller.prefetch = prefetch_views();
         }
         let cancel = Cancellation::default();
-        let token = cancel.clone();
         let (sender, receiver) = mpsc::channel();
+        // Update all runs one command per source; its output says which
+        // package each one is on, so pass those lines to the progress.
+        let followed: Vec<String> = job
+            .operations()
+            .into_iter()
+            .filter_map(|operation| match operation {
+                Operation::UpgradeAll { backend } => Some(backend),
+                _ => None,
+            })
+            .collect();
+        let token = if followed.is_empty() {
+            cancel.clone()
+        } else {
+            cancel.with_output(output_follower(followed, sender.clone()))
+        };
         let worker_job = job.clone();
         // Loads rebuild for fresh discovery; the previous engine is dropped.
         // Details can reuse a warm engine; mutation jobs always rediscover.
@@ -2925,6 +3071,7 @@ impl ffi::PackageController {
                 self.rust().active_activity_id,
                 &self.rust().names_for(&worker_job.operations()),
             )
+            .with_rows(&self.rust().packages)
         });
         self.as_mut().rust_mut().worker = Some(Worker {
             handle,
@@ -2939,6 +3086,14 @@ impl ffi::PackageController {
         let foreground = !self.rust().background && !quiet;
         self.as_mut().set_busy(foreground);
         self.set_writing(writing);
+    }
+    fn follow_output(mut self: Pin<&mut Self>, line: &str) {
+        if let Some(state) = self.as_mut().rust_mut().progress_state.as_mut() {
+            if state.observe(line) {
+                let snapshot = state.snapshot();
+                self.as_mut().set_progress(snapshot);
+            }
+        }
     }
     fn update_progress(mut self: Pin<&mut Self>, event: &Event) {
         if let Some(state) = self.as_mut().rust_mut().progress_state.as_mut() {
@@ -4604,7 +4759,10 @@ impl ffi::PackageController {
                             }
                         }
                     }
-                    Reply::Progress(_) | Reply::ProgressEvent(_) | Reply::Inventory(_) => {}
+                    Reply::Progress(_)
+                    | Reply::ProgressEvent(_)
+                    | Reply::Output(_)
+                    | Reply::Inventory(_) => {}
                 }
             }
             if joined.is_err() && !self.rust().background {
@@ -4662,6 +4820,7 @@ impl ffi::PackageController {
                         self.as_mut().set_status(message.as_str().into());
                     }
                     Reply::ProgressEvent(event) => self.as_mut().update_progress(&event),
+                    Reply::Output(line) => self.as_mut().follow_output(&line),
                     _ => {}
                 }
             }
@@ -8376,6 +8535,7 @@ mod tests {
                         completed: 7,
                         total: None,
                     },
+                    Progress::Package("synthetic-firmware".into()),
                 ],
             })
             .unwrap();
@@ -8394,7 +8554,14 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(texts, ["Transferred 5 of 10", "Transferred 7"]);
+        assert_eq!(
+            texts,
+            [
+                "Transferred 5 of 10",
+                "Transferred 7",
+                "Updating synthetic-firmware"
+            ]
+        );
         assert!(matches!(
             replies.last(),
             Some(Reply::Done(Ok(Payload::Batch(status, outcomes))))
@@ -9075,6 +9242,14 @@ mod tests {
                 vec![Operation::Upgrade(standalone.id)]
             );
         }
+        for backend in ["rustup", "pixi", "nix"] {
+            let mut toolchain = package.clone();
+            toolchain.id.backend = backend.into();
+            assert_eq!(
+                upgrade_plan(&[toolchain.clone()]),
+                vec![Operation::Upgrade(toolchain.id)]
+            );
+        }
         let mixed = upgrade_plan(&[package.clone(), firmware.clone()]);
         assert!(mixed.contains(&Operation::Upgrade(firmware.id.clone())));
         let label = confirmation_label(
@@ -9134,13 +9309,18 @@ mod tests {
             current,
             uninstalled,
         ]);
-        assert_eq!(plan.len(), 2);
-        assert!(plan.contains(&Operation::UpgradeAll {
-            backend: id.backend.clone()
-        }));
-        assert!(plan.contains(&Operation::UpgradeAll {
-            backend: other.id.backend
-        }));
+        // One command for each source, however many packages it updates.
+        assert_eq!(
+            plan,
+            vec![
+                Operation::UpgradeAll {
+                    backend: id.backend.clone()
+                },
+                Operation::UpgradeAll {
+                    backend: other.id.backend.clone()
+                }
+            ]
+        );
         for fail in [false, true] {
             let mut engine = Engine::default();
             engine
@@ -9415,6 +9595,12 @@ mod tests {
             "The package manager reported an error."
         );
         assert_eq!(plain_error(&failed("boom"), None, false), "Boom.");
+        let sudo_failed = failed(
+            "Error: Failure while executing; `/usr/bin/sudo -E -- /bin/rm -r -f --` exited with 1.",
+        );
+        assert!(plain_error(&sudo_failed, Some("homebrew-cask"), false)
+            .starts_with("Homebrew needed your administrator password"));
+        assert!(plain_error(&sudo_failed, Some("npm"), false).starts_with("npm couldn't run"));
         // Running as root is explained, whatever layer said it.
         assert_eq!(
             plain_error(
@@ -9953,6 +10139,20 @@ mod tests {
         assert_eq!(snapshot["current_source"], "apt");
         assert_eq!(snapshot["action"], "update");
         assert!((snapshot["fraction"].as_f64().unwrap() - 0.5 / 3.0).abs() < 1e-9);
+        assert_eq!(snapshot["finished"], json!([]));
+        // A finished package step is listed, a whole-source one is not.
+        state.apply(&Event::Finished {
+            operation: Operation::Upgrade(second.clone()),
+            result: Ok(OperationOutcome::default()),
+        });
+        state.apply(&Event::Finished {
+            operation: Operation::UpgradeAll {
+                backend: "flatpak".into(),
+            },
+            result: Ok(OperationOutcome::default()),
+        });
+        let snapshot: Value = serde_json::from_str(&state.snapshot().to_string()).unwrap();
+        assert_eq!(snapshot["finished"], json!([target_row(&second)]));
         // One change: its transfer is the fraction, unknown without one.
         let single = Job::Write(Operation::Install(first.clone()), None);
         let mut state = ProgressState::new(&single, None, &names);
@@ -9973,6 +10173,138 @@ mod tests {
             result: Ok(OperationOutcome::default()),
         });
         assert_eq!(state.fraction(), Some(1.0));
+    }
+    #[test]
+    fn update_all_counts_and_follows_each_package_of_a_source() {
+        let cask = |name: &str, shown: &str| {
+            let mut package = synthetic_package(name, shown);
+            package.id.backend = "homebrew-cask".into();
+            package.update = UpdateAvailability::Available;
+            package
+        };
+        let (alpha, beta, gamma) = (
+            cask("alpha", "Alpha App"),
+            cask("beta", "Beta App"),
+            cask("gamma", "Gamma App"),
+        );
+        let mut current = cask("current", "Current");
+        current.update = UpdateAvailability::Current;
+        let firmware = {
+            let mut package = synthetic_package("bios", "BIOS");
+            package.id.backend = "fwupd".into();
+            package.id
+        };
+        let casks = Operation::UpgradeAll {
+            backend: "homebrew-cask".into(),
+        };
+        let flatpak = Operation::UpgradeAll {
+            backend: "flatpak".into(),
+        };
+        let job = Job::UpgradeAll(
+            vec![
+                casks.clone(),
+                flatpak.clone(),
+                Operation::Upgrade(firmware.clone()),
+            ],
+            None,
+        );
+        let packages = [alpha.clone(), beta.clone(), gamma.clone(), current];
+        let mut state = ProgressState::new(&job, None, &Names::new()).with_rows(&packages);
+        let snapshot = |state: &ProgressState| -> Value {
+            serde_json::from_str(&state.snapshot().to_string()).unwrap()
+        };
+        // Three casks, one Flatpak step without rows, and the firmware.
+        assert_eq!(snapshot(&state)["total"], 5);
+        assert_eq!(snapshot(&state)["targets"].as_array().unwrap().len(), 4);
+        assert!(!state.observe("==> Upgrading beta"), "nothing runs yet");
+        state.apply(&Event::Started(casks.clone()));
+        assert!(!state.observe("==> Upgrading 3 outdated packages:"));
+        assert!(!state.observe("==> Upgrading unlisted"));
+        assert!(state.observe("==> Upgrading beta"));
+        let now = snapshot(&state);
+        assert_eq!(now["label"], "Update Beta App");
+        assert_eq!(now["current"], target_row(&beta.id));
+        assert_eq!(now["done"], 0);
+        assert!(state.observe("==> Upgrading gamma"));
+        assert_eq!(snapshot(&state)["finished"], json!([target_row(&beta.id)]));
+        // Sources PkgDeck updates one by one report packages directly, by
+        // the name people see as well.
+        state.apply(&Event::Progress {
+            operation: casks.clone(),
+            progress: Progress::Package("Alpha App".into()),
+        });
+        assert_eq!(snapshot(&state)["done"], 2);
+        state.apply(&Event::Finished {
+            operation: casks,
+            result: Ok(OperationOutcome::default()),
+        });
+        assert_eq!(snapshot(&state)["done"], 3);
+        assert_eq!(snapshot(&state)["finished"].as_array().unwrap().len(), 3);
+        state.apply(&Event::Started(flatpak.clone()));
+        state.apply(&Event::Finished {
+            operation: flatpak,
+            result: Ok(OperationOutcome::default()),
+        });
+        assert_eq!(snapshot(&state)["done"], 4);
+        state.apply(&Event::Started(Operation::Upgrade(firmware.clone())));
+        assert!(
+            !state.observe("==> Upgrading alpha"),
+            "not a whole-source step"
+        );
+        state.apply(&Event::Finished {
+            operation: Operation::Upgrade(firmware),
+            result: Ok(OperationOutcome::default()),
+        });
+        assert_eq!(snapshot(&state)["done"], 5);
+        assert_eq!(state.fraction(), Some(1.0));
+
+        // The worker passes on only lines that name a package.
+        let (sender, receiver) = mpsc::channel();
+        let follow = output_follower(vec!["homebrew-cask".into()], sender);
+        follow("==> Downloading https://example.invalid/beta.zip");
+        follow("==> Upgrading beta");
+        assert!(matches!(
+            receiver.try_iter().collect::<Vec<_>>().as_slice(),
+            [Reply::Output(line)] if line == "==> Upgrading beta"
+        ));
+    }
+    #[test]
+    fn followed_output_moves_the_running_update_all_on() {
+        let mut controller = synthetic_controller();
+        let mut controller = controller.pin_mut();
+        let mut package = synthetic_package("beta", "Beta App");
+        package.id.backend = "homebrew-cask".into();
+        package.update = UpdateAvailability::Available;
+        let casks = Operation::UpgradeAll {
+            backend: "homebrew-cask".into(),
+        };
+        let job = Job::UpgradeAll(vec![casks.clone()], None);
+        let mut state =
+            ProgressState::new(&job, None, &Names::new()).with_rows(std::slice::from_ref(&package));
+        state.apply(&Event::Started(casks));
+        controller.as_mut().rust_mut().progress_state = Some(state);
+        let (sender, receiver) = mpsc::channel();
+        let (release, hold) = mpsc::channel::<()>();
+        sender
+            .send(Reply::Output("==> Upgrading beta".into()))
+            .unwrap();
+        controller.as_mut().rust_mut().worker = Some(Worker {
+            handle: thread::spawn(move || {
+                let _ = hold.recv();
+                drop(sender);
+            }),
+            receiver,
+            cancel: Cancellation::default(),
+            job,
+        });
+        controller.as_mut().poll();
+        let progress: Value = serde_json::from_str(&controller.progress().to_string()).unwrap();
+        assert_eq!(progress["label"], "Update Beta App");
+        assert_eq!(progress["current"], target_row(&package.id));
+        drop(release);
+        controller.as_mut().rust_mut().progress_state = None;
+        controller.as_mut().follow_output("==> Upgrading beta");
+        settle(&mut controller);
     }
     #[test]
     fn undo_is_offered_only_where_it_is_safe() {

@@ -98,8 +98,12 @@ impl Schedule {
     }
 }
 
+/// Where the start-at-login entry lives: an XDG autostart entry on Linux,
+/// a per-user LaunchAgent on macOS.
 pub fn autostart_path() -> Option<PathBuf> {
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    return launch_agent_path_from(std::env::var_os("HOME"));
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     return None;
     #[cfg(target_os = "linux")]
     {
@@ -119,6 +123,12 @@ fn autostart_path_from(config: Option<OsString>, home: Option<OsString>) -> Opti
                 .map(|home| PathBuf::from(home).join(".config"))
         })?;
     Some(base.join("autostart/io.github.astrovm.PkgDeck.desktop"))
+}
+#[cfg(any(target_os = "macos", test))]
+fn launch_agent_path_from(home: Option<OsString>) -> Option<PathBuf> {
+    home.filter(|p| Path::new(p).is_absolute()).map(|home| {
+        PathBuf::from(home).join("Library/LaunchAgents/io.github.astrovm.PkgDeck.plist")
+    })
 }
 pub fn set_autostart(path: &Path, enabled: bool) -> io::Result<()> {
     let environment: BTreeMap<OsString, OsString> = std::env::vars_os().collect();
@@ -142,6 +152,19 @@ fn set_autostart_for(
         path.parent()
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid autostart path"))?,
     )?;
+    if path
+        .extension()
+        .is_some_and(|extension| extension == "plist")
+    {
+        let plist = launch_agent(&std::env::current_exe()?)?;
+        let mut file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(path)?;
+        file.write_all(plist.as_bytes())?;
+        return file.sync_all();
+    }
     let executable = if matches!(runtime, Runtime::Native | Runtime::AppImage) {
         std::env::current_exe()?
     } else {
@@ -155,6 +178,62 @@ fn set_autostart_for(
         .open(path)?;
     file.write_all(format!("[Desktop Entry]\nType=Application\nName=PkgDeck\nExec={exec}\nIcon=io.github.astrovm.PkgDeck\nX-GNOME-Autostart-enabled=true\n").as_bytes())?;
     file.sync_all()
+}
+
+/// A LaunchAgent that opens PkgDeck in the background at login. Inside an
+/// app bundle it goes through `open`, so macOS starts the app the usual way
+/// (one copy, Dock and menu bar set up); outside one it runs the program.
+fn launch_agent(executable: &Path) -> io::Result<String> {
+    let path = executable
+        .to_str()
+        .filter(|value| executable.is_absolute() && !value.chars().any(char::is_control))
+        .ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "invalid autostart executable")
+        })?;
+    let bundle = executable
+        .ancestors()
+        .find(|ancestor| {
+            ancestor
+                .extension()
+                .is_some_and(|extension| extension == "app")
+        })
+        .and_then(Path::to_str);
+    let arguments: Vec<&str> = match bundle {
+        Some(bundle) => vec![
+            "/usr/bin/open",
+            "-g",
+            "-j",
+            "-a",
+            bundle,
+            "--args",
+            "--background",
+        ],
+        None => vec![path, "--background"],
+    };
+    let escape = |value: &str| {
+        value
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+    };
+    let arguments: String = arguments
+        .iter()
+        .map(|argument| format!("        <string>{}</string>\n", escape(argument)))
+        .collect();
+    Ok([
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n",
+        "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n",
+        "<plist version=\"1.0\">\n<dict>\n",
+        "    <key>Label</key>\n    <string>io.github.astrovm.PkgDeck</string>\n",
+        "    <key>ProgramArguments</key>\n    <array>\n",
+        &arguments,
+        "    </array>\n",
+        "    <key>RunAtLoad</key>\n    <true/>\n",
+        "    <key>LimitLoadToSessionType</key>\n    <string>Aqua</string>\n",
+        "    <key>ProcessType</key>\n    <string>Interactive</string>\n",
+        "</dict>\n</plist>\n",
+    ]
+    .concat())
 }
 
 fn autostart_exec(
@@ -296,7 +375,33 @@ mod tests {
             .contains("\nExec=snap run pkgdeck --background\n"));
         let blocked = path.join("app.desktop");
         assert!(set_autostart(&blocked, true).is_err());
+        let agent = path.with_file_name("io.github.astrovm.PkgDeck.plist");
+        set_autostart(&agent, true).unwrap();
+        let plist = fs::read_to_string(&agent).unwrap();
+        assert!(plist.contains("<string>--background</string>"));
+        assert!(plist.contains("<key>RunAtLoad</key>\n    <true/>"));
+        // A file where the folder should be blocks the write.
+        assert!(set_autostart(&agent.join("blocked.plist"), true).is_err());
+        set_autostart(&agent, false).unwrap();
+        assert!(!agent.exists());
         fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn launch_agent_opens_the_bundle_in_the_background() {
+        let bundled = launch_agent(Path::new(
+            "/Applications/Pkg & <Deck>.app/Contents/MacOS/pkgdeck",
+        ))
+        .unwrap();
+        assert!(bundled.contains(
+            "        <string>/usr/bin/open</string>\n        <string>-g</string>\n        <string>-j</string>\n        <string>-a</string>\n        <string>/Applications/Pkg &amp; &lt;Deck&gt;.app</string>\n        <string>--args</string>\n        <string>--background</string>\n"
+        ));
+        let loose = launch_agent(Path::new("/opt/pkgdeck/bin/pkgdeck")).unwrap();
+        assert!(loose.contains(
+            "        <string>/opt/pkgdeck/bin/pkgdeck</string>\n        <string>--background</string>\n"
+        ));
+        assert!(launch_agent(Path::new("relative/pkgdeck")).is_err());
+        assert!(launch_agent(Path::new("/tmp/app\nstart")).is_err());
     }
 
     #[test]
@@ -335,11 +440,20 @@ mod tests {
     #[test]
     fn autostart_path_uses_absolute_user_config_and_falls_back_to_home() {
         let suffix = Path::new("autostart/io.github.astrovm.PkgDeck.desktop");
-        if cfg!(target_os = "linux") {
-            assert!(autostart_path().unwrap().ends_with(suffix));
+        let agent = Path::new("Library/LaunchAgents/io.github.astrovm.PkgDeck.plist");
+        let expected = if cfg!(target_os = "macos") {
+            agent
         } else {
-            assert!(autostart_path().is_none());
-        }
+            suffix
+        };
+        assert!(autostart_path().is_some_and(|path| path.ends_with(expected)));
+        assert_eq!(
+            launch_agent_path_from(Some("/Users/fixture".into())),
+            Some(PathBuf::from(
+                "/Users/fixture/Library/LaunchAgents/io.github.astrovm.PkgDeck.plist"
+            ))
+        );
+        assert_eq!(launch_agent_path_from(Some("relative".into())), None);
         assert_eq!(
             autostart_path_from(
                 Some("/home/fixture/.config-alt".into()),

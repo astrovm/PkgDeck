@@ -58,6 +58,59 @@ fn refuse_root_as(write: bool, root: bool) -> Result<(), ExecutionError> {
     Ok(())
 }
 
+/// Points sudo at the password dialog bundled with the macOS app, so a
+/// Homebrew cask that needs administrator access (Docker Desktop removing
+/// its helper tools, for one) can ask for the password without a terminal.
+/// A prompt the person set up themselves wins; other builds have no helper.
+fn use_askpass(env: &mut BTreeMap<OsString, OsString>, executable: Option<&Path>) {
+    let helper = executable
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .map(|contents| contents.join("Resources/pkgdeck-askpass"))
+        .filter(|helper| helper.is_file());
+    if let Some(helper) = helper {
+        env.entry("SUDO_ASKPASS".into())
+            .or_insert_with(|| helper.into_os_string());
+    }
+}
+
+#[cfg(test)]
+mod askpass_tests {
+    use super::*;
+    #[test]
+    fn homebrew_asks_for_passwords_with_the_bundled_dialog() {
+        let bundle = std::env::temp_dir()
+            .join(format!("pkgdeck-askpass-{}", std::process::id()))
+            .join("PkgDeck.app/Contents");
+        fs::create_dir_all(bundle.join("MacOS")).unwrap();
+        fs::create_dir_all(bundle.join("Resources")).unwrap();
+        let executable = bundle.join("MacOS/pkgdeck");
+        let mut env = BTreeMap::new();
+        use_askpass(&mut env, Some(&executable));
+        assert!(env.is_empty(), "no helper, no prompt");
+        let helper = bundle.join("Resources/pkgdeck-askpass");
+        fs::write(&helper, "#!/bin/sh\n").unwrap();
+        use_askpass(&mut env, Some(&executable));
+        assert_eq!(
+            env.get(&OsString::from("SUDO_ASKPASS")),
+            Some(&helper.clone().into_os_string())
+        );
+        let mut own = BTreeMap::from([(
+            OsString::from("SUDO_ASKPASS"),
+            OsString::from("/usr/local/bin/mine"),
+        )]);
+        use_askpass(&mut own, Some(&executable));
+        assert_eq!(
+            own.get(&OsString::from("SUDO_ASKPASS")),
+            Some(&OsString::from("/usr/local/bin/mine"))
+        );
+        let mut none = BTreeMap::new();
+        use_askpass(&mut none, None);
+        assert!(none.is_empty());
+        fs::remove_dir_all(bundle.parent().unwrap().parent().unwrap()).unwrap();
+    }
+}
+
 pub const BACKENDS: &[(&str, &str)] = &[
     ("APT", "apt-get"),
     ("DNF", "dnf"),
@@ -535,6 +588,7 @@ impl Host {
         ] {
             host.env.insert(name.into(), "1".into());
         }
+        use_askpass(&mut host.env, std::env::current_exe().ok().as_deref());
         let run = || {
             let command = host.command(&path, args)?;
             process::run(

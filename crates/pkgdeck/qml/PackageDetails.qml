@@ -324,6 +324,7 @@ Rectangle {
                         NumberAnimation { duration: Theme.revealDuration; easing.type: Easing.OutCubic }
                     }
                     ListView {
+                        boundsBehavior: Theme.motionEnabled ? Flickable.DragAndOvershootBounds : Flickable.StopAtBounds
                         id: screenshotGallery
                         objectName: "screenshotGallery"
                         visible: panel.screenshots.length > 0

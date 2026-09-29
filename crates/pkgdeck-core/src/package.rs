@@ -231,7 +231,13 @@ impl Operation {
 #[serde(rename_all = "snake_case")]
 pub enum Progress {
     Message(String),
-    Transfer { completed: u64, total: Option<u64> },
+    Transfer {
+        completed: u64,
+        total: Option<u64>,
+    },
+    /// A step that changes several packages moved on to this one, named as
+    /// its source names it (Homebrew's "==> Upgrading <name>", for one).
+    Package(String),
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default, Eq, PartialEq)]
