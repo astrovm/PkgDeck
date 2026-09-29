@@ -271,17 +271,18 @@ fn failure(error: EngineError) -> (Value, u8) {
     let message = crate::presentation::error_message(&error);
     (json!({"error": error, "message": message}), code)
 }
-fn read_only_mutation(args: &Args) -> Option<EngineError> {
+/// An install or upgrade limited to inventory-only sources, which never
+/// install or upgrade. Removal goes on to planning: the source decides.
+fn inventory_only_mutation(args: &Args) -> Option<EngineError> {
     let capability = match args.command.as_ref()? {
         Commands::Install { .. } => Capability::Install,
-        Commands::Remove { .. } => Capability::Remove,
         Commands::Upgrade { .. } => Capability::Upgrade,
         _ => return None,
     };
     if args
         .from
         .iter()
-        .any(|id| !pkgdeck_core::backends::read_only(id))
+        .any(|id| !pkgdeck_core::backends::inventory_only(id))
     {
         return None;
     }
@@ -297,8 +298,10 @@ enum Lookup {
     Details,
     /// `install`: an unverified registry offer counts when it is the only one.
     Install,
-    /// `remove` and `upgrade NAME`: installed packages only.
+    /// `upgrade NAME`: installed packages only.
     Installed,
+    /// `remove`: installed packages, and a macOS app by its path.
+    Remove,
 }
 /// The package a typed name picks. `offers` are registry sources that
 /// could also try the name but did not confirm it exists; they never make
@@ -317,6 +320,8 @@ fn select(
 ) -> Selection {
     let report = if lookup == Lookup::Installed {
         engine.installed_for_mutation(cancel)
+    } else if lookup == Lookup::Remove {
+        engine.installed_for_removal(name, cancel)
     } else if lookup == Lookup::Install {
         engine.lookup_for_mutation(name, cancel)
     } else {
@@ -586,7 +591,7 @@ pub fn dispatch_with(
         }
         _ => (),
     }
-    if let Some(error) = read_only_mutation(args) {
+    if let Some(error) = inventory_only_mutation(args) {
         return failure(error);
     }
     // A typed name no source confirmed, with the registries that could try it.
@@ -648,7 +653,7 @@ pub fn dispatch_with(
                     .packages
                     .into_iter()
                     .filter(|p| p.update == UpdateAvailability::Available)
-                    .filter(|p| !pkgdeck_core::backends::read_only(&p.id.backend))
+                    .filter(|p| !pkgdeck_core::backends::inventory_only(&p.id.backend))
                 {
                     let operation =
                         if pkgdeck_core::backends::per_package_upgrades(&package.id.backend) {
@@ -668,10 +673,10 @@ pub fn dispatch_with(
             | Commands::Remove { names }
             | Commands::Upgrade { names, .. } => {
                 let mut operations = Vec::new();
-                let lookup = if matches!(command, Commands::Install { .. }) {
-                    Lookup::Install
-                } else {
-                    Lookup::Installed
+                let lookup = match command {
+                    Commands::Install { .. } => Lookup::Install,
+                    Commands::Remove { .. } => Lookup::Remove,
+                    _ => Lookup::Installed,
                 };
                 for name in names {
                     let selection = select(engine, args, name, lookup, cancel);
@@ -744,13 +749,15 @@ pub fn dispatch_with(
             return (data, code);
         }
     };
-    // Inventory-only sources cannot produce a mutation, even when an exact
-    // installed lookup succeeds. Reject before confirmation, progress events,
-    // and activity history rather than relying on execute's capability check.
-    if let Some(operation) = operations
-        .iter()
-        .find(|operation| pkgdeck_core::backends::read_only(operation.backend()))
-    {
+    // A change its source can't make, such as removing firmware, and any
+    // change but removal on an inventory-only source, is refused before
+    // confirmation, progress events, and activity history rather than by
+    // execute's capability check after approval.
+    if let Some(operation) = operations.iter().find(|operation| {
+        !engine.supports(operation.backend(), operation.capability())
+            || (pkgdeck_core::backends::inventory_only(operation.backend())
+                && !matches!(operation, Operation::Remove(_)))
+    }) {
         return failure(EngineError::Unsupported {
             backend: operation.backend().into(),
             capability: operation.capability(),
@@ -1024,7 +1031,7 @@ pub fn run(args: &Args) -> u8 {
         completions(shell, &mut io::stdout().lock());
         return 0;
     }
-    if let Some(error) = read_only_mutation(args) {
+    if let Some(error) = inventory_only_mutation(args) {
         let (data, code) = failure(error);
         return emit(args, data, code, false);
     }
@@ -1594,6 +1601,9 @@ mod tests {
                 self.0.fetch_add(1, Ordering::Relaxed);
                 Ok(vec![])
             }
+            fn may_have(&self, name: &str) -> bool {
+                name.ends_with(".app")
+            }
         }
         let reads = Arc::new(AtomicU32::new(0));
         for words in [
@@ -1638,10 +1648,117 @@ mod tests {
             assert_eq!(call(&mut engine, words, false).1, 0);
         }
         assert!(reads.load(Ordering::Relaxed) >= 3);
+        // Removing an app by its path is the one change that asks it.
+        let before = reads.load(Ordering::Relaxed);
+        let (data, code) = call(&mut engine, &["remove", "/Applications/Fixture.app"], false);
+        assert_eq!(code, 3, "{data}");
+        assert!(reads.load(Ordering::Relaxed) > before);
+    }
+    /// A source that reads its packages but can't remove them.
+    struct NoRemoval(Fixture);
+    impl Backend for NoRemoval {
+        fn id(&self) -> &str {
+            self.0.id()
+        }
+        fn capabilities(&self) -> &[Capability] {
+            &[
+                Capability::Search,
+                Capability::Installed,
+                Capability::Upgrade,
+            ]
+        }
+        fn detect(&mut self, cancel: &Cancellation) -> Result<Availability, EngineError> {
+            self.0.detect(cancel)
+        }
+        fn search(
+            &mut self,
+            query: &str,
+            cancel: &Cancellation,
+        ) -> Result<Vec<Package>, EngineError> {
+            self.0.search(query, cancel)
+        }
+        fn installed(&mut self, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
+            self.0.installed(cancel)
+        }
+    }
+    fn fixture(backend: &str) -> Fixture {
+        Fixture {
+            backend: backend.into(),
+            installed: true,
+            fail: None,
+            read_failure: None,
+            verified: true,
+        }
     }
     #[test]
-    fn read_only_mutations_fail_before_confirmation_or_activity_events() {
-        for command in ["install", "remove", "upgrade"] {
+    fn removals_reach_sources_that_support_them_and_others_fail_before_confirmation() {
+        for backend in ["macos-apps", "fwupd", "codex"] {
+            for yes in [false, true] {
+                // Without Remove, the change is refused before it is shown.
+                let mut engine = Engine::default();
+                engine.register(NoRemoval(fixture(backend))).unwrap();
+                let mut argv = vec!["pkd", "remove", "--from", backend, "fixture"];
+                if yes {
+                    argv.push("--yes");
+                }
+                let args = Args::try_parse_from(&argv).unwrap();
+                let mut events = vec![];
+                // Asking would be declined and exit with 7, not 1.
+                let (data, code) = dispatch(
+                    &mut engine,
+                    &args,
+                    &Cancellation::default(),
+                    &mut decline,
+                    &mut record(&mut events),
+                );
+                assert_eq!(code, 1, "{data}");
+                assert_eq!(data["error"]["Unsupported"]["backend"], backend, "{data}");
+                assert_eq!(
+                    data["error"]["Unsupported"]["capability"], "remove",
+                    "{data}"
+                );
+                assert!(events.is_empty());
+                // With Remove, it is confirmed and runs like any removal.
+                let mut engine = Engine::default();
+                engine.register(fixture(backend)).unwrap();
+                let mut asked = vec![];
+                let mut events = vec![];
+                let (data, code) = dispatch(
+                    &mut engine,
+                    &args,
+                    &Cancellation::default(),
+                    &mut |ops| {
+                        asked.extend_from_slice(ops);
+                        yes
+                    },
+                    &mut record(&mut events),
+                );
+                if yes {
+                    assert!(asked.is_empty());
+                    assert_eq!(code, 0, "{data}");
+                    assert_eq!(
+                        data["operations"][0]["operation"]["remove"]["backend"], backend,
+                        "{data}"
+                    );
+                    assert!(matches!(
+                        events.last(),
+                        Some(Event::Finished { result: Ok(_), .. })
+                    ));
+                } else {
+                    assert_eq!(asked.len(), 1, "{data}");
+                    assert!(
+                        matches!(&asked[0], Operation::Remove(id) if id.backend == backend),
+                        "{data}"
+                    );
+                    assert_eq!(code, 7, "{data}");
+                    assert!(events.is_empty());
+                }
+            }
+        }
+    }
+    #[test]
+    fn inventory_only_installs_and_upgrades_fail_before_confirmation_or_activity_events() {
+        for command in ["install", "upgrade"] {
             for yes in [false, true] {
                 let mut engine = Engine::default();
                 engine

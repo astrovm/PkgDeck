@@ -368,6 +368,10 @@ conda)
     success info jq
     success upgrade jq
     micromamba list --name tools --json | jq -e '(.packages // .)[] | select(.name == "jq") | .version != "1.7.1"'
+    success remove jq
+    micromamba list --name tools --json | jq -e '[(.packages // .)[] | select(.name == "jq")] | length == 0'
+    # The environment itself stays; only the package left it.
+    micromamba env list --json | jq -e '.envs | any(endswith("/envs/tools"))'
     ;;
 gem)
     setup_gem

@@ -130,7 +130,11 @@ Controls.ApplicationWindow {
     readonly property int queuedCount: activityRows.filter(row => row.state === "queued").length
     readonly property var backgroundState: JSON.parse(backend.background_state && backend.background_state !== "{}" ? backend.background_state : preferences.lastBackgroundState)
     property bool notificationAvailable: false
+    // The Mac app can notify, but macOS hasn't allowed PkgDeck's own
+    // notifications yet, so they show Script Editor's icon.
+    property bool notificationPermissionNeeded: false
     signal testNotificationRequested()
+    signal notificationSettingsRequested()
     property bool startHidden: Qt.application.arguments.indexOf("--background") >= 0
     property bool forceQuit: false
     property bool trayAvailable: false
@@ -416,7 +420,9 @@ Controls.ApplicationWindow {
     // The app always asks through the system password prompt; tests and
     // development runs can still pass --auth sudo.
     readonly property bool useSudo: argument("--auth", "polkit") === "sudo"
-    function updateOnly(source) {
+    // Sources PkgDeck never installs from. Their rows update, and remove
+    // only when the source says it can.
+    function neverInstalls(source) {
         return ["fwupd", "mas", "conda", "system-image", "aur", "toolbox", "distrobox", "codex", "claude", "grok", "opencode", "cursor", "copilot", "kiro", "antigravity", "amp", "droid", "solana", "anchor", "foundry"].indexOf(source) >= 0;
     }
     readonly property var knownSourceIds: ["apt", "dnf", "pacman", "zypper", "snap", "homebrew", "homebrew-cask", "macos-apps", "mas", "aur", "apk", "xbps", "system-image", "macports", "rustup", "nix", "go", "dotnet", "appimage", "flatpak", "docker", "podman", "toolbox", "distrobox", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "mise", "pixi", "conda", "composer", "gem", "fwupd", "codex", "claude", "grok", "opencode", "cursor", "copilot", "kiro", "antigravity", "amp", "droid", "solana", "anchor", "foundry"]
@@ -1212,6 +1218,13 @@ Controls.ApplicationWindow {
         return !!row && row.kind === "package" && row.source === "macos-apps" && !!row.adopt_with
             && homebrewAdoptionSupported && sourceInfo("homebrew-cask").availability_kind === "available";
     }
+    // An installed package row can be removed. macOS apps and sources
+    // PkgDeck never installs from need their source to say it can remove.
+    function canRemove(row) {
+        return !!row && row.kind === "package" && isInstalled(row)
+            && (row.source !== "macos-apps" && !neverInstalls(row.source)
+                || sourceInfo(row.source).capabilities.indexOf("remove") >= 0);
+    }
     // The action a row's button runs: "install", "remove", "upgrade",
     // "clean", "adopt", or "" when the row has none.
     function rowActionName(row) {
@@ -1222,9 +1235,9 @@ Controls.ApplicationWindow {
         if (row.kind !== "package")
             return "";
         if (row.source === "macos-apps")
-            return canAdopt(row) ? "adopt" : "";
-        if (updateOnly(row.source))
-            return row.update === "available" ? "upgrade" : "";
+            return canAdopt(row) ? "adopt" : canRemove(row) ? "remove" : "";
+        if (neverInstalls(row.source))
+            return row.update === "available" ? "upgrade" : canRemove(row) ? "remove" : "";
         if (currentView === "Updates")
             return "upgrade";
         return isInstalled(row) ? "remove" : "install";
@@ -3754,7 +3767,10 @@ Controls.ApplicationWindow {
     Shortcut {
         sequence: "Ctrl+D"
         enabled: !backend.busy || backend.writing
-        onActivated: root.propose("remove")
+        onActivated: {
+            if (root.canRemove(root.selected))
+                root.propose("remove");
+        }
     }
     Shortcut {
         sequence: "Ctrl+U"

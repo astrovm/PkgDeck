@@ -5,7 +5,9 @@
 //! Updating a container upgrades every package inside it with the
 //! container's own package manager. Whether anything is pending is never
 //! guessed, so rows report updates as unknown. Containers are never created
-//! or removed here: removing one would discard everything installed in it.
+//! here. Removing one runs the tool's own `rm --force`, which deletes the
+//! container and everything installed in it; the home folder it shares with
+//! the host is kept.
 //!
 //! Only the invoking user's rootless containers are listed. A container
 //! Distrobox made is a Distrobox row even when its image carries the Toolbx
@@ -20,6 +22,7 @@ const CAPABILITIES: &[Capability] = &[
     Capability::Details,
     Capability::Installed,
     Capability::Upgrade,
+    Capability::Remove,
 ];
 /// Labels Toolbx puts on its containers (current and pre-0.0.90).
 const TOOLBOX_LABELS: [&str; 2] = [
@@ -631,6 +634,44 @@ impl<T: Transport> DevContainers<T> {
         }
         Ok(deferred)
     }
+
+    /// `toolbox rm --force <name>` or `distrobox rm --force <name>`: removes
+    /// the container even while it runs, without asking. Distrobox also
+    /// deletes its exports and launcher; neither touches the home folder.
+    /// No `--` goes before the name: `distrobox rm` drops every name after
+    /// it. Names never start with a dash (see `valid_name`).
+    fn remove(
+        &self,
+        found: &Found,
+        cancel: &Cancellation,
+        progress: &mut dyn FnMut(Progress),
+    ) -> Result<OperationOutcome, EngineError> {
+        let name = found.name.as_str();
+        progress(Progress::Message(format!(
+            "Removing the container {name} and everything installed in it with {} rm",
+            self.id_str()
+        )));
+        let completion = self.tool(&["rm", "--force", name], cancel, true)?;
+        let deferred = completion.cancellation_deferred;
+        bytes(self.id_str(), completion)?;
+        // Verify with a fresh read; writes may finish after cancellation.
+        if self
+            .containers(&Cancellation::default())?
+            .iter()
+            .any(|c| c.name == found.name)
+        {
+            return Err(invalid(
+                self.id_str(),
+                format!(
+                    "{} rm finished, but the container {name} is still there",
+                    self.id_str()
+                ),
+            ));
+        }
+        Ok(OperationOutcome {
+            cancellation_deferred: deferred,
+        })
+    }
 }
 
 impl<T: Transport> Backend for DevContainers<T> {
@@ -735,7 +776,12 @@ impl<T: Transport> Backend for DevContainers<T> {
             }
         };
         lines.push(format!(
-            "Install tools with `{command}`. PkgDeck never removes a container, because that would delete everything installed in it."
+            "Install tools with `{command}`. Removing runs `{} rm --force`, which deletes the container and everything installed in it{}; your home folder is kept.",
+            self.id_str(),
+            match self.kind {
+                Kind::Toolbox => "",
+                Kind::Distrobox => ", along with what it exported to the host",
+            }
         ));
         Ok(PackageDetails {
             package,
@@ -750,12 +796,17 @@ impl<T: Transport> Backend for DevContainers<T> {
         cancel: &Cancellation,
         progress: &mut dyn FnMut(Progress),
     ) -> Result<OperationOutcome, EngineError> {
-        let Operation::Upgrade(id) = operation else {
-            return Err(self.unsupported(operation.capability()));
+        let (id, remove) = match operation {
+            Operation::Upgrade(id) => (id, false),
+            Operation::Remove(id) => (id, true),
+            _ => return Err(self.unsupported(operation.capability())),
         };
         let found = self.find(id, cancel)?;
         if cancel.requested() {
             return Err(EngineError::Cancelled);
+        }
+        if remove {
+            return self.remove(&found, cancel, progress);
         }
         let deferred = self.upgrade(&found, cancel, progress)?;
         // Verify with a fresh read; writes may finish after cancellation.
@@ -889,6 +940,12 @@ d03cf38f6ad7 | dbx-fedora           | Created            | registry.fedoraprojec
         cancel_on_write: bool,
         /// `distrobox upgrade` leaves the list without the container.
         vanish: bool,
+        /// Set once `rm` took a container out; Podman then lists none.
+        removed: Arc<Mutex<bool>>,
+        /// `rm` succeeds without removing anything.
+        rm_keeps: bool,
+        /// `rm` fails with this.
+        rm_failure: Option<ExecutionError>,
         home: Option<PathBuf>,
     }
     fn done(text: &str, code: i32) -> Completion {
@@ -925,6 +982,7 @@ d03cf38f6ad7 | dbx-fedora           | Created            | registry.fedoraprojec
                 return Err(error.clone());
             }
             match (executable, args[0].as_str()) {
+                ("podman", "ps") if *self.removed.lock().unwrap() => Ok(done("[]", 0)),
                 ("podman", "ps") => Ok(self.podman.clone().unwrap_or_else(|| done(PODMAN, 0))),
                 ("toolbox", "--version") => Ok(done("toolbox version 0.3\n", 0)),
                 ("distrobox", "version") => Ok(done("distrobox: 1.8.2.5\n", 0)),
@@ -940,6 +998,22 @@ d03cf38f6ad7 | dbx-fedora           | Created            | registry.fedoraprojec
                         "OK: 26166 distinct packages available\nOK: 537 MiB in 376 packages\n",
                         0,
                     ))
+                }
+                (_, "rm") => {
+                    assert!(write);
+                    if let Some(error) = &self.rm_failure {
+                        return Err(error.clone());
+                    }
+                    if !self.rm_keeps {
+                        *self.removed.lock().unwrap() = true;
+                        let mut list = self.list.lock().unwrap();
+                        *list = list
+                            .lines()
+                            .filter(|line| !line.contains(&format!("| {} ", args[2])))
+                            .map(|line| format!("{line}\n"))
+                            .collect();
+                    }
+                    Ok(done("Removing container...\n", 0))
                 }
                 ("toolbox", "run") if args[3] == "sh" => {
                     if self.cancel_after_probe {
@@ -1243,16 +1317,15 @@ nothexnothex | bad | Up | x\n";
     }
 
     #[test]
-    fn nothing_but_upgrades_and_nothing_foreign_or_cancelled_runs() {
+    fn nothing_but_upgrades_and_removals_and_nothing_foreign_or_cancelled_runs() {
         let fake = fake();
         let mut distrobox = DevContainers::distrobox(fake.clone());
         assert!(!distrobox.capabilities().contains(&Capability::Install));
-        assert!(!distrobox.capabilities().contains(&Capability::Remove));
+        assert!(distrobox.capabilities().contains(&Capability::Remove));
         let cancel = Cancellation::default();
         let row = distrobox.installed(&cancel).unwrap().remove(0);
         for operation in [
             Operation::Install(row.id.clone()),
-            Operation::Remove(row.id.clone()),
             Operation::UpgradeAll {
                 backend: "distrobox".into(),
             },
@@ -1265,32 +1338,37 @@ nothexnothex | bad | Up | x\n";
                 Err(EngineError::Unsupported { .. })
             ));
         }
-        let mut foreign = row.id.clone();
-        foreign.backend = "toolbox".into();
-        assert!(distrobox
-            .execute(&Operation::Upgrade(foreign), &cancel, &mut |_| {})
-            .unwrap_err()
-            .to_string()
-            .contains("foreign or invalid container"));
-        let mut option = row.id.clone();
-        option.name = "--all".into();
-        assert!(distrobox
-            .execute(&Operation::Upgrade(option), &cancel, &mut |_| {})
-            .is_err());
-        let mut absent = row.id.clone();
-        absent.name = "missing-box".into();
-        // `distrobox upgrade` offers to create a missing container, so it
-        // must never run for one.
-        assert!(matches!(
-            distrobox.execute(&Operation::Upgrade(absent), &cancel, &mut |_| {}),
-            Err(EngineError::NotFound)
-        ));
-        let cancelled = Cancellation::default();
-        cancelled.cancel();
-        assert!(matches!(
-            distrobox.execute(&Operation::Upgrade(row.id), &cancelled, &mut |_| {}),
-            Err(EngineError::Cancelled)
-        ));
+        for operation in [Operation::Upgrade, Operation::Remove] {
+            let mut foreign = row.id.clone();
+            foreign.backend = "toolbox".into();
+            assert!(distrobox
+                .execute(&operation(foreign), &cancel, &mut |_| {})
+                .unwrap_err()
+                .to_string()
+                .contains("foreign or invalid container"));
+            // `--all` would remove every container.
+            let mut option = row.id.clone();
+            option.name = "--all".into();
+            assert!(distrobox
+                .execute(&operation(option), &cancel, &mut |_| {})
+                .unwrap_err()
+                .to_string()
+                .contains("foreign or invalid container"));
+            let mut absent = row.id.clone();
+            absent.name = "missing-box".into();
+            // `distrobox upgrade` offers to create a missing container, so it
+            // must never run for one.
+            assert!(matches!(
+                distrobox.execute(&operation(absent), &cancel, &mut |_| {}),
+                Err(EngineError::NotFound)
+            ));
+            let cancelled = Cancellation::default();
+            cancelled.cancel();
+            assert!(matches!(
+                distrobox.execute(&operation(row.id.clone()), &cancelled, &mut |_| {}),
+                Err(EngineError::Cancelled)
+            ));
+        }
         assert!(!fake
             .calls
             .lock()
@@ -1547,5 +1625,97 @@ nothexnothex | bad | Up | x\n";
             .description
             .contains("Exported to the host: commands busybox in ~/.local/bin."));
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn removing_a_container_runs_the_tool_and_is_verified() {
+        let cancel = Cancellation::default();
+        for (kind, name, expected) in [
+            (
+                Kind::Toolbox,
+                "fedora-toolbox-43",
+                "write: toolbox rm --force fedora-toolbox-43",
+            ),
+            (
+                Kind::Distrobox,
+                "alpine-box",
+                "write: distrobox rm --force alpine-box",
+            ),
+        ] {
+            let fake = fake();
+            let mut backend = DevContainers {
+                transport: fake.clone(),
+                kind,
+            };
+            let row = backend
+                .installed(&cancel)
+                .unwrap()
+                .into_iter()
+                .find(|row| row.id.name == name)
+                .unwrap();
+            let details = backend.details(&row.id, &cancel).unwrap();
+            assert!(
+                details.description.contains(&format!(
+                    "Removing runs `{} rm --force`, which deletes the container and everything installed in it",
+                    kind.id()
+                )),
+                "{}",
+                details.description
+            );
+            assert_eq!(
+                details.description.contains("what it exported to the host"),
+                kind == Kind::Distrobox
+            );
+            let mut messages = vec![];
+            backend
+                .execute(&Operation::Remove(row.id.clone()), &cancel, &mut |p| {
+                    messages.push(p)
+                })
+                .unwrap();
+            assert!(fake.calls.lock().unwrap().contains(&expected.into()));
+            assert_eq!(
+                messages,
+                [Progress::Message(format!(
+                    "Removing the container {name} and everything installed in it with {} rm",
+                    kind.id()
+                ))]
+            );
+            assert!(!names(&backend.installed(&cancel).unwrap()).contains(&name));
+            // Only that container went; the other Distrobox one stays.
+            if kind == Kind::Distrobox {
+                assert_eq!(names(&backend.installed(&cancel).unwrap()), ["dbx-fedora"]);
+            }
+        }
+    }
+
+    #[test]
+    fn failed_or_unverified_container_removals_are_errors() {
+        let cancel = Cancellation::default();
+        let row = DevContainers::toolbox(fake())
+            .installed(&cancel)
+            .unwrap()
+            .remove(0);
+        let failure = ExecutionError::Failed(done("", 1));
+        let mut toolbox = DevContainers::toolbox(Fake {
+            rm_failure: Some(failure.clone()),
+            ..fake()
+        });
+        assert_eq!(
+            toolbox.execute(&Operation::Remove(row.id.clone()), &cancel, &mut ignore),
+            Err(EngineError::Execution(failure))
+        );
+        let mut toolbox = DevContainers::toolbox(Fake {
+            rm_keeps: true,
+            ..fake()
+        });
+        let error = toolbox
+            .execute(&Operation::Remove(row.id), &cancel, &mut ignore)
+            .unwrap_err();
+        assert!(
+            error.to_string().contains(
+                "toolbox rm finished, but the container fedora-toolbox-43 is still there"
+            ),
+            "{error}"
+        );
     }
 }

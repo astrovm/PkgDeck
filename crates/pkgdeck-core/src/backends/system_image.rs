@@ -6,6 +6,11 @@
 //! bootc and rpm-ostree can both manage the same machine: bootc's status is
 //! read first when it reports a booted image, otherwise rpm-ostree's.
 //! PkgDeck never restarts the computer.
+//!
+//! Packages layered on top of the image with `rpm-ostree install` are rows
+//! of their own. They update along with the system, and removing one runs
+//! `rpm-ostree uninstall`, which also applies on the next restart. The
+//! system image itself can't be removed.
 use super::{bytes, invalid, NativeTransport, Transport};
 use crate::{engine::*, package::*, process::*};
 use serde_json::Value;
@@ -13,11 +18,24 @@ use std::ffi::OsString;
 
 const ID: &str = "system-image";
 const NAME: &str = "system";
+/// The reference that marks a layered package's row.
+const LAYERED: &str = "layered";
 const CAPABILITIES: &[Capability] = &[
     Capability::Installed,
     Capability::Details,
     Capability::Upgrade,
+    Capability::Remove,
 ];
+
+/// RPM package names; also keeps a name from ever reading as an option.
+/// Other requests (a file path, `pkgconfig(zlib)`) get no row of their own.
+fn valid_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with('-')
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._+-".contains(&b))
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Tool {
@@ -117,6 +135,17 @@ fn parse_rpm_ostree(value: &Value) -> Option<Status> {
     })
 }
 
+impl Status {
+    /// The deployment the next restart boots: the staged one, if any.
+    fn next(&self) -> &Deployment {
+        self.staged.as_ref().unwrap_or(&self.booted)
+    }
+    /// Packages layered in the next deployment that can have a row.
+    fn layered(&self) -> impl Iterator<Item = &String> {
+        self.next().packages.iter().filter(|name| valid_name(name))
+    }
+}
+
 pub struct SystemImage<T = NativeTransport> {
     transport: T,
     tool: Option<Tool>,
@@ -210,6 +239,147 @@ impl<T: Transport> SystemImage<T> {
             adopt_with: None,
         }
     }
+
+    /// rpm-ostree's status, which is where layered packages are listed,
+    /// even on a machine bootc describes. Without rpm-ostree there are none.
+    fn ostree(&self, cancel: &Cancellation) -> Result<Option<Status>, EngineError> {
+        match self.read(Tool::RpmOstree, cancel) {
+            Err(EngineError::Cancelled | EngineError::Execution(ExecutionError::Cancelled)) => {
+                Err(EngineError::Cancelled)
+            }
+            Err(_) => Ok(None),
+            status => status,
+        }
+    }
+
+    /// The running version of a layered package, from the RPM database.
+    /// None when it only arrives with the next restart.
+    fn rpm_version(
+        &self,
+        name: &str,
+        cancel: &Cancellation,
+    ) -> Result<Option<String>, EngineError> {
+        let args: Vec<OsString> = [
+            "-q",
+            "--qf",
+            "%{VERSION}-%{RELEASE}\\n",
+            "--whatprovides",
+            name,
+        ]
+        .iter()
+        .map(OsString::from)
+        .collect();
+        match self.transport.system_manager("rpm", &args, cancel, false) {
+            Ok(completion) => Ok(String::from_utf8_lossy(&bytes(ID, completion)?)
+                .lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty())
+                .map(str::to_owned)),
+            Err(ExecutionError::Cancelled) => Err(EngineError::Cancelled),
+            Err(_) => Ok(None),
+        }
+    }
+
+    fn layered_package(
+        &self,
+        name: &str,
+        status: &Status,
+        cancel: &Cancellation,
+    ) -> Result<Package, EngineError> {
+        let running = status.booted.packages.iter().any(|p| p == name);
+        Ok(Package {
+            id: PackageId {
+                backend: ID.into(),
+                name: name.into(),
+                architecture: std::env::consts::ARCH.into(),
+                scope: Scope::System,
+                remote: None,
+                reference: Some(LAYERED.into()),
+            },
+            display_name: name.into(),
+            summary: if running {
+                "Layered on the system image with rpm-ostree".into()
+            } else {
+                "Layered with rpm-ostree; arrives with the next restart".into()
+            },
+            installed_version: Some(
+                self.rpm_version(name, cancel)?
+                    .unwrap_or_else(|| "unknown".into()),
+            ),
+            candidate_version: None,
+            // It updates with the system image, never on its own.
+            update: UpdateAvailability::Unknown,
+            icon: None,
+            component_ids: vec![],
+            homepages: vec![],
+            adopt_with: None,
+        })
+    }
+
+    /// The system row, then one per layered package.
+    fn rows(&mut self, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
+        let Some((tool, status)) = self.status(cancel)? else {
+            return Ok(vec![]);
+        };
+        let mut rows = vec![Self::package(tool, &status)];
+        let ostree = match tool {
+            Tool::RpmOstree => Some(status),
+            Tool::Bootc => self.ostree(cancel)?,
+        };
+        if let Some(status) = &ostree {
+            for name in status.layered() {
+                rows.push(self.layered_package(name, status, cancel)?);
+            }
+        }
+        Ok(rows)
+    }
+
+    /// `rpm-ostree uninstall <name>`: a new deployment without the package,
+    /// used from the next restart.
+    fn uninstall(
+        &self,
+        id: &PackageId,
+        cancel: &Cancellation,
+        progress: &mut dyn FnMut(Progress),
+    ) -> Result<OperationOutcome, EngineError> {
+        let layered = |status: &Status| status.layered().any(|name| *name == id.name);
+        let before = self.ostree(cancel)?.ok_or(EngineError::NotFound)?;
+        if !layered(&before) {
+            return Err(EngineError::NotFound);
+        }
+        if cancel.requested() {
+            return Err(EngineError::Cancelled);
+        }
+        progress(Progress::Message(format!(
+            "Removing {} from the system image with rpm-ostree. If you cancel, PkgDeck waits for it to finish.",
+            id.name
+        )));
+        let completion = self.transport.system_manager(
+            Tool::RpmOstree.executable(),
+            &["uninstall".into(), id.name.clone().into()],
+            cancel,
+            true,
+        )?;
+        let deferred = completion.cancellation_deferred;
+        bytes(ID, completion)?;
+        // Writes may finish after cancellation; check with a fresh read.
+        let after = self
+            .read(Tool::RpmOstree, &Cancellation::default())?
+            .ok_or(EngineError::NotFound)?;
+        if layered(&after) {
+            return Err(invalid(
+                ID,
+                format!("rpm-ostree finished, but {} is still layered", id.name),
+            ));
+        }
+        progress(Progress::Message(format!(
+            "Restart your computer to finish removing {}. PkgDeck doesn't restart it for you.",
+            id.name
+        )));
+        Ok(OperationOutcome {
+            cancellation_deferred: deferred,
+        })
+    }
 }
 
 impl<T: Transport> Backend for SystemImage<T> {
@@ -235,17 +405,26 @@ impl<T: Transport> Backend for SystemImage<T> {
         })
     }
     fn installed(&mut self, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
-        Ok(self
-            .status(cancel)?
-            .map(|(tool, status)| Self::package(tool, &status))
-            .into_iter()
-            .collect())
+        self.rows(cancel)
     }
     fn details(
         &mut self,
         id: &PackageId,
         cancel: &Cancellation,
     ) -> Result<PackageDetails, EngineError> {
+        if id.reference.as_deref() == Some(LAYERED) {
+            let package = self
+                .rows(cancel)?
+                .into_iter()
+                .find(|row| row.id == *id)
+                .ok_or(EngineError::NotFound)?;
+            return Ok(PackageDetails {
+                package,
+                description: "Layered on top of the system image with rpm-ostree. It updates along with the system image. Removing it runs `rpm-ostree uninstall`, which makes a new deployment without it that applies on the next restart; PkgDeck never restarts the computer.".into(),
+                homepage: None,
+                dependencies: vec![],
+            });
+        }
         let (tool, status) = self.status(cancel)?.ok_or(EngineError::NotFound)?;
         let package = Self::package(tool, &status);
         if package.id.name != id.name || id.backend != ID {
@@ -290,9 +469,27 @@ impl<T: Transport> Backend for SystemImage<T> {
         progress: &mut dyn FnMut(Progress),
     ) -> Result<OperationOutcome, EngineError> {
         match operation {
+            Operation::Remove(id) if id.backend == ID && id.reference.as_deref() == Some(LAYERED) => {
+                return self.uninstall(id, cancel, progress)
+            }
+            Operation::Upgrade(id) if id.backend == ID && id.reference.as_deref() == Some(LAYERED) => {
+                return Err(invalid(
+                    ID,
+                    format!(
+                        "{} updates along with the system image; update the system image instead",
+                        id.name
+                    ),
+                ))
+            }
+            Operation::Remove(id) if id.backend == ID && id.name == NAME => {
+                return Err(invalid(
+                    ID,
+                    "The system image can't be removed: it is the operating system itself. Only packages layered on top of it can be removed.",
+                ))
+            }
             Operation::Upgrade(id) if id.backend == ID && id.name == NAME => {}
             Operation::UpgradeAll { backend } if backend == ID => {}
-            Operation::Upgrade(_) => return Err(EngineError::NotFound),
+            Operation::Upgrade(_) | Operation::Remove(_) => return Err(EngineError::NotFound),
             other => return Err(self.unsupported(other.capability())),
         }
         let (tool, before) = self.status(cancel)?.ok_or(EngineError::NotFound)?;
@@ -341,9 +538,14 @@ mod tests {
       "rollback":{"image":{"image":{"image":"quay.io/fedora/fedora-bootc:44"},"version":"44.20260913.0"}}}}"#;
     const BOOTC_NOT_BOOTED: &str = r#"{"status":{"booted":null,"staged":null,"rollback":null}}"#;
     const RPM_OSTREE: &str = r#"{"deployments":[
-        {"booted":false,"staged":true,"version":"44.20260927.0","origin":"fedora:fedora/44/x86_64/silverblue","requested-packages":["htop"],"osname":"fedora"},
+        {"booted":false,"staged":true,"version":"44.20260927.0","origin":"fedora:fedora/44/x86_64/silverblue","requested-packages":["htop","fish","pkgconfig(zlib)"],"osname":"fedora"},
         {"booted":true,"staged":false,"version":"44.20260920.0","container-image-reference":"ostree-image-signed:docker://quay.io/fedora-ostree-desktops/silverblue:44","requested-packages":["htop"],"osname":"fedora"},
         {"booted":false,"version":"44.20260913.0","origin":"fedora:fedora/44/x86_64/silverblue","osname":"fedora"}],
+      "cached-update":null}"#;
+    /// RPM_OSTREE after `rpm-ostree uninstall htop`: a new staged deployment.
+    const RPM_OSTREE_UNINSTALLED: &str = r#"{"deployments":[
+        {"booted":false,"staged":true,"version":"44.20260927.0","requested-packages":["fish","pkgconfig(zlib)"],"osname":"fedora"},
+        {"booted":true,"staged":false,"version":"44.20260920.0","requested-packages":["htop"],"osname":"fedora"}],
       "cached-update":null}"#;
 
     #[derive(Clone)]
@@ -357,6 +559,10 @@ mod tests {
         current: bool,
         /// bootc's status output is cut off at the output limit.
         truncated_bootc: bool,
+        /// How writes fail, if they do.
+        write_error: Option<ExecutionError>,
+        /// Calls to this executable are cancelled.
+        cancelled: Option<&'static str>,
     }
     fn done(text: &str) -> Completion {
         Completion {
@@ -381,8 +587,18 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(format!("{executable} {} write={write}", args.join(" ")));
-            if self.interrupted {
+            if self.interrupted || self.cancelled == Some(executable) {
                 return Err(ExecutionError::Cancelled);
+            }
+            if executable == "rpm" {
+                assert!(!write);
+                return match args.last().unwrap().as_str() {
+                    "htop" => Ok(done("3.4.1-1.fc44\n")),
+                    other => Err(ExecutionError::Failed(Completion {
+                        code: Some(1),
+                        ..done(&format!("no package provides {other}\n"))
+                    })),
+                };
             }
             let (state, staged) = if executable == "bootc" {
                 (&self.bootc, BOOTC_STAGED)
@@ -391,8 +607,15 @@ mod tests {
                 (&self.ostree, RPM_OSTREE)
             };
             if write {
+                if let Some(error) = &self.write_error {
+                    return Err(error.clone());
+                }
                 if !self.current {
-                    *state.lock().unwrap() = Some(staged);
+                    *state.lock().unwrap() = Some(if args[0] == "uninstall" {
+                        RPM_OSTREE_UNINSTALLED
+                    } else {
+                        staged
+                    });
                 }
                 return Ok(done(""));
             }
@@ -417,6 +640,8 @@ mod tests {
             interrupted: false,
             current: false,
             truncated_bootc: false,
+            write_error: None,
+            cancelled: None,
         }
     }
     fn ignore(_: Progress) {}
@@ -540,13 +765,14 @@ mod tests {
                 Availability::Available
             );
         }
-        // The whole OS updates as one; nothing is installed or removed here.
+        // The whole OS updates as one; nothing is installed here.
         assert_eq!(
             image.capabilities(),
             [
                 Capability::Installed,
                 Capability::Details,
-                Capability::Upgrade
+                Capability::Upgrade,
+                Capability::Remove
             ]
         );
         let row = image.installed(&Cancellation::default()).unwrap().remove(0);
@@ -561,9 +787,19 @@ mod tests {
             image.details(&other, &cancel),
             Err(EngineError::NotFound)
         ));
+        // The image itself is the operating system: it is never removed.
+        let error = image
+            .execute(&Operation::Remove(row.id.clone()), &cancel, &mut |_| {})
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("The system image can't be removed: it is the operating system itself."),
+            "{error}"
+        );
         assert!(matches!(
-            image.execute(&Operation::Remove(row.id.clone()), &cancel, &mut |_| {}),
-            Err(EngineError::Unsupported { .. })
+            image.execute(&Operation::Remove(other.clone()), &cancel, &mut |_| {}),
+            Err(EngineError::NotFound)
         ));
         assert!(matches!(
             image.execute(
@@ -708,8 +944,188 @@ mod tests {
             *fake.calls.lock().unwrap(),
             [
                 "bootc status --format json write=false",
-                "rpm-ostree status --json write=false"
+                "rpm-ostree status --json write=false",
+                "rpm -q --qf %{VERSION}-%{RELEASE}\\n --whatprovides htop write=false",
+                "rpm -q --qf %{VERSION}-%{RELEASE}\\n --whatprovides fish write=false"
             ]
         );
+    }
+
+    fn layered(image: &mut SystemImage<Fake>, name: &str) -> Option<Package> {
+        image
+            .installed(&Cancellation::default())
+            .unwrap()
+            .into_iter()
+            .find(|row| row.id.name == name)
+    }
+
+    #[test]
+    fn layered_packages_are_rows_of_their_own() {
+        // bootc describes the machine; rpm-ostree still lists what is layered.
+        let mut image = SystemImage::new(fake(Some(BOOTC_UPDATE), Some(RPM_OSTREE)));
+        let rows = image.installed(&Cancellation::default()).unwrap();
+        let summary: Vec<(&str, Option<&str>, Option<&str>)> = rows
+            .iter()
+            .map(|row| {
+                (
+                    row.id.name.as_str(),
+                    row.id.reference.as_deref(),
+                    row.installed_version.as_deref(),
+                )
+            })
+            .collect();
+        // Requests that aren't package names, like pkgconfig(zlib), get no row.
+        assert_eq!(
+            summary,
+            [
+                ("system", Some("bootc"), Some("44.20260920.0")),
+                ("htop", Some("layered"), Some("3.4.1-1.fc44")),
+                ("fish", Some("layered"), Some("unknown")),
+            ]
+        );
+        assert_eq!(
+            rows[1].summary,
+            "Layered on the system image with rpm-ostree"
+        );
+        assert_eq!(
+            rows[2].summary,
+            "Layered with rpm-ostree; arrives with the next restart"
+        );
+        assert_eq!(rows[1].update, UpdateAvailability::Unknown);
+        let cancel = Cancellation::default();
+        let details = image.details(&rows[1].id, &cancel).unwrap();
+        assert!(details.description.contains("`rpm-ostree uninstall`"));
+        assert_eq!(details.package, rows[1]);
+        let mut absent = rows[1].id.clone();
+        absent.name = "vim".into();
+        assert_eq!(image.details(&absent, &cancel), Err(EngineError::NotFound));
+        // Layered packages update with the system, never on their own.
+        let error = image
+            .execute(
+                &Operation::Upgrade(rows[1].id.clone()),
+                &cancel,
+                &mut ignore,
+            )
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("htop updates along with the system image"),
+            "{error}"
+        );
+        // Without rpm-ostree nothing is layered.
+        let mut bootc = SystemImage::new(fake(Some(BOOTC_UPDATE), None));
+        assert_eq!(bootc.installed(&cancel).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn removing_a_layered_package_stages_a_deployment_without_it() {
+        let fake = fake(None, Some(RPM_OSTREE));
+        let mut image = SystemImage::new(fake.clone());
+        let htop = layered(&mut image, "htop").unwrap();
+        let mut messages = vec![];
+        image
+            .execute(
+                &Operation::Remove(htop.id.clone()),
+                &Cancellation::default(),
+                &mut |progress| messages.push(progress),
+            )
+            .unwrap();
+        assert!(fake
+            .calls
+            .lock()
+            .unwrap()
+            .contains(&"rpm-ostree uninstall htop write=true".into()));
+        assert_eq!(
+            messages,
+            [
+                Progress::Message(
+                    "Removing htop from the system image with rpm-ostree. If you cancel, PkgDeck waits for it to finish.".into()
+                ),
+                Progress::Message(
+                    "Restart your computer to finish removing htop. PkgDeck doesn't restart it for you.".into()
+                ),
+            ]
+        );
+        // Gone from the next deployment, so no longer a row.
+        assert_eq!(layered(&mut image, "htop"), None);
+        assert!(layered(&mut image, "fish").is_some());
+        assert_eq!(
+            image.execute(
+                &Operation::Remove(htop.id),
+                &Cancellation::default(),
+                &mut ignore
+            ),
+            Err(EngineError::NotFound)
+        );
+    }
+
+    #[test]
+    fn failed_unverified_foreign_or_cancelled_layered_removals_are_errors() {
+        let cancel = Cancellation::default();
+        let htop = layered(&mut SystemImage::new(fake(None, Some(RPM_OSTREE))), "htop").unwrap();
+        let remove = Operation::Remove(htop.id.clone());
+        // rpm-ostree's own failure is reported as is.
+        let mut failing = fake(None, Some(RPM_OSTREE));
+        failing.write_error = Some(ExecutionError::TimedOut);
+        assert_eq!(
+            SystemImage::new(failing).execute(&remove, &cancel, &mut ignore),
+            Err(EngineError::Execution(ExecutionError::TimedOut))
+        );
+        // rpm-ostree finished, but the package is still layered.
+        let mut unchanged = fake(None, Some(RPM_OSTREE));
+        unchanged.current = true;
+        let error = SystemImage::new(unchanged)
+            .execute(&remove, &cancel, &mut ignore)
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("rpm-ostree finished, but htop is still layered"),
+            "{error}"
+        );
+        // Other sources, requests without a row, machines without
+        // rpm-ostree and cancelled removals never run `uninstall`.
+        let fake_ostree = fake(None, Some(RPM_OSTREE));
+        let mut image = SystemImage::new(fake_ostree.clone());
+        let mut foreign = htop.id.clone();
+        foreign.backend = "dnf".into();
+        let mut request = htop.id.clone();
+        request.name = "pkgconfig(zlib)".into();
+        for id in [foreign, request] {
+            assert_eq!(
+                image.execute(&Operation::Remove(id), &cancel, &mut ignore),
+                Err(EngineError::NotFound)
+            );
+        }
+        let cancelled = Cancellation::default();
+        cancelled.cancel();
+        assert_eq!(
+            image.execute(&remove, &cancelled, &mut ignore),
+            Err(EngineError::Cancelled)
+        );
+        assert!(!fake_ostree
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|c| c.contains("write=true")));
+        assert_eq!(
+            SystemImage::new(fake(Some(BOOTC_UPDATE), None)).execute(&remove, &cancel, &mut ignore),
+            Err(EngineError::NotFound)
+        );
+    }
+
+    #[test]
+    fn cancelling_a_layered_package_read_cancels_the_listing() {
+        for (tool, bootc) in [("rpm", None), ("rpm-ostree", Some(BOOTC_UPDATE))] {
+            let mut fake = fake(bootc, Some(RPM_OSTREE));
+            fake.cancelled = Some(tool);
+            assert_eq!(
+                SystemImage::new(fake).installed(&Cancellation::default()),
+                Err(EngineError::Cancelled),
+                "{tool}"
+            );
+        }
     }
 }

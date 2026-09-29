@@ -1840,14 +1840,16 @@ fn batch_status_text(status: &str, sudo: bool) -> String {
 /// The inverse change a toast may offer as Undo. Only an install and a
 /// removal undo each other; updates and cleanups cannot be reversed, and
 /// a package removed from a local file or a direct download can't be
-/// installed again without that file.
+/// installed again without that file. Nor can one removed from a source
+/// PkgDeck never installs from, such as the macOS Applications inventory.
 fn undo_action(operation: &Operation) -> Option<&'static str> {
     match operation {
-        Operation::Install(id) if !pkgdeck_core::backends::update_only(&id.backend) => {
+        Operation::Install(id) if !pkgdeck_core::backends::never_installs(&id.backend) => {
             Some("remove")
         }
         Operation::Remove(id)
-            if !pkgdeck_core::backends::update_only(&id.backend)
+            if !pkgdeck_core::backends::never_installs(&id.backend)
+                && !pkgdeck_core::backends::inventory_only(&id.backend)
                 && id.backend != "appimage"
                 && !id.reference.as_deref().is_some_and(|reference| {
                     ["local-deb:", "artifact:", "flatpakref:"]
@@ -1859,6 +1861,25 @@ fn undo_action(operation: &Operation) -> Option<&'static str> {
         }
         _ => None,
     }
+}
+/// Whether a row of `backend` may offer removal. Sources PkgDeck never
+/// installs from, and inventories, remove only when the source catalog
+/// (the page's list of sources and what each can do) says they can; the
+/// engine still refuses anything a backend doesn't support.
+fn removable(catalog: &str, backend: &str) -> bool {
+    if !pkgdeck_core::backends::never_installs(backend)
+        && !pkgdeck_core::backends::inventory_only(backend)
+    {
+        return true;
+    }
+    serde_json::from_str::<Vec<Value>>(catalog).is_ok_and(|rows| {
+        rows.iter().any(|row| {
+            row["source"] == backend
+                && row["capabilities"]
+                    .as_array()
+                    .is_some_and(|capabilities| capabilities.contains(&json!(Capability::Remove)))
+        })
+    })
 }
 /// A machine-readable name for what a change does, for the frontend.
 fn operation_kind(operation: &Operation) -> &'static str {
@@ -3642,20 +3663,24 @@ impl ffi::PackageController {
                     .get(i)
                     .map(|item| Operation::Clean(item.id.clone()))
             } else {
+                let catalog = self.source_catalog().to_string();
                 self.rust()
                     .packages
                     .get(i)
-                    .filter(|p| !pkgdeck_core::backends::read_only(&p.id.backend))
+                    // Inventory rows are never installed or updated here.
+                    .filter(|p| {
+                        action == "remove" || !pkgdeck_core::backends::inventory_only(&p.id.backend)
+                    })
                     .and_then(|p| match action.as_str() {
                         "install"
-                            if !pkgdeck_core::backends::update_only(&p.id.backend)
+                            if !pkgdeck_core::backends::never_installs(&p.id.backend)
                                 && p.installed_version.is_none() =>
                         {
                             Some(Operation::Install(p.id.clone()))
                         }
                         "remove"
-                            if !pkgdeck_core::backends::update_only(&p.id.backend)
-                                && p.installed_version.is_some() =>
+                            if p.installed_version.is_some()
+                                && removable(&catalog, &p.id.backend) =>
                         {
                             Some(Operation::Remove(p.id.clone()))
                         }
@@ -8037,18 +8062,72 @@ mod tests {
             .is_some_and(CachedView::stale));
     }
     #[test]
-    fn macos_inventory_never_proposes_a_write() {
+    fn restricted_sources_propose_removal_only_when_their_source_can_remove() {
         let mut controller = ffi::create_controller();
         let mut controller = controller.pin_mut();
-        let mut package = synthetic_package("/Applications/Obsidian.app", "Obsidian");
-        package.id.backend = "macos-apps".into();
-        package.installed_version = Some("1.2.3".into());
-        controller.as_mut().rust_mut().packages = vec![package];
-        for action in ["install", "remove", "upgrade"] {
-            controller.as_mut().propose(action.into(), 0);
-            assert!(controller.rust().pending.is_none());
-            assert!(controller.confirmation().is_empty());
+        let mut app = synthetic_package("/Applications/Obsidian.app", "Obsidian");
+        app.id.backend = "macos-apps".into();
+        app.installed_version = Some("1.2.3".into());
+        app.update = UpdateAvailability::Available;
+        let mut tool = synthetic_package("codex", "Codex");
+        tool.id.backend = "codex".into();
+        tool.installed_version = Some("1.0".into());
+        let mut missing = tool.clone();
+        missing.installed_version = None;
+        controller.as_mut().rust_mut().packages = vec![app, tool, missing];
+        let proposes =
+            |controller: &mut Pin<&mut ffi::PackageController>, action: &str, index: i32| {
+                controller.as_mut().propose(action.into(), index);
+                let proposed = controller.rust().pending.is_some();
+                assert_eq!(proposed, !controller.confirmation().is_empty());
+                proposed
+            };
+        // Until the catalog says a source can remove, nothing is proposed.
+        for catalog in [
+            "[]",
+            "not json",
+            r#"[{"source":"macos-apps","capabilities":["search","installed"]},
+                {"source":"codex","capabilities":["installed","upgrade"]}]"#,
+        ] {
+            controller.as_mut().set_source_catalog(catalog.into());
+            for index in [0, 1] {
+                assert!(!proposes(&mut controller, "remove", index));
+            }
         }
+        controller.as_mut().set_source_catalog(
+            r#"[{"source":"macos-apps","capabilities":["installed","remove"]},
+                {"source":"codex","capabilities":["installed","remove","upgrade"]}]"#
+                .into(),
+        );
+        // Inventory rows are still never installed or updated, and a source
+        // PkgDeck never installs from offers no install.
+        for action in ["install", "upgrade"] {
+            assert!(!proposes(&mut controller, action, 0));
+        }
+        assert!(!proposes(&mut controller, "install", 2));
+        // Only installed rows can be removed.
+        assert!(!proposes(&mut controller, "remove", 2));
+        for (index, backend) in [(0, "macos-apps"), (1, "codex")] {
+            assert!(proposes(&mut controller, "remove", index));
+            assert!(
+                matches!(&controller.rust().pending, Some(Job::Write(Operation::Remove(id), _)) if id.backend == backend)
+            );
+        }
+    }
+    #[test]
+    fn ordinary_sources_offer_removal_without_asking_the_catalog() {
+        assert!(removable("[]", "apt"));
+        assert!(removable("not json", "homebrew"));
+        assert!(!removable("[]", "fwupd"));
+        assert!(!removable(r#"[{"source":"mas"}]"#, "mas"));
+        assert!(!removable(
+            r#"[{"source":"conda","capabilities":["remove"]}]"#,
+            "mas"
+        ));
+        assert!(removable(
+            r#"[{"source":"mas","capabilities":["remove"]}]"#,
+            "mas"
+        ));
     }
     #[test]
     fn firmware_actions_require_confirmation_and_never_offer_removal() {
@@ -10325,6 +10404,12 @@ mod tests {
         appimage.backend = "appimage".into();
         assert_eq!(undo_action(&Operation::Remove(appimage.clone())), None);
         assert_eq!(undo_action(&Operation::Install(appimage)), Some("remove"));
+        // Removing from a source PkgDeck can't install from can't be undone.
+        for backend in ["codex", "mas", "macos-apps"] {
+            let mut restricted = id.clone();
+            restricted.backend = backend.into();
+            assert_eq!(undo_action(&Operation::Remove(restricted)), None);
+        }
         let mut firmware = id;
         firmware.backend = "fwupd".into();
         assert_eq!(undo_action(&Operation::Install(firmware)), None);

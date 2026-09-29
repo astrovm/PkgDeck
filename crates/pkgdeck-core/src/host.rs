@@ -48,7 +48,7 @@ pub struct Host {
 pub const ROOT_REFUSAL: &str = "PkgDeck can't make changes when it runs as root. Run it as your normal user; it asks for permission when needed.";
 
 /// Writes refuse to run as root (see [`ROOT_REFUSAL`]).
-fn refuse_root(write: bool) -> Result<(), ExecutionError> {
+pub(crate) fn refuse_root(write: bool) -> Result<(), ExecutionError> {
     refuse_root_as(write, rustix::process::geteuid().is_root())
 }
 fn refuse_root_as(write: bool, root: bool) -> Result<(), ExecutionError> {
@@ -541,6 +541,34 @@ impl Host {
         cancel: &Cancellation,
     ) -> Result<Completion, ExecutionError> {
         process::run(self.command(executable, args)?, limits, cancel, false)
+    }
+
+    /// The fixed macOS programs app removal runs as the invoking user:
+    /// `/bin/ps` to see which apps are open and `/usr/bin/trash` to move an
+    /// app the user owns to their Trash. Nothing else runs through here.
+    pub fn macos_tool(
+        &self,
+        executable: &Path,
+        args: &[OsString],
+        cancel: &Cancellation,
+        write: bool,
+    ) -> Result<Completion, ExecutionError> {
+        refuse_root(write)?;
+        if !matches!(executable.to_str(), Some("/bin/ps" | "/usr/bin/trash")) {
+            return Err(ExecutionError::Invalid(format!(
+                "{} is not a macOS tool PkgDeck runs",
+                executable.display()
+            )));
+        }
+        process::run(
+            self.command(executable, args)?,
+            Limits {
+                timeout: std::time::Duration::from_secs(60),
+                output_bytes: 4 * 1024 * 1024,
+            },
+            cancel,
+            write,
+        )
     }
 
     /// Run an already identified standalone installation as its owner. The
@@ -1235,6 +1263,8 @@ impl Host {
             let dirs: &[&str] = match executable {
                 "apk" => &["/sbin", "/usr/sbin"],
                 "port" => &["/opt/local/bin"],
+                // Moves a system-owned app to the Trash (see mac_apps.rs).
+                "mv" => &["/bin"],
                 _ => &["/usr/bin"],
             };
             let mut found = None;
@@ -1666,6 +1696,30 @@ mod flatpak_bridge_tests {
         let output = String::from_utf8(manager.stdout).unwrap();
         assert!(output.contains("/usr/bin/dnf install synthetic-package"));
         assert!(!output.contains("/home/fixture/untrusted-bin/dnf"));
+        // Removing a system-owned app moves it with the system's own mv.
+        let moved = host
+            .system_manager(
+                "mv",
+                &["-n".into(), "a".into(), "b".into()],
+                &cancel,
+                true,
+                Authorization::SudoNonInteractive,
+            )
+            .unwrap();
+        assert!(String::from_utf8(moved.stdout)
+            .unwrap()
+            .contains("/usr/bin/sudo -n -- /bin/mv -n a b"));
+        // App removal runs only its two fixed programs as the user.
+        let ps = host
+            .macos_tool(Path::new("/bin/ps"), &["-ax".into()], &cancel, false)
+            .unwrap();
+        assert!(String::from_utf8(ps.stdout)
+            .unwrap()
+            .contains("/bin/ps -ax"));
+        assert!(matches!(
+            host.macos_tool(Path::new("/bin/rm"), &[], &cancel, true),
+            Err(ExecutionError::Invalid(reason)) if reason.contains("/bin/rm")
+        ));
 
         host.bridge = "/usr/bin/false".into();
         assert!(matches!(

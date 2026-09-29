@@ -383,6 +383,44 @@ TestCase {
         compare(browser.rowActionName(row), "", "Read-only sources cannot act on stale or malformed update metadata");
         browser.choose(0);
         compare(fake.selection, 0, "Read-only app details remain accessible");
+        keyClick(Qt.Key_D, Qt.ControlModifier);
+        compare(fake.confirmation, "", "The remove shortcut follows the row's rule");
+    }
+    // The source catalog with "remove" added to the given sources.
+    function allowRemoval(ids) {
+        fake.source_catalog = JSON.stringify(browser.sourceIds.map((id) => ({source: id, summary: "Available", availability_kind: "available", capabilities: ids.indexOf(id) >= 0 ? ["installed", "upgrade", "remove"] : ["installed", "upgrade"]})));
+    }
+    function test_macos_apps_offer_removal_once_their_source_supports_it() {
+        browser.openView("Installed");
+        const row = {kind: "package", name: "/Applications/Obsidian.app", display_name: "Obsidian", source: "macos-apps", architecture: "unknown", scope: "system", installed: "1.2.3", update: "available", summary: "Obsidian"};
+        fake.rows = JSON.stringify([row]);
+        allowRemoval(["macos-apps"]);
+        const list = findChild(browser, "packageResults");
+        tryCompare(list, "count", 1);
+        // Removal, never an update, even with update metadata.
+        compare(browser.rowActionName(row), "remove");
+        compare(browser.rowActionName(Object.assign({}, row, {installed: null})), "");
+        waitForRendering(browser.contentItem);
+        const action = findChild(list.itemAtIndex(0), "rowPackageAction");
+        tryCompare(action, "visible", true);
+        compare(action.symbol, "remove");
+        browser.choose(0);
+        const panel = findChild(browser, "detailsPanel");
+        tryCompare(panel, "visible", true);
+        compare(panel.actionText, "Remove");
+        compare(panel.actionTone, "danger");
+        clickDelegate(action);
+        verify(fake.confirmation.indexOf("remove") === 0, fake.confirmation);
+        fake.confirm(false);
+        tryCompare(findChild(browser, "confirmationDialog"), "visible", false);
+        keyClick(Qt.Key_D, Qt.ControlModifier);
+        verify(fake.confirmation.indexOf("remove") === 0, fake.confirmation);
+        fake.confirm(false);
+        // Adoption still comes first when Homebrew can take the app over.
+        browser.homebrewAdoptionSupported = true;
+        allowRemoval(["macos-apps", "homebrew-cask"]);
+        compare(browser.rowActionName(Object.assign({}, row, {adopt_with: "obsidian"})), "adopt");
+        compare(fake.writes, 0);
     }
     function test_adoptable_macos_apps_offer_manage_with_homebrew() {
         browser.homebrewAdoptionSupported = true;
@@ -1726,11 +1764,24 @@ TestCase {
         // Sources that could not be checked are not listed as a warning.
         verify(findChild(browser, "backgroundCheckFailures") === null);
         compare(availability.text, "Notifications available");
+        const settings = findChild(browser, "notificationSettingsButton");
+        verify(!settings.visible);
         verify(button.enabled);
         let requested = 0;
         browser.testNotificationRequested.connect(() => requested++);
         button.clicked();
         compare(requested, 1);
+        // The Mac app before macOS allows its notifications: they still go
+        // out, and Settings says why they lack PkgDeck's icon.
+        browser.notificationPermissionNeeded = true;
+        verify(availability.text.indexOf("Script Editor") >= 0);
+        verify(button.enabled);
+        verify(settings.visible);
+        let opened = 0;
+        browser.notificationSettingsRequested.connect(() => opened++);
+        settings.clicked();
+        compare(opened, 1);
+        browser.notificationPermissionNeeded = false;
         const history = JSON.stringify({notified: {fixture: []}});
         fake.notification_history = history;
         browser.destroy();
@@ -2149,6 +2200,40 @@ TestCase {
         fake.confirmation = "";
         fake.rows = JSON.stringify([{kind: "package", name: "codex", display_name: "Codex", source: "codex", installed: "2.0.0", candidate: "2.0.0", update: "current", scope: {user: {uid: 1000}}}]);
         tryVerify(() => list.itemAtIndex(0) !== null);
+        tryVerify(() => !findChild(list.itemAtIndex(0), "rowPackageAction").visible);
+        browser.choose(0);
+        keyClick(Qt.Key_D, Qt.ControlModifier);
+        compare(fake.confirmation, "");
+        compare(fake.writes, 0);
+    }
+    function test_update_only_rows_offer_removal_when_their_source_can_remove() {
+        browser.openView("Installed");
+        const current = {kind: "package", name: "codex", display_name: "Codex", source: "codex", architecture: "x86_64", installed: "2.0.0", candidate: "2.0.0", update: "current", scope: {user: {uid: 1000}}, summary: "Standalone CLI"};
+        fake.rows = JSON.stringify([current]);
+        allowRemoval(["codex"]);
+        const list = findChild(browser, "packageResults");
+        tryVerify(() => list.itemAtIndex(0) !== null);
+        compare(browser.rowActionName(current), "remove");
+        // An available update comes first; removal is never offered to rows
+        // that aren't installed, nor for sources that can't remove.
+        compare(browser.rowActionName(Object.assign({}, current, {update: "available"})), "upgrade");
+        compare(browser.rowActionName(Object.assign({}, current, {installed: null})), "");
+        compare(browser.rowActionName(Object.assign({}, current, {source: "fwupd"})), "");
+        const action = findChild(list.itemAtIndex(0), "rowPackageAction");
+        tryCompare(action, "visible", true);
+        compare(action.symbol, "remove");
+        waitForRendering(browser.contentItem);
+        clickDelegate(action);
+        verify(fake.confirmation.indexOf("remove") === 0, fake.confirmation);
+        fake.confirm(false);
+        browser.choose(0);
+        tryCompare(findChild(browser, "confirmationDialog"), "visible", false);
+        keyClick(Qt.Key_D, Qt.ControlModifier);
+        verify(fake.confirmation.indexOf("remove") === 0, fake.confirmation);
+        fake.confirm(false);
+        // Ordinary sources keep their removal whatever the catalog says.
+        compare(browser.rowActionName(Object.assign({}, current, {source: "apt"})), "remove");
+        allowRemoval([]);
         tryVerify(() => !findChild(list.itemAtIndex(0), "rowPackageAction").visible);
         compare(fake.writes, 0);
     }

@@ -562,6 +562,98 @@ fn exact_lookups_only_ask_sources_that_can_have_the_name() {
 }
 
 #[test]
+fn only_removals_of_an_app_path_read_the_macos_inventory() {
+    /// The macOS Applications inventory: it can only hold absolute app paths.
+    struct Inventory(Synthetic);
+    impl Backend for Inventory {
+        fn id(&self) -> &str {
+            self.0.id()
+        }
+        fn capabilities(&self) -> &[Capability] {
+            self.0.capabilities()
+        }
+        fn detect(&mut self, cancel: &Cancellation) -> Result<Availability, EngineError> {
+            self.0.detect(cancel)
+        }
+        fn search(
+            &mut self,
+            query: &str,
+            cancel: &Cancellation,
+        ) -> Result<Vec<Package>, EngineError> {
+            self.0.search(query, cancel)
+        }
+        fn installed(&mut self, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
+            self.0.installed(cancel)
+        }
+        fn may_have(&self, name: &str) -> bool {
+            name.ends_with(".app")
+        }
+    }
+    let app_path = "/Applications/Fixture.app";
+    let mut app = package(id("macos-apps"));
+    app.id.name = app_path.into();
+    app.installed_version = Some("1.0".into());
+    let mut inventory = Synthetic::new("macos-apps", Fault::None);
+    inventory.packages = [(app.id.clone(), app.clone())].into();
+    let calls = inventory.calls.clone();
+    let mut tool = package(id("synthetic"));
+    tool.installed_version = Some("1.0".into());
+    let mut synthetic = Synthetic::new("synthetic", Fault::None);
+    synthetic.packages = [(tool.id.clone(), tool.clone())].into();
+    let mut engine = Engine::default();
+    engine.register(Inventory(inventory)).unwrap();
+    engine.register(synthetic).unwrap();
+    let cancel = Cancellation::default();
+
+    // Installs, upgrades and removals of other names never read it.
+    let report = engine.installed_for_mutation(&cancel);
+    assert_eq!(report.packages, [tool.clone()]);
+    let report = engine.installed_for_removal("fixture-tool", &cancel);
+    assert_eq!(report.packages, [tool.clone()]);
+    assert_eq!(report.successful_sources, ["synthetic"]);
+    let report = engine.lookup_for_mutation(app_path, &cancel);
+    assert!(report.packages.is_empty());
+    assert_eq!(report.successful_sources, ["synthetic"]);
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+
+    // Removing an app path finds it next to every other installed package,
+    // sorted like any report, so a pinned or unpinned name can pick it.
+    let report = engine.installed_for_removal(app_path, &cancel);
+    assert!(calls.load(Ordering::Relaxed) > 0);
+    assert_eq!(report.packages, [app.clone(), tool]);
+    assert_eq!(report.successful_sources, ["synthetic", "macos-apps"]);
+    assert!(report.failures.is_empty());
+    let mut select = selector();
+    select.name = app_path.into();
+    assert_eq!(report.select(&select).unwrap(), app.id);
+
+    // An inventory that can't be read blocks the removal it was asked for.
+    let mut broken = Synthetic::new("macos-apps", Fault::Query);
+    broken.packages.clear();
+    let mut engine = Engine::default();
+    engine.register(Inventory(broken)).unwrap();
+    let report = engine.installed_for_removal(app_path, &cancel);
+    assert_eq!(report.failures.len(), 1);
+    assert_eq!(report.failures[0].backend, "macos-apps");
+    assert!(matches!(
+        report.select(&select),
+        Err(EngineError::Incomplete(_))
+    ));
+}
+
+#[test]
+fn supports_reports_each_registered_capability() {
+    let mut engine = engine(Fault::None);
+    let mut limited = Synthetic::new("limited", Fault::None);
+    limited.capabilities = &[Capability::Search, Capability::Upgrade];
+    engine.register(limited).unwrap();
+    assert!(engine.supports("synthetic", Capability::Remove));
+    assert!(engine.supports("limited", Capability::Upgrade));
+    assert!(!engine.supports("limited", Capability::Remove));
+    assert!(!engine.supports("missing", Capability::Search));
+}
+
+#[test]
 fn partial_queries_preserve_successes_but_cannot_resolve_unseen_ambiguity() {
     let mut engine = engine(Fault::Query);
     engine

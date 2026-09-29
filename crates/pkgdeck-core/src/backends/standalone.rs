@@ -115,9 +115,18 @@ trait StandaloneIo: Send {
         version: &Version,
         cancel: &Cancellation,
     ) -> Result<Completion, EngineError>;
+    fn remove(
+        &self,
+        tool: StandaloneTool,
+        installation: &Installation,
+        cancel: &Cancellation,
+    ) -> Result<Completion, EngineError>;
 }
 struct NativeStandalone {
     host: Host,
+    /// Removal moves files here instead of deleting them, so a mistake can
+    /// be undone: macOS's `trash`. Linux deletes them.
+    trash: Option<PathBuf>,
 }
 pub struct Standalone {
     tool: StandaloneTool,
@@ -129,6 +138,7 @@ impl Standalone {
             tool,
             io: Box::new(NativeStandalone {
                 host: Host::current(),
+                trash: cfg!(target_os = "macos").then(|| "/usr/bin/trash".into()),
             }),
         }
     }
@@ -211,6 +221,55 @@ impl Standalone {
             adopt_with: None,
         }
     }
+    /// Shows what a tool's updater or removal printed; returns whether it
+    /// finished after a cancellation.
+    fn finish(
+        &self,
+        completion: Completion,
+        progress: &mut dyn FnMut(Progress),
+    ) -> Result<bool, EngineError> {
+        let deferred = completion.cancellation_deferred;
+        let output = bytes(self.id(), completion)?;
+        if !output.is_empty() {
+            progress(Progress::Message(String::from_utf8_lossy(&output).into()));
+        }
+        Ok(deferred)
+    }
+    fn remove(
+        &self,
+        installation: &Installation,
+        cancel: &Cancellation,
+        progress: &mut dyn FnMut(Progress),
+    ) -> Result<OperationOutcome, EngineError> {
+        if cancel.requested() {
+            return Err(EngineError::Cancelled);
+        }
+        progress(Progress::Message(format!(
+            "Removing {} {}",
+            self.tool.name(),
+            installation.version
+        )));
+        let completion = self.io.remove(self.tool, installation, cancel)?;
+        let deferred = self.finish(completion, progress)?;
+        // Native writes may complete after cancellation. Verification must still run.
+        if self
+            .io
+            .locate(self.tool, &Cancellation::default())?
+            .is_some()
+        {
+            return Err(invalid_data(
+                self.tool,
+                "removal finished but the tool is still installed",
+            ));
+        }
+        progress(Progress::Message(format!(
+            "{} removed. Its settings were kept.",
+            self.tool.name()
+        )));
+        Ok(OperationOutcome {
+            cancellation_deferred: deferred,
+        })
+    }
 }
 impl Backend for Standalone {
     fn id(&self) -> &str {
@@ -222,6 +281,7 @@ impl Backend for Standalone {
             Capability::Installed,
             Capability::Details,
             Capability::Upgrade,
+            Capability::Remove,
         ]
     }
     fn detect(&mut self, cancel: &Cancellation) -> Result<Availability, EngineError> {
@@ -284,12 +344,15 @@ impl Backend for Standalone {
         cancel: &Cancellation,
         progress: &mut dyn FnMut(Progress),
     ) -> Result<OperationOutcome, EngineError> {
-        let Operation::Upgrade(id) = operation else {
+        let (Operation::Upgrade(id) | Operation::Remove(id)) = operation else {
             return Err(self.unsupported(operation.capability()));
         };
         let installation = self.installation(cancel)?;
         if self.package(&installation, None).id != *id {
             return Err(EngineError::NotFound);
+        }
+        if let Operation::Remove(_) = operation {
+            return self.remove(&installation, cancel, progress);
         }
         let candidate = self.io.latest(self.tool, &installation, cancel)?;
         if !candidate.cmp_precedence(&installation.version).is_gt() {
@@ -307,11 +370,7 @@ impl Backend for Standalone {
         let completion = self
             .io
             .update(self.tool, &installation, &candidate, cancel)?;
-        let deferred = completion.cancellation_deferred;
-        let output = bytes(self.id(), completion)?;
-        if !output.is_empty() {
-            progress(Progress::Message(String::from_utf8_lossy(&output).into()));
-        }
+        let deferred = self.finish(completion, progress)?;
         // Native writes may complete after cancellation. Verification must still run.
         let updated = self.installation(&Cancellation::default())?;
         if !updated
@@ -860,6 +919,232 @@ impl StandaloneIo for NativeStandalone {
             .host
             .standalone_write(&installation.updater, &args, &[], cancel)?)
     }
+    fn remove(
+        &self,
+        tool: StandaloneTool,
+        installation: &Installation,
+        cancel: &Cancellation,
+    ) -> Result<Completion, EngineError> {
+        crate::host::refuse_root(true)?;
+        // Recheck ownership/layout immediately before removing anything.
+        let current = self.locate(tool, cancel)?.ok_or(EngineError::NotFound)?;
+        if current.launcher != installation.launcher {
+            return Err(EngineError::NotFound);
+        }
+        let home = self.home()?;
+        let removal = self.removal(tool, &home)?;
+        let targets = removal.targets(tool, &home)?;
+        let completion = match &self.trash {
+            Some(trash) => {
+                let args: Vec<OsString> = targets.iter().map(Into::into).collect();
+                self.host.standalone_write(trash, &args, &[], cancel)?
+            }
+            None => {
+                for target in &targets {
+                    delete(target)?;
+                }
+                Completion {
+                    code: Some(0),
+                    signal: None,
+                    stdout: vec![],
+                    stderr: vec![],
+                    truncated: false,
+                    cancellation_deferred: false,
+                }
+            }
+        };
+        // Only folders left empty go; anything else in them stays.
+        for folder in &removal.emptied {
+            let _ = fs::remove_dir(folder);
+        }
+        Ok(completion)
+    }
+}
+
+/// What removing a tool takes away: what its official installer put there,
+/// never the tool's settings, credentials or keys.
+struct Removal {
+    /// The tool's own folder. A launcher goes only while it resolves here.
+    root: PathBuf,
+    launchers: Vec<PathBuf>,
+    /// Folders and files the installer created.
+    paths: Vec<PathBuf>,
+    /// Folders that go too once nothing else is left in them.
+    emptied: Vec<PathBuf>,
+}
+impl NativeStandalone {
+    /// Paths come from the same settings `locate` reads.
+    fn removal(&self, tool: StandaloneTool, home: &Path) -> Result<Removal, EngineError> {
+        let bin = home.join(".local/bin");
+        let removal = |root: PathBuf, launchers: &[&str], paths: Vec<PathBuf>| Removal {
+            launchers: launchers.iter().map(|name| bin.join(name)).collect(),
+            root,
+            paths,
+            emptied: vec![],
+        };
+        Ok(match tool {
+            StandaloneTool::Codex => {
+                let dir = self.setting_path("CODEX_INSTALL_DIR", bin.clone())?;
+                let codex = self.setting_path("CODEX_HOME", home.join(".codex"))?;
+                let root = codex.join("packages/standalone");
+                Removal {
+                    launchers: vec![dir.join("codex"), dir.join("codex-code-mode-host")],
+                    paths: vec![root.clone()],
+                    root,
+                    emptied: vec![codex.join("packages")],
+                }
+            }
+            StandaloneTool::Claude => {
+                let root = self
+                    .setting_path("XDG_DATA_HOME", home.join(".local/share"))?
+                    .join("claude");
+                removal(root.clone(), &["claude"], vec![root])
+            }
+            // Grok links both `grok` and `agent`, beside itself and in
+            // ~/.local/bin.
+            StandaloneTool::Grok => {
+                let dir = self.setting_path("GROK_BIN_DIR", home.join(".grok/bin"))?;
+                let root = home.join(".grok/downloads");
+                let mut removal = removal(root.clone(), &["grok", "agent"], vec![root]);
+                removal
+                    .launchers
+                    .extend([dir.join("grok"), dir.join("agent")]);
+                removal.emptied.push(home.join(".grok/bin"));
+                removal
+            }
+            // ~/.opencode also holds OpenCode's plugins, which stay.
+            StandaloneTool::OpenCode => {
+                let root = home.join(".opencode/bin");
+                removal(root.clone(), &[], vec![root])
+            }
+            StandaloneTool::Cursor => {
+                let root = home.join(".local/share/cursor-agent");
+                removal(root.clone(), &["agent", "cursor-agent"], vec![root])
+            }
+            StandaloneTool::Copilot => removal(bin.clone(), &["copilot"], vec![]),
+            StandaloneTool::Kiro => removal(bin.clone(), &["kiro-cli", "kiro-cli-chat"], vec![]),
+            StandaloneTool::Antigravity => removal(bin.clone(), &["agy"], vec![]),
+            StandaloneTool::Droid => removal(bin.clone(), &["droid"], vec![]),
+            // The installer links amp into ~/.local/bin and keeps its
+            // download checks beside the binary.
+            StandaloneTool::Amp => {
+                let amp = self.setting_path("AMP_HOME", home.join(".amp"))?;
+                let root = amp.join("bin");
+                let mut paths = vec![root.clone()];
+                paths.extend(
+                    [
+                        "amp-install-version.txt",
+                        "amp-install-checksum.txt",
+                        "amp-install-signature.minisign",
+                        "signing-key.pub",
+                    ]
+                    .map(|name| amp.join(name)),
+                );
+                let mut removal = removal(root, &["amp"], paths);
+                removal.emptied.push(amp);
+                removal
+            }
+            // Keypairs and the installer's channel live in ~/.config/solana
+            // and stay.
+            StandaloneTool::Solana => {
+                let solana = home.join(".local/share/solana");
+                let mut removal =
+                    removal(solana.join("install"), &[], vec![solana.join("install")]);
+                removal.emptied.push(solana);
+                removal
+            }
+            // AVM installs itself with Cargo, which records it beside `bin`.
+            StandaloneTool::Anchor => {
+                let avm = self.setting_path("AVM_HOME", home.join(".avm"))?;
+                let paths = ["bin", ".version", ".crates.toml", ".crates2.json"]
+                    .map(|name| avm.join(name))
+                    .into();
+                let mut removal = removal(avm.join("bin"), &[], paths);
+                removal.emptied.push(avm);
+                removal
+            }
+            // Cast wallets (keystores) and caches stay in the Foundry folder.
+            StandaloneTool::Foundry => {
+                let foundry = self.setting_path("FOUNDRY_DIR", home.join(".foundry"))?;
+                let paths = ["bin", "versions", "share/man"]
+                    .map(|name| foundry.join(name))
+                    .into();
+                let mut removal = removal(foundry.join("bin"), &[], paths);
+                removal.emptied.extend([foundry.join("share"), foundry]);
+                removal
+            }
+        })
+    }
+}
+impl Removal {
+    /// What to remove, checked like `native_binary` checks a launcher: a
+    /// folder or file must be the user's own, not a link somewhere else, not
+    /// in a package manager's prefix and not the home folder or above it.
+    fn targets(&self, tool: StandaloneTool, home: &Path) -> Result<Vec<PathBuf>, EngineError> {
+        let mut launchers: Vec<PathBuf> = vec![];
+        let root = fs::canonicalize(&self.root).ok();
+        for launcher in &self.launchers {
+            // Launchers that now point elsewhere belong to something else.
+            let ours = fs::canonicalize(launcher)
+                .is_ok_and(|target| root.as_ref().is_some_and(|root| target.starts_with(root)));
+            // GROK_BIN_DIR may name ~/.local/bin, listing a link twice.
+            if ours && !launchers.contains(launcher) {
+                launchers.push(launcher.clone());
+            }
+        }
+        // Launchers go last, so a removal failing partway still leaves the
+        // tool findable, and removable again.
+        let mut targets = vec![];
+        let home = fs::canonicalize(home).map_err(ExecutionError::from)?;
+        for path in &self.paths {
+            let metadata = match fs::symlink_metadata(path) {
+                Ok(metadata) => metadata,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(ExecutionError::from(e).into()),
+            };
+            let foreign = metadata.file_type().is_symlink()
+                || metadata.uid() != rustix::process::getuid().as_raw()
+                || {
+                    let path = fs::canonicalize(path).map_err(ExecutionError::from)?;
+                    home.starts_with(&path) || managed(&path)
+                };
+            if foreign {
+                return Err(invalid_data(
+                    tool,
+                    format!(
+                        "PkgDeck won't remove {}: it links somewhere else, isn't yours, or holds your home folder. Nothing was removed.",
+                        path.display()
+                    ),
+                ));
+            }
+            targets.push(path.clone());
+        }
+        targets.extend(launchers);
+        Ok(targets)
+    }
+}
+
+/// Deletes a file, a link (not what it points to) or a whole folder.
+fn delete(path: &Path) -> Result<(), EngineError> {
+    let folder = fs::symlink_metadata(path)
+        .map_err(ExecutionError::from)?
+        .is_dir();
+    if folder {
+        fs::remove_dir_all(path)
+    } else {
+        fs::remove_file(path)
+    }
+    .map_err(|e| ExecutionError::from(e).into())
+}
+
+/// Whether a path lies in npm's or Homebrew's own storage.
+fn managed(path: &Path) -> bool {
+    path.components().any(|p| {
+        matches!(
+            p.as_os_str().to_str(),
+            Some("node_modules" | "Cellar" | "Caskroom")
+        )
+    })
 }
 
 impl NativeStandalone {
@@ -915,14 +1200,7 @@ fn native_binary(
         Err(e) => return Err(ExecutionError::from(e).into()),
     };
     // Do not follow a private storage root redirected into a manager prefix.
-    if !binary.starts_with(&root)
-        || root.components().any(|p| {
-            matches!(
-                p.as_os_str().to_str(),
-                Some("node_modules" | "Cellar" | "Caskroom")
-            )
-        })
-    {
+    if !binary.starts_with(&root) || managed(&root) {
         return Ok(None);
     }
     let metadata = fs::metadata(&binary).map_err(ExecutionError::from)?;
@@ -1051,6 +1329,17 @@ mod tests {
                         ),
                     ]),
                 ),
+                trash: None,
+            }
+        }
+        /// Like `native`, moving removals to the Trash the way macOS does:
+        /// a shim records what it was given, then deletes it, or fails while
+        /// `trash-fails` exists. Written once, like the curl shim.
+        fn trashing(&self) -> NativeStandalone {
+            let trash = self.script("trash/trash", "#!/bin/sh\n[ -e \"$HOME/trash-fails\" ] && { echo 'could not move to the Trash' >&2; exit 5; }\nfor path do printf '%s\\n' \"$path\" >> \"$HOME/trashed\"; rm -rf \"$path\"; done\n");
+            NativeStandalone {
+                trash: Some(trash),
+                ..self.native()
             }
         }
         fn install(&self, tool: StandaloneTool) -> PathBuf {
@@ -1176,6 +1465,9 @@ mod tests {
         deferred: bool,
         /// Cancel while checking for the newer version.
         cancel_on_check: bool,
+        /// Cancel once the installation is found, as pressing Cancel right
+        /// after confirming would.
+        cancel_on_locate: bool,
     }
     impl Fixture {
         fn new() -> Self {
@@ -1191,6 +1483,7 @@ mod tests {
                 change: true,
                 deferred: false,
                 cancel_on_check: false,
+                cancel_on_locate: false,
             }
         }
     }
@@ -1202,6 +1495,9 @@ mod tests {
         ) -> Result<Option<Installation>, EngineError> {
             if cancel.requested() {
                 return Err(EngineError::Cancelled);
+            }
+            if self.cancel_on_locate {
+                cancel.cancel();
             }
             Ok(self.installed.lock().unwrap().clone())
         }
@@ -1231,6 +1527,20 @@ mod tests {
             result.cancellation_deferred = self.deferred;
             Ok(result)
         }
+        fn remove(
+            &self,
+            _: StandaloneTool,
+            _: &Installation,
+            _: &Cancellation,
+        ) -> Result<Completion, EngineError> {
+            *self.writes.lock().unwrap() += 1;
+            if self.change {
+                *self.installed.lock().unwrap() = None;
+            }
+            let mut result = ok("");
+            result.cancellation_deferred = self.deferred;
+            Ok(result)
+        }
     }
     #[test]
     fn standalone_lifecycle_uses_exact_identity_and_confirms_version() {
@@ -1248,7 +1558,8 @@ mod tests {
                     Capability::Search,
                     Capability::Installed,
                     Capability::Details,
-                    Capability::Upgrade
+                    Capability::Upgrade,
+                    Capability::Remove
                 ]
             );
             assert_eq!(backend.detect(&cancel).unwrap(), Availability::Available);
@@ -1269,10 +1580,10 @@ mod tests {
             foreign.reference = Some("/other/tool".into());
             assert!(backend.details(&foreign, &cancel).is_err());
             assert!(backend
-                .execute(&Operation::Upgrade(foreign), &cancel, &mut |_| {})
+                .execute(&Operation::Upgrade(foreign.clone()), &cancel, &mut |_| {})
                 .is_err());
             assert!(backend
-                .execute(&Operation::Remove(package.id.clone()), &cancel, &mut |_| {})
+                .execute(&Operation::Remove(foreign), &cancel, &mut |_| {})
                 .is_err());
             assert_eq!(*fixture.writes.lock().unwrap(), 0);
             let mut progress = vec![];
@@ -1288,9 +1599,26 @@ mod tests {
                 UpdateAvailability::Current
             );
             backend
-                .execute(&Operation::Upgrade(package.id), &cancel, &mut |_| {})
+                .execute(
+                    &Operation::Upgrade(package.id.clone()),
+                    &cancel,
+                    &mut drop::<Progress>,
+                )
                 .unwrap();
             assert_eq!(*fixture.writes.lock().unwrap(), 1);
+            // Removal confirms the tool is gone afterwards.
+            let mut progress = vec![];
+            backend
+                .execute(&Operation::Remove(package.id), &cancel, &mut |p| {
+                    progress.push(p)
+                })
+                .unwrap();
+            assert_eq!(*fixture.writes.lock().unwrap(), 2);
+            assert!(matches!(
+                progress.last(),
+                Some(Progress::Message(text)) if text.ends_with("removed. Its settings were kept.")
+            ));
+            assert!(backend.installed(&cancel).unwrap().is_empty());
         }
     }
     #[test]
@@ -1781,12 +2109,14 @@ mod tests {
     fn native_rejects_sandbox_missing_home_and_invalid_paths() {
         let native = NativeStandalone {
             host: Host::new(Runtime::Flatpak, BTreeMap::new()),
+            trash: None,
         };
         assert!(native
             .locate(StandaloneTool::Codex, &Cancellation::default())
             .is_err());
         let native = NativeStandalone {
             host: Host::new(Runtime::Native, BTreeMap::new()),
+            trash: None,
         };
         assert!(native.home().is_err());
         let native = NativeStandalone {
@@ -1794,6 +2124,7 @@ mod tests {
                 Runtime::Native,
                 BTreeMap::from([("CODEX_HOME".into(), "relative".into())]),
             ),
+            trash: None,
         };
         assert!(native
             .setting_path("CODEX_HOME", "/fallback".into())
@@ -1921,6 +2252,7 @@ mod tests {
                     ("PATH".into(), temp.0.join("empty").into_os_string()),
                 ]),
             ),
+            trash: None,
         };
         assert!(matches!(
             offline.latest(StandaloneTool::Amp, &amp, &cancel),
@@ -1951,6 +2283,388 @@ mod tests {
                 .unwrap()
                 .version,
             Version::new(1, 0, 0)
+        );
+    }
+    #[test]
+    fn standalone_removal_confirms_the_tool_is_gone() {
+        let cancel = Cancellation::default();
+        let mut fixture = Fixture::new();
+        fixture.change = false;
+        let mut backend = Standalone {
+            tool: StandaloneTool::Claude,
+            io: Box::new(fixture.clone()),
+        };
+        let id = backend.installed(&cancel).unwrap()[0].id.clone();
+        // Only upgrades and removals are offered.
+        assert!(backend
+            .execute(&Operation::Install(id.clone()), &cancel, &mut |_| {})
+            .is_err());
+        assert!(backend
+            .execute(&Operation::Remove(id.clone()), &cancel, &mut |_| {})
+            .unwrap_err()
+            .to_string()
+            .contains("still installed"));
+        // A cancellation after the checks stops before anything is removed.
+        let writes = *fixture.writes.lock().unwrap();
+        fixture.cancel_on_locate = true;
+        backend.io = Box::new(fixture.clone());
+        assert!(matches!(
+            backend.execute(
+                &Operation::Remove(id.clone()),
+                &Cancellation::default(),
+                &mut drop::<Progress>
+            ),
+            Err(EngineError::Cancelled)
+        ));
+        assert_eq!(*fixture.writes.lock().unwrap(), writes);
+        // A removal finishing after a cancellation says so.
+        fixture.cancel_on_locate = false;
+        fixture.change = true;
+        fixture.deferred = true;
+        backend.io = Box::new(fixture.clone());
+        assert!(
+            backend
+                .execute(&Operation::Remove(id.clone()), &cancel, &mut |_| {})
+                .unwrap()
+                .cancellation_deferred
+        );
+        assert!(matches!(
+            backend.execute(&Operation::Remove(id), &cancel, &mut |_| {}),
+            Err(EngineError::NotFound)
+        ));
+    }
+    fn exists(path: &Path) -> bool {
+        fs::symlink_metadata(path).is_ok()
+    }
+    #[test]
+    fn native_removal_takes_only_what_each_installer_put_there() {
+        let cancel = Cancellation::default();
+        for trash in [false, true] {
+            for tool in StandaloneTool::ALL {
+                let temp = Temp::new();
+                let native = if trash {
+                    temp.trashing()
+                } else {
+                    temp.native()
+                };
+                let launcher = temp.install(tool);
+                let link = |target: &str, link: &str| {
+                    let link = temp.0.join(link);
+                    fs::create_dir_all(link.parent().unwrap()).unwrap();
+                    symlink(temp.0.join(target), link).unwrap();
+                };
+                // What else each installer leaves, and what's the user's.
+                let (removed, kept): (&[&str], &[&str]) = match tool {
+                    StandaloneTool::Codex => {
+                        link(
+                            ".codex/packages/standalone/releases/1.0.0-test/bin/codex",
+                            ".local/bin/codex-code-mode-host",
+                        );
+                        (
+                            &[
+                                ".local/bin/codex",
+                                ".local/bin/codex-code-mode-host",
+                                ".codex/packages",
+                            ],
+                            &[".codex/config.toml", ".codex/auth.json"],
+                        )
+                    }
+                    StandaloneTool::Claude => (
+                        &[".local/bin/claude", ".local/share/claude"],
+                        &[".claude/settings.json", ".claude.json"],
+                    ),
+                    StandaloneTool::Grok => {
+                        link(".grok/downloads/grok-linux-test", ".grok/bin/agent");
+                        link(".grok/bin/grok", ".local/bin/grok");
+                        link(".grok/bin/agent", ".local/bin/agent");
+                        (
+                            &[
+                                ".grok/bin",
+                                ".grok/downloads",
+                                ".local/bin/grok",
+                                ".local/bin/agent",
+                            ],
+                            &[".grok/auth.json"],
+                        )
+                    }
+                    StandaloneTool::OpenCode => (&[".opencode/bin"], &[".opencode/package.json"]),
+                    StandaloneTool::Cursor => {
+                        link(
+                            ".local/share/cursor-agent/versions/1.0.0/cursor-agent",
+                            ".local/bin/cursor-agent",
+                        );
+                        (
+                            &[
+                                ".local/bin/agent",
+                                ".local/bin/cursor-agent",
+                                ".local/share/cursor-agent",
+                            ],
+                            &[".cursor/cli-config.json"],
+                        )
+                    }
+                    StandaloneTool::Copilot => (&[".local/bin/copilot"], &[".copilot/config.json"]),
+                    StandaloneTool::Kiro => {
+                        temp.script(".local/bin/kiro-cli-chat", "#!/bin/sh\n");
+                        (
+                            &[".local/bin/kiro-cli", ".local/bin/kiro-cli-chat"],
+                            &[".kiro/settings/cli.json"],
+                        )
+                    }
+                    StandaloneTool::Antigravity => {
+                        (&[".local/bin/agy"], &[".gemini/settings.json"])
+                    }
+                    StandaloneTool::Amp => {
+                        link(".amp/bin/amp", ".local/bin/amp");
+                        temp.write(".amp/amp-install-version.txt", "1.0.0");
+                        temp.write(".amp/signing-key.pub", "key");
+                        (&[".amp", ".local/bin/amp"], &[".config/amp/settings.json"])
+                    }
+                    StandaloneTool::Droid => (&[".local/bin/droid"], &[".factory/settings.json"]),
+                    StandaloneTool::Solana => (
+                        &[".local/share/solana"],
+                        &[
+                            ".config/solana/id.json",
+                            ".config/solana/cli/config.yml",
+                            ".config/solana/install/config.yml",
+                        ],
+                    ),
+                    StandaloneTool::Anchor => {
+                        link(".avm/bin/avm", ".avm/bin/anchor");
+                        temp.write(".avm/.crates.toml", "[v1]\n");
+                        (&[".avm"], &[".config/solana/id.json"])
+                    }
+                    StandaloneTool::Foundry => {
+                        temp.write(".foundry/share/man/man1/forge.1", "manual");
+                        (
+                            &[".foundry/bin", ".foundry/versions", ".foundry/share"],
+                            &[".foundry/keystores/dev", ".foundry/cache/rpc.json"],
+                        )
+                    }
+                };
+                let kept: Vec<_> = kept.iter().chain(&[".local/bin/unrelated"]).collect();
+                for path in &kept {
+                    if !temp.0.join(path).exists() {
+                        // Settings are JSON, which Claude Code discovery reads.
+                        temp.write(path, "{}");
+                    }
+                }
+                let installation = native.locate(tool, &cancel).unwrap().unwrap();
+                assert_eq!(installation.launcher, launcher);
+                let result = native.remove(tool, &installation, &cancel);
+                // Removal never runs as root.
+                assert_eq!(result.is_err(), rustix::process::geteuid().is_root());
+                let Ok(result) = result else { continue };
+                assert_eq!(result.code, Some(0));
+                assert!(native.locate(tool, &cancel).unwrap().is_none());
+                for path in removed {
+                    assert!(!exists(&temp.0.join(path)), "{tool:?} left {path}");
+                }
+                for path in &kept {
+                    assert!(temp.0.join(path).is_file(), "{tool:?} removed {path}");
+                }
+                // The Trash gets each item once, all inside this home.
+                let trashed = fs::read_to_string(temp.0.join("trashed")).unwrap_or_default();
+                let mut lines: Vec<_> = trashed.lines().collect();
+                assert_eq!(lines.is_empty(), !trash);
+                assert!(lines
+                    .iter()
+                    .all(|line| Path::new(line).starts_with(&temp.0)));
+                let count = lines.len();
+                lines.sort();
+                lines.dedup();
+                assert_eq!(lines.len(), count);
+            }
+        }
+    }
+    #[test]
+    fn native_removal_refuses_what_isnt_the_tools_own() {
+        let cancel = Cancellation::default();
+        // Cursor leaves the `agent` link Grok's installer made.
+        let temp = Temp::new();
+        let native = temp.native();
+        let grok = temp.install(StandaloneTool::Grok);
+        temp.install(StandaloneTool::Cursor);
+        let agent = temp.0.join(".local/bin/agent");
+        fs::remove_file(&agent).unwrap();
+        symlink(&grok, &agent).unwrap();
+        symlink(
+            temp.0
+                .join(".local/share/cursor-agent/versions/1.0.0/cursor-agent"),
+            temp.0.join(".local/bin/cursor-agent"),
+        )
+        .unwrap();
+        let cursor = native
+            .locate(StandaloneTool::Cursor, &cancel)
+            .unwrap()
+            .unwrap();
+        let result = native.remove(StandaloneTool::Cursor, &cursor, &cancel);
+        // Removal never runs as root; the checks below need it to.
+        assert_eq!(result.is_err(), rustix::process::geteuid().is_root());
+        let Ok(_) = result else { return };
+        assert!(native
+            .locate(StandaloneTool::Cursor, &cancel)
+            .unwrap()
+            .is_none());
+        assert!(exists(&agent));
+        let grok = native
+            .locate(StandaloneTool::Grok, &cancel)
+            .unwrap()
+            .unwrap();
+        // Another copy than the one checked is never removed, and a
+        // cancelled removal removes nothing.
+        let moved = Installation {
+            launcher: temp.0.join("elsewhere/grok"),
+            ..grok.clone()
+        };
+        assert!(matches!(
+            native.remove(StandaloneTool::Grok, &moved, &cancel),
+            Err(EngineError::NotFound)
+        ));
+        let cancelled = Cancellation::default();
+        cancelled.cancel();
+        assert!(matches!(
+            native.remove(StandaloneTool::Grok, &grok, &cancelled),
+            Err(EngineError::Cancelled)
+        ));
+        assert!(native
+            .locate(StandaloneTool::Grok, &cancel)
+            .unwrap()
+            .is_some());
+        // A tool folder that links somewhere else is left alone.
+        let temp = Temp::new();
+        let native = temp.native();
+        let elsewhere = temp.0.join("elsewhere/bin");
+        fs::create_dir_all(&elsewhere).unwrap();
+        temp.install(StandaloneTool::OpenCode);
+        fs::rename(
+            temp.0.join(".opencode/bin/opencode"),
+            elsewhere.join("opencode"),
+        )
+        .unwrap();
+        fs::remove_dir(temp.0.join(".opencode/bin")).unwrap();
+        symlink(&elsewhere, temp.0.join(".opencode/bin")).unwrap();
+        let opencode = native
+            .locate(StandaloneTool::OpenCode, &cancel)
+            .unwrap()
+            .unwrap();
+        assert!(native
+            .remove(StandaloneTool::OpenCode, &opencode, &cancel)
+            .unwrap_err()
+            .to_string()
+            .contains("won't remove"));
+        assert!(elsewhere.join("opencode").is_file());
+        // Nor is a folder holding the home folder, whatever FOUNDRY_DIR says.
+        let temp = Temp::new();
+        temp.install(StandaloneTool::Foundry);
+        let foundry = temp.0.join(".foundry");
+        let native = NativeStandalone {
+            host: Host::new(
+                Runtime::Native,
+                BTreeMap::from([
+                    ("HOME".into(), foundry.join("versions").into_os_string()),
+                    ("FOUNDRY_DIR".into(), foundry.as_os_str().into()),
+                    ("PATH".into(), "/usr/bin:/bin".into()),
+                ]),
+            ),
+            trash: None,
+        };
+        let installation = native
+            .locate(StandaloneTool::Foundry, &cancel)
+            .unwrap()
+            .unwrap();
+        assert!(native
+            .remove(StandaloneTool::Foundry, &installation, &cancel)
+            .unwrap_err()
+            .to_string()
+            .contains("won't remove"));
+        assert!(foundry.join("bin/forge").exists());
+        // A path through a file is an error, not a missing folder.
+        let temp = Temp::new();
+        let native = temp.native();
+        temp.install(StandaloneTool::Foundry);
+        temp.write(".foundry/share", "not a folder");
+        let installation = native
+            .locate(StandaloneTool::Foundry, &cancel)
+            .unwrap()
+            .unwrap();
+        assert!(native
+            .remove(StandaloneTool::Foundry, &installation, &cancel)
+            .is_err());
+        assert!(temp.0.join(".foundry/bin/forge").exists());
+    }
+    #[test]
+    fn native_removal_reports_failures_and_removes_each_link_once() {
+        // Removal never runs as root, so neither does this test.
+        let user = crate::host::refuse_root(true);
+        let Ok(()) = user else { return };
+        let cancel = Cancellation::default();
+        // A Trash that fails leaves everything in place.
+        let temp = Temp::new();
+        let native = temp.trashing();
+        temp.install(StandaloneTool::Solana);
+        temp.write("trash-fails", "");
+        let solana = native
+            .locate(StandaloneTool::Solana, &cancel)
+            .unwrap()
+            .unwrap();
+        let result = native
+            .remove(StandaloneTool::Solana, &solana, &cancel)
+            .unwrap();
+        assert_eq!(result.code, Some(5));
+        assert!(native
+            .locate(StandaloneTool::Solana, &cancel)
+            .unwrap()
+            .is_some());
+        // A deletion that fails is reported, and the launcher still works.
+        let temp = Temp::new();
+        let native = temp.native();
+        temp.install(StandaloneTool::Claude);
+        let versions = temp.0.join(".local/share/claude/versions");
+        fs::set_permissions(&versions, fs::Permissions::from_mode(0o555)).unwrap();
+        let claude = native
+            .locate(StandaloneTool::Claude, &cancel)
+            .unwrap()
+            .unwrap();
+        let result = native.remove(StandaloneTool::Claude, &claude, &cancel);
+        fs::set_permissions(&versions, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(result.is_err());
+        assert!(native
+            .locate(StandaloneTool::Claude, &cancel)
+            .unwrap()
+            .is_some());
+        // With GROK_BIN_DIR at ~/.local/bin each link is removed once.
+        let temp = Temp::new();
+        let bin = temp.0.join(".local/bin");
+        let trash = temp.trashing().trash;
+        let native = NativeStandalone {
+            host: Host::new(
+                Runtime::Native,
+                BTreeMap::from([
+                    ("HOME".into(), temp.0.as_os_str().into()),
+                    ("GROK_BIN_DIR".into(), bin.as_os_str().into()),
+                    ("PATH".into(), "/usr/bin:/bin".into()),
+                ]),
+            ),
+            trash,
+        };
+        temp.install(StandaloneTool::Grok);
+        let binary = temp.0.join(".grok/downloads/grok-linux-test");
+        fs::create_dir_all(&bin).unwrap();
+        symlink(&binary, bin.join("grok")).unwrap();
+        symlink(&binary, bin.join("agent")).unwrap();
+        let grok = native
+            .locate(StandaloneTool::Grok, &cancel)
+            .unwrap()
+            .unwrap();
+        native.remove(StandaloneTool::Grok, &grok, &cancel).unwrap();
+        assert_eq!(
+            fs::read_to_string(temp.0.join("trashed")).unwrap(),
+            format!(
+                "{}\n{}\n{}\n",
+                temp.0.join(".grok/downloads").display(),
+                bin.join("grok").display(),
+                bin.join("agent").display(),
+            )
         );
     }
 }

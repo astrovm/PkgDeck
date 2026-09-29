@@ -123,8 +123,10 @@ pub const BACKEND_IDS: &[&str] = &[
     "foundry",
 ];
 
-/// These sources update existing installations but do not install or remove them.
-pub fn update_only(id: &str) -> bool {
+/// PkgDeck never installs from these sources: it updates what is already
+/// there, and removes it only when the backend reports
+/// [`Capability::Remove`].
+pub fn never_installs(id: &str) -> bool {
     matches!(
         id,
         "fwupd" | "mas" | "conda" | "system-image" | "aur" | "toolbox" | "distrobox"
@@ -134,7 +136,7 @@ pub fn update_only(id: &str) -> bool {
 /// Sources upgraded package by package: they have no single "upgrade
 /// everything" command, so `pkd upgrade` without names lists each package.
 pub fn per_package_upgrades(id: &str) -> bool {
-    update_only(id) || matches!(id, "pixi" | "rustup" | "nix")
+    never_installs(id) || matches!(id, "pixi" | "rustup" | "nix")
 }
 
 /// The package a line of a manager's output says it is working on, when it
@@ -210,8 +212,11 @@ pub fn output_package(backend: &str, line: &str) -> Option<String> {
     (!name.is_empty()).then_some(name)
 }
 
-/// Inventory sources whose rows must never offer package mutations.
-pub fn read_only(id: &str) -> bool {
+/// Inventory sources: PkgDeck never installs or upgrades their rows, and they
+/// never take part in resolving a name to install or upgrade. Removal still
+/// reaches the backend, which refuses it unless it reports
+/// [`Capability::Remove`].
+pub fn inventory_only(id: &str) -> bool {
     id == "macos-apps"
 }
 
@@ -393,6 +398,20 @@ pub trait Transport: Send {
     ) -> Result<Completion, ExecutionError> {
         let _ = (args, cancel, write);
         Err(ExecutionError::Disabled(format!("{executable} not found")))
+    }
+    /// Run `/bin/ps` or `/usr/bin/trash` as the invoking user, for removing
+    /// Mac apps. Fixtures override it; elsewhere nothing runs.
+    fn macos_tool(
+        &self,
+        executable: &std::path::Path,
+        _args: &[OsString],
+        _cancel: &Cancellation,
+        _write: bool,
+    ) -> Result<Completion, ExecutionError> {
+        Err(ExecutionError::Disabled(format!(
+            "{} is unavailable",
+            executable.display()
+        )))
     }
     fn container(
         &self,
@@ -922,6 +941,15 @@ impl Transport for NativeTransport {
     ) -> Result<Completion, ExecutionError> {
         self.host
             .system_manager(executable, args, cancel, write, self.authorization)
+    }
+    fn macos_tool(
+        &self,
+        executable: &std::path::Path,
+        args: &[OsString],
+        cancel: &Cancellation,
+        write: bool,
+    ) -> Result<Completion, ExecutionError> {
+        self.host.macos_tool(executable, args, cancel, write)
     }
     fn container(
         &self,
@@ -5722,7 +5750,7 @@ fn native_engine_on(
         ));
     }
     if allowed("macos-apps") {
-        candidates.push((Box::new(MacApps::native()), true));
+        candidates.push((Box::new(MacApps::native(transport())), true));
     }
     if allowed("mas") {
         candidates.push((Box::new(MacAppStore::new(transport())), true));

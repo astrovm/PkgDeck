@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Exercise Toolbx or Distrobox development containers through pkd against the
-# real tools: list, details, upgrade, and the refusal to remove a container.
+# real tools: list, details, upgrade, and removal.
 # Results are confirmed through the tool itself, never only PkgDeck output.
 # Each test container is made with its own tool and removed at exit, even on
 # failure. A second container, made from the same Toolbx image by the other
@@ -97,14 +97,6 @@ distrobox)
     ;;
 esac
 
-# A container is never removed: that would delete what is installed in it.
-removal=$(run remove "$box") || true
-if grep -q '"exit_code":0' <<<"$removal"; then
-    echo "pkd removed $box" >&2
-    exit 1
-fi
-podman container exists "$box"
-
 success upgrade "$box" >/dev/null
 podman container exists "$box"
 case $backend in
@@ -117,6 +109,25 @@ distrobox)
 esac
 if [[ $pending -ne 0 ]]; then
     echo "$box still has $pending packages to upgrade after pkd upgrade" >&2
+    exit 1
+fi
+
+# Removing deletes the running container, and only that one.
+success remove "$box" >/dev/null
+if podman container exists "$box"; then
+    echo "$box still exists after pkd remove" >&2
+    exit 1
+fi
+podman container exists "$other"
+list=$(success list)
+if listed "$box" "$list"; then
+    echo "pkd list still shows $box after pkd remove" >&2
+    exit 1
+fi
+# A container that is gone can't be removed again.
+removal=$(run remove "$box") || true
+if grep -q '"exit_code":0' <<<"$removal"; then
+    echo "pkd removed $box twice: $removal" >&2
     exit 1
 fi
 echo "dev-containers: $backend passed"

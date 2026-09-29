@@ -88,6 +88,11 @@ installs that package, never a guess from the name.
 fuzzy matching or aliases.
 
 - If the same name exists in more than one source, pick one with `--from`.
+- `remove` finds an app from macOS Applications by its full path, for example
+  `pkd remove /Applications/Example.app --from macos-apps`. `install` and
+  `upgrade` never use that source.
+- If a source can't do what you asked, such as removing firmware, PkgDeck
+  says so before asking you to confirm.
 - npm, pnpm, Bun, Cargo, RubyGems, Composer, pip, pipx and uv install any
   name their registry has, and a registry name alone doesn't prove it's the
   package you mean (npm has an unrelated `ripgrep`). So for exact names
@@ -115,8 +120,9 @@ fuzzy matching or aliases.
 - conda uses conda, mamba, or micromamba, whichever it finds first. It lists the
   packages you asked for in the base environment and in each named environment
   (those in an `envs` folder), not their dependencies. It updates them after
-  a dry-run solve; install and remove them with the manager itself. Project
-  prefixes elsewhere are left alone.
+  a dry-run solve, and `remove` runs the manager's own `remove` in that
+  environment, which keeps the environment itself. Install them with the
+  manager. Project prefixes elsewhere are left alone.
 - rustup lists each installed toolchain, plus a separate `rustup` row for
   rustup itself. Channels (`stable`, `beta`, `nightly`) update within their
   channel; pinned versions such as `1.85.0` never show updates. Search offers a
@@ -322,6 +328,7 @@ restarts your computer, downgrades firmware, or forces an update.
 pkd list --from toolbox
 pkd info fedora-toolbox-43 --from distrobox
 pkd upgrade fedora-toolbox-43 --from toolbox
+pkd remove old-box --from distrobox
 ```
 
 On image-based systems such as Fedora Silverblue, development tools live
@@ -333,8 +340,14 @@ Distrobox runs `distrobox upgrade`, and Toolbx runs the container's own
 package manager (dnf, apt, pacman, zypper, apk or XBPS) through
 `toolbox run`. That starts a stopped container. If sudo inside a Toolbx
 container asks for a password, update it from a terminal with
-`toolbox enter`. PkgDeck never creates or removes containers, and update
-status stays unknown, so `pkd upgrade` without names leaves them alone.
+`toolbox enter`. Update status stays unknown, so `pkd upgrade` without names
+leaves them alone.
+
+`pkd remove` deletes a container with `toolbox rm --force` or
+`distrobox rm --force`, even while it runs, and everything installed in it
+goes with it. Your home folder is shared with the host and stays. Distrobox
+also deletes the apps and commands the container exported. PkgDeck never
+creates containers.
 
 ## Image-based Linux systems
 
@@ -342,6 +355,7 @@ status stays unknown, so `pkd upgrade` without names leaves them alone.
 pkd list --from system-image
 pkd info system --from system-image
 pkd upgrade --from system-image
+pkd remove htop --from system-image
 ```
 
 On Fedora Atomic desktops, CoreOS, and other bootc or rpm-ostree systems, the
@@ -350,17 +364,23 @@ On Fedora Atomic desktops, CoreOS, and other bootc or rpm-ostree systems, the
 running deployment, the one waiting for a restart, the rollback, and layered
 packages.
 
-It can only update. `pkd upgrade` runs `bootc upgrade` or `rpm-ostree upgrade`,
-which downloads a new deployment that applies on the next restart. PkgDeck
-never restarts your computer. If an update is already waiting for a restart,
-it does nothing and says so. Ordinary systems report the source as
-unavailable.
+`pkd upgrade` runs `bootc upgrade` or `rpm-ostree upgrade`, which downloads a
+new deployment that applies on the next restart. PkgDeck never restarts your
+computer. If an update is already waiting for a restart, it does nothing and
+says so. Ordinary systems report the source as unavailable.
+
+Packages layered on top of the image with `rpm-ostree install` get a row of
+their own, from the deployment the next restart uses. They update along with
+the system, so they can't be updated on their own. `pkd remove` runs
+`rpm-ostree uninstall`, which also makes a new deployment: the package is gone
+after the next restart. The `system` row itself can't be removed.
 
 ## Arch User Repository (AUR)
 
 ```sh
 pkd list --from aur
 pkd info yay --from aur
+pkd remove yay --from aur
 ```
 
 The `aur` source lists installed packages that Pacman's repositories don't
@@ -370,10 +390,15 @@ appears once. Details show the AUR version, maintainer, and whether it's
 flagged out of date. Packages missing from the AUR are shown as built locally
 or removed from the AUR.
 
-This source is read-only. In June 2026 malicious commits reached about 1,500
-AUR packages, and building one runs its PKGBUILD. PkgDeck shows what's
-outdated; review the PKGBUILD and update with your AUR helper. Search only
-matches installed AUR packages.
+In June 2026 malicious commits reached about 1,500 AUR packages, and building
+one runs its PKGBUILD. PkgDeck never builds one itself: `pkd upgrade` runs
+your AUR helper (paru, then yay), and its preview links the PKGBUILD's change
+history so you can review it first. It never installs AUR packages. Search
+only matches installed AUR packages.
+
+`pkd remove` builds nothing, so it needs no helper: it runs `pacman -Rns`,
+exactly as the Pacman source removes a package, with the same password
+prompt.
 
 If Pacman's repository databases aren't synced, every package looks foreign,
 so the source reports an error instead: run `pkd refresh --from pacman`. When
@@ -401,6 +426,7 @@ pkd list --from mas
 pkd info Keynote --from mas
 pkd upgrade --from mas              # update every App Store app with an update
 pkd upgrade Keynote --from mas
+pkd remove Keynote --from mas       # move it to the Trash
 ```
 
 The `mas` source uses [mas](https://github.com/mas-cli/mas) 7 or newer
@@ -411,7 +437,17 @@ starts a download. Name an app by its name or its App Store ID.
 Updates run `mas update`. mas asks for your Mac password through sudo, which
 needs a terminal, so update from `pkd` in Terminal or from the App Store app.
 You must be signed in to the App Store. PkgDeck checks that each app's version
-changed afterwards. It never installs, removes, or moves App Store apps.
+changed afterwards. It never installs App Store apps.
+
+Removing an app moves its bundle to your Trash (`~/.Trash`), where you can put
+it back. App Store apps belong to root, so PkgDeck moves them with the system's
+`/bin/mv` as root: `pkd` uses an existing sudo login (`sudo -n`), the Mac app
+shows the macOS administrator password dialog. The app stays owned by root in
+the Trash, like one Finder moved there. PkgDeck doesn't run `mas uninstall`,
+because that needs sudo's terminal prompt. Before moving, PkgDeck checks that
+the App Store receipt is in the bundle and that the app isn't open; afterwards
+it checks that the bundle left and that `mas list` no longer shows it there.
+It refuses to run as root, since root's Trash isn't yours.
 
 ## macOS application inventory
 
@@ -419,9 +455,10 @@ changed afterwards. It never installs, removes, or moves App Store apps.
 pkd list --from macos-apps
 pkd list --from macos-apps --json
 pkd info '/Applications/Visual Studio Code.app' --from macos-apps
+pkd remove '/Applications/Visual Studio Code.app' --from macos-apps
 ```
 
-This read-only source scans `/Applications` and `~/Applications`. The exact
+This source scans `/Applications` and `~/Applications`. The exact
 bundle path is the package name and reference, so two copies keep separate
 identities. Details include location, observed version/build, Homebrew ownership
 evidence, and curated cask candidates for VS Code, Firefox, and Obsidian.
@@ -455,8 +492,29 @@ symlink to the exact bundle. Failed checks stay unknown. Missing ownership
 records do not prove that an app is unmanaged. Apps with unreadable metadata
 remain visible, with an unknown version. Architecture and update status are
 unknown in this first inventory implementation. This source itself can't
-install, remove, or update; adoption runs through the cask, as above. On other platforms the source reports that macOS is
-required. See the [GUI guide](gui.md#macos-application-inventory) for scan limits.
+install or update; adoption runs through the cask, as above. On other platforms the source reports that macOS is
+required.
+
+### Removing an app
+
+`pkd remove <bundle path> --from macos-apps` takes the app off the Mac, by
+what the inventory knows about it:
+
+- **Managed by Homebrew:** `brew uninstall --cask` for its cask, which deletes
+  the app as removing the cask would.
+- **Anything else you own**, in a folder you can change: `/usr/bin/trash` moves
+  it to your Trash, with no prompt.
+- **Anything else** (App Store apps belong to root): the system's `/bin/mv`
+  moves it into your Trash as root, after `sudo -n` in `pkd` or the macOS
+  administrator password dialog in the Mac app. Cancel changes nothing.
+
+PkgDeck refuses, with the reason, apps that come with macOS (anything on the
+system volume, such as Safari through its alias in `/Applications`, or guarded
+by System Integrity Protection), aliases, open apps, apps whose Homebrew records
+couldn't be checked, and apps two casks claim. Right before removing it re-reads
+the bundle: if the bundle at that path changed identity since it was listed,
+nothing happens. Afterwards it checks that the bundle is gone. A second app with
+the same name in the Trash is kept; the new one gets a number (`Name 2.app`). See the [GUI guide](gui.md#macos-application-inventory) for scan limits.
 Unreadable subfolders produce a partial inventory: readable apps remain listed,
 and source errors identify the skipped folders (also in JSON `failures`).
 
@@ -476,9 +534,10 @@ pkd list --from codex --json
 pkd info codex --from codex
 pkd upgrade codex --from codex
 pkd upgrade --from claude --from grok --from opencode
+pkd remove codex --from codex
 ```
 
-PkgDeck only updates these tools. It can't install or remove them. Copies
+PkgDeck updates and removes these tools. It can't install them. Copies
 installed with npm or Homebrew are handled by that package manager. The
 program must be owned by you and installed in the official location:
 
@@ -521,6 +580,34 @@ fails, it's reported as an error, never as "up to date". Updates need
 confirmation, run without admin rights, and never downgrade a newer version.
 PkgDeck checks the version after updating. Restart open sessions of the tool
 to use the new version.
+
+Removing a tool takes away only what its installer put there. Your settings,
+sign-ins and keys stay:
+
+| Tool | Removes | Keeps |
+| --- | --- | --- |
+| Codex | `~/.local/bin/codex` and `codex-code-mode-host`, `~/.codex/packages/standalone` | The rest of `~/.codex`: settings, sign-in and history |
+| Claude Code | `~/.local/bin/claude`, `~/.local/share/claude` | `~/.claude` and `~/.claude.json` |
+| Grok | The `grok` and `agent` links in `~/.grok/bin` and `~/.local/bin`, `~/.grok/downloads` | The rest of `~/.grok`, including your sign-in. Links the installer made in `/usr/local/bin` are left for you to remove |
+| OpenCode | `~/.opencode/bin` | The rest of `~/.opencode` (plugins) and `~/.config/opencode` |
+| Cursor CLI | `~/.local/bin/agent` and `cursor-agent`, `~/.local/share/cursor-agent` | `~/.cursor` |
+| GitHub Copilot CLI | `~/.local/bin/copilot` | `~/.copilot` |
+| Kiro CLI | `~/.local/bin/kiro-cli` and `kiro-cli-chat` | Kiro's settings |
+| Antigravity CLI | `~/.local/bin/agy` | Antigravity's settings |
+| Amp | `~/.amp/bin`, the installer's download checks in `~/.amp`, and the `~/.local/bin/amp` link | `~/.config/amp` |
+| Factory Droid | `~/.local/bin/droid` | `~/.factory` |
+| Solana CLI (Agave) | `~/.local/share/solana/install`, with every installed release | `~/.config/solana`: your keypairs and the CLI and installer settings |
+| Anchor (AVM) | In `~/.avm`: `bin` (avm, anchor, every `anchor-VERSION` and `solana-verify`), `.version`, and Cargo's records of AVM (`.crates.toml`, `.crates2.json`) | Your Anchor projects |
+| Foundry | `~/.foundry/bin`, `~/.foundry/versions` and `~/.foundry/share/man` | `~/.foundry/keystores` (cast wallets) and `~/.foundry/cache` |
+
+The same overrides as above apply. Folders left empty are removed too. On
+macOS everything goes to the Trash, so you can put it back; on Linux it's
+deleted. A launcher is removed only while it still points into the tool's own
+folder, so a link another tool took over stays. PkgDeck refuses to remove a
+folder that is a link to somewhere else, isn't yours, or holds your home
+folder. Removal needs confirmation, runs without admin rights, and PkgDeck
+checks afterwards that the tool is gone. Lines the installer added to your
+shell setup (`~/.zshrc`, `~/.bashrc`) stay; remove them yourself if you like.
 
 Official docs: [Codex](https://learn.chatgpt.com/docs/codex/cli),
 [Claude Code](https://code.claude.com/docs/en/setup),
