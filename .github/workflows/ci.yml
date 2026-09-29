@@ -873,3 +873,26 @@ jobs:
     with:
       tag: ${{ github.ref_name }}
     secrets: inherit
+
+  required-ci:
+    name: CI / Required
+    # Always report a result, including when a prerequisite failed or was skipped.
+    if: ${{ always() && github.event_name == 'pull_request' }}
+    needs:
+      - test-linux
+      - test-macos
+      - test-podman
+      - test-backends
+      - coverage-combined
+      - package-macos
+      - package-linux-cli
+      - test-homebrew
+      - package-bundles
+      - package-flatpak
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every PR validation job to pass
+        env:
+          RESULTS: ${{ toJSON(needs.*.result) }}
+        run: jq --exit-status 'length > 0 and all(. == "success")' <<< "$RESULTS"
