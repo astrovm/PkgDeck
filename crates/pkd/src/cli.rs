@@ -1703,11 +1703,12 @@ mod tests {
                 }
                 let args = Args::try_parse_from(&argv).unwrap();
                 let mut events = vec![];
+                // Asking would be declined and exit with 7, not 1.
                 let (data, code) = dispatch(
                     &mut engine,
                     &args,
                     &Cancellation::default(),
-                    &mut |_| panic!("an unsupported removal must not ask"),
+                    &mut decline,
                     &mut record(&mut events),
                 );
                 assert_eq!(code, 1, "{data}");
