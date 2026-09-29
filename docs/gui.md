@@ -221,8 +221,14 @@ With [mas](https://github.com/mas-cli/mas) 7 or newer installed, the **Mac App
 Store** source lists apps installed from the App Store and shows which have
 updates. Updates need your Mac password, which mas can only ask for in a
 terminal. If PkgDeck can't get it, it says so; run `pkd upgrade --from mas` in
-Terminal, or update in the App Store app. PkgDeck never installs or removes
-App Store apps.
+Terminal, or update in the App Store app. PkgDeck never installs App Store
+apps.
+
+**Remove** moves an App Store app to your Trash, where you can drag it back
+out. App Store apps belong to the system, so macOS asks for your administrator
+password first; Cancel leaves the app where it is. Quit the app before removing
+it: PkgDeck refuses apps that are open. Afterwards PkgDeck checks that the app
+left and that the App Store no longer lists it.
 
 ### macOS application inventory
 
@@ -250,9 +256,20 @@ is offered only when that cask would manage this exact copy, never a second
 install, and a finished handover has no Undo, since removing the cask would
 delete the app.
 
-This source is otherwise read-only: no install, remove, or update buttons. Copies
-already listed under Homebrew also appear in this inventory with their ownership
-label. Helper apps inside bundles are excluded; aliases to the same bundle are
+This source never installs or updates apps. **Remove** takes an app off the Mac:
+
+- Homebrew uninstalls an app its cask manages, the same as removing the cask.
+- Any other app goes to your Trash. Apps you own go without a prompt; apps that
+  belong to the system, such as App Store apps, go after macOS asks for your
+  administrator password.
+- Apps that come with macOS (Safari, and anything System Integrity Protection
+  guards), aliases, and open apps are refused with the reason. So is an app
+  that Homebrew's records can't be checked for, or that two casks claim.
+- Right before removing, PkgDeck checks that the bundle at that path is still
+  the one it listed, and afterwards that it is gone.
+
+Copies already listed under Homebrew also appear in this inventory with their
+ownership label. Helper apps inside bundles are excluded; aliases to the same bundle are
 listed once. Discovery covers up to four levels of subfolders and does not follow
 directory symlinks. Unknown versions remain explicitly unknown.
 Unreadable subfolders are skipped and reported as source errors; readable sibling

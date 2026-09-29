@@ -1,4 +1,6 @@
-//! Read-only macOS bundle inventory. A cask suggestion never authorizes a write.
+//! macOS bundle inventory. It lists apps and removes them (to the Trash, or
+//! through Homebrew for casks); it never installs or updates. A cask
+//! suggestion never authorizes a write.
 use super::*;
 use serde_json::Value;
 use std::{
@@ -409,18 +411,217 @@ fn cask_candidate(bundle_id: &str) -> Option<&'static str> {
     }
 }
 
+/// How many "Name N.app" spellings the Trash is searched for a free name.
+const TRASH_NAMES: usize = 100;
+
+/// A plain-language refusal, shown as it is.
+pub(super) fn refused(reason: impl Into<String>) -> EngineError {
+    ExecutionError::Invalid(reason.into()).into()
+}
+
+/// The path people see. mas reports App Store apps through the Data
+/// volume's firmlink (`/System/Volumes/Data/Applications/…`).
+pub(super) fn visible(path: &Path) -> PathBuf {
+    path.strip_prefix("/System/Volumes/Data")
+        .map_or_else(|_| path.to_owned(), |rest| Path::new("/").join(rest))
+}
+
+/// Apps that come with macOS live on the sealed system volume (Safari in its
+/// Cryptex, reached through an alias in /Applications); System Integrity
+/// Protection's restricted flag marks any other protected item.
+pub(super) fn part_of_macos(path: &Path) -> bool {
+    let canonical = visible(&fs::canonicalize(path).unwrap_or_else(|_| path.to_owned()));
+    canonical.starts_with("/System") || restricted(&canonical)
+}
+
+#[cfg(target_os = "macos")]
+fn restricted(path: &Path) -> bool {
+    use std::os::macos::fs::MetadataExt;
+    // SF_RESTRICTED in <sys/stat.h>.
+    fs::symlink_metadata(path).is_ok_and(|m| m.st_flags() & 0x0008_0000 != 0)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn restricted(_: &Path) -> bool {
+    false
+}
+
+/// Takes an app bundle off the Mac by moving it to the Trash, where it can
+/// be put back. The Mac App Store source and this inventory share it.
+pub(super) struct Remover<'a> {
+    pub(super) transport: &'a dyn Transport,
+    /// The person PkgDeck runs for; their Trash receives the app.
+    pub(super) uid: u32,
+    pub(super) backend: &'static str,
+}
+
+impl Remover<'_> {
+    /// Refuses what must stay: parts of macOS, aliases, and open apps. Also
+    /// refuses to start as root, whose Trash is not the person's.
+    pub(super) fn check(
+        &self,
+        name: &str,
+        path: &Path,
+        cancel: &Cancellation,
+    ) -> Result<(), EngineError> {
+        if self.uid == 0 {
+            return Err(refused(crate::host::ROOT_REFUSAL));
+        }
+        if part_of_macos(path) {
+            return Err(refused(format!(
+                "{name} is part of macOS, so PkgDeck won't remove it."
+            )));
+        }
+        let metadata = fs::symlink_metadata(path).map_err(|_| EngineError::NotFound)?;
+        if metadata.file_type().is_symlink() {
+            return Err(refused(format!(
+                "{} is an alias, not the app itself. Remove the app it points to.",
+                path.display()
+            )));
+        }
+        let output = self
+            .transport
+            .macos_tool(
+                Path::new("/bin/ps"),
+                &["-axww".into(), "-o".into(), "comm=".into()],
+                cancel,
+                false,
+            )
+            .map_err(EngineError::from)
+            .and_then(|result| bytes(self.backend, result))?;
+        let open = String::from_utf8_lossy(&output)
+            .lines()
+            .any(|line| visible(Path::new(line.trim())).starts_with(path));
+        if open {
+            return Err(refused(format!(
+                "{name} is open. Quit it, then remove it again."
+            )));
+        }
+        Ok(())
+    }
+
+    /// Moves the bundle to the Trash and checks that it left. An app the
+    /// person owns in a folder they can change goes through `/usr/bin/trash`
+    /// with no prompt; anything else (App Store apps belong to root) is moved
+    /// by the system's `mv` after the administrator password prompt.
+    pub(super) fn trash(
+        &self,
+        name: &str,
+        path: &Path,
+        cancel: &Cancellation,
+        progress: &mut dyn FnMut(Progress),
+    ) -> Result<OperationOutcome, EngineError> {
+        use std::os::unix::fs::MetadataExt;
+        if cancel.requested() {
+            return Err(EngineError::Cancelled);
+        }
+        let metadata = fs::symlink_metadata(path).map_err(|_| EngineError::NotFound)?;
+        let owned = metadata.uid() == self.uid
+            && path.parent().is_some_and(|parent| {
+                rustix::fs::access(parent, rustix::fs::Access::WRITE_OK).is_ok()
+            });
+        let result = if owned {
+            progress(Progress::Message(format!("Moving {name} to the Trash")));
+            self.transport.macos_tool(
+                Path::new("/usr/bin/trash"),
+                &["-s".into(), path.into()],
+                cancel,
+                true,
+            )
+        } else {
+            let destination = self.destination(path)?;
+            progress(Progress::Message(format!(
+                "Moving {name} to the Trash. It belongs to the system, so macOS asks for an administrator password."
+            )));
+            self.transport.system_manager(
+                "mv",
+                &["-n".into(), "--".into(), path.into(), destination.into()],
+                cancel,
+                true,
+            )
+        }?;
+        if result.code != Some(0) {
+            if String::from_utf8_lossy(&result.stderr).contains("sudo:") {
+                return Err(ExecutionError::AuthorizationDenied.into());
+            }
+            return Err(ExecutionError::Failed(result).into());
+        }
+        if fs::symlink_metadata(path).is_ok() {
+            return Err(refused(format!(
+                "{name} is still at {} after moving it to the Trash.",
+                path.display()
+            )));
+        }
+        Ok(OperationOutcome {
+            cancellation_deferred: result.cancellation_deferred,
+        })
+    }
+
+    /// A free name in the person's Trash, the way Finder numbers copies.
+    fn destination(&self, path: &Path) -> Result<PathBuf, EngineError> {
+        use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+        let home = self
+            .transport
+            .env("HOME")
+            .map(PathBuf::from)
+            .filter(|home| home.is_absolute())
+            .ok_or_else(|| {
+                refused("PkgDeck can't find your home folder, so it has no Trash to use.")
+            })?;
+        let trash = home.join(".Trash");
+        if fs::symlink_metadata(&trash).is_err() {
+            fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&trash)
+                .map_err(ExecutionError::from)?;
+        }
+        // The Trash must be the home owner's own folder, never an alias
+        // that sends the app somewhere else.
+        let home_owner = fs::metadata(&home).map_err(ExecutionError::from)?.uid();
+        if !fs::symlink_metadata(&trash).is_ok_and(|m| m.is_dir() && m.uid() == home_owner) {
+            return Err(refused(format!(
+                "{} isn't a folder you own, so PkgDeck won't move apps into it.",
+                trash.display()
+            )));
+        }
+        let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+        (1..=TRASH_NAMES)
+            .map(|n| match n {
+                1 => trash.join(format!("{stem}.app")),
+                n => trash.join(format!("{stem} {n}.app")),
+            })
+            .find(|candidate| fs::symlink_metadata(candidate).is_err())
+            .ok_or_else(|| {
+                refused(format!(
+                    "The Trash already holds {TRASH_NAMES} apps named {stem}. Empty it, then try again."
+                ))
+            })
+    }
+}
+
+/// One listed bundle and the identity its removal is checked against.
+#[derive(Clone)]
+struct Listed {
+    details: PackageDetails,
+    bundle_id: Option<String>,
+    canonical: PathBuf,
+}
+
 pub struct MacApps {
     roots: Vec<(PathBuf, Scope)>,
     io: Box<dyn AppIo>,
-    snapshot: Option<Vec<PackageDetails>>,
+    snapshot: Option<Vec<Listed>>,
     scan_errors: Vec<EngineError>,
     exact_query: bool,
-    selected: Option<PackageDetails>,
+    selected: Option<Listed>,
+    /// Runs Homebrew, the Trash and the password prompt for removals.
+    transport: Box<dyn Transport>,
+    uid: u32,
 }
 
 impl MacApps {
-    pub fn native() -> Self {
-        let host = Host::current();
+    pub fn native(transport: NativeTransport) -> Self {
+        let host = transport.host.clone();
         let mut roots = vec![(PathBuf::from("/Applications"), Scope::System)];
         if let Some(home) = host
             .var("HOME")
@@ -444,10 +645,12 @@ impl MacApps {
             scan_errors: vec![],
             exact_query: false,
             selected: None,
+            transport: Box::new(transport),
+            uid: rustix::process::getuid().as_raw(),
         }
     }
 
-    fn inventory(&mut self, cancel: &Cancellation) -> Result<&[PackageDetails], EngineError> {
+    fn inventory(&mut self, cancel: &Cancellation) -> Result<&[Listed], EngineError> {
         if cancel.requested() {
             return Err(EngineError::Cancelled);
         }
@@ -473,7 +676,7 @@ impl MacApps {
                     cancel,
                 )?;
             }
-            apps.sort_by(|a, b| a.package.id.cmp(&b.package.id));
+            apps.sort_by(|a, b| a.details.package.id.cmp(&b.details.package.id));
             self.snapshot = Some(apps);
             self.scan_errors = errors;
         }
@@ -531,7 +734,7 @@ impl MacApps {
         depth: usize,
         budget: &mut usize,
         seen: &mut BTreeSet<PathBuf>,
-        apps: &mut Vec<PackageDetails>,
+        apps: &mut Vec<Listed>,
         errors: &mut Vec<EngineError>,
         ownership: &Result<BTreeMap<PathBuf, Vec<String>>, EngineError>,
         cancel: &Cancellation,
@@ -636,7 +839,7 @@ impl MacApps {
         scope: &Scope,
         ownership: &Result<BTreeMap<PathBuf, Vec<String>>, EngineError>,
         cancel: &Cancellation,
-    ) -> Result<PackageDetails, EngineError> {
+    ) -> Result<Listed, EngineError> {
         let metadata = self.io.plist(&path.join("Contents/Info.plist"), cancel);
         if cancel.requested() || matches!(&metadata, Err(EngineError::Cancelled)) {
             return Err(EngineError::Cancelled);
@@ -701,7 +904,10 @@ impl MacApps {
                 description.push(format!("To let Homebrew manage this copy, install the {token} cask. PkgDeck first checks the publisher signature, version, architecture, and every file the cask adds, and keeps a copy of the app until Homebrew finishes."));
             }
         }
-        description.push("Read-only inventory. PkgDeck cannot install, update, remove, or adopt this app from this source.".into());
+        if part_of_macos(canonical) {
+            description.push("Part of macOS, so PkgDeck won't remove it.".into());
+        }
+        description.push("PkgDeck can't install or update apps from this source. Removing an app moves it to the Trash; Homebrew uninstalls the apps it manages.".into());
         let name = path
             .to_str()
             .ok_or_else(|| invalid(ID, format!("{} is not valid UTF-8", path.display())))?;
@@ -713,7 +919,7 @@ impl MacApps {
                 .unwrap_or_default(),
             path.display()
         );
-        Ok(PackageDetails {
+        let details = PackageDetails {
             package: Package {
                 id: PackageId {
                     backend: ID.into(),
@@ -738,6 +944,98 @@ impl MacApps {
             description: description.join("\n\n"),
             homepage: candidate.map(|token| format!("https://formulae.brew.sh/cask/{token}")),
             dependencies: vec![],
+        };
+        Ok(Listed {
+            details,
+            bundle_id: bundle_id.map(str::to_owned),
+            canonical: canonical.to_owned(),
+        })
+    }
+
+    /// Removes one listed app: Homebrew uninstalls a cask it manages, any
+    /// other app goes to the Trash. The bundle must still be the one listed.
+    fn remove(
+        &mut self,
+        id: &PackageId,
+        cancel: &Cancellation,
+        progress: &mut dyn FnMut(Progress),
+    ) -> Result<OperationOutcome, EngineError> {
+        if cancel.requested() {
+            return Err(EngineError::Cancelled);
+        }
+        let canonical = self.details_path(id)?;
+        let listed = self
+            .selected
+            .iter()
+            .chain(self.snapshot.iter().flatten())
+            .find(|listed| listed.details.package.id == *id)
+            .cloned();
+        // Whatever happens next, the listing may no longer be true.
+        self.snapshot = None;
+        self.selected = None;
+        let path = Path::new(&id.name);
+        let ownership = self.io.ownership(cancel);
+        if cancel.requested() || matches!(&ownership, Err(EngineError::Cancelled)) {
+            return Err(EngineError::Cancelled);
+        }
+        let now = self.describe(path, &canonical, &id.scope, &ownership, cancel)?;
+        if listed.is_some_and(|listed| {
+            listed.bundle_id != now.bundle_id || listed.canonical != now.canonical
+        }) {
+            return Err(refused(format!(
+                "{} changed since PkgDeck listed it. Reload, then try again.",
+                path.display()
+            )));
+        }
+        let name = now.details.package.display_name;
+        let remover = Remover {
+            transport: &*self.transport,
+            uid: self.uid,
+            backend: ID,
+        };
+        remover.check(&name, path, cancel)?;
+        let owners = match &ownership {
+            Ok(records) => records.get(&canonical).cloned().unwrap_or_default(),
+            // Without Homebrew nothing can manage the app.
+            Err(EngineError::Execution(ExecutionError::Disabled(_))) => vec![],
+            Err(error) => {
+                return Err(refused(format!(
+                    "PkgDeck couldn't check whether Homebrew manages {name} ({error}), so it won't remove it."
+                )))
+            }
+        };
+        let token = match owners.as_slice() {
+            [] => return remover.trash(&name, path, cancel, progress),
+            [token] => token,
+            _ => {
+                return Err(refused(format!(
+                "Homebrew's records name more than one cask for {name} ({}). Remove it with brew.",
+                owners.join(", ")
+            )))
+            }
+        };
+        progress(Progress::Message(format!(
+            "Uninstalling {name} with Homebrew ({token})"
+        )));
+        let result = self.transport.brew(
+            &[
+                "uninstall".into(),
+                "--cask".into(),
+                "--force".into(),
+                "--".into(),
+                token.into(),
+            ],
+            cancel,
+            true,
+        )?;
+        if fs::symlink_metadata(path).is_ok() {
+            return Err(refused(format!(
+                "Homebrew finished, but {name} is still at {}.",
+                path.display()
+            )));
+        }
+        Ok(OperationOutcome {
+            cancellation_deferred: result.cancellation_deferred,
         })
     }
 }
@@ -751,6 +1049,7 @@ impl Backend for MacApps {
             Capability::Search,
             Capability::Installed,
             Capability::Details,
+            Capability::Remove,
         ]
     }
     fn detect(&mut self, cancel: &Cancellation) -> Result<Availability, EngineError> {
@@ -768,7 +1067,7 @@ impl Backend for MacApps {
         Ok(self
             .inventory(cancel)?
             .iter()
-            .map(|d| d.package.clone())
+            .map(|d| d.details.package.clone())
             .collect())
     }
     fn query_errors(&self) -> Vec<EngineError> {
@@ -802,10 +1101,10 @@ impl Backend for MacApps {
             remote: None,
             reference: Some(name.into()),
         };
-        match self.details(&id, cancel) {
-            Ok(details) => {
-                let package = details.package.clone();
-                self.selected = Some(details);
+        match self.listed(&id, cancel) {
+            Ok(listed) => {
+                let package = listed.details.package.clone();
+                self.selected = Some(listed);
                 Ok(vec![package])
             }
             Err(EngineError::NotFound) => Ok(vec![]),
@@ -828,16 +1127,38 @@ impl Backend for MacApps {
         id: &PackageId,
         cancel: &Cancellation,
     ) -> Result<PackageDetails, EngineError> {
+        Ok(self.listed(id, cancel)?.details)
+    }
+    /// Only removal: this source never installs or updates an app.
+    fn execute(
+        &mut self,
+        operation: &Operation,
+        cancel: &Cancellation,
+        progress: &mut dyn FnMut(Progress),
+    ) -> Result<OperationOutcome, EngineError> {
+        let Operation::Remove(id) = operation else {
+            return Err(self.unsupported(operation.capability()));
+        };
+        self.remove(id, cancel, progress)
+    }
+}
+
+impl MacApps {
+    fn listed(&mut self, id: &PackageId, cancel: &Cancellation) -> Result<Listed, EngineError> {
         if cancel.requested() {
             return Err(EngineError::Cancelled);
         }
-        if let Some(selected) = self.selected.as_ref().filter(|d| d.package.id == *id) {
+        if let Some(selected) = self
+            .selected
+            .as_ref()
+            .filter(|d| d.details.package.id == *id)
+        {
             return Ok(selected.clone());
         }
         if let Some(snapshot) = &self.snapshot {
             return snapshot
                 .iter()
-                .find(|d| d.package.id == *id)
+                .find(|d| d.details.package.id == *id)
                 .cloned()
                 .ok_or(EngineError::NotFound);
         }
@@ -856,8 +1177,158 @@ impl Backend for MacApps {
     }
 }
 
+/// A transport that moves fixture bundles the way the Trash, the password
+/// prompt and Homebrew would, and records what ran.
+#[cfg(test)]
+pub(super) mod removal_fakes {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    /// What the administrator `mv` does.
+    #[derive(Clone, Copy, PartialEq)]
+    pub(crate) enum Privileged {
+        Move,
+        /// The person pressed Cancel in the password dialog.
+        Cancel,
+        /// `sudo -n` had no password to use.
+        Denied,
+        Fail,
+        /// Reports success without moving anything.
+        Ignore,
+    }
+
+    #[derive(Clone)]
+    pub(crate) struct Mover {
+        pub(crate) calls: Arc<Mutex<Vec<String>>>,
+        pub(crate) home: Option<PathBuf>,
+        /// What `ps` lists, one executable per line.
+        pub(crate) ps: String,
+        pub(crate) privileged: Privileged,
+        /// The bundle `brew uninstall` takes away, if any.
+        pub(crate) brew_removes: Option<PathBuf>,
+        /// Cancel while PkgDeck checks for open apps.
+        pub(crate) cancel_on_ps: bool,
+        pub(crate) ps_fails: bool,
+        /// stderr of a failing `brew uninstall`.
+        pub(crate) brew_error: Option<&'static str>,
+    }
+
+    pub(crate) fn completion(code: i32, stderr: &str) -> Completion {
+        Completion {
+            code: Some(code),
+            signal: None,
+            stdout: vec![],
+            stderr: stderr.as_bytes().to_vec(),
+            truncated: false,
+            cancellation_deferred: false,
+        }
+    }
+
+    impl Mover {
+        pub(crate) fn new(home: PathBuf) -> Self {
+            Self {
+                calls: Arc::default(),
+                home: Some(home),
+                ps: "/usr/libexec/launchd\n".into(),
+                privileged: Privileged::Move,
+                brew_removes: None,
+                cancel_on_ps: false,
+                ps_fails: false,
+                brew_error: None,
+            }
+        }
+        pub(crate) fn calls(&self) -> Vec<String> {
+            self.calls.lock().unwrap().clone()
+        }
+        fn record(&self, executable: &str, args: &[OsString]) -> Vec<String> {
+            let args: Vec<String> = args.iter().map(|a| a.to_string_lossy().into()).collect();
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("{executable} {}", args.join(" ")));
+            args
+        }
+    }
+
+    impl Transport for Mover {
+        fn env(&self, name: &str) -> Option<OsString> {
+            assert_eq!(name, "HOME");
+            self.home.clone().map(Into::into)
+        }
+        fn macos_tool(
+            &self,
+            executable: &Path,
+            args: &[OsString],
+            cancel: &Cancellation,
+            write: bool,
+        ) -> Result<Completion, ExecutionError> {
+            let args = self.record(&executable.to_string_lossy(), args);
+            if executable == Path::new("/bin/ps") {
+                assert!(!write);
+                if self.cancel_on_ps {
+                    cancel.cancel();
+                }
+                if self.ps_fails {
+                    return Ok(completion(1, "ps: sysctl failed\n"));
+                }
+                let mut result = completion(0, "");
+                result.stdout = self.ps.clone().into_bytes();
+                return Ok(result);
+            }
+            assert_eq!(executable, Path::new("/usr/bin/trash"));
+            assert!(write);
+            assert_eq!(args[0], "-s");
+            let source = Path::new(&args[1]);
+            let trash = self.home.as_ref().unwrap().join(".Trash");
+            fs::create_dir_all(&trash).unwrap();
+            fs::rename(source, trash.join(source.file_name().unwrap())).unwrap();
+            Ok(completion(0, ""))
+        }
+        fn system_manager(
+            &self,
+            executable: &str,
+            args: &[OsString],
+            _: &Cancellation,
+            write: bool,
+        ) -> Result<Completion, ExecutionError> {
+            let args = self.record(executable, args);
+            assert_eq!(executable, "mv");
+            assert!(write);
+            assert_eq!(args[..2], ["-n", "--"]);
+            match self.privileged {
+                Privileged::Move => {
+                    fs::rename(&args[2], &args[3]).unwrap();
+                    Ok(completion(0, ""))
+                }
+                Privileged::Cancel => Err(ExecutionError::AuthorizationCancelled),
+                Privileged::Denied => Ok(completion(1, "sudo: a password is required\n")),
+                Privileged::Fail => Ok(completion(1, "mv: rename failed\n")),
+                Privileged::Ignore => Ok(completion(0, "")),
+            }
+        }
+        fn brew(
+            &self,
+            args: &[OsString],
+            _: &Cancellation,
+            write: bool,
+        ) -> Result<Completion, ExecutionError> {
+            let args = self.record("brew", args);
+            assert!(write);
+            assert_eq!(args[..4], ["uninstall", "--cask", "--force", "--"]);
+            if let Some(stderr) = self.brew_error {
+                return Err(ExecutionError::Failed(completion(1, stderr)));
+            }
+            if let Some(app) = &self.brew_removes {
+                fs::remove_dir_all(app).unwrap();
+            }
+            Ok(completion(0, ""))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::removal_fakes::*;
     use super::*;
     use serde_json::json;
     use std::os::unix::fs::symlink;
@@ -900,7 +1371,12 @@ mod tests {
                 scan_errors: vec![],
                 exact_query: false,
                 selected: None,
+                transport: Box::new(self.mover()),
+                uid: rustix::process::getuid().as_raw(),
             }
+        }
+        fn mover(&self) -> Mover {
+            Mover::new(self.0.join("home"))
         }
     }
     impl Drop for Fixture {
@@ -1406,12 +1882,11 @@ mod tests {
         ));
         for operation in [
             Operation::Install(external.id.clone()),
-            Operation::Remove(external.id.clone()),
             Operation::Upgrade(external.id.clone()),
         ] {
             assert!(matches!(
                 backend.execute(&operation, &cancel, &mut |_| panic!(
-                    "read-only source emitted write progress"
+                    "this source never installs or updates"
                 )),
                 Err(EngineError::Unsupported { .. })
             ));
@@ -1646,7 +2121,8 @@ mod tests {
             [
                 Capability::Search,
                 Capability::Installed,
-                Capability::Details
+                Capability::Details,
+                Capability::Remove
             ]
         );
     }
@@ -2005,5 +2481,419 @@ mod tests {
         assert!(rows[0]
             .summary
             .starts_with("Homebrew ownership could not be checked"));
+    }
+
+    fn app_id(path: &Path) -> PackageId {
+        let name: String = path.to_string_lossy().into();
+        PackageId {
+            backend: ID.into(),
+            name: name.clone(),
+            architecture: "unknown".into(),
+            scope: Scope::System,
+            remote: None,
+            reference: Some(name),
+        }
+    }
+    fn removal(path: &Path) -> Operation {
+        Operation::Remove(app_id(path))
+    }
+    fn remove(
+        backend: &mut MacApps,
+        path: &Path,
+    ) -> (Result<OperationOutcome, EngineError>, Vec<String>) {
+        let mut messages = vec![];
+        let result = backend.execute(&removal(path), &Cancellation::default(), &mut |p| {
+            if let Progress::Message(text) = p {
+                messages.push(text);
+            }
+        });
+        (result, messages)
+    }
+    fn uid() -> u32 {
+        rustix::process::getuid().as_raw()
+    }
+
+    #[test]
+    fn removal_moves_an_app_you_own_to_the_trash_and_forgets_the_listing() {
+        let f = Fixture::new();
+        let app = f.bundle("Editor.app", "com.example.editor");
+        let mut backend = f.backend(Ok(BTreeMap::new()));
+        let mover = f.mover();
+        backend.transport = Box::new(mover.clone());
+        backend.installed(&Cancellation::default()).unwrap();
+        let (result, messages) = remove(&mut backend, &app);
+        result.unwrap();
+        assert!(!app.exists());
+        assert!(f
+            .0
+            .join("home/.Trash/Editor.app/Contents/Info.plist")
+            .is_file());
+        assert_eq!(messages, ["Moving Fixture App to the Trash"]);
+        assert_eq!(
+            mover.calls(),
+            [
+                "/bin/ps -axww -o comm=".to_owned(),
+                format!("/usr/bin/trash -s {}", app.display())
+            ]
+        );
+        // The listing is read again next time, and the app is gone from it.
+        assert!(backend.snapshot.is_none());
+        assert!(matches!(
+            remove(&mut backend, &app).0,
+            Err(EngineError::NotFound)
+        ));
+        // This source still never installs or updates.
+        assert!(backend.capabilities().contains(&Capability::Remove));
+    }
+
+    #[test]
+    fn apps_owned_by_the_system_move_after_the_password_prompt() {
+        use std::os::unix::fs::PermissionsExt;
+        let f = Fixture::new();
+        let first = f.bundle("Store.app", "com.example.store");
+        let second = f.bundle("Utilities/Store.app", "com.example.store");
+        let mut backend = f.backend(Ok(BTreeMap::new()));
+        // Someone else owns these bundles, as root owns App Store apps.
+        backend.uid = uid() + 1;
+        let mover = f.mover();
+        backend.transport = Box::new(mover.clone());
+        let trash = f.0.join("home/.Trash");
+        fs::create_dir_all(f.0.join("home")).unwrap();
+        let (result, messages) = remove(&mut backend, &first);
+        result.unwrap();
+        assert!(messages[0].contains("macOS asks for an administrator password"));
+        // A missing Trash is created for its owner only.
+        assert_eq!(
+            fs::metadata(&trash).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert!(trash.join("Store.app").is_dir());
+        // A same-named app already in the Trash is kept; this one is numbered.
+        remove(&mut backend, &second).0.unwrap();
+        assert!(trash.join("Store 2.app").is_dir());
+        assert_eq!(
+            mover.calls()[1],
+            format!(
+                "mv -n -- {} {}",
+                first.display(),
+                trash.join("Store.app").display()
+            )
+        );
+    }
+
+    #[test]
+    fn a_refused_or_failed_password_prompt_leaves_the_app_in_place() {
+        let f = Fixture::new();
+        let app = f.bundle("Store.app", "com.example.store");
+        fs::create_dir_all(f.0.join("home/.Trash")).unwrap();
+        for (privileged, expected) in [
+            (Privileged::Cancel, "authorization cancelled"),
+            (Privileged::Denied, "authorization denied"),
+            (Privileged::Fail, "the package manager"),
+            (Privileged::Ignore, "is still at"),
+        ] {
+            let mut backend = f.backend(Ok(BTreeMap::new()));
+            backend.uid = uid() + 1;
+            let mut mover = f.mover();
+            mover.privileged = privileged;
+            backend.transport = Box::new(mover);
+            let error = remove(&mut backend, &app).0.unwrap_err();
+            assert!(error.to_string().contains(expected), "{error}");
+            assert!(app.is_dir());
+        }
+        // Cancel in the password dialog is its own outcome, not a failure.
+        let mut backend = f.backend(Ok(BTreeMap::new()));
+        backend.uid = uid() + 1;
+        let mut mover = f.mover();
+        mover.privileged = Privileged::Cancel;
+        backend.transport = Box::new(mover);
+        assert!(matches!(
+            remove(&mut backend, &app).0,
+            Err(EngineError::Execution(
+                ExecutionError::AuthorizationCancelled
+            ))
+        ));
+    }
+
+    #[test]
+    fn the_trash_must_be_a_folder_the_person_owns() {
+        let f = Fixture::new();
+        let app = f.bundle("Store.app", "com.example.store");
+        let attempt = |mover: Mover| {
+            let mut backend = f.backend(Ok(BTreeMap::new()));
+            backend.uid = uid() + 1;
+            backend.transport = Box::new(mover.clone());
+            let error = remove(&mut backend, &app).0.unwrap_err().to_string();
+            // Nothing was moved.
+            assert!(!mover.calls().iter().any(|call| call.starts_with("mv")));
+            error
+        };
+        let mut homeless = f.mover();
+        homeless.home = None;
+        assert!(attempt(homeless).contains("can't find your home folder"));
+        let mut relative = f.mover();
+        relative.home = Some("home".into());
+        assert!(attempt(relative).contains("can't find your home folder"));
+        // An alias would send the app somewhere else.
+        fs::create_dir_all(f.0.join("home")).unwrap();
+        fs::create_dir_all(f.0.join("elsewhere")).unwrap();
+        symlink(f.0.join("elsewhere"), f.0.join("home/.Trash")).unwrap();
+        assert!(attempt(f.mover()).contains("isn't a folder you own"));
+        fs::remove_file(f.0.join("home/.Trash")).unwrap();
+        // Every name is taken.
+        fs::create_dir(f.0.join("home/.Trash")).unwrap();
+        fs::create_dir(f.0.join("home/.Trash/Store.app")).unwrap();
+        for n in 2..=TRASH_NAMES {
+            fs::create_dir(f.0.join(format!("home/.Trash/Store {n}.app"))).unwrap();
+        }
+        assert!(attempt(f.mover()).contains("already holds 100 apps named Store"));
+        assert!(app.is_dir());
+    }
+
+    #[test]
+    fn homebrew_uninstalls_the_casks_it_manages() {
+        let f = Fixture::new();
+        let owned = f.bundle("Owned.app", "com.example.owned");
+        let kept = f.bundle("Kept.app", "com.example.kept");
+        let shared = f.bundle("Shared.app", "com.example.shared");
+        let canonical = |path: &Path| fs::canonicalize(path).unwrap();
+        let records = BTreeMap::from([
+            (canonical(&owned), vec!["tap/tools/owned".to_owned()]),
+            (canonical(&kept), vec!["kept".to_owned()]),
+            (
+                canonical(&shared),
+                vec!["first".to_owned(), "second".to_owned()],
+            ),
+        ]);
+        let backend = || f.backend(Ok(records.clone()));
+        let mut apps = backend();
+        let mut mover = f.mover();
+        mover.brew_removes = Some(owned.clone());
+        apps.transport = Box::new(mover.clone());
+        let (result, messages) = remove(&mut apps, &owned);
+        result.unwrap();
+        assert!(!owned.exists());
+        assert_eq!(
+            messages,
+            ["Uninstalling Fixture App with Homebrew (tap/tools/owned)"]
+        );
+        assert_eq!(
+            mover.calls().last().unwrap(),
+            "brew uninstall --cask --force -- tap/tools/owned"
+        );
+        // Homebrew that leaves the app behind is reported.
+        let mut apps = backend();
+        let error = remove(&mut apps, &kept).0.unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("Homebrew finished, but Fixture App is still at"));
+        // Two casks claim it: PkgDeck can't pick one.
+        let mut apps = backend();
+        let error = remove(&mut apps, &shared).0.unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("more than one cask for Fixture App (first, second)"));
+        // A failing Homebrew is reported as it is.
+        let mut apps = backend();
+        let mut mover = f.mover();
+        mover.brew_error = Some("Error: It seems the App source is not there.\n");
+        apps.transport = Box::new(mover);
+        assert!(matches!(
+            remove(&mut apps, &kept).0,
+            Err(EngineError::Execution(ExecutionError::Failed(_)))
+        ));
+        assert!(kept.is_dir() && shared.is_dir());
+    }
+
+    #[test]
+    fn homebrew_that_cannot_be_checked_blocks_removal_unless_it_is_missing() {
+        let f = Fixture::new();
+        let app = f.bundle("App.app", "com.example.app");
+        let mut broken = f.backend(Err(invalid(ID, "brew broke")));
+        let error = remove(&mut broken, &app).0.unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("couldn't check whether Homebrew manages Fixture App"));
+        let mut cancelled = f.backend(Err(EngineError::Cancelled));
+        assert!(matches!(
+            remove(&mut cancelled, &app).0,
+            Err(EngineError::Cancelled)
+        ));
+        assert!(app.is_dir());
+        // No Homebrew at all: nothing else can manage the app.
+        let mut plain = f.backend(Err(
+            ExecutionError::Disabled("Homebrew not found".into()).into()
+        ));
+        remove(&mut plain, &app).0.unwrap();
+        assert!(!app.exists());
+    }
+
+    #[test]
+    fn removal_refuses_a_bundle_that_changed_since_it_was_listed() {
+        let f = Fixture::new();
+        let app = f.bundle("App.app", "com.example.app");
+        let rewrite = |id: &str| {
+            fs::write(
+                app.join("Contents/Info.plist"),
+                json!({"CFBundleIdentifier": id}).to_string(),
+            )
+            .unwrap()
+        };
+        let cancel = Cancellation::default();
+        // Listed by a scan, then replaced by another app at the same path.
+        let mut scanned = f.backend(Ok(BTreeMap::new()));
+        let mover = f.mover();
+        scanned.transport = Box::new(mover.clone());
+        scanned.installed(&cancel).unwrap();
+        rewrite("com.example.other");
+        let error = remove(&mut scanned, &app).0.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("changed since PkgDeck listed it"),
+            "{error}"
+        );
+        // Picked by its exact path, then changed.
+        let mut picked = f.backend(Ok(BTreeMap::new()));
+        picked.transport = Box::new(mover.clone());
+        picked.lookup(app.to_str().unwrap(), &cancel).unwrap();
+        rewrite("com.example.third");
+        assert!(remove(&mut picked, &app).0.is_err());
+        assert!(app.is_dir());
+        assert!(mover.calls().is_empty(), "nothing ran");
+    }
+
+    #[test]
+    fn removal_refuses_open_apps_aliases_root_and_cancellation() {
+        let f = Fixture::new();
+        let app = f.bundle("App.app", "com.example.app");
+        // Open: its executable is running.
+        let mut open = f.backend(Ok(BTreeMap::new()));
+        let mut mover = f.mover();
+        mover.ps = format!(
+            "/usr/libexec/launchd\n{}/Contents/MacOS/fixture\n",
+            app.display()
+        );
+        open.transport = Box::new(mover);
+        let error = remove(&mut open, &app).0.unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Fixture App is open. Quit it, then remove it again."
+        );
+        let mut other = f.backend(Ok(BTreeMap::new()));
+        let alias = f.0.join("Alias.app");
+        symlink(&app, &alias).unwrap();
+        let error = remove(&mut other, &alias).0.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("is an alias, not the app itself"),
+            "{error}"
+        );
+        // PkgDeck running as root has no person's Trash to use.
+        let mut root = f.backend(Ok(BTreeMap::new()));
+        root.uid = 0;
+        let error = remove(&mut root, &app).0.unwrap_err();
+        assert_eq!(error.to_string(), crate::host::ROOT_REFUSAL);
+        // Cancelling before or while checking moves nothing.
+        let cancel = Cancellation::default();
+        cancel.cancel();
+        assert!(matches!(
+            other.execute(&removal(&app), &cancel, &mut drop::<Progress>),
+            Err(EngineError::Cancelled)
+        ));
+        let mut cancelling = f.backend(Ok(BTreeMap::new()));
+        let mut mover = f.mover();
+        mover.cancel_on_ps = true;
+        cancelling.transport = Box::new(mover);
+        assert!(matches!(
+            remove(&mut cancelling, &app).0,
+            Err(EngineError::Cancelled)
+        ));
+        // A failed check for open apps stops the removal, too.
+        let mut unchecked = f.backend(Ok(BTreeMap::new()));
+        let mut mover = f.mover();
+        mover.ps_fails = true;
+        unchecked.transport = Box::new(mover.clone());
+        assert!(matches!(
+            remove(&mut unchecked, &app).0,
+            Err(EngineError::Execution(ExecutionError::Failed(_)))
+        ));
+        assert_eq!(mover.calls().len(), 1, "only ps ran");
+        assert!(app.is_dir());
+        // Another app whose name starts the same is not this one.
+        let mut mover = f.mover();
+        mover.ps = format!(
+            "{} 2.app/Contents/MacOS/fixture\n",
+            app.with_extension("").display()
+        );
+        other.transport = Box::new(mover);
+        remove(&mut other, &app).0.unwrap();
+        assert!(!app.exists());
+    }
+
+    #[test]
+    fn apps_that_come_with_macos_are_never_removed() {
+        let f = Fixture::new();
+        assert!(part_of_macos(Path::new(
+            "/System/Applications/PkgDeck Missing.app"
+        )));
+        let data = Path::new("/System/Volumes/Data/Applications/PkgDeck Missing.app");
+        assert_eq!(
+            visible(data),
+            PathBuf::from("/Applications/PkgDeck Missing.app")
+        );
+        assert!(!part_of_macos(data));
+        assert!(!part_of_macos(&f.0));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn protected_macos_apps_are_listed_but_never_removed() {
+        let f = Fixture::new();
+        // System Integrity Protection's restricted flag.
+        assert!(part_of_macos(Path::new("/bin")));
+        // Like Safari: an alias in the folder, the app on the system volume.
+        let finder = Path::new("/System/Library/CoreServices/Finder.app");
+        let alias = f.0.join("Finder.app");
+        symlink(finder, &alias).unwrap();
+        let mut backend = f.backend(Ok(BTreeMap::new()));
+        let listed = backend
+            .details(&app_id(&alias), &Cancellation::default())
+            .unwrap();
+        assert!(listed
+            .description
+            .contains("Part of macOS, so PkgDeck won't remove it."));
+        let error = remove(&mut backend, &alias).0.unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Finder is part of macOS, so PkgDeck won't remove it."
+        );
+        assert!(finder.is_dir());
+    }
+
+    #[test]
+    fn only_the_native_transport_runs_macos_tools() {
+        struct Nothing;
+        impl Transport for Nothing {}
+        let cancel = Cancellation::default();
+        assert!(matches!(
+            Nothing.macos_tool(Path::new("/bin/ps"), &[], &cancel, false),
+            Err(ExecutionError::Disabled(reason)) if reason == "/bin/ps is unavailable"
+        ));
+        let native = NativeTransport {
+            host: Host::current(),
+            authorization: crate::host::Authorization::SudoNonInteractive,
+        };
+        let pid = std::process::id().to_string();
+        let ps = native
+            .macos_tool(
+                Path::new("/bin/ps"),
+                &["-p".into(), pid.clone().into(), "-o".into(), "pid=".into()],
+                &cancel,
+                false,
+            )
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&ps.stdout).trim(), pid);
     }
 }

@@ -1,13 +1,19 @@
-//! Mac App Store apps through `mas`: inventory, update checks, and updates.
+//! Mac App Store apps through `mas`: inventory, update checks, updates, and
+//! removal.
 //!
 //! App Store apps keep App Store ownership. PkgDeck lists them, reads which
-//! have updates, and asks mas to install those updates; it never installs,
-//! removes, or moves them. mas asks for the Mac password through sudo itself,
-//! which needs a terminal, and the App Store account stays Apple's to handle.
+//! have updates, and asks mas to install those updates. mas asks for the Mac
+//! password through sudo itself, which needs a terminal, and the App Store
+//! account stays Apple's to handle. Removing an app moves it to the Trash
+//! like Finder does; App Store apps belong to the system, so macOS asks for
+//! an administrator password first. PkgDeck never installs App Store apps.
+use super::mac_apps::{refused, visible, Remover};
 use super::{bytes, invalid, NativeTransport, Transport};
 use crate::{engine::*, package::*, process::*};
 use serde::Deserialize;
 use std::ffi::OsString;
+use std::path::PathBuf;
+use std::time::Duration;
 
 const ID: &str = "mas";
 const CAPABILITIES: &[Capability] = &[
@@ -15,10 +21,17 @@ const CAPABILITIES: &[Capability] = &[
     Capability::Installed,
     Capability::Details,
     Capability::Upgrade,
+    Capability::Remove,
 ];
+/// How often the App Store listing is read again after a removal, while
+/// Spotlight catches up with the move.
+const SETTLE_TRIES: usize = 10;
 
 pub struct MacAppStore<T = NativeTransport> {
     transport: T,
+    /// The person PkgDeck runs for; their Trash receives removed apps.
+    uid: u32,
+    settle: Duration,
 }
 
 /// One `mas list --json` or `mas outdated --json` record. mas prints one
@@ -69,7 +82,11 @@ fn owns(id: &PackageId, app: &MasApp) -> bool {
 
 impl<T: Transport> MacAppStore<T> {
     pub fn new(transport: T) -> Self {
-        Self { transport }
+        Self {
+            transport,
+            uid: rustix::process::getuid().as_raw(),
+            settle: Duration::from_secs(1),
+        }
     }
 
     fn run(
@@ -235,6 +252,65 @@ impl<T: Transport> MacAppStore<T> {
             ids.len()
         ])
     }
+
+    /// Moves the selected app to the Trash. The App Store's own listing names
+    /// the bundle, and its receipt must still be there; afterwards the listing
+    /// must no longer show the app where it was.
+    fn remove(
+        &self,
+        id: &PackageId,
+        cancel: &Cancellation,
+        progress: &mut dyn FnMut(Progress),
+    ) -> Result<OperationOutcome, EngineError> {
+        let app = self.find(id, cancel)?;
+        let path = app
+            .path
+            .as_deref()
+            .map(|path| visible(std::path::Path::new(path)))
+            .filter(|path| path.is_absolute() && path.extension().is_some_and(|ext| ext == "app"))
+            .ok_or_else(|| {
+                refused(format!(
+                    "mas doesn't say where {} is installed, so PkgDeck can't remove it.",
+                    app.name
+                ))
+            })?;
+        if !path.join("Contents/_MASReceipt/receipt").is_file() {
+            return Err(refused(format!(
+                "{} has no App Store receipt, so it may not be {} from the App Store. Reload, then try again.",
+                path.display(),
+                app.name
+            )));
+        }
+        let remover = Remover {
+            transport: &self.transport,
+            uid: self.uid,
+            backend: ID,
+        };
+        remover.check(&app.name, &path, cancel)?;
+        let outcome = remover.trash(&app.name, &path, cancel, progress)?;
+        // Spotlight, which mas reads, notices the move a moment later.
+        let listed_here = |now: &MasApp| {
+            now.adam_id == app.adam_id
+                && now
+                    .path
+                    .as_deref()
+                    .map(|p| visible(std::path::Path::new(p)))
+                    == Some(PathBuf::from(&path))
+        };
+        for attempt in 0..SETTLE_TRIES {
+            if attempt > 0 {
+                std::thread::sleep(self.settle);
+            }
+            if !self.list(&Cancellation::default())?.iter().any(listed_here) {
+                return Ok(outcome);
+            }
+        }
+        Err(refused(format!(
+            "{} is in the Trash, but the App Store still lists it at {}. Reload in a moment to check.",
+            app.name,
+            path.display()
+        )))
+    }
 }
 
 impl<T: Transport> Backend for MacAppStore<T> {
@@ -310,7 +386,8 @@ impl<T: Transport> Backend for MacAppStore<T> {
         }
         description.push(
             "Updates come from the App Store through mas and need the Mac password. \
-             PkgDeck does not install or remove App Store apps."
+             Removing it moves it to the Trash; macOS asks for an administrator password first. \
+             PkgDeck does not install App Store apps."
                 .into(),
         );
         Ok(PackageDetails {
@@ -326,12 +403,13 @@ impl<T: Transport> Backend for MacAppStore<T> {
         cancel: &Cancellation,
         progress: &mut dyn FnMut(Progress),
     ) -> Result<OperationOutcome, EngineError> {
-        let Operation::Upgrade(id) = operation else {
-            return Err(self.unsupported(operation.capability()));
-        };
-        Ok(self
-            .update(std::slice::from_ref(id), cancel, progress)?
-            .remove(0))
+        match operation {
+            Operation::Upgrade(id) => Ok(self
+                .update(std::slice::from_ref(id), cancel, progress)?
+                .remove(0)),
+            Operation::Remove(id) => self.remove(id, cancel, progress),
+            _ => Err(self.unsupported(operation.capability())),
+        }
     }
     /// One mas run updates every selected app, so sudo asks once.
     fn execute_group(
@@ -353,7 +431,9 @@ impl<T: Transport> Backend for MacAppStore<T> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::mac_apps::removal_fakes::{Mover, Privileged};
     use super::*;
+    use std::path::Path;
     use std::sync::{Arc, Mutex};
 
     /// Answers `mas` with canned output and records every command it ran.
@@ -368,6 +448,10 @@ mod tests {
         version: Result<&'static str, fn() -> ExecutionError>,
         /// stderr of a failing `mas list`.
         list_error: Option<&'static str>,
+        /// The Trash, the password prompt and `ps`.
+        mover: Mover,
+        /// Spotlight still lists apps that moved away.
+        stale: bool,
     }
     impl Default for Fake {
         fn default() -> Self {
@@ -379,6 +463,8 @@ mod tests {
                 update_installs: false,
                 version: Ok("7.0.0\n"),
                 list_error: None,
+                mover: Mover::new(std::env::temp_dir().join("pkgdeck-mas-no-home")),
+                stale: false,
             }
         }
     }
@@ -420,7 +506,25 @@ mod tests {
                 "version" => self.version.map(|text| done(text.into())).map_err(|e| e()),
                 "list" => match self.list_error {
                     Some(stderr) => Err(failed(stderr)),
-                    None => Ok(done(self.list.lock().unwrap().join("\n"))),
+                    // Fixture apps that left their folder drop out, as
+                    // Spotlight eventually notices.
+                    None => Ok(done(
+                        self.list
+                            .lock()
+                            .unwrap()
+                            .iter()
+                            .filter(|line| {
+                                let record: serde_json::Value = serde_json::from_str(line).unwrap();
+                                let path =
+                                    visible(Path::new(record["path"].as_str().unwrap_or("/")));
+                                self.stale
+                                    || !path.starts_with(std::env::temp_dir())
+                                    || path.exists()
+                            })
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    )),
                 },
                 "outdated" => Ok(done(self.outdated.lock().unwrap().join("\n"))),
                 _ => {
@@ -439,6 +543,212 @@ mod tests {
                 }
             }
         }
+        fn env(&self, name: &str) -> Option<OsString> {
+            self.mover.env(name)
+        }
+        fn macos_tool(
+            &self,
+            executable: &Path,
+            args: &[OsString],
+            cancel: &Cancellation,
+            write: bool,
+        ) -> Result<Completion, ExecutionError> {
+            self.mover.macos_tool(executable, args, cancel, write)
+        }
+        fn system_manager(
+            &self,
+            executable: &str,
+            args: &[OsString],
+            cancel: &Cancellation,
+            write: bool,
+        ) -> Result<Completion, ExecutionError> {
+            self.mover.system_manager(executable, args, cancel, write)
+        }
+    }
+
+    /// An App Store app in a temporary Applications folder, with its receipt.
+    struct Installed {
+        root: PathBuf,
+        app: PathBuf,
+    }
+    impl Installed {
+        fn new() -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let root = std::env::temp_dir().join(format!(
+                "pkgdeck-mas-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            let app = root.join("Applications/Alpha.app");
+            std::fs::create_dir_all(app.join("Contents/_MASReceipt")).unwrap();
+            std::fs::write(app.join("Contents/_MASReceipt/receipt"), "receipt").unwrap();
+            std::fs::create_dir_all(root.join("home")).unwrap();
+            Self { root, app }
+        }
+        /// A store whose listing names this app; root owns App Store apps.
+        fn store(&self, path: &str) -> (MacAppStore<Fake>, Fake) {
+            let mut fake = fake();
+            *fake.list.lock().unwrap() = vec![app(1, "Alpha", "1.0").replace(
+                "/Applications/Alpha.app",
+                &path.replace("{app}", self.app.to_str().unwrap()),
+            )];
+            fake.mover = Mover::new(self.root.join("home"));
+            let mut store = MacAppStore::new(fake.clone());
+            store.uid = rustix::process::getuid().as_raw() + 1;
+            store.settle = Duration::ZERO;
+            (store, fake)
+        }
+    }
+    impl Drop for Installed {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+    fn remove(store: &mut MacAppStore<Fake>) -> Result<OperationOutcome, EngineError> {
+        store.execute(
+            &Operation::Remove(id("1")),
+            &Cancellation::default(),
+            &mut drop::<Progress>,
+        )
+    }
+
+    #[test]
+    fn removal_moves_the_app_to_the_trash_after_the_password_prompt() {
+        let installed = Installed::new();
+        let (mut store, fake) = installed.store("{app}");
+        let mut messages = vec![];
+        store
+            .execute(
+                &Operation::Remove(id("1")),
+                &Cancellation::default(),
+                &mut |progress| {
+                    if let Progress::Message(text) = progress {
+                        messages.push(text);
+                    }
+                },
+            )
+            .unwrap();
+        let trashed = installed.root.join("home/.Trash/Alpha.app");
+        assert!(!installed.app.exists());
+        assert!(trashed.join("Contents/_MASReceipt/receipt").is_file());
+        assert!(messages[0].starts_with("Moving Alpha to the Trash."));
+        assert_eq!(
+            fake.mover.calls(),
+            [
+                "/bin/ps -axww -o comm=".to_owned(),
+                format!("mv -n -- {} {}", installed.app.display(), trashed.display())
+            ]
+        );
+        // mas never removes anything itself.
+        assert!(!fake
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call.starts_with("uninstall")));
+        // Removed apps are no longer there to remove.
+        assert!(matches!(remove(&mut store), Err(EngineError::NotFound)));
+    }
+
+    #[test]
+    fn an_app_store_app_you_own_goes_through_the_trash_command() {
+        let installed = Installed::new();
+        // mas reports apps through the Data volume's firmlink.
+        let (mut store, fake) = installed.store("/System/Volumes/Data{app}");
+        store.uid = rustix::process::getuid().as_raw();
+        remove(&mut store).unwrap();
+        assert_eq!(
+            fake.mover.calls().last().unwrap(),
+            &format!("/usr/bin/trash -s {}", installed.app.display())
+        );
+        assert!(!installed.app.exists());
+        assert!(installed.root.join("home/.Trash/Alpha.app").is_dir());
+    }
+
+    #[test]
+    fn a_listing_that_keeps_the_app_is_reported_after_retrying() {
+        let installed = Installed::new();
+        let (mut store, mut fake) = installed.store("{app}");
+        fake.stale = true;
+        store.transport = fake.clone();
+        let error = remove(&mut store).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Alpha is in the Trash, but the App Store still lists it"),
+            "{error}"
+        );
+        // One listing to find the app, then every retry.
+        let lists = fake
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| call.starts_with("list"))
+            .count();
+        assert_eq!(lists, 1 + SETTLE_TRIES);
+    }
+
+    #[test]
+    fn removal_refusals_leave_the_app_in_place() {
+        let installed = Installed::new();
+        let refusal = |path: &str, change: &dyn Fn(&mut MacAppStore<Fake>)| {
+            let (mut store, _) = installed.store(path);
+            change(&mut store);
+            let error = remove(&mut store).unwrap_err();
+            assert!(installed.app.is_dir());
+            error
+        };
+        // The password dialog's Cancel button.
+        let error = refusal("{app}", &|store| {
+            store.transport.mover.privileged = Privileged::Cancel;
+        });
+        assert!(matches!(
+            error,
+            EngineError::Execution(ExecutionError::AuthorizationCancelled)
+        ));
+        let error = refusal("{app}", &|store| {
+            store.transport.mover.privileged = Privileged::Denied;
+        });
+        assert!(matches!(
+            error,
+            EngineError::Execution(ExecutionError::AuthorizationDenied)
+        ));
+        let running = format!("{}/Contents/MacOS/Alpha\n", installed.app.display());
+        let error = refusal("{app}", &|store| {
+            store.transport.mover.ps = running.clone();
+        });
+        assert_eq!(
+            error.to_string(),
+            "Alpha is open. Quit it, then remove it again."
+        );
+        let error = refusal("{app}", &|store| store.uid = 0);
+        assert_eq!(error.to_string(), crate::host::ROOT_REFUSAL);
+        let error = refusal("relative/Alpha.app", &|_| {});
+        assert!(error
+            .to_string()
+            .contains("doesn't say where Alpha is installed"));
+        let error = refusal("{app}/Contents", &|_| {});
+        assert!(error
+            .to_string()
+            .contains("doesn't say where Alpha is installed"));
+        let error = refusal("{app}", &|store| {
+            store.transport.list.lock().unwrap()[0] =
+                r#"{"adamID":1,"name":"Alpha","version":"1.0"}"#.into();
+        });
+        assert!(error
+            .to_string()
+            .contains("doesn't say where Alpha is installed"));
+        // Without the receipt this may be some other app at that path.
+        let copy = installed.root.join("Applications/Copy.app");
+        std::fs::create_dir_all(&copy).unwrap();
+        let error = refusal(copy.to_str().unwrap(), &|_| {});
+        assert!(
+            error.to_string().contains("has no App Store receipt"),
+            "{error}"
+        );
+        assert!(copy.is_dir());
     }
     fn app(id: u64, name: &str, version: &str) -> String {
         format!(
@@ -567,7 +877,7 @@ mod tests {
         ));
         assert!(matches!(
             store.execute(
-                &Operation::Remove(id("1")),
+                &Operation::Install(id("1")),
                 &Cancellation::default(),
                 &mut drop::<Progress>
             ),
@@ -643,7 +953,7 @@ mod tests {
         let mut store = MacAppStore::new(fake());
         // Any app name can be an installed App Store app.
         assert!(store.may_have("Final Cut Pro") && !store.may_have(""));
-        // Updates only: installs and removals stay with the App Store.
+        // Updates and removals; installs stay with the App Store.
         assert_eq!(store.capabilities(), CAPABILITIES);
         let details = store.details(&id("2"), &Cancellation::default()).unwrap();
         assert_eq!(details.package.display_name, "Beta");
@@ -654,7 +964,10 @@ mod tests {
         assert!(details
             .description
             .starts_with("Location: /Applications/Beta.app\n\nApp Store ID: 2\n\nBundle identifier: com.example.Beta"));
-        assert!(details.description.contains("does not install or remove"));
+        assert!(details.description.contains("moves it to the Trash"));
+        assert!(details
+            .description
+            .contains("does not install App Store apps"));
         let mut foreign = id("2");
         foreign.backend = "homebrew-cask".into();
         assert!(matches!(
