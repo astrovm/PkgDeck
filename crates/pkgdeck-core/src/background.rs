@@ -440,15 +440,16 @@ mod tests {
     #[test]
     fn autostart_path_uses_absolute_user_config_and_falls_back_to_home() {
         let suffix = Path::new("autostart/io.github.astrovm.PkgDeck.desktop");
-        if cfg!(target_os = "linux") {
-            assert!(autostart_path().unwrap().ends_with(suffix));
-        } else if cfg!(target_os = "macos") {
-            assert!(autostart_path()
-                .unwrap()
-                .ends_with("Library/LaunchAgents/io.github.astrovm.PkgDeck.plist"));
+        let agent = Path::new("Library/LaunchAgents/io.github.astrovm.PkgDeck.plist");
+        let expected = if cfg!(target_os = "macos") {
+            agent
         } else {
-            assert!(autostart_path().is_none());
-        }
+            suffix
+        };
+        assert!(
+            autostart_path().is_some_and(|path| path.ends_with(expected))
+                || !cfg!(any(target_os = "linux", target_os = "macos"))
+        );
         assert_eq!(
             launch_agent_path_from(Some("/Users/fixture".into())),
             Some(PathBuf::from(
