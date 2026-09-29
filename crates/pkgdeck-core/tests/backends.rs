@@ -2412,6 +2412,42 @@ fn pnpm_outdated_newer_reports_available() {
 }
 
 #[test]
+fn pnpm_without_its_bin_directory_on_path_is_unavailable() {
+    // pnpm 12's output when `pnpm setup` never ran.
+    let failed = |stderr: &str| {
+        Some(ExecutionError::Failed(Completion {
+            code: Some(1),
+            signal: None,
+            stdout: vec![],
+            stderr: stderr.as_bytes().to_vec(),
+            truncated: false,
+            cancellation_deferred: false,
+        }))
+    };
+    let not_in_path = "Error: ERR_PNPM_GLOBAL_BIN_DIR_NOT_IN_PATH\n\n  × The configured global bin directory \"/Users/test/Library/pnpm/bin\" is not\n  │ in PATH\n  help: Run \"pnpm setup\" to update your shell configuration.\n";
+    let cancel = Cancellation::default();
+    let mut pnpm = DevTool::pnpm(DevFixture {
+        fail: failed(not_in_path),
+        ..DevFixture::default()
+    });
+    match pnpm.detect(&cancel) {
+        Ok(Availability::Unavailable(reason)) => assert!(reason.contains("pnpm setup"), "{reason}"),
+        other => panic!("{other:?}"),
+    }
+    // Any other pnpm failure, or npm, still reports the failure.
+    let mut other = DevTool::pnpm(DevFixture {
+        fail: failed("Error: ERR_PNPM_UNEXPECTED\n"),
+        ..DevFixture::default()
+    });
+    assert!(other.detect(&cancel).is_err());
+    let mut npm = DevTool::npm(DevFixture {
+        fail: failed(not_in_path),
+        ..DevFixture::default()
+    });
+    assert!(npm.detect(&cancel).is_err());
+}
+
+#[test]
 fn bun_lifecycle() {
     let base = std::env::temp_dir().join(format!("pkgdeck-bun-test-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
@@ -2429,12 +2465,22 @@ fn bun_lifecycle() {
         ("broken", "not json"),
         ("noversion", r#"{"name": "noversion"}"#),
         ("badname", r#"{"name": "--evil", "version": "1.0.0"}"#),
+        // A dependency of an installed tool, hoisted next to it.
+        ("hoisted", r#"{"name": "hoisted", "version": "4.0.0"}"#),
     ] {
         let dir = modules.join(dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("package.json"), manifest).unwrap();
     }
     std::fs::write(modules.join("stray.txt"), "not a package").unwrap();
+    // Bun's global manifest names what the user installed; `missing` was
+    // removed from disk and `../escape` is not a package name.
+    std::fs::write(
+        base.join(".bun/install/global/package.json"),
+        r#"{"dependencies": {"alpha": "^1.0.0", "beta": "latest", "@scope/gamma": "^3.0.0",
+            "broken": "*", "noversion": "*", "badname": "*", "missing": "*", "../escape": "*"}}"#,
+    )
+    .unwrap();
     let fixture = DevFixture {
         home: Some(base.to_str().unwrap().into()),
         version: "1.3.0\n".into(),
@@ -2445,6 +2491,7 @@ fn bun_lifecycle() {
     assert_eq!(backend.detect(&cancel), Ok(Availability::Available));
     let installed = backend.installed(&cancel).unwrap();
     assert_eq!(installed.len(), 3);
+    assert!(!installed.iter().any(|p| p.id.name == "hoisted"));
     let alpha = installed.iter().find(|p| p.id.name == "alpha").unwrap();
     assert_eq!(alpha.summary, "Alpha tool");
     assert_eq!(alpha.update, UpdateAvailability::Current);
@@ -2783,10 +2830,16 @@ fn bun_skips_unreadable_manifests() {
     let mut backend = DevTool::bun(fixture);
     let cancel = Cancellation::default();
     assert_eq!(backend.detect(&cancel), Ok(Availability::Available));
+    // Without a global manifest nothing was installed with Bun.
     assert!(backend.installed(&cancel).unwrap().is_empty());
-    std::fs::set_permissions(&modules, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let manifest = base.join(".bun/install/global/package.json");
+    std::fs::write(&manifest, r#"{"dependencies": {"emptyver": "*"}}"#).unwrap();
+    assert!(backend.installed(&cancel).unwrap().is_empty());
+    std::fs::write(&manifest, "not json").unwrap();
     assert!(backend.installed(&cancel).is_err());
-    std::fs::set_permissions(&modules, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::set_permissions(&manifest, std::fs::Permissions::from_mode(0o000)).unwrap();
+    assert!(backend.installed(&cancel).is_err());
+    std::fs::set_permissions(&manifest, std::fs::Permissions::from_mode(0o644)).unwrap();
     std::fs::remove_dir_all(&base).unwrap();
 }
 

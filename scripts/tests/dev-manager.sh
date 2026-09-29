@@ -249,6 +249,8 @@ bun)
     success sources
     bun add --global cowsay@1.5.0
     have cowsay
+    # cowsay's dependencies sit next to it in node_modules but aren't tools.
+    run list | absent '"name":"yargs"'
     success info cowsay
     success upgrade cowsay
     grep -q '"version": "1.6.0"' "$HOME/.bun/install/global/node_modules/cowsay/package.json"

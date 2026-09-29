@@ -3714,6 +3714,13 @@ struct PnpmOutdated {
     latest: String,
 }
 
+/// Bun's global `package.json`: what `bun add --global` installed.
+#[derive(Deserialize)]
+struct BunGlobal {
+    #[serde(default)]
+    dependencies: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
 #[derive(Deserialize)]
 struct BunManifest {
     name: String,
@@ -4101,7 +4108,20 @@ impl<T: Transport> DevTool<T> {
                 ))
             }
             DevKind::Npm | DevKind::Pnpm => {
-                let output = self.call(&["root", "--global"], cancel, false)?;
+                let output = match self.call(&["root", "--global"], cancel, false) {
+                    // pnpm 11 and later refuse every global command until
+                    // `pnpm setup` puts their bin directory on PATH.
+                    Err(ExecutionError::Failed(result))
+                        if self.kind == DevKind::Pnpm
+                            && String::from_utf8_lossy(&result.stderr)
+                                .contains("ERR_PNPM_GLOBAL_BIN_DIR_NOT_IN_PATH") =>
+                    {
+                        return Err(ExecutionError::Disabled(
+                            "pnpm's global bin directory isn't in PATH. Run `pnpm setup`, then open a new terminal".into(),
+                        ));
+                    }
+                    result => result?,
+                };
                 let path = PathBuf::from(
                     String::from_utf8(output.stdout)
                         .map_err(|e| ExecutionError::Invalid(e.to_string()))?
@@ -4370,30 +4390,24 @@ impl<T: Transport> DevTool<T> {
         .ok()
     }
     fn bun_inventory(&self, home: &std::path::Path) -> Result<Vec<PackageDetails>, EngineError> {
-        let mut details = Vec::new();
-        let entries = match std::fs::read_dir(host_metadata_path(&home.join("node_modules"))) {
-            Ok(entries) => entries,
+        let id = self.kind.id();
+        // Bun hoists every dependency into one flat `node_modules` and keeps
+        // them after a removal, so only the global manifest's dependencies
+        // are packages the user installed.
+        let manifest = match std::fs::read_to_string(host_metadata_path(&home.join("package.json")))
+        {
+            Ok(manifest) => manifest,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
-            Err(e) => return Err(invalid(self.kind.id(), e.to_string())),
+            Err(e) => return Err(invalid(id, e.to_string())),
         };
-        for entry in entries.filter_map(Result::ok) {
-            let path = entry.path();
-            if path
-                .file_name()
-                .is_some_and(|name| name.to_str().is_some_and(|name| name.starts_with('@')))
-            {
-                for scoped in std::fs::read_dir(&path)
-                    .into_iter()
-                    .flatten()
-                    .filter_map(Result::ok)
-                {
-                    details.extend(self.bun_package(home, &scoped.path()));
-                }
-            } else {
-                details.extend(self.bun_package(home, &path));
-            }
-        }
-        Ok(details)
+        let manifest: BunGlobal = serde_json::from_str(&manifest).map_err(|e| invalid(id, e))?;
+        let modules = home.join("node_modules");
+        Ok(manifest
+            .dependencies
+            .keys()
+            .filter(|name| self.kind.valid_name(name))
+            .filter_map(|name| self.bun_package(home, &modules.join(name)))
+            .collect())
     }
     fn pip_inventory(
         &self,

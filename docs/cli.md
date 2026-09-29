@@ -47,14 +47,16 @@ pkd completions bash                     # print a shell completion script
 Sources for `--from`: `fwupd`, `apt`, `dnf`, `pacman`, `aur`, `zypper`, `apk`,
 `xbps`, `snap`, `system-image`, `homebrew`, `homebrew-cask`, `macos-apps`,
 `mas`, `macports`, `appimage`, `flatpak`, `docker`, `podman`, `toolbox`, `distrobox`, `cargo`,
-`rustup`, `npm`, `pnpm`, `bun`, `pip`, `pipx`, `uv`, `mise`, `pixi`, `conda`,
-`nix`, `composer`, `gem`,
+`rustup`, `go`, `dotnet`, `npm`, `pnpm`, `bun`, `pip`, `pipx`, `uv`, `mise`, `pixi`,
+`conda`, `nix`, `composer`, `gem`,
 `codex`, `claude`, `grok`, `opencode`, `cursor`, `copilot`, `kiro`,
 `antigravity`, `amp`, and `droid`.
 
 Without `--from`, PkgDeck uses every package manager it finds. Package managers
 that aren't installed are skipped. Sources that fail are reported, not
 hidden. `pkd sources` lists every source, including unavailable ones and why.
+pnpm 11 and later refuse global installs until `pnpm setup` puts their bin
+folder on your PATH, so until then pnpm shows as unavailable.
 
 ![pkd sources listing available and unavailable package managers](screenshots/cli-sources.png)
 
