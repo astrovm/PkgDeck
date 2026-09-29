@@ -39,7 +39,12 @@ pub use pixi::Pixi;
 pub use rustup::Rustup;
 use serde::Deserialize;
 pub use standalone::{Standalone, StandaloneTool};
-use std::{collections::BTreeMap, ffi::OsString, path::PathBuf, time::Duration};
+use std::{
+    collections::BTreeMap,
+    ffi::{OsStr, OsString},
+    path::PathBuf,
+    time::Duration,
+};
 pub use system_image::SystemImage;
 
 const CAPABILITIES: &[Capability] = &[
@@ -113,6 +118,9 @@ pub const BACKEND_IDS: &[&str] = &[
     "antigravity",
     "amp",
     "droid",
+    "solana",
+    "anchor",
+    "foundry",
 ];
 
 /// These sources update existing installations but do not install or remove them.
@@ -250,6 +258,9 @@ pub fn display_name(id: &str) -> &str {
         "antigravity" => "Antigravity CLI",
         "amp" => "Amp",
         "droid" => "Factory Droid",
+        "solana" => "Solana CLI (Agave)",
+        "anchor" => "Anchor (AVM)",
+        "foundry" => "Foundry",
         // npm, pnpm, pip, pipx, uv, mise, pixi, apk, and rustup are written in lower case.
         other => other,
     }
@@ -3714,6 +3725,25 @@ struct PnpmOutdated {
     latest: String,
 }
 
+/// Which installed development tools an inventory checks for newer versions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Updates<'a> {
+    None,
+    All,
+    /// Only the tool whose details are open.
+    Only(&'a str),
+}
+
+impl Updates<'_> {
+    fn covers(self, name: &str) -> bool {
+        match self {
+            Self::None => false,
+            Self::All => true,
+            Self::Only(only) => only == name,
+        }
+    }
+}
+
 /// Bun's global `package.json`: what `bun add --global` installed.
 #[derive(Deserialize)]
 struct BunGlobal {
@@ -4237,24 +4267,34 @@ impl<T: Transport> DevTool<T> {
         })
     }
     /// Split one `cargo install --list` header (`name vversion [(source)]:`)
-    /// without allocating. Registry installs omit the source; anything else
-    /// is not a package entry.
-    fn cargo_header(line: &str) -> Option<(&str, &str)> {
+    /// without allocating, and whether the package came from crates.io, which
+    /// current Cargo leaves unnamed. Anything else is not a package entry.
+    fn cargo_header(line: &str) -> Option<(&str, &str, bool)> {
         let header = line.strip_suffix(':')?;
         let (name, rest) = header.split_once(' ')?;
-        let (version, sourced) = match rest.split_once(' ') {
-            Some((version, source)) => (version, source.starts_with('(') && source.ends_with(')')),
-            None => (rest, true),
+        let (version, sourced, crates_io) = match rest.split_once(' ') {
+            Some((version, source)) => (
+                version,
+                source.starts_with('(') && source.ends_with(')'),
+                // Older Cargo names crates.io too.
+                matches!(
+                    source,
+                    "(registry+https://github.com/rust-lang/crates.io-index)"
+                        | "(registry+sparse+https://index.crates.io/)"
+                ),
+            ),
+            None => (rest, true, true),
         };
         let version = version.strip_prefix('v')?;
         if !sourced || version.is_empty() || version.chars().any(char::is_whitespace) {
             return None;
         }
-        Some((name, version))
+        Some((name, version, crates_io))
     }
     fn cargo_inventory(
         &self,
         home: &std::path::Path,
+        updates: Updates,
         cancel: &Cancellation,
     ) -> Result<Vec<PackageDetails>, EngineError> {
         let id = self.kind.id();
@@ -4265,8 +4305,14 @@ impl<T: Transport> DevTool<T> {
             if line.is_empty() || line.starts_with([' ', '\t']) {
                 continue;
             }
-            let Some((name, version)) = Self::cargo_header(line) else {
+            let Some((name, version, crates_io)) = Self::cargo_header(line) else {
                 return Err(invalid(id, "invalid cargo metadata"));
+            };
+            // Git and path installs have no registry version to compare.
+            let candidate = if updates.covers(name) && crates_io {
+                self.newer_version(home, name, version, cancel)?
+            } else {
+                None
             };
             details.push(self.detail(
                 home,
@@ -4274,7 +4320,7 @@ impl<T: Transport> DevTool<T> {
                 "Cargo-installed command-line tool".into(),
                 None,
                 version.into(),
-                None,
+                candidate,
             )?);
         }
         Ok(details)
@@ -4389,7 +4435,12 @@ impl<T: Transport> DevTool<T> {
         )
         .ok()
     }
-    fn bun_inventory(&self, home: &std::path::Path) -> Result<Vec<PackageDetails>, EngineError> {
+    fn bun_inventory(
+        &self,
+        home: &std::path::Path,
+        updates: Updates,
+        cancel: &Cancellation,
+    ) -> Result<Vec<PackageDetails>, EngineError> {
         let id = self.kind.id();
         // Bun hoists every dependency into one flat `node_modules` and keeps
         // them after a removal, so only the global manifest's dependencies
@@ -4402,12 +4453,73 @@ impl<T: Transport> DevTool<T> {
         };
         let manifest: BunGlobal = serde_json::from_str(&manifest).map_err(|e| invalid(id, e))?;
         let modules = home.join("node_modules");
-        Ok(manifest
+        let mut details: Vec<PackageDetails> = manifest
             .dependencies
             .keys()
             .filter(|name| self.kind.valid_name(name))
             .filter_map(|name| self.bun_package(home, &modules.join(name)))
-            .collect())
+            .collect();
+        for detail in &mut details {
+            let package = &mut detail.package;
+            if !updates.covers(&package.id.name) {
+                continue;
+            }
+            let installed = package.installed_version.as_deref().unwrap_or_default();
+            if let Some(newer) = self.newer_version(home, &package.id.name, installed, cancel)? {
+                package.candidate_version = Some(newer);
+                package.update = UpdateAvailability::Available;
+            }
+        }
+        Ok(details)
+    }
+    /// The registry's latest version of an installed Cargo or Bun tool when
+    /// it is newer than `installed`. These managers have no outdated command,
+    /// so each tool is looked up; offline or unknown tools get no candidate.
+    fn newer_version(
+        &self,
+        home: &std::path::Path,
+        name: &str,
+        installed: &str,
+        cancel: &Cancellation,
+    ) -> Result<Option<String>, EngineError> {
+        let latest = match self.kind {
+            DevKind::Cargo => self
+                .registry_hits(name, cancel)?
+                .into_iter()
+                .find(|(hit, _, _)| hit == name)
+                .map(|(_, version, _)| version),
+            // `bun pm view` needs a package.json, so it runs in Bun's
+            // global folder.
+            _ => {
+                let args = [
+                    OsStr::new("pm"),
+                    OsStr::new("view"),
+                    OsStr::new("--cwd"),
+                    home.as_os_str(),
+                    OsStr::new(name),
+                    OsStr::new("version"),
+                ]
+                .map(OsString::from);
+                match self
+                    .transport
+                    .dev_tool(self.kind.executable(), &args, cancel, false)
+                {
+                    Err(ExecutionError::Cancelled) => return Err(EngineError::Cancelled),
+                    Ok(result) if !result.truncated => String::from_utf8(result.stdout)
+                        .ok()
+                        .map(|version| version.trim().to_string()),
+                    _ => None,
+                }
+            }
+        };
+        let newer = |latest: &str| match (
+            semver::Version::parse(latest),
+            semver::Version::parse(installed),
+        ) {
+            (Ok(latest), Ok(installed)) => latest > installed,
+            _ => false,
+        };
+        Ok(latest.filter(|latest| newer(latest)))
     }
     fn pip_inventory(
         &self,
@@ -5027,20 +5139,26 @@ impl<T: Transport> DevTool<T> {
             adopt_with: None,
         })
     }
-    fn inventory(&self, cancel: &Cancellation) -> Result<Vec<PackageDetails>, EngineError> {
+    /// Installed tools; `updates` also looks for newer versions, which costs
+    /// a registry request per tool for Cargo and Bun and is slow for mise.
+    fn inventory(
+        &self,
+        updates: Updates,
+        cancel: &Cancellation,
+    ) -> Result<Vec<PackageDetails>, EngineError> {
         let home = self
             .home
             .clone()
             .ok_or_else(|| invalid(self.kind.id(), "manager home not detected"))?;
         match self.kind {
-            DevKind::Cargo => self.cargo_inventory(&home, cancel),
+            DevKind::Cargo => self.cargo_inventory(&home, updates, cancel),
             DevKind::Npm => self.npm_inventory(&home, cancel),
             DevKind::Pnpm => self.pnpm_inventory(&home, cancel),
-            DevKind::Bun => self.bun_inventory(&home),
+            DevKind::Bun => self.bun_inventory(&home, updates, cancel),
             DevKind::Pip => self.pip_inventory(&home, cancel),
             DevKind::Pipx => self.pipx_inventory(&home, cancel),
             DevKind::Uv => self.uv_inventory(&home, cancel),
-            DevKind::Mise => self.mise_inventory(&home, true, cancel),
+            DevKind::Mise => self.mise_inventory(&home, updates != Updates::None, cancel),
             DevKind::Composer => self.composer_inventory(&home, cancel),
             DevKind::Gem => self.gem_inventory(&home, cancel),
         }
@@ -5127,7 +5245,7 @@ impl<T: Transport> DevTool<T> {
         if self.kind == DevKind::Uv {
             // `tool upgrade --all` keeps exact pins like per-package upgrade,
             // so reinstall every tool at `@latest` as the single transaction.
-            for package in self.inventory(cancel)? {
+            for package in self.inventory(Updates::None, cancel)? {
                 let name = &package.package.id.name;
                 progress(Progress::Package(name.clone()));
                 progress(Progress::Message(format!("Upgrading {name} to latest.")));
@@ -5163,7 +5281,7 @@ impl<T: Transport> DevTool<T> {
         if self.kind == DevKind::Composer {
             // `global update` respects pinned constraints, so re-require each
             // installed package to reach the reported latest candidates.
-            for package in self.inventory(cancel)? {
+            for package in self.inventory(Updates::None, cancel)? {
                 let name = &package.package.id.name;
                 progress(Progress::Package(name.clone()));
                 progress(Progress::Message(format!("Upgrading {name}.")));
@@ -5188,7 +5306,7 @@ impl<T: Transport> DevTool<T> {
                 cancellation_deferred: result.cancellation_deferred,
             });
         }
-        for package in self.inventory(cancel)? {
+        for package in self.inventory(Updates::None, cancel)? {
             let name = &package.package.id.name;
             if self.kind == DevKind::Cargo {
                 progress(Progress::Package(name.clone()));
@@ -5236,7 +5354,7 @@ impl<T: Transport> Backend for DevTool<T> {
             .clone()
             .ok_or_else(|| invalid(self.kind.id(), "manager home not detected"))?;
         let installed = self
-            .inventory(cancel)?
+            .inventory(Updates::None, cancel)?
             .into_iter()
             .map(|d| d.package)
             .find(|package| package.id.name == name);
@@ -5279,7 +5397,7 @@ impl<T: Transport> Backend for DevTool<T> {
     }
     fn installed(&mut self, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
         Ok(self
-            .inventory(cancel)?
+            .inventory(Updates::All, cancel)?
             .into_iter()
             .map(|d| d.package)
             .collect())
@@ -5294,16 +5412,13 @@ impl<T: Transport> Backend for DevTool<T> {
             .clone()
             .ok_or_else(|| invalid(self.kind.id(), "manager home not detected"))?;
         let lowered = query.to_ascii_lowercase();
-        // mise's update check reaches the network for every global tool, so
-        // searches list its tools without it.
-        let inventory: Vec<Package> = if self.kind == DevKind::Mise {
-            self.mise_inventory(&home, false, cancel)?
-        } else {
-            self.inventory(cancel)?
-        }
-        .into_iter()
-        .map(|d| d.package)
-        .collect();
+        // Update checks for Cargo, Bun and mise reach the network for every
+        // tool, so searches list installed tools without them.
+        let inventory: Vec<Package> = self
+            .inventory(Updates::None, cancel)?
+            .into_iter()
+            .map(|d| d.package)
+            .collect();
         let mut results: Vec<Package> = inventory
             .iter()
             .filter(|package| {
@@ -5411,26 +5526,16 @@ impl<T: Transport> Backend for DevTool<T> {
         cancel: &Cancellation,
     ) -> Result<PackageDetails, EngineError> {
         self.target(id)?;
-        // mise's update check is slow offline; only an installed tool needs it.
-        let installed = if self.kind == DevKind::Mise {
-            let home = self
-                .home
-                .clone()
-                .ok_or_else(|| invalid(self.kind.id(), "manager home not detected"))?;
-            self.mise_inventory(&home, false, cancel)?
-                .iter()
-                .any(|d| d.package.id == *id)
-        } else {
-            true
-        };
-        if installed {
-            if let Some(installed) = self
-                .inventory(cancel)?
-                .into_iter()
-                .find(|d| d.package.id == *id)
-            {
-                return Ok(installed);
+        let find =
+            |inventory: Vec<PackageDetails>| inventory.into_iter().find(|d| d.package.id == *id);
+        if let Some(listed) = find(self.inventory(Updates::None, cancel)?) {
+            // Cargo, Bun and mise check updates per tool, slowly or over the
+            // network, so only an installed tool gets one, just for itself.
+            // The other managers' listings already include updates.
+            if !matches!(self.kind, DevKind::Cargo | DevKind::Bun | DevKind::Mise) {
+                return Ok(listed);
             }
+            return Ok(find(self.inventory(Updates::Only(&id.name), cancel)?).unwrap_or(listed));
         }
         // A search result that is not installed yet (a registry match) still
         // opens: find the same identity again. Unversioned exact-name offers

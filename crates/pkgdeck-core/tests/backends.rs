@@ -1765,6 +1765,18 @@ impl Transport for DevFixture {
                     self.list_result()
                 }
             }
+            // `bun pm view … version`: every tool's latest version.
+            ("bun", Some("pm")) => match &self.outdated {
+                Some(text) => Ok(output(text)),
+                None => Err(ExecutionError::Failed(Completion {
+                    code: Some(1),
+                    signal: None,
+                    stdout: vec![],
+                    stderr: b"network unreachable".to_vec(),
+                    truncated: false,
+                    cancellation_deferred: false,
+                })),
+            },
             ("mise", Some("ls")) => self.list_result(),
             ("mise", Some("outdated")) => {
                 Ok(output(self.outdated.clone().unwrap_or_else(|| "{}".into())))
@@ -2571,6 +2583,150 @@ fn bun_lifecycle() {
         "alpha@latest".into()
     ]));
     assert!(!writes.contains(&vec!["update".into(), "--global".into()]));
+    std::fs::remove_dir_all(&base).unwrap();
+}
+
+#[test]
+fn cargo_checks_crates_io_for_newer_versions() {
+    // A crates.io tool with a newer release, one ahead of crates.io, and a
+    // path install that crates.io can't know about.
+    let list = "ripgrep v14.1.0:\n    rg\nfd-find v10.0.0 (registry+https://github.com/rust-lang/crates.io-index):\n    fd\nlocal v0.1.0 (/home/test/src/local):\n    local\n";
+    let fixture = DevFixture {
+        home: Some("/home/test".into()),
+        version: "cargo 1.98.1\n".into(),
+        list: list.into(),
+        registry: Some(
+            "ripgrep = \"15.2.0\"    # Fast grep\nfd-find = \"9.0.0\"    # Find\nlocal = \"9.0.0\"\n"
+                .into(),
+        ),
+        ..DevFixture::default()
+    };
+    let mut backend = DevTool::cargo(fixture.clone());
+    let cancel = Cancellation::default();
+    assert_eq!(backend.detect(&cancel), Ok(Availability::Available));
+    let installed = backend.installed(&cancel).unwrap();
+    let find = |name: &str| installed.iter().find(|p| p.id.name == name).unwrap();
+    assert_eq!(find("ripgrep").update, UpdateAvailability::Available);
+    assert_eq!(find("ripgrep").candidate_version.as_deref(), Some("15.2.0"));
+    assert_eq!(find("fd-find").update, UpdateAvailability::Current);
+    assert_eq!(find("fd-find").candidate_version, None);
+    assert_eq!(find("local").update, UpdateAvailability::Current);
+    let searched = |fixture: &DevFixture| {
+        fixture
+            .calls()
+            .into_iter()
+            .filter(|(_, args, _)| args.iter().any(|arg| arg == "search"))
+            .map(|(_, args, _)| args.last().cloned().unwrap())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(searched(&fixture), ["ripgrep", "fd-find"]);
+    // Details check only the tool that opens; searches check none.
+    let ripgrep = find("ripgrep").id.clone();
+    let details = backend.details(&ripgrep, &cancel).unwrap();
+    assert_eq!(details.package.candidate_version.as_deref(), Some("15.2.0"));
+    assert_eq!(searched(&fixture).len(), 3);
+    backend.search("fd", &cancel).unwrap();
+    assert_eq!(searched(&fixture)[3..], ["fd"]);
+    // Offline, tools stay listed without a candidate.
+    let mut offline = DevTool::cargo(DevFixture {
+        registry: None,
+        ..fixture.clone()
+    });
+    assert_eq!(offline.detect(&cancel), Ok(Availability::Available));
+    assert!(offline
+        .installed(&cancel)
+        .unwrap()
+        .iter()
+        .all(|p| p.candidate_version.is_none()));
+    // Cancelling during the check stops the listing.
+    let mut cancelled = DevTool::cargo(DevFixture {
+        cancel_on: Some("--config".into()),
+        ..fixture
+    });
+    assert_eq!(cancelled.detect(&cancel), Ok(Availability::Available));
+    assert_eq!(cancelled.installed(&cancel), Err(EngineError::Cancelled));
+}
+
+#[test]
+fn bun_checks_the_registry_for_newer_versions() {
+    let base = std::env::temp_dir().join(format!("pkgdeck-bun-updates-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let global = base.join(".bun/install/global");
+    for (name, version) in [("alpha", "1.0.0"), ("beta", "2.0.0"), ("odd", "1.0")] {
+        let dir = global.join("node_modules").join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("package.json"),
+            format!(r#"{{"name": "{name}", "version": "{version}"}}"#),
+        )
+        .unwrap();
+    }
+    std::fs::write(
+        global.join("package.json"),
+        r#"{"dependencies": {"alpha": "*", "beta": "*", "odd": "*"}}"#,
+    )
+    .unwrap();
+    let fixture = DevFixture {
+        home: Some(base.to_str().unwrap().into()),
+        version: "1.4.2\n".into(),
+        // The registry's latest release, for every tool.
+        outdated: Some("1.5.0\n".into()),
+        ..DevFixture::default()
+    };
+    let mut backend = DevTool::bun(fixture.clone());
+    let cancel = Cancellation::default();
+    assert_eq!(backend.detect(&cancel), Ok(Availability::Available));
+    let installed = backend.installed(&cancel).unwrap();
+    let find = |name: &str| installed.iter().find(|p| p.id.name == name).unwrap();
+    assert_eq!(find("alpha").update, UpdateAvailability::Available);
+    assert_eq!(find("alpha").candidate_version.as_deref(), Some("1.5.0"));
+    // Older than installed, or not a version PkgDeck can compare.
+    assert_eq!(find("beta").update, UpdateAvailability::Current);
+    assert_eq!(find("odd").update, UpdateAvailability::Current);
+    let views: Vec<Vec<String>> = fixture
+        .calls()
+        .into_iter()
+        .filter(|(exe, args, _)| exe == "bun" && args.first().map(String::as_str) == Some("pm"))
+        .map(|(_, args, _)| args)
+        .collect();
+    assert_eq!(views.len(), 3);
+    assert_eq!(
+        views[0],
+        [
+            "pm",
+            "view",
+            "--cwd",
+            global.to_str().unwrap(),
+            "alpha",
+            "version"
+        ]
+    );
+    let alpha = find("alpha").id.clone();
+    assert_eq!(
+        backend
+            .details(&alpha, &cancel)
+            .unwrap()
+            .package
+            .candidate_version
+            .as_deref(),
+        Some("1.5.0")
+    );
+    let mut offline = DevTool::bun(DevFixture {
+        outdated: None,
+        ..fixture.clone()
+    });
+    assert_eq!(offline.detect(&cancel), Ok(Availability::Available));
+    assert!(offline
+        .installed(&cancel)
+        .unwrap()
+        .iter()
+        .all(|p| p.update == UpdateAvailability::Current));
+    let mut cancelled = DevTool::bun(DevFixture {
+        cancel_on: Some("pm".into()),
+        ..fixture
+    });
+    assert_eq!(cancelled.detect(&cancel), Ok(Availability::Available));
+    assert_eq!(cancelled.installed(&cancel), Err(EngineError::Cancelled));
     std::fs::remove_dir_all(&base).unwrap();
 }
 

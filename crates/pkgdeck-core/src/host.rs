@@ -378,6 +378,7 @@ impl Host {
             // session but missing here; Cargo and Bun read theirs too.
             "PNPM_HOME",
             "CARGO_HOME",
+            "RUSTUP_HOME",
             "BUN_INSTALL",
             "COMPOSER_HOME",
             "GEM_HOME",
@@ -385,6 +386,8 @@ impl Host {
             "CODEX_INSTALL_DIR",
             "CLAUDE_CONFIG_DIR",
             "GROK_BIN_DIR",
+            "AVM_HOME",
+            "FOUNDRY_DIR",
             "DISABLE_UPDATES",
         ] {
             if let Some(value) = source.get(&OsString::from(name)) {
@@ -559,7 +562,9 @@ impl Host {
         process::run(
             command,
             Limits {
-                timeout: std::time::Duration::from_secs(300),
+                // AVM builds solana-verify from source during an Anchor
+                // update, which takes minutes on slower machines.
+                timeout: std::time::Duration::from_secs(900),
                 output_bytes: 1024 * 1024,
             },
             cancel,
