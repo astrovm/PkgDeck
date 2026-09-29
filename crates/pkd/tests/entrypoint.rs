@@ -13,8 +13,22 @@ fn pkd() -> Command {
 }
 
 #[test]
-fn read_only_source_is_rejected_before_noninteractive_confirmation() {
-    for verb in ["install", "remove", "upgrade"] {
+fn inventory_only_source_is_rejected_before_noninteractive_confirmation() {
+    // Removal is up to the source, so it needs approval like any change.
+    let output = pkd()
+        .args([
+            "--json",
+            "--from",
+            "macos-apps",
+            "remove",
+            "/Applications/Fixture.app",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let data: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(data["data"]["error"], "confirmation_required");
+    for verb in ["install", "upgrade"] {
         for yes in [false, true] {
             let mut command = pkd();
             command.args([

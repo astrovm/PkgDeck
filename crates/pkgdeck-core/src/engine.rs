@@ -502,13 +502,38 @@ impl Engine {
     /// errors: they cannot contribute an operation or an ambiguous target.
     pub fn installed_for_mutation(&mut self, cancel: &Cancellation) -> PackageReport {
         self.query_where(None, false, cancel, &|backend| {
-            !crate::backends::read_only(backend.id())
+            !crate::backends::inventory_only(backend.id())
         })
+    }
+    /// Installed packages a removal of `name` may pick: everything
+    /// [`installed_for_mutation`](Self::installed_for_mutation) reads, plus
+    /// an exact lookup in the inventory-only sources that could hold `name`
+    /// (a macOS app's path). Other names never read those inventories.
+    pub fn installed_for_removal(&mut self, name: &str, cancel: &Cancellation) -> PackageReport {
+        let mut report = self.installed_for_mutation(cancel);
+        let inventory = self.query_where(Some(name), true, cancel, &|backend| {
+            crate::backends::inventory_only(backend.id()) && backend.may_have(name)
+        });
+        report.packages.extend(inventory.packages);
+        report.packages.sort_by(|a, b| a.id.cmp(&b.id));
+        report.failures.extend(inventory.failures);
+        report
+            .successful_sources
+            .extend(inventory.successful_sources);
+        report
     }
     pub fn lookup_for_mutation(&mut self, name: &str, cancel: &Cancellation) -> PackageReport {
         self.query_where(Some(name), true, cancel, &|backend| {
-            !crate::backends::read_only(backend.id()) && backend.may_have(name)
+            !crate::backends::inventory_only(backend.id()) && backend.may_have(name)
         })
+    }
+    /// Whether a registered backend declares `capability`. Frontends check
+    /// this before asking for confirmation; [`execute`](Self::execute)
+    /// refuses unsupported changes regardless.
+    pub fn supports(&self, backend: &str, capability: Capability) -> bool {
+        self.backends
+            .get(backend)
+            .is_some_and(|backend| backend.capabilities().contains(&capability))
     }
     /// Discover cleanup plans independently per backend. Sources without a
     /// cleanup capability are omitted; they have nothing to show on this view.
