@@ -84,6 +84,11 @@ Updates lists package updates and, if `fwupdmgr` is installed, firmware updates.
 - Click a row's arrow to update just that item.
 - Check several rows and click **Update selected**. When every row is checked,
   the button reads **Update all**.
+- **Update all** updates one package at a time, so the progress bar names
+  the package being updated and counts packages, and each row shows its own
+  progress. System package managers (APT, DNF, Pacman, Zypper, apk, XBPS and
+  MacPorts) are the exception: each updates everything in one step, because
+  updating their packages one by one could leave the system half upgraded.
 
 Versions appear as `installed → new` when the source provides both. Some
 Flatpak runtimes only report a branch or commit. PkgDeck shows what the
@@ -262,12 +267,16 @@ is running. Turn them off in Settings.
   minutes.
 - Checks wait while you're offline, on a metered connection, or while another
   package operation is running.
-- On Linux, **Start in background at login** keeps checks running after you
-  log in.
-- Click the tray icon to show or hide the window. Its menu has **Check now**
-  and **Quit**. Clicking a notification opens Updates.
+- **Start in background at login** keeps checks running after you log in.
+  On Linux it adds an autostart entry; on macOS it adds a LaunchAgent,
+  `~/Library/LaunchAgents/io.github.astrovm.PkgDeck.plist`.
+- Click the tray icon (the menu bar icon on macOS) to show or hide the window.
+  Its menu has **Check now** and **Quit**. Clicking a notification opens
+  Updates.
 - When your desktop has a system tray, closing the window keeps PkgDeck
-  running there. Use **Quit** in the tray menu to exit.
+  running there. Use **Quit** in the tray menu to exit. On macOS, Cmd+Q and
+  **Quit PkgDeck** in the app menu quit too, Cmd+W closes the window to the
+  menu bar, and clicking the Dock icon brings it back.
 
 You get one notification for each new batch of updates, including on the first
 check. PkgDeck remembers what it already told you about, even after a restart.
@@ -277,6 +286,12 @@ notification.
 Settings shows when the last check ran, how many updates it found, and
 whether your desktop supports notifications. **Test
 notification** sends a sample message.
+
+On macOS, the Dock icon shows the number of updates found. Notification
+Center only accepts notifications from apps signed with a Developer ID; the
+Homebrew build is ad-hoc signed, so its notifications are posted through
+AppleScript and appear under Script Editor, and clicking one doesn't open
+PkgDeck. A signed build asks for permission on first launch and posts its own.
 
 ## Performance
 
@@ -300,7 +315,12 @@ out of date, and each page refreshes when you open it.
 | Ctrl+Shift+U | Update checked packages |
 | Ctrl+Enter | Apply the open confirmation (Alt plus the underlined letter also works) |
 | Esc | Clear the search, or close the details |
-| Ctrl+Q | Quit (waits for any running package change to finish) |
+| Ctrl+M | Refresh the source's package lists |
+| Ctrl+Q | Quit (waits for any running package change to finish); on Linux, with background checks on, it closes to the tray |
+
+On macOS, Cmd takes the place of Ctrl and Settings shows the shortcuts with
+Mac key symbols. Refreshing package lists is Shift+Cmd+R there, because
+Cmd+M minimizes the window, and Cmd+W closes it.
 
 Use Tab to move between controls. Column headings also sort with Space or
 Enter, and Shift+Left or Shift+Right resizes a focused column. Row actions and icon buttons have screen reader labels.
@@ -312,12 +332,15 @@ depends on your system and installed package managers. With Homebrew 6.0 or
 later, Homebrew Casks also work on Linux: search shows only casks Linux can
 install (AppImages, command-line tools and fonts), and AppImages a cask
 installed are listed under Homebrew Casks rather than as unmanaged AppImages. On macOS, AppImage
-support and start at login are hidden.
+support is hidden.
 
 When a change needs administrator rights, the app always asks with your
 system's password prompt: polkit on Linux, and the standard administrator
 password dialog on macOS. There is no setting for this, because a sudo login
-from a terminal doesn't carry over to the app. The Flatpak
+from a terminal doesn't carry over to the app. Some Homebrew casks run `sudo`
+themselves, for example to remove Docker Desktop's helper tools; the macOS
+app then shows a password dialog for Homebrew. If you cancel it, that change
+stops and the error says Homebrew didn't get your password. The Flatpak
 and Snap
 builds manage your system's packages, not just sandboxed ones. See
 [packages and releases](distribution.md) and

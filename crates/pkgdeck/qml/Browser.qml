@@ -84,7 +84,22 @@ Controls.ApplicationWindow {
     readonly property var actionProgress: JSON.parse(backend.progress || "{}")
     readonly property var repositoryReport: JSON.parse(backend.repositories || "{}")
     readonly property var repositoryFeatures: repositoryReport.features || ({})
-    property bool desktopAutostartSupported: Qt.platform.os !== "osx"
+    // On a Mac, shortcuts read with Mac key symbols, Cmd-Q quits, Cmd-W
+    // closes the window and Cmd-M minimizes it, as in other Mac apps.
+    property bool macOS: Qt.platform.os === "osx"
+    // Start at login: an autostart entry on Linux, a LaunchAgent on macOS.
+    property bool desktopAutostartSupported: Qt.platform.os === "linux" || macOS
+    // A shortcut as people type it here: "Ctrl+Shift+U" stays on Linux and
+    // reads "⇧⌘U" on a Mac, where Qt's Ctrl is the Command key.
+    function keys(text) {
+        const parts = text.split("+");
+        if (!macOS || parts.length < 2)
+            return text;
+        const key = parts.pop();
+        const symbols = {Alt: "⌥", Shift: "⇧", Ctrl: "⌘"};
+        return ["Alt", "Shift", "Ctrl"].filter((name) => parts.indexOf(name) >= 0).map((name) => symbols[name]).join("") + key;
+    }
+    readonly property string refreshListsKeys: macOS ? "Ctrl+Shift+R" : "Ctrl+M"
     function managerAvailable(id) { return sourceInfo(id).availability_kind === "available"; }
     function supportedFilePatterns() {
         // AppImage is always available on Linux, including before source discovery.
@@ -122,6 +137,15 @@ Controls.ApplicationWindow {
     property alias backgroundMode: preferences.backgroundMode
     property alias autostartEnabled: preferences.autostart
     property alias preferredSidebarWidth: preferences.sidebarWidth
+    // Quit from the keyboard. On a Mac that quits even with background
+    // checks on, like every Mac app; elsewhere it closes to the tray.
+    function quitFromKeyboard() {
+        if (macOS)
+            forceQuit = true;
+        root.close();
+        if (forceQuit && !closePending)
+            Qt.quit();
+    }
     function showFromTray() {
         root.show();
         root.raise();
@@ -877,6 +901,26 @@ Controls.ApplicationWindow {
     readonly property var progressTargets: (actionProgress.targets || []).map((row) => rowIdentity(row))
     function rowIsActive(identity) {
         return backend.writing && (activeRows.indexOf(identity) >= 0 || progressTargets.indexOf(identity) >= 0);
+    }
+    // In a batch that goes package by package, the row running now and the
+    // rows already done, by identity.
+    readonly property string currentTarget: actionProgress.current ? rowIdentity(actionProgress.current) : ""
+    readonly property var finishedTargets: (actionProgress.finished || []).map((row) => rowIdentity(row))
+    // Progress to draw on one row: done rows are full, the running row
+    // sweeps (or fills with its download), and rows still waiting show an
+    // empty track. A single change, or a step that updates a whole source,
+    // shows the progress of the whole change instead.
+    function rowFraction(identity) {
+        const p = actionProgress;
+        if ((p.total || 0) <= 1 || currentTarget === "")
+            return actionFraction();
+        if (finishedTargets.indexOf(identity) >= 0)
+            return 1;
+        if (identity !== currentTarget)
+            return 0;
+        if ((p.transfer_total || 0) > 0)
+            return Math.min(1, (p.transferred || 0) / p.transfer_total);
+        return -1;
     }
     // Share of the running change that is done, or -1 when unknown.
     function actionFraction() {
@@ -1741,6 +1785,7 @@ Controls.ApplicationWindow {
                                 }
                             }
                             Flickable {
+                                boundsBehavior: Theme.motionEnabled ? Flickable.DragAndOvershootBounds : Flickable.StopAtBounds
                                 id: sourceList
                                 Layout.fillWidth: true
                                 Layout.fillHeight: true
@@ -2263,7 +2308,7 @@ Controls.ApplicationWindow {
                             glyphColor: root.muted
                             implicitHeight: 30
                             Accessible.name: "Reload"
-                            tooltipText: "Reload (Ctrl+R)"
+                            tooltipText: "Reload (" + root.keys("Ctrl+R") + ")"
                             enabled: !backend.busy || backend.writing
                             onClicked: root.reload(true)
                         }
@@ -2389,6 +2434,8 @@ Controls.ApplicationWindow {
                         }
                     }
                     ListView {
+                        // With animations off, lists stop at their ends instead of bouncing.
+                        boundsBehavior: Theme.motionEnabled ? Flickable.DragAndOvershootBounds : Flickable.StopAtBounds
                         id: results
                         objectName: "packageResults"
                         Layout.fillWidth: true
@@ -2528,7 +2575,7 @@ Controls.ApplicationWindow {
                                         anchors.rightMargin: 10
                                         anchors.bottomMargin: 3
                                         running: packageRow.active
-                                        value: packageRow.active ? root.actionFraction() : -1
+                                        value: packageRow.active ? root.rowFraction(packageRow.identity) : -1
                                     }
                                 }
                             }
@@ -2899,7 +2946,7 @@ Controls.ApplicationWindow {
                                     text: emptyActions.iconsOnly ? "" : emptyActions.reloadLabel
                                     symbol: "refresh"
                                     Accessible.name: emptyActions.reloadLabel
-                                    tooltipText: emptyActions.reloadLabel + " (Ctrl+R)"
+                                    tooltipText: emptyActions.reloadLabel + " (" + root.keys("Ctrl+R") + ")"
                                     onClicked: root.reload(true)
                                 }
                                 ActionButton {
@@ -3072,8 +3119,9 @@ Controls.ApplicationWindow {
                 }
                 ActionButton { text: ""; symbol: "refresh"; Accessible.name: "Reload repositories"; tooltipText: Accessible.name; enabled: !backend.busy; onClicked: backend.loadRepositories() }
             }
-            Controls.BusyIndicator { visible: backend.busy; running: visible; Layout.alignment: Qt.AlignHCenter }
+            Controls.BusyIndicator { visible: backend.busy; running: visible && root.motionEnabled; Layout.alignment: Qt.AlignHCenter }
             ListView {
+                boundsBehavior: Theme.motionEnabled ? Flickable.DragAndOvershootBounds : Flickable.StopAtBounds
                 id: repositoryList
                 objectName: "repositoryList"
                 Layout.fillWidth: true
@@ -3424,7 +3472,7 @@ Controls.ApplicationWindow {
                     objectName: "confirmationApply"
                     text: confirmation.applyWord
                     mnemonicIndex: confirmation.applyMnemonic
-                    tooltipText: confirmation.applyMnemonic >= 0 ? "Alt+" + text.charAt(mnemonicIndex).toUpperCase() + " or Ctrl+Enter" : "Ctrl+Enter"
+                    tooltipText: confirmation.applyMnemonic >= 0 ? root.keys("Alt+" + text.charAt(mnemonicIndex).toUpperCase()) + " or " + root.keys("Ctrl+Enter") : root.keys("Ctrl+Enter")
                     symbol: ""
                     primary: true
                     // Removing reads as destructive, not as the default go-ahead.
@@ -3632,7 +3680,17 @@ Controls.ApplicationWindow {
     }
     Shortcut {
         sequence: "Ctrl+Q"
+        onActivated: root.quitFromKeyboard()
+    }
+    Shortcut {
+        sequence: "Ctrl+W"
+        enabled: root.macOS
         onActivated: root.close()
+    }
+    Shortcut {
+        sequence: "Ctrl+M"
+        enabled: root.macOS
+        onActivated: root.showMinimized()
     }
     Shortcut {
         sequence: "Ctrl+L"
@@ -3706,7 +3764,8 @@ Controls.ApplicationWindow {
         onActivated: root.upgradeUpdates()
     }
     Shortcut {
-        sequence: "Ctrl+M"
+        // Cmd-M minimizes on a Mac, so refreshing moves to Shift-Cmd-R there.
+        sequence: root.refreshListsKeys
         enabled: !backend.busy || backend.writing
         onActivated: root.propose("refresh")
     }

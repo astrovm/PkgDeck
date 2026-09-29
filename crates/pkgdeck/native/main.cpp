@@ -1,5 +1,8 @@
 #include "network.h"
 #include "opening.h"
+#ifdef Q_OS_MACOS
+#include "macos.h"
+#endif
 
 #include <QApplication>
 #include <QCoreApplication>
@@ -8,6 +11,7 @@
 #include <QFileInfo>
 #include <QGuiApplication>
 #include <QQmlApplicationEngine>
+#include <QQmlContext>
 #include <QSettings>
 #include <QStandardPaths>
 #include <QUrl>
@@ -93,6 +97,9 @@ extern "C" int pkgdeck_run_gui(int argc, char **argv, const char *version) {
         qInstallMessageHandler(shutdownMessageHandler);
         return 0;
     }
+#ifdef Q_OS_MACOS
+    engine.rootContext()->setContextProperty(QStringLiteral("macNative"), new pkgdeck::MacNative(&app));
+#endif
     QObject::connect(&engine, &QQmlApplicationEngine::objectCreationFailed,
                      &app, [] { QCoreApplication::exit(1); }, Qt::QueuedConnection);
     engine.load(QUrl(QStringLiteral("qrc:/qt/qml/io/github/astrovm/PkgDeck/qml/Main.qml")));

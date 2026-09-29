@@ -1,0 +1,7 @@
+#!/bin/sh
+# sudo runs this (SUDO_ASKPASS) when a Homebrew cask needs administrator
+# access, such as removing Docker Desktop's helper tools. It asks for the
+# password in a macOS dialog and prints it for sudo; Cancel makes sudo fail.
+exec /usr/bin/osascript \
+    -e 'display dialog "Homebrew needs your password to finish a change that requires administrator access." with title "PkgDeck" default answer "" with hidden answer with icon caution buttons {"Cancel", "OK"} default button "OK" cancel button "Cancel"' \
+    -e 'text returned of result'

@@ -129,8 +129,8 @@ DeckScrollView {
                     }
                     Controls.Label {
                         objectName: "notificationAvailability"
-                        text: !page.app.trayAvailable ? "Notifications unavailable: no system tray found"
-                            : !page.app.notificationAvailable ? "This system tray does not support notifications"
+                        text: !page.app.trayAvailable ? "Notifications unavailable: no " + (page.app.macOS ? "menu bar icon" : "system tray") + " found"
+                            : !page.app.notificationAvailable ? (page.app.macOS ? "Notifications are off: allow PkgDeck in System Settings > Notifications" : "This system tray does not support notifications")
                             : "Notifications available"
                         color: Theme.muted
                         wrapMode: Text.WordWrap
@@ -216,7 +216,7 @@ DeckScrollView {
                         {action: "Install", keys: "Ctrl+I"},
                         {action: "Remove", keys: "Ctrl+D"},
                         {action: "Update", keys: "Ctrl+U"},
-                        {action: "Refresh the source's package lists", keys: "Ctrl+M"},
+                        {action: "Refresh the source's package lists", keys: page.app.refreshListsKeys},
                         {action: "Reload the page", keys: "Ctrl+R"},
                         {action: "Apply a confirmation", keys: "Ctrl+Enter"},
                         {action: "Clear search or close details", keys: "Esc"},
@@ -234,7 +234,7 @@ DeckScrollView {
                             Layout.fillWidth: true
                         }
                         Controls.Label {
-                            text: modelData.keys
+                            text: page.app.keys(modelData.keys)
                             color: Theme.ink
                             font.family: "monospace"
                             font.pointSize: Theme.pointSize(0.88)

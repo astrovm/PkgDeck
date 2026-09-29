@@ -129,6 +129,18 @@ pub fn per_package_upgrades(id: &str) -> bool {
     update_only(id) || matches!(id, "pixi" | "rustup" | "nix")
 }
 
+/// System package managers whose "update everything" must stay one
+/// transaction: updating their packages one by one could leave the system
+/// half upgraded (Arch, for one, does not support partial upgrades).
+/// Update all updates every other source package by package, so progress
+/// can name each one.
+pub fn upgrades_as_one(id: &str) -> bool {
+    matches!(
+        id,
+        "apt" | "dnf" | "pacman" | "zypper" | "apk" | "xbps" | "macports"
+    )
+}
+
 /// Inventory sources whose rows must never offer package mutations.
 pub fn read_only(id: &str) -> bool {
     id == "macos-apps"

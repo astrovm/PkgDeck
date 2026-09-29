@@ -294,6 +294,8 @@ struct ProgressState {
     /// The operation running now; before the first one starts, the job's
     /// only operation, if it has just one.
     current: Option<Operation>,
+    /// Packages whose step already finished, successfully or not.
+    finished: Vec<PackageId>,
     names: Names,
 }
 impl ProgressState {
@@ -333,6 +335,7 @@ impl ProgressState {
             transfer_total: None,
             operations,
             current,
+            finished: vec![],
             names: names.clone(),
         }
     }
@@ -351,7 +354,8 @@ impl ProgressState {
                 self.transferred = *completed;
                 self.transfer_total = (*total).filter(|total| *total > 0);
             }
-            Event::Finished { .. } => {
+            Event::Finished { operation, .. } => {
+                self.finished.extend(package_target(operation).cloned());
                 self.done = (self.done + 1).min(self.total);
                 self.transferred = 0;
                 self.transfer_total = None;
@@ -402,6 +406,7 @@ impl ProgressState {
             "sources": sources,
             "action": current.map_or("", operation_kind),
             "current": current.and_then(package_target).map(target_row),
+            "finished": self.finished.iter().map(target_row).collect::<Vec<_>>(),
             "current_source": current.map(Operation::backend),
         }))
     }
@@ -1092,23 +1097,24 @@ impl Controller {
         }
     }
 }
+/// Update all: one whole-system upgrade for each system package manager,
+/// and one update per package everywhere else, so progress names each
+/// package as it goes.
 fn upgrade_plan(packages: &[Package]) -> Vec<Operation> {
-    let backends: std::collections::BTreeSet<_> = packages
+    let (whole, each): (Vec<_>, Vec<_>) = packages
         .iter()
         .filter(|p| p.installed_version.is_some() && p.update == UpdateAvailability::Available)
-        .filter(|p| !pkgdeck_core::backends::update_only(&p.id.backend))
-        .map(|p| p.id.backend.clone())
-        .collect();
+        .partition(|p| pkgdeck_core::backends::upgrades_as_one(&p.id.backend));
+    let backends: std::collections::BTreeSet<_> =
+        whole.iter().map(|p| p.id.backend.clone()).collect();
+    // A package listed twice is still updated once, in list order.
+    let mut seen = std::collections::BTreeSet::new();
     backends
         .into_iter()
         .map(|backend| Operation::UpgradeAll { backend })
         .chain(
-            packages
-                .iter()
-                .filter(|p| {
-                    pkgdeck_core::backends::update_only(&p.id.backend)
-                        && p.update == UpdateAvailability::Available
-                })
+            each.into_iter()
+                .filter(|p| seen.insert(&p.id))
                 .map(|p| Operation::Upgrade(p.id.clone())),
         )
         .collect()
@@ -1441,6 +1447,14 @@ fn plain_error(error: &EngineError, backend: Option<&str>, sudo: bool) -> String
         EngineError::Execution(E::Interrupted) => "The package manager was interrupted. Check its state before trying again.".into(),
         EngineError::Execution(E::TimedOut) => "The package manager took too long to answer. Try again.".into(),
         EngineError::Cancelled | EngineError::Execution(E::Cancelled) => "Cancelled.".into(),
+        // A cask script ran sudo and got no password: the dialog was
+        // cancelled, or this build has no dialog to show.
+        EngineError::Execution(E::Failed(result))
+            if matches!(backend, Some("homebrew" | "homebrew-cask"))
+                && String::from_utf8_lossy(&result.stderr).contains("/usr/bin/sudo") =>
+        {
+            "Homebrew needed your administrator password to finish this change and didn't get one. Try again and enter your password when asked.".into()
+        }
         EngineError::Execution(E::Failed(result)) => {
             let output = String::from_utf8_lossy(&result.stderr);
             let output = if output.trim().is_empty() {
@@ -9075,6 +9089,14 @@ mod tests {
                 vec![Operation::Upgrade(standalone.id)]
             );
         }
+        for backend in ["rustup", "pixi", "nix"] {
+            let mut toolchain = package.clone();
+            toolchain.id.backend = backend.into();
+            assert_eq!(
+                upgrade_plan(&[toolchain.clone()]),
+                vec![Operation::Upgrade(toolchain.id)]
+            );
+        }
         let mixed = upgrade_plan(&[package.clone(), firmware.clone()]);
         assert!(mixed.contains(&Operation::Upgrade(firmware.id.clone())));
         let label = confirmation_label(
@@ -9134,13 +9156,27 @@ mod tests {
             current,
             uninstalled,
         ]);
-        assert_eq!(plan.len(), 2);
-        assert!(plan.contains(&Operation::UpgradeAll {
-            backend: id.backend.clone()
-        }));
-        assert!(plan.contains(&Operation::UpgradeAll {
-            backend: other.id.backend
-        }));
+        assert_eq!(
+            plan,
+            vec![
+                Operation::Upgrade(package.id.clone()),
+                Operation::Upgrade(other.id.clone())
+            ]
+        );
+        // System package managers still update everything in one step.
+        let mut system = package.clone();
+        system.id.backend = "apt".into();
+        let mut second = system.clone();
+        second.id.name = "second".into();
+        assert_eq!(
+            upgrade_plan(&[system, package.clone(), second]),
+            vec![
+                Operation::UpgradeAll {
+                    backend: "apt".into()
+                },
+                Operation::Upgrade(package.id.clone())
+            ]
+        );
         for fail in [false, true] {
             let mut engine = Engine::default();
             engine
@@ -9415,6 +9451,12 @@ mod tests {
             "The package manager reported an error."
         );
         assert_eq!(plain_error(&failed("boom"), None, false), "Boom.");
+        let sudo_failed = failed(
+            "Error: Failure while executing; `/usr/bin/sudo -E -- /bin/rm -r -f --` exited with 1.",
+        );
+        assert!(plain_error(&sudo_failed, Some("homebrew-cask"), false)
+            .starts_with("Homebrew needed your administrator password"));
+        assert!(plain_error(&sudo_failed, Some("npm"), false).starts_with("npm couldn't run"));
         // Running as root is explained, whatever layer said it.
         assert_eq!(
             plain_error(
@@ -9953,6 +9995,20 @@ mod tests {
         assert_eq!(snapshot["current_source"], "apt");
         assert_eq!(snapshot["action"], "update");
         assert!((snapshot["fraction"].as_f64().unwrap() - 0.5 / 3.0).abs() < 1e-9);
+        assert_eq!(snapshot["finished"], json!([]));
+        // A finished package step is listed, a whole-source one is not.
+        state.apply(&Event::Finished {
+            operation: Operation::Upgrade(second.clone()),
+            result: Ok(OperationOutcome::default()),
+        });
+        state.apply(&Event::Finished {
+            operation: Operation::UpgradeAll {
+                backend: "flatpak".into(),
+            },
+            result: Ok(OperationOutcome::default()),
+        });
+        let snapshot: Value = serde_json::from_str(&state.snapshot().to_string()).unwrap();
+        assert_eq!(snapshot["finished"], json!([target_row(&second)]));
         // One change: its transfer is the fraction, unknown without one.
         let single = Job::Write(Operation::Install(first.clone()), None);
         let mut state = ProgressState::new(&single, None, &names);
@@ -10871,9 +10927,7 @@ mod tests {
 
         controller.as_mut().rust_mut().worker = Some(retried(vec![fixture_row()]));
         controller.as_mut().poll();
-        let upgrade = Operation::UpgradeAll {
-            backend: "fixture".into(),
-        };
+        let upgrade = Operation::Upgrade(fixture_row().id);
         assert!(matches!(
             &controller.rust().worker,
             Some(worker) if matches!(&worker.job, Job::PlanUpgrade(operations, 1) if operations == std::slice::from_ref(&upgrade))

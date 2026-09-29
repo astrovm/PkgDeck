@@ -293,6 +293,9 @@ TestCase {
         verify(!browser.motionEnabled);
         compare(browser.feedbackDuration, 0);
         compare(browser.revealDuration, 0);
+        // Lists stop at their ends instead of bouncing past them.
+        compare(findChild(browser, "packageResults").boundsBehavior, Flickable.StopAtBounds);
+        compare(findChild(browser, "settingsScroll").contentItem.boundsBehavior, Flickable.StopAtBounds);
         compare(findChild(browser, "detailsContent").opacity, 1);
         browser.openView("Search");
         browser.choose(0);
@@ -1274,6 +1277,23 @@ TestCase {
         fake.writing = false;
         verify(!strip.visible);
     }
+    function test_rows_show_their_own_step_in_a_package_by_package_batch() {
+        const row = (name) => ({source: "homebrew", name: name, architecture: "arm64", remote: null, scope: "system", reference: null});
+        const id = (name) => browser.rowIdentity(row(name));
+        fake.writing = true;
+        fake.progress = JSON.stringify({label: "Update beta", done: 1, total: 3, fraction: 1 / 3,
+            targets: [row("alpha"), row("beta"), row("gamma")], current: row("beta"), finished: [row("alpha")]});
+        compare(browser.rowFraction(id("alpha")), 1);
+        compare(browser.rowFraction(id("beta")), -1);
+        compare(browser.rowFraction(id("gamma")), 0);
+        fake.progress = JSON.stringify({label: "Update beta", done: 1, total: 3, fraction: 0.5,
+            transferred: 25, transfer_total: 100, current: row("beta"), finished: [row("alpha")]});
+        compare(browser.rowFraction(id("beta")), 0.25);
+        // A whole-source step has no current row: every row shows the batch.
+        fake.progress = JSON.stringify({label: "Update all APT packages", done: 1, total: 2, fraction: 0.5});
+        compare(browser.rowFraction(id("gamma")), 0.5);
+        fake.writing = false;
+    }
     function test_confirmation_shows_summary_before_optional_details() {
         browser.openView("Search");
         fake.confirmation_data = JSON.stringify({action: "Install", summary: "Install synthetic-tool\nSource: apt\nScope: System", details: "Additional dependency: synthetic-library"});
@@ -1398,9 +1418,20 @@ TestCase {
         compare(shortcuts.count, 20);
         verify(findChild(browser, "shortcutsToggle") === null);
         waitForRendering(browser.contentItem);
+        const macOS = browser.macOS;
+        browser.macOS = false;
         compare(shortcuts.itemAt(0).children[1].text, "Ctrl+1");
         compare(shortcuts.itemAt(5).children[1].text, "Ctrl+F");
         compare(shortcuts.itemAt(11).children[1].text, "Ctrl+Shift+U");
+        compare(shortcuts.itemAt(15).children[1].text, "Ctrl+M");
+        // A Mac reads Command and Shift symbols, and Cmd-M minimizes there.
+        browser.macOS = true;
+        compare(shortcuts.itemAt(0).children[1].text, "⌘1");
+        compare(shortcuts.itemAt(11).children[1].text, "⇧⌘U");
+        compare(shortcuts.itemAt(15).children[1].text, "⇧⌘R");
+        compare(shortcuts.itemAt(9).children[1].text, "↑ / ↓");
+        compare(browser.keys("Alt+R"), "⌥R");
+        browser.macOS = macOS;
         for (const name of ["animationsSetting", "backgroundModeSetting"]) {
             const setting = findChild(browser, name);
             compare(setting.contentItem.color.toString(), browser.ink.toString());

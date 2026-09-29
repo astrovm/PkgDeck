@@ -1,8 +1,14 @@
 use std::process::{Command, Stdio};
 
 fn pkd() -> Command {
+    // Activity history and caches go to a scratch folder, never the real one.
+    let state = std::env::temp_dir().join(format!("pkgdeck-entrypoint-{}", std::process::id()));
     let mut command = Command::new(env!("CARGO_BIN_EXE_pkd"));
-    command.env_remove("DISPLAY").env_remove("WAYLAND_DISPLAY");
+    command
+        .env_remove("DISPLAY")
+        .env_remove("WAYLAND_DISPLAY")
+        .env("XDG_STATE_HOME", &state)
+        .env("XDG_CACHE_HOME", &state);
     command
 }
 

@@ -16,6 +16,13 @@ Controls.ScrollView {
     // Keep content clear of the scrollbar while there is something to scroll.
     // Reads the heights, not the bar, so the padding never loops back on itself.
     rightPadding: contentHeight > availableHeight + 0.5 ? Theme.scrollGutter : 0
+    // With animations off, the page stops at its ends instead of bouncing.
+    Binding {
+        target: view.contentItem
+        property: "boundsBehavior"
+        value: Flickable.StopAtBounds
+        when: !Theme.motionEnabled && view.contentItem instanceof Flickable
+    }
     Controls.ScrollBar.vertical: DeckScrollBar {
         id: verticalBar
         parent: view

@@ -164,6 +164,7 @@ ColumnLayout {
         }
     }
     ListView {
+        boundsBehavior: Theme.motionEnabled ? Flickable.DragAndOvershootBounds : Flickable.StopAtBounds
         id: list
         objectName: "activityList"
         Layout.fillWidth: true
