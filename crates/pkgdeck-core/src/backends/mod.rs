@@ -129,16 +129,77 @@ pub fn per_package_upgrades(id: &str) -> bool {
     update_only(id) || matches!(id, "pixi" | "rustup" | "nix")
 }
 
-/// System package managers whose "update everything" must stay one
-/// transaction: updating their packages one by one could leave the system
-/// half upgraded (Arch, for one, does not support partial upgrades).
-/// Update all updates every other source package by package, so progress
-/// can name each one.
-pub fn upgrades_as_one(id: &str) -> bool {
-    matches!(
-        id,
-        "apt" | "dnf" | "pacman" | "zypper" | "apk" | "xbps" | "macports"
-    )
+/// The package a line of a manager's output says it is working on, when it
+/// is one of the lines that name each package during an update: Homebrew's
+/// "==> Upgrading firefox", APT's "Unpacking curl:amd64 (8.5) over ...",
+/// DNF's "Upgrading htop-3.3.0-1.fc41.x86_64", and so on. Update all runs
+/// one command per source and follows these to show each package.
+pub fn output_package(backend: &str, line: &str) -> Option<String> {
+    let word = |rest: &str| rest.split_whitespace().next().map(str::to_owned);
+    let after = |marker: &str| line.find(marker).map(|at| &line[at + marker.len()..]);
+    // name-version-release.arch, with an optional epoch in the version.
+    let rpm = |nevra: String| {
+        let base = nevra
+            .rsplit_once('.')
+            .map_or(nevra.as_str(), |(base, _)| base);
+        let mut parts = base.rsplitn(3, '-');
+        let (_, _, name) = (parts.next()?, parts.next()?, parts.next()?);
+        Some(name.to_owned())
+    };
+    let name = match backend {
+        "homebrew" | "homebrew-cask" => {
+            let rest = line.strip_prefix("==> Upgrading ")?;
+            // The summary heading ("Upgrading 3 outdated packages:") names none.
+            if rest.trim().contains(char::is_whitespace) {
+                return None;
+            }
+            word(rest)?.rsplit('/').next().map(str::to_owned)
+        }
+        "apt" => word(line.strip_prefix("Unpacking ")?)?
+            .split(':')
+            .next()
+            .map(str::to_owned),
+        // DNF 4: "  Upgrading   : htop-3.3.0-1.fc41.x86_64   1/2";
+        // DNF 5: "[1/2] Upgrading htop-0:3.3.0-1.fc41.x86_64".
+        "dnf" => match line.trim_start().strip_prefix("Upgrading") {
+            Some(rest) if rest.trim_start().starts_with(':') => {
+                rpm(word(rest.trim_start()[1..].trim_start())?)
+            }
+            _ => rpm(word(after("] Upgrading ")?)?),
+        },
+        "zypper" => rpm(word(after(") Installing: ")?)?),
+        "pacman" => word(after(") upgrading ")?),
+        "apk" => word(after(") Upgrading ")?),
+        // "htop-3.3.0_1: unpacking ..."
+        "xbps" => line
+            .split_once(": unpacking")
+            .and_then(|(pkgver, _)| pkgver.trim().rsplit_once('-'))
+            .map(|(name, _)| name.to_owned()),
+        "macports" => word(line.strip_prefix("--->  Installing ")?),
+        // "Updating app/org.gnome.Maps/x86_64/stable" or a bare ID.
+        "flatpak" => {
+            let reference = word(line.trim_start().strip_prefix("Updating ")?)?;
+            let mut parts = reference.split('/');
+            let first = parts.next().unwrap_or_default();
+            match parts.next() {
+                Some(id) if first == "app" || first == "runtime" => Some(id.to_owned()),
+                _ => Some(first.to_owned()),
+            }
+        }
+        // "firefox 131.0 from Mozilla✓ refreshed"
+        "snap" if line.trim_end().ends_with(" refreshed") => word(line),
+        "pipx" => word(line.trim_start().strip_prefix("upgraded package ")?),
+        "gem" => word(line.strip_prefix("Updating ")?).filter(|name| name != "installed"),
+        // "==> Downloading Final Cut Pro (11.0)": App Store names have spaces.
+        "mas" => line.strip_prefix("==> Downloading ").map(|rest| {
+            rest.rsplit_once(" (")
+                .map_or(rest, |(name, _)| name)
+                .trim()
+                .to_owned()
+        }),
+        _ => None,
+    }?;
+    (!name.is_empty()).then_some(name)
 }
 
 /// Inventory sources whose rows must never offer package mutations.
@@ -5054,6 +5115,7 @@ impl<T: Transport> DevTool<T> {
             // so reinstall every tool at `@latest` as the single transaction.
             for package in self.inventory(cancel)? {
                 let name = &package.package.id.name;
+                progress(Progress::Package(name.clone()));
                 progress(Progress::Message(format!("Upgrading {name} to latest.")));
                 let latest = format!("{name}@latest");
                 self.call(&["tool", "install", "--force", &latest], cancel, true)?;
@@ -5089,6 +5151,7 @@ impl<T: Transport> DevTool<T> {
             // installed package to reach the reported latest candidates.
             for package in self.inventory(cancel)? {
                 let name = &package.package.id.name;
+                progress(Progress::Package(name.clone()));
                 progress(Progress::Message(format!("Upgrading {name}.")));
                 self.call(
                     &[
@@ -5114,6 +5177,7 @@ impl<T: Transport> DevTool<T> {
         for package in self.inventory(cancel)? {
             let name = &package.package.id.name;
             if self.kind == DevKind::Cargo {
+                progress(Progress::Package(name.clone()));
                 progress(Progress::Message(format!("Reinstalling {name}.")));
                 self.call(&["install", "--force", name], cancel, true)?;
             } else if self.kind == DevKind::Pip {
@@ -5121,9 +5185,11 @@ impl<T: Transport> DevTool<T> {
                     .home
                     .clone()
                     .ok_or_else(|| invalid(self.kind.id(), "manager home not detected"))?;
+                progress(Progress::Package(name.clone()));
                 progress(Progress::Message(format!("Upgrading {name}.")));
                 self.pip_call(&home, &["install", "--upgrade", name], cancel, true)?;
             } else {
+                progress(Progress::Package(name.clone()));
                 progress(Progress::Message(format!("Upgrading {name} to latest.")));
                 let latest = format!("{name}@latest");
                 self.call(&["add", "--global", &latest], cancel, true)?;
@@ -6257,6 +6323,95 @@ mod tests {
             Some(theme.join("pkgdeck-fixture-icon.png"))
         );
         std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn update_output_names_the_package_each_manager_is_on() {
+        for (backend, line, name) in [
+            ("homebrew", "==> Upgrading openssl@3", Some("openssl@3")),
+            (
+                "homebrew-cask",
+                "==> Upgrading astrovm/pkgdeck/pkgdeck",
+                Some("pkgdeck"),
+            ),
+            ("homebrew-cask", "==> Upgrading 3 outdated packages:", None),
+            ("homebrew", "  3.6.4 -> 3.6.4_1", None),
+            (
+                "apt",
+                "Unpacking curl:amd64 (8.5.0-2) over (8.4.0-1) ...",
+                Some("curl"),
+            ),
+            ("apt", "Setting up curl:amd64 (8.5.0-2) ...", None),
+            (
+                "dnf",
+                "  Upgrading        : htop-3.3.0-1.fc41.x86_64        1/2",
+                Some("htop"),
+            ),
+            (
+                "dnf",
+                "[1/4] Upgrading htop-0:3.3.0-1.fc41.x86_64 100% |",
+                Some("htop"),
+            ),
+            ("dnf", "  Upgrading        :", None),
+            ("dnf", "Upgrading:", None),
+            (
+                "zypper",
+                "(1/2) Installing: vim-9.1.0-1.1.x86_64 [...done]",
+                Some("vim"),
+            ),
+            ("zypper", "(1/2) Installing: broken [...done]", None),
+            (
+                "pacman",
+                "(1/3) upgrading linux-firmware          [####]",
+                Some("linux-firmware"),
+            ),
+            (
+                "apk",
+                "(2/5) Upgrading musl (1.2.4-r2 -> 1.2.5-r0)",
+                Some("musl"),
+            ),
+            ("xbps", "htop-3.3.0_1: unpacking ...", Some("htop")),
+            ("xbps", "nodash: unpacking ...", None),
+            ("macports", "--->  Installing wget @1.24.5_0", Some("wget")),
+            (
+                "flatpak",
+                "Updating app/org.gnome.Maps/x86_64/stable",
+                Some("org.gnome.Maps"),
+            ),
+            (
+                "flatpak",
+                "Updating org.freedesktop.Platform",
+                Some("org.freedesktop.Platform"),
+            ),
+            (
+                "snap",
+                "firefox 131.0 from Mozilla✓ refreshed",
+                Some("firefox"),
+            ),
+            ("snap", "All snaps up to date.", None),
+            (
+                "pipx",
+                "upgraded package black from 24.1 to 24.2 (location: ...)",
+                Some("black"),
+            ),
+            ("gem", "Updating rake", Some("rake")),
+            ("gem", "Updating installed gems", None),
+            (
+                "mas",
+                "==> Downloading Final Cut Pro (11.0)",
+                Some("Final Cut Pro"),
+            ),
+            ("mas", "==> Downloading Xcode", Some("Xcode")),
+            ("npm", "changed 3 packages in 2s", None),
+        ] {
+            assert_eq!(
+                output_package(backend, line).as_deref(),
+                name,
+                "{backend}: {line}"
+            );
+        }
+        assert_eq!(output_package("flatpak", "Updating "), None);
+        assert_eq!(output_package("mas", "==> Downloading  "), None);
     }
 
     const CODE_APP: &str = "/Applications/Visual Studio Code.app";

@@ -84,11 +84,15 @@ Updates lists package updates and, if `fwupdmgr` is installed, firmware updates.
 - Click a row's arrow to update just that item.
 - Check several rows and click **Update selected**. When every row is checked,
   the button reads **Update all**.
-- **Update all** updates one package at a time, so the progress bar names
-  the package being updated and counts packages, and each row shows its own
-  progress. System package managers (APT, DNF, Pacman, Zypper, apk, XBPS and
-  MacPorts) are the exception: each updates everything in one step, because
-  updating their packages one by one could leave the system half upgraded.
+- **Update all** runs one update command per package manager, so you
+  approve and enter your password once. The progress bar still counts
+  packages and names the one being updated, and each row shows whether it's
+  done, updating, or waiting. PkgDeck reads this from each manager's output:
+  Homebrew, APT, DNF, Zypper, Pacman, apk, XBPS, MacPorts, Flatpak, Snap,
+  pipx, RubyGems and the Mac App Store say which package they're on, and
+  PkgDeck updates Cargo, uv, pip, Composer, rustup, pixi, Nix and Conda
+  packages one at a time itself. For managers that don't say (npm, for
+  one), all of their rows show progress until they finish.
 
 Versions appear as `installed → new` when the source provides both. Some
 Flatpak runtimes only report a branch or commit. PkgDeck shows what the

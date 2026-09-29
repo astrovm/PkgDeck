@@ -906,17 +906,20 @@ Controls.ApplicationWindow {
     // rows already done, by identity.
     readonly property string currentTarget: actionProgress.current ? rowIdentity(actionProgress.current) : ""
     readonly property var finishedTargets: (actionProgress.finished || []).map((row) => rowIdentity(row))
-    // Progress to draw on one row: done rows are full, the running row
-    // sweeps (or fills with its download), and rows still waiting show an
-    // empty track. A single change, or a step that updates a whole source,
-    // shows the progress of the whole change instead.
+    // Progress to draw on one row of a batch: done rows are full, the
+    // running row sweeps (or fills with its download), and rows still
+    // waiting show an empty track. While a source updates without naming
+    // its packages, all of its rows sweep. A single change shows its own
+    // progress.
     function rowFraction(identity) {
         const p = actionProgress;
-        if ((p.total || 0) <= 1 || currentTarget === "")
+        if ((p.total || 0) <= 1)
             return actionFraction();
         if (finishedTargets.indexOf(identity) >= 0)
             return 1;
-        if (identity !== currentTarget)
+        const running = currentTarget !== "" ? identity === currentTarget
+            : !!p.current_source && JSON.parse(identity)[0] === p.current_source;
+        if (!running)
             return 0;
         if ((p.transfer_total || 0) > 0)
             return Math.min(1, (p.transferred || 0) / p.transfer_total);

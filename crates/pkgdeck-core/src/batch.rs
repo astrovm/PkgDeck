@@ -18,7 +18,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-const PROTOCOL: u8 = 1;
+// 2: the runner forwards each line of a command's output as it runs.
+const PROTOCOL: u8 = 2;
 const SYSTEM_PATH: &str = "/usr/sbin:/usr/bin:/sbin:/bin";
 const MAX_MESSAGE: usize = 4 * 1024 * 1024;
 
@@ -343,9 +344,19 @@ enum Request {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum Response {
-    Ready { protocol: u8 },
-    Completed { completion: WireCompletion },
-    Rejected { reason: String },
+    Ready {
+        protocol: u8,
+    },
+    /// A line the running command printed, sent before it completes.
+    Output {
+        line: String,
+    },
+    Completed {
+        completion: WireCompletion,
+    },
+    Rejected {
+        reason: String,
+    },
 }
 #[derive(Serialize, Deserialize)]
 struct WireCompletion {
@@ -738,8 +749,14 @@ pub fn run_in_scope(
                     command: next,
                 },
             )?;
-            let response: Response = serde_json::from_slice(&line(&mut session.output)?)
-                .map_err(|e| ExecutionError::Io(e.to_string()))?;
+            let response = loop {
+                let response: Response = serde_json::from_slice(&line(&mut session.output)?)
+                    .map_err(|e| ExecutionError::Io(e.to_string()))?;
+                match response {
+                    Response::Output { line } => cancel.observe(&line),
+                    other => break other,
+                }
+            };
             match response {
                 Response::Completed { completion } => {
                     session.next[index] += 1;
@@ -774,8 +791,12 @@ fn serve_as(
     }
     serve_protocol(input, output, run_protected)
 }
-/// Run one approved command with a fixed system environment.
-fn run_protected(expected: &ProtectedCommand) -> Result<Completion, ExecutionError> {
+/// Run one approved command with a fixed system environment, handing each
+/// line it prints to `on_line`.
+fn run_protected(
+    expected: &ProtectedCommand,
+    on_line: &mut dyn FnMut(&str),
+) -> Result<Completion, ExecutionError> {
     let mut native = Command::new(&expected.program);
     native
         .args(&expected.args)
@@ -783,12 +804,28 @@ fn run_protected(expected: &ProtectedCommand) -> Result<Completion, ExecutionErr
         .env("PATH", SYSTEM_PATH)
         .env("LC_ALL", "C")
         .current_dir("/");
-    process::run(native, Limits::default(), &Cancellation::default(), true)
+    process::run_observed(
+        native,
+        Limits::default(),
+        &Cancellation::default(),
+        true,
+        on_line,
+    )
+}
+/// Runs one approved command, handing each line it prints to the second
+/// argument.
+trait RunProtected:
+    FnMut(&ProtectedCommand, &mut dyn FnMut(&str)) -> Result<Completion, ExecutionError>
+{
+}
+impl<F: FnMut(&ProtectedCommand, &mut dyn FnMut(&str)) -> Result<Completion, ExecutionError>>
+    RunProtected for F
+{
 }
 fn serve_protocol(
     mut input: &mut impl Read,
     mut output: &mut impl Write,
-    mut run: impl FnMut(&ProtectedCommand) -> Result<Completion, ExecutionError>,
+    mut run: impl RunProtected,
 ) -> Result<(), ExecutionError> {
     let start: Request =
         serde_json::from_slice(&line(&mut input)?).map_err(|e| invalid(&e.to_string()))?;
@@ -828,7 +865,16 @@ fn serve_protocol(
         last_operation = operation;
         next[operation] += 1;
         let expected = &commands[operation][command];
-        let completion = run(expected)?;
+        let completion = run(expected, &mut |line| {
+            // The frontend follows progress from these; a lost line is not
+            // worth failing the command over.
+            let _ = send(
+                &mut output,
+                &Response::Output {
+                    line: line.to_owned(),
+                },
+            );
+        })?;
         send(
             &mut output,
             &Response::Completed {
@@ -875,10 +921,8 @@ mod tests {
     #[derive(Default)]
     struct Recorder(Vec<ProtectedCommand>);
     impl Recorder {
-        fn run(
-            &mut self,
-        ) -> impl FnMut(&ProtectedCommand) -> Result<Completion, ExecutionError> + '_ {
-            |command| {
+        fn run(&mut self) -> impl RunProtected + '_ {
+            |command, _| {
                 self.0.push(command.clone());
                 Ok(completion())
             }
@@ -912,10 +956,15 @@ mod tests {
         ];
         let mut seen = Vec::new();
         let mut output = Vec::new();
-        serve_protocol(&mut Cursor::new(input(&requests)), &mut output, |command| {
-            seen.push(command.clone());
-            Ok(completion())
-        })
+        serve_protocol(
+            &mut Cursor::new(input(&requests)),
+            &mut output,
+            |command, on_line| {
+                seen.push(command.clone());
+                on_line(&format!("Running {}", command.program));
+                Ok(completion())
+            },
+        )
         .unwrap();
         assert_eq!(seen.len(), 3);
         assert_eq!(seen[0].program, "/usr/bin/apt-get");
@@ -926,8 +975,13 @@ mod tests {
             .filter(|line| !line.is_empty())
             .map(|line| serde_json::from_slice::<Response>(line).unwrap())
             .collect::<Vec<_>>();
-        assert_eq!(replies.len(), 4);
+        // Ready, then each command's output line before its completion.
+        assert_eq!(replies.len(), 7);
         assert!(matches!(replies[0], Response::Ready { protocol: PROTOCOL }));
+        assert!(
+            matches!(&replies[1], Response::Output { line } if line == "Running /usr/bin/apt-get")
+        );
+        assert!(matches!(replies[2], Response::Completed { .. }));
     }
 
     #[test]
@@ -953,10 +1007,14 @@ mod tests {
             },
         ];
         let mut calls = 0;
-        serve_protocol(&mut Cursor::new(input(&requests)), &mut Vec::new(), |_| {
-            calls += 1;
-            Ok(completion())
-        })
+        serve_protocol(
+            &mut Cursor::new(input(&requests)),
+            &mut Vec::new(),
+            |_, _| {
+                calls += 1;
+                Ok(completion())
+            },
+        )
         .unwrap();
         assert_eq!(calls, 1);
     }
@@ -1255,8 +1313,9 @@ mod tests {
         // The child implements just the framed protocol. No native package
         // tool is started; this exercises the frontend side of the boundary.
         let script = r#"IFS= read -r start
-printf '%s\n' '{"type":"ready","protocol":1}'
+printf '%s\n' '{"type":"ready","protocol":2}'
 while IFS= read -r request; do
+  printf '%s\n' '{"type":"output","line":"Unpacking synthetic:amd64 (2) over (1) ..."}'
   printf '%s\n' '{"type":"completed","completion":{"code":0,"signal":null,"stdout":[100,111,110,101],"stderr":[],"truncated":false,"cancellation_deferred":false}}'
 done"#;
         let mut child = Command::new("/bin/sh");
@@ -1283,10 +1342,20 @@ done"#;
             run_in_scope(Path::new("/usr/bin/apt-get"), &["--purge".into()], &cancel),
             Some(Err(ExecutionError::Invalid(_)))
         ));
-        let result = run_in_scope(Path::new(&command.program), &args, &cancel)
+        // Output lines reach the job's observer while the command runs.
+        let lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = lines.clone();
+        let observed = cancel.with_output(std::sync::Arc::new(move |line: &str| {
+            seen.lock().unwrap().push(line.to_owned());
+        }));
+        let result = run_in_scope(Path::new(&command.program), &args, &observed)
             .unwrap()
             .unwrap();
         assert_eq!(result.stdout, b"done");
+        assert_eq!(
+            *lines.lock().unwrap(),
+            ["Unpacking synthetic:amd64 (2) over (1) ..."]
+        );
         assert!(matches!(
             run_in_scope(Path::new(&command.program), &args, &cancel),
             Some(Err(ExecutionError::Invalid(_)))
@@ -1304,7 +1373,7 @@ done"#;
     fn scoped_session_can_cancel_a_pending_authorization() {
         let mut child = Command::new("/bin/sh");
         child.arg("-c").arg(
-            "IFS= read -r start; sleep 2; printf '%s\\n' '{\"type\":\"ready\",\"protocol\":1}'",
+            "IFS= read -r start; sleep 2; printf '%s\\n' '{\"type\":\"ready\",\"protocol\":2}'",
         );
         let operations = [Operation::Refresh {
             backend: "apt".into(),
@@ -1399,7 +1468,8 @@ done"#;
         }];
         let commands = batch_commands(&operations).unwrap();
         for script in [
-            "IFS= read -r start; printf '%s\\n' '{\"type\":\"ready\",\"protocol\":2}'; sleep 1",
+            // A runner speaking another protocol version is refused.
+            "IFS= read -r start; printf '%s\\n' '{\"type\":\"ready\",\"protocol\":3}'; sleep 1",
             "IFS= read -r start; printf '%s\\n' '{\"type\":\"rejected\",\"reason\":\"no\"}'; sleep 1",
             "exit 126",
         ] {
@@ -1466,7 +1536,7 @@ done"#;
     #[test]
     fn scoped_session_preserves_native_rejection_and_cancel_before_dispatch() {
         let script = r#"IFS= read -r start
-printf '%s\n' '{"type":"ready","protocol":1}'
+printf '%s\n' '{"type":"ready","protocol":2}'
 while IFS= read -r request; do
   printf '%s\n' '{"type":"rejected","reason":"synthetic rejection"}'
 done"#;
@@ -1587,7 +1657,7 @@ done"#;
     fn scoped_grouped_apt_write_runs_the_confirmed_targets_once() {
         use std::collections::BTreeMap;
         let script = r#"IFS= read -r start
-printf '%s\n' '{"type":"ready","protocol":1}'
+printf '%s\n' '{"type":"ready","protocol":2}'
 while IFS= read -r request; do
   printf '%s\n' '{"type":"completed","completion":{"code":0,"signal":null,"stdout":[100,111,110,101],"stderr":[],"truncated":false,"cancellation_deferred":false}}'
 done"#;
@@ -1705,7 +1775,7 @@ done"#;
         ];
         let mut output = Vec::new();
         assert!(matches!(
-            serve_protocol(&mut Cursor::new(input(&requests)), &mut output, |_| Err(
+            serve_protocol(&mut Cursor::new(input(&requests)), &mut output, |_, _| Err(
                 ExecutionError::AuthorizationDenied
             )),
             Err(ExecutionError::AuthorizationDenied)
@@ -1735,7 +1805,7 @@ done"#;
         ));
 
         let mut child = Command::new("/bin/sh");
-        child.arg("-c").arg("IFS= read -r start; printf '%s\\n' '{\"type\":\"ready\",\"protocol\":1}'; IFS= read -r request; printf '%s\\n' '{\"type\":\"ready\",\"protocol\":1}'");
+        child.arg("-c").arg("IFS= read -r start; printf '%s\\n' '{\"type\":\"ready\",\"protocol\":2}'; IFS= read -r request; printf '%s\\n' '{\"type\":\"ready\",\"protocol\":2}'");
         let cancel = Cancellation::default();
         let scope = begin_session(child, &operations, commands.clone(), &cancel)
             .unwrap()
@@ -1757,7 +1827,7 @@ done"#;
         }];
         let commands = batch_commands(&operations).unwrap();
         let mut child = Command::new("/bin/sh");
-        child.arg("-c").arg("IFS= read -r start; printf '%s\\n' '{\"type\":\"ready\",\"protocol\":1}'; IFS= read -r request");
+        child.arg("-c").arg("IFS= read -r start; printf '%s\\n' '{\"type\":\"ready\",\"protocol\":2}'; IFS= read -r request");
         let cancel = Cancellation::default();
         let scope = begin_session(child, &operations, commands, &cancel)
             .unwrap()
@@ -1888,16 +1958,21 @@ done"#;
 
     #[test]
     fn approved_commands_run_with_a_fixed_system_environment() {
-        let result = run_protected(&ProtectedCommand {
-            program: "/bin/sh".into(),
-            args: vec![
-                "-c".into(),
-                "printf '%s|%s|%s' \"$PATH\" \"$LC_ALL\" \"$PWD\"".into(),
-            ],
-        })
+        let mut lines = Vec::new();
+        let result = run_protected(
+            &ProtectedCommand {
+                program: "/bin/sh".into(),
+                args: vec![
+                    "-c".into(),
+                    "printf '%s|%s|%s' \"$PATH\" \"$LC_ALL\" \"$PWD\"".into(),
+                ],
+            },
+            &mut |line| lines.push(line.to_owned()),
+        )
         .unwrap();
         assert_eq!(result.code, Some(0));
         assert_eq!(result.stdout, format!("{SYSTEM_PATH}|C|/").as_bytes());
+        assert_eq!(lines, [format!("{SYSTEM_PATH}|C|/")]);
     }
 
     #[test]
@@ -1954,7 +2029,7 @@ done"#;
         let commands = batch_commands(&operations).unwrap();
         let mut child = Command::new("/bin/sh");
         child.arg("-c").arg(
-            "IFS= read -r start; exec 0<&-; printf '%s\\n' '{\"type\":\"ready\",\"protocol\":1}'; sleep 5",
+            "IFS= read -r start; exec 0<&-; printf '%s\\n' '{\"type\":\"ready\",\"protocol\":2}'; sleep 5",
         );
         let cancel = Cancellation::default();
         let scope = begin_session(child, &operations, commands.clone(), &cancel)

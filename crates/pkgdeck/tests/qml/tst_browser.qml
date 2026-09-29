@@ -1289,9 +1289,15 @@ TestCase {
         fake.progress = JSON.stringify({label: "Update beta", done: 1, total: 3, fraction: 0.5,
             transferred: 25, transfer_total: 100, current: row("beta"), finished: [row("alpha")]});
         compare(browser.rowFraction(id("beta")), 0.25);
-        // A whole-source step has no current row: every row shows the batch.
-        fake.progress = JSON.stringify({label: "Update all APT packages", done: 1, total: 2, fraction: 0.5});
-        compare(browser.rowFraction(id("gamma")), 0.5);
+        // A source that doesn't name its packages: all of its rows run.
+        fake.progress = JSON.stringify({label: "Update all Homebrew packages", done: 1, total: 3, fraction: 1 / 3,
+            current_source: "homebrew", finished: [row("alpha")]});
+        compare(browser.rowFraction(id("alpha")), 1);
+        compare(browser.rowFraction(id("gamma")), -1);
+        compare(browser.rowFraction(JSON.stringify(["npm", "tool", "all", null, "system", null])), 0);
+        // A single change shows its own progress.
+        fake.progress = JSON.stringify({label: "Update gamma", done: 0, total: 1, transferred: 1, transfer_total: 4});
+        compare(browser.rowFraction(id("gamma")), 0.25);
         fake.writing = false;
     }
     function test_confirmation_shows_summary_before_optional_details() {
