@@ -446,10 +446,7 @@ mod tests {
         } else {
             suffix
         };
-        assert!(
-            autostart_path().is_some_and(|path| path.ends_with(expected))
-                || !cfg!(any(target_os = "linux", target_os = "macos"))
-        );
+        assert!(autostart_path().is_some_and(|path| path.ends_with(expected)));
         assert_eq!(
             launch_agent_path_from(Some("/Users/fixture".into())),
             Some(PathBuf::from(
