@@ -1534,6 +1534,23 @@ mod tests {
                 .to_string()
                 .contains("no release commit"));
         }
+        // Either download failing fails the check (the curl shim fails for
+        // a missing response file).
+        fs::remove_file(temp.0.join("channel")).unwrap();
+        assert!(native
+            .latest(StandaloneTool::Solana, &stable, &cancel)
+            .is_err());
+        temp.write(
+            "channel",
+            "commit: 44b42d45ec7e555b26ca15ad924a7432d18aaa9f\n",
+        );
+        fs::remove_file(temp.0.join("release")).unwrap();
+        assert!(native
+            .latest(StandaloneTool::Solana, &stable, &cancel)
+            .is_err());
+        assert!(fs::read_to_string(temp.0.join("request"))
+            .unwrap()
+            .ends_with("/44b42d45ec7e555b26ca15ad924a7432d18aaa9f/Cargo.toml"));
         fs::write(&config, "explicit_release: !Channel nightly\n").unwrap();
         assert!(native
             .locate(StandaloneTool::Solana, &cancel)
