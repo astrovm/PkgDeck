@@ -9,7 +9,9 @@
 #include <QIcon>
 #include <QProcess>
 #include <QPixmap>
+#include <QStringList>
 #include <QtGlobal>
+#include <cstring>
 #include <utility>
 
 @interface PkgDeckStatusDelegate : NSObject
@@ -115,6 +117,88 @@ struct MacTray {
         [item release];
         [delegate release];
     }
+
+    QString titles() const {
+        QStringList lines;
+        for (NSMenuItem *entry in item.menu.itemArray)
+            lines.append(QString::fromUtf8(entry.title.UTF8String));
+        return lines.join(QLatin1Char('\n'));
+    }
+
+    // Shows the menu the way a click does, then cancels tracking. A non-mouse
+    // event is current first: messaging clickCount on that event throws, which
+    // is the abort in Qt's tray. Nothing in this method reads a click count.
+    bool openAndDismiss(QString *failure) {
+        NSMenu *menu = item.menu;
+        NSStatusBarButton *button = item.button;
+        if (!menu || !button) {
+            *failure = QStringLiteral("missing");
+            return false;
+        }
+        __block bool began = false;
+        __block bool finished = false;
+        id observer = [[NSNotificationCenter defaultCenter]
+            addObserverForName:NSMenuDidBeginTrackingNotification
+                        object:nil
+                         queue:nil
+                    usingBlock:^(NSNotification *note) {
+                        NSMenu *tracking = note.object;
+                        for (NSMenuItem *entry in tracking.itemArray) {
+                            if (entry.target != delegate)
+                                continue;
+                            began = true;
+                            dispatch_async(dispatch_get_main_queue(), ^{ [tracking cancelTracking]; });
+                            break;
+                        }
+                    }];
+        // Tracking runs a nested run loop, so this runs while the menu is open
+        // if the notification above did not see our items.
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            if (!finished)
+                [menu cancelTracking];
+        });
+        NSEvent *event = [NSEvent otherEventWithType:NSEventTypeApplicationDefined
+                                             location:NSZeroPoint
+                                        modifierFlags:0
+                                            timestamp:NSProcessInfo.processInfo.systemUptime
+                                         windowNumber:button.window ? button.window.windowNumber : 0
+                                              context:nil
+                                              subtype:0
+                                                data1:0
+                                                data2:0];
+        [NSApp postEvent:event atStart:YES];
+        // Dequeueing the event makes it current. Menu tracking then starts
+        // while that event is still current, which is when clickCount throws.
+        (void)[NSApp nextEventMatchingMask:NSEventMaskApplicationDefined
+                                  untilDate:[NSDate distantPast]
+                                     inMode:NSDefaultRunLoopMode
+                                    dequeue:YES];
+        char crashName[128] = {};
+        @try {
+            [button performClick:nil];
+            if (!began) {
+                const NSPoint location = NSMakePoint(NSMidX(button.bounds), NSMinY(button.bounds));
+                [menu popUpMenuPositioningItem:nil atLocation:location inView:button];
+            }
+        } @catch (NSException *exception) {
+            const char *name = exception.name.UTF8String;
+            if (name)
+                std::strncpy(crashName, name, sizeof crashName - 1);
+            qWarning("PKGDECK_TRAY_CRASH %s: %s", name ? name : "", exception.reason.UTF8String ?: "");
+        }
+        [menu cancelTracking];
+        finished = true;
+        [[NSNotificationCenter defaultCenter] removeObserver:observer];
+        if (crashName[0] != '\0') {
+            *failure = QString::fromUtf8(crashName);
+            return false;
+        }
+        if (!began) {
+            *failure = QStringLiteral("unopened");
+            return false;
+        }
+        return true;
+    }
 };
 
 MacNative::~MacNative() = default;
@@ -134,6 +218,17 @@ void MacNative::setTrayVisible(bool visible) {
     else
         tray.reset();
     emit trayVisibleChanged();
+}
+
+QString MacNative::exerciseTrayMenu() {
+    if (!tray || !tray->item.menu || !tray->item.button)
+        return QStringLiteral("missing");
+    if (!tray->item.button.window)
+        return QStringLiteral("no-status-window");
+    QString failure;
+    if (!tray->openAndDismiss(&failure))
+        return failure;
+    return tray->titles();
 }
 
 MacNative::MacNative(QObject *parent) : QObject(parent) {

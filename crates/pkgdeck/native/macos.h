@@ -28,6 +28,11 @@ public:
     bool trayVisible() const;
     // QML's Binding calls this. A plain method is invisible to that writer.
     Q_INVOKABLE void setTrayVisible(bool visible);
+    // Opens the status menu and closes it. Returns the item titles, one per
+    // line, or a short reason the menu did not open. The smoke test calls
+    // this while the current event is not a mouse event: Qt's tray reads
+    // NSEvent.clickCount there, and that read aborts on macOS 27.
+    Q_INVOKABLE QString exerciseTrayMenu();
     bool notificationsAllowed() const { return bundled; }
     bool authorized() const { return allowed; }
     Q_INVOKABLE void notify(const QString &title, const QString &body);

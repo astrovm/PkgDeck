@@ -98,5 +98,11 @@ for ((run=1; run<=runs; run++)); do
         echo "Installed Cocoa startup never became ready (run $run of $runs)" >&2
         exit 1
     }
+    # The pipe is a literal separator. grep without -F would treat it as OR.
+    grep -qF 'PKGDECK_TRAY_MENU Open|Check now|Quit' "$logs/cocoa-$run.log" || {
+        cat "$logs/cocoa-$run.log"
+        echo "Installed Cocoa startup did not open the menu bar menu (run $run of $runs)" >&2
+        exit 1
+    }
 done
 echo "Installed Cocoa startup passed $runs runs"

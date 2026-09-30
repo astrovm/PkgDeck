@@ -116,6 +116,23 @@ Browser {
         interval: 150
         running: Qt.application.arguments.indexOf("--smoke-test") !== -1
         onTriggered: {
+            // Opening Qt's Cocoa tray menu reads NSEvent.clickCount and aborts
+            // on macOS 27. This process must not construct that tray, and the
+            // native menu must survive being opened.
+            if (browser.macOS && (trayLoader.active || trayLoader.object !== null)) {
+                console.error("PKGDECK_QT_TRAY");
+                Qt.exit(1);
+                return;
+            }
+            if (browser.mac && browser.mac.trayAvailable) {
+                const menu = browser.mac.exerciseTrayMenu();
+                if (menu !== "Open\nCheck now\nQuit") {
+                    console.error("PKGDECK_TRAY_MENU " + menu);
+                    Qt.exit(1);
+                    return;
+                }
+                console.info("PKGDECK_TRAY_MENU Open|Check now|Quit");
+            }
             console.info("PKGDECK_GUI_READY");
             Qt.quit();
         }
