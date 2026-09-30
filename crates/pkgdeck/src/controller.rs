@@ -787,8 +787,11 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
                     }
                     Ok(_) => "Completed".into(),
                     // A denial keeps the engine's words; the frontend
-                    // explains it for the chosen permission option.
-                    Err(error) if is_denied(&error) => error.to_string(),
+                    // explains it for the chosen permission option. The App
+                    // Store has its own explanation, independent of it.
+                    Err(error) if is_denied(&error) && operation.backend() != "mas" => {
+                        error.to_string()
+                    }
                     Err(error) => plain_error(&error, Some(operation.backend()), false),
                 };
                 status.push_str(&format!("\n{}: {outcome}", operation_title(operation)));
@@ -2214,9 +2217,12 @@ fn operation_title_named(operation: &Operation, names: &Names) -> String {
     }
 }
 /// The package name shown for an identity. A downloaded AppImage shows its
-/// file name, and a reference such as a Flatpak ref wins over the name.
+/// file name, and a reference such as a Flatpak ref wins over the name
+/// (except an App Store ID).
 fn package_name(id: &PackageId) -> &str {
     match id.reference.as_deref() {
+        // The App Store ID only selects the app; people know it by name.
+        Some(_) if id.backend == "mas" => &id.name,
         Some(reference) if !reference.starts_with("artifact:") => reference,
         Some(_) if id.backend == "appimage" => id
             .name
@@ -9571,6 +9577,15 @@ mod tests {
         assert_eq!(package_name(&id), "Tool.AppImage");
         id.reference = Some("app/org.example.Tool/x86_64/stable".into());
         assert_eq!(package_name(&id), "app/org.example.Tool/x86_64/stable");
+        // An App Store app shows its name, not its App Store ID.
+        id.backend = "mas".into();
+        id.name = "iMovie".into();
+        id.reference = Some("408981434".into());
+        assert_eq!(package_name(&id), "iMovie");
+        assert_eq!(
+            operation_title(&Operation::Upgrade(id)),
+            "Update iMovie (Mac App Store)"
+        );
     }
     #[test]
     fn repository_text_names_sources_and_scopes() {

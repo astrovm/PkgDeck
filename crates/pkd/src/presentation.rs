@@ -22,6 +22,10 @@ pub fn package_marker(installed: bool, update: bool) -> &'static str {
     }
 }
 fn target(id: &PackageId) -> String {
+    // The App Store ID only selects the app; people know it by name.
+    if id.backend == "mas" {
+        return clean(&id.name);
+    }
     clean(id.reference.as_deref().unwrap_or(&id.name))
 }
 /// The name people know a source by ("APT", "Flatpak"), for sentences.
@@ -1445,6 +1449,11 @@ mod tests {
             assert_eq!(operation_progress(operation), *progress);
             assert_eq!(operation_context(operation), *context);
         }
+        // An App Store app is named for people, not by its App Store ID.
+        let mut app = id("mas", "unknown", Scope::System);
+        app.name = "iMovie".into();
+        app.reference = Some("408981434".into());
+        assert_eq!(operation_title(&Operation::Upgrade(app)), "Update iMovie");
         let notes = [(operations[4].clone(), "Update (1): snapd\n".to_string())];
         for color in [false, true] {
             let review = plan(&operations, &notes, color);

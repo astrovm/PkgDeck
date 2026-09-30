@@ -146,6 +146,23 @@ impl Standalone {
 fn invalid_data(tool: StandaloneTool, reason: impl std::fmt::Display) -> EngineError {
     invalid(tool.id(), reason)
 }
+/// GitHub answers 403 or 429 once an address has used its 60 unsigned
+/// requests an hour. Say that instead of showing curl's words.
+fn github_rate_limit(tool: StandaloneTool, url: &str, error: EngineError) -> EngineError {
+    let EngineError::Execution(ExecutionError::Failed(result)) = &error else {
+        return error;
+    };
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    if url.starts_with("https://api.github.com/")
+        && (stderr.contains("error: 403") || stderr.contains("error: 429"))
+    {
+        return invalid_data(
+            tool,
+            "GitHub is limiting update checks from this network. Try again in about an hour",
+        );
+    }
+    error
+}
 fn version(tool: StandaloneTool, text: &str) -> Result<Version, EngineError> {
     // Foundry marks its stable builds `1.3.5-stable`; the suffix is not a
     // pre-release.
@@ -849,7 +866,9 @@ impl StandaloneIo for NativeStandalone {
             // Copilot; every other tool returned above.
             _ => "https://api.github.com/repos/github/copilot-cli/releases/latest".into(),
         };
-        let text = self.fetch(&url, cancel)?;
+        let text = self
+            .fetch(&url, cancel)
+            .map_err(|error| github_rate_limit(tool, &url, error))?;
         if tool == StandaloneTool::Claude {
             return version(tool, &text);
         }
@@ -1972,6 +1991,53 @@ mod tests {
             Version::new(1, 0, 88)
         );
     }
+    #[test]
+    fn github_rate_limits_are_said_plainly() {
+        let curl_failed = |stderr: &str| {
+            EngineError::Execution(ExecutionError::Failed(Completion {
+                code: Some(22),
+                signal: None,
+                stdout: vec![],
+                stderr: stderr.as_bytes().to_vec(),
+                truncated: false,
+                cancellation_deferred: false,
+            }))
+        };
+        let api = "https://api.github.com/repos/foundry-rs/foundry/releases/latest";
+        for status in [403, 429] {
+            let error = github_rate_limit(
+                StandaloneTool::Foundry,
+                api,
+                curl_failed(&format!(
+                    "curl: (56) The requested URL returned error: {status}"
+                )),
+            );
+            assert!(
+                error.to_string().contains("limiting update checks"),
+                "{error}"
+            );
+        }
+        // Other failures, and other hosts, keep curl's own words.
+        assert!(matches!(
+            github_rate_limit(StandaloneTool::Foundry, api, EngineError::NotFound),
+            EngineError::NotFound
+        ));
+        let not_found = curl_failed("curl: (22) The requested URL returned error: 404");
+        assert!(matches!(
+            github_rate_limit(StandaloneTool::Foundry, api, not_found),
+            EngineError::Execution(ExecutionError::Failed(_))
+        ));
+        let elsewhere = curl_failed("curl: (22) The requested URL returned error: 403");
+        assert!(matches!(
+            github_rate_limit(
+                StandaloneTool::Claude,
+                "https://downloads.claude.ai/claude-code-releases/stable",
+                elsewhere
+            ),
+            EngineError::Execution(ExecutionError::Failed(_))
+        ));
+    }
+
     #[test]
     fn network_checks_never_rewrite_the_curl_shim() {
         let temp = Temp::new();
