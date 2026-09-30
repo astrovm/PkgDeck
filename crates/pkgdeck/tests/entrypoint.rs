@@ -10,8 +10,7 @@ use std::{
 
 #[test]
 fn second_launch_activates_existing_instance() {
-    // Keep Unix socket paths below macOS's sockaddr_un limit, including the
-    // Library/Application Support suffix used by QStandardPaths there.
+    // Keep Unix socket paths below macOS's sockaddr_un limit.
     let runtime =
         std::path::PathBuf::from("/tmp").join(format!("pkgdeck-instance-{}", std::process::id()));
     fs::create_dir_all(&runtime).unwrap();
@@ -44,18 +43,7 @@ fn second_launch_activates_existing_instance() {
         child: launch().spawn().unwrap(),
         runtime: runtime.clone(),
     };
-    let socket_root = if cfg!(target_os = "macos") {
-        let output = Command::new("qtpaths")
-            .args(["--writable-path", "RuntimeLocation"])
-            .env("HOME", &runtime)
-            .output()
-            .unwrap();
-        assert!(output.status.success());
-        std::path::PathBuf::from(String::from_utf8(output.stdout).unwrap().trim())
-    } else {
-        runtime.clone()
-    };
-    let socket = socket_root.join(format!(
+    let socket = runtime.join(format!(
         "pkgdeck-open-{}",
         rustix::process::geteuid().as_raw()
     ));

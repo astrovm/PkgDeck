@@ -512,10 +512,9 @@ pub fn gui_lifecycle(args: &[String]) {
 pub fn gui(args: &[String], failure: bool) {
     use std::os::unix::fs::PermissionsExt;
     let dir = Temp::new();
-    // The launch registers a single-instance socket in Qt's runtime folder.
+    // The launch registers a single-instance socket in the runtime folder.
     // Give it a private, short one (a socket path must fit in sockaddr_un) so
-    // the test never hands off to an installed PkgDeck that is running;
-    // macOS ignores XDG_RUNTIME_DIR and derives that folder from HOME.
+    // the test never hands off to an installed PkgDeck that is running.
     let runtime = PathBuf::from("/tmp").join(dir.0.file_name().unwrap());
     let _ = fs::remove_dir_all(&runtime);
     fs::create_dir_all(&runtime).unwrap();
@@ -528,9 +527,6 @@ pub fn gui(args: &[String], failure: bool) {
         .env("XDG_DATA_HOME", &dir.0)
         .env("XDG_DATA_DIRS", &dir.0)
         .env("XDG_RUNTIME_DIR", &runtime);
-    if cfg!(target_os = "macos") {
-        c.env("HOME", &runtime);
-    }
     if failure {
         let module = dir.0.join("org/kde/kirigami");
         fs::create_dir_all(&module).unwrap();

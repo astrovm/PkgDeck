@@ -33,7 +33,12 @@ void deliver_pending(QQmlApplicationEngine &engine, QStringList &pending) {
 }
 
 bool register_open_handler(QQmlApplicationEngine &engine, const QString &input) {
-    const auto runtime = QStandardPaths::writableLocation(QStandardPaths::RuntimeLocation);
+    // Qt's macOS runtime folder is the real Application Support directory and
+    // ignores the environment, so honour XDG_RUNTIME_DIR there too. Tests use
+    // it to keep their launches away from an installed PkgDeck that is running.
+    auto runtime = qEnvironmentVariable("XDG_RUNTIME_DIR");
+    if (runtime.isEmpty())
+        runtime = QStandardPaths::writableLocation(QStandardPaths::RuntimeLocation);
     if (runtime.isEmpty()) return false;
     const auto name = runtime + "/pkgdeck-open-" + QString::number(geteuid());
     const auto forward = [&] {
