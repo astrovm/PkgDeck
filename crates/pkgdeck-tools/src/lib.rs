@@ -510,14 +510,23 @@ pub fn gui_lifecycle(args: &[String]) {
     }
 }
 pub fn gui(args: &[String], failure: bool) {
+    use std::os::unix::fs::PermissionsExt;
     let dir = Temp::new();
+    // The launch registers a single-instance socket in the runtime folder.
+    // Give it a private, short one (a socket path must fit in sockaddr_un) so
+    // the test never hands off to an installed PkgDeck that is running.
+    let runtime = PathBuf::from("/tmp").join(dir.0.file_name().unwrap());
+    let _ = fs::remove_dir_all(&runtime);
+    fs::create_dir_all(&runtime).unwrap();
+    fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
     let mut c = Command::new("timeout");
     c.args(["--kill-after=5s", "30s"]).args(args);
     c.env("QT_QPA_PLATFORM", "offscreen")
         .env("QT_QUICK_BACKEND", "software")
         .env("XDG_CONFIG_HOME", &dir.0)
         .env("XDG_DATA_HOME", &dir.0)
-        .env("XDG_DATA_DIRS", &dir.0);
+        .env("XDG_DATA_DIRS", &dir.0)
+        .env("XDG_RUNTIME_DIR", &runtime);
     if failure {
         let module = dir.0.join("org/kde/kirigami");
         fs::create_dir_all(&module).unwrap();
@@ -544,6 +553,7 @@ pub fn gui(args: &[String], failure: bool) {
             .env("SNAP", "/synthetic-disabled-runtime");
     }
     let out = c.output().unwrap();
+    let _ = fs::remove_dir_all(&runtime);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(i32::from(failure)), "{stderr}");
     assert!(
