@@ -2018,6 +2018,10 @@ mod tests {
             );
         }
         // Other failures, and other hosts, keep curl's own words.
+        assert!(matches!(
+            github_rate_limit(StandaloneTool::Foundry, api, EngineError::NotFound),
+            EngineError::NotFound
+        ));
         let not_found = curl_failed("curl: (22) The requested URL returned error: 404");
         assert!(matches!(
             github_rate_limit(StandaloneTool::Foundry, api, not_found),
