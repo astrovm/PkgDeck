@@ -1476,6 +1476,28 @@ fn meaningful_line(output: &str) -> Option<String> {
     {
         return Some("rustup has no default toolchain".into());
     }
+    // Cargo builds a dependency's C bindings while installing. Say which
+    // one failed, and the usual reason for the one people hit most.
+    if let Some(krate) = line
+        .strip_prefix("failed to run custom build command for `")
+        .and_then(|rest| rest.split('`').next())
+    {
+        return Some(if krate.starts_with("openssl-sys ") {
+            format!("building `{krate}` failed. It needs OpenSSL's development files (libssl-dev or openssl-devel) and pkg-config")
+        } else {
+            format!("building `{krate}` failed. Run the update in a terminal to read the build log")
+        });
+    }
+    // Flatpak names the remote and the URL; people need the remote and why.
+    if let Some(rest) = line.strip_prefix("Unable to load summary from remote ") {
+        let remote = rest.split(':').next().unwrap_or_default();
+        let reason = rest.rsplit(": ").next().unwrap_or_default();
+        let reason = reason
+            .split_once("] ")
+            .filter(|(code, _)| code.starts_with('['))
+            .map_or(reason, |(_, reason)| reason);
+        return Some(format!("it can't reach the remote {remote} ({reason})"));
+    }
     Some(line.trim_end_matches(['.', ':', ';']).to_owned())
 }
 const ROOT_MESSAGE: &str =
@@ -9656,6 +9678,23 @@ mod tests {
         assert_eq!(
             plain_error(&rustup, Some("cargo"), false),
             "Cargo couldn't run: rustup has no default toolchain."
+        );
+        // Cargo names the dependency whose build failed.
+        let openssl = failed("error: failed to run custom build command for `openssl-sys v0.6.7`\n\nCaused by:\n  process didn't exit successfully\n");
+        assert_eq!(
+            plain_error(&openssl, Some("cargo"), false),
+            "Cargo couldn't run: building `openssl-sys v0.6.7` failed. It needs OpenSSL's development files (libssl-dev or openssl-devel) and pkg-config."
+        );
+        let other = failed("error: failed to run custom build command for `ring v0.17.0`\n");
+        assert_eq!(
+            plain_error(&other, Some("cargo"), false),
+            "Cargo couldn't run: building `ring v0.17.0` failed. Run the update in a terminal to read the build log."
+        );
+        // Flatpak names the remote and the reason, not the URL.
+        let remote = failed("error: Unable to load summary from remote astrovm: While fetching https://flatpak.4st.li/repo/summary.idx: [35] SSL connect error\n");
+        assert_eq!(
+            plain_error(&remote, Some("flatpak"), false),
+            "Flatpak couldn't run: it can't reach the remote astrovm (SSL connect error)."
         );
         // The same text reached through Display, with the debug exit code.
         assert_eq!(

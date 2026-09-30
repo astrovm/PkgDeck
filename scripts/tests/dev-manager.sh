@@ -481,7 +481,12 @@ dotnet)
     dotnet tool list --global | awk '$1 == "dotnetsay" {print $2}' | grep -qv '^2\.1\.7$'
     success remove dotnetsay
     dotnet tool list --global | absent '^dotnetsay '
-    run search dotnetsay | jq -e '.data.packages[] | select(.id.name == "dotnetsay") | .candidate_version | test("^[0-9]")'
+    # The search reads nuget.org, which now and then answers with an error.
+    for attempt in 1 2 3 4; do
+        if run search dotnetsay | jq -e '.data.packages[] | select(.id.name == "dotnetsay") | .candidate_version | test("^[0-9]")'; then break; fi
+        if [[ $attempt == 4 ]]; then echo "pkd search dotnetsay found no version" >&2; exit 1; fi
+        sleep 10
+    done
     success install dotnetsay
     have dotnetsay
     dotnet tool list --global | grep -q '^dotnetsay '

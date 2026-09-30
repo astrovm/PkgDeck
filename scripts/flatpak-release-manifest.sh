@@ -8,7 +8,7 @@ case "$tag" in v*) ;; *) echo "tag must start with v" >&2; exit 2 ;; esac
 url="https://github.com/astrovm/PkgDeck/archive/refs/tags/$tag.tar.gz"
 archive=$(mktemp)
 trap 'rm -f "$archive"' EXIT
-curl -fL --retry 3 "$url" -o "$archive"
+curl -fL --retry 5 --retry-delay 5 --retry-all-errors "$url" -o "$archive"
 sha=$(sha256sum "$archive" | cut -d' ' -f1)
 
 awk -v url="$url" -v sha="$sha" '

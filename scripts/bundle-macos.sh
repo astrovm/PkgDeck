@@ -22,7 +22,7 @@ fetch() {
     local name=$1 sha256=$2 archive
     archive=$work/src/$name-$kf_version.0.tar.xz
     if [[ ! -f $archive ]]; then
-        curl -fL --retry 3 "https://download.kde.org/stable/frameworks/$kf_version/$name-$kf_version.0.tar.xz" -o "$archive.part"
+        curl -fL --retry 5 --retry-delay 5 --retry-all-errors "https://download.kde.org/stable/frameworks/$kf_version/$name-$kf_version.0.tar.xz" -o "$archive.part"
         mv "$archive.part" "$archive"
     fi
     printf '%s  %s\n' "$sha256" "$archive" | shasum -a 256 --check --status

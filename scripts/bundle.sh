@@ -16,7 +16,7 @@ case "$(uname -m)" in
     *) echo "Unsupported AppImage updater architecture: $(uname -m)" >&2; exit 1 ;;
 esac
 mkdir -p "$out/usr/lib/pkgdeck"
-curl -fL --retry 3 "$updater_url" -o "$out/usr/lib/pkgdeck/appimageupdatetool.AppImage"
+curl -fL --retry 5 --retry-delay 5 --retry-all-errors "$updater_url" -o "$out/usr/lib/pkgdeck/appimageupdatetool.AppImage"
 printf '%s  %s\n' "$updater_sha256" "$out/usr/lib/pkgdeck/appimageupdatetool.AppImage" | sha256sum --check --status
 chmod +x "$out/usr/lib/pkgdeck/appimageupdatetool.AppImage"
 scripts/build-apt.sh "${CARGO_TARGET_DIR:-target}/release"
