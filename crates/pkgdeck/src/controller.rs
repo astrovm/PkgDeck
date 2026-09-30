@@ -4725,15 +4725,20 @@ impl ffi::PackageController {
         });
         let replies: Vec<_> = replies
             .into_iter()
-            .filter_map(|reply| {
-                if let Reply::Inventory(report) = reply {
+            .filter_map(|reply| match reply {
+                Reply::Inventory(report) => {
                     if !cancelled {
                         self.as_mut().warm_inventory(report);
                     }
                     None
-                } else {
-                    Some(reply)
                 }
+                // Sent just before Done, which reads it, so it is kept
+                // whether or not the worker has finished by now.
+                Reply::FailureOutput(output) => {
+                    self.as_mut().rust_mut().failure_output = output;
+                    None
+                }
+                reply => Some(reply),
             })
             .collect();
         if let Some((job, cancel, joined)) = finished {
@@ -5015,9 +5020,6 @@ impl ffi::PackageController {
                     }
                     Reply::ProgressEvent(event) => self.as_mut().update_progress(&event),
                     Reply::Output(line) => self.as_mut().follow_output(&line),
-                    Reply::FailureOutput(output) => {
-                        self.as_mut().rust_mut().failure_output = output;
-                    }
                     _ => {}
                 }
             }
@@ -9825,11 +9827,15 @@ mod tests {
         let long = format!("{}\nthe reason", "x".repeat(FAILURE_OUTPUT_LIMIT * 2));
         let kept = raw_failure_output(&failed("", &long)).unwrap();
         assert!(kept.starts_with('…') && kept.ends_with("the reason"));
+        // The cut moves forward off the middle of a character.
+        let accents = format!("{}x", "é".repeat(FAILURE_OUTPUT_LIMIT));
+        let kept = raw_failure_output(&failed("", &accents)).unwrap();
+        assert!(kept.starts_with("…é") && kept.ends_with('x'));
     }
     #[test]
     fn retry_runs_only_the_steps_that_failed() {
         let names = |job: &Option<Job>| match job {
-            Some(Job::UpgradeAll(operations, _)) => operations.len(),
+            Some(Job::UpgradeAll(operations, _) | Job::CleanAll(operations)) => operations.len(),
             _ => 0,
         };
         let upgrade = |backend: &str| Operation::UpgradeAll {
@@ -9848,6 +9854,61 @@ mod tests {
         assert!(retry_job(&job, &none_failed).is_none());
         assert_eq!(names(&retry_job(&job, &Err(EngineError::NotFound))), 2);
         assert!(retry_job(&job, &Err(EngineError::Cancelled)).is_none());
+        // A step that finished has nothing to retry.
+        assert!(retry_job(&job, &Ok(Payload::Written(OperationOutcome::default()))).is_none());
+        assert_eq!(names(&None), 0);
+        // Cleanups retry the same way.
+        let cache = |backend: &str| {
+            Operation::Clean(CleanupId {
+                backend: backend.into(),
+                key: "cache".into(),
+            })
+        };
+        let clean = Job::CleanAll(vec![cache("apt"), cache("npm")]);
+        let one_failed = Ok(Payload::Batch(
+            String::new(),
+            vec![Outcome::Failed, Outcome::Finished],
+        ));
+        assert_eq!(names(&retry_job(&clean, &one_failed)), 1);
+        assert!(retry_job(&clean, &none_failed).is_none());
+    }
+    #[test]
+    fn a_failed_change_offers_its_output_and_retry_once() {
+        use pkgdeck_core::process::{Completion, ExecutionError as E};
+        let mut controller = synthetic_controller();
+        let mut controller = controller.pin_mut();
+        let row = fixture_row();
+        controller.as_mut().rust_mut().packages = vec![row.clone()];
+        let job = Job::Write(Operation::Upgrade(row.id.clone()), None);
+        let failure = EngineError::Execution(E::Failed(Completion {
+            code: Some(1),
+            signal: None,
+            stdout: vec![],
+            stderr: b"the tool said no".to_vec(),
+            truncated: false,
+            cancellation_deferred: false,
+        }));
+        controller.as_mut().rust_mut().worker = Some(fake_worker(
+            job,
+            vec![
+                Reply::FailureOutput("Upgrade\nthe batch log".into()),
+                Reply::Done(Err(failure)),
+            ],
+        ));
+        controller.as_mut().poll();
+        let notice: Value = serde_json::from_str(&controller.notice().to_string()).unwrap();
+        assert_eq!(notice["kind"], "error");
+        assert_eq!(notice["output"], "Upgrade\nthe batch log");
+        assert_eq!(notice["retry"], true);
+        // Retry clears the banner and runs the change again, once.
+        controller.as_mut().retry_change();
+        assert_eq!(controller.notice().to_string(), "{}");
+        assert!(controller.rust().worker.is_some());
+        settle(&mut controller);
+        let finished = controller.notice().to_string();
+        assert!(finished.contains("\"success\""));
+        controller.as_mut().retry_change();
+        assert_eq!(controller.notice().to_string(), finished);
     }
     #[test]
     fn engine_errors_become_one_plain_sentence() {
