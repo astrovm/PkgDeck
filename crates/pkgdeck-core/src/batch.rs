@@ -1643,17 +1643,15 @@ done"#;
         );
         // Another test's fork can still hold a just-written script open,
         // which makes exec fail with "Text file busy". It clears at once.
-        let output = (0..50)
-            .find_map(|_| {
-                let result = Command::new(&launcher).arg("--batch-runner").output();
-                if matches!(&result, Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy) {
-                    std::thread::sleep(Duration::from_millis(20));
-                    return None;
-                }
-                Some(result)
-            })
-            .expect("the script stayed busy")
-            .unwrap();
+        let output = loop {
+            let result = Command::new(&launcher).arg("--batch-runner").output();
+            let busy =
+                matches!(&result, Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy);
+            std::thread::sleep(Duration::from_millis(if busy { 20 } else { 0 }));
+            if !busy {
+                break result.unwrap();
+            }
+        };
         assert!(output.status.success());
         assert_eq!(
             output.stdout,
