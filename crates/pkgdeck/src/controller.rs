@@ -172,6 +172,9 @@ pub mod ffi {
         #[cxx_name = "dismissNotice"]
         fn dismiss_notice(self: Pin<&mut PackageController>);
         #[qinvokable]
+        #[cxx_name = "retryChange"]
+        fn retry_change(self: Pin<&mut PackageController>);
+        #[qinvokable]
         #[cxx_name = "cancelQueued"]
         fn cancel_queued(self: Pin<&mut PackageController>);
         #[qinvokable]
@@ -277,6 +280,8 @@ enum Reply {
     ProgressEvent(Event),
     /// A line of output from an Update all step that names a package.
     Output(String),
+    /// What the failed steps of a batch printed, for the banner's details.
+    FailureOutput(String),
     Partial(PackageReport),
     Inventory(PackageReport),
     DetailsPreview(Box<PackageDetails>),
@@ -775,7 +780,13 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
             let noun = if operations.iter().all(|op| matches!(op, Operation::Clean(_))) { "cleanup tasks" } else { "updates" };
             let mut status = format!("Completed {completed} of {} {noun}.", operations.len());
             let mut outcomes = Vec::new();
+            let mut failure_output = Vec::new();
             for (operation, result) in operations.iter().zip(results) {
+                if let Err(error) = &result {
+                    if let Some(output) = raw_failure_output(error) {
+                        failure_output.push(format!("{}\n{output}", operation_title(operation)));
+                    }
+                }
                 outcomes.push(match &result {
                     Ok(_) => Outcome::Finished,
                     Err(EngineError::Cancelled) => Outcome::Cancelled,
@@ -798,6 +809,9 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
             }
             if operations.iter().any(|op| matches!(op, Operation::Upgrade(id) if id.backend == "fwupd")) {
                 status.push_str("\nFirmware: Restart or shut down the device if the update asked for it.");
+            }
+            if !failure_output.is_empty() {
+                send(Reply::FailureOutput(failure_output.join("\n\n")));
             }
             Ok(Payload::Batch(status, outcomes))
         }
@@ -1034,6 +1048,11 @@ pub struct Controller {
     /// Rows already on screen stay until the refresh finishes instead of
     /// being replaced by each streamed partial.
     hold_partials: bool,
+    /// What the failed steps of the running batch printed, until its notice
+    /// takes it.
+    failure_output: String,
+    /// The change the banner's Retry runs again.
+    retry_job: Option<Job>,
     last_rewarm: Instant,
     /// Scope, elevation, and detection time of `engine`, so searches can
     /// reuse detected managers instead of rediscovering on every query.
@@ -1113,6 +1132,8 @@ impl Default for Controller {
             details_worker: None,
             awaiting_prefetch: false,
             hold_partials: false,
+            failure_output: String::new(),
+            retry_job: None,
             last_rewarm: Instant::now(),
             engine_scope: None,
             reused_engine_born: None,
@@ -1448,6 +1469,50 @@ fn strip_debug(text: &str) -> String {
     }
     out
 }
+/// The most output shown under a failure. The end matters most: it is where
+/// tools print what went wrong.
+const FAILURE_OUTPUT_LIMIT: usize = 6000;
+/// Everything a failed command printed, for the banner's details, so the
+/// reason is readable without running it again in a terminal.
+fn raw_failure_output(error: &EngineError) -> Option<String> {
+    let EngineError::Execution(pkgdeck_core::process::ExecutionError::Failed(result)) = error
+    else {
+        return None;
+    };
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    let text = [stdout.trim(), stderr.trim()]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if text.is_empty() {
+        return None;
+    }
+    let mut start = text.len().saturating_sub(FAILURE_OUTPUT_LIMIT);
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    Some(if start > 0 {
+        format!("…{}", &text[start..])
+    } else {
+        text
+    })
+}
+/// Whether a failed OpenSSL build says its headers or pkg-config are
+/// missing, the only case installing them fixes.
+fn missing_openssl_files(output: &str) -> bool {
+    let output = output.to_ascii_lowercase();
+    [
+        "pkg-config",
+        "pkg_config",
+        "opensslconf.h",
+        "could not find openssl",
+        "could not find directory of openssl",
+    ]
+    .iter()
+    .any(|marker| output.contains(marker))
+}
 /// The first line of tool output worth showing: an error line if there is
 /// one, else the first non-empty line. Prefixes such as "error:" and "E:"
 /// are removed because the sentence around it already says it failed.
@@ -1482,11 +1547,15 @@ fn meaningful_line(output: &str) -> Option<String> {
         .strip_prefix("failed to run custom build command for `")
         .and_then(|rest| rest.split('`').next())
     {
-        return Some(if krate.starts_with("openssl-sys ") {
-            format!("building `{krate}` failed. It needs OpenSSL's development files (libssl-dev or openssl-devel) and pkg-config")
-        } else {
-            format!("building `{krate}` failed. Run the update in a terminal to read the build log")
-        });
+        return Some(
+            if krate.starts_with("openssl-sys ") && missing_openssl_files(output) {
+                format!("building `{krate}` failed. It needs OpenSSL's development files (libssl-dev or openssl-devel) and pkg-config")
+            } else {
+                format!(
+                    "building `{krate}` failed. Run the update in a terminal to read the build log"
+                )
+            },
+        );
     }
     // Flatpak names the remote and the URL; people need the remote and why.
     if let Some(rest) = line.strip_prefix("Unable to load summary from remote ") {
@@ -1954,6 +2023,42 @@ fn with_subject(mut notice: Value, subject: Value) -> Value {
         notice.extend(subject);
     }
     notice
+}
+/// What Retry runs again after a failure: the one change, or only the
+/// steps of a batch that failed. A plan reviewed for the whole batch no
+/// longer fits a part of it.
+fn retry_job(job: &Job, result: &Result<Payload, EngineError>) -> Option<Job> {
+    let failed: Vec<bool> = match result {
+        Err(EngineError::Cancelled)
+        | Err(EngineError::Execution(pkgdeck_core::process::ExecutionError::Cancelled)) => {
+            return None
+        }
+        Err(_) => job.operations().iter().map(|_| true).collect(),
+        Ok(Payload::Batch(_, outcomes)) => outcomes.iter().map(|o| *o == Outcome::Failed).collect(),
+        Ok(_) => return None,
+    };
+    let keep = |operations: &[Operation]| -> Vec<Operation> {
+        operations
+            .iter()
+            .zip(&failed)
+            .filter(|(_, failed)| **failed)
+            .map(|(operation, _)| operation.clone())
+            .collect()
+    };
+    match job {
+        Job::Write(..) if failed.iter().any(|f| *f) => Some(job.clone()),
+        Job::UpgradeAll(operations, plan) => {
+            let retry = keep(operations);
+            let all = retry.len() == operations.len();
+            (!retry.is_empty())
+                .then(|| Job::UpgradeAll(retry, if all { plan.clone() } else { None }))
+        }
+        Job::CleanAll(operations) => {
+            let retry = keep(operations);
+            (!retry.is_empty()).then(|| Job::CleanAll(retry))
+        }
+        _ => None,
+    }
 }
 /// What the banner says once a change finishes.
 fn write_notice(
@@ -2704,8 +2809,19 @@ impl ffi::PackageController {
         };
         self.as_mut().set_background_state(encoded(json!({"last_check": checked, "available": available, "failures": failures, "notify": false})));
     }
-    pub fn dismiss_notice(self: Pin<&mut Self>) {
+    pub fn dismiss_notice(mut self: Pin<&mut Self>) {
+        self.as_mut().rust_mut().retry_job = None;
         self.set_notice("{}".into());
+    }
+    /// Run again what the banner reports as failed. The change was already
+    /// confirmed, and it is reviewed again before it runs, like any other.
+    pub fn retry_change(mut self: Pin<&mut Self>) {
+        let Some(job) = self.as_mut().rust_mut().retry_job.take() else {
+            return;
+        };
+        self.as_mut().set_notice("{}".into());
+        self.as_mut().accept_confirmed(job);
+        self.sync_needs_poll();
     }
     /// Read the Activity history on a worker; poll() publishes it. A read
     /// requested while one runs starts again after it, so the newest state
@@ -4697,7 +4813,7 @@ impl ffi::PackageController {
                         if job.writes() {
                             // A changed plan is not a failure: the new plan
                             // opens for review right after this.
-                            let notice = if repreview_changed_plan(
+                            let mut notice = if repreview_changed_plan(
                                 &job,
                                 &result,
                                 &self.rust().packages,
@@ -4713,6 +4829,27 @@ impl ffi::PackageController {
                                     &self.rust().names_for(&job.operations()),
                                 )
                             };
+                            let batch_output =
+                                std::mem::take(&mut self.as_mut().rust_mut().failure_output);
+                            let retry = if notice["kind"] == "error" {
+                                let output = if batch_output.is_empty() {
+                                    result
+                                        .as_ref()
+                                        .err()
+                                        .and_then(raw_failure_output)
+                                        .unwrap_or_default()
+                                } else {
+                                    batch_output
+                                };
+                                if !output.is_empty() {
+                                    notice["output"] = json!(output);
+                                }
+                                retry_job(&job, &result)
+                            } else {
+                                None
+                            };
+                            notice["retry"] = json!(retry.is_some());
+                            self.as_mut().rust_mut().retry_job = retry;
                             self.as_mut().set_notice(encoded(notice));
                             if let Some(id) = self.as_mut().rust_mut().active_activity_id.take() {
                                 if let Some(store) = self.rust().activity_store.clone() {
@@ -4818,6 +4955,7 @@ impl ffi::PackageController {
                     Reply::Progress(_)
                     | Reply::ProgressEvent(_)
                     | Reply::Output(_)
+                    | Reply::FailureOutput(_)
                     | Reply::Inventory(_) => {}
                 }
             }
@@ -4877,6 +5015,9 @@ impl ffi::PackageController {
                     }
                     Reply::ProgressEvent(event) => self.as_mut().update_progress(&event),
                     Reply::Output(line) => self.as_mut().follow_output(&line),
+                    Reply::FailureOutput(output) => {
+                        self.as_mut().rust_mut().failure_output = output;
+                    }
                     _ => {}
                 }
             }
@@ -9662,6 +9803,53 @@ mod tests {
         );
     }
     #[test]
+    fn failed_commands_keep_their_output_for_the_banner() {
+        use pkgdeck_core::process::{Completion, ExecutionError as E};
+        let failed = |stdout: &str, stderr: &str| {
+            EngineError::Execution(E::Failed(Completion {
+                code: Some(101),
+                signal: None,
+                stdout: stdout.as_bytes().to_vec(),
+                stderr: stderr.as_bytes().to_vec(),
+                truncated: false,
+                cancellation_deferred: false,
+            }))
+        };
+        assert_eq!(
+            raw_failure_output(&failed("built 3 crates\n", "error: linker failed\n")).as_deref(),
+            Some("built 3 crates\nerror: linker failed")
+        );
+        assert_eq!(raw_failure_output(&failed("", "  \n")), None);
+        assert_eq!(raw_failure_output(&EngineError::NotFound), None);
+        // A long log keeps its end, where the reason is.
+        let long = format!("{}\nthe reason", "x".repeat(FAILURE_OUTPUT_LIMIT * 2));
+        let kept = raw_failure_output(&failed("", &long)).unwrap();
+        assert!(kept.starts_with('…') && kept.ends_with("the reason"));
+    }
+    #[test]
+    fn retry_runs_only_the_steps_that_failed() {
+        let names = |job: &Option<Job>| match job {
+            Some(Job::UpgradeAll(operations, _)) => operations.len(),
+            _ => 0,
+        };
+        let upgrade = |backend: &str| Operation::UpgradeAll {
+            backend: backend.into(),
+        };
+        let job = Job::UpgradeAll(vec![upgrade("cargo"), upgrade("npm")], None);
+        let partial = Ok(Payload::Batch(
+            String::new(),
+            vec![Outcome::Finished, Outcome::Failed],
+        ));
+        assert_eq!(names(&retry_job(&job, &partial)), 1);
+        let none_failed = Ok(Payload::Batch(
+            String::new(),
+            vec![Outcome::Finished, Outcome::Finished],
+        ));
+        assert!(retry_job(&job, &none_failed).is_none());
+        assert_eq!(names(&retry_job(&job, &Err(EngineError::NotFound))), 2);
+        assert!(retry_job(&job, &Err(EngineError::Cancelled)).is_none());
+    }
+    #[test]
     fn engine_errors_become_one_plain_sentence() {
         use pkgdeck_core::process::{Completion, ExecutionError as E};
         let failed = |stderr: &str| {
@@ -9680,10 +9868,16 @@ mod tests {
             "Cargo couldn't run: rustup has no default toolchain."
         );
         // Cargo names the dependency whose build failed.
-        let openssl = failed("error: failed to run custom build command for `openssl-sys v0.6.7`\n\nCaused by:\n  process didn't exit successfully\n");
+        let openssl = failed("error: failed to run custom build command for `openssl-sys v0.9.100`\n\nCaused by:\n  Could not find openssl via pkg-config\n");
         assert_eq!(
             plain_error(&openssl, Some("cargo"), false),
-            "Cargo couldn't run: building `openssl-sys v0.6.7` failed. It needs OpenSSL's development files (libssl-dev or openssl-devel) and pkg-config."
+            "Cargo couldn't run: building `openssl-sys v0.9.100` failed. It needs OpenSSL's development files (libssl-dev or openssl-devel) and pkg-config."
+        );
+        // The same crate failing for another reason gets no install advice.
+        let old_openssl = failed("error: failed to run custom build command for `openssl-sys v0.6.7`\n\nCaused by:\n  process didn't exit successfully\n");
+        assert_eq!(
+            plain_error(&old_openssl, Some("cargo"), false),
+            "Cargo couldn't run: building `openssl-sys v0.6.7` failed. Run the update in a terminal to read the build log."
         );
         let other = failed("error: failed to run custom build command for `ring v0.17.0`\n");
         assert_eq!(

@@ -2132,6 +2132,7 @@ Controls.ApplicationWindow {
                 id: noticeBanner
                 objectName: "changeNotice"
                 readonly property var notice: JSON.parse(backend.notice || "{}")
+                property bool showOutput: false
                 readonly property color toneColor: notice.kind === "error" ? root.danger : notice.kind === "success" ? root.success : root.muted
                 // Successes show as a toast; the banner is for problems.
                 readonly property bool shown: notice.title !== undefined && notice.kind !== "success" && notice.kind !== "info" && root.currentView !== "Settings"
@@ -2144,6 +2145,7 @@ Controls.ApplicationWindow {
                 opacity: shown ? 1 : 0
                 Behavior on opacity { NumberAnimation { duration: root.revealDuration } }
                 onNoticeChanged: {
+                    showOutput = false;
                     if (notice.title !== undefined && (notice.kind === "success" || notice.kind === "info"))
                         changeToast.show(notice.title, root.undoAction(notice) ? "Undo" : "", notice.kind);
                 }
@@ -2182,6 +2184,57 @@ Controls.ApplicationWindow {
                             wrapMode: Text.WordWrap
                             Layout.fillWidth: true
                         }
+                        // What the tool itself printed, for when the sentence
+                        // above is not enough.
+                        Controls.ScrollView {
+                            objectName: "changeNoticeOutput"
+                            visible: noticeBanner.showOutput && !!noticeBanner.notice.output
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: Math.min(outputText.implicitHeight + 12, 200)
+                            Layout.topMargin: 6
+                            clip: true
+                            TextEdit {
+                                id: outputText
+                                width: parent.width
+                                padding: 6
+                                text: noticeBanner.notice.output || ""
+                                readOnly: true
+                                selectByMouse: true
+                                textFormat: TextEdit.PlainText
+                                wrapMode: TextEdit.Wrap
+                                font.family: "monospace"
+                                font.pointSize: Theme.pointSize(Theme.smallScale)
+                                color: root.ink
+                            }
+                        }
+                    }
+                    ActionButton {
+                        objectName: "changeNoticeDetails"
+                        visible: !!noticeBanner.notice.output
+                        text: noticeBanner.showOutput ? "Hide details" : "Show details"
+                        symbol: "info"
+                        flat: true
+                        Layout.alignment: Qt.AlignTop
+                        onClicked: noticeBanner.showOutput = !noticeBanner.showOutput
+                    }
+                    ActionButton {
+                        objectName: "changeNoticeCopy"
+                        visible: noticeBanner.showOutput && !!noticeBanner.notice.output
+                        text: "Copy"
+                        symbol: "help"
+                        flat: true
+                        Layout.alignment: Qt.AlignTop
+                        onClicked: { outputText.selectAll(); outputText.copy(); outputText.deselect(); }
+                    }
+                    ActionButton {
+                        objectName: "changeNoticeRetry"
+                        visible: noticeBanner.notice.retry === true
+                        text: "Retry"
+                        symbol: "refresh"
+                        flat: true
+                        enabled: !backend.busy
+                        Layout.alignment: Qt.AlignTop
+                        onClicked: backend.retryChange()
                     }
                     ClearFieldButton {
                         objectName: "dismissChangeNotice"
