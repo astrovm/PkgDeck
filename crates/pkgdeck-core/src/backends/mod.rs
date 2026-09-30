@@ -995,6 +995,9 @@ pub struct HomebrewCask<T = NativeTransport> {
 }
 pub struct Flatpak<T = NativeTransport> {
     transport: T,
+    /// Remotes the last installed query could not ask about updates. The
+    /// rest were asked, so their rows are complete.
+    skipped: Vec<EngineError>,
 }
 fn flatpak_offer_reference(reference: &str) -> Option<(&str, &str, &str)> {
     let mut parts = reference.split('/');
@@ -1004,7 +1007,10 @@ fn flatpak_offer_reference(reference: &str) -> Option<(&str, &str, &str)> {
 }
 impl<T: Transport> Flatpak<T> {
     pub fn new(transport: T) -> Self {
-        Self { transport }
+        Self {
+            transport,
+            skipped: vec![],
+        }
     }
 }
 impl<T: Transport> Homebrew<T> {
@@ -1076,6 +1082,7 @@ impl<T: Transport> Flatpak<T> {
         cancel: &Cancellation,
         system: bool,
         updates: bool,
+        skipped: &mut Vec<EngineError>,
     ) -> Result<Vec<Package>, EngineError> {
         let scope = if system {
             Scope::System
@@ -1151,31 +1158,53 @@ impl<T: Transport> Flatpak<T> {
         }
         // Flatpak compares commits, not version labels: rebuilds and runtimes
         // can have an update even when the version is unchanged or empty.
-        let output = bytes(
-            "flatpak",
-            self.call(
-                &[
-                    prefix,
-                    "remote-ls",
-                    "--updates",
-                    "--columns=ref,version,origin",
-                ],
-                cancel,
-                false,
-                system,
-            )?,
-        )?;
-        let updates = String::from_utf8(output).map_err(|e| invalid("flatpak", e))?;
-        for line in updates.lines().filter(|line| !line.trim().is_empty()) {
-            let fields: Vec<_> = line.split('\t').collect();
-            if fields.len() != 3 || flatpak_reference(fields[0]).is_none() || !flatpak_id(fields[2])
-            {
-                return Err(invalid("flatpak", "invalid update metadata"));
+        let remote_updates = |remote: Option<&str>| -> Result<String, EngineError> {
+            let mut args = vec![
+                prefix,
+                "remote-ls",
+                "--updates",
+                "--columns=ref,version,origin",
+            ];
+            args.extend(remote);
+            let output = bytes("flatpak", self.call(&args, cancel, false, system)?)?;
+            String::from_utf8(output).map_err(|e| invalid("flatpak", e))
+        };
+        let remotes: std::collections::BTreeSet<_> =
+            origins.iter().filter(|origin| !origin.is_empty()).collect();
+        let mut texts = Vec::new();
+        match remote_updates(None) {
+            Ok(text) => texts.push(text),
+            // One unreachable remote makes flatpak refuse to list any. Ask
+            // each remote on its own so the others still show their updates.
+            Err(first) if !cancel.requested() && remotes.len() > 1 => {
+                let mut failures = Vec::new();
+                for remote in remotes {
+                    match remote_updates(Some(remote)) {
+                        Ok(text) => texts.push(text),
+                        Err(error) => failures.push(error),
+                    }
+                }
+                if texts.is_empty() || cancel.requested() {
+                    return Err(first);
+                }
+                skipped.extend(failures);
             }
-            for (package, origin) in packages.iter_mut().zip(&origins) {
-                if package.id.reference.as_deref() == Some(fields[0]) && origin == fields[2] {
-                    package.candidate_version = Some(fields[1].into());
-                    package.update = UpdateAvailability::Available;
+            Err(error) => return Err(error),
+        }
+        for updates in texts {
+            for line in updates.lines().filter(|line| !line.trim().is_empty()) {
+                let fields: Vec<_> = line.split('\t').collect();
+                if fields.len() != 3
+                    || flatpak_reference(fields[0]).is_none()
+                    || !flatpak_id(fields[2])
+                {
+                    return Err(invalid("flatpak", "invalid update metadata"));
+                }
+                for (package, origin) in packages.iter_mut().zip(&origins) {
+                    if package.id.reference.as_deref() == Some(fields[0]) && origin == fields[2] {
+                        package.candidate_version = Some(fields[1].into());
+                        package.update = UpdateAvailability::Available;
+                    }
                 }
             }
         }
@@ -1317,10 +1346,14 @@ impl<T: Transport> Backend for Flatpak<T> {
             Err(e) => Err(e),
         }
     }
+    fn query_errors(&self) -> Vec<EngineError> {
+        self.skipped.clone()
+    }
     fn search(&mut self, query: &str, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
         if query.trim().is_empty() || query.starts_with('-') {
             return Err(invalid("flatpak", "expected a search term"));
         }
+        self.skipped.clear();
         if flatpak_reference(query).is_some() {
             return self.installed(cancel).map(|packages| {
                 packages
@@ -1341,8 +1374,8 @@ impl<T: Transport> Backend for Flatpak<T> {
         result.retain(|package| seen.insert(package.id.clone()));
         // Local inventory is enough to choose Install versus Remove. Search
         // must not fetch remote update metadata just to establish this state.
-        let mut installed = self.list(cancel, false, false)?;
-        installed.extend(self.list(cancel, true, false)?);
+        let mut installed = self.list(cancel, false, false, &mut vec![])?;
+        installed.extend(self.list(cancel, true, false, &mut vec![])?);
         let mut offers = Vec::new();
         for offer in result {
             let matches: Vec<_> =
@@ -1371,8 +1404,10 @@ impl<T: Transport> Backend for Flatpak<T> {
     }
     fn installed(&mut self, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
         let home = self.transport.env("HOME").map(PathBuf::from);
-        let mut result = self.list(cancel, false, true)?;
-        result.extend(self.list(cancel, true, true)?);
+        let mut skipped = Vec::new();
+        let mut result = self.list(cancel, false, true, &mut skipped)?;
+        result.extend(self.list(cancel, true, true, &mut skipped)?);
+        self.skipped = skipped;
         for package in &mut result {
             // Exported icons double as the installed check per scope; `list`
             // only reports user and system installations.

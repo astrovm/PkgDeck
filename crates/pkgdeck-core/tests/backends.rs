@@ -636,6 +636,57 @@ fn flatpak_list_accepts_an_omitted_empty_options_column() {
         .all(|package| package.summary == "Synthetic app"));
 }
 
+#[test]
+fn flatpak_updates_survive_an_unreachable_remote() {
+    let cancel = Cancellation::default();
+    let arch = std::env::consts::ARCH;
+    let installed = format!(
+        "io.example.One\t{arch}\tstable\t1.0\tOne\tflathub\n\
+         io.example.Two\t{arch}\tstable\t1.0\tTwo\tastrovm\n"
+    );
+    let mut backend = Flatpak::new(FlatpakFixture {
+        installed: Some(installed.clone()),
+        unreachable: vec!["astrovm"],
+        ..FlatpakFixture::default()
+    });
+    let packages = backend.installed(&cancel).unwrap();
+    let updates: Vec<_> = packages
+        .iter()
+        .filter(|package| package.update == UpdateAvailability::Available)
+        .collect();
+    assert_eq!(updates.len(), 2, "one per installation");
+    assert!(updates
+        .iter()
+        .all(|package| package.id.name == "io.example.One"));
+    // The rows are usable, but the source is not complete.
+    let skipped = backend.query_errors();
+    assert_eq!(skipped.len(), 2);
+    assert!(skipped
+        .iter()
+        .all(|error| error.to_string().contains("astrovm")));
+    // A search does not repeat another query's errors.
+    backend.search("io.example.One", &cancel).unwrap();
+    assert!(backend.query_errors().is_empty());
+
+    // With one remote there is nothing to fall back to.
+    let mut single = Flatpak::new(FlatpakFixture {
+        installed: Some(format!(
+            "io.example.Two\t{arch}\tstable\t1.0\tTwo\tastrovm\n"
+        )),
+        unreachable: vec!["astrovm"],
+        ..FlatpakFixture::default()
+    });
+    assert!(single.installed(&cancel).is_err());
+
+    // When every remote fails the source really is unreachable.
+    let mut all = Flatpak::new(FlatpakFixture {
+        installed: Some(installed),
+        unreachable: vec!["astrovm", "flathub"],
+        ..FlatpakFixture::default()
+    });
+    assert!(all.installed(&cancel).is_err());
+}
+
 type FlatpakCall = (Vec<String>, bool, bool);
 
 #[derive(Clone, Default)]
@@ -644,6 +695,9 @@ struct FlatpakFixture {
     installed: Option<String>,
     user_updates: Option<Completion>,
     system_updates: Option<Completion>,
+    /// A remote whose summary cannot be loaded. Flatpak then refuses to list
+    /// updates from any remote unless one is named.
+    unreachable: Vec<&'static str>,
 }
 impl Transport for FlatpakFixture {
     fn apt_query(
@@ -682,6 +736,31 @@ impl Transport for FlatpakFixture {
             .unwrap()
             .push((args.clone(), write, system));
         if args.contains(&"remote-ls".into()) {
+            if !self.unreachable.is_empty() {
+                let asked = args.get(4);
+                if let Some(remote) = self
+                    .unreachable
+                    .iter()
+                    .find(|remote| asked.is_none_or(|asked| asked == *remote))
+                {
+                    return Err(ExecutionError::Failed(Completion {
+                        code: Some(1),
+                        signal: None,
+                        stdout: vec![],
+                        stderr: format!(
+                            "error: Unable to load summary from remote {remote}: SSL connect error"
+                        )
+                        .into_bytes(),
+                        truncated: false,
+                        cancellation_deferred: false,
+                    }));
+                }
+                return Ok(output(format!(
+                    "app/io.example.One/{}/stable\t2.0\t{}\n",
+                    std::env::consts::ARCH,
+                    asked.unwrap()
+                )));
+            }
             return Ok(if system {
                 self.system_updates.clone()
             } else {
