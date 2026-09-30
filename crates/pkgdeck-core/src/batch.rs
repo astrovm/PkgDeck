@@ -1641,10 +1641,22 @@ done"#;
             appimage_launcher(&launcher),
             Some(fs::canonicalize(&launcher).unwrap())
         );
-        let output = Command::new(&launcher)
-            .arg("--batch-runner")
-            .output()
-            .unwrap();
+        // Another test's fork can still hold a just-written script open,
+        // which makes exec fail with "Text file busy". It clears at once.
+        let run = || Command::new(&launcher).arg("--batch-runner").output();
+        let busy = |result: &std::io::Result<std::process::Output>| {
+            result.as_ref().err().map(std::io::Error::kind)
+                == Some(std::io::ErrorKind::ExecutableFileBusy)
+        };
+        let output = std::iter::repeat_with(|| {
+            let result = run();
+            std::thread::sleep(Duration::from_millis(if busy(&result) { 20 } else { 0 }));
+            result
+        })
+        .take(50)
+        .find(|result| !busy(result))
+        .expect("the script stayed busy")
+        .unwrap();
         assert!(output.status.success());
         assert_eq!(
             output.stdout,
