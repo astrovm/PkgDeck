@@ -2186,13 +2186,13 @@ Controls.ApplicationWindow {
                         }
                         // What the tool itself printed, for when the sentence
                         // above is not enough.
-                        Controls.ScrollView {
+                        DeckScrollView {
                             objectName: "changeNoticeOutput"
                             visible: noticeBanner.showOutput && !!noticeBanner.notice.output
                             Layout.fillWidth: true
                             Layout.preferredHeight: Math.min(outputText.implicitHeight + 12, 200)
                             Layout.topMargin: 6
-                            clip: true
+                            ink: root.muted
                             TextEdit {
                                 id: outputText
                                 width: parent.width
