@@ -309,9 +309,10 @@ is running. Turn them off in Settings.
 - **Start in background at login** keeps checks running after you log in.
   On Linux it adds an autostart entry; on macOS it adds a LaunchAgent,
   `~/Library/LaunchAgents/io.github.astrovm.PkgDeck.plist`.
-- Click the tray icon (the menu bar icon on macOS) to show or hide the window.
-  Its menu has **Check now** and **Quit**. Clicking a notification opens
-  Updates.
+- On macOS, click the menu bar icon and choose **Open** to show the window.
+  Its menu also has **Check now** and **Quit**. Elsewhere, click the tray
+  icon to show or hide the window; that menu has **Check now** and **Quit**.
+  Clicking a notification opens Updates.
 - When your desktop has a system tray, closing the window keeps PkgDeck
   running there. Use **Quit** in the tray menu to exit. On macOS, Cmd+Q and
   **Quit PkgDeck** in the app menu quit too, Cmd+W closes the window to the
