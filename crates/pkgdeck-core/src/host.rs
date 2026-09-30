@@ -706,7 +706,7 @@ impl Host {
         watches
     }
 
-    /// Official installers put rustup, Nix, pixi and the conda family outside
+    /// Official installers put Cargo, rustup, Nix, pixi and the conda family outside
     /// the PATH a desktop app starts with. Only their fixed per-user locations, or the
     /// executable a `conda init` shell names, are tried.
     fn user_install(&self, name: &str) -> Result<Option<PathBuf>, ExecutionError> {
@@ -742,9 +742,10 @@ impl Host {
                 candidates.extend(home.as_ref().map(|home| home.join(".dotnet/dotnet")));
                 candidates.push("/usr/local/share/dotnet/dotnet".into());
             }
-            "rustup" => {
-                candidates.extend(path("CARGO_HOME").map(|dir| dir.join("bin/rustup")));
-                candidates.extend(home.as_ref().map(|home| home.join(".cargo/bin/rustup")));
+            // rustup puts cargo and its own binary in the same folder.
+            "cargo" | "rustup" => {
+                candidates.extend(path("CARGO_HOME").map(|dir| dir.join("bin").join(name)));
+                candidates.extend(home.as_ref().map(|home| home.join(".cargo/bin").join(name)));
             }
             // Single-user installs link into the profile; multi-user ones
             // into the default profile.
@@ -2477,6 +2478,7 @@ mod boundary_tests {
                 "bin/rustup",
                 Some(".cargo/bin/rustup"),
             ),
+            ("cargo", "CARGO_HOME", "bin/cargo", Some(".cargo/bin/cargo")),
             ("nix", "", "", Some(".nix-profile/bin/nix")),
         ] {
             let from_variable = tools.join(name).join(under_variable);
