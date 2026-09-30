@@ -66,7 +66,12 @@ script='
     out=$(run aur --yes install yay || true)
     jq -e ".exit_code != 0" <<<"$out" >/dev/null || { echo "AUR install was not refused: $out" >&2; exit 1; }
     # Without a helper there is nothing to build with, and nothing changes.
-    out=$(run aur --yes upgrade yay || true)
+    # The update check reads the AUR first; a dropped connection is retried.
+    for attempt in 1 2 3 4; do
+        out=$(run aur --yes upgrade yay || true)
+        grep -q "install paru or yay" <<<"$out" && break
+        [[ $attempt == 4 ]] || sleep 10
+    done
     grep -q "install paru or yay" <<<"$out" || { echo "Expected a missing-helper error: $out" >&2; exit 1; }
     [[ $(pacman -Q yay) == "yay 0.1-1" ]]
 
