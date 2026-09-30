@@ -116,7 +116,14 @@ impl<T: Transport> MacAppStore<T> {
     }
 
     fn package(app: &MasApp, candidate: Option<Option<&str>>) -> Package {
-        let path = app.path.as_deref().unwrap_or("unknown location");
+        // macOS reports apps at their real volume path; people know
+        // /Applications.
+        let path = app.path.as_deref().map(|path| {
+            path.strip_prefix("/System/Volumes/Data")
+                .filter(|rest| rest.starts_with('/'))
+                .unwrap_or(path)
+        });
+        let path = path.unwrap_or("unknown location");
         Package {
             id: PackageId {
                 backend: ID.into(),
@@ -773,6 +780,19 @@ mod tests {
             remote: None,
             reference: Some(adam_id.into()),
         }
+    }
+
+    #[test]
+    fn summary_shows_the_path_people_know() {
+        let fake = fake();
+        fake.list.lock().unwrap()[0] = app(1, "Alpha", "1.0").replace(
+            "/Applications/Alpha.app",
+            "/System/Volumes/Data/Applications/Alpha.app",
+        );
+        let rows = MacAppStore::new(fake)
+            .installed(&Cancellation::default())
+            .unwrap();
+        assert_eq!(rows[0].summary, "App Store app · /Applications/Alpha.app");
     }
 
     #[test]

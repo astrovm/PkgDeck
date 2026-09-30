@@ -77,12 +77,17 @@ void MacNative::openNotificationSettings() {
 // again right before each notification.
 void MacNative::notify(const QString &title, const QString &body) {
     if (!bundled) return;
+    // The callback runs later on a framework thread. A block captures a
+    // reference parameter by address, and the caller's strings are gone by
+    // then, so it gets its own copies.
+    const QString titleCopy = title;
+    const QString bodyCopy = body;
     [[UNUserNotificationCenter currentNotificationCenter] getNotificationSettingsWithCompletionHandler:^(UNNotificationSettings *settings) {
         const bool granted = settings.authorizationStatus == UNAuthorizationStatusAuthorized
             || settings.authorizationStatus == UNAuthorizationStatusProvisional;
-        QMetaObject::invokeMethod(this, [this, granted, title, body] {
+        QMetaObject::invokeMethod(this, [this, granted, titleCopy, bodyCopy] {
             setAllowed(granted);
-            post(title, body);
+            post(titleCopy, bodyCopy);
         }, Qt::QueuedConnection);
     }];
 }
