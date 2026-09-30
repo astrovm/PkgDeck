@@ -2055,7 +2055,7 @@ fn retry_job(job: &Job, result: &Result<Payload, EngineError>) -> Option<Job> {
         }
         Job::CleanAll(operations) => {
             let retry = keep(operations);
-            (!retry.is_empty()).then(|| Job::CleanAll(retry))
+            (!retry.is_empty()).then_some(Job::CleanAll(retry))
         }
         _ => None,
     }
