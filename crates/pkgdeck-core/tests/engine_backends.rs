@@ -3,7 +3,10 @@
 use pkgdeck_core::{backends::*, engine::*, host::AptAction, package::*, process::*};
 use std::{
     ffi::OsString,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
 };
 
 type Reply = Result<Completion, ExecutionError>;
@@ -563,6 +566,23 @@ fn cask_json(token: &str, homepage: &str) -> String {
     }]})
     .to_string()
 }
+fn formula_installed(version: &str, outdated: bool) -> String {
+    format!(
+        r#"{{"formulae":[{{"full_name":"wget","desc":"fetch","homepage":"https://example.invalid","versions":{{"stable":"{version}"}},"revision":0,"installed":[{{"version":"1.0"}}],"linked_keg":"1.0","outdated":{outdated},"dependencies":[]}}]}}"#
+    )
+}
+fn cask_installed(version: &str, outdated: bool) -> String {
+    format!(
+        r#"{{"casks":[{{"full_token":"pkgdeck","name":["PkgDeck"],"desc":"packages","homepage":"https://example.invalid","version":"{version}","installed":"1.0","outdated":{outdated}}}]}}"#
+    )
+}
+fn brew_updates(script: &Script) -> usize {
+    script
+        .calls()
+        .iter()
+        .filter(|line| line.as_str() == "w:brew update")
+        .count()
+}
 /// Homebrew answering detection, then `rest` for everything else.
 fn brew(rest: impl Fn(&str) -> Reply + Send + Sync + 'static) -> Script {
     Script::new(move |line| match line {
@@ -570,6 +590,268 @@ fn brew(rest: impl Fn(&str) -> Reply + Send + Sync + 'static) -> Script {
         "brew --version" => ok("Homebrew 7.0.6\n"),
         other => rest(other),
     })
+}
+
+#[test]
+fn index_refresh_does_not_probe_npm_before_a_named_upgrade_lookup() {
+    let cancel = Cancellation::default();
+    let script = Script::new(|line| match line {
+        "npm root --global" => ok("/opt/npm/lib/node_modules\n"),
+        "npm ls --global --depth=0 --json" => {
+            ok(r#"{"dependencies":{"eslint":{"version":"9.0.0"}}}"#)
+        }
+        "npm outdated --global --json" => ok("{}"),
+        other => panic!("unexpected {other}"),
+    });
+    let mut engine = Engine::default();
+    engine.register(DevTool::npm(script.clone())).unwrap();
+
+    assert!(engine.refresh_update_indexes(&cancel).is_empty());
+    assert!(script.calls().is_empty());
+
+    let report = engine.lookup_for_mutation("eslint", &cancel);
+    assert!(report.failures.is_empty(), "{:?}", report.failures);
+    assert_eq!(report.packages.len(), 1);
+    assert_eq!(report.packages[0].id.name, "eslint");
+    assert_eq!(
+        report.packages[0].installed_version.as_deref(),
+        Some("9.0.0")
+    );
+    assert_eq!(
+        script.calls(),
+        [
+            "npm root --global",
+            "npm ls --global --depth=0 --json",
+            "npm outdated --global --json"
+        ]
+    );
+}
+
+#[test]
+fn index_refresh_skips_homebrew_cached_as_unavailable() {
+    let cancel = Cancellation::default();
+    let script = Script::new(|line| panic!("unavailable backend must not run {line}"));
+    let mut engine = Engine::default();
+    engine.register(HomebrewCask::new(script.clone())).unwrap();
+    engine.note_detected(
+        "homebrew-cask".into(),
+        Ok(Availability::Unavailable("casks require Homebrew 6".into())),
+    );
+
+    let failures = engine.refresh_update_indexes(&cancel);
+    assert_eq!(failures.len(), 1);
+    assert_eq!(
+        failures[0],
+        BackendFailure {
+            backend: "homebrew-cask".into(),
+            error: EngineError::Unavailable {
+                backend: "homebrew-cask".into(),
+                reason: "casks require Homebrew 6".into(),
+            },
+        }
+    );
+    // Named upgrades still report the same cached error on lookup.
+    assert_eq!(
+        engine.lookup_for_mutation("pkgdeck", &cancel).failures,
+        failures
+    );
+    assert!(script.calls().is_empty());
+}
+
+#[test]
+fn index_refresh_detects_homebrew_before_writing() {
+    let cancel = Cancellation::default();
+    let script = Script::new(|line| match line {
+        "brew --prefix" => Err(ExecutionError::Disabled("Homebrew is not installed".into())),
+        other => panic!("unavailable backend must not run {other}"),
+    });
+    let mut engine = Engine::default();
+    engine.register(Homebrew::new(script.clone())).unwrap();
+
+    let failures = engine.refresh_update_indexes(&cancel);
+    assert_eq!(failures.len(), 1);
+    assert!(matches!(failures[0].error, EngineError::Unavailable { .. }));
+    assert_eq!(script.calls(), ["brew --prefix"]);
+}
+
+#[test]
+fn index_refresh_shares_one_fetch_for_available_homebrew_sources() {
+    let cancel = Cancellation::default();
+    let script = Script::new(|line| match line {
+        "w:brew update" => ok(""),
+        other => panic!("cached detection must not run {other}"),
+    });
+    let mut engine = Engine::default();
+    engine.register(Homebrew::new(script.clone())).unwrap();
+    engine.register(HomebrewCask::new(script.clone())).unwrap();
+    for id in ["homebrew", "homebrew-cask"] {
+        engine.note_detected(id.into(), Ok(Availability::Available));
+    }
+
+    assert!(engine.refresh_update_indexes(&cancel).is_empty());
+    assert_eq!(script.calls(), ["w:brew update"]);
+}
+
+#[test]
+fn index_refresh_fetches_for_casks_alone() {
+    let cancel = Cancellation::default();
+    let script = Script::new(|line| match line {
+        "w:brew update" => ok(""),
+        other => panic!("cached detection must not run {other}"),
+    });
+    let mut engine = Engine::default();
+    engine.register(HomebrewCask::new(script.clone())).unwrap();
+    engine.note_detected("homebrew-cask".into(), Ok(Availability::Available));
+
+    assert!(engine.refresh_update_indexes(&cancel).is_empty());
+    assert_eq!(script.calls(), ["w:brew update"]);
+}
+
+#[test]
+fn a_cancelled_index_refresh_stops_before_fetching() {
+    let cancel = Cancellation::default();
+    cancel.cancel();
+    let script = Script::new(|line| panic!("cancelled refresh must not run {line}"));
+    let mut engine = Engine::default();
+    engine.register(Homebrew::new(script.clone())).unwrap();
+    engine.register(HomebrewCask::new(script.clone())).unwrap();
+
+    assert_eq!(
+        engine.refresh_update_indexes(&cancel),
+        [BackendFailure {
+            backend: "homebrew".into(),
+            error: EngineError::Cancelled,
+        }]
+    );
+    assert!(script.calls().is_empty());
+}
+
+#[test]
+fn a_cancelled_homebrew_fetch_cancels_the_update_check() {
+    let cancel = Cancellation::default();
+    let script = brew(|line| match line {
+        "w:brew update" => Err(ExecutionError::Cancelled),
+        other => panic!("a cancelled fetch must not list: {other}"),
+    });
+    let mut engine = Engine::default();
+    engine.register(Homebrew::new(script.clone())).unwrap();
+    let report = engine.installed_for_updates(&cancel);
+    assert!(report.packages.is_empty());
+    assert_eq!(
+        report.failures,
+        [BackendFailure {
+            backend: "homebrew".into(),
+            error: EngineError::Cancelled,
+        }]
+    );
+}
+
+#[test]
+fn update_checks_fetch_homebrew_once_and_listings_do_not() {
+    let cancel = Cancellation::default();
+    let fetched = Arc::new(AtomicBool::new(false));
+    let script = brew({
+        let fetched = fetched.clone();
+        move |line| {
+            if line == "w:brew update" {
+                fetched.store(true, Ordering::SeqCst);
+                return ok("");
+            }
+            let fresh = fetched.load(Ordering::SeqCst);
+            let (version, outdated) = if fresh { ("2.0", true) } else { ("1.0", false) };
+            match line {
+                "brew info --json=v2 --formula --installed" => {
+                    ok(&formula_installed(version, outdated))
+                }
+                "brew info --json=v2 --cask --installed" => ok(&cask_installed(version, outdated)),
+                other => panic!("unexpected {other}"),
+            }
+        }
+    });
+    let mut engine = Engine::default();
+    engine.register(Homebrew::new(script.clone())).unwrap();
+    engine.register(HomebrewCask::new(script.clone())).unwrap();
+    let listed = engine.installed(&cancel);
+    assert!(listed.failures.is_empty(), "{:?}", listed.failures);
+    assert_eq!(brew_updates(&script), 0);
+    assert!(listed.packages.iter().all(|package| {
+        package.update == UpdateAvailability::Current
+            && package.installed_version.as_deref() == Some("1.0")
+            && package.candidate_version.as_deref() == Some("1.0")
+    }));
+    assert_eq!(listed.packages.len(), 2);
+
+    let checked = engine.installed_for_updates(&cancel);
+    assert!(checked.failures.is_empty(), "{:?}", checked.failures);
+    assert_eq!(brew_updates(&script), 1);
+    let mut sources = checked.successful_sources.clone();
+    sources.sort();
+    assert_eq!(sources, ["homebrew", "homebrew-cask"]);
+    for name in ["wget", "pkgdeck"] {
+        let package = checked
+            .packages
+            .iter()
+            .find(|package| package.id.name == name)
+            .unwrap();
+        assert_eq!(package.update, UpdateAvailability::Available, "{name}");
+        assert_eq!(package.installed_version.as_deref(), Some("1.0"));
+        assert_eq!(package.candidate_version.as_deref(), Some("2.0"));
+    }
+
+    // The next check fetches again.
+    let again = engine.installed_for_updates(&cancel);
+    assert!(again.failures.is_empty(), "{:?}", again.failures);
+    assert_eq!(brew_updates(&script), 2);
+    assert!(again
+        .packages
+        .iter()
+        .all(|package| package.update == UpdateAvailability::Available));
+}
+
+#[test]
+fn a_failed_homebrew_fetch_is_shared_and_keeps_the_known_packages() {
+    let cancel = Cancellation::default();
+    let script = brew(|line| {
+        if line == "w:brew update" {
+            return failed(1);
+        }
+        match line {
+            "brew info --json=v2 --formula --installed" => ok(&formula_installed("1.0", false)),
+            "brew info --json=v2 --cask --installed" => ok(&cask_installed("1.0", false)),
+            other => panic!("unexpected {other}"),
+        }
+    });
+    let mut engine = Engine::default();
+    engine.register(Homebrew::new(script.clone())).unwrap();
+    engine.register(HomebrewCask::new(script.clone())).unwrap();
+    let report = engine.installed_for_updates(&cancel);
+    assert_eq!(brew_updates(&script), 1);
+    assert!(
+        report.successful_sources.is_empty(),
+        "{:?}",
+        report.successful_sources
+    );
+    assert_eq!(report.packages.len(), 2);
+    assert!(report
+        .packages
+        .iter()
+        .all(|package| package.update == UpdateAvailability::Current));
+    assert_eq!(report.failures.len(), 2);
+    let mut backends: Vec<_> = report
+        .failures
+        .iter()
+        .map(|failure| failure.backend.as_str())
+        .collect();
+    backends.sort();
+    assert_eq!(backends, ["homebrew", "homebrew-cask"]);
+    for failure in &report.failures {
+        match &failure.error {
+            EngineError::Execution(ExecutionError::Failed(completion)) => {
+                assert_eq!(completion.code, Some(1));
+            }
+            other => panic!("expected the shared brew failure, got {other:?}"),
+        }
+    }
 }
 
 #[test]

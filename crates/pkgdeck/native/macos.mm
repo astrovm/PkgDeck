@@ -136,7 +136,6 @@ struct MacTray {
             return false;
         }
         __block bool began = false;
-        __block bool finished = false;
         id observer = [[NSNotificationCenter defaultCenter]
             addObserverForName:NSMenuDidBeginTrackingNotification
                         object:nil
@@ -151,12 +150,14 @@ struct MacTray {
                             break;
                         }
                     }];
-        // Tracking runs a nested run loop, so this runs while the menu is open
-        // if the notification above did not see our items.
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            if (!finished)
-                [menu cancelTracking];
-        });
+        // Tracking runs a nested run loop, so this fires while the menu is open
+        // if the notification above did not see our items. It repeats until
+        // this method returns: a slow click can outlast one firing and leave
+        // the fallback popup below open with nothing left to close it.
+        NSTimer *dismiss = [NSTimer timerWithTimeInterval:0.5
+                                                  repeats:YES
+                                                    block:^(NSTimer *) { [menu cancelTracking]; }];
+        [[NSRunLoop mainRunLoop] addTimer:dismiss forMode:NSRunLoopCommonModes];
         NSEvent *event = [NSEvent otherEventWithType:NSEventTypeApplicationDefined
                                              location:NSZeroPoint
                                         modifierFlags:0
@@ -186,8 +187,8 @@ struct MacTray {
                 std::strncpy(crashName, name, sizeof crashName - 1);
             qWarning("PKGDECK_TRAY_CRASH %s: %s", name ? name : "", exception.reason.UTF8String ?: "");
         }
+        [dismiss invalidate];
         [menu cancelTracking];
-        finished = true;
         [[NSNotificationCenter defaultCenter] removeObserver:observer];
         if (crashName[0] != '\0') {
             *failure = QString::fromUtf8(crashName);

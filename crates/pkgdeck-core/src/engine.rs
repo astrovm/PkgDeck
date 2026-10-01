@@ -4,7 +4,13 @@ use crate::{
     package::*,
     process::{Cancellation, ExecutionError},
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Condvar, Mutex,
+    },
+};
 
 #[derive(serde::Serialize, Clone, Debug, Eq, PartialEq)]
 pub struct BackendFailure {
@@ -82,6 +88,102 @@ impl From<ExecutionError> for EngineError {
     }
 }
 
+/// One in-flight update check. Formulae and casks both ask for `brew update`;
+/// the first runs it and the other waits, then both see the same result.
+struct IndexRefresh {
+    started: bool,
+    finished: bool,
+    error: Option<EngineError>,
+}
+static UPDATE_CHECKS: Mutex<Option<HashMap<u64, IndexRefresh>>> = Mutex::new(None);
+static UPDATE_CHECK_TURN: Condvar = Condvar::new();
+static NEXT_UPDATE_CHECK: AtomicU64 = AtomicU64::new(1);
+
+fn update_checks() -> std::sync::MutexGuard<'static, Option<HashMap<u64, IndexRefresh>>> {
+    UPDATE_CHECKS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+fn begin_update_check_token() -> u64 {
+    let token = NEXT_UPDATE_CHECK.fetch_add(1, Ordering::Relaxed);
+    update_checks().get_or_insert_with(HashMap::new).insert(
+        token,
+        IndexRefresh {
+            started: false,
+            finished: false,
+            error: None,
+        },
+    );
+    token
+}
+fn end_update_check_token(token: u64) {
+    if let Some(checks) = update_checks().as_mut() {
+        checks.remove(&token);
+    }
+}
+/// Run `refresh` once for `token`. A second caller with the same token waits
+/// and returns the first result, so two backends cannot fetch twice. If the
+/// runner stops early, the waiter still wakes.
+pub(crate) fn once_per_check(
+    token: u64,
+    refresh: impl FnOnce() -> Result<(), EngineError>,
+) -> Result<(), EngineError> {
+    loop {
+        let mut checks = update_checks();
+        let Some(gate) = checks.as_mut().and_then(|map| map.get_mut(&token)) else {
+            return Ok(());
+        };
+        if gate.finished {
+            return match gate.error.clone() {
+                Some(error) => Err(error),
+                None => Ok(()),
+            };
+        }
+        if gate.started {
+            drop(
+                UPDATE_CHECK_TURN
+                    .wait(checks)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            );
+            continue;
+        }
+        gate.started = true;
+        drop(checks);
+        // Drop publishes the outcome, including when `refresh` panics, so the
+        // waiter cannot sit on the condvar forever.
+        let mut finish = CheckFinish {
+            token,
+            outcome: None,
+        };
+        let result = refresh();
+        finish.outcome = Some(result.clone());
+        return result;
+    }
+}
+struct CheckFinish {
+    token: u64,
+    outcome: Option<Result<(), EngineError>>,
+}
+impl Drop for CheckFinish {
+    fn drop(&mut self) {
+        let error = match self.outcome.take() {
+            Some(Ok(())) => None,
+            Some(Err(error)) => Some(error),
+            None => Some(EngineError::Execution(ExecutionError::Invalid(
+                "update check stopped before it finished".into(),
+            ))),
+        };
+        if let Some(gate) = update_checks()
+            .as_mut()
+            .and_then(|checks| checks.get_mut(&self.token))
+        {
+            gate.finished = true;
+            gate.error = error;
+        }
+        UPDATE_CHECK_TURN.notify_all();
+    }
+}
+
 /// Implementations use documented APIs/structured output and the host boundary for commands.
 /// Cancellation must be propagated to reads; native writes retain their deferred-cancel semantics.
 pub trait Backend: Send {
@@ -97,6 +199,23 @@ pub trait Backend: Send {
     }
     fn installed(&mut self, _cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
         Err(self.unsupported(Capability::Installed))
+    }
+    /// Join an update check. Backends that share one refresh (Homebrew
+    /// formulae and casks share `brew update`) keep `token` until the check
+    /// ends. `None` is every other query, which must not fetch.
+    fn arm_update_check(&mut self, _token: Option<u64>) {}
+    /// Whether update checks need an explicit metadata refresh. This is a
+    /// cheap declaration: non-participants are not detected just to refresh.
+    fn has_update_index(&self) -> bool {
+        false
+    }
+    /// Refresh metadata before an update check lists installed packages.
+    /// Listing Homebrew sets `HOMEBREW_NO_AUTO_UPDATE`, and its `outdated`
+    /// flag is computed from the local tap, so a new cask stays invisible
+    /// until something runs `brew update`. Armed Homebrew backends do that
+    /// once per check. Everything else leaves lists as they are.
+    fn refresh_update_index(&mut self, _cancel: &Cancellation) -> Result<(), EngineError> {
+        Ok(())
     }
     /// Failures from skipped portions of the most recent successful search or
     /// installed query. These accompany usable rows, but prevent the source
@@ -498,6 +617,76 @@ impl Engine {
     pub fn installed(&mut self, cancel: &Cancellation) -> PackageReport {
         self.query(None, cancel)
     }
+    /// Installed packages after refreshing metadata that an update check
+    /// would otherwise miss. Homebrew fetches its taps once; formulae and
+    /// casks share that fetch. Other managers list as [`installed`] does.
+    pub fn installed_for_updates(&mut self, cancel: &Cancellation) -> PackageReport {
+        self.checking_updates(|engine| engine.installed(cancel))
+    }
+    /// [`installed_stream`](Self::installed_stream) for an update check.
+    /// Homebrew's rows wait on `brew update`; other sources still arrive as
+    /// they answer.
+    pub fn installed_for_updates_stream(
+        &mut self,
+        cancel: &Cancellation,
+        emit: &mut dyn FnMut(PackageReport),
+    ) -> PackageReport {
+        self.checking_updates(|engine| engine.installed_stream(cancel, emit))
+    }
+    /// [`installed_for_mutation`](Self::installed_for_mutation) after the same
+    /// refresh as [`installed_for_updates`](Self::installed_for_updates).
+    /// `pkd upgrade` with no names uses it so a full upgrade sees a new cask.
+    pub fn installed_for_upgrade(&mut self, cancel: &Cancellation) -> PackageReport {
+        self.checking_updates(|engine| engine.installed_for_mutation(cancel))
+    }
+    /// Fetch update metadata without listing. Named upgrades call this once,
+    /// then look packages up. Failures are returned and not cached as a list.
+    pub fn refresh_update_indexes(&mut self, cancel: &Cancellation) -> Vec<BackendFailure> {
+        self.checking_updates(|engine| {
+            let mut failures = Vec::new();
+            for (id, backend) in engine
+                .backends
+                .iter_mut()
+                .filter(|(_, backend)| backend.has_update_index())
+            {
+                if cancel.requested() {
+                    failures.push(BackendFailure {
+                        backend: id.clone(),
+                        error: EngineError::Cancelled,
+                    });
+                    break;
+                }
+                let result = Self::available_backend(
+                    &mut **backend,
+                    id,
+                    engine.detected.get(id).cloned(),
+                    cancel,
+                )
+                .and_then(|()| backend.refresh_update_index(cancel));
+                if let Err(error) = result {
+                    failures.push(BackendFailure {
+                        backend: id.clone(),
+                        error,
+                    });
+                }
+            }
+            failures
+        })
+    }
+    /// Arm every backend, run `body`, then disarm. The token stays live for
+    /// the whole call, including worker threads `body` spawns.
+    fn checking_updates<T>(&mut self, body: impl FnOnce(&mut Self) -> T) -> T {
+        let token = begin_update_check_token();
+        for backend in self.backends.values_mut() {
+            backend.arm_update_check(Some(token));
+        }
+        let result = body(self);
+        for backend in self.backends.values_mut() {
+            backend.arm_update_check(None);
+        }
+        end_update_check_token(token);
+        result
+    }
     /// Mutation planning excludes inventory-only sources, including their
     /// errors: they cannot contribute an operation or an ambiguous target.
     pub fn installed_for_mutation(&mut self, cancel: &Cancellation) -> PackageReport {
@@ -787,6 +976,48 @@ impl Engine {
         if !backend.capabilities().contains(&capability) {
             return Err(backend.unsupported(capability));
         }
+        Self::available_backend(backend, id, noted, cancel)?;
+        // An update check refreshes before listing. A fetch failure still
+        // lists what is already known and reports the failure beside those rows.
+        let mut index_error = None;
+        if query.is_none() {
+            match backend.refresh_update_index(cancel) {
+                Ok(()) => {}
+                Err(EngineError::Cancelled) => return Err(EngineError::Cancelled),
+                Err(error) => index_error = Some(error),
+            }
+        }
+        let packages = match query {
+            Some(name) if exact => backend.lookup(name, cancel)?,
+            Some(query) => backend.search(query, cancel)?,
+            None => backend.installed(cancel)?,
+        };
+        let mut seen = BTreeSet::new();
+        if packages.iter().any(|p| {
+            p.id.backend != id
+                || !seen.insert(&p.id)
+                || (query.is_none() && p.installed_version.is_none())
+        }) {
+            return Err(EngineError::InvalidResponse {
+                backend: id.into(),
+                reason: "foreign/duplicate identity or missing installed state".into(),
+            });
+        }
+        let mut errors = backend.query_errors();
+        if let Some(error) = index_error {
+            errors.insert(0, error);
+        }
+        Ok((packages, errors))
+    }
+
+    /// Queries and index refreshes honor the same cached detection outcomes.
+    /// Callers check cancellation first.
+    fn available_backend(
+        backend: &mut dyn Backend,
+        id: &str,
+        noted: Option<Availability>,
+        cancel: &Cancellation,
+    ) -> Result<(), EngineError> {
         match noted {
             Some(Availability::Available) => {}
             Some(Availability::Unavailable(reason)) => {
@@ -809,23 +1040,7 @@ impl Engine {
                 }
             }
         }
-        let packages = match query {
-            Some(name) if exact => backend.lookup(name, cancel)?,
-            Some(query) => backend.search(query, cancel)?,
-            None => backend.installed(cancel)?,
-        };
-        let mut seen = BTreeSet::new();
-        if packages.iter().any(|p| {
-            p.id.backend != id
-                || !seen.insert(&p.id)
-                || (query.is_none() && p.installed_version.is_none())
-        }) {
-            return Err(EngineError::InvalidResponse {
-                backend: id.into(),
-                reason: "foreign/duplicate identity or missing installed state".into(),
-            });
-        }
-        Ok((packages, backend.query_errors()))
+        Ok(())
     }
 
     pub fn details(
@@ -1474,5 +1689,57 @@ mod operation_plan_tests {
             );
             assert_eq!(writes.load(Ordering::SeqCst), usize::from(!drift));
         }
+    }
+}
+
+#[cfg(test)]
+mod update_check_tests {
+    use super::*;
+    use std::{sync::mpsc, thread, time::Duration};
+
+    #[test]
+    fn a_check_without_a_live_token_does_not_refresh() {
+        assert_eq!(
+            once_per_check(0, || panic!("no live check, nothing to refresh")),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn a_second_caller_waits_for_the_first_result() {
+        let token = begin_update_check_token();
+        let (started_tx, started) = mpsc::channel();
+        let (release, release_rx) = mpsc::channel::<()>();
+        let first = thread::spawn(move || {
+            once_per_check(token, || {
+                started_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Err(EngineError::Cancelled)
+            })
+        });
+        started.recv().unwrap();
+        let second =
+            thread::spawn(move || once_per_check(token, || panic!("the first caller refreshes")));
+        // Let the second caller reach the wait before the first finishes.
+        thread::sleep(Duration::from_millis(100));
+        release.send(()).unwrap();
+        assert_eq!(first.join().unwrap(), Err(EngineError::Cancelled));
+        assert_eq!(second.join().unwrap(), Err(EngineError::Cancelled));
+        end_update_check_token(token);
+    }
+
+    #[test]
+    fn a_refresh_that_panics_still_finishes_the_check() {
+        let token = begin_update_check_token();
+        let panicked =
+            std::panic::catch_unwind(|| once_per_check(token, || panic!("refresh stopped")));
+        assert!(panicked.is_err());
+        assert_eq!(
+            once_per_check(token, || panic!("the check already ran")),
+            Err(EngineError::Execution(ExecutionError::Invalid(
+                "update check stopped before it finished".into()
+            )))
+        );
+        end_update_check_token(token);
     }
 }

@@ -465,6 +465,15 @@ jobs:
         # Installs this job's own package, instead of a separate job waiting
         # for a macOS runner and downloading it again.
         run: bash scripts/tests/homebrew-cask.sh build/artifacts
+      - name: Upload installed startup diagnostics
+        if: ${{ !cancelled() && needs.reviewed.outputs.tested != 'true' }}
+        # Diagnostics only: an upload outage must not fail a passing build.
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: macos-cask-startup-${{ matrix.arch }}
+          path: ${{ runner.temp }}/pkgdeck-macos-startup
+          if-no-files-found: ignore
       - name: Upload app
         if: needs.reviewed.outputs.tested != 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

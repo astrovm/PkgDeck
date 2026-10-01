@@ -29,7 +29,8 @@ script="
     $adduser
     printf 'pkgdeck-test ALL=(root) NOPASSWD: $writers\\n' >/etc/sudoers.d/pkgdeck
     run() { sudo -u pkgdeck-test /opt/pkd --json --yes --auth sudo --from $backend --arch \$(uname -m) \"\$@\"; }
-    success() { run \"\$@\" | grep -q '\"exit_code\":0'; }
+    # Print pkd's report when a step fails; grep -q alone would hide it.
+    success() { local out; out=\$(run \"\$@\") || true; grep -q '\"exit_code\":0' <<<\"\$out\" || { printf '%s\\n' \"\$out\" >&2; return 1; }; }
     success sources
     success search jq
     success info jq

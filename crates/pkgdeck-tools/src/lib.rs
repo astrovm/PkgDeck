@@ -417,13 +417,25 @@ pub fn gui_lifecycle(args: &[String]) {
     call.extend(["--auth".into(), "sudo".into()]);
     let mut gui = Desktop::new();
     gui.launch(&call);
+    // The Updates preload runs `brew update` in the background, which moves
+    // the fixture's tap to 2.0. Let it land first so it cannot race the
+    // install below or the query count.
+    until(
+        || {
+            fs::read(dir.0.join("state.json"))
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                .is_some_and(|current| current["candidate"] == "2.0")
+        },
+        30,
+    );
     gui.search("fixture");
     // Selection can still be fetching details. Wait until that query lands
     // so the next arrow is what the assertion measures.
     let queries = stable_bytes(&dir.0.join("queries.log"));
     gui.key("Up");
     assert_eq!(fs::read(dir.0.join("queries.log")).unwrap(), queries);
-    for (op, installed) in [("install", json!("1.0")), ("update", json!("1.0"))] {
+    for (op, installed) in [("install", json!("2.0")), ("update", json!("2.0"))] {
         gui.write(op, "fixture");
         assert!(
             dir.0.join("state.json").exists(),
