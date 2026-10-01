@@ -178,18 +178,6 @@ DeckScrollView {
                         wrapMode: Text.WordWrap
                         Layout.fillWidth: true
                     }
-                    Controls.Label {
-                        objectName: "notificationAvailability"
-                        // Only shown when notifications won't work as expected.
-                        visible: text.length > 0
-                        text: !page.app.trayAvailable ? "No " + (page.app.macOS ? "menu bar icon" : "system tray") + ", so no notifications"
-                            : !page.app.notificationAvailable ? (page.app.macOS ? "Notifications are off in System Settings" : "This system tray can't show notifications")
-                            : page.app.notificationPermissionNeeded ? "Notifications show Script Editor's icon until you allow PkgDeck"
-                            : ""
-                        color: Theme.muted
-                        wrapMode: Text.WordWrap
-                        Layout.fillWidth: true
-                    }
                     ActionButton {
                         objectName: "notificationSettingsButton"
                         text: "Notification settings"
@@ -198,13 +186,38 @@ DeckScrollView {
                         onClicked: page.app.notificationSettingsRequested()
                     }
                 }
-                ActionButton {
-                    objectName: "testNotificationButton"
-                    text: "Test notification"
-                    symbol: "bell"
-                    enabled: page.store.backgroundMode && page.app.notificationAvailable
-                    onClicked: page.app.testNotificationRequested()
+                RowLayout {
+                    spacing: 8
                     Layout.alignment: page.stacked ? Qt.AlignLeft : (Qt.AlignRight | Qt.AlignVCenter)
+                    // A warning icon, only when notifications won't work as
+                    // expected; hover it for why.
+                    DeckIcon {
+                        id: notificationWarning
+                        objectName: "notificationAvailability"
+                        readonly property string text: !page.app.trayAvailable ? "No " + (page.app.macOS ? "menu bar icon" : "system tray") + ", so no notifications"
+                            : !page.app.notificationAvailable ? (page.app.macOS ? "Notifications are off in System Settings" : "This system tray can't show notifications")
+                            : page.app.notificationPermissionNeeded ? "Notifications show Script Editor's icon until you allow PkgDeck"
+                            : ""
+                        name: "warning"
+                        ink: Theme.warning
+                        visible: text.length > 0
+                        Layout.preferredWidth: 18
+                        Layout.preferredHeight: 18
+                        Accessible.ignored: false
+                        Accessible.role: Accessible.StaticText
+                        Accessible.name: text
+                        HoverHandler { id: notificationWarningHover }
+                        Controls.ToolTip.visible: notificationWarningHover.hovered
+                        Controls.ToolTip.delay: 300
+                        Controls.ToolTip.text: text
+                    }
+                    ActionButton {
+                        objectName: "testNotificationButton"
+                        text: "Test notification"
+                        symbol: "bell"
+                        enabled: page.store.backgroundMode && page.app.notificationAvailable
+                        onClicked: page.app.testNotificationRequested()
+                    }
                 }
             }
         }
