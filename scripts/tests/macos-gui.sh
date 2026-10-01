@@ -84,6 +84,9 @@ for ((run=1; run<=runs; run++)); do
         # A failed startup must retain the main-thread stack, not only a job timeout.
         /usr/bin/sample "$pid" 2 -file "$logs/cocoa-$run.sample.txt" || true
         cat "$logs/cocoa-$run.log"
+        # Print the stacks here too: a failed step can end the job before
+        # its diagnostics are uploaded.
+        sed -n '/^Call graph:/,/^Total number in stack/p' "$logs/cocoa-$run.sample.txt" 2>/dev/null | head -n 200 || true
         echo "Installed Cocoa startup did not exit within 60 seconds (run $run of $runs)" >&2
         exit 1
     fi
