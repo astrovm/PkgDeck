@@ -4,8 +4,43 @@
 #import <UserNotifications/UserNotifications.h>
 
 #include <QMetaObject>
+#include <QBuffer>
+#include <QGuiApplication>
+#include <QIcon>
 #include <QProcess>
+#include <QPixmap>
+#include <QStringList>
 #include <QtGlobal>
+#include <cstring>
+#include <utility>
+
+@interface PkgDeckStatusDelegate : NSObject
+@property(nonatomic, assign) pkgdeck::MacNative *owner;
+- (void)open:(id)sender;
+- (void)check:(id)sender;
+- (void)quit:(id)sender;
+@end
+
+@implementation PkgDeckStatusDelegate
+- (void)post:(void (*)(pkgdeck::MacNative *))signal {
+    pkgdeck::MacNative *owner = self.owner;
+    if (!owner)
+        return;
+    QMetaObject::invokeMethod(owner, [owner, signal] { signal(owner); }, Qt::QueuedConnection);
+}
+- (void)open:(id)sender {
+    Q_UNUSED(sender);
+    [self post:[](pkgdeck::MacNative *owner) { emit owner->trayOpenRequested(); }];
+}
+- (void)check:(id)sender {
+    Q_UNUSED(sender);
+    [self post:[](pkgdeck::MacNative *owner) { emit owner->trayCheckRequested(); }];
+}
+- (void)quit:(id)sender {
+    Q_UNUSED(sender);
+    [self post:[](pkgdeck::MacNative *owner) { emit owner->trayQuitRequested(); }];
+}
+@end
 
 @interface PkgDeckNotificationDelegate : NSObject <UNUserNotificationCenterDelegate>
 @property(nonatomic, assign) pkgdeck::MacNative *owner;
@@ -29,6 +64,174 @@
 @end
 
 namespace pkgdeck {
+struct MacTray {
+    NSStatusItem *item;
+    PkgDeckStatusDelegate *delegate;
+
+    explicit MacTray(MacNative *owner) {
+        delegate = [[PkgDeckStatusDelegate alloc] init];
+        delegate.owner = owner;
+        item = [[[NSStatusBar systemStatusBar] statusItemWithLength:NSSquareStatusItemLength] retain];
+        NSMenu *menu = [[NSMenu alloc] initWithTitle:@"PkgDeck"];
+        menu.autoenablesItems = NO;
+        for (const auto &[title, action] : {
+                 std::pair<NSString *, SEL>{@"Open", @selector(open:)},
+                 std::pair<NSString *, SEL>{@"Check now", @selector(check:)},
+                 std::pair<NSString *, SEL>{@"Quit", @selector(quit:)}}) {
+            NSMenuItem *entry = [[NSMenuItem alloc] initWithTitle:title action:action keyEquivalent:@""];
+            entry.target = delegate;
+            [menu addItem:entry];
+            [entry release];
+        }
+        // AppKit opens this menu itself. Qt's tray does the same and then
+        // reads NSEvent.clickCount, which throws on macOS 27 unless the
+        // current event is a mouse event. Nothing here reads a click count.
+        item.menu = menu;
+        [menu release];
+        const int points = 18;
+        const qreal scale = qGuiApp ? qMax(qreal(1), qGuiApp->devicePixelRatio()) : 1;
+        QByteArray png;
+        QBuffer buffer(&png);
+        buffer.open(QIODevice::WriteOnly);
+        QIcon(QStringLiteral(":/pkgdeck/logo-template.svg"))
+            .pixmap(QSize(points, points) * scale)
+            .toImage()
+            .save(&buffer, "PNG");
+        NSImage *image = [[NSImage alloc] initWithData:[NSData dataWithBytes:png.constData() length:size_t(png.size())]];
+        if (image) {
+            image.size = NSMakeSize(points, points);
+            [image setTemplate:YES];
+        }
+        if (item.button) {
+            item.button.image = image;
+            item.button.imageScaling = NSImageScaleProportionallyDown;
+            item.button.toolTip = @"PkgDeck";
+            item.button.accessibilityLabel = @"PkgDeck";
+        }
+        [image release];
+    }
+
+    ~MacTray() {
+        delegate.owner = nullptr;
+        [[NSStatusBar systemStatusBar] removeStatusItem:item];
+        [item release];
+        [delegate release];
+    }
+
+    QString titles() const {
+        QStringList lines;
+        for (NSMenuItem *entry in item.menu.itemArray)
+            lines.append(QString::fromUtf8(entry.title.UTF8String));
+        return lines.join(QLatin1Char('\n'));
+    }
+
+    // Shows the menu the way a click does, then cancels tracking. A non-mouse
+    // event is current first: messaging clickCount on that event throws, which
+    // is the abort in Qt's tray. Nothing in this method reads a click count.
+    bool openAndDismiss(QString *failure) {
+        NSMenu *menu = item.menu;
+        NSStatusBarButton *button = item.button;
+        if (!menu || !button) {
+            *failure = QStringLiteral("missing");
+            return false;
+        }
+        __block bool began = false;
+        id observer = [[NSNotificationCenter defaultCenter]
+            addObserverForName:NSMenuDidBeginTrackingNotification
+                        object:nil
+                         queue:nil
+                    usingBlock:^(NSNotification *note) {
+                        NSMenu *tracking = note.object;
+                        for (NSMenuItem *entry in tracking.itemArray) {
+                            if (entry.target != delegate)
+                                continue;
+                            began = true;
+                            dispatch_async(dispatch_get_main_queue(), ^{ [tracking cancelTracking]; });
+                            break;
+                        }
+                    }];
+        // Tracking runs a nested run loop, so this fires while the menu is open
+        // if the notification above did not see our items. It repeats until
+        // this method returns: a slow click can outlast one firing and leave
+        // the fallback popup below open with nothing left to close it.
+        NSTimer *dismiss = [NSTimer timerWithTimeInterval:0.5
+                                                  repeats:YES
+                                                    block:^(NSTimer *) { [menu cancelTracking]; }];
+        [[NSRunLoop mainRunLoop] addTimer:dismiss forMode:NSRunLoopCommonModes];
+        NSEvent *event = [NSEvent otherEventWithType:NSEventTypeApplicationDefined
+                                             location:NSZeroPoint
+                                        modifierFlags:0
+                                            timestamp:NSProcessInfo.processInfo.systemUptime
+                                         windowNumber:button.window ? button.window.windowNumber : 0
+                                              context:nil
+                                              subtype:0
+                                                data1:0
+                                                data2:0];
+        [NSApp postEvent:event atStart:YES];
+        // Dequeueing the event makes it current. Menu tracking then starts
+        // while that event is still current, which is when clickCount throws.
+        (void)[NSApp nextEventMatchingMask:NSEventMaskApplicationDefined
+                                  untilDate:[NSDate distantPast]
+                                     inMode:NSDefaultRunLoopMode
+                                    dequeue:YES];
+        char crashName[128] = {};
+        @try {
+            [button performClick:nil];
+            if (!began) {
+                const NSPoint location = NSMakePoint(NSMidX(button.bounds), NSMinY(button.bounds));
+                [menu popUpMenuPositioningItem:nil atLocation:location inView:button];
+            }
+        } @catch (NSException *exception) {
+            const char *name = exception.name.UTF8String;
+            if (name)
+                std::strncpy(crashName, name, sizeof crashName - 1);
+            qWarning("PKGDECK_TRAY_CRASH %s: %s", name ? name : "", exception.reason.UTF8String ?: "");
+        }
+        [dismiss invalidate];
+        [menu cancelTracking];
+        [[NSNotificationCenter defaultCenter] removeObserver:observer];
+        if (crashName[0] != '\0') {
+            *failure = QString::fromUtf8(crashName);
+            return false;
+        }
+        if (!began) {
+            *failure = QStringLiteral("unopened");
+            return false;
+        }
+        return true;
+    }
+};
+
+MacNative::~MacNative() = default;
+
+bool MacNative::trayAvailable() const {
+    return QGuiApplication::platformName() == QStringLiteral("cocoa");
+}
+
+bool MacNative::trayVisible() const {
+    return bool(tray);
+}
+
+void MacNative::setTrayVisible(bool visible) {
+    if (!trayAvailable() || visible == trayVisible()) return;
+    if (visible)
+        tray = std::make_unique<MacTray>(this);
+    else
+        tray.reset();
+    emit trayVisibleChanged();
+}
+
+QString MacNative::exerciseTrayMenu() {
+    if (!tray || !tray->item.menu || !tray->item.button)
+        return QStringLiteral("missing");
+    if (!tray->item.button.window)
+        return QStringLiteral("no-status-window");
+    QString failure;
+    if (!tray->openAndDismiss(&failure))
+        return failure;
+    return tray->titles();
+}
+
 MacNative::MacNative(QObject *parent) : QObject(parent) {
     // The notification center needs a bundle identifier; a bare binary
     // (a development build or a test) would crash asking for it.

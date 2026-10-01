@@ -18,6 +18,10 @@ case "$1" in
         case "$1" in
             update)
                 [[ $# == 1 ]]
+                if [[ -f $HOME/fail-update ]]; then
+                    echo 'synthetic update failure' >&2
+                    exit 1
+                fi
                 filter='.candidate="2.0"'
                 ;;
             uninstall)

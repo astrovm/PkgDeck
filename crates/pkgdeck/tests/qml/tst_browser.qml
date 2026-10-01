@@ -100,6 +100,8 @@ TestCase {
         function refreshActivity() {}
         function cancelQueued() {}
         function checkUpdates(sources, enabled, offline, metered, force) {}
+        property int checkInterval: 0
+        function setCheckInterval(minutes) { checkInterval = minutes; }
         function restoreNotificationHistory(history) { lastRestoredHistory = history; notification_history = history; }
         function acknowledgeNotification() {}
         function setAutostart(enabled) { return true; }
@@ -556,6 +558,22 @@ TestCase {
         verify(findChild(browser, "resultsBox").visible);
         verify(!findChild(browser, "sourceFailureNotice").visible);
         verify(!findChild(browser, "cleanAllButton").visible);
+    }
+    function test_check_interval_setting_reaches_the_backend() {
+        compare(fake.checkInterval, browser.store.checkInterval);
+        browser.openView("Settings");
+        const interval = findChild(browser, "checkIntervalSetting");
+        compare(interval.currentText, "30 minutes");
+        interval.currentIndex = 2;
+        interval.activated(2);
+        compare(browser.store.checkInterval, 60);
+        compare(fake.checkInterval, 60);
+        browser.backgroundMode = false;
+        verify(!interval.enabled);
+        browser.backgroundMode = true;
+        interval.currentIndex = 1;
+        interval.activated(1);
+        compare(fake.checkInterval, 30);
     }
     function test_search_clears_old_results_and_appearance_setting_applies() {
         browser.openView("Installed");

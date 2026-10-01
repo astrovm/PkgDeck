@@ -632,7 +632,7 @@ pub fn dispatch_with(
                 Ok(operations)
             }
             Commands::Upgrade { names, .. } if names.is_empty() => {
-                let report = engine.installed_for_mutation(cancel);
+                let report = engine.installed_for_upgrade(cancel);
                 if !report.failures.is_empty() {
                     return Err(EngineError::Incomplete(report.failures));
                 }
@@ -672,6 +672,15 @@ pub fn dispatch_with(
             Commands::Install { names }
             | Commands::Remove { names }
             | Commands::Upgrade { names, .. } => {
+                // One fetch for the whole command. Each name is then looked
+                // up against the tap `brew update` just wrote. A failed
+                // fetch stops only upgrades from that source: the stale tap
+                // could hide the new version.
+                let refresh_failures = if matches!(command, Commands::Upgrade { .. }) {
+                    engine.refresh_update_indexes(cancel)
+                } else {
+                    Vec::new()
+                };
                 let mut operations = Vec::new();
                 let lookup = match command {
                     Commands::Install { .. } => Lookup::Install,
@@ -691,6 +700,12 @@ pub fn dispatch_with(
                             return Err(error);
                         }
                     };
+                    if let Some(failure) = refresh_failures
+                        .iter()
+                        .find(|failure| failure.backend == id.backend)
+                    {
+                        return Err(failure.error.clone());
+                    }
                     let operation = match command {
                         Commands::Install { .. } => Operation::Install(id),
                         Commands::Remove { .. } => Operation::Remove(id),

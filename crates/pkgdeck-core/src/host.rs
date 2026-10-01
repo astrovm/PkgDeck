@@ -601,6 +601,8 @@ impl Host {
     }
 
     /// Homebrew always runs as the invoking user, with automatic unrelated work disabled.
+    /// Update checks call `brew update` themselves. `HOMEBREW_NO_AUTO_UPDATE` stays
+    /// set so `info` and `upgrade` do not fetch on their own.
     pub fn brew(
         &self,
         args: &[OsString],

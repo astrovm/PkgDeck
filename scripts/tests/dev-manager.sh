@@ -105,7 +105,11 @@ setup_micromamba() {
     *) platform=linux-64 ;;
     esac
     mkdir -p "$HOME/.local/bin"
-    curl -fsSL "https://micro.mamba.pm/api/micromamba/$platform/latest" | tar -xj -C "$HOME/.local" bin/micromamba
+    # The download server answers 503 now and then. Fetch to a file so curl
+    # can retry, then extract.
+    curl -fsSL --retry 5 --retry-delay 5 -o "$HOME/micromamba.tar.bz2" \
+        "https://micro.mamba.pm/api/micromamba/$platform/latest"
+    tar -xjf "$HOME/micromamba.tar.bz2" -C "$HOME/.local" bin/micromamba
     export MAMBA_ROOT_PREFIX="$HOME/micromamba"
     micromamba() { "$HOME/.local/bin/micromamba" "$@"; }
     micromamba --version
@@ -159,8 +163,10 @@ setup_nix() {
     nix --version
     # Nixpkgs 26.11 dropped Intel Macs; their users pin nixpkgs to the
     # 26.05 branch, which pkd then uses like any registry entry.
+    # Use its archive directly: github: resolves the branch through the
+    # rate-limited GitHub API shared by the hosted runners.
     if [[ $(uname -s) == Darwin && $(uname -m) == x86_64 ]]; then
-        nix registry add nixpkgs github:NixOS/nixpkgs/nixpkgs-26.05-darwin
+        nix registry add nixpkgs tarball+https://github.com/NixOS/nixpkgs/archive/refs/heads/nixpkgs-26.05-darwin.tar.gz
     fi
 }
 

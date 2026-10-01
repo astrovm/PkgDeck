@@ -81,6 +81,11 @@ only Docker or Podman and search for the full image name with its tag.
 ## Updates
 
 Updates lists package updates and, if `fwupdmgr` is installed, firmware updates.
+Opening this page, **Reload**, and the background check run `brew update` once
+before they read Homebrew. Formulae and casks share that fetch, so a newly
+published cask (including PkgDeck itself) can show up. The Installed page does
+not fetch. The first Updates load can take longer while Homebrew fetches;
+other sources still appear as they answer.
 
 ![Updates for an APT package and three npm tools, all checked](screenshots/updates.png)
 
@@ -302,16 +307,18 @@ See [supported install layouts and what removal keeps](cli.md#standalone-cli-too
 **Background checks** are on by default: PkgDeck checks for updates while it
 is running. Turn them off in Settings.
 
-- The first check runs about 30 seconds after launch, then at most every 30
-  minutes.
+- The first check runs about 30 seconds after launch, then at most once per
+  **Check every** interval: 15 minutes to a day, 30 minutes by default. The
+  Updates page refreshes in the background no more often than that either.
 - Checks wait while you're offline, on a metered connection, or while another
   package operation is running.
 - **Start in background at login** keeps checks running after you log in.
   On Linux it adds an autostart entry; on macOS it adds a LaunchAgent,
   `~/Library/LaunchAgents/io.github.astrovm.PkgDeck.plist`.
-- Click the tray icon (the menu bar icon on macOS) to show or hide the window.
-  Its menu has **Check now** and **Quit**. Clicking a notification opens
-  Updates.
+- On macOS, click the menu bar icon and choose **Open** to show the window.
+  Its menu also has **Check now** and **Quit**. Elsewhere, click the tray
+  icon to show or hide the window; that menu has **Check now** and **Quit**.
+  Clicking a notification opens Updates.
 - When your desktop has a system tray, closing the window keeps PkgDeck
   running there. Use **Quit** in the tray menu to exit. On macOS, Cmd+Q and
   **Quit PkgDeck** in the app menu quit too, Cmd+W closes the window to the
