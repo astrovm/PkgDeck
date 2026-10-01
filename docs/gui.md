@@ -198,6 +198,17 @@ entries. It never shows updates, because only evaluating the flake can tell;
 upgrade an entry with `pkd upgrade NAME --from nix`. See the
 [CLI guide](cli.md#choosing-packages).
 
+### Oh My Zsh
+
+**Oh My Zsh** lists the Oh My Zsh checkout (`$ZSH`, by default
+`~/.oh-my-zsh`) and every plugin and theme cloned with git into
+`$ZSH_CUSTOM/plugins` and `$ZSH_CUSTOM/themes` (by default `$ZSH/custom`).
+Plugins and themes are named `plugin/NAME` and `theme/NAME`. Update checks run
+`git fetch` in each; other listings never touch the network. Updating
+fast-forwards to the upstream branch, so a checkout with local commits or
+changes is left alone and reported as failed. A checkout that doesn't track a
+branch never shows updates. PkgDeck never installs or removes these.
+
 ### AUR
 
 On Arch, the **AUR** source lists installed packages that aren't in Pacman's

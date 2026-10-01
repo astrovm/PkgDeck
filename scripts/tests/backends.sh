@@ -18,7 +18,7 @@ native)
     [[ $(uname -m) == x86_64 ]] && backends=(dnf pacman aur zypper apk xbps snap toolbox distrobox)
     ;;
 dev)
-    backends=(cargo rustup go dotnet npm pnpm bun pip pipx uv mise pixi conda nix composer gem)
+    backends=(cargo rustup go dotnet npm pnpm bun pip pipx uv mise pixi conda nix composer gem oh-my-zsh)
     # MacPorts rides along on macOS rather than taking another macOS runner.
     [[ $(uname -s) == Darwin ]] && backends+=(macports)
     ;;

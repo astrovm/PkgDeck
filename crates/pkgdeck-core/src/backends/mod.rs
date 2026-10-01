@@ -14,6 +14,7 @@ mod go_bin;
 mod mac_apps;
 mod mas;
 mod nix;
+mod oh_my_zsh;
 mod pixi;
 mod rustup;
 mod standalone;
@@ -35,6 +36,7 @@ pub use go_bin::GoBinaries;
 pub use mac_apps::MacApps;
 pub use mas::MacAppStore;
 pub use nix::Nix;
+pub use oh_my_zsh::OhMyZsh;
 pub use pixi::Pixi;
 pub use rustup::Rustup;
 use serde::Deserialize;
@@ -108,6 +110,7 @@ pub const BACKEND_IDS: &[&str] = &[
     "nix",
     "composer",
     "gem",
+    "oh-my-zsh",
     "codex",
     "claude",
     "grok",
@@ -129,7 +132,7 @@ pub const BACKEND_IDS: &[&str] = &[
 pub fn never_installs(id: &str) -> bool {
     matches!(
         id,
-        "fwupd" | "mas" | "conda" | "system-image" | "aur" | "toolbox" | "distrobox"
+        "fwupd" | "mas" | "conda" | "system-image" | "aur" | "toolbox" | "distrobox" | "oh-my-zsh"
     ) || StandaloneTool::ALL.iter().any(|tool| tool.id() == id)
 }
 
@@ -242,6 +245,7 @@ pub fn display_name(id: &str) -> &str {
         "nix" => "Nix",
         "go" => "Go",
         "dotnet" => ".NET tools",
+        "oh-my-zsh" => "Oh My Zsh",
         "appimage" => "AppImage",
         "flatpak" => "Flatpak",
         "docker" => "Docker images",
@@ -919,6 +923,7 @@ impl Transport for NativeTransport {
             "uv" => "uv",
             "composer" => "Composer",
             "gem" => "RubyGems",
+            "git" => "Git",
             other => other,
         };
         self.host.dev_tool(executable, label, args, cancel, write)
@@ -5930,6 +5935,9 @@ fn native_engine_on(
     }
     if allowed("rustup") {
         candidates.push((Box::new(Rustup::new(transport())), probe_unless_listed));
+    }
+    if allowed("oh-my-zsh") {
+        candidates.push((Box::new(OhMyZsh::new(transport())), probe_unless_listed));
     }
     if allowed("nix") {
         candidates.push((Box::new(Nix::new(transport())), probe_unless_listed));

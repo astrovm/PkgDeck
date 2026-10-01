@@ -389,6 +389,9 @@ impl Host {
             "AVM_HOME",
             "FOUNDRY_DIR",
             "DISABLE_UPDATES",
+            // Oh My Zsh's checkout and its custom plugins and themes.
+            "ZSH",
+            "ZSH_CUSTOM",
         ] {
             if let Some(value) = source.get(&OsString::from(name)) {
                 env.insert(name.into(), value.clone());
@@ -402,6 +405,8 @@ impl Host {
             ("DOTNET_NOLOGO", "1"),
             ("DOTNET_GENERATE_ASPNET_CERTIFICATE", "false"),
             ("DOTNET_ADD_GLOBAL_TOOLS_TO_PATH", "false"),
+            // Git fails instead of waiting for a password nobody can type.
+            ("GIT_TERMINAL_PROMPT", "0"),
         ] {
             env.insert(name.into(), value.into());
         }

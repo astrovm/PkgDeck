@@ -1427,6 +1427,7 @@ fn source_display_name(id: &str) -> String {
         "conda" => "Conda",
         "composer" => "Composer",
         "gem" => "RubyGems",
+        "oh-my-zsh" => "Oh My Zsh",
         "fwupd" => "Firmware",
         "codex" => "Codex (standalone)",
         "claude" => "Claude Code (standalone)",

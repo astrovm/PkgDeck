@@ -572,6 +572,9 @@ fn venv_pip_runs_only_inside_explicit_absolute_environments() {
             ("MISE_INSTALLS_DIR", "/home/test/mise/installs"),
             ("MISE_STATE_DIR", "/home/test/mise/state"),
             ("XDG_STATE_HOME", "/home/test/.local/state"),
+            ("ZSH", "/home/test/.oh-my-zsh"),
+            ("ZSH_CUSTOM", "/home/test/zsh-custom"),
+            ("GIT_TERMINAL_PROMPT", "1"),
             ("LD_LIBRARY_PATH", "/app/lib"),
             ("PYTHONPATH", "/app/python"),
         ]),
@@ -593,9 +596,16 @@ fn venv_pip_runs_only_inside_explicit_absolute_environments() {
         "MISE_INSTALLS_DIR",
         "MISE_STATE_DIR",
         "XDG_STATE_HOME",
+        "ZSH",
+        "ZSH_CUSTOM",
     ] {
         assert!(host.var(name).is_some(), "{name}");
     }
+    // Git never waits for a password, whatever the session says.
+    assert_eq!(
+        host.var("GIT_TERMINAL_PROMPT").as_deref(),
+        Some("0".as_ref())
+    );
     assert!(host.var("LD_LIBRARY_PATH").is_none());
     assert!(host.var("PYTHONPATH").is_none());
     let cancel = Cancellation::default();
