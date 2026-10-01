@@ -798,9 +798,10 @@ TestCase {
             architecture: "x86_64", scope: "system", installed: "", candidate: "",
             reference: "runtime/org.example.Platform/x86_64/stable", update: "available"};
         fake.rows = JSON.stringify([runtime]);
-        wait(30);
+        const list = findChild(browser, "packageResults");
+        tryVerify(() => list.itemAtIndex(0) !== null);
         browser.choose(0);
-        const action = findChild(findChild(browser, "packageResults").itemAtIndex(0), "rowPackageAction");
+        const action = findChild(list.itemAtIndex(0), "rowPackageAction");
         verify(action.enabled);
         compare(action.symbol, "updates");
         mouseClick(action);
