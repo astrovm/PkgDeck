@@ -340,6 +340,37 @@ check. PkgDeck remembers what it already told you about, even after a restart.
 If one source fails, updates from the other sources still trigger a
 notification.
 
+### Automatic updates
+
+Turn on **Install updates automatically** and PkgDeck installs what a
+background check finds, then sends one notification saying what it
+installed. Each run shows in Activity, marked **Automatic**.
+
+- It waits while another change runs or waits for your confirmation, and
+  skips a source whose check failed.
+- Sources that run as you (Homebrew, Oh My Zsh, Cargo, npm and the other
+  development tools) update right away.
+- System packages need **Allow system updates without a password**. Turning
+  it on asks for your password once. On Linux it saves a polkit rule,
+  `/etc/polkit-1/rules.d/49-pkgdeck-unattended-USER.rules`, that lets
+  PkgDeck's helper refresh and update every package of APT, DNF, Pacman,
+  Zypper, system Flatpaks and Snaps for you, in your active local session,
+  without asking. The helper accepts nothing else in that mode: no installs,
+  no removals of named packages, no other commands. On macOS it saves a
+  sudoers entry, `/private/etc/sudoers.d/pkgdeck-unattended-USER`, for
+  MacPorts' two update commands only. Turning the setting off removes the
+  file. The helper must be installed in a folder only root can change (the
+  system Flatpak, Snap or a system package), not an AppImage, a user Flatpak
+  or Homebrew on Linux.
+- Without that approval, system packages still just notify you. PkgDeck
+  never shows a password prompt for an automatic update.
+- An APT update that would remove packages waits for **Update all**, unless
+  **Allow updates that remove packages** is on.
+- Firmware, the Mac App Store, apk, XBPS, the AUR, Toolbx and Distrobox are
+  never updated automatically.
+- A Homebrew cask whose installer needs an administrator password still asks
+  for it.
+
 Settings shows when the last check ran, how many updates it found, and
 whether your desktop supports notifications. **Test
 notification** sends a sample message.

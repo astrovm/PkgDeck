@@ -23,10 +23,12 @@ fixture=pkgdeck-fixture
 marker=/etc/pkgdeck-disposable-ci-runner
 repo=/etc/apt/sources.list.d/pkgdeck-fixture.list
 rule=/etc/polkit-1/rules.d/00-pkgdeck-fixture.rules
+unattended=/etc/polkit-1/rules.d/49-pkgdeck-unattended-pkgdeck-test.rules
+unattended_test=/etc/polkit-1/rules.d/48-pkgdeck-unattended-test.rules
 sudoers=/etc/sudoers.d/pkgdeck-fixture
 binaries=/opt/pkgdeck-bin
 runner=/usr/libexec/pkgdeck-host-runner
-for path in "$marker" "$repo" "$rule" "$sudoers" "$binaries" "$runner" /opt/pkgdeck-fixture-repo /tmp/pkgdeck-package; do
+for path in "$marker" "$repo" "$rule" "$unattended" "$unattended_test" "$sudoers" "$binaries" "$runner" /opt/pkgdeck-fixture-repo /tmp/pkgdeck-package; do
     [[ ! -e $path ]] || { echo "Fixture path already exists: $path" >&2; exit 1; }
 done
 for user in pkgdeck-test pkgdeck-denied; do
@@ -45,7 +47,7 @@ cleanup() {
     if dpkg-query -W -f='${db:Status-Status}' "$fixture" 2>/dev/null | grep -qx installed; then
         apt-get remove -y -qq "$fixture" >/dev/null 2>&1
     fi
-    rm -f -- "$rule" "$sudoers" "$repo" "$marker" "$runner"
+    rm -f -- "$rule" "$unattended" "$unattended_test" "$sudoers" "$repo" "$marker" "$runner"
     userdel -r pkgdeck-denied &>/dev/null
     userdel -r pkgdeck-test &>/dev/null
     rm -rf -- "$binaries" /opt/pkgdeck-fixture-repo /tmp/pkgdeck-package
@@ -140,4 +142,46 @@ for auth in sudo polkit; do
     batch_probe "$auth" remove
     [[ ! -e /usr/share/pkgdeck-fixture/version ]]
 done
+
+# Unattended updates: the helper saves its own rule for the user pkexec ran
+# for. The fixture rule above authorizes that one step.
+key=$(runuser -u pkgdeck-test -- /usr/bin/pkexec --disable-internal-agent "$runner" --allow-unattended-updates </dev/null)
+[[ $key == "$runner" ]]
+[[ -f $unattended && $(stat -c '%U %a' "$unattended") == 'root 644' ]]
+grep -q 'subject.user != "pkgdeck-test"' "$unattended"
+grep -qF "program == \"$runner\"" "$unattended"
+# A runner session has no active local seat, so test a copy without that
+# one condition: it shows what polkit's program and command_line details
+# hold for the saved rule.
+rm -f -- "$rule"
+sed 's/!subject.local || !subject.active/false/' "$unattended" >"$unattended_test"
+rm -f -- "$unattended"
+systemctl restart polkit
+# Exit 127 is pkexec refusing; 1 is the helper rejecting the empty request
+# after polkit let it start.
+started() {
+    local user=$1 status=0
+    shift
+    runuser -u "$user" -- /usr/bin/pkexec --disable-internal-agent "$runner" "$@" </dev/null >/dev/null 2>&1 || status=$?
+    echo "$status"
+}
+[[ $(started pkgdeck-test --upgrade-only) == 1 ]]
+[[ $(started pkgdeck-test --upgrade-only --allow-removals) == 1 ]]
+[[ $(started pkgdeck-test) == 127 ]]
+[[ $(started pkgdeck-test --allow-unattended-updates) == 127 ]]
+[[ $(started pkgdeck-test --upgrade-only --other) == 127 ]]
+[[ $(started pkgdeck-denied --upgrade-only) == 127 ]]
+echo PASS unattended polkit rule
+# Removing it needs the same authorization as saving it.
+cp "$unattended_test" "$unattended"
+cat >"$rule" <<'RULE'
+polkit.addRule(function(action, subject) {
+    if (action.id == "org.freedesktop.policykit.exec" && action.lookup("program") == "/usr/libexec/pkgdeck-host-runner") {
+        return subject.user == "pkgdeck-test" ? polkit.Result.YES : polkit.Result.NO;
+    }
+});
+RULE
+systemctl restart polkit
+runuser -u pkgdeck-test -- /usr/bin/pkexec --disable-internal-agent "$runner" --forbid-unattended-updates </dev/null
+[[ ! -e $unattended ]]
 echo PKGDECK_HOST_AUTHORIZATION_PASS
