@@ -644,32 +644,30 @@ impl Engine {
     pub fn refresh_update_indexes(&mut self, cancel: &Cancellation) -> Vec<BackendFailure> {
         self.checking_updates(|engine| {
             let mut failures = Vec::new();
-            let ids: Vec<_> = engine
+            for (id, backend) in engine
                 .backends
-                .iter()
+                .iter_mut()
                 .filter(|(_, backend)| backend.has_update_index())
-                .map(|(id, _)| id.clone())
-                .collect();
-            for id in ids {
+            {
                 if cancel.requested() {
                     failures.push(BackendFailure {
-                        backend: id,
+                        backend: id.clone(),
                         error: EngineError::Cancelled,
                     });
                     break;
                 }
-                let Some(backend) = engine.backends.get_mut(&id) else {
-                    continue;
-                };
                 let result = Self::available_backend(
                     &mut **backend,
-                    &id,
-                    engine.detected.get(&id).cloned(),
+                    id,
+                    engine.detected.get(id).cloned(),
                     cancel,
                 )
                 .and_then(|()| backend.refresh_update_index(cancel));
                 if let Err(error) = result {
-                    failures.push(BackendFailure { backend: id, error });
+                    failures.push(BackendFailure {
+                        backend: id.clone(),
+                        error,
+                    });
                 }
             }
             failures
@@ -1013,15 +1011,13 @@ impl Engine {
     }
 
     /// Queries and index refreshes honor the same cached detection outcomes.
+    /// Callers check cancellation first.
     fn available_backend(
         backend: &mut dyn Backend,
         id: &str,
         noted: Option<Availability>,
         cancel: &Cancellation,
     ) -> Result<(), EngineError> {
-        if cancel.requested() {
-            return Err(EngineError::Cancelled);
-        }
         match noted {
             Some(Availability::Available) => {}
             Some(Availability::Unavailable(reason)) => {
@@ -1693,5 +1689,57 @@ mod operation_plan_tests {
             );
             assert_eq!(writes.load(Ordering::SeqCst), usize::from(!drift));
         }
+    }
+}
+
+#[cfg(test)]
+mod update_check_tests {
+    use super::*;
+    use std::{sync::mpsc, thread, time::Duration};
+
+    #[test]
+    fn a_check_without_a_live_token_does_not_refresh() {
+        assert_eq!(
+            once_per_check(0, || panic!("no live check, nothing to refresh")),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn a_second_caller_waits_for_the_first_result() {
+        let token = begin_update_check_token();
+        let (started_tx, started) = mpsc::channel();
+        let (release, release_rx) = mpsc::channel::<()>();
+        let first = thread::spawn(move || {
+            once_per_check(token, || {
+                started_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Err(EngineError::Cancelled)
+            })
+        });
+        started.recv().unwrap();
+        let second =
+            thread::spawn(move || once_per_check(token, || panic!("the first caller refreshes")));
+        // Let the second caller reach the wait before the first finishes.
+        thread::sleep(Duration::from_millis(100));
+        release.send(()).unwrap();
+        assert_eq!(first.join().unwrap(), Err(EngineError::Cancelled));
+        assert_eq!(second.join().unwrap(), Err(EngineError::Cancelled));
+        end_update_check_token(token);
+    }
+
+    #[test]
+    fn a_refresh_that_panics_still_finishes_the_check() {
+        let token = begin_update_check_token();
+        let panicked =
+            std::panic::catch_unwind(|| once_per_check(token, || panic!("refresh stopped")));
+        assert!(panicked.is_err());
+        assert_eq!(
+            once_per_check(token, || panic!("the check already ran")),
+            Err(EngineError::Execution(ExecutionError::Invalid(
+                "update check stopped before it finished".into()
+            )))
+        );
+        end_update_check_token(token);
     }
 }

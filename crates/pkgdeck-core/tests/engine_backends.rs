@@ -693,6 +693,60 @@ fn index_refresh_shares_one_fetch_for_available_homebrew_sources() {
 }
 
 #[test]
+fn index_refresh_fetches_for_casks_alone() {
+    let cancel = Cancellation::default();
+    let script = Script::new(|line| match line {
+        "w:brew update" => ok(""),
+        other => panic!("cached detection must not run {other}"),
+    });
+    let mut engine = Engine::default();
+    engine.register(HomebrewCask::new(script.clone())).unwrap();
+    engine.note_detected("homebrew-cask".into(), Ok(Availability::Available));
+
+    assert!(engine.refresh_update_indexes(&cancel).is_empty());
+    assert_eq!(script.calls(), ["w:brew update"]);
+}
+
+#[test]
+fn a_cancelled_index_refresh_stops_before_fetching() {
+    let cancel = Cancellation::default();
+    cancel.cancel();
+    let script = Script::new(|line| panic!("cancelled refresh must not run {line}"));
+    let mut engine = Engine::default();
+    engine.register(Homebrew::new(script.clone())).unwrap();
+    engine.register(HomebrewCask::new(script.clone())).unwrap();
+
+    assert_eq!(
+        engine.refresh_update_indexes(&cancel),
+        [BackendFailure {
+            backend: "homebrew".into(),
+            error: EngineError::Cancelled,
+        }]
+    );
+    assert!(script.calls().is_empty());
+}
+
+#[test]
+fn a_cancelled_homebrew_fetch_cancels_the_update_check() {
+    let cancel = Cancellation::default();
+    let script = brew(|line| match line {
+        "w:brew update" => Err(ExecutionError::Cancelled),
+        other => panic!("a cancelled fetch must not list: {other}"),
+    });
+    let mut engine = Engine::default();
+    engine.register(Homebrew::new(script.clone())).unwrap();
+    let report = engine.installed_for_updates(&cancel);
+    assert!(report.packages.is_empty());
+    assert_eq!(
+        report.failures,
+        [BackendFailure {
+            backend: "homebrew".into(),
+            error: EngineError::Cancelled,
+        }]
+    );
+}
+
+#[test]
 fn update_checks_fetch_homebrew_once_and_listings_do_not() {
     let cancel = Cancellation::default();
     let fetched = Arc::new(AtomicBool::new(false));
