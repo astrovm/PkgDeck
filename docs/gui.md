@@ -81,6 +81,11 @@ only Docker or Podman and search for the full image name with its tag.
 ## Updates
 
 Updates lists package updates and, if `fwupdmgr` is installed, firmware updates.
+Opening this page, **Reload**, and the background check run `brew update` once
+before they read Homebrew. Formulae and casks share that fetch, so a newly
+published cask (including PkgDeck itself) can show up. The Installed page does
+not fetch. The first Updates load can take longer while Homebrew fetches;
+other sources still appear as they answer.
 
 ![Updates for an APT package and three npm tools, all checked](screenshots/updates.png)
 

@@ -67,6 +67,13 @@ sources that worked, and an error for each source that failed. One failed
 source doesn't hide results from the others. Sources and packages are always
 returned in the same order.
 
+Update checks call `installed_for_updates`, `installed_for_updates_stream`,
+or `installed_for_upgrade`. Those arm Homebrew, which runs `brew update` once
+per check. Formulae and casks share that fetch, and the next check fetches
+again. A plain `installed` query does not. When the fetch fails, the packages
+already known are still returned, and each Homebrew source reports the
+failure, so neither counts as complete.
+
 If a relevant source failed, selecting a package by name returns `Incomplete`,
 even when another source has a match. This stops PkgDeck from installing the
 only visible result of an incomplete search. If you explicitly pick a working

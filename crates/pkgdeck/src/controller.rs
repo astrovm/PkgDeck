@@ -672,7 +672,7 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
             .map(Payload::ManifestPreview)
             .map_err(|error| EngineError::Execution(ExecutionError::Invalid(error.to_string()))),
         Job::BackgroundUpdates(_) => {
-            let mut report = engine.installed(cancel);
+            let mut report = engine.installed_for_updates(cancel);
             filter_updates(&mut report);
             Ok(Payload::BackgroundUpdates(report))
         }
@@ -706,7 +706,14 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
                     }
                     send(Reply::Partial(partial))
                 };
-                let mut report = engine.installed_stream(cancel, &mut send_partial);
+                let mut report = if view == "Updates" {
+                    // Homebrew's outdated flag is the local tap. Fetch it
+                    // before listing, or a new cask (including PkgDeck) never
+                    // appears. Other sources still stream while that runs.
+                    engine.installed_for_updates_stream(cancel, &mut send_partial)
+                } else {
+                    engine.installed_stream(cancel, &mut send_partial)
+                };
                 send(Reply::Inventory(report.clone()));
                 if view == "Updates" {
                     filter_updates(&mut report);
@@ -722,8 +729,13 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
             } else if view == "Clean" {
                 Ok(Payload::RetryCleanup(source, engine.cleanup(cancel)))
             } else {
-                let mut report = if view == "Search" { engine.search(&query, cancel) }
-                    else { engine.installed(cancel) };
+                let mut report = if view == "Search" {
+                    engine.search(&query, cancel)
+                } else if view == "Updates" {
+                    engine.installed_for_updates(cancel)
+                } else {
+                    engine.installed(cancel)
+                };
                 if view == "Updates" {
                     filter_updates(&mut report);
                 } else if view == "Installed" {
@@ -735,7 +747,7 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
             }
         }
         Job::RetryFailedUpdates(sources) => {
-            let mut report = engine.installed(cancel);
+            let mut report = engine.installed_for_updates(cancel);
             filter_updates(&mut report);
             Ok(Payload::RetryFailedUpdates(sources, report))
         }

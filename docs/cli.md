@@ -146,9 +146,12 @@ changing anything, then runs each change in order. If one fails, earlier
 changes are kept.
 
 `pkd upgrade` without names updates every installed package that has an
-update. `--from` and `--arch` narrow it down. `pkd refresh` (or
-`pkd update`) only refreshes package lists. It never installs updates, and
-when it finishes it reminds you to run `pkd upgrade`.
+update. `--from` and `--arch` narrow it down. Before it decides, it fetches
+Homebrew once (`brew update`); formulae and casks share that fetch. `pkd list`
+does not. If the fetch fails, an upgrade with no names stops and reports the
+failure. A named upgrade (`pkd upgrade NAME`) fetches once, then still looks
+the name up. `pkd refresh` (or `pkd update`) only refreshes package lists. It
+never installs updates, and when it finishes it reminds you to run `pkd upgrade`.
 
 ## Confirmation and passwords
 

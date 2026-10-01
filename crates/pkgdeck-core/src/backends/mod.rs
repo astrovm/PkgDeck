@@ -985,6 +985,8 @@ impl<T> Apt<T> {
 pub struct Homebrew<T = NativeTransport> {
     pub transport: T,
     prefix: Option<PathBuf>,
+    /// Set for an update check so formulae and casks share one `brew update`.
+    update_check: Option<u64>,
 }
 pub struct HomebrewCask<T = NativeTransport> {
     pub transport: T,
@@ -992,6 +994,8 @@ pub struct HomebrewCask<T = NativeTransport> {
     /// Checks and backs up an app already in the cask's place before
     /// Homebrew adopts it; `None` never adopts (fixture transports).
     adoption: Option<Box<dyn adopt::AdoptIo>>,
+    /// Set for an update check so formulae and casks share one `brew update`.
+    update_check: Option<u64>,
 }
 pub struct Flatpak<T = NativeTransport> {
     transport: T,
@@ -1013,11 +1017,20 @@ impl<T: Transport> Flatpak<T> {
         }
     }
 }
+/// One `brew update` at a time across checks. Callers that share a token
+/// already share one fetch; this only keeps a second check, or an explicit
+/// refresh, from taking Homebrew's git lock at the same moment. The next
+/// check still fetches. It does not reuse a finished result.
+fn brew_update_turn() -> std::sync::MutexGuard<'static, ()> {
+    static TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    TURN.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 impl<T: Transport> Homebrew<T> {
     pub fn new(transport: T) -> Self {
         Self {
             transport,
             prefix: None,
+            update_check: None,
         }
     }
 }
@@ -1027,6 +1040,7 @@ impl<T: Transport> HomebrewCask<T> {
             transport,
             prefix: None,
             adoption: None,
+            update_check: None,
         }
     }
     /// Casks can take over apps someone installed themselves (macOS only).
@@ -2439,6 +2453,22 @@ impl<T: Transport> Backend for Homebrew<T> {
     fn id(&self) -> &str {
         "homebrew"
     }
+    fn arm_update_check(&mut self, token: Option<u64>) {
+        self.update_check = token;
+    }
+    fn refresh_update_index(&mut self, cancel: &Cancellation) -> Result<(), EngineError> {
+        let Some(token) = self.update_check else {
+            return Ok(());
+        };
+        // Formulae and casks both enter here. The first `brew update` wins;
+        // the other waits and reuses its result. A different check waits its
+        // turn, then fetches again.
+        crate::engine::once_per_check(token, || {
+            let _turn = brew_update_turn();
+            self.call(&["update"], cancel, true)?;
+            Ok(())
+        })
+    }
     fn capabilities(&self) -> &[Capability] {
         CLEAN_CAPABILITIES
     }
@@ -2564,7 +2594,12 @@ impl<T: Transport> Backend for Homebrew<T> {
         progress(Progress::Message(
             "Running brew. If you cancel, PkgDeck waits for it to finish.".into(),
         ));
-        let result = self.call(&args, cancel, true)?;
+        let result = if args == ["update"] {
+            let _turn = brew_update_turn();
+            self.call(&args, cancel, true)?
+        } else {
+            self.call(&args, cancel, true)?
+        };
         Ok(OperationOutcome {
             cancellation_deferred: result.cancellation_deferred,
         })
@@ -2718,6 +2753,19 @@ impl<T: Transport> Backend for HomebrewCask<T> {
     fn id(&self) -> &str {
         "homebrew-cask"
     }
+    fn arm_update_check(&mut self, token: Option<u64>) {
+        self.update_check = token;
+    }
+    fn refresh_update_index(&mut self, cancel: &Cancellation) -> Result<(), EngineError> {
+        let Some(token) = self.update_check else {
+            return Ok(());
+        };
+        crate::engine::once_per_check(token, || {
+            let _turn = brew_update_turn();
+            self.call(&["update"], cancel, true)?;
+            Ok(())
+        })
+    }
     fn capabilities(&self) -> &[Capability] {
         CAPABILITIES
     }
@@ -2869,7 +2917,12 @@ impl<T: Transport> Backend for HomebrewCask<T> {
         progress(Progress::Message(
             "Running brew. If you cancel, PkgDeck waits for it to finish.".into(),
         ));
-        let result = self.call(&args, cancel, true)?;
+        let result = if args == ["update"] {
+            let _turn = brew_update_turn();
+            self.call(&args, cancel, true)?
+        } else {
+            self.call(&args, cancel, true)?
+        };
         Ok(OperationOutcome {
             cancellation_deferred: result.cancellation_deferred,
         })
