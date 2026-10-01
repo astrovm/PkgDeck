@@ -105,11 +105,16 @@ setup_micromamba() {
     *) platform=linux-64 ;;
     esac
     mkdir -p "$HOME/.local/bin"
-    # The download server answers 503 now and then. Fetch to a file so curl
-    # can retry, then extract.
-    curl -fsSL --retry 5 --retry-delay 5 -o "$HOME/micromamba.tar.bz2" \
-        "https://micro.mamba.pm/api/micromamba/$platform/latest"
-    tar -xjf "$HOME/micromamba.tar.bz2" -C "$HOME/.local" bin/micromamba
+    # The download server answers 5xx now and then. Fetch to a file so curl
+    # can retry, then extract. If it stays down, GitHub hosts the same binary.
+    if curl -fsSL --retry 5 --retry-delay 5 -o "$HOME/micromamba.tar.bz2" \
+        "https://micro.mamba.pm/api/micromamba/$platform/latest"; then
+        tar -xjf "$HOME/micromamba.tar.bz2" -C "$HOME/.local" bin/micromamba
+    else
+        curl -fsSL --retry 5 --retry-delay 5 -o "$HOME/.local/bin/micromamba" \
+            "https://github.com/mamba-org/micromamba-releases/releases/latest/download/micromamba-$platform"
+        chmod +x "$HOME/.local/bin/micromamba"
+    fi
     export MAMBA_ROOT_PREFIX="$HOME/micromamba"
     micromamba() { "$HOME/.local/bin/micromamba" "$@"; }
     micromamba --version
