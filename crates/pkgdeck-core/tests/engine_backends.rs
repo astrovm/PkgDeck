@@ -593,6 +593,71 @@ fn brew(rest: impl Fn(&str) -> Reply + Send + Sync + 'static) -> Script {
 }
 
 #[test]
+fn index_refresh_skips_homebrew_cached_as_unavailable() {
+    let cancel = Cancellation::default();
+    let script = Script::new(|line| panic!("unavailable backend must not run {line}"));
+    let mut engine = Engine::default();
+    engine.register(HomebrewCask::new(script.clone())).unwrap();
+    engine.note_detected(
+        "homebrew-cask".into(),
+        Ok(Availability::Unavailable("casks require Homebrew 6".into())),
+    );
+
+    let failures = engine.refresh_update_indexes(&cancel);
+    assert_eq!(failures.len(), 1);
+    assert_eq!(
+        failures[0],
+        BackendFailure {
+            backend: "homebrew-cask".into(),
+            error: EngineError::Unavailable {
+                backend: "homebrew-cask".into(),
+                reason: "casks require Homebrew 6".into(),
+            },
+        }
+    );
+    // Named upgrades still report the same cached error on lookup.
+    assert_eq!(
+        engine.lookup_for_mutation("pkgdeck", &cancel).failures,
+        failures
+    );
+    assert!(script.calls().is_empty());
+}
+
+#[test]
+fn index_refresh_detects_homebrew_before_writing() {
+    let cancel = Cancellation::default();
+    let script = Script::new(|line| match line {
+        "brew --prefix" => Err(ExecutionError::Disabled("Homebrew is not installed".into())),
+        other => panic!("unavailable backend must not run {other}"),
+    });
+    let mut engine = Engine::default();
+    engine.register(Homebrew::new(script.clone())).unwrap();
+
+    let failures = engine.refresh_update_indexes(&cancel);
+    assert_eq!(failures.len(), 1);
+    assert!(matches!(failures[0].error, EngineError::Unavailable { .. }));
+    assert_eq!(script.calls(), ["brew --prefix"]);
+}
+
+#[test]
+fn index_refresh_shares_one_fetch_for_available_homebrew_sources() {
+    let cancel = Cancellation::default();
+    let script = Script::new(|line| match line {
+        "w:brew update" => ok(""),
+        other => panic!("cached detection must not run {other}"),
+    });
+    let mut engine = Engine::default();
+    engine.register(Homebrew::new(script.clone())).unwrap();
+    engine.register(HomebrewCask::new(script.clone())).unwrap();
+    for id in ["homebrew", "homebrew-cask"] {
+        engine.note_detected(id.into(), Ok(Availability::Available));
+    }
+
+    assert!(engine.refresh_update_indexes(&cancel).is_empty());
+    assert_eq!(script.calls(), ["w:brew update"]);
+}
+
+#[test]
 fn update_checks_fetch_homebrew_once_and_listings_do_not() {
     let cancel = Cancellation::default();
     let fetched = Arc::new(AtomicBool::new(false));

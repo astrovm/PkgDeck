@@ -651,7 +651,14 @@ impl Engine {
                 let Some(backend) = engine.backends.get_mut(&id) else {
                     continue;
                 };
-                if let Err(error) = backend.refresh_update_index(cancel) {
+                let result = Self::available_backend(
+                    &mut **backend,
+                    &id,
+                    engine.detected.get(&id).cloned(),
+                    cancel,
+                )
+                .and_then(|()| backend.refresh_update_index(cancel));
+                if let Err(error) = result {
                     failures.push(BackendFailure { backend: id, error });
                 }
             }
@@ -961,28 +968,7 @@ impl Engine {
         if !backend.capabilities().contains(&capability) {
             return Err(backend.unsupported(capability));
         }
-        match noted {
-            Some(Availability::Available) => {}
-            Some(Availability::Unavailable(reason)) => {
-                return Err(EngineError::Unavailable {
-                    backend: id.into(),
-                    reason,
-                });
-            }
-            None => {
-                if let Availability::Unavailable(reason) = backend.detect(cancel)? {
-                    return Err(EngineError::Unavailable {
-                        backend: id.into(),
-                        reason,
-                    });
-                }
-                // Detection may have taken time; do not start a query after
-                // cancellation.
-                if cancel.requested() {
-                    return Err(EngineError::Cancelled);
-                }
-            }
-        }
+        Self::available_backend(backend, id, noted, cancel)?;
         // An update check refreshes before listing. A fetch failure still
         // lists what is already known and reports the failure beside those rows.
         let mut index_error = None;
@@ -1014,6 +1000,41 @@ impl Engine {
             errors.insert(0, error);
         }
         Ok((packages, errors))
+    }
+
+    /// Queries and index refreshes honor the same cached detection outcomes.
+    fn available_backend(
+        backend: &mut dyn Backend,
+        id: &str,
+        noted: Option<Availability>,
+        cancel: &Cancellation,
+    ) -> Result<(), EngineError> {
+        if cancel.requested() {
+            return Err(EngineError::Cancelled);
+        }
+        match noted {
+            Some(Availability::Available) => {}
+            Some(Availability::Unavailable(reason)) => {
+                return Err(EngineError::Unavailable {
+                    backend: id.into(),
+                    reason,
+                });
+            }
+            None => {
+                if let Availability::Unavailable(reason) = backend.detect(cancel)? {
+                    return Err(EngineError::Unavailable {
+                        backend: id.into(),
+                        reason,
+                    });
+                }
+                // Detection may have taken time; do not start a query after
+                // cancellation.
+                if cancel.requested() {
+                    return Err(EngineError::Cancelled);
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn details(
