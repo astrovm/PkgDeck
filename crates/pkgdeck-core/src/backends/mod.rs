@@ -2453,6 +2453,9 @@ impl<T: Transport> Backend for Homebrew<T> {
     fn id(&self) -> &str {
         "homebrew"
     }
+    fn has_update_index(&self) -> bool {
+        true
+    }
     fn arm_update_check(&mut self, token: Option<u64>) {
         self.update_check = token;
     }
@@ -2752,6 +2755,9 @@ impl<T: Transport> Backend for HomebrewCask<T> {
     }
     fn id(&self) -> &str {
         "homebrew-cask"
+    }
+    fn has_update_index(&self) -> bool {
+        true
     }
     fn arm_update_check(&mut self, token: Option<u64>) {
         self.update_check = token;

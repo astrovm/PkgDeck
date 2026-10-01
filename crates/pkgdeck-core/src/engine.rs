@@ -204,6 +204,11 @@ pub trait Backend: Send {
     /// formulae and casks share `brew update`) keep `token` until the check
     /// ends. `None` is every other query, which must not fetch.
     fn arm_update_check(&mut self, _token: Option<u64>) {}
+    /// Whether update checks need an explicit metadata refresh. This is a
+    /// cheap declaration: non-participants are not detected just to refresh.
+    fn has_update_index(&self) -> bool {
+        false
+    }
     /// Refresh metadata before an update check lists installed packages.
     /// Listing Homebrew sets `HOMEBREW_NO_AUTO_UPDATE`, and its `outdated`
     /// flag is computed from the local tap, so a new cask stays invisible
@@ -639,7 +644,12 @@ impl Engine {
     pub fn refresh_update_indexes(&mut self, cancel: &Cancellation) -> Vec<BackendFailure> {
         self.checking_updates(|engine| {
             let mut failures = Vec::new();
-            let ids: Vec<_> = engine.backends.keys().cloned().collect();
+            let ids: Vec<_> = engine
+                .backends
+                .iter()
+                .filter(|(_, backend)| backend.has_update_index())
+                .map(|(id, _)| id.clone())
+                .collect();
             for id in ids {
                 if cancel.requested() {
                     failures.push(BackendFailure {

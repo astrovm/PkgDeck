@@ -593,6 +593,41 @@ fn brew(rest: impl Fn(&str) -> Reply + Send + Sync + 'static) -> Script {
 }
 
 #[test]
+fn index_refresh_does_not_probe_npm_before_a_named_upgrade_lookup() {
+    let cancel = Cancellation::default();
+    let script = Script::new(|line| match line {
+        "npm root --global" => ok("/opt/npm/lib/node_modules\n"),
+        "npm ls --global --depth=0 --json" => {
+            ok(r#"{"dependencies":{"eslint":{"version":"9.0.0"}}}"#)
+        }
+        "npm outdated --global --json" => ok("{}"),
+        other => panic!("unexpected {other}"),
+    });
+    let mut engine = Engine::default();
+    engine.register(DevTool::npm(script.clone())).unwrap();
+
+    assert!(engine.refresh_update_indexes(&cancel).is_empty());
+    assert!(script.calls().is_empty());
+
+    let report = engine.lookup_for_mutation("eslint", &cancel);
+    assert!(report.failures.is_empty(), "{:?}", report.failures);
+    assert_eq!(report.packages.len(), 1);
+    assert_eq!(report.packages[0].id.name, "eslint");
+    assert_eq!(
+        report.packages[0].installed_version.as_deref(),
+        Some("9.0.0")
+    );
+    assert_eq!(
+        script.calls(),
+        [
+            "npm root --global",
+            "npm ls --global --depth=0 --json",
+            "npm outdated --global --json"
+        ]
+    );
+}
+
+#[test]
 fn index_refresh_skips_homebrew_cached_as_unavailable() {
     let cancel = Cancellation::default();
     let script = Script::new(|line| panic!("unavailable backend must not run {line}"));
