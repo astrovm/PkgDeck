@@ -445,12 +445,19 @@ pub struct Engine {
     apt_upgrade_plan: Option<AptUpgradePlan>,
     operation_plan: Option<TransactionPlan>,
     batch_authorization: Option<(Host, Authorization)>,
+    batch_mode: crate::batch::BatchMode,
 }
 impl Engine {
     /// Native engines use one trusted runner for the protected part of a
     /// confirmed batch when it is installed by the host package.
     pub fn enable_batch_authorization(&mut self, host: Host, authorization: Authorization) {
         self.batch_authorization = Some((host, authorization));
+    }
+    /// Run batches through an upgrade-only runner, for unattended updates
+    /// under a saved approval: no password prompt, and nothing but
+    /// refreshes and full upgrades of system managers.
+    pub fn set_batch_mode(&mut self, mode: crate::batch::BatchMode) {
+        self.batch_mode = mode;
     }
     /// Simulate the host APT solver before asking the user to approve a full update.
     pub fn plan_apt_upgrade(
@@ -1277,26 +1284,27 @@ impl Engine {
             operation: operations[0].clone(),
             progress: Progress::Message("Authorizing system changes for this batch.".into()),
         });
-        let guard = match crate::batch::begin(&host, authorization, operations, cancel) {
-            Ok(guard) => guard,
-            Err(error) => {
-                return operations
-                    .iter()
-                    .enumerate()
-                    .map(|(index, operation)| {
-                        if index != 0 {
-                            events(Event::Started(operation.clone()));
-                        }
-                        let result = Err(EngineError::from(error.clone()));
-                        events(Event::Finished {
-                            operation: operation.clone(),
-                            result: result.clone(),
-                        });
-                        result
-                    })
-                    .collect();
-            }
-        };
+        let guard =
+            match crate::batch::begin(&host, authorization, self.batch_mode, operations, cancel) {
+                Ok(guard) => guard,
+                Err(error) => {
+                    return operations
+                        .iter()
+                        .enumerate()
+                        .map(|(index, operation)| {
+                            if index != 0 {
+                                events(Event::Started(operation.clone()));
+                            }
+                            let result = Err(EngineError::from(error.clone()));
+                            events(Event::Finished {
+                                operation: operation.clone(),
+                                result: result.clone(),
+                            });
+                            result
+                        })
+                        .collect();
+                }
+            };
         if guard.is_none() {
             events(Event::Progress {
                 operation: operations[0].clone(),
