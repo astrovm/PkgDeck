@@ -117,23 +117,15 @@ DeckScrollView {
             SettingCheckBox {
                 objectName: "allowRemovalsSetting"
                 text: "Allow updates that remove packages"
+                tooltipText: "Like an old kernel replaced by a new one"
                 checked: page.store.allowRemovals
                 onClicked: page.store.allowRemovals = checked
                 Accessible.name: text
             }
-            Controls.Label {
-                objectName: "allowRemovalsHelp"
-                Layout.fillWidth: true
-                Layout.leftMargin: 28
-                wrapMode: Text.WordWrap
-                color: Theme.muted
-                text: page.store.allowRemovals
-                    ? "Some updates replace packages, like an old kernel. Update all shows them before you confirm."
-                    : "APT updates that would remove packages are skipped."
-            }
             SettingCheckBox {
                 objectName: "systemApprovalSetting"
                 text: "Allow system updates without a password"
+                tooltipText: page.app.macOS ? "" : "Installing or removing still asks"
                 checked: page.store.systemApproval !== ""
                 onClicked: {
                     page.app.backend.allowSystemUpdates(checked);
@@ -147,11 +139,9 @@ DeckScrollView {
                 Layout.fillWidth: true
                 Layout.leftMargin: 28
                 wrapMode: Text.WordWrap
-                color: page.app.backend.approval_error ? Theme.danger : Theme.muted
+                visible: text.length > 0
+                color: Theme.danger
                 text: page.app.backend.approval_error
-                    || (page.app.macOS
-                        ? "MacPorts updates without a password."
-                        : "System packages update without a password. Installing or removing still asks.")
             }
             SettingCheckBox {
                 objectName: "autostartSetting"

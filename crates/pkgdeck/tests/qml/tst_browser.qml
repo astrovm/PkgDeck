@@ -600,14 +600,12 @@ TestCase {
         compare(fake.autoUpdate, true);
         verify(approval.enabled);
         const removals = findChild(browser, "allowRemovalsSetting");
-        const removalsHelp = findChild(browser, "allowRemovalsHelp");
         verify(removals.enabled);
         verify(removals.checked);
-        verify(removalsHelp.text.indexOf("old kernel") >= 0);
+        verify(removals.tooltipText.indexOf("old kernel") >= 0);
         removals.checked = false;
         removals.clicked();
         compare(fake.allowRemovals, false);
-        verify(removalsHelp.text.indexOf("skipped") >= 0);
         removals.checked = true;
         removals.clicked();
         compare(fake.allowRemovals, true);
@@ -621,8 +619,9 @@ TestCase {
         verify(approval.checked);
         fake.approval_error = "The password prompt was cancelled.";
         compare(help.text, "The password prompt was cancelled.");
+        verify(help.visible);
         fake.approval_error = "";
-        verify(help.text.length > 0);
+        verify(!help.visible);
         fake.system_approval = "";
         compare(browser.store.systemApproval, "");
         auto.checked = false;

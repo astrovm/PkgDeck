@@ -6,6 +6,11 @@ import QtQuick.Layouts
 // anywhere on the row toggles it.
 Controls.Switch {
     id: setting
+    // Shown on hover, only where the label needs it.
+    property string tooltipText: ""
+    Controls.ToolTip.visible: hovered && tooltipText.length > 0
+    Controls.ToolTip.delay: 500
+    Controls.ToolTip.text: tooltipText
     Layout.fillWidth: true
     implicitHeight: Math.max(Theme.controlHeight, contentItem.implicitHeight + 8)
     leftPadding: 0
