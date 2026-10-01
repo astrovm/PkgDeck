@@ -2,15 +2,15 @@
 
 One app for every package manager.
 
-Search, install, update, and clean up software in one place.
+Search, install, update, and clean up software, from the app or the `pkd` command line.
 
 ![PkgDeck showing search results](docs/screenshots/search.png)
 
-## Features
+## ✨ Features
 
 | Page          | What it does                                                                |
 | ------------- | --------------------------------------------------------------------------- |
-| **Search**    | Compare software across sources and pick the exact source and scope         |
+| **Search**    | Compare results across sources and install for you or the whole system      |
 | **Installed** | Browse installed packages and spot duplicate installs                       |
 | **Updates**   | Apply one update, a selection, or everything at once                        |
 | **Clean**     | Preview what will be removed before you confirm                             |
@@ -55,6 +55,12 @@ With Flatpak, run the CLI like this:
 
 ```sh
 flatpak run --command=pkd io.github.astrovm.PkgDeck
+```
+
+Add an alias to type `pkd` instead:
+
+```sh
+alias pkd='flatpak run --command=pkd io.github.astrovm.PkgDeck'
 ```
 
 With other installs, run `pkd` directly:
