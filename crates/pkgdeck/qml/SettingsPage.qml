@@ -107,6 +107,55 @@ DeckScrollView {
                 }
             }
             SettingCheckBox {
+                objectName: "autoUpdateSetting"
+                text: "Install updates automatically"
+                enabled: page.store.backgroundMode
+                checked: page.store.autoUpdate
+                onClicked: page.store.autoUpdate = checked
+                Accessible.name: text
+            }
+            SettingCheckBox {
+                objectName: "autoUpdateRemovalsSetting"
+                text: "Allow updates that remove packages"
+                enabled: page.store.backgroundMode && page.store.autoUpdate
+                checked: page.store.autoUpdateRemovals
+                onClicked: page.store.autoUpdateRemovals = checked
+                Accessible.name: text
+            }
+            Controls.Label {
+                objectName: "autoUpdateRemovalsHelp"
+                Layout.fillWidth: true
+                Layout.leftMargin: 28
+                wrapMode: Text.WordWrap
+                color: Theme.muted
+                text: page.store.autoUpdateRemovals
+                    ? "An update can remove packages when the package manager decides to, such as an old kernel replaced by a new one."
+                    : "An update that would remove packages waits for you to run Update all."
+            }
+            SettingCheckBox {
+                objectName: "systemApprovalSetting"
+                text: "Allow system updates without a password"
+                enabled: page.store.backgroundMode && page.store.autoUpdate
+                checked: page.store.systemApproval !== ""
+                onClicked: {
+                    page.app.backend.allowSystemUpdates(checked);
+                    // The saved setting decides once the password prompt is answered.
+                    checked = Qt.binding(() => page.store.systemApproval !== "");
+                }
+                Accessible.name: text
+            }
+            Controls.Label {
+                objectName: "systemApprovalHelp"
+                Layout.fillWidth: true
+                Layout.leftMargin: 28
+                wrapMode: Text.WordWrap
+                color: page.app.backend.approval_error ? Theme.danger : Theme.muted
+                text: page.app.backend.approval_error
+                    || (page.app.macOS
+                        ? "MacPorts updates run without asking for your password. Asks for it once to allow this."
+                        : "System packages (APT, DNF, Pacman, Zypper, system Flatpaks and Snaps) update without asking for your password, and only updates: nothing is installed or removed. Asks for it once to allow this.")
+            }
+            SettingCheckBox {
                 objectName: "autostartSetting"
                 text: "Start in background at login"
                 visible: page.app.desktopAutostartSupported

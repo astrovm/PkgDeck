@@ -106,6 +106,19 @@ Browser {
         }
     }
     Connections {
+        target: browser.backend
+        function onAuto_update_resultChanged() {
+            const result = JSON.parse(browser.backend.auto_update_result || "{}");
+            if (!result.total || !browser.backgroundMode || !browser.trayAvailable || !browser.notificationAvailable)
+                return;
+            const updated = result.updated || 0;
+            const failed = result.failed || 0;
+            const body = (updated > 0 ? "Installed " + updated + (updated === 1 ? " update" : " updates") : "No updates installed")
+                + (failed > 0 ? ", " + failed + " need your attention" : "");
+            browser.notify("PkgDeck updates", body);
+        }
+    }
+    Connections {
         target: browser.mac
         function onTrayOpenRequested() { browser.showFromTray(); }
         function onTrayCheckRequested() { browser.checkUpdates(true); }

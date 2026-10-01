@@ -226,18 +226,22 @@ pub enum BatchMode {
     #[default]
     Reviewed,
     /// Refreshes and full upgrades of system managers only, for unattended
-    /// updates under a saved approval. APT never removes a package here.
-    UpgradeOnly,
+    /// updates under a saved approval. APT removes packages only with
+    /// `removals`, which the person allowed in settings.
+    UpgradeOnly { removals: bool },
 }
 /// The runner argument that selects [`BatchMode::UpgradeOnly`]. A saved
 /// approval matches the runner's exact command line, this flag included.
 pub const UPGRADE_ONLY: &str = "--upgrade-only";
+/// Added after [`UPGRADE_ONLY`] when an update may remove packages.
+pub const ALLOW_REMOVALS: &str = "--allow-removals";
 /// System managers an upgrade-only runner updates.
 pub const UPGRADE_ONLY_BACKENDS: &[&str] = &["apt", "flatpak", "dnf", "pacman", "zypper", "snap"];
 
-/// Refuse anything but refreshes and full upgrades of [`UPGRADE_ONLY_BACKENDS`].
-/// A per-package upgrade is refused too: `pacman -S --needed NAME` would
-/// install a package that is not there.
+/// Refuse any change the runner would make as root other than refreshes
+/// and full upgrades of [`UPGRADE_ONLY_BACKENDS`]. Changes that run as the
+/// user never reach the runner and pass. A per-package upgrade is refused:
+/// `pacman -S --needed NAME` would install a package that is not there.
 pub fn check_mode(mode: BatchMode, operations: &[Operation]) -> Result<(), ExecutionError> {
     if mode == BatchMode::Reviewed {
         return Ok(());
@@ -245,8 +249,9 @@ pub fn check_mode(mode: BatchMode, operations: &[Operation]) -> Result<(), Execu
     let allowed = operations.iter().all(|operation| match operation {
         Operation::Refresh { backend } | Operation::UpgradeAll { backend } => {
             UPGRADE_ONLY_BACKENDS.contains(&backend.as_str())
+                || protected_commands(operation).is_ok_and(|commands| commands.is_empty())
         }
-        _ => false,
+        _ => protected_commands(operation).is_ok_and(|commands| commands.is_empty()),
     });
     if allowed {
         Ok(())
@@ -256,16 +261,17 @@ pub fn check_mode(mode: BatchMode, operations: &[Operation]) -> Result<(), Execu
         ))
     }
 }
-/// The commands the runner itself runs. In upgrade-only mode APT aborts
-/// rather than remove anything (`--no-remove`); the frontend still asks for
-/// the reviewed command, and the runner substitutes this one.
+/// The commands the runner itself runs. In upgrade-only mode without
+/// removals APT aborts rather than remove anything (`--no-remove`); the
+/// frontend still asks for the reviewed command, and the runner substitutes
+/// this one.
 fn runner_commands(
     mode: BatchMode,
     operations: &[Operation],
 ) -> Result<Vec<Vec<ProtectedCommand>>, ExecutionError> {
     check_mode(mode, operations)?;
     let mut commands = batch_commands(operations)?;
-    if mode == BatchMode::UpgradeOnly {
+    if mode == (BatchMode::UpgradeOnly { removals: false }) {
         for (operation, commands) in operations.iter().zip(&mut commands) {
             if matches!(operation, Operation::UpgradeAll { backend } if backend == "apt") {
                 for command in commands {
@@ -609,7 +615,7 @@ pub fn begin(
         Some(command) => start(command),
         // Without a runner each command would ask for a password on its
         // own; nobody is there to answer during an unattended update.
-        None if mode == BatchMode::UpgradeOnly => Err(ExecutionError::Disabled(
+        None if mode != BatchMode::Reviewed => Err(ExecutionError::Disabled(
             "unattended updates need PkgDeck's system helper".into(),
         )),
         None => Ok(None),
@@ -630,8 +636,11 @@ fn runner_command(
     if appimage {
         args.push("--batch-runner".into());
     }
-    if mode == BatchMode::UpgradeOnly {
+    if let BatchMode::UpgradeOnly { removals } = mode {
         args.push(UPGRADE_ONLY.into());
+        if removals {
+            args.push(ALLOW_REMOVALS.into());
+        }
     }
     let mut command = host.command(Path::new(program), &args)?;
     command.stderr(Stdio::null()).process_group(0);
@@ -1073,7 +1082,18 @@ mod tests {
             .iter()
             .flat_map(|backend| [refresh(backend), all(backend)])
             .collect();
-        assert_eq!(check_mode(BatchMode::UpgradeOnly, &allowed), Ok(()));
+        assert_eq!(
+            check_mode(BatchMode::UpgradeOnly { removals: false }, &allowed),
+            Ok(())
+        );
+        // Changes that run as the user never reach the runner.
+        let mut user = id("homebrew", "wget");
+        user.scope = Scope::User { uid: 1000 };
+        let user_changes = [all("homebrew"), all("cargo"), Operation::Upgrade(user)];
+        assert_eq!(
+            check_mode(BatchMode::UpgradeOnly { removals: false }, &user_changes),
+            Ok(())
+        );
         for refused in [
             Operation::Install(id("apt", "synthetic")),
             Operation::Remove(id("dnf", "synthetic")),
@@ -1081,13 +1101,18 @@ mod tests {
             Operation::Upgrade(id("pacman", "synthetic")),
             all("fwupd"),
             refresh("fwupd"),
+            Operation::Upgrade(id("flatpak", "org.example.App")),
             Operation::Clean(crate::package::CleanupId {
                 backend: "apt".into(),
                 key: "autoremove".into(),
             }),
         ] {
             assert!(
-                check_mode(BatchMode::UpgradeOnly, &[all("apt"), refused.clone()]).is_err(),
+                check_mode(
+                    BatchMode::UpgradeOnly { removals: false },
+                    &[all("apt"), refused.clone()]
+                )
+                .is_err(),
                 "{refused:?}"
             );
             assert_eq!(check_mode(BatchMode::Reviewed, &[refused]), Ok(()));
@@ -1097,7 +1122,8 @@ mod tests {
         // for the reviewed command by index.
         let operations = vec![refresh("apt"), all("apt"), all("dnf")];
         let reviewed = batch_commands(&operations).unwrap();
-        let runner = runner_commands(BatchMode::UpgradeOnly, &operations).unwrap();
+        let runner =
+            runner_commands(BatchMode::UpgradeOnly { removals: false }, &operations).unwrap();
         assert_eq!(runner[0], reviewed[0]);
         assert_eq!(runner[2], reviewed[2]);
         assert_eq!(
@@ -1122,7 +1148,7 @@ mod tests {
         ];
         let mut recorder = Recorder(vec![]);
         serve_protocol(
-            BatchMode::UpgradeOnly,
+            BatchMode::UpgradeOnly { removals: false },
             &mut Cursor::new(input(&requests)),
             &mut Vec::new(),
             recorder.run(),
@@ -1130,11 +1156,16 @@ mod tests {
         .unwrap();
         assert_eq!(recorder.0, [runner[1][0].clone()]);
 
+        // With removals allowed, APT runs the reviewed command as is.
+        let removing =
+            runner_commands(BatchMode::UpgradeOnly { removals: true }, &operations).unwrap();
+        assert_eq!(removing, reviewed);
+
         // An install never starts, even before the first command.
         let mut output = Vec::new();
         let mut recorder = Recorder(vec![]);
         assert!(serve_protocol(
-            BatchMode::UpgradeOnly,
+            BatchMode::UpgradeOnly { removals: false },
             &mut Cursor::new(input(&[Request::Start {
                 protocol: PROTOCOL,
                 operations: vec![Operation::Install(id("apt", "synthetic"))],
@@ -1153,7 +1184,7 @@ mod tests {
         let command = runner_command(
             &host,
             Authorization::Polkit,
-            BatchMode::UpgradeOnly,
+            BatchMode::UpgradeOnly { removals: false },
             Some((runner, false)),
         )
         .unwrap()
@@ -1170,11 +1201,28 @@ mod tests {
                 "--upgrade-only"
             ]
         );
+        let command = runner_command(
+            &host,
+            Authorization::Polkit,
+            BatchMode::UpgradeOnly { removals: true },
+            Some((PathBuf::from("/usr/libexec/pkgdeck-host-runner"), false)),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .eq([
+                "--disable-internal-agent",
+                "/usr/libexec/pkgdeck-host-runner",
+                "--upgrade-only",
+                "--allow-removals"
+            ]));
         let cancel = Cancellation::default();
         let refused = begin(
             &host,
             Authorization::Polkit,
-            BatchMode::UpgradeOnly,
+            BatchMode::UpgradeOnly { removals: false },
             &[Operation::Install(id("apt", "synthetic"))],
             &cancel,
         );

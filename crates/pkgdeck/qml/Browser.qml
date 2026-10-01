@@ -1319,6 +1319,12 @@ Controls.ApplicationWindow {
         property bool backgroundMode: true
         // Minutes between background update checks.
         property int checkInterval: 30
+        // Install what background checks find, with nobody watching.
+        property bool autoUpdate: false
+        // Let those updates remove packages when the manager's plan does.
+        property bool autoUpdateRemovals: false
+        // The helper the system update approval covers, or empty.
+        property string systemApproval: ""
         property bool autostart: false
         property string notificationHistory: "{}"
         property string lastBackgroundState: "{}"
@@ -1472,9 +1478,18 @@ Controls.ApplicationWindow {
     Connections {
         target: preferences
         function onCheckIntervalChanged() { backend.setCheckInterval(preferences.checkInterval); }
+        function onAutoUpdateChanged() { backend.setAutoUpdate(preferences.autoUpdate); }
+        function onAutoUpdateRemovalsChanged() { backend.setAutoUpdateRemovals(preferences.autoUpdateRemovals); }
+    }
+    Connections {
+        target: backend
+        function onSystem_approvalChanged() { preferences.systemApproval = backend.system_approval; }
     }
     Component.onCompleted: {
         backend.setCheckInterval(preferences.checkInterval);
+        backend.setAutoUpdate(preferences.autoUpdate);
+        backend.setAutoUpdateRemovals(preferences.autoUpdateRemovals);
+        backend.restoreSystemApproval(preferences.systemApproval);
         backend.restoreNotificationHistory(preferences.notificationHistory);
         // Explicit --from flags seed the session checklist without
         // persisting; otherwise restore the stored list, migrating the

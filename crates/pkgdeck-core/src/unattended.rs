@@ -8,7 +8,7 @@
 //! the helper's own root-owned path, so a program the user can replace never
 //! gets it. On macOS it is a sudoers entry for MacPorts' two update commands.
 use crate::{
-    batch::{self, BatchMode, UPGRADE_ONLY},
+    batch::{self, BatchMode, ALLOW_REMOVALS, UPGRADE_ONLY},
     host::Host,
     process::{self, Cancellation, ExecutionError, Limits},
 };
@@ -59,7 +59,10 @@ fn invalid(reason: impl Into<String>) -> ExecutionError {
 pub fn run_runner(args: &[OsString]) -> Result<(), ExecutionError> {
     match args {
         [] => batch::serve(BatchMode::Reviewed),
-        [flag] if flag == UPGRADE_ONLY => batch::serve(BatchMode::UpgradeOnly),
+        [flag] if flag == UPGRADE_ONLY => batch::serve(BatchMode::UpgradeOnly { removals: false }),
+        [flag, removals] if flag == UPGRADE_ONLY && removals == ALLOW_REMOVALS => {
+            batch::serve(BatchMode::UpgradeOnly { removals: true })
+        }
         [flag] if flag == GRANT => save_rule(true),
         [flag] if flag == REVOKE => save_rule(false),
         _ => Err(invalid("unknown runner arguments")),
@@ -142,8 +145,10 @@ polkit.addRule(function (action, subject) {{
         return polkit.Result.NOT_HANDLED;
     }}
     var program = action.lookup("program");
+    var command = action.lookup("command_line");
     if ({test} &&
-        action.lookup("command_line") == program + " {UPGRADE_ONLY}") {{
+        (command == program + " {UPGRADE_ONLY}" ||
+         command == program + " {UPGRADE_ONLY} {ALLOW_REMOVALS}")) {{
         return polkit.Result.YES;
     }}
     return polkit.Result.NOT_HANDLED;
@@ -435,7 +440,8 @@ mod tests {
         assert!(rule.contains(r#"subject.user != "astro""#));
         assert!(rule.contains("!subject.local || !subject.active"));
         assert!(rule.contains(r#"program == "/usr/libexec/pkgdeck-host-runner""#));
-        assert!(rule.contains(r#"action.lookup("command_line") == program + " --upgrade-only""#));
+        assert!(rule.contains(r#"command == program + " --upgrade-only" ||"#));
+        assert!(rule.contains(r#"command == program + " --upgrade-only --allow-removals")"#));
         assert!(rule.contains("polkit.Result.YES"));
         let prefix = polkit_rule("astro", &RunnerMatch::Prefix(FLATPAK_PREFIX.into())).unwrap();
         assert!(prefix.contains(&format!(r#"program.indexOf("{FLATPAK_PREFIX}") == 0"#)));
@@ -466,10 +472,12 @@ mod tests {
             run_runner(&["--other".into()]),
             Err(ExecutionError::Invalid(_))
         ));
-        assert!(matches!(
-            run_runner(&[UPGRADE_ONLY.into(), "extra".into()]),
-            Err(ExecutionError::Invalid(_))
-        ));
+        for extra in ["extra", UPGRADE_ONLY] {
+            assert!(matches!(
+                run_runner(&[UPGRADE_ONLY.into(), extra.into()]),
+                Err(ExecutionError::Invalid(_))
+            ));
+        }
         if !rustix::process::geteuid().is_root() {
             for flag in [GRANT, REVOKE] {
                 assert_eq!(

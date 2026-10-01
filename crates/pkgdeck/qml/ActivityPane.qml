@@ -269,7 +269,8 @@ ColumnLayout {
                         background: Rectangle { radius: height / 2; color: Theme.tint(entryCard.toneColor, 0.14) }
                     }
                     Controls.Label {
-                        text: pane.when(modelData.started_at)
+                        objectName: "activityWhen"
+                        text: (modelData.frontend === "auto" ? "Automatic · " : "") + pane.when(modelData.started_at)
                         color: pane.muted
                         font.pointSize: Theme.pointSize(Theme.smallScale)
                     }

@@ -102,6 +102,16 @@ TestCase {
         function checkUpdates(sources, enabled, offline, metered, force) {}
         property int checkInterval: 0
         function setCheckInterval(minutes) { checkInterval = minutes; }
+        property bool autoUpdate: false
+        property string system_approval: ""
+        property string approval_error: ""
+        property string auto_update_result: "{}"
+        property var allowed: []
+        function setAutoUpdate(enabled) { autoUpdate = enabled; }
+        property bool autoUpdateRemovals: false
+        function setAutoUpdateRemovals(allowed) { autoUpdateRemovals = allowed; }
+        function restoreSystemApproval(approval) { system_approval = approval; }
+        function allowSystemUpdates(allow) { allowed.push(allow); }
         function restoreNotificationHistory(history) { lastRestoredHistory = history; notification_history = history; }
         function acknowledgeNotification() {}
         function setAutostart(enabled) { return true; }
@@ -574,6 +584,48 @@ TestCase {
         interval.currentIndex = 1;
         interval.activated(1);
         compare(fake.checkInterval, 30);
+    }
+    function test_automatic_updates_settings_reach_the_backend() {
+        browser.backgroundMode = true;
+        browser.openView("Settings");
+        const auto = findChild(browser, "autoUpdateSetting");
+        const approval = findChild(browser, "systemApprovalSetting");
+        const help = findChild(browser, "systemApprovalHelp");
+        verify(!auto.checked);
+        verify(!approval.enabled);
+        auto.checked = true;
+        auto.clicked();
+        compare(browser.store.autoUpdate, true);
+        compare(fake.autoUpdate, true);
+        verify(approval.enabled);
+        const removals = findChild(browser, "autoUpdateRemovalsSetting");
+        const removalsHelp = findChild(browser, "autoUpdateRemovalsHelp");
+        verify(!removals.checked);
+        verify(removalsHelp.text.indexOf("waits for you") >= 0);
+        removals.checked = true;
+        removals.clicked();
+        compare(fake.autoUpdateRemovals, true);
+        verify(removalsHelp.text.indexOf("old kernel") >= 0);
+        removals.checked = false;
+        removals.clicked();
+        compare(fake.autoUpdateRemovals, false);
+        // Asking does not turn it on; the saved approval does.
+        approval.checked = true;
+        approval.clicked();
+        compare(fake.allowed[fake.allowed.length - 1], true);
+        verify(!approval.checked);
+        fake.system_approval = "/usr/libexec/pkgdeck-host-runner";
+        compare(browser.store.systemApproval, "/usr/libexec/pkgdeck-host-runner");
+        verify(approval.checked);
+        fake.approval_error = "The password prompt was cancelled.";
+        compare(help.text, "The password prompt was cancelled.");
+        fake.approval_error = "";
+        verify(help.text.length > 0);
+        fake.system_approval = "";
+        compare(browser.store.systemApproval, "");
+        auto.checked = false;
+        auto.clicked();
+        compare(fake.autoUpdate, false);
     }
     function test_search_clears_old_results_and_appearance_setting_applies() {
         browser.openView("Installed");

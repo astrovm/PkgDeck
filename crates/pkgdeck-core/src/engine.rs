@@ -1255,7 +1255,20 @@ impl Engine {
         }
         let checked: Vec<_> = operations
             .iter()
-            .map(|operation| self.preflight(operation, cancel))
+            .map(|operation| {
+                // A source that would ask for a password, or that needs
+                // someone there (firmware), never runs unattended.
+                if self.batch_mode != crate::batch::BatchMode::Reviewed
+                    && crate::unattended::unattended(operation.backend())
+                        == crate::unattended::Unattended::Never
+                {
+                    return Err(EngineError::InvalidResponse {
+                        backend: operation.backend().into(),
+                        reason: "This source is never updated automatically.".into(),
+                    });
+                }
+                self.preflight(operation, cancel)
+            })
             .collect();
         if checked.iter().any(Result::is_err) {
             return operations.iter().zip(checked).map(|(operation, result)| {
