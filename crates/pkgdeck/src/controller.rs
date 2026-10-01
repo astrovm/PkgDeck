@@ -283,7 +283,9 @@ enum Reply {
     /// What the failed steps of a batch printed, for the banner's details.
     FailureOutput(String),
     Partial(PackageReport),
-    Inventory(PackageReport),
+    /// Every installed package, and whether update indexes were refreshed
+    /// first. Only a refreshed inventory may stand in for Updates.
+    Inventory(PackageReport, bool),
     DetailsPreview(Box<PackageDetails>),
     Done(Result<Payload, EngineError>),
     Engine(Box<Engine>),
@@ -714,7 +716,7 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
                 } else {
                     engine.installed_stream(cancel, &mut send_partial)
                 };
-                send(Reply::Inventory(report.clone()));
+                send(Reply::Inventory(report.clone(), view == "Updates"));
                 if view == "Updates" {
                     filter_updates(&mut report);
                 } else {
@@ -1175,15 +1177,12 @@ impl Controller {
     }
     /// A preload already loading this section, so a visible load can wait
     /// for it instead of querying every manager a second time.
-    fn awaits_prefetch(&self, key: &str, view: &str) -> bool {
-        self.prefetch_worker.as_ref().is_some_and(|worker| {
-            // One inventory read fills both Installed and Updates.
-            !worker.stale
-                && (worker.key == key
-                    || worker.view == "Installed"
-                        && view == "Updates"
-                        && worker.key == cache_key("Installed", "", &self.source_filter, self.sudo))
-        })
+    /// Installed does not stand in for Updates: Updates refreshes update
+    /// indexes before listing.
+    fn awaits_prefetch(&self, key: &str) -> bool {
+        self.prefetch_worker
+            .as_ref()
+            .is_some_and(|worker| !worker.stale && worker.key == key)
     }
     /// Whether poll() may still deliver something or start queued work:
     /// any worker thread, a section waiting for its preload, or preloads
@@ -3452,7 +3451,7 @@ impl ffi::PackageController {
                     self.as_mut().rust_mut().hold_partials = true;
                     self.as_mut().set_refreshing(true);
                     if same_reload {
-                    } else if self.as_mut().rust_mut().awaits_prefetch(&key, &view) {
+                    } else if self.as_mut().rust_mut().awaits_prefetch(&key) {
                         self.as_mut().rust_mut().awaiting_prefetch = true;
                     } else {
                         self.as_mut().start(Job::Load(view, query));
@@ -3487,7 +3486,7 @@ impl ffi::PackageController {
         self.as_mut().set_phase("loading");
         // The section is already preloading: wait for that result instead
         // of querying every manager a second time.
-        if !force && self.rust().awaits_prefetch(&key, &view) {
+        if !force && self.rust().awaits_prefetch(&key) {
             self.as_mut().rust_mut().awaiting_prefetch = true;
             if let Some(worker) = &self.rust().worker {
                 worker.cancel.cancel();
@@ -4409,7 +4408,10 @@ impl ffi::PackageController {
             }
         }
     }
-    fn warm_inventory(mut self: Pin<&mut Self>, mut report: PackageReport) {
+    /// An inventory warms Installed. It warms Updates only when it was read
+    /// after refreshing update indexes; otherwise Updates would show the
+    /// stale Homebrew tap and skip its own `brew update`.
+    fn warm_inventory(mut self: Pin<&mut Self>, mut report: PackageReport, refreshed: bool) {
         let sources = self.rust().source_filter.clone();
         let sudo = self.rust().sudo;
         let key = cache_key("Installed", "", &sources, sudo);
@@ -4417,6 +4419,9 @@ impl ffi::PackageController {
             .rust_mut()
             .prefetched
             .insert(key, (Instant::now(), Payload::Packages(report.clone())));
+        if !refreshed {
+            return;
+        }
         report
             .packages
             .retain(|p| p.update == UpdateAvailability::Available);
@@ -4607,7 +4612,9 @@ impl ffi::PackageController {
             if !stale {
                 for reply in replies {
                     match reply {
-                        Reply::Inventory(report) => self.as_mut().warm_inventory(report),
+                        Reply::Inventory(report, refreshed) => {
+                            self.as_mut().warm_inventory(report, refreshed)
+                        }
                         Reply::Done(Ok(payload)) => {
                             if let Payload::Sources(sources) = &payload {
                                 let rows: Vec<_> = sources.iter().map(source_row).collect();
@@ -4626,11 +4633,7 @@ impl ffi::PackageController {
             // Show the result if the visible section was waiting for it,
             // or load it directly if the preload failed.
             let active = self.rust().active_view.clone();
-            if finished
-                && !stale
-                && self.rust().awaiting_prefetch
-                && (active == view || view == "Installed" && active == "Updates")
-            {
+            if finished && !stale && self.rust().awaiting_prefetch && active == view {
                 self.as_mut().rust_mut().awaiting_prefetch = false;
                 let view = active;
                 let sources = self.rust().source_filter.join(",");
@@ -4738,9 +4741,9 @@ impl ffi::PackageController {
         let replies: Vec<_> = replies
             .into_iter()
             .filter_map(|reply| match reply {
-                Reply::Inventory(report) => {
+                Reply::Inventory(report, refreshed) => {
                     if !cancelled {
-                        self.as_mut().warm_inventory(report);
+                        self.as_mut().warm_inventory(report, refreshed);
                     }
                     None
                 }
@@ -4973,7 +4976,7 @@ impl ffi::PackageController {
                     | Reply::ProgressEvent(_)
                     | Reply::Output(_)
                     | Reply::FailureOutput(_)
-                    | Reply::Inventory(_) => {}
+                    | Reply::Inventory(..) => {}
                 }
             }
             if joined.is_err() && !self.rust().background {
@@ -6010,51 +6013,61 @@ mod tests {
     }
     #[test]
     fn background_inventory_populates_both_sections_without_foreground_changes() {
-        let mut controller = ffi::create_controller();
-        let mut controller = controller.pin_mut();
-        controller.as_mut().set_rows("original".into());
-        let package: Package = serde_json::from_value(json!({
-            "id": {"backend":"snap", "name":"synthetic", "architecture":"all", "scope":"system"},
-            "display_name":"Synthetic", "summary":"Fixture", "installed_version":"1",
-            "candidate_version":"2", "update":"available"
-        }))
-        .unwrap();
-        let mut engine = Engine::default();
-        engine
-            .register(Fixture {
-                package,
-                fail: false,
-            })
+        // An Updates read refreshes indexes first, so it can fill Installed
+        // too. A plain Installed read cannot stand in for Updates.
+        for (read, updates_cached) in [("Updates", true), ("Installed", false)] {
+            let mut controller = ffi::create_controller();
+            let mut controller = controller.pin_mut();
+            controller.as_mut().rust_mut().prefetch.clear();
+            controller.as_mut().set_rows("original".into());
+            let package: Package = serde_json::from_value(json!({
+                "id": {"backend":"snap", "name":"synthetic", "architecture":"all", "scope":"system"},
+                "display_name":"Synthetic", "summary":"Fixture", "installed_version":"1",
+                "candidate_version":"2", "update":"available"
+            }))
             .unwrap();
-        let (sender, receiver) = mpsc::channel();
-        let handle = thread::spawn(move || {
-            execute(
-                &mut engine,
-                Job::Load("Installed".into(), "".into()),
-                &Cancellation::default(),
-                &mut |reply| {
-                    sender.send(reply).unwrap();
-                },
-            )
-        });
-        handle.join().unwrap();
-        controller.as_mut().rust_mut().background = true;
-        controller.as_mut().rust_mut().worker = Some(Worker {
-            handle: thread::spawn(|| {}),
-            receiver,
-            cancel: Cancellation::default(),
-            job: Job::Load("Installed".into(), "".into()),
-        });
-        controller.as_mut().poll();
-        assert_eq!(controller.rows().to_string(), "original");
-        assert!(!controller.busy());
-        // A single Installed execution supplies both sections. Switching to
-        // Updates and back starts no new worker and preserves native updates.
-        for view in ["Updates", "Installed"] {
+            let mut engine = Engine::default();
+            engine
+                .register(Fixture {
+                    package,
+                    fail: false,
+                })
+                .unwrap();
+            let (sender, receiver) = mpsc::channel();
+            let handle = thread::spawn(move || {
+                execute(
+                    &mut engine,
+                    Job::Load(read.into(), "".into()),
+                    &Cancellation::default(),
+                    &mut |reply| {
+                        sender.send(reply).unwrap();
+                    },
+                )
+            });
+            handle.join().unwrap();
+            controller.as_mut().rust_mut().background = true;
+            controller.as_mut().rust_mut().worker = Some(Worker {
+                handle: thread::spawn(|| {}),
+                receiver,
+                cancel: Cancellation::default(),
+                job: Job::Load(read.into(), "".into()),
+            });
+            controller.as_mut().poll();
+            assert_eq!(controller.rows().to_string(), "original");
+            assert!(!controller.busy());
+            assert_eq!(
+                controller
+                    .rust()
+                    .prefetched
+                    .contains_key(&cache_key("Updates", "", &[], false)),
+                updates_cached,
+                "{read}"
+            );
+            // Installed opens from the cache and keeps native updates.
             controller
                 .as_mut()
-                .load(view.into(), "".into(), "".into(), false, false);
-            assert!(controller.rust().worker.is_none());
+                .load("Installed".into(), "".into(), "".into(), false, false);
+            assert!(controller.rust().worker.is_none(), "{read}");
             assert_eq!(controller.rust().packages.len(), 1);
             assert_eq!(
                 controller.rust().packages[0].update,
@@ -7776,7 +7789,7 @@ mod tests {
             "Sources",
             key.clone(),
             vec![
-                Reply::Inventory(inventory),
+                Reply::Inventory(inventory, true),
                 Reply::Done(Ok(Payload::Sources(sources))),
             ],
             false,
@@ -7930,15 +7943,15 @@ mod tests {
             package.candidate_version = Some("2".into());
             report.packages.push(package);
             report.successful_sources.push("apt".into());
-            let _ = sender.send(Reply::Inventory(report.clone()));
+            let _ = sender.send(Reply::Inventory(report.clone(), true));
             let _ = sender.send(Reply::Done(Ok(Payload::Packages(report))));
         });
         controller.as_mut().rust_mut().prefetch_worker = Some(PrefetchWorker {
             handle,
             receiver,
             cancel: Cancellation::default(),
-            view: "Installed".into(),
-            key: cache_key("Installed", "", &[], false),
+            view: "Updates".into(),
+            key: cache_key("Updates", "", &[], false),
             stale: false,
         });
         // An older foreground read is cancelled and its reply ignored.
@@ -9462,7 +9475,10 @@ mod tests {
             assert_eq!(replies.len(), 3);
             let partial = expect!(replies.remove(0), Reply::Partial(report) => report);
             assert_eq!(partial.packages, vec![package.clone()]);
-            assert!(matches!(replies.remove(0), Reply::Inventory(_)));
+            assert!(matches!(
+                replies.remove(0),
+                Reply::Inventory(_, refreshed) if refreshed == (view == "Updates")
+            ));
             let terminal =
                 expect!(replies.remove(0), Reply::Done(Ok(Payload::Packages(report))) => report);
             assert_eq!(terminal, partial);
