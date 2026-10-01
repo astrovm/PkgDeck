@@ -319,7 +319,7 @@ See [supported install layouts and what removal keeps](cli.md#standalone-cli-too
 is running. Turn them off in Settings.
 
 - The first check runs about 30 seconds after launch, then at most once per
-  **Check every** interval: 15 minutes to a day, 30 minutes by default. The
+  **Check every** interval: 15 minutes to a week, 30 minutes by default. The
   Updates page refreshes in the background no more often than that either.
 - Checks wait while you're offline, on a metered connection, or while another
   package operation is running.

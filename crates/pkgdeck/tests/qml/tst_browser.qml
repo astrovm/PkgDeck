@@ -574,16 +574,24 @@ TestCase {
         browser.openView("Settings");
         const interval = findChild(browser, "checkIntervalSetting");
         compare(interval.currentText, "30 minutes");
-        interval.currentIndex = 2;
-        interval.activated(2);
+        interval.value = 2;
+        interval.moved();
         compare(browser.store.checkInterval, 60);
         compare(fake.checkInterval, 60);
+        // Days, up to a week.
+        interval.value = interval.to;
+        interval.moved();
+        compare(interval.currentText, "1 week");
+        compare(fake.checkInterval, 10080);
         browser.backgroundMode = false;
         verify(!interval.enabled);
         browser.backgroundMode = true;
-        interval.currentIndex = 1;
-        interval.activated(1);
+        interval.value = 1;
+        interval.moved();
         compare(fake.checkInterval, 30);
+        // A saved interval between steps shows the closest one.
+        browser.store.checkInterval = 1500;
+        compare(interval.currentText, "1 day");
     }
     function test_automatic_updates_settings_reach_the_backend() {
         browser.backgroundMode = true;

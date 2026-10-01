@@ -94,16 +94,76 @@ DeckScrollView {
             }
             SettingRow {
                 label: "Check every"
-                ThemedComboBox {
+                Controls.Slider {
+                    id: interval
                     objectName: "checkIntervalSetting"
-                    readonly property var minutes: [15, 30, 60, 180, 360, 720, 1440]
+                    readonly property var minutes: [15, 30, 60, 180, 360, 720, 1440, 2880, 4320, 10080]
+                    readonly property var labels: ["15 minutes", "30 minutes", "1 hour", "3 hours", "6 hours", "12 hours", "1 day", "2 days", "3 days", "1 week"]
+                    readonly property string currentText: labels[Math.round(value)]
+                    // The step closest to the saved interval.
+                    function nearest(saved) {
+                        let best = 0;
+                        for (let i = 1; i < minutes.length; i++)
+                            if (Math.abs(minutes[i] - saved) < Math.abs(minutes[best] - saved))
+                                best = i;
+                        return best;
+                    }
                     Layout.fillWidth: page.stacked
                     Layout.preferredWidth: page.controlWidth()
                     enabled: page.store.backgroundMode
-                    model: ["15 minutes", "30 minutes", "Hour", "3 hours", "6 hours", "12 hours", "Day"]
-                    currentIndex: Math.max(0, minutes.indexOf(page.store.checkInterval))
-                    onActivated: page.store.checkInterval = minutes[currentIndex]
+                    from: 0
+                    to: minutes.length - 1
+                    stepSize: 1
+                    snapMode: Controls.Slider.SnapAlways
+                    value: nearest(page.store.checkInterval)
+                    onMoved: {
+                        page.store.checkInterval = minutes[Math.round(value)];
+                        // Dragging replaced the binding; follow the saved setting again.
+                        value = Qt.binding(() => nearest(page.store.checkInterval));
+                    }
                     Accessible.name: "Check for updates every"
+                    Accessible.description: currentText
+                    leftPadding: 0
+                    rightPadding: 0
+                    topPadding: 22
+                    background: Item {
+                        x: interval.leftPadding
+                        width: interval.availableWidth
+                        height: interval.height
+                        opacity: interval.enabled ? 1 : 0.45
+                        Text {
+                            objectName: "checkIntervalValue"
+                            text: interval.currentText
+                            color: Theme.ink
+                            font: interval.font
+                            anchors.right: parent.right
+                            anchors.top: parent.top
+                        }
+                        Rectangle {
+                            y: interval.topPadding + interval.availableHeight / 2 - height / 2
+                            width: parent.width
+                            height: 4
+                            radius: 2
+                            color: Theme.tint(Theme.ink, Theme.dark ? 0.18 : 0.16)
+                            Rectangle {
+                                width: interval.visualPosition * parent.width
+                                height: parent.height
+                                radius: 2
+                                color: Theme.accent
+                            }
+                        }
+                    }
+                    handle: Rectangle {
+                        x: interval.leftPadding + interval.visualPosition * (interval.availableWidth - width)
+                        y: interval.topPadding + interval.availableHeight / 2 - height / 2
+                        implicitWidth: 18
+                        implicitHeight: 18
+                        radius: 9
+                        color: Theme.dark ? "#e9edf3" : "#ffffff"
+                        border.color: interval.visualFocus ? Theme.accent : Theme.tint("#000000", 0.18)
+                        border.width: interval.visualFocus ? 2 : 1
+                        opacity: interval.enabled ? 1 : 0.45
+                    }
                 }
             }
             SettingCheckBox {
