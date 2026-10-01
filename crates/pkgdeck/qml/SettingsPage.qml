@@ -180,10 +180,12 @@ DeckScrollView {
                     }
                     Controls.Label {
                         objectName: "notificationAvailability"
-                        text: !page.app.trayAvailable ? "Notifications unavailable: no " + (page.app.macOS ? "menu bar icon" : "system tray") + " found"
-                            : !page.app.notificationAvailable ? (page.app.macOS ? "Notifications are off: allow PkgDeck in System Settings > Notifications" : "This system tray does not support notifications")
-                            : page.app.notificationPermissionNeeded ? "macOS hasn't allowed PkgDeck's notifications yet, so they show Script Editor's icon. Allow PkgDeck in Notification settings."
-                            : "Notifications available"
+                        // Only shown when notifications won't work as expected.
+                        visible: text.length > 0
+                        text: !page.app.trayAvailable ? "No " + (page.app.macOS ? "menu bar icon" : "system tray") + ", so no notifications"
+                            : !page.app.notificationAvailable ? (page.app.macOS ? "Notifications are off in System Settings" : "This system tray can't show notifications")
+                            : page.app.notificationPermissionNeeded ? "Notifications show Script Editor's icon until you allow PkgDeck"
+                            : ""
                         color: Theme.muted
                         wrapMode: Text.WordWrap
                         Layout.fillWidth: true

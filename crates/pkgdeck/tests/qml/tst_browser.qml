@@ -1835,7 +1835,7 @@ TestCase {
         verify(status.text.indexOf("2 updates found") >= 0);
         // Sources that could not be checked are not listed as a warning.
         verify(findChild(browser, "backgroundCheckFailures") === null);
-        compare(availability.text, "Notifications available");
+        verify(!availability.visible);
         const settings = findChild(browser, "notificationSettingsButton");
         verify(!settings.visible);
         verify(button.enabled);
