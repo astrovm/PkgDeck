@@ -607,11 +607,11 @@ mod tests {
             save_rule_as(true, false, None, astro, installed, yes, &dir, &mut out),
             Err(invalid("host runner requires root"))
         );
-        for uid in [None, Some("0"), Some("abc")] {
+        for caller in [None, Some("0"), Some("abc")] {
             assert_eq!(
-                save(true, uid, astro, installed, yes, &dir),
+                save(true, caller, astro, installed, yes, &dir),
                 Err(invalid("run this through pkexec as the person allowing it")),
-                "{uid:?}"
+                "{caller:?}"
             );
         }
         for name_of in [spaced, unknown] {
