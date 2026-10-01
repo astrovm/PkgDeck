@@ -110,6 +110,20 @@ fn commands_use_sanitized_host_transport_and_one_json_document() {
     fixture.call(&["install", "fixture"], 2);
     if !rustix_root() {
         fixture.call(&["--yes", "install", "fixture"], 0);
+        // A failed fetch must not upgrade against the stale tap.
+        fs::write(fixture.0.join("fail-update"), "").unwrap();
+        let refused = fixture
+            .command()
+            .args(["--json", "--yes", "upgrade", "fixture"])
+            .output()
+            .unwrap();
+        assert!(!refused.status.success());
+        assert!(String::from_utf8_lossy(&refused.stdout).contains("synthetic update failure"));
+        fs::remove_file(fixture.0.join("fail-update")).unwrap();
+        assert_eq!(
+            fixture.call(&["list"], 0)["packages"][0]["installed_version"],
+            "1.0"
+        );
         fixture.call(&["--yes", "update"], 0);
         assert_eq!(
             fixture.call(&["list"], 0)["packages"][0]["update"],

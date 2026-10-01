@@ -4410,15 +4410,19 @@ impl ffi::PackageController {
     }
     /// An inventory warms Installed. It warms Updates only when it was read
     /// after refreshing update indexes; otherwise Updates would show the
-    /// stale Homebrew tap and skip its own `brew update`.
+    /// stale Homebrew tap and skip its own `brew update`. A refreshed read
+    /// with failures may carry a failed fetch, which a plain Installed read
+    /// would not hit, so Installed loads on its own then.
     fn warm_inventory(mut self: Pin<&mut Self>, mut report: PackageReport, refreshed: bool) {
         let sources = self.rust().source_filter.clone();
         let sudo = self.rust().sudo;
-        let key = cache_key("Installed", "", &sources, sudo);
-        self.as_mut()
-            .rust_mut()
-            .prefetched
-            .insert(key, (Instant::now(), Payload::Packages(report.clone())));
+        if !refreshed || report.failures.is_empty() {
+            let key = cache_key("Installed", "", &sources, sudo);
+            self.as_mut()
+                .rust_mut()
+                .prefetched
+                .insert(key, (Instant::now(), Payload::Packages(report.clone())));
+        }
         if !refreshed {
             return;
         }
@@ -6073,6 +6077,27 @@ mod tests {
                 controller.rust().packages[0].update,
                 UpdateAvailability::Available
             );
+        }
+    }
+
+    #[test]
+    fn a_failed_update_refresh_does_not_warm_installed() {
+        let installed = cache_key("Installed", "", &[], false);
+        let updates = cache_key("Updates", "", &[], false);
+        let mut report = PackageReport::default();
+        report.failures.push(BackendFailure {
+            backend: "homebrew".into(),
+            error: EngineError::Cancelled,
+        });
+        for (refreshed, installed_cached) in [(true, false), (false, true)] {
+            let mut controller = ffi::create_controller();
+            let mut controller = controller.pin_mut();
+            controller
+                .as_mut()
+                .warm_inventory(report.clone(), refreshed);
+            let cached = &controller.rust().prefetched;
+            assert_eq!(cached.contains_key(&installed), installed_cached);
+            assert_eq!(cached.contains_key(&updates), refreshed);
         }
     }
 
