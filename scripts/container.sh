@@ -6,7 +6,7 @@ command -v podman >/dev/null || { echo 'Podman is required for --engine podman.'
 kind=${1:?Expected development or lifecycle}; shift
 case "$kind" in
     development) recipe=containers/development.Containerfile; inputs=("$recipe" rust-toolchain.toml scripts/setup-dev.sh scripts/dev-env.sh) ;;
-    lifecycle) recipe=containers/lifecycle.Containerfile; inputs=("$recipe" scripts/vm/prepare.sh) ;;
+    lifecycle) recipe=containers/lifecycle.Containerfile; inputs=("$recipe" scripts/ci/apt-mirrors.sh scripts/vm/prepare.sh) ;;
     *) echo "Unknown container kind: $kind" >&2; exit 2 ;;
 esac
 key=$(cat "${inputs[@]}" | sha256sum | cut -c1-16)
