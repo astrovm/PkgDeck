@@ -159,8 +159,10 @@ setup_nix() {
     nix --version
     # Nixpkgs 26.11 dropped Intel Macs; their users pin nixpkgs to the
     # 26.05 branch, which pkd then uses like any registry entry.
+    # Use its archive directly: github: resolves the branch through the
+    # rate-limited GitHub API shared by the hosted runners.
     if [[ $(uname -s) == Darwin && $(uname -m) == x86_64 ]]; then
-        nix registry add nixpkgs github:NixOS/nixpkgs/nixpkgs-26.05-darwin
+        nix registry add nixpkgs tarball+https://github.com/NixOS/nixpkgs/archive/refs/heads/nixpkgs-26.05-darwin.tar.gz
     fi
 }
 
