@@ -105,7 +105,11 @@ setup_micromamba() {
     *) platform=linux-64 ;;
     esac
     mkdir -p "$HOME/.local/bin"
-    curl -fsSL "https://micro.mamba.pm/api/micromamba/$platform/latest" | tar -xj -C "$HOME/.local" bin/micromamba
+    # The download server answers 503 now and then. Fetch to a file so curl
+    # can retry, then extract.
+    curl -fsSL --retry 5 --retry-delay 5 -o "$HOME/micromamba.tar.bz2" \
+        "https://micro.mamba.pm/api/micromamba/$platform/latest"
+    tar -xjf "$HOME/micromamba.tar.bz2" -C "$HOME/.local" bin/micromamba
     export MAMBA_ROOT_PREFIX="$HOME/micromamba"
     micromamba() { "$HOME/.local/bin/micromamba" "$@"; }
     micromamba --version
