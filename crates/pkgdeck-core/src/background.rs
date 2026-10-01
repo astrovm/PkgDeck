@@ -16,11 +16,19 @@ use std::{
     path::{Path, PathBuf},
 };
 
+/// Default time between background checks.
 pub const CHECK_INTERVAL_SECONDS: u64 = 30 * 60;
+/// The shortest interval a user may pick. Each check can run `brew update`
+/// and query every source, so more often than this mostly adds load.
+pub const MIN_CHECK_INTERVAL_SECONDS: u64 = 15 * 60;
 
 #[derive(Default)]
 pub struct Schedule {
-    next_due: u64,
+    /// When the last check started. The next one is due an interval later,
+    /// so a changed interval applies right away.
+    last_started: Option<u64>,
+    /// Zero means [`CHECK_INTERVAL_SECONDS`].
+    interval: u64,
     notified: BTreeMap<String, BTreeSet<(PackageId, Option<String>)>>,
     pending: BTreeMap<String, BTreeSet<(PackageId, Option<String>)>>,
 }
@@ -51,6 +59,18 @@ impl Schedule {
             self.notified.insert(source, updates);
         }
     }
+    /// Seconds between background checks, at least
+    /// [`MIN_CHECK_INTERVAL_SECONDS`].
+    pub fn interval(&self) -> u64 {
+        if self.interval == 0 {
+            CHECK_INTERVAL_SECONDS
+        } else {
+            self.interval
+        }
+    }
+    pub fn set_interval(&mut self, seconds: u64) {
+        self.interval = seconds.max(MIN_CHECK_INTERVAL_SECONDS);
+    }
     pub fn ready(
         &mut self,
         now: u64,
@@ -60,10 +80,13 @@ impl Schedule {
         busy: bool,
         force: bool,
     ) -> bool {
-        if !enabled && !force || offline || metered || busy || !force && now < self.next_due {
+        let due = self
+            .last_started
+            .is_none_or(|last| now >= last.saturating_add(self.interval()));
+        if !enabled && !force || offline || metered || busy || !force && !due {
             return false;
         }
-        self.next_due = now.saturating_add(CHECK_INTERVAL_SECONDS);
+        self.last_started = Some(now);
         true
     }
     pub fn complete(&mut self, report: &PackageReport) -> CheckResult {
@@ -304,6 +327,30 @@ mod tests {
             false,
             true
         ));
+    }
+    #[test]
+    fn a_changed_interval_applies_to_the_next_check() {
+        let mut schedule = Schedule::default();
+        assert_eq!(schedule.interval(), CHECK_INTERVAL_SECONDS);
+        assert!(schedule.ready(0, true, false, false, false, false));
+        let hour = 60 * 60;
+        schedule.set_interval(hour);
+        assert_eq!(schedule.interval(), hour);
+        assert!(!schedule.ready(CHECK_INTERVAL_SECONDS, true, false, false, false, false));
+        assert!(schedule.ready(hour, true, false, false, false, false));
+        // Shorter than the last wait: due as soon as that much has passed.
+        schedule.set_interval(MIN_CHECK_INTERVAL_SECONDS);
+        assert!(schedule.ready(
+            hour + MIN_CHECK_INTERVAL_SECONDS,
+            true,
+            false,
+            false,
+            false,
+            false
+        ));
+        // Below the minimum is raised to it.
+        schedule.set_interval(60);
+        assert_eq!(schedule.interval(), MIN_CHECK_INTERVAL_SECONDS);
     }
     #[test]
     fn first_check_notifies_once_and_history_survives_restart() {

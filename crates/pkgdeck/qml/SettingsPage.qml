@@ -92,6 +92,20 @@ DeckScrollView {
                 }
                 Accessible.name: text
             }
+            SettingRow {
+                label: "Check every"
+                ThemedComboBox {
+                    objectName: "checkIntervalSetting"
+                    readonly property var minutes: [15, 30, 60, 180, 360, 720, 1440]
+                    Layout.fillWidth: page.stacked
+                    Layout.preferredWidth: page.controlWidth()
+                    enabled: page.store.backgroundMode
+                    model: ["15 minutes", "30 minutes", "Hour", "3 hours", "6 hours", "12 hours", "Day"]
+                    currentIndex: Math.max(0, minutes.indexOf(page.store.checkInterval))
+                    onActivated: page.store.checkInterval = minutes[currentIndex]
+                    Accessible.name: "Check for updates every"
+                }
+            }
             SettingCheckBox {
                 objectName: "autostartSetting"
                 text: "Start in background at login"

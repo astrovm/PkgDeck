@@ -1317,6 +1317,8 @@ Controls.ApplicationWindow {
         property string sortColumn: ""
         property bool sortAscending: true
         property bool backgroundMode: true
+        // Minutes between background update checks.
+        property int checkInterval: 30
         property bool autostart: false
         property string notificationHistory: "{}"
         property string lastBackgroundState: "{}"
@@ -1467,7 +1469,12 @@ Controls.ApplicationWindow {
                 root.reload(true, true);
         }
     }
+    Connections {
+        target: preferences
+        function onCheckIntervalChanged() { backend.setCheckInterval(preferences.checkInterval); }
+    }
     Component.onCompleted: {
+        backend.setCheckInterval(preferences.checkInterval);
         backend.restoreNotificationHistory(preferences.notificationHistory);
         // Explicit --from flags seed the session checklist without
         // persisting; otherwise restore the stored list, migrating the

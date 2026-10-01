@@ -187,6 +187,11 @@ pub mod ffi {
             metered: bool,
             force: bool,
         );
+        /// How often background checks run. Values below the minimum are
+        /// raised to it.
+        #[qinvokable]
+        #[cxx_name = "setCheckInterval"]
+        fn set_check_interval(self: Pin<&mut PackageController>, minutes: i32);
         #[qinvokable]
         #[cxx_name = "restoreNotificationHistory"]
         fn restore_notification_history(self: Pin<&mut PackageController>, history: QString);
@@ -2762,6 +2767,13 @@ impl ffi::PackageController {
         self.as_mut().rust_mut().background = true;
         self.start(Job::BackgroundUpdates(sources));
     }
+    pub fn set_check_interval(mut self: Pin<&mut Self>, minutes: i32) {
+        let seconds = u64::try_from(minutes).unwrap_or(0).saturating_mul(60);
+        self.as_mut()
+            .rust_mut()
+            .background_schedule
+            .set_interval(seconds);
+    }
     pub fn restore_notification_history(mut self: Pin<&mut Self>, history: QString) {
         self.as_mut()
             .rust_mut()
@@ -4686,17 +4698,26 @@ impl ffi::PackageController {
         {
             self.as_mut().rust_mut().last_rewarm = Instant::now();
             let (sources, sudo) = (self.rust().source_filter.clone(), self.rust().sudo);
-            // prefetch_views() is in pop order, so Installed (which also
-            // fills Updates) still loads first.
+            // Updates runs `brew update` first, so it refreshes no more often
+            // than background checks do.
+            let updates_after = REWARM_AFTER.max(Duration::from_secs(
+                self.rust().background_schedule.interval(),
+            ));
+            // prefetch_views() is in pop order, so Installed still loads first.
             let old: Vec<String> = prefetch_views()
                 .into_iter()
                 .filter(|view| {
                     let key = cache_key(view, "", &sources, sudo);
                     let cached = self.rust().view_cache.get(&key).map(|v| v.loaded);
                     let preloaded = self.rust().prefetched.get(&key).map(|(loaded, _)| *loaded);
+                    let after = if view == "Updates" {
+                        updates_after
+                    } else {
+                        REWARM_AFTER
+                    };
                     cached
                         .max(preloaded)
-                        .is_none_or(|loaded| loaded.elapsed() >= REWARM_AFTER)
+                        .is_none_or(|loaded| loaded.elapsed() >= after)
                 })
                 .collect();
             self.as_mut().rust_mut().prefetch = old;
@@ -7869,6 +7890,43 @@ mod tests {
         controller.as_mut().rust_mut().prefetch.clear();
         controller.as_mut().poll();
         assert!(controller.rust().prefetch.is_empty());
+    }
+    #[test]
+    fn updates_refresh_in_the_background_only_as_often_as_checks_run() {
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().rust_mut().pending = Some(Job::Load("Search".into(), String::new()));
+        controller.as_mut().set_check_interval(60);
+        let key = cache_key("Updates", "", &[], false);
+        for view in ["Installed", "Clean", "Sources"] {
+            controller
+                .as_mut()
+                .rust_mut()
+                .view_cache
+                .insert(cache_key(view, "", &[], false), cached_view("fresh"));
+        }
+        // Older than the usual rewarm, younger than the hourly check.
+        for (age, due) in [(REWARM_AFTER, false), (Duration::from_secs(60 * 60), true)] {
+            let mut updates = cached_view("updates");
+            updates.loaded = Instant::now() - age;
+            controller
+                .as_mut()
+                .rust_mut()
+                .view_cache
+                .insert(key.clone(), updates);
+            controller.as_mut().rust_mut().prefetch.clear();
+            controller.as_mut().rust_mut().last_rewarm = Instant::now() - Duration::from_secs(60);
+            controller.as_mut().poll();
+            assert_eq!(
+                controller.rust().prefetch,
+                if due {
+                    vec!["Updates".to_owned()]
+                } else {
+                    vec![]
+                },
+                "{age:?}"
+            );
+        }
     }
     #[test]
     fn preloads_start_on_their_own_worker_and_report_back() {

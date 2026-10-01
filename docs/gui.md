@@ -307,8 +307,9 @@ See [supported install layouts and what removal keeps](cli.md#standalone-cli-too
 **Background checks** are on by default: PkgDeck checks for updates while it
 is running. Turn them off in Settings.
 
-- The first check runs about 30 seconds after launch, then at most every 30
-  minutes.
+- The first check runs about 30 seconds after launch, then at most once per
+  **Check every** interval: 15 minutes to a day, 30 minutes by default. The
+  Updates page refreshes in the background no more often than that either.
 - Checks wait while you're offline, on a metered connection, or while another
   package operation is running.
 - **Start in background at login** keeps checks running after you log in.
