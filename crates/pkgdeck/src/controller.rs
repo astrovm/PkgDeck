@@ -2231,11 +2231,11 @@ fn plan_checked_upgrade(packages: &[Package], identities: &str) -> CheckedPlan {
         status: None,
     }
 }
-/// Cache key for one view snapshot: view, search text, checked sources,
-/// and elevation. The Installed filter is client-side, so it stays out of
-/// the key and shares the loaded rows while typing.
+/// Sections preloaded in the background, in pop order. Updates is not one:
+/// it runs `brew update` first, and a preload would do that at every launch
+/// and rewarm without anyone asking.
 fn prefetch_views() -> Vec<String> {
-    ["Installed", "Updates", "Clean", "Sources"]
+    ["Installed", "Clean", "Sources"]
         .into_iter()
         .rev()
         .map(str::to_owned)
@@ -2245,6 +2245,9 @@ const VIEW_TTL: Duration = Duration::from_secs(60);
 /// Preloaded sections older than this are loaded again in the background
 /// while the app is open, so switching stays instant.
 const REWARM_AFTER: Duration = Duration::from_secs(300);
+/// Cache key for one view snapshot: view, search text, checked sources,
+/// and elevation. The Installed filter is client-side, so it stays out of
+/// the key and shares the loaded rows while typing.
 fn cache_key(view: &str, query: &str, sources: &[String], sudo: bool) -> String {
     // Sources always lists every manager, whatever the filter.
     let sources = if view == "Sources" {
@@ -4686,8 +4689,7 @@ impl ffi::PackageController {
         {
             self.as_mut().rust_mut().last_rewarm = Instant::now();
             let (sources, sudo) = (self.rust().source_filter.clone(), self.rust().sudo);
-            // prefetch_views() is in pop order, so Installed (which also
-            // fills Updates) still loads first.
+            // prefetch_views() is in pop order, so Installed still loads first.
             let old: Vec<String> = prefetch_views()
                 .into_iter()
                 .filter(|view| {
@@ -7278,10 +7280,10 @@ mod tests {
         let mut controller = Controller::default();
         assert_eq!(controller.active_view, "Search");
         let order: Vec<_> = std::iter::from_fn(|| controller.next_prefetch()).collect();
-        assert_eq!(order, ["Installed", "Updates", "Clean", "Sources"]);
+        assert_eq!(order, ["Installed", "Clean", "Sources"]);
         assert!(controller.prefetch.is_empty());
         controller.invalidate_prefetch();
-        assert_eq!(controller.prefetch.len(), 4);
+        assert_eq!(controller.prefetch.len(), 3);
     }
     fn synthetic_package(name: &str, display_name: &str) -> Package {
         Package {
@@ -7860,11 +7862,11 @@ mod tests {
             .insert(cache_key("Clean", "", &[], false), fresh);
         controller.as_mut().rust_mut().last_rewarm = Instant::now() - Duration::from_secs(60);
         controller.as_mut().poll();
-        // Installed (old), Updates and Sources (never loaded) reload,
-        // Installed first because it also fills Updates.
+        // Installed (old) and Sources (never loaded) reload, Installed
+        // first. Updates is never preloaded.
         let mut order = controller.rust().prefetch.clone();
         order.reverse();
-        assert_eq!(order, ["Installed", "Updates", "Sources"]);
+        assert_eq!(order, ["Installed", "Sources"]);
         // Checked at most every 30 seconds.
         controller.as_mut().rust_mut().prefetch.clear();
         controller.as_mut().poll();
