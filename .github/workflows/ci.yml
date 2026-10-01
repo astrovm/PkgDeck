@@ -637,7 +637,8 @@ jobs:
     needs: [reviewed]
     name: Package / AppImage + Snap (${{ matrix.arch }})
     if: "!cancelled() && !inputs.homebrew_only"
-    timeout-minutes: 30
+    # Usually under 12 minutes; a slow Ubuntu mirror has stretched it past 30.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -682,9 +683,25 @@ jobs:
           build/AppDir/AppRun --cli </dev/null | grep -F 'Usage: pkd'
           build/AppDir/AppRun --cli --version
           build/AppDir/AppRun --cli doctor
+      # Only main saves, like the Rust cache; pull requests restore main's image.
+      - name: Cache lifecycle container image
+        if: github.ref == 'refs/heads/main'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: build/container-images
+          key: podman-lifecycle-v1-${{ matrix.arch }}-${{ hashFiles('containers/lifecycle.Containerfile', 'scripts/ci/apt-mirrors.sh', 'scripts/vm/prepare.sh') }}
+      - name: Restore lifecycle container image
+        if: github.ref != 'refs/heads/main'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: build/container-images
+          key: podman-lifecycle-v1-${{ matrix.arch }}-${{ hashFiles('containers/lifecycle.Containerfile', 'scripts/ci/apt-mirrors.sh', 'scripts/vm/prepare.sh') }}
+      - name: Build lifecycle container image
+        if: github.ref == 'refs/heads/main' && needs.reviewed.outputs.tested == 'true'
+        run: PKGDECK_IMAGE_ARCHIVE="$PWD/build/container-images" scripts/container.sh lifecycle --build-only
       - name: Run packaged GUI lifecycle tests
         if: needs.reviewed.outputs.tested != 'true'
-        run: PKGDECK_FRONTEND=gui PKGDECK_BINARY_DIR="$PWD/build/AppDir/usr/bin" scripts/container.sh lifecycle
+        run: PKGDECK_IMAGE_ARCHIVE="$PWD/build/container-images" PKGDECK_FRONTEND=gui PKGDECK_BINARY_DIR="$PWD/build/AppDir/usr/bin" scripts/container.sh lifecycle
       - name: Build and test AppImage
         if: needs.reviewed.outputs.tested != 'true'
         env:

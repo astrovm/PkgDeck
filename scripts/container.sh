@@ -11,8 +11,19 @@ case "$kind" in
 esac
 key=$(cat "${inputs[@]}" | sha256sum | cut -c1-16)
 image="localhost/pkgdeck-$kind:$key-$(uname -m)"
+# CI keeps built images in PKGDECK_IMAGE_ARCHIVE, so a slow package mirror
+# costs one build per recipe change instead of one per run.
+archive=${PKGDECK_IMAGE_ARCHIVE:+$PKGDECK_IMAGE_ARCHIVE/pkgdeck-$kind-$key-$(uname -m).tar}
 if ! podman image exists "$image"; then
-    podman build --layers -f "$recipe" -t "$image" .
+    if [[ -n $archive && -s $archive ]]; then
+        podman load -i "$archive"
+    else
+        podman build --layers -f "$recipe" -t "$image" .
+        if [[ -n $archive ]]; then
+            mkdir -p "$PKGDECK_IMAGE_ARCHIVE"
+            podman save -o "$archive" "$image"
+        fi
+    fi
 fi
 if [[ "${1:-}" == --build-only ]]; then printf '%s\n' "$image"; exit 0; fi
 run_container() {
