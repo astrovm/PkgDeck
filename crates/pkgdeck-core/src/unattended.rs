@@ -233,7 +233,7 @@ fn save_rule_as(
     let runner = runner()?;
     if !trusted(&runner) {
         return Err(invalid(
-            "PkgDeck's helper isn't installed in a root-owned folder (an AppImage, a user Flatpak or Homebrew), so it can't be allowed to run without a password",
+            "This copy of PkgDeck can't do this. Use the system Flatpak, the Snap or your distro's package.",
         ));
     }
     let runner = RunnerMatch::for_runner(&runner)?;
@@ -630,7 +630,7 @@ mod tests {
         );
         assert!(matches!(
             save(true, Some("1000"), astro, installed, no, &dir),
-            Err(ExecutionError::Invalid(reason)) if reason.contains("root-owned folder")
+            Err(ExecutionError::Invalid(reason)) if reason.contains("can't do this")
         ));
         assert!(save(true, Some("1000"), astro, misnamed, yes, &dir).is_err());
         assert_eq!(

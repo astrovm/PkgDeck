@@ -200,14 +200,14 @@ upgrade an entry with `pkd upgrade NAME --from nix`. See the
 
 ### Oh My Zsh
 
-**Oh My Zsh** lists the Oh My Zsh checkout (`$ZSH`, by default
-`~/.oh-my-zsh`) and every plugin and theme cloned with git into
-`$ZSH_CUSTOM/plugins` and `$ZSH_CUSTOM/themes` (by default `$ZSH/custom`).
-Plugins and themes are named `plugin/NAME` and `theme/NAME`. Update checks run
-`git fetch` in each; other listings never touch the network. Updating
-fast-forwards to the upstream branch, so a checkout with local commits or
-changes is left alone and reported as failed. A checkout that doesn't track a
-branch never shows updates. PkgDeck never installs or removes these.
+**Oh My Zsh** lists your Oh My Zsh folder (`$ZSH`, usually `~/.oh-my-zsh`).
+It also lists plugins and themes you cloned with git into `$ZSH_CUSTOM`.
+
+- They show as `plugin/NAME` and `theme/NAME`.
+- Only update checks go online (`git fetch`).
+- Updates fast-forward. A checkout with your own changes is left alone and
+  shows as failed.
+- PkgDeck never installs or removes these.
 
 ### AUR
 
@@ -342,50 +342,51 @@ notification.
 
 ### Automatic updates
 
-Turn on **Install updates automatically** and PkgDeck installs what a
-background check finds, then sends one notification saying what it
-installed. Each run shows in Activity, marked **Automatic**.
+Turn on **Install updates automatically**. When a background check finds
+updates, PkgDeck installs them and sends one notification.
 
-- It waits while another change runs or waits for your confirmation, and
-  skips a source whose check failed.
-- Sources that run as you (Homebrew, Oh My Zsh, Cargo, npm and the other
-  development tools) update right away.
-- System packages need **Allow system updates without a password**. It also
-  applies to **Update all**, which then updates system packages without a
-  prompt; installing, removing or updating one package still asks. Turning
-  it on asks for your password once. On Linux it saves a polkit rule,
-  `/etc/polkit-1/rules.d/49-pkgdeck-unattended-USER.rules`, that lets
-  PkgDeck's helper refresh and update every package of APT, DNF, Pacman,
-  Zypper, system Flatpaks and Snaps for you, in your active local session,
-  without asking. The helper accepts nothing else in that mode: no installs,
-  no removals of named packages, no other commands. On macOS it saves a
-  sudoers entry, `/private/etc/sudoers.d/pkgdeck-unattended-USER`, for
-  MacPorts' two update commands only. Turning the setting off removes the
-  file. The helper must be installed in a folder only root can change (the
-  system Flatpak, Snap or a system package), not an AppImage, a user Flatpak
-  or Homebrew on Linux.
-- Without that approval, system packages still just notify you. PkgDeck
-  never shows a password prompt for an automatic update.
-- **Allow updates that remove packages** (on by default) applies to
-  **Update all** and to automatic updates. With it off, both leave APT out
-  when its update would remove packages, and Update all says so in its
-  confirmation.
-- Firmware, the Mac App Store, apk, XBPS, the AUR, Toolbx and Distrobox are
-  never updated automatically.
-- A Homebrew cask whose installer needs an administrator password still asks
-  for it.
+- Each run shows in Activity, marked **Automatic**.
+- It waits if another change is running, and skips sources whose check
+  failed.
+- Sources that run as you (Homebrew, Oh My Zsh, Cargo, npm and other
+  developer tools) update right away.
+- Firmware, the Mac App Store, apk, XBPS, the AUR, Toolbx and Distrobox
+  never update automatically.
 
-Settings shows when the last check ran, how many updates it found, and
-whether your desktop supports notifications. **Test
-notification** sends a sample message.
+#### System packages
 
-On macOS, the Dock icon shows the number of updates found. macOS lists
-PkgDeck in System Settings > Notifications with notifications turned off,
-because the Homebrew build isn't signed with a Developer ID. Until you turn
-them on, PkgDeck's notifications are posted through AppleScript: they appear
-under Script Editor's icon, and clicking one doesn't open PkgDeck. Settings
-says so and has a **Notification settings** button that opens PkgDeck's page
-there. Once allowed, notifications show PkgDeck's icon, without a restart.
+System packages need **Allow system updates without a password**.
+
+- It asks for your password once, to turn it on.
+- It also lets **Update all** skip the password.
+- Installing or removing a package still asks.
+- Without it, system updates only notify you. Automatic updates never show
+  a password prompt.
+
+What it saves:
+
+- Linux: a polkit rule,
+  `/etc/polkit-1/rules.d/49-pkgdeck-unattended-USER.rules`. It lets
+  PkgDeck's helper refresh and update everything from APT, DNF, Pacman,
+  Zypper, system Flatpaks and Snaps, only in your active local session.
+  The helper does nothing else in that mode.
+- macOS: a sudoers entry, `/private/etc/sudoers.d/pkgdeck-unattended-USER`,
+  for MacPorts' two update commands only.
+- Turning it off deletes the file.
+- On Linux this needs the system Flatpak, the Snap or your distro's
+  package. AppImages, user Flatpaks and Homebrew can't use it.
+
+#### Updates that remove packages
+
+**Allow updates that remove packages** is on by default.
+
+- Some updates replace packages, like an old kernel.
+- **Update all** shows them before you confirm.
+- Turn it off to skip APT updates that would remove packages. This applies
+  to **Update all** and automatic updates.
+
+A Homebrew cask whose installer needs an administrator password still asks
+for it.
 
 ## Performance
 

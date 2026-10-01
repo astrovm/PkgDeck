@@ -128,8 +128,8 @@ DeckScrollView {
                 wrapMode: Text.WordWrap
                 color: Theme.muted
                 text: page.store.allowRemovals
-                    ? "Update all, and automatic updates, can remove packages when the package manager decides to, such as an old kernel replaced by a new one. Update all lists them before you confirm."
-                    : "Update all, and automatic updates, leave out APT when its update would remove packages."
+                    ? "Some updates replace packages, like an old kernel. Update all shows them before you confirm."
+                    : "APT updates that would remove packages are skipped."
             }
             SettingCheckBox {
                 objectName: "systemApprovalSetting"
@@ -150,8 +150,8 @@ DeckScrollView {
                 color: page.app.backend.approval_error ? Theme.danger : Theme.muted
                 text: page.app.backend.approval_error
                     || (page.app.macOS
-                        ? "Update all, and automatic updates, update MacPorts without asking for your password. Asks for it once to allow this."
-                        : "Update all, and automatic updates, update system packages (APT, DNF, Pacman, Zypper, system Flatpaks and Snaps) without asking for your password. Only updating everything is allowed; installing, removing or updating one package still asks. Asks for it once to allow this.")
+                        ? "MacPorts updates without a password."
+                        : "System packages update without a password. Installing or removing still asks.")
             }
             SettingCheckBox {
                 objectName: "autostartSetting"

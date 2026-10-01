@@ -607,7 +607,7 @@ TestCase {
         removals.checked = false;
         removals.clicked();
         compare(fake.allowRemovals, false);
-        verify(removalsHelp.text.indexOf("leave out APT") >= 0);
+        verify(removalsHelp.text.indexOf("skipped") >= 0);
         removals.checked = true;
         removals.clicked();
         compare(fake.allowRemovals, true);
