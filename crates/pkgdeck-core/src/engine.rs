@@ -446,6 +446,7 @@ pub struct Engine {
     operation_plan: Option<TransactionPlan>,
     batch_authorization: Option<(Host, Authorization)>,
     batch_mode: crate::batch::BatchMode,
+    unattended: bool,
 }
 impl Engine {
     /// Native engines use one trusted runner for the protected part of a
@@ -458,6 +459,11 @@ impl Engine {
     /// refreshes and full upgrades of system managers.
     pub fn set_batch_mode(&mut self, mode: crate::batch::BatchMode) {
         self.batch_mode = mode;
+    }
+    /// Nobody is watching: refuse sources that would ask for a password or
+    /// need someone there (see [`crate::unattended::Unattended::Never`]).
+    pub fn set_unattended(&mut self, unattended: bool) {
+        self.unattended = unattended;
     }
     /// Simulate the host APT solver before asking the user to approve a full update.
     pub fn plan_apt_upgrade(
@@ -1258,7 +1264,7 @@ impl Engine {
             .map(|operation| {
                 // A source that would ask for a password, or that needs
                 // someone there (firmware), never runs unattended.
-                if self.batch_mode != crate::batch::BatchMode::Reviewed
+                if self.unattended
                     && crate::unattended::unattended(operation.backend())
                         == crate::unattended::Unattended::Never
                 {

@@ -350,7 +350,9 @@ installed. Each run shows in Activity, marked **Automatic**.
   skips a source whose check failed.
 - Sources that run as you (Homebrew, Oh My Zsh, Cargo, npm and the other
   development tools) update right away.
-- System packages need **Allow system updates without a password**. Turning
+- System packages need **Allow system updates without a password**. It also
+  applies to **Update all**, which then updates system packages without a
+  prompt; installing, removing or updating one package still asks. Turning
   it on asks for your password once. On Linux it saves a polkit rule,
   `/etc/polkit-1/rules.d/49-pkgdeck-unattended-USER.rules`, that lets
   PkgDeck's helper refresh and update every package of APT, DNF, Pacman,
@@ -364,8 +366,10 @@ installed. Each run shows in Activity, marked **Automatic**.
   or Homebrew on Linux.
 - Without that approval, system packages still just notify you. PkgDeck
   never shows a password prompt for an automatic update.
-- An APT update that would remove packages waits for **Update all**, unless
-  **Allow updates that remove packages** is on.
+- **Allow updates that remove packages** (on by default) applies to
+  **Update all** and to automatic updates. With it off, both leave APT out
+  when its update would remove packages, and Update all says so in its
+  confirmation.
 - Firmware, the Mac App Store, apk, XBPS, the AUR, Toolbx and Distrobox are
   never updated automatically.
 - A Homebrew cask whose installer needs an administrator password still asks

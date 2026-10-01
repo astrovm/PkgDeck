@@ -115,27 +115,25 @@ DeckScrollView {
                 Accessible.name: text
             }
             SettingCheckBox {
-                objectName: "autoUpdateRemovalsSetting"
+                objectName: "allowRemovalsSetting"
                 text: "Allow updates that remove packages"
-                enabled: page.store.backgroundMode && page.store.autoUpdate
-                checked: page.store.autoUpdateRemovals
-                onClicked: page.store.autoUpdateRemovals = checked
+                checked: page.store.allowRemovals
+                onClicked: page.store.allowRemovals = checked
                 Accessible.name: text
             }
             Controls.Label {
-                objectName: "autoUpdateRemovalsHelp"
+                objectName: "allowRemovalsHelp"
                 Layout.fillWidth: true
                 Layout.leftMargin: 28
                 wrapMode: Text.WordWrap
                 color: Theme.muted
-                text: page.store.autoUpdateRemovals
-                    ? "An update can remove packages when the package manager decides to, such as an old kernel replaced by a new one."
-                    : "An update that would remove packages waits for you to run Update all."
+                text: page.store.allowRemovals
+                    ? "Update all, and automatic updates, can remove packages when the package manager decides to, such as an old kernel replaced by a new one. Update all lists them before you confirm."
+                    : "Update all, and automatic updates, leave out APT when its update would remove packages."
             }
             SettingCheckBox {
                 objectName: "systemApprovalSetting"
                 text: "Allow system updates without a password"
-                enabled: page.store.backgroundMode && page.store.autoUpdate
                 checked: page.store.systemApproval !== ""
                 onClicked: {
                     page.app.backend.allowSystemUpdates(checked);
@@ -152,8 +150,8 @@ DeckScrollView {
                 color: page.app.backend.approval_error ? Theme.danger : Theme.muted
                 text: page.app.backend.approval_error
                     || (page.app.macOS
-                        ? "MacPorts updates run without asking for your password. Asks for it once to allow this."
-                        : "System packages (APT, DNF, Pacman, Zypper, system Flatpaks and Snaps) update without asking for your password, and only updates: nothing is installed or removed. Asks for it once to allow this.")
+                        ? "Update all, and automatic updates, update MacPorts without asking for your password. Asks for it once to allow this."
+                        : "Update all, and automatic updates, update system packages (APT, DNF, Pacman, Zypper, system Flatpaks and Snaps) without asking for your password. Only updating everything is allowed; installing, removing or updating one package still asks. Asks for it once to allow this.")
             }
             SettingCheckBox {
                 objectName: "autostartSetting"

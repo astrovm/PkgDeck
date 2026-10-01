@@ -108,8 +108,8 @@ TestCase {
         property string auto_update_result: "{}"
         property var allowed: []
         function setAutoUpdate(enabled) { autoUpdate = enabled; }
-        property bool autoUpdateRemovals: false
-        function setAutoUpdateRemovals(allowed) { autoUpdateRemovals = allowed; }
+        property bool allowRemovals: true
+        function setAllowRemovals(allowed) { allowRemovals = allowed; }
         function restoreSystemApproval(approval) { system_approval = approval; }
         function allowSystemUpdates(allow) { allowed.push(allow); }
         function restoreNotificationHistory(history) { lastRestoredHistory = history; notification_history = history; }
@@ -592,23 +592,25 @@ TestCase {
         const approval = findChild(browser, "systemApprovalSetting");
         const help = findChild(browser, "systemApprovalHelp");
         verify(!auto.checked);
-        verify(!approval.enabled);
+        // These apply to Update all too, so they work without automatic updates.
+        verify(approval.enabled);
         auto.checked = true;
         auto.clicked();
         compare(browser.store.autoUpdate, true);
         compare(fake.autoUpdate, true);
         verify(approval.enabled);
-        const removals = findChild(browser, "autoUpdateRemovalsSetting");
-        const removalsHelp = findChild(browser, "autoUpdateRemovalsHelp");
-        verify(!removals.checked);
-        verify(removalsHelp.text.indexOf("waits for you") >= 0);
-        removals.checked = true;
-        removals.clicked();
-        compare(fake.autoUpdateRemovals, true);
+        const removals = findChild(browser, "allowRemovalsSetting");
+        const removalsHelp = findChild(browser, "allowRemovalsHelp");
+        verify(removals.enabled);
+        verify(removals.checked);
         verify(removalsHelp.text.indexOf("old kernel") >= 0);
         removals.checked = false;
         removals.clicked();
-        compare(fake.autoUpdateRemovals, false);
+        compare(fake.allowRemovals, false);
+        verify(removalsHelp.text.indexOf("leave out APT") >= 0);
+        removals.checked = true;
+        removals.clicked();
+        compare(fake.allowRemovals, true);
         // Asking does not turn it on; the saved approval does.
         approval.checked = true;
         approval.clicked();
