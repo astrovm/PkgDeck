@@ -610,9 +610,28 @@ pub fn begin(
     let runner = appimage
         .map(|path| (path, true))
         .or_else(|| runner_path(host).map(|path| (path, false)));
-    let start = |command| begin_session(command, operations, commands, cancel);
+    start_runner(
+        host,
+        authorization,
+        mode,
+        runner,
+        operations,
+        commands,
+        cancel,
+    )
+}
+/// Start the session through `runner`, the one [`begin`] found, if any.
+fn start_runner(
+    host: &Host,
+    authorization: Authorization,
+    mode: BatchMode,
+    runner: Option<(PathBuf, bool)>,
+    operations: &[Operation],
+    commands: Vec<Vec<ProtectedCommand>>,
+    cancel: &Cancellation,
+) -> Result<Option<ScopeGuard>, ExecutionError> {
     match runner_command(host, authorization, mode, runner)? {
-        Some(command) => start(command),
+        Some(command) => begin_session(command, operations, commands, cancel),
         // Without a runner each command would ask for a password on its
         // own; nobody is there to answer during an unattended update.
         None if mode != BatchMode::Reviewed => Err(ExecutionError::Disabled(
@@ -2417,5 +2436,54 @@ done"#;
             find_runner(Runtime::AppImage, Path::new("/nonexistent/bin/pkd"), ""),
             None
         );
+    }
+
+    #[test]
+    fn a_found_runner_starts_and_a_missing_one_refuses_unattended_batches() {
+        let refresh = [Operation::Refresh {
+            backend: "apt".into(),
+        }];
+        let commands = || batch_commands(&refresh).unwrap();
+        let cancel = Cancellation::default();
+        let upgrade_only = BatchMode::UpgradeOnly { removals: false };
+        // A bridge that exits at once: the runner never says it is ready.
+        let mut flatpak = Host::new(Runtime::Flatpak, Default::default());
+        flatpak.set_bridge_for_tests(Path::new("/usr/bin/true"));
+        let runner = PathBuf::from("/opt/pkgdeck/libexec/pkgdeck-host-runner");
+        assert!(start_runner(
+            &flatpak,
+            Authorization::Polkit,
+            upgrade_only,
+            Some((runner, false)),
+            &refresh,
+            commands(),
+            &cancel,
+        )
+        .is_err());
+        assert!(SESSION.with(|cell| cell.borrow().is_none()));
+        let native = Host::new(Runtime::Native, Default::default());
+        assert!(matches!(
+            start_runner(
+                &native,
+                Authorization::Polkit,
+                upgrade_only,
+                None,
+                &refresh,
+                commands(),
+                &cancel,
+            ),
+            Err(ExecutionError::Disabled(reason)) if reason.contains("system helper")
+        ));
+        assert!(start_runner(
+            &native,
+            Authorization::Polkit,
+            BatchMode::Reviewed,
+            None,
+            &refresh,
+            commands(),
+            &cancel,
+        )
+        .unwrap()
+        .is_none());
     }
 }

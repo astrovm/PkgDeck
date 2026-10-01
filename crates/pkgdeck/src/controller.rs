@@ -103,7 +103,7 @@ pub mod ffi {
         /// Why saving or removing that approval failed, or empty.
         #[qproperty(QString, approval_error)]
         /// The last automatic update, for a notification:
-        /// {updated, failed, held}.
+        /// {updated, failed, total}.
         #[qproperty(QString, auto_update_result)]
         #[qproperty(QString, confirmation)]
         #[qproperty(QString, confirmation_data)]
@@ -1020,12 +1020,15 @@ fn approval_error(error: &ExecutionError) -> String {
 struct Natives {
     engine: fn(&[String], bool, Authorization, &Cancellation) -> Result<Engine, EngineError>,
     host: fn() -> pkgdeck_core::host::Host,
+    /// Saves or removes the system update approval, behind a password.
+    approve: fn(&pkgdeck_core::host::Host, bool, &Cancellation) -> Result<String, ExecutionError>,
     root: &'static str,
     metadata: crate::metadata::Sources,
 }
 const NATIVES: Natives = Natives {
     engine: pkgdeck_core::backends::native_engine,
     host: pkgdeck_core::host::Host::current,
+    approve: pkgdeck_core::unattended::set_approval,
     root: "/",
     metadata: crate::metadata::SYSTEM,
 };
@@ -2971,13 +2974,13 @@ impl ffi::PackageController {
             return;
         }
         self.as_mut().set_approval_error(QString::default());
-        let host = (self.rust().natives.host)();
+        let natives = self.rust().natives;
+        let host = (natives.host)();
         let (sender, receiver) = mpsc::channel();
         let handle = thread::spawn(move || {
-            let result =
-                pkgdeck_core::unattended::set_approval(&host, allow, &Cancellation::default())
-                    .map(|key| if allow { key } else { String::new() })
-                    .map_err(|error| approval_error(&error));
+            let result = (natives.approve)(&host, allow, &Cancellation::default())
+                .map(|key| if allow { key } else { String::new() })
+                .map_err(|error| approval_error(&error));
             let _ = sender.send(result);
         });
         self.as_mut().rust_mut().approval_worker = Some(ApprovalWorker { handle, receiver });
@@ -11857,9 +11860,28 @@ mod tests {
         catalog: no_catalog,
         fetch: offline,
     };
+    /// A machine without the helper: approving never reaches a password prompt.
+    fn no_approval(
+        _: &pkgdeck_core::host::Host,
+        _: bool,
+        _: &Cancellation,
+    ) -> Result<String, ExecutionError> {
+        Err(ExecutionError::Disabled(
+            "PkgDeck's system helper is not installed".into(),
+        ))
+    }
+    /// The password was given: the approval names a synthetic helper.
+    fn synthetic_approval(
+        _: &pkgdeck_core::host::Host,
+        grant: bool,
+        _: &Cancellation,
+    ) -> Result<String, ExecutionError> {
+        Ok(if grant { "synthetic-helper" } else { "" }.into())
+    }
     pub(super) const NO_MANAGERS: Natives = Natives {
         engine: no_engine,
         host: bare_host,
+        approve: no_approval,
         root: "/nonexistent/pkgdeck-tests",
         metadata: NO_METADATA,
     };
@@ -11883,6 +11905,7 @@ mod tests {
     const SYNTHETIC: Natives = Natives {
         engine: fixture_engine,
         host: bare_host,
+        approve: no_approval,
         root: "/nonexistent/pkgdeck-tests",
         metadata: NO_METADATA,
     };
@@ -12563,6 +12586,193 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("The planned changes are different now."));
+    }
+    #[test]
+    fn automatic_runs_use_their_batch_mode_and_report_what_they_did() {
+        let mut controller = synthetic_controller();
+        let mut controller = controller.pin_mut();
+        let operations = vec![Operation::UpgradeAll {
+            backend: "fixture".into(),
+        }];
+        controller
+            .as_mut()
+            .start(Job::AutoUpgrade(operations.clone(), false));
+        settle(&mut controller);
+        let result: Value =
+            serde_json::from_str(&controller.auto_update_result().to_string()).unwrap();
+        assert_eq!(result, json!({"updated": 1, "failed": 0, "total": 1}));
+        // A run that never reached its batch leaves the last result alone.
+        controller.as_mut().set_auto_update_result("{}".into());
+        controller.as_mut().rust_mut().natives = Natives {
+            engine: missing_engine,
+            ..SYNTHETIC
+        };
+        controller
+            .as_mut()
+            .start(Job::AutoUpgrade(operations, false));
+        settle(&mut controller);
+        assert_eq!(controller.auto_update_result().to_string(), "{}");
+    }
+    #[test]
+    fn system_update_approval_is_saved_removed_and_explained() {
+        let mut controller = synthetic_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().rust_mut().natives = Natives {
+            approve: synthetic_approval,
+            ..SYNTHETIC
+        };
+        let approval_idle =
+            |controller: &ffi::PackageController| controller.rust().approval_worker.is_none();
+        controller.as_mut().allow_system_updates(true);
+        assert!(controller.needs_poll());
+        wait_until(&mut controller, approval_idle);
+        assert_eq!(controller.system_approval().to_string(), "synthetic-helper");
+        assert_eq!(controller.approval_error().to_string(), "");
+        controller.as_mut().allow_system_updates(false);
+        wait_until(&mut controller, approval_idle);
+        assert_eq!(controller.system_approval().to_string(), "");
+
+        // Without the helper, the reason is shown and nothing is saved.
+        controller.as_mut().rust_mut().natives = SYNTHETIC;
+        controller.as_mut().allow_system_updates(true);
+        wait_until(&mut controller, approval_idle);
+        assert_eq!(controller.system_approval().to_string(), "");
+        assert_eq!(
+            controller.approval_error().to_string(),
+            "PkgDeck's system helper is not installed"
+        );
+
+        // While the password prompt is open, another toggle waits and the
+        // answer is read once it arrives.
+        let (sender, receiver) = mpsc::channel();
+        controller.as_mut().rust_mut().approval_worker = Some(ApprovalWorker {
+            handle: thread::spawn(|| {}),
+            receiver,
+        });
+        controller.as_mut().allow_system_updates(false);
+        controller.as_mut().poll();
+        assert!(controller.rust().approval_worker.is_some());
+        assert_eq!(
+            controller.approval_error().to_string(),
+            "PkgDeck's system helper is not installed"
+        );
+        sender.send(Ok("later-helper".into())).unwrap();
+        controller.as_mut().poll();
+        assert!(controller.rust().approval_worker.is_none());
+        assert_eq!(controller.system_approval().to_string(), "later-helper");
+    }
+    #[test]
+    fn approval_failures_read_as_one_sentence() {
+        let failed = |stderr: &str| {
+            ExecutionError::Failed(pkgdeck_core::process::Completion {
+                code: Some(1),
+                signal: None,
+                stdout: vec![],
+                stderr: stderr.as_bytes().to_vec(),
+                truncated: false,
+                cancellation_deferred: false,
+            })
+        };
+        for (error, sentence) in [
+            (
+                ExecutionError::AuthorizationCancelled,
+                "The password prompt was cancelled.",
+            ),
+            (ExecutionError::Disabled("Not installed".into()), "Not installed"),
+            (ExecutionError::Invalid("Unexpected user".into()), "Unexpected user"),
+            (
+                failed("polkit noise\npkgdeck-host-runner: this system's polkit has no rules folder\n\n"),
+                "this system's polkit has no rules folder",
+            ),
+            (
+                failed(" \n"),
+                "PkgDeck's helper could not save the setting.",
+            ),
+            (ExecutionError::TimedOut, "host read timed out"),
+        ] {
+            assert_eq!(approval_error(&error), sentence);
+        }
+    }
+    #[test]
+    fn a_saved_approval_counts_only_for_the_helper_it_names() {
+        let mut controller = idle_controller();
+        let mut controller = controller.pin_mut();
+        assert!(!controller.rust().approval_current());
+        controller
+            .as_mut()
+            .restore_system_approval("some-other-helper".into());
+        let current = controller.rust().approval_current();
+        // The test binary has no root-owned helper beside it on Linux.
+        #[cfg(not(target_os = "macos"))]
+        assert!(!current);
+        #[cfg(target_os = "macos")]
+        let _ = current;
+        // Nothing that may update unattended: no run is queued.
+        controller.as_mut().set_auto_update(true);
+        let mut firmware = synthetic_package("firmware", "Firmware");
+        firmware.id.backend = "fwupd".into();
+        firmware.update = UpdateAvailability::Available;
+        firmware.candidate_version = Some("2".into());
+        let report = PackageReport {
+            packages: vec![firmware],
+            failures: vec![],
+            successful_sources: vec!["fwupd".into()],
+        };
+        assert!(!controller.as_mut().schedule_auto_update(&report));
+        assert!(controller.rust().validated_confirmed.is_none());
+    }
+    #[test]
+    fn automatic_runs_without_apt_skip_its_plan_and_hold_it_when_planning_fails() {
+        let all = |backend: &str| Operation::UpgradeAll {
+            backend: backend.into(),
+        };
+        let mut engine = Engine::default();
+        engine
+            .register(Scripted {
+                id: "homebrew",
+                progress: vec![],
+            })
+            .unwrap();
+        let cancel = Cancellation::default();
+        let replies = run_job(
+            &mut engine,
+            Job::AutoUpgrade(vec![all("homebrew")], false),
+            &cancel,
+        );
+        let outcomes = expect!(
+            replies.into_iter().last(),
+            Some(Reply::Done(Ok(Payload::Batch(_, outcomes)))) => outcomes
+        );
+        assert_eq!(outcomes, [Outcome::Finished]);
+        // APT isn't there to plan, so it is held with the reason and the
+        // rest still runs.
+        let replies = run_job(
+            &mut engine,
+            Job::AutoUpgrade(vec![all("apt"), all("homebrew")], true),
+            &cancel,
+        );
+        let outcomes = expect!(
+            replies.into_iter().last(),
+            Some(Reply::Done(Ok(Payload::Batch(_, outcomes)))) => outcomes
+        );
+        assert_eq!(outcomes, [Outcome::Failed, Outcome::Finished]);
+        // A cleanup batch names its tasks as such.
+        let replies = run_job(
+            &mut engine,
+            Job::CleanAll(vec![Operation::Clean(CleanupId {
+                backend: "fwupd".into(),
+                key: "cache".into(),
+            })]),
+            &cancel,
+        );
+        let status = expect!(
+            replies.into_iter().last(),
+            Some(Reply::Done(Ok(Payload::Batch(status, _)))) => status
+        );
+        assert!(
+            status.starts_with("Completed 0 of 1 cleanup tasks."),
+            "{status}"
+        );
     }
     #[test]
     fn details_workers_replace_older_lookups_and_report_failures() {

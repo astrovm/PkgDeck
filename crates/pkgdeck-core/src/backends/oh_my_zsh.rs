@@ -391,11 +391,13 @@ mod tests {
     type Failure = (&'static str, fn() -> ExecutionError);
 
     /// Runs the real `git`, with `HOME`, `ZSH` and `ZSH_CUSTOM` from `env`.
-    /// A command whose arguments contain `fail` fails as `failure` does.
+    /// A command whose arguments contain `fail` fails as `failure` does;
+    /// one that contains `skip` succeeds without running.
     #[derive(Clone, Default)]
     struct Git {
         env: BTreeMap<&'static str, OsString>,
         fail: Option<Failure>,
+        skip: Option<&'static str>,
         calls: Arc<Mutex<Vec<String>>>,
     }
     impl DevTool for Git {
@@ -418,6 +420,16 @@ mod tests {
                 if line.contains(needle) {
                     return Err(error());
                 }
+            }
+            if self.skip.is_some_and(|needle| line.contains(needle)) {
+                return Ok(Completion {
+                    code: Some(0),
+                    signal: None,
+                    stdout: vec![],
+                    stderr: vec![],
+                    truncated: false,
+                    cancellation_deferred: false,
+                });
             }
             assert_eq!(executable, "git");
             let output = Command::new("git")
@@ -773,5 +785,62 @@ mod tests {
             backend.installed(&Cancellation::default()),
             Err(EngineError::Cancelled)
         );
+    }
+
+    #[test]
+    fn themes_are_rows_and_failed_reads_or_pulls_are_errors() {
+        let f = fixture();
+        let cancel = Cancellation::default();
+        let root = f.home.path().join(".oh-my-zsh");
+        published(
+            f.home.path(),
+            "agnoster",
+            &root.join("custom/themes/agnoster"),
+            "agnoster.zsh-theme",
+        );
+        let backend = |fail: Option<Failure>, skip: Option<&'static str>| {
+            OhMyZsh::new(DevTools(Git {
+                env: BTreeMap::from([("HOME", f.home.path().into())]),
+                fail,
+                skip,
+                ..Git::default()
+            }))
+        };
+        let mut plain = backend(None, None);
+        assert!(plain.has_update_index());
+        let rows = plain.installed(&cancel).unwrap();
+        let theme = rows
+            .iter()
+            .find(|row| row.id.name == "theme/agnoster")
+            .unwrap();
+        assert_eq!(theme.summary, "Oh My Zsh custom theme");
+        assert_eq!(theme.display_name, "agnoster");
+
+        for needle in ["--short=12 HEAD", "rev-list"] {
+            assert!(matches!(
+                backend(
+                    Some((needle, || ExecutionError::Invalid("broken".into()))),
+                    None
+                )
+                .installed(&cancel),
+                Err(EngineError::Execution(ExecutionError::Invalid(_)))
+            ));
+        }
+
+        // A pull that reports success but leaves the checkout behind.
+        commit(&f.core, "news");
+        let mut stuck = backend(None, Some("pull"));
+        stuck.arm_update_check(Some(1));
+        stuck.refresh_update_index(&cancel).unwrap();
+        let core = stuck.installed(&cancel).unwrap().remove(0);
+        assert_eq!(core.update, UpdateAvailability::Available);
+        let error = stuck
+            .execute(&Operation::Upgrade(core.id), &cancel, &mut ignore)
+            .unwrap_err();
+        assert!(
+            matches!(&error, EngineError::InvalidResponse { reason, .. } if reason.contains("still behind")),
+            "{error:?}"
+        );
+        assert!(!root.join("news").exists());
     }
 }

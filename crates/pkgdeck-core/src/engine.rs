@@ -1566,6 +1566,55 @@ mod apt_upgrade_tests {
     }
 
     #[test]
+    fn unattended_batches_refuse_sources_that_need_someone_there() {
+        struct Fixture(&'static str, Arc<AtomicUsize>);
+        impl Backend for Fixture {
+            fn id(&self) -> &str {
+                self.0
+            }
+            fn capabilities(&self) -> &[Capability] {
+                &[Capability::Refresh]
+            }
+            fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
+                Ok(Availability::Available)
+            }
+            fn execute(
+                &mut self,
+                _: &Operation,
+                _: &Cancellation,
+                _: &mut dyn FnMut(Progress),
+            ) -> Result<OperationOutcome, EngineError> {
+                self.1.fetch_add(1, Ordering::SeqCst);
+                Ok(OperationOutcome::default())
+            }
+        }
+        let writes = Arc::new(AtomicUsize::new(0));
+        let mut engine = Engine::default();
+        engine.register(Fixture("fwupd", writes.clone())).unwrap();
+        engine.register(Fixture("user", writes.clone())).unwrap();
+        engine.enable_batch_authorization(
+            Host::new(Runtime::Native, Default::default()),
+            Authorization::Polkit,
+        );
+        engine.set_batch_mode(crate::batch::BatchMode::UpgradeOnly { removals: false });
+        engine.set_unattended(true);
+        let operations = ["fwupd", "user"].map(|backend| Operation::Refresh {
+            backend: backend.into(),
+        });
+        let results = engine.execute_batch(&operations, &Cancellation::default(), &mut |_| {});
+        assert!(matches!(
+            &results[0],
+            Err(EngineError::InvalidResponse { backend, reason })
+                if backend == "fwupd" && reason.contains("never updated automatically")
+        ));
+        assert!(matches!(
+            &results[1],
+            Err(EngineError::InvalidResponse { reason, .. }) if reason.contains("could not be checked")
+        ));
+        assert_eq!(writes.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
     fn exact_apt_selections_share_one_native_transaction_and_keep_two_outcomes() {
         struct GroupedFixture(Arc<AtomicUsize>);
         impl Backend for GroupedFixture {

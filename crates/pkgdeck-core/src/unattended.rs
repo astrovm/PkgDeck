@@ -9,12 +9,14 @@
 //! gets it. On macOS it is a sudoers entry for MacPorts' two update commands.
 use crate::{
     batch::{self, BatchMode, ALLOW_REMOVALS, UPGRADE_ONLY},
-    host::Host,
+    host::{Host, Runtime},
     process::{self, Cancellation, ExecutionError, Limits},
 };
 use std::{
     ffi::OsString,
+    io::{self, Write},
     path::{Path, PathBuf},
+    process::Output,
 };
 
 /// How a source may be updated with nobody watching.
@@ -157,8 +159,8 @@ polkit.addRule(function (action, subject) {{
         test = runner.test()
     ))
 }
-pub fn rule_path(user: &str) -> PathBuf {
-    Path::new(RULES_DIR).join(format!("49-pkgdeck-unattended-{user}.rules"))
+pub fn rule_path(dir: &Path, user: &str) -> PathBuf {
+    dir.join(format!("49-pkgdeck-unattended-{user}.rules"))
 }
 
 /// True when `path` and every folder above it belong to root and nobody
@@ -174,47 +176,74 @@ pub fn root_owned(path: &Path) -> bool {
 /// Save or remove the rule, as root. The user is the one pkexec (or sudo)
 /// ran for, never a name the caller passes.
 fn save_rule(grant: bool) -> Result<(), ExecutionError> {
-    if !rustix::process::geteuid().is_root() {
-        return Err(invalid("host runner requires root"));
-    }
-    let uid = ["PKEXEC_UID", "SUDO_UID"]
-        .into_iter()
-        .find_map(|name| std::env::var(name).ok())
-        .and_then(|uid| uid.parse::<u32>().ok())
-        .filter(|uid| *uid != 0)
-        .ok_or_else(|| invalid("run this through pkexec as the person allowing it"))?;
-    let output = std::process::Command::new("/usr/bin/id")
+    save_rule_as(
+        grant,
+        rustix::process::geteuid().is_root(),
+        ["PKEXEC_UID", "SUDO_UID"]
+            .into_iter()
+            .find_map(|name| std::env::var(name).ok()),
+        user_name,
+        helper_path,
+        root_owned,
+        Path::new(RULES_DIR),
+        &mut io::stdout().lock(),
+    )
+}
+/// The login name of `uid`, as `id` prints it.
+fn user_name(uid: u32) -> io::Result<Output> {
+    std::process::Command::new("/usr/bin/id")
         .args(["-nu", &uid.to_string()])
         .env_clear()
         .output()
-        .map_err(|error| ExecutionError::Io(error.to_string()))?;
+}
+/// The helper itself, with every link resolved.
+fn helper_path() -> io::Result<PathBuf> {
+    std::fs::canonicalize(std::env::current_exe()?)
+}
+#[allow(clippy::too_many_arguments)]
+fn save_rule_as(
+    grant: bool,
+    root: bool,
+    uid: Option<String>,
+    name_of: fn(u32) -> io::Result<Output>,
+    runner: fn() -> io::Result<PathBuf>,
+    trusted: fn(&Path) -> bool,
+    dir: &Path,
+    out: &mut impl Write,
+) -> Result<(), ExecutionError> {
+    if !root {
+        return Err(invalid("host runner requires root"));
+    }
+    let uid = uid
+        .and_then(|uid| uid.parse::<u32>().ok())
+        .filter(|uid| *uid != 0)
+        .ok_or_else(|| invalid("run this through pkexec as the person allowing it"))?;
+    let output = name_of(uid)?;
     let user = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     if !output.status.success() || !safe_user(&user) {
         return Err(invalid("unexpected user name"));
     }
-    let path = rule_path(&user);
+    let path = rule_path(dir, &user);
     if !grant {
         return match std::fs::remove_file(&path) {
-            Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
-                Err(ExecutionError::Io(error.to_string()))
-            }
+            Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error.into()),
             _ => Ok(()),
         };
     }
-    let runner = std::fs::canonicalize(std::env::current_exe()?)?;
-    if !root_owned(&runner) {
+    let runner = runner()?;
+    if !trusted(&runner) {
         return Err(invalid(
             "PkgDeck's helper isn't installed in a root-owned folder (an AppImage, a user Flatpak or Homebrew), so it can't be allowed to run without a password",
         ));
     }
-    let rule = polkit_rule(&user, &RunnerMatch::for_runner(&runner)?)?;
-    let dir = Path::new(RULES_DIR);
+    let runner = RunnerMatch::for_runner(&runner)?;
+    let rule = polkit_rule(&user, &runner)?;
     if !dir.is_dir() {
         return Err(invalid("this system's polkit has no rules folder"));
     }
     let temporary = dir.join(format!(".pkgdeck-unattended-{user}.tmp"));
     {
-        use std::{io::Write, os::unix::fs::OpenOptionsExt};
+        use std::os::unix::fs::OpenOptionsExt;
         let _ = std::fs::remove_file(&temporary);
         let mut file = std::fs::OpenOptions::new()
             .write(true)
@@ -227,16 +256,20 @@ fn save_rule(grant: bool) -> Result<(), ExecutionError> {
     std::fs::rename(&temporary, &path)?;
     // The caller saves this to tell later whether the helper it finds is
     // still the approved one.
-    println!("{}", RunnerMatch::for_runner(&runner)?.key());
+    writeln!(out, "{}", runner.key())?;
     Ok(())
 }
 
 /// The approval key for the helper this frontend would start, or None when
 /// it has none or the helper isn't root-owned.
 pub fn current_runner(host: &Host) -> Option<String> {
-    let path = batch::runner_path(host)?;
-    (host.runtime == crate::host::Runtime::Flatpak || root_owned(&path))
-        .then(|| RunnerMatch::for_runner(&path).ok())
+    runner_key(host.runtime, &batch::runner_path(host)?)
+}
+/// A Flatpak's own folder is root-owned on the host even where the sandbox
+/// can't tell, so only other installs are checked.
+fn runner_key(runtime: Runtime, path: &Path) -> Option<String> {
+    (runtime == Runtime::Flatpak || root_owned(path))
+        .then(|| RunnerMatch::for_runner(path).ok())
         .flatten()
         .map(|runner| runner.key())
 }
@@ -256,18 +289,35 @@ pub fn set_approval(
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let runner = batch::runner_path(host).ok_or_else(|| {
-            ExecutionError::Disabled("PkgDeck's system helper is not installed".into())
-        })?;
-        let (program, mut args) = crate::host::Authorization::Polkit.prefix(&runner);
-        args.push(if grant { GRANT } else { REVOKE }.into());
-        let command = host.command(Path::new(program), &args)?;
-        let result = process::run(command, Limits::default(), cancel, true)?;
-        match result.code {
-            Some(0) => Ok(String::from_utf8_lossy(&result.stdout).trim().to_owned()),
-            Some(126) => Err(ExecutionError::AuthorizationCancelled),
-            _ => Err(ExecutionError::Failed(result)),
-        }
+        polkit_approval(host, batch::runner_path(host), grant, cancel)
+    }
+}
+/// Run `runner` through pkexec to save or remove the rule.
+#[cfg(any(not(target_os = "macos"), test))]
+fn polkit_approval(
+    host: &Host,
+    runner: Option<PathBuf>,
+    grant: bool,
+    cancel: &Cancellation,
+) -> Result<String, ExecutionError> {
+    let runner = runner.ok_or_else(|| {
+        ExecutionError::Disabled("PkgDeck's system helper is not installed".into())
+    })?;
+    let (program, mut args) = crate::host::Authorization::Polkit.prefix(&runner);
+    args.push(if grant { GRANT } else { REVOKE }.into());
+    let command = host.command(Path::new(program), &args)?;
+    polkit_result(process::run(command, Limits::default(), cancel, true))
+}
+/// pkexec exits with 126 when the password dialog is dismissed.
+#[cfg(any(not(target_os = "macos"), test))]
+fn polkit_result(
+    result: Result<process::Completion, ExecutionError>,
+) -> Result<String, ExecutionError> {
+    let result = result?;
+    match result.code {
+        Some(0) => Ok(String::from_utf8_lossy(&result.stdout).trim().to_owned()),
+        Some(126) => Err(ExecutionError::AuthorizationCancelled),
+        _ => Err(ExecutionError::Failed(result)),
     }
 }
 
@@ -315,20 +365,27 @@ pub mod macos {
 
     #[cfg(target_os = "macos")]
     pub fn set_approval(grant: bool, cancel: &Cancellation) -> Result<String, ExecutionError> {
+        set_approval_as(grant, root_owned(Path::new(PORT)), cancel)
+    }
+    /// `macports` says whether MacPorts is installed root-owned, which the
+    /// entry needs: sudo would otherwise run a program the user can replace.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn set_approval_as(
+        grant: bool,
+        macports: bool,
+        cancel: &Cancellation,
+    ) -> Result<String, ExecutionError> {
         let user = std::process::Command::new("/usr/bin/id")
             .arg("-un")
-            .output()
-            .map_err(|error| ExecutionError::Io(error.to_string()))?;
+            .output()?;
         let user = String::from_utf8_lossy(&user.stdout).trim().to_owned();
-        if grant && !root_owned(Path::new(PORT)) {
+        if grant && !macports {
             return Err(ExecutionError::Disabled(
                 "MacPorts isn't installed in /opt/local".into(),
             ));
         }
-        let shell = crate::host::shell_command(
-            Path::new("/bin/sh"),
-            &["-c".into(), script(&user, grant)?.into()],
-        )?;
+        let args = ["-c".into(), script(&user, grant)?.into()];
+        let shell = crate::host::shell_command(Path::new("/bin/sh"), &args)?;
         let apple = format!(
             "do shell script {} with administrator privileges",
             crate::host::applescript_string(&shell)
@@ -339,12 +396,13 @@ pub mod macos {
             .env_clear()
             .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
             .current_dir("/");
-        let result = crate::host::administrator_result(process::run(
-            command,
-            Limits::default(),
-            cancel,
-            true,
-        )?)?;
+        approval_result(process::run(command, Limits::default(), cancel, true))
+    }
+    /// What the administrator dialog's script reported.
+    pub(crate) fn approval_result(
+        result: Result<process::Completion, ExecutionError>,
+    ) -> Result<String, ExecutionError> {
+        let result = crate::host::administrator_result(result?)?;
         if result.code == Some(0) {
             Ok(KEY.into())
         } else {
@@ -452,7 +510,7 @@ mod tests {
             );
         }
         assert_eq!(
-            rule_path("astro"),
+            rule_path(Path::new(RULES_DIR), "astro"),
             Path::new("/etc/polkit-1/rules.d/49-pkgdeck-unattended-astro.rules")
         );
     }
@@ -478,14 +536,275 @@ mod tests {
                 Err(ExecutionError::Invalid(_))
             ));
         }
-        if !rustix::process::geteuid().is_root() {
-            for flag in [GRANT, REVOKE] {
-                assert_eq!(
-                    run_runner(&[flag.into()]),
-                    Err(invalid("host runner requires root"))
-                );
-            }
+        // Tests never run as root, so each of these stops at the root check.
+        for args in [
+            vec![GRANT],
+            vec![REVOKE],
+            vec![UPGRADE_ONLY, ALLOW_REMOVALS],
+        ] {
+            let args = args.into_iter().map(OsString::from).collect::<Vec<_>>();
+            assert_eq!(run_runner(&args), Err(invalid("host runner requires root")));
         }
+    }
+
+    fn named(code: i32, name: &str) -> io::Result<Output> {
+        use std::os::unix::process::ExitStatusExt;
+        Ok(Output {
+            status: std::process::ExitStatus::from_raw(code << 8),
+            stdout: format!("{name}\n").into_bytes(),
+            stderr: Vec::new(),
+        })
+    }
+    fn astro(_: u32) -> io::Result<Output> {
+        named(0, "astro")
+    }
+    fn spaced(_: u32) -> io::Result<Output> {
+        named(0, "a b")
+    }
+    fn unknown(_: u32) -> io::Result<Output> {
+        named(1, "astro")
+    }
+    fn missing_id(_: u32) -> io::Result<Output> {
+        Err(io::Error::other("no id"))
+    }
+    fn installed() -> io::Result<PathBuf> {
+        Ok("/usr/libexec/pkgdeck-host-runner".into())
+    }
+    fn misnamed() -> io::Result<PathBuf> {
+        Ok("/usr/libexec/other".into())
+    }
+    fn gone() -> io::Result<PathBuf> {
+        Err(io::Error::other("no helper"))
+    }
+    fn yes(_: &Path) -> bool {
+        true
+    }
+    fn no(_: &Path) -> bool {
+        false
+    }
+
+    #[test]
+    fn the_rule_is_saved_only_for_the_pkexec_user_and_a_root_owned_helper() {
+        let dir = std::env::temp_dir().join(format!("pkgdeck-rules-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let save = |grant, uid: Option<&str>, name_of, runner, trusted, dir: &Path| {
+            let mut out = Vec::new();
+            let result = save_rule_as(
+                grant,
+                true,
+                uid.map(Into::into),
+                name_of,
+                runner,
+                trusted,
+                dir,
+                &mut out,
+            );
+            result.map(|()| String::from_utf8(out).unwrap())
+        };
+        let mut out = Vec::new();
+        assert_eq!(
+            save_rule_as(true, false, None, astro, installed, yes, &dir, &mut out),
+            Err(invalid("host runner requires root"))
+        );
+        for uid in [None, Some("0"), Some("abc")] {
+            assert_eq!(
+                save(true, uid, astro, installed, yes, &dir),
+                Err(invalid("run this through pkexec as the person allowing it")),
+                "{uid:?}"
+            );
+        }
+        for name_of in [spaced, unknown] {
+            assert_eq!(
+                save(true, Some("1000"), name_of, installed, yes, &dir),
+                Err(invalid("unexpected user name"))
+            );
+        }
+        assert_eq!(
+            save(true, Some("1000"), missing_id, installed, yes, &dir),
+            Err(ExecutionError::Io("no id".into()))
+        );
+        assert_eq!(
+            save(true, Some("1000"), astro, gone, yes, &dir),
+            Err(ExecutionError::Io("no helper".into()))
+        );
+        assert!(matches!(
+            save(true, Some("1000"), astro, installed, no, &dir),
+            Err(ExecutionError::Invalid(reason)) if reason.contains("root-owned folder")
+        ));
+        assert!(save(true, Some("1000"), astro, misnamed, yes, &dir).is_err());
+        assert_eq!(
+            save(
+                true,
+                Some("1000"),
+                astro,
+                installed,
+                yes,
+                &dir.join("missing")
+            ),
+            Err(invalid("this system's polkit has no rules folder"))
+        );
+
+        // A temporary file left by an interrupted save is replaced.
+        let temporary = dir.join(".pkgdeck-unattended-astro.tmp");
+        std::fs::write(&temporary, "stale").unwrap();
+        assert_eq!(
+            save(true, Some("1000"), astro, installed, yes, &dir).unwrap(),
+            "/usr/libexec/pkgdeck-host-runner\n"
+        );
+        let path = rule_path(&dir, "astro");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            polkit_rule(
+                "astro",
+                &RunnerMatch::for_runner(&installed().unwrap()).unwrap()
+            )
+            .unwrap()
+        );
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o133, 0, "{mode:o}");
+        }
+        assert!(!temporary.exists());
+
+        // Removing it works once, and again when it's already gone.
+        for _ in 0..2 {
+            assert_eq!(
+                save(false, Some("1000"), astro, gone, no, &dir),
+                Ok(String::new())
+            );
+            assert!(!path.exists());
+        }
+        std::fs::create_dir(&path).unwrap();
+        assert!(matches!(
+            save(false, Some("1000"), astro, gone, no, &dir),
+            Err(ExecutionError::Io(_))
+        ));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_rule_names_the_real_user_and_helper() {
+        let output = user_name(rustix::process::getuid().as_raw()).unwrap();
+        assert!(output.status.success());
+        assert!(safe_user(String::from_utf8_lossy(&output.stdout).trim()));
+        assert!(helper_path().unwrap().is_absolute());
+    }
+
+    #[test]
+    fn only_a_root_owned_or_flatpak_helper_has_a_key() {
+        let flatpak = format!("{FLATPAK_PREFIX}x86_64/stable/0123abcd/files/libexec/{RUNNER}");
+        assert_eq!(
+            runner_key(Runtime::Flatpak, Path::new(&flatpak)),
+            Some(format!("{FLATPAK_PREFIX}*"))
+        );
+        assert_eq!(
+            runner_key(Runtime::Flatpak, Path::new("/usr/libexec/other")),
+            None
+        );
+        // The test binary lives in a folder the user owns.
+        let mine = std::env::current_exe().unwrap();
+        assert_eq!(runner_key(Runtime::Native, &mine), None);
+        // A PkgDeck installed on this machine may have a helper of its own.
+        let host = Host::new(Runtime::Native, Default::default());
+        assert_eq!(
+            current_runner(&host),
+            batch::runner_path(&host).and_then(|path| runner_key(Runtime::Native, &path))
+        );
+    }
+
+    #[test]
+    fn saving_the_approval_runs_nothing_once_cancelled() {
+        let cancel = Cancellation::default();
+        cancel.cancel();
+        let host = Host::new(Runtime::Native, Default::default());
+        for grant in [true, false] {
+            assert!(matches!(
+                set_approval(&host, grant, &cancel),
+                Err(ExecutionError::Disabled(_) | ExecutionError::Cancelled)
+            ));
+        }
+        assert!(matches!(
+            polkit_approval(&host, None, true, &cancel),
+            Err(ExecutionError::Disabled(_))
+        ));
+        let runner = PathBuf::from("/usr/libexec/pkgdeck-host-runner");
+        assert_eq!(
+            polkit_approval(&host, Some(runner), false, &cancel),
+            Err(ExecutionError::Cancelled)
+        );
+    }
+
+    fn ended(code: i32, stdout: &str, stderr: &str) -> process::Completion {
+        process::Completion {
+            code: Some(code),
+            signal: None,
+            stdout: stdout.into(),
+            stderr: stderr.into(),
+            truncated: false,
+            cancellation_deferred: false,
+        }
+    }
+
+    #[test]
+    fn pkexec_reports_the_key_a_dismissed_dialog_or_a_failure() {
+        assert_eq!(
+            polkit_result(Ok(ended(0, "/usr/libexec/pkgdeck-host-runner\n", ""))),
+            Ok("/usr/libexec/pkgdeck-host-runner".into())
+        );
+        assert_eq!(
+            polkit_result(Ok(ended(126, "", ""))),
+            Err(ExecutionError::AuthorizationCancelled)
+        );
+        assert_eq!(
+            polkit_result(Ok(ended(1, "", "no"))),
+            Err(ExecutionError::Failed(ended(1, "", "no")))
+        );
+        assert_eq!(
+            polkit_result(Err(ExecutionError::Cancelled)),
+            Err(ExecutionError::Cancelled)
+        );
+    }
+
+    #[test]
+    fn the_administrator_dialog_reports_the_key_a_dismissal_or_a_failure() {
+        assert_eq!(
+            macos::approval_result(Ok(ended(0, "", ""))),
+            Ok(macos::KEY.into())
+        );
+        assert_eq!(
+            macos::approval_result(Ok(ended(1, "", "User canceled. (-128)"))),
+            Err(ExecutionError::AuthorizationCancelled)
+        );
+        assert_eq!(
+            macos::approval_result(Ok(ended(1, "", "visudo: bad"))),
+            Err(ExecutionError::Failed(ended(1, "", "visudo: bad")))
+        );
+        assert_eq!(
+            macos::approval_result(Err(ExecutionError::Cancelled)),
+            Err(ExecutionError::Cancelled)
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_macports_entry_is_saved_only_for_a_root_owned_macports() {
+        let cancel = Cancellation::default();
+        cancel.cancel();
+        assert!(matches!(
+            macos::set_approval_as(true, false, &cancel),
+            Err(ExecutionError::Disabled(_))
+        ));
+        // A cancelled job never shows the password dialog.
+        for grant in [true, false] {
+            assert_eq!(
+                macos::set_approval_as(grant, true, &cancel),
+                Err(ExecutionError::Cancelled)
+            );
+        }
+        // sudo -n never asks for a password.
+        let _ = macos::approved();
     }
 
     #[test]
