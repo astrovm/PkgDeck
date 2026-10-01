@@ -8,6 +8,7 @@ Controls.Switch {
     id: setting
     // Adds an info icon after the label; hovering it shows this text.
     property string tooltipText: ""
+    readonly property alias label: label
     Accessible.description: tooltipText
     Layout.fillWidth: true
     implicitHeight: Math.max(Theme.controlHeight, contentItem.implicitHeight + 8)
@@ -45,6 +46,7 @@ Controls.Switch {
     contentItem: RowLayout {
         spacing: 6
         Text {
+            id: label
             text: setting.text
             color: setting.enabled ? Theme.ink : Theme.muted
             font: setting.font

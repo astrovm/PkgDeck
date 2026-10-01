@@ -1558,7 +1558,7 @@ TestCase {
         browser.macOS = macOS;
         for (const name of ["animationsSetting", "backgroundModeSetting"]) {
             const setting = findChild(browser, name);
-            compare(setting.contentItem.color.toString(), browser.ink.toString());
+            compare(setting.label.color.toString(), browser.ink.toString());
         }
         waitForRendering(browser.contentItem);
         const appearance = findChild(browser, "appearanceSetting");
