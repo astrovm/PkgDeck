@@ -1612,6 +1612,11 @@ mod apt_upgrade_tests {
             Err(EngineError::InvalidResponse { reason, .. }) if reason.contains("could not be checked")
         ));
         assert_eq!(writes.load(Ordering::SeqCst), 0);
+        // With someone there, the same source runs.
+        engine.set_unattended(false);
+        let results = engine.execute_batch(&operations[1..], &Cancellation::default(), &mut |_| {});
+        assert!(results.iter().all(Result::is_ok), "{results:?}");
+        assert_eq!(writes.load(Ordering::SeqCst), 1);
     }
 
     #[test]
