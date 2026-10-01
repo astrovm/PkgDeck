@@ -423,11 +423,11 @@ Controls.ApplicationWindow {
     // Sources PkgDeck never installs from. Their rows update, and remove
     // only when the source says it can.
     function neverInstalls(source) {
-        return ["fwupd", "mas", "conda", "system-image", "aur", "toolbox", "distrobox", "codex", "claude", "grok", "opencode", "cursor", "copilot", "kiro", "antigravity", "amp", "droid", "solana", "anchor", "foundry"].indexOf(source) >= 0;
+        return ["fwupd", "mas", "conda", "system-image", "aur", "toolbox", "distrobox", "oh-my-zsh", "codex", "claude", "grok", "opencode", "cursor", "copilot", "kiro", "antigravity", "amp", "droid", "solana", "anchor", "foundry"].indexOf(source) >= 0;
     }
-    readonly property var knownSourceIds: ["apt", "dnf", "pacman", "zypper", "snap", "homebrew", "homebrew-cask", "macos-apps", "mas", "aur", "apk", "xbps", "system-image", "macports", "rustup", "nix", "go", "dotnet", "appimage", "flatpak", "docker", "podman", "toolbox", "distrobox", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "mise", "pixi", "conda", "composer", "gem", "fwupd", "codex", "claude", "grok", "opencode", "cursor", "copilot", "kiro", "antigravity", "amp", "droid", "solana", "anchor", "foundry"]
+    readonly property var knownSourceIds: ["apt", "dnf", "pacman", "zypper", "snap", "homebrew", "homebrew-cask", "macos-apps", "mas", "aur", "apk", "xbps", "system-image", "macports", "rustup", "nix", "go", "dotnet", "appimage", "flatpak", "docker", "podman", "toolbox", "distrobox", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "mise", "pixi", "conda", "composer", "gem", "oh-my-zsh", "fwupd", "codex", "claude", "grok", "opencode", "cursor", "copilot", "kiro", "antigravity", "amp", "droid", "solana", "anchor", "foundry"]
     readonly property var sourceIds: knownSourceIds.concat(sourceCatalog.map((row) => row.source).filter((id) => knownSourceIds.indexOf(id) < 0))
-    readonly property var sourceNames: ["APT", "DNF", "Pacman", "Zypper", "Snap", "Homebrew", "Homebrew Casks", "macOS Applications", "Mac App Store", "AUR", "apk", "XBPS", "System image", "MacPorts", "rustup", "Nix", "Go", ".NET tools", "AppImage", "Flatpak", "Docker images", "Podman images", "Toolbx containers", "Distrobox containers", "Cargo", "npm", "pnpm", "Bun", "pip", "pipx", "uv", "mise", "pixi", "Conda", "Composer", "RubyGems", "Firmware", "Codex (standalone)", "Claude Code (standalone)", "Grok (standalone)", "OpenCode (standalone)", "Cursor CLI (standalone)", "GitHub Copilot CLI (standalone)", "Kiro CLI (standalone)", "Antigravity CLI (standalone)", "Amp (standalone)", "Factory Droid (standalone)", "Solana CLI (Agave)", "Anchor (AVM)", "Foundry"]
+    readonly property var sourceNames: ["APT", "DNF", "Pacman", "Zypper", "Snap", "Homebrew", "Homebrew Casks", "macOS Applications", "Mac App Store", "AUR", "apk", "XBPS", "System image", "MacPorts", "rustup", "Nix", "Go", ".NET tools", "AppImage", "Flatpak", "Docker images", "Podman images", "Toolbx containers", "Distrobox containers", "Cargo", "npm", "pnpm", "Bun", "pip", "pipx", "uv", "mise", "pixi", "Conda", "Composer", "RubyGems", "Oh My Zsh", "Firmware", "Codex (standalone)", "Claude Code (standalone)", "Grok (standalone)", "OpenCode (standalone)", "Cursor CLI (standalone)", "GitHub Copilot CLI (standalone)", "Kiro CLI (standalone)", "Antigravity CLI (standalone)", "Amp (standalone)", "Factory Droid (standalone)", "Solana CLI (Agave)", "Anchor (AVM)", "Foundry"]
     function containerSource(source) {
         return source === "docker" || source === "podman";
     }
@@ -1319,6 +1319,13 @@ Controls.ApplicationWindow {
         property bool backgroundMode: true
         // Minutes between background update checks.
         property int checkInterval: 30
+        // Install what background checks find, with nobody watching.
+        property bool autoUpdate: false
+        // Let Update all, manual or automatic, remove packages when the
+        // manager's plan does.
+        property bool allowRemovals: true
+        // The helper the system update approval covers, or empty.
+        property string systemApproval: ""
         property bool autostart: false
         property string notificationHistory: "{}"
         property string lastBackgroundState: "{}"
@@ -1472,9 +1479,18 @@ Controls.ApplicationWindow {
     Connections {
         target: preferences
         function onCheckIntervalChanged() { backend.setCheckInterval(preferences.checkInterval); }
+        function onAutoUpdateChanged() { backend.setAutoUpdate(preferences.autoUpdate); }
+        function onAllowRemovalsChanged() { backend.setAllowRemovals(preferences.allowRemovals); }
+    }
+    Connections {
+        target: backend
+        function onSystem_approvalChanged() { preferences.systemApproval = backend.system_approval; }
     }
     Component.onCompleted: {
         backend.setCheckInterval(preferences.checkInterval);
+        backend.setAutoUpdate(preferences.autoUpdate);
+        backend.setAllowRemovals(preferences.allowRemovals);
+        backend.restoreSystemApproval(preferences.systemApproval);
         backend.restoreNotificationHistory(preferences.notificationHistory);
         // Explicit --from flags seed the session checklist without
         // persisting; otherwise restore the stored list, migrating the

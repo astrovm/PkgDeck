@@ -389,6 +389,9 @@ impl Host {
             "AVM_HOME",
             "FOUNDRY_DIR",
             "DISABLE_UPDATES",
+            // Oh My Zsh's checkout and its custom plugins and themes.
+            "ZSH",
+            "ZSH_CUSTOM",
         ] {
             if let Some(value) = source.get(&OsString::from(name)) {
                 env.insert(name.into(), value.clone());
@@ -402,6 +405,8 @@ impl Host {
             ("DOTNET_NOLOGO", "1"),
             ("DOTNET_GENERATE_ASPNET_CERTIFICATE", "false"),
             ("DOTNET_ADD_GLOBAL_TOOLS_TO_PATH", "false"),
+            // Git fails instead of waiting for a password nobody can type.
+            ("GIT_TERMINAL_PROMPT", "0"),
         ] {
             env.insert(name.into(), value.into());
         }
@@ -1366,7 +1371,7 @@ impl Host {
 
 /// AppleScript error -128 is the password dialog's Cancel button.
 #[cfg(any(target_os = "macos", test))]
-fn administrator_result(result: Completion) -> Result<Completion, ExecutionError> {
+pub(crate) fn administrator_result(result: Completion) -> Result<Completion, ExecutionError> {
     if result.code != Some(0) && String::from_utf8_lossy(&result.stderr).contains("(-128)") {
         return Err(ExecutionError::AuthorizationCancelled);
     }
@@ -1375,7 +1380,10 @@ fn administrator_result(result: Completion) -> Result<Completion, ExecutionError
 
 /// One shell command line with every word single-quoted.
 #[cfg(any(target_os = "macos", test))]
-fn shell_command(executable: &Path, args: &[OsString]) -> Result<String, ExecutionError> {
+pub(crate) fn shell_command(
+    executable: &Path,
+    args: &[OsString],
+) -> Result<String, ExecutionError> {
     let quote = |arg: &std::ffi::OsStr| -> Result<String, ExecutionError> {
         let text = arg
             .to_str()
@@ -1394,13 +1402,16 @@ fn shell_command(executable: &Path, args: &[OsString]) -> Result<String, Executi
 
 /// An AppleScript string literal.
 #[cfg(any(target_os = "macos", test))]
-fn applescript_string(text: &str) -> String {
+pub(crate) fn applescript_string(text: &str) -> String {
     format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
 /// `do shell script "'/opt/local/bin/port' '-N' 'install' 'xz'" …`
 #[cfg(any(target_os = "macos", test))]
-fn administrator_script(executable: &Path, args: &[OsString]) -> Result<String, ExecutionError> {
+pub(crate) fn administrator_script(
+    executable: &Path,
+    args: &[OsString],
+) -> Result<String, ExecutionError> {
     Ok(format!(
         "do shell script {} with administrator privileges without altering line endings",
         applescript_string(&shell_command(executable, args)?)

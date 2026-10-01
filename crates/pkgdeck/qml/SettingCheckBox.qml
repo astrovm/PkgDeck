@@ -6,6 +6,10 @@ import QtQuick.Layouts
 // anywhere on the row toggles it.
 Controls.Switch {
     id: setting
+    // Adds an info icon after the label; hovering it shows this text.
+    property string tooltipText: ""
+    readonly property alias label: label
+    Accessible.description: tooltipText
     Layout.fillWidth: true
     implicitHeight: Math.max(Theme.controlHeight, contentItem.implicitHeight + 8)
     leftPadding: 0
@@ -39,12 +43,31 @@ Controls.Switch {
             visible: setting.visualFocus
         }
     }
-    contentItem: Text {
-        text: setting.text
-        color: setting.enabled ? Theme.ink : Theme.muted
-        font: setting.font
-        wrapMode: Text.WordWrap
-        verticalAlignment: Text.AlignVCenter
-        rightPadding: 52
+    contentItem: RowLayout {
+        spacing: 6
+        Text {
+            id: label
+            text: setting.text
+            color: setting.enabled ? Theme.ink : Theme.muted
+            font: setting.font
+            wrapMode: Text.WordWrap
+            verticalAlignment: Text.AlignVCenter
+            Layout.maximumWidth: setting.availableWidth - 52 - (info.visible ? info.width + 6 : 0)
+        }
+        DeckIcon {
+            id: info
+            objectName: "settingInfo"
+            name: "info"
+            ink: Theme.muted
+            visible: setting.tooltipText.length > 0
+            Layout.preferredWidth: 16
+            Layout.preferredHeight: 16
+            HoverHandler { id: infoHover }
+            Controls.ToolTip.visible: infoHover.hovered
+            Controls.ToolTip.delay: 300
+            Controls.ToolTip.text: setting.tooltipText
+        }
+        // Keeps the label clear of the switch on the right.
+        Item { Layout.fillWidth: true; Layout.minimumWidth: 52 }
     }
 }

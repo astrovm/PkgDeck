@@ -445,12 +445,25 @@ pub struct Engine {
     apt_upgrade_plan: Option<AptUpgradePlan>,
     operation_plan: Option<TransactionPlan>,
     batch_authorization: Option<(Host, Authorization)>,
+    batch_mode: crate::batch::BatchMode,
+    unattended: bool,
 }
 impl Engine {
     /// Native engines use one trusted runner for the protected part of a
     /// confirmed batch when it is installed by the host package.
     pub fn enable_batch_authorization(&mut self, host: Host, authorization: Authorization) {
         self.batch_authorization = Some((host, authorization));
+    }
+    /// Run batches through an upgrade-only runner, for unattended updates
+    /// under a saved approval: no password prompt, and nothing but
+    /// refreshes and full upgrades of system managers.
+    pub fn set_batch_mode(&mut self, mode: crate::batch::BatchMode) {
+        self.batch_mode = mode;
+    }
+    /// Nobody is watching: refuse sources that would ask for a password or
+    /// need someone there (see [`crate::unattended::Unattended::Never`]).
+    pub fn set_unattended(&mut self, unattended: bool) {
+        self.unattended = unattended;
     }
     /// Simulate the host APT solver before asking the user to approve a full update.
     pub fn plan_apt_upgrade(
@@ -1248,7 +1261,20 @@ impl Engine {
         }
         let checked: Vec<_> = operations
             .iter()
-            .map(|operation| self.preflight(operation, cancel))
+            .map(|operation| {
+                // A source that would ask for a password, or that needs
+                // someone there (firmware), never runs unattended.
+                if self.unattended
+                    && crate::unattended::unattended(operation.backend())
+                        == crate::unattended::Unattended::Never
+                {
+                    return Err(EngineError::InvalidResponse {
+                        backend: operation.backend().into(),
+                        reason: "This source is never updated automatically.".into(),
+                    });
+                }
+                self.preflight(operation, cancel)
+            })
             .collect();
         if checked.iter().any(Result::is_err) {
             return operations.iter().zip(checked).map(|(operation, result)| {
@@ -1277,26 +1303,27 @@ impl Engine {
             operation: operations[0].clone(),
             progress: Progress::Message("Authorizing system changes for this batch.".into()),
         });
-        let guard = match crate::batch::begin(&host, authorization, operations, cancel) {
-            Ok(guard) => guard,
-            Err(error) => {
-                return operations
-                    .iter()
-                    .enumerate()
-                    .map(|(index, operation)| {
-                        if index != 0 {
-                            events(Event::Started(operation.clone()));
-                        }
-                        let result = Err(EngineError::from(error.clone()));
-                        events(Event::Finished {
-                            operation: operation.clone(),
-                            result: result.clone(),
-                        });
-                        result
-                    })
-                    .collect();
-            }
-        };
+        let guard =
+            match crate::batch::begin(&host, authorization, self.batch_mode, operations, cancel) {
+                Ok(guard) => guard,
+                Err(error) => {
+                    return operations
+                        .iter()
+                        .enumerate()
+                        .map(|(index, operation)| {
+                            if index != 0 {
+                                events(Event::Started(operation.clone()));
+                            }
+                            let result = Err(EngineError::from(error.clone()));
+                            events(Event::Finished {
+                                operation: operation.clone(),
+                                result: result.clone(),
+                            });
+                            result
+                        })
+                        .collect();
+                }
+            };
         if guard.is_none() {
             events(Event::Progress {
                 operation: operations[0].clone(),
@@ -1536,6 +1563,60 @@ mod apt_upgrade_tests {
         let results = engine.execute_batch(&operations, &cancel, &mut |_| {});
         assert!(results.iter().all(Result::is_ok));
         assert_eq!(writes.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn unattended_batches_refuse_sources_that_need_someone_there() {
+        struct Fixture(&'static str, Arc<AtomicUsize>);
+        impl Backend for Fixture {
+            fn id(&self) -> &str {
+                self.0
+            }
+            fn capabilities(&self) -> &[Capability] {
+                &[Capability::Refresh]
+            }
+            fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
+                Ok(Availability::Available)
+            }
+            fn execute(
+                &mut self,
+                _: &Operation,
+                _: &Cancellation,
+                _: &mut dyn FnMut(Progress),
+            ) -> Result<OperationOutcome, EngineError> {
+                self.1.fetch_add(1, Ordering::SeqCst);
+                Ok(OperationOutcome::default())
+            }
+        }
+        let writes = Arc::new(AtomicUsize::new(0));
+        let mut engine = Engine::default();
+        engine.register(Fixture("fwupd", writes.clone())).unwrap();
+        engine.register(Fixture("user", writes.clone())).unwrap();
+        engine.enable_batch_authorization(
+            Host::new(Runtime::Native, Default::default()),
+            Authorization::Polkit,
+        );
+        engine.set_batch_mode(crate::batch::BatchMode::UpgradeOnly { removals: false });
+        engine.set_unattended(true);
+        let operations = ["fwupd", "user"].map(|backend| Operation::Refresh {
+            backend: backend.into(),
+        });
+        let results = engine.execute_batch(&operations, &Cancellation::default(), &mut |_| {});
+        assert!(matches!(
+            &results[0],
+            Err(EngineError::InvalidResponse { backend, reason })
+                if backend == "fwupd" && reason.contains("never updated automatically")
+        ));
+        assert!(matches!(
+            &results[1],
+            Err(EngineError::InvalidResponse { reason, .. }) if reason.contains("could not be checked")
+        ));
+        assert_eq!(writes.load(Ordering::SeqCst), 0);
+        // With someone there, the same source runs.
+        engine.set_unattended(false);
+        let results = engine.execute_batch(&operations[1..], &Cancellation::default(), &mut |_| {});
+        assert!(results.iter().all(Result::is_ok), "{results:?}");
+        assert_eq!(writes.load(Ordering::SeqCst), 1);
     }
 
     #[test]

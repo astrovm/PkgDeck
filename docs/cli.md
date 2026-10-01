@@ -48,7 +48,7 @@ Sources for `--from`: `fwupd`, `apt`, `dnf`, `pacman`, `aur`, `zypper`, `apk`,
 `xbps`, `snap`, `system-image`, `homebrew`, `homebrew-cask`, `macos-apps`,
 `mas`, `macports`, `appimage`, `flatpak`, `docker`, `podman`, `toolbox`, `distrobox`, `cargo`,
 `rustup`, `go`, `dotnet`, `npm`, `pnpm`, `bun`, `pip`, `pipx`, `uv`, `mise`, `pixi`,
-`conda`, `nix`, `composer`, `gem`,
+`conda`, `nix`, `composer`, `gem`, `oh-my-zsh`,
 `codex`, `claude`, `grok`, `opencode`, `cursor`, `copilot`, `kiro`,
 `antigravity`, `amp`, `droid`, `solana`, `anchor`, and `foundry`.
 

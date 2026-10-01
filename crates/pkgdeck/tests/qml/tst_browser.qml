@@ -102,6 +102,16 @@ TestCase {
         function checkUpdates(sources, enabled, offline, metered, force) {}
         property int checkInterval: 0
         function setCheckInterval(minutes) { checkInterval = minutes; }
+        property bool autoUpdate: false
+        property string system_approval: ""
+        property string approval_error: ""
+        property string auto_update_result: "{}"
+        property var allowed: []
+        function setAutoUpdate(enabled) { autoUpdate = enabled; }
+        property bool allowRemovals: true
+        function setAllowRemovals(allowed) { allowRemovals = allowed; }
+        function restoreSystemApproval(approval) { system_approval = approval; }
+        function allowSystemUpdates(allow) { allowed.push(allow); }
         function restoreNotificationHistory(history) { lastRestoredHistory = history; notification_history = history; }
         function acknowledgeNotification() {}
         function setAutostart(enabled) { return true; }
@@ -564,16 +574,67 @@ TestCase {
         browser.openView("Settings");
         const interval = findChild(browser, "checkIntervalSetting");
         compare(interval.currentText, "30 minutes");
-        interval.currentIndex = 2;
-        interval.activated(2);
+        interval.value = 2;
+        interval.moved();
         compare(browser.store.checkInterval, 60);
         compare(fake.checkInterval, 60);
+        // Days, up to a week.
+        interval.value = interval.to;
+        interval.moved();
+        compare(interval.currentText, "1 week");
+        compare(fake.checkInterval, 10080);
         browser.backgroundMode = false;
         verify(!interval.enabled);
         browser.backgroundMode = true;
-        interval.currentIndex = 1;
-        interval.activated(1);
+        interval.value = 1;
+        interval.moved();
         compare(fake.checkInterval, 30);
+        // A saved interval between steps shows the closest one.
+        browser.store.checkInterval = 1500;
+        compare(interval.currentText, "1 day");
+    }
+    function test_automatic_updates_settings_reach_the_backend() {
+        browser.backgroundMode = true;
+        browser.openView("Settings");
+        const auto = findChild(browser, "autoUpdateSetting");
+        const approval = findChild(browser, "systemApprovalSetting");
+        const help = findChild(browser, "systemApprovalHelp");
+        verify(!auto.checked);
+        // These apply to Update all too, so they work without automatic updates.
+        verify(approval.enabled);
+        auto.checked = true;
+        auto.clicked();
+        compare(browser.store.autoUpdate, true);
+        compare(fake.autoUpdate, true);
+        verify(approval.enabled);
+        const removals = findChild(browser, "allowRemovalsSetting");
+        verify(removals.enabled);
+        verify(removals.checked);
+        verify(removals.tooltipText.indexOf("old kernel") >= 0);
+        removals.checked = false;
+        removals.clicked();
+        compare(fake.allowRemovals, false);
+        removals.checked = true;
+        removals.clicked();
+        compare(fake.allowRemovals, true);
+        // Asking does not turn it on; the saved approval does.
+        approval.checked = true;
+        approval.clicked();
+        compare(fake.allowed[fake.allowed.length - 1], true);
+        verify(!approval.checked);
+        fake.system_approval = "/usr/libexec/pkgdeck-host-runner";
+        compare(browser.store.systemApproval, "/usr/libexec/pkgdeck-host-runner");
+        verify(approval.checked);
+        fake.approval_error = "The password prompt was cancelled.";
+        compare(help.text, "The password prompt was cancelled.");
+        verify(help.visible);
+        fake.approval_error = "";
+        verify(!help.visible);
+        fake.system_approval = "";
+        compare(browser.store.systemApproval, "");
+        auto.checked = false;
+        auto.clicked();
+        compare(fake.autoUpdate, false);
     }
     function test_search_clears_old_results_and_appearance_setting_applies() {
         browser.openView("Installed");
@@ -744,9 +805,10 @@ TestCase {
             architecture: "x86_64", scope: "system", installed: "", candidate: "",
             reference: "runtime/org.example.Platform/x86_64/stable", update: "available"};
         fake.rows = JSON.stringify([runtime]);
-        wait(30);
+        const list = findChild(browser, "packageResults");
+        tryVerify(() => list.itemAtIndex(0) !== null);
         browser.choose(0);
-        const action = findChild(findChild(browser, "packageResults").itemAtIndex(0), "rowPackageAction");
+        const action = findChild(list.itemAtIndex(0), "rowPackageAction");
         verify(action.enabled);
         compare(action.symbol, "updates");
         mouseClick(action);
@@ -1496,7 +1558,7 @@ TestCase {
         browser.macOS = macOS;
         for (const name of ["animationsSetting", "backgroundModeSetting"]) {
             const setting = findChild(browser, name);
-            compare(setting.contentItem.color.toString(), browser.ink.toString());
+            compare(setting.label.color.toString(), browser.ink.toString());
         }
         waitForRendering(browser.contentItem);
         const appearance = findChild(browser, "appearanceSetting");
@@ -1781,7 +1843,7 @@ TestCase {
         verify(status.text.indexOf("2 updates found") >= 0);
         // Sources that could not be checked are not listed as a warning.
         verify(findChild(browser, "backgroundCheckFailures") === null);
-        compare(availability.text, "Notifications available");
+        verify(!availability.visible);
         const settings = findChild(browser, "notificationSettingsButton");
         verify(!settings.visible);
         verify(button.enabled);

@@ -3,12 +3,12 @@
 # Ephemeral runners need no cleanup; lifecycle state is confirmed through
 # the underlying manager, never only PkgDeck output. Tool installations use
 # user-writable prefixes so no step ever needs elevation.
-# Usage: scripts/tests/dev-manager.sh cargo|rustup|go|dotnet|npm|pnpm|bun|pip|pipx|uv|mise|pixi|conda|nix|composer|gem|rustup|nix <pkd>
+# Usage: scripts/tests/dev-manager.sh cargo|rustup|go|dotnet|npm|pnpm|bun|pip|pipx|uv|mise|pixi|conda|nix|composer|gem|oh-my-zsh <pkd>
 # -E lets failures inside the helper functions below reach the ERR trap.
 set -Eeuo pipefail
 trap 'echo "dev-manager FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
-backend=${1:?Usage: scripts/tests/dev-manager.sh cargo|rustup|go|dotnet|npm|pnpm|bun|pip|pipx|uv|mise|pixi|conda|nix|composer|gem|rustup|nix <pkd>}
-pkd=${2:?Usage: scripts/tests/dev-manager.sh cargo|rustup|go|dotnet|npm|pnpm|bun|pip|pipx|uv|mise|pixi|conda|nix|composer|gem|rustup|nix <pkd>}
+backend=${1:?Usage: scripts/tests/dev-manager.sh cargo|rustup|go|dotnet|npm|pnpm|bun|pip|pipx|uv|mise|pixi|conda|nix|composer|gem|oh-my-zsh <pkd>}
+pkd=${2:?Usage: scripts/tests/dev-manager.sh cargo|rustup|go|dotnet|npm|pnpm|bun|pip|pipx|uv|mise|pixi|conda|nix|composer|gem|oh-my-zsh <pkd>}
 echo "dev-manager: backend=$backend pkd=$pkd user=$(whoami) home=$HOME"
 run() { "$pkd" --json --yes --auth sudo --from "$backend" "$@"; }
 # Keep pkd's report so a failed step shows what pkd said and how long it took.
@@ -105,11 +105,16 @@ setup_micromamba() {
     *) platform=linux-64 ;;
     esac
     mkdir -p "$HOME/.local/bin"
-    # The download server answers 503 now and then. Fetch to a file so curl
-    # can retry, then extract.
-    curl -fsSL --retry 5 --retry-delay 5 -o "$HOME/micromamba.tar.bz2" \
-        "https://micro.mamba.pm/api/micromamba/$platform/latest"
-    tar -xjf "$HOME/micromamba.tar.bz2" -C "$HOME/.local" bin/micromamba
+    # The download server answers 5xx now and then. Fetch to a file so curl
+    # can retry, then extract. If it stays down, GitHub hosts the same binary.
+    if curl -fsSL --retry 5 --retry-delay 5 -o "$HOME/micromamba.tar.bz2" \
+        "https://micro.mamba.pm/api/micromamba/$platform/latest"; then
+        tar -xjf "$HOME/micromamba.tar.bz2" -C "$HOME/.local" bin/micromamba
+    else
+        curl -fsSL --retry 5 --retry-delay 5 -o "$HOME/.local/bin/micromamba" \
+            "https://github.com/mamba-org/micromamba-releases/releases/latest/download/micromamba-$platform"
+        chmod +x "$HOME/.local/bin/micromamba"
+    fi
     export MAMBA_ROOT_PREFIX="$HOME/micromamba"
     micromamba() { "$HOME/.local/bin/micromamba" "$@"; }
     micromamba --version
@@ -196,7 +201,38 @@ setup_dotnet() {
     dotnet --version
 }
 
+setup_oh_my_zsh() {
+    # Two real checkouts, each one commit behind its upstream branch.
+    export ZSH="$HOME/.oh-my-zsh"
+    rm -rf "$ZSH"
+    git clone --quiet --depth 3 https://github.com/ohmyzsh/ohmyzsh.git "$ZSH"
+    git clone --quiet --depth 3 https://github.com/zsh-users/zsh-autosuggestions.git \
+        "$ZSH/custom/plugins/zsh-autosuggestions"
+    for repo in "$ZSH" "$ZSH/custom/plugins/zsh-autosuggestions"; do
+        git -C "$repo" reset --quiet --hard HEAD~1
+    done
+}
+# Whether pkd lists $1 with update state $2.
+update_state() {
+    run list | jq -e --arg name "$1" --arg state "$2" \
+        '[.data.packages[] | select(.id.name == $name)] | length == 1 and .[0].update == $state' >/dev/null
+}
+
 case $backend in
+oh-my-zsh)
+    setup_oh_my_zsh
+    success sources
+    have oh-my-zsh
+    have plugin/zsh-autosuggestions
+    update_state oh-my-zsh available
+    update_state plugin/zsh-autosuggestions available
+    success info oh-my-zsh
+    success upgrade oh-my-zsh plugin/zsh-autosuggestions
+    for repo in "$ZSH" "$ZSH/custom/plugins/zsh-autosuggestions"; do
+        [[ $(git -C "$repo" rev-parse HEAD) == $(git -C "$repo" rev-parse '@{upstream}') ]]
+    done
+    update_state oh-my-zsh current
+    ;;
 cargo)
     success sources
     cargo install cowsay

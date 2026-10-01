@@ -219,6 +219,71 @@ pub fn protected_commands(operation: &Operation) -> Result<Vec<ProtectedCommand>
     Ok(vec![command])
 }
 
+/// What one runner session may do.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum BatchMode {
+    /// Changes someone reviewed and confirmed for this session.
+    #[default]
+    Reviewed,
+    /// Refreshes and full upgrades of system managers only, for unattended
+    /// updates under a saved approval. APT removes packages only with
+    /// `removals`, which the person allowed in settings.
+    UpgradeOnly { removals: bool },
+}
+/// The runner argument that selects [`BatchMode::UpgradeOnly`]. A saved
+/// approval matches the runner's exact command line, this flag included.
+pub const UPGRADE_ONLY: &str = "--upgrade-only";
+/// Added after [`UPGRADE_ONLY`] when an update may remove packages.
+pub const ALLOW_REMOVALS: &str = "--allow-removals";
+/// System managers an upgrade-only runner updates.
+pub const UPGRADE_ONLY_BACKENDS: &[&str] = &["apt", "flatpak", "dnf", "pacman", "zypper", "snap"];
+
+/// Refuse any change the runner would make as root other than refreshes
+/// and full upgrades of [`UPGRADE_ONLY_BACKENDS`]. Changes that run as the
+/// user never reach the runner and pass. A per-package upgrade is refused:
+/// `pacman -S --needed NAME` would install a package that is not there.
+pub fn check_mode(mode: BatchMode, operations: &[Operation]) -> Result<(), ExecutionError> {
+    if mode == BatchMode::Reviewed {
+        return Ok(());
+    }
+    let allowed = operations.iter().all(|operation| match operation {
+        Operation::Refresh { backend } | Operation::UpgradeAll { backend } => {
+            UPGRADE_ONLY_BACKENDS.contains(&backend.as_str())
+                || protected_commands(operation).is_ok_and(|commands| commands.is_empty())
+        }
+        _ => protected_commands(operation).is_ok_and(|commands| commands.is_empty()),
+    });
+    if allowed {
+        Ok(())
+    } else {
+        Err(invalid(
+            "unattended updates only refresh sources and update every package",
+        ))
+    }
+}
+/// The commands the runner itself runs. In upgrade-only mode without
+/// removals APT aborts rather than remove anything (`--no-remove`); the
+/// frontend still asks for the reviewed command, and the runner substitutes
+/// this one.
+fn runner_commands(
+    mode: BatchMode,
+    operations: &[Operation],
+) -> Result<Vec<Vec<ProtectedCommand>>, ExecutionError> {
+    check_mode(mode, operations)?;
+    let mut commands = batch_commands(operations)?;
+    if mode == (BatchMode::UpgradeOnly { removals: false }) {
+        for (operation, commands) in operations.iter().zip(&mut commands) {
+            if matches!(operation, Operation::UpgradeAll { backend } if backend == "apt") {
+                for command in commands {
+                    let verb = command.args.len() - 1;
+                    command.args.insert(verb, "--no-remove".into());
+                }
+            }
+        }
+    }
+    Ok(commands)
+}
+
 fn apt_group_action(operation: &Operation) -> Result<Option<AptAction>, ExecutionError> {
     match operation {
         Operation::Install(id) if id.backend == "apt" => {
@@ -505,7 +570,7 @@ fn find_runner(runtime: Runtime, executable: &Path, flatpak_info: &str) -> Optio
     }
     None
 }
-fn runner_path(host: &Host) -> Option<PathBuf> {
+pub(crate) fn runner_path(host: &Host) -> Option<PathBuf> {
     let info = if host.runtime == Runtime::Flatpak {
         fs::read_to_string("/.flatpak-info").ok()?
     } else {
@@ -522,6 +587,7 @@ fn appimage_launcher(path: &Path) -> Option<PathBuf> {
 pub fn begin(
     host: &Host,
     authorization: Authorization,
+    mode: BatchMode,
     operations: &[Operation],
     cancel: &Cancellation,
 ) -> Result<Option<ScopeGuard>, ExecutionError> {
@@ -531,6 +597,7 @@ pub fn begin(
     if cancel.requested() {
         return Err(ExecutionError::Cancelled);
     }
+    check_mode(mode, operations)?;
     let commands = batch_commands(operations)?;
     if !commands.iter().any(|entry| !entry.is_empty()) {
         return Ok(None);
@@ -543,14 +610,42 @@ pub fn begin(
     let runner = appimage
         .map(|path| (path, true))
         .or_else(|| runner_path(host).map(|path| (path, false)));
-    let start = |command| begin_session(command, operations, commands, cancel);
-    runner_command(host, authorization, runner)?.map_or(Ok(None), start)
+    start_runner(
+        host,
+        authorization,
+        mode,
+        runner,
+        operations,
+        commands,
+        cancel,
+    )
+}
+/// Start the session through `runner`, the one [`begin`] found, if any.
+fn start_runner(
+    host: &Host,
+    authorization: Authorization,
+    mode: BatchMode,
+    runner: Option<(PathBuf, bool)>,
+    operations: &[Operation],
+    commands: Vec<Vec<ProtectedCommand>>,
+    cancel: &Cancellation,
+) -> Result<Option<ScopeGuard>, ExecutionError> {
+    match runner_command(host, authorization, mode, runner)? {
+        Some(command) => begin_session(command, operations, commands, cancel),
+        // Without a runner each command would ask for a password on its
+        // own; nobody is there to answer during an unattended update.
+        None if mode != BatchMode::Reviewed => Err(ExecutionError::Disabled(
+            "unattended updates need PkgDeck's system helper".into(),
+        )),
+        None => Ok(None),
+    }
 }
 /// The authorization prompt that starts `runner`, a packaged host runner
 /// or (with `true`) an AppImage launcher that starts its bundled runner.
 fn runner_command(
     host: &Host,
     authorization: Authorization,
+    mode: BatchMode,
     runner: Option<(PathBuf, bool)>,
 ) -> Result<Option<Command>, ExecutionError> {
     let Some((path, appimage)) = runner else {
@@ -559,6 +654,12 @@ fn runner_command(
     let (program, mut args) = authorization.prefix(&path);
     if appimage {
         args.push("--batch-runner".into());
+    }
+    if let BatchMode::UpgradeOnly { removals } = mode {
+        args.push(UPGRADE_ONLY.into());
+        if removals {
+            args.push(ALLOW_REMOVALS.into());
+        }
     }
     let mut command = host.command(Path::new(program), &args)?;
     command.stderr(Stdio::null()).process_group(0);
@@ -774,22 +875,24 @@ pub fn run_in_scope(
 
 /// Entry point for the elevated binary. No executable path or argument list
 /// is read from the frontend after its typed plan has been validated.
-pub fn serve() -> Result<(), ExecutionError> {
+pub fn serve(mode: BatchMode) -> Result<(), ExecutionError> {
     serve_as(
         rustix::process::geteuid().is_root(),
+        mode,
         &mut std::io::stdin().lock(),
         &mut std::io::stdout().lock(),
     )
 }
 fn serve_as(
     root: bool,
+    mode: BatchMode,
     input: &mut impl Read,
     output: &mut impl Write,
 ) -> Result<(), ExecutionError> {
     if !root {
         return Err(invalid("host runner requires root"));
     }
-    serve_protocol(input, output, run_protected)
+    serve_protocol(mode, input, output, run_protected)
 }
 /// Run one approved command with a fixed system environment, handing each
 /// line it prints to `on_line`.
@@ -823,6 +926,7 @@ impl<F: FnMut(&ProtectedCommand, &mut dyn FnMut(&str)) -> Result<Completion, Exe
 {
 }
 fn serve_protocol(
+    mode: BatchMode,
     mut input: &mut impl Read,
     mut output: &mut impl Write,
     mut run: impl RunProtected,
@@ -836,7 +940,7 @@ fn serve_protocol(
         } if !operations.is_empty() && operations.len() <= 1024 => operations,
         _ => return Err(invalid("invalid authorization protocol or plan")),
     };
-    let commands = batch_commands(&operations)?;
+    let commands = runner_commands(mode, &operations)?;
     if !commands.iter().any(|entry| !entry.is_empty()) {
         return Err(invalid("empty protected plan"));
     }
@@ -957,6 +1061,7 @@ mod tests {
         let mut seen = Vec::new();
         let mut output = Vec::new();
         serve_protocol(
+            BatchMode::Reviewed,
             &mut Cursor::new(input(&requests)),
             &mut output,
             |command, on_line| {
@@ -985,6 +1090,165 @@ mod tests {
     }
 
     #[test]
+    fn upgrade_only_runners_refresh_and_update_everything_and_nothing_else() {
+        let all = |backend: &str| Operation::UpgradeAll {
+            backend: backend.into(),
+        };
+        let refresh = |backend: &str| Operation::Refresh {
+            backend: backend.into(),
+        };
+        let allowed: Vec<_> = UPGRADE_ONLY_BACKENDS
+            .iter()
+            .flat_map(|backend| [refresh(backend), all(backend)])
+            .collect();
+        assert_eq!(
+            check_mode(BatchMode::UpgradeOnly { removals: false }, &allowed),
+            Ok(())
+        );
+        // Changes that run as the user never reach the runner.
+        let mut user = id("homebrew", "wget");
+        user.scope = Scope::User { uid: 1000 };
+        let user_changes = [all("homebrew"), all("cargo"), Operation::Upgrade(user)];
+        assert_eq!(
+            check_mode(BatchMode::UpgradeOnly { removals: false }, &user_changes),
+            Ok(())
+        );
+        for refused in [
+            Operation::Install(id("apt", "synthetic")),
+            Operation::Remove(id("dnf", "synthetic")),
+            // `pacman -S --needed NAME` would install a missing package.
+            Operation::Upgrade(id("pacman", "synthetic")),
+            all("fwupd"),
+            refresh("fwupd"),
+            Operation::Upgrade(id("flatpak", "org.example.App")),
+            Operation::Clean(crate::package::CleanupId {
+                backend: "apt".into(),
+                key: "autoremove".into(),
+            }),
+        ] {
+            assert!(
+                check_mode(
+                    BatchMode::UpgradeOnly { removals: false },
+                    &[all("apt"), refused.clone()]
+                )
+                .is_err(),
+                "{refused:?}"
+            );
+            assert_eq!(check_mode(BatchMode::Reviewed, &[refused]), Ok(()));
+        }
+
+        // APT never removes anything in this mode; the frontend still asks
+        // for the reviewed command by index.
+        let operations = vec![refresh("apt"), all("apt"), all("dnf")];
+        let reviewed = batch_commands(&operations).unwrap();
+        let runner =
+            runner_commands(BatchMode::UpgradeOnly { removals: false }, &operations).unwrap();
+        assert_eq!(runner[0], reviewed[0]);
+        assert_eq!(runner[2], reviewed[2]);
+        assert_eq!(
+            runner[1][0].args,
+            [
+                "--assume-yes",
+                "-o",
+                "DPkg::Lock::Timeout=0",
+                "--no-remove",
+                "dist-upgrade"
+            ]
+        );
+        let requests = [
+            Request::Start {
+                protocol: PROTOCOL,
+                operations: operations.clone(),
+            },
+            Request::Run {
+                operation: 1,
+                command: 0,
+            },
+        ];
+        let mut recorder = Recorder(vec![]);
+        serve_protocol(
+            BatchMode::UpgradeOnly { removals: false },
+            &mut Cursor::new(input(&requests)),
+            &mut Vec::new(),
+            recorder.run(),
+        )
+        .unwrap();
+        assert_eq!(recorder.0, [runner[1][0].clone()]);
+
+        // With removals allowed, APT runs the reviewed command as is.
+        let removing =
+            runner_commands(BatchMode::UpgradeOnly { removals: true }, &operations).unwrap();
+        assert_eq!(removing, reviewed);
+
+        // An install never starts, even before the first command.
+        let mut output = Vec::new();
+        let mut recorder = Recorder(vec![]);
+        assert!(serve_protocol(
+            BatchMode::UpgradeOnly { removals: false },
+            &mut Cursor::new(input(&[Request::Start {
+                protocol: PROTOCOL,
+                operations: vec![Operation::Install(id("apt", "synthetic"))],
+            }])),
+            &mut output,
+            recorder.run(),
+        )
+        .is_err());
+        assert!(output.is_empty() && recorder.0.is_empty());
+    }
+
+    #[test]
+    fn upgrade_only_sessions_start_the_runner_with_its_flag_or_not_at_all() {
+        let host = Host::new(Runtime::Native, Default::default());
+        let runner = PathBuf::from("/usr/libexec/pkgdeck-host-runner");
+        let command = runner_command(
+            &host,
+            Authorization::Polkit,
+            BatchMode::UpgradeOnly { removals: false },
+            Some((runner, false)),
+        )
+        .unwrap()
+        .unwrap();
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            args,
+            [
+                "--disable-internal-agent",
+                "/usr/libexec/pkgdeck-host-runner",
+                "--upgrade-only"
+            ]
+        );
+        let command = runner_command(
+            &host,
+            Authorization::Polkit,
+            BatchMode::UpgradeOnly { removals: true },
+            Some((PathBuf::from("/usr/libexec/pkgdeck-host-runner"), false)),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .eq([
+                "--disable-internal-agent",
+                "/usr/libexec/pkgdeck-host-runner",
+                "--upgrade-only",
+                "--allow-removals"
+            ]));
+        let cancel = Cancellation::default();
+        let refused = begin(
+            &host,
+            Authorization::Polkit,
+            BatchMode::UpgradeOnly { removals: false },
+            &[Operation::Install(id("apt", "synthetic"))],
+            &cancel,
+        );
+        assert!(matches!(refused, Err(ExecutionError::Invalid(_))));
+    }
+
+    #[test]
     fn consecutive_apt_targets_are_one_approved_native_command() {
         let operations = vec![
             Operation::Install(id("apt", "synthetic-one")),
@@ -1008,6 +1272,7 @@ mod tests {
         ];
         let mut calls = 0;
         serve_protocol(
+            BatchMode::Reviewed,
             &mut Cursor::new(input(&requests)),
             &mut Vec::new(),
             |_, _| {
@@ -1040,6 +1305,7 @@ mod tests {
         ];
         let mut recorder = Recorder::default();
         let result = serve_protocol(
+            BatchMode::Reviewed,
             &mut Cursor::new(input(&requests)),
             &mut Vec::new(),
             recorder.run(),
@@ -1054,6 +1320,7 @@ mod tests {
         let mut output = Vec::new();
         let mut recorder = Recorder::default();
         let result = serve_protocol(
+            BatchMode::Reviewed,
             &mut Cursor::new(input(&[Request::Start {
                 protocol: PROTOCOL,
                 operations,
@@ -1269,9 +1536,13 @@ mod tests {
             },
         ] {
             let mut output = Vec::new();
-            assert!(
-                serve_protocol(&mut Cursor::new(input(&[request])), &mut output, &mut run).is_err()
-            );
+            assert!(serve_protocol(
+                BatchMode::Reviewed,
+                &mut Cursor::new(input(&[request])),
+                &mut output,
+                &mut run
+            )
+            .is_err());
             assert!(output.is_empty());
         }
         for invalid_run in [
@@ -1300,9 +1571,13 @@ mod tests {
                 invalid_run,
             ];
             let mut output = Vec::new();
-            assert!(
-                serve_protocol(&mut Cursor::new(input(&requests)), &mut output, &mut run).is_err()
-            );
+            assert!(serve_protocol(
+                BatchMode::Reviewed,
+                &mut Cursor::new(input(&requests)),
+                &mut output,
+                &mut run
+            )
+            .is_err());
         }
         drop(run);
         assert!(recorder.0.is_empty());
@@ -1402,12 +1677,19 @@ done"#;
             scope: Scope::User { uid: 1000 },
             ..id("flatpak", "org.example.Test")
         });
-        assert!(begin(&host, Authorization::Polkit, &[user], &cancel)
-            .unwrap()
-            .is_none());
         assert!(begin(
             &host,
             Authorization::Polkit,
+            BatchMode::Reviewed,
+            &[user],
+            &cancel
+        )
+        .unwrap()
+        .is_none());
+        assert!(begin(
+            &host,
+            Authorization::Polkit,
+            BatchMode::Reviewed,
             &[Operation::Refresh {
                 backend: "apt".into()
             }],
@@ -1420,6 +1702,7 @@ done"#;
         assert!(begin(
             &host,
             Authorization::Polkit,
+            BatchMode::Reviewed,
             &[Operation::Install(id("apt", "--purge"))],
             &cancel
         )
@@ -1429,6 +1712,7 @@ done"#;
             begin(
                 &host,
                 Authorization::Polkit,
+                BatchMode::Reviewed,
                 &[Operation::Refresh {
                     backend: "apt".into()
                 }],
@@ -1455,7 +1739,12 @@ done"#;
         let mut output = Vec::new();
         let mut recorder = Recorder::default();
         assert!(matches!(
-            serve_protocol(&mut Cursor::new(b"not json\n"), &mut output, recorder.run()),
+            serve_protocol(
+                BatchMode::Reviewed,
+                &mut Cursor::new(b"not json\n"),
+                &mut output,
+                recorder.run()
+            ),
             Err(ExecutionError::Invalid(_))
         ));
         assert!(recorder.0.is_empty());
@@ -1763,7 +2052,12 @@ done"#;
         let mut output = Vec::new();
         let mut recorder = Recorder::default();
         assert!(matches!(
-            serve_protocol(&mut Cursor::new(malformed), &mut output, recorder.run()),
+            serve_protocol(
+                BatchMode::Reviewed,
+                &mut Cursor::new(malformed),
+                &mut output,
+                recorder.run()
+            ),
             Err(ExecutionError::Invalid(_))
         ));
         assert!(recorder.0.is_empty());
@@ -1787,9 +2081,12 @@ done"#;
         ];
         let mut output = Vec::new();
         assert!(matches!(
-            serve_protocol(&mut Cursor::new(input(&requests)), &mut output, |_, _| Err(
-                ExecutionError::AuthorizationDenied
-            )),
+            serve_protocol(
+                BatchMode::Reviewed,
+                &mut Cursor::new(input(&requests)),
+                &mut output,
+                |_, _| Err(ExecutionError::AuthorizationDenied)
+            ),
             Err(ExecutionError::AuthorizationDenied)
         ));
         assert_eq!(output.iter().filter(|b| **b == b'\n').count(), 1);
@@ -1846,7 +2143,13 @@ done"#;
             .unwrap();
         let host = Host::new(Runtime::Native, BTreeMap::new());
         assert!(matches!(
-            begin(&host, Authorization::Polkit, &operations, &cancel),
+            begin(
+                &host,
+                Authorization::Polkit,
+                BatchMode::Reviewed,
+                &operations,
+                &cancel
+            ),
             Err(ExecutionError::Invalid(_))
         ));
         drop(scope);
@@ -1886,7 +2189,12 @@ done"#;
         };
         let mut recorder = Recorder::default();
         let mut full: &mut [u8] = &mut [];
-        let result = serve_protocol(&mut Cursor::new(input(&[start])), &mut full, recorder.run());
+        let result = serve_protocol(
+            BatchMode::Reviewed,
+            &mut Cursor::new(input(&[start])),
+            &mut full,
+            recorder.run(),
+        );
         assert!(matches!(result, Err(ExecutionError::Io(_))));
         assert!(recorder.0.is_empty());
     }
@@ -1910,6 +2218,7 @@ done"#;
         let mut recorder = Recorder::default();
         let mut buffer = ready_only();
         let result = serve_protocol(
+            BatchMode::Reviewed,
             &mut Cursor::new(input(&[
                 refresh(),
                 Request::Run {
@@ -1925,6 +2234,7 @@ done"#;
         // Nor can a finished command's completion, after it ran once.
         let mut buffer = ready_only();
         let result = serve_protocol(
+            BatchMode::Reviewed,
             &mut Cursor::new(input(&[
                 refresh(),
                 Request::Run {
@@ -1948,13 +2258,13 @@ done"#;
         let mut input = Cursor::new(invalid_plan);
         let mut output = Vec::new();
         assert!(matches!(
-            serve_as(false, &mut input, &mut output),
+            serve_as(false, BatchMode::Reviewed, &mut input, &mut output),
             Err(ExecutionError::Invalid(reason)) if reason == "host runner requires root"
         ));
         assert_eq!(input.position(), 0);
         // As root the request is read and validated before anything runs.
         assert!(matches!(
-            serve_as(true, &mut input, &mut output),
+            serve_as(true, BatchMode::Reviewed, &mut input, &mut output),
             Err(ExecutionError::Invalid(reason)) if reason.contains("invalid authorization protocol")
         ));
         assert!(output.is_empty());
@@ -1962,7 +2272,7 @@ done"#;
         assert!(
             rustix::process::geteuid().is_root()
                 || matches!(
-                    serve(),
+                    serve(BatchMode::Reviewed),
                     Err(ExecutionError::Invalid(reason)) if reason == "host runner requires root"
                 )
         );
@@ -2062,18 +2372,25 @@ done"#;
         use std::collections::BTreeMap;
         let host = Host::new(Runtime::Native, BTreeMap::new());
         let runner = PathBuf::from("/opt/pkgdeck/libexec/pkgdeck-host-runner");
-        assert!(runner_command(&host, Authorization::Polkit, None)
-            .unwrap()
-            .is_none());
+        assert!(
+            runner_command(&host, Authorization::Polkit, BatchMode::Reviewed, None)
+                .unwrap()
+                .is_none()
+        );
         let args = |command: &Command| {
             command
                 .get_args()
                 .map(|arg| arg.to_string_lossy().into_owned())
                 .collect::<Vec<_>>()
         };
-        let command = runner_command(&host, Authorization::Polkit, Some((runner.clone(), true)))
-            .unwrap()
-            .unwrap();
+        let command = runner_command(
+            &host,
+            Authorization::Polkit,
+            BatchMode::Reviewed,
+            Some((runner.clone(), true)),
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(command.get_program(), "/usr/bin/pkexec");
         assert_eq!(
             args(&command),
@@ -2086,6 +2403,7 @@ done"#;
         let command = runner_command(
             &host,
             Authorization::SudoNonInteractive,
+            BatchMode::Reviewed,
             Some((runner, false)),
         )
         .unwrap()
@@ -2107,6 +2425,7 @@ done"#;
                 || begin(
                     &appimage,
                     Authorization::Polkit,
+                    BatchMode::Reviewed,
                     &refresh,
                     &Cancellation::default()
                 )
@@ -2117,5 +2436,54 @@ done"#;
             find_runner(Runtime::AppImage, Path::new("/nonexistent/bin/pkd"), ""),
             None
         );
+    }
+
+    #[test]
+    fn a_found_runner_starts_and_a_missing_one_refuses_unattended_batches() {
+        let refresh = [Operation::Refresh {
+            backend: "apt".into(),
+        }];
+        let commands = || batch_commands(&refresh).unwrap();
+        let cancel = Cancellation::default();
+        let upgrade_only = BatchMode::UpgradeOnly { removals: false };
+        // A bridge that exits at once: the runner never says it is ready.
+        let mut flatpak = Host::new(Runtime::Flatpak, Default::default());
+        flatpak.set_bridge_for_tests(Path::new("/usr/bin/true"));
+        let runner = PathBuf::from("/opt/pkgdeck/libexec/pkgdeck-host-runner");
+        assert!(start_runner(
+            &flatpak,
+            Authorization::Polkit,
+            upgrade_only,
+            Some((runner, false)),
+            &refresh,
+            commands(),
+            &cancel,
+        )
+        .is_err());
+        assert!(SESSION.with(|cell| cell.borrow().is_none()));
+        let native = Host::new(Runtime::Native, Default::default());
+        assert!(matches!(
+            start_runner(
+                &native,
+                Authorization::Polkit,
+                upgrade_only,
+                None,
+                &refresh,
+                commands(),
+                &cancel,
+            ),
+            Err(ExecutionError::Disabled(reason)) if reason.contains("system helper")
+        ));
+        assert!(start_runner(
+            &native,
+            Authorization::Polkit,
+            BatchMode::Reviewed,
+            None,
+            &refresh,
+            commands(),
+            &cancel,
+        )
+        .unwrap()
+        .is_none());
     }
 }

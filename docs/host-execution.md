@@ -93,8 +93,17 @@ runs `/usr/bin/apt-get` through either:
 - `/usr/bin/sudo -n --`, which only works with an existing sudo login or
   password-free rule, and never prompts.
 
-PkgDeck never installs passwords, polkit policies, or sudoers rules. The CI
-test only grants permissions on a throwaway runner. Desktop password prompts
+PkgDeck never stores passwords. It saves a polkit rule or a sudoers entry
+only when you turn on **Allow system updates without a password** for
+[automatic updates](gui.md#automatic-updates), and removes it when you turn
+that off. That rule covers only the helper's upgrade-only mode
+(`pkgdeck-host-runner --upgrade-only`), which refuses everything except
+refreshing sources and updating every package of APT, DNF, Pacman, Zypper,
+system Flatpaks and Snaps; APT also gets `--no-remove` unless you allowed
+updates that remove packages. The rule names the helper's own root-owned
+path, so a program you could replace never gets it. The helper writes the
+rule itself, as root, for the user who ran pkexec. The CI test only grants
+other permissions on a throwaway runner. Desktop password prompts
 are checked by hand before each release. pkexec exit codes 126 and 127 are
 reported as "cancelled" and "denied". See the
 [pkexec manual](https://polkit.pages.freedesktop.org/polkit/pkexec.1.html).

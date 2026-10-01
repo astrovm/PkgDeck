@@ -6,13 +6,24 @@ command -v podman >/dev/null || { echo 'Podman is required for --engine podman.'
 kind=${1:?Expected development or lifecycle}; shift
 case "$kind" in
     development) recipe=containers/development.Containerfile; inputs=("$recipe" rust-toolchain.toml scripts/setup-dev.sh scripts/dev-env.sh) ;;
-    lifecycle) recipe=containers/lifecycle.Containerfile; inputs=("$recipe" scripts/vm/prepare.sh) ;;
+    lifecycle) recipe=containers/lifecycle.Containerfile; inputs=("$recipe" scripts/ci/apt-mirrors.sh scripts/vm/prepare.sh) ;;
     *) echo "Unknown container kind: $kind" >&2; exit 2 ;;
 esac
 key=$(cat "${inputs[@]}" | sha256sum | cut -c1-16)
 image="localhost/pkgdeck-$kind:$key-$(uname -m)"
+# CI keeps built images in PKGDECK_IMAGE_ARCHIVE, so a slow package mirror
+# costs one build per recipe change instead of one per run.
+archive=${PKGDECK_IMAGE_ARCHIVE:+$PKGDECK_IMAGE_ARCHIVE/pkgdeck-$kind-$key-$(uname -m).tar}
 if ! podman image exists "$image"; then
-    podman build --layers -f "$recipe" -t "$image" .
+    if [[ -n $archive && -s $archive ]]; then
+        podman load -i "$archive"
+    else
+        podman build --layers -f "$recipe" -t "$image" .
+        if [[ -n $archive ]]; then
+            mkdir -p "$PKGDECK_IMAGE_ARCHIVE"
+            podman save -o "$archive" "$image"
+        fi
+    fi
 fi
 if [[ "${1:-}" == --build-only ]]; then printf '%s\n' "$image"; exit 0; fi
 run_container() {

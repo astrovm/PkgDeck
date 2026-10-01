@@ -97,6 +97,14 @@ pub mod ffi {
         #[qproperty(QString, activity)]
         #[qproperty(QString, background_state)]
         #[qproperty(QString, notification_history)]
+        /// The saved approval for system updates without a password: the
+        /// helper it covers, or empty when there is none.
+        #[qproperty(QString, system_approval)]
+        /// Why saving or removing that approval failed, or empty.
+        #[qproperty(QString, approval_error)]
+        /// The last automatic update, for a notification:
+        /// {updated, failed, total}.
+        #[qproperty(QString, auto_update_result)]
         #[qproperty(QString, confirmation)]
         #[qproperty(QString, confirmation_data)]
         #[qproperty(QString, version)]
@@ -201,6 +209,23 @@ pub mod ffi {
         #[qinvokable]
         #[cxx_name = "setAutostart"]
         fn set_autostart(self: Pin<&mut PackageController>, enabled: bool) -> bool;
+        /// Install updates a background check finds, with nobody watching.
+        #[qinvokable]
+        #[cxx_name = "setAutoUpdate"]
+        fn set_auto_update(self: Pin<&mut PackageController>, enabled: bool);
+        /// Let Update all, manual or automatic, remove packages when the
+        /// manager's plan does (APT replacing a kernel, for one).
+        #[qinvokable]
+        #[cxx_name = "setAllowRemovals"]
+        fn set_allow_removals(self: Pin<&mut PackageController>, allowed: bool);
+        /// Restore the saved approval at startup.
+        #[qinvokable]
+        #[cxx_name = "restoreSystemApproval"]
+        fn restore_system_approval(self: Pin<&mut PackageController>, approval: QString);
+        /// Save (true) or remove the approval. Asks for the password once.
+        #[qinvokable]
+        #[cxx_name = "allowSystemUpdates"]
+        fn allow_system_updates(self: Pin<&mut PackageController>, allow: bool);
     }
 }
 
@@ -222,6 +247,10 @@ enum Job {
     Write(Operation, Option<Box<TransactionPlan>>),
     PlanUpgrade(Vec<Operation>, usize),
     UpgradeAll(Vec<Operation>, Option<AptUpgradePlan>),
+    /// Updates a background check found, applied with nobody watching:
+    /// system managers only through the upgrade-only helper. With `true`,
+    /// an APT update may remove packages.
+    AutoUpgrade(Vec<Operation>, bool),
     CleanAll(Vec<Operation>),
     ManifestExport(PathBuf, Vec<PackageId>),
     ManifestPreview(PathBuf),
@@ -232,6 +261,7 @@ impl Job {
             self,
             Self::Write(..)
                 | Self::UpgradeAll(..)
+                | Self::AutoUpgrade(..)
                 | Self::CleanAll(_)
                 | Self::Repositories(Some(_))
                 | Self::ImportRepository(_)
@@ -247,7 +277,9 @@ impl Job {
     fn operations(&self) -> Vec<Operation> {
         match self {
             Self::Write(operation, _) => vec![operation.clone()],
-            Self::UpgradeAll(operations, _) | Self::CleanAll(operations) => operations.clone(),
+            Self::UpgradeAll(operations, _)
+            | Self::AutoUpgrade(operations, _)
+            | Self::CleanAll(operations) => operations.clone(),
             _ => vec![],
         }
     }
@@ -780,59 +812,36 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
             Ok(Payload::CleanPreview(operations, report.items))
         }
         Job::UpgradeAll(operations, _) | Job::CleanAll(operations) => {
-            let results = engine.execute_batch(&operations, cancel, &mut |event| {
-                if let Event::Progress {
-                    operation,
-                    progress: Progress::Message(message),
-                } = &event
-                {
-                    send(Reply::Progress(format!(
-                        "{}: {message}",
-                        operation_title(operation)
-                    )));
+            Ok(run_batch(engine, &operations, Vec::new(), cancel, send))
+        }
+        Job::AutoUpgrade(operations, removals) => {
+            // Nobody reviews this run. Unless removals are allowed, APT goes
+            // ahead only when its dry run removes nothing; otherwise it waits
+            // for Update all.
+            let apt = |op: &Operation| matches!(op, Operation::UpgradeAll { backend } if backend == "apt");
+            let held = if operations.iter().any(apt) {
+                match engine.plan_apt_upgrade(cancel) {
+                    Ok(plan) if removals || plan.removals.is_empty() => None,
+                    Ok(plan) => Some(format!(
+                        "Not updated automatically: it would remove {} {}. Review it with Update all.",
+                        plan.removals.len(),
+                        if plan.removals.len() == 1 { "package" } else { "packages" }
+                    )),
+                    Err(error) => Some(plain_error(&error, Some("apt"), false)),
                 }
-                if !matches!(&event, Event::Progress { progress: Progress::Message(_), .. }) {
-                    send(Reply::ProgressEvent(event));
-                }
-            });
-            let completed = results.iter().filter(|r| r.is_ok()).count();
-            let noun = if operations.iter().all(|op| matches!(op, Operation::Clean(_))) { "cleanup tasks" } else { "updates" };
-            let mut status = format!("Completed {completed} of {} {noun}.", operations.len());
-            let mut outcomes = Vec::new();
-            let mut failure_output = Vec::new();
-            for (operation, result) in operations.iter().zip(results) {
-                if let Err(error) = &result {
-                    if let Some(output) = raw_failure_output(error) {
-                        failure_output.push(format!("{}\n{output}", operation_title(operation)));
-                    }
-                }
-                outcomes.push(match &result {
-                    Ok(_) => Outcome::Finished,
-                    Err(EngineError::Cancelled) => Outcome::Cancelled,
-                    Err(_) => Outcome::Failed,
-                });
-                let outcome = match result {
-                    Ok(outcome) if outcome.cancellation_deferred => {
-                        "Finished before it could be cancelled. Changes were kept.".into()
-                    }
-                    Ok(_) => "Completed".into(),
-                    // A denial keeps the engine's words; the frontend
-                    // explains it for the chosen permission option. The App
-                    // Store has its own explanation, independent of it.
-                    Err(error) if is_denied(&error) && operation.backend() != "mas" => {
-                        error.to_string()
-                    }
-                    Err(error) => plain_error(&error, Some(operation.backend()), false),
-                };
-                status.push_str(&format!("\n{}: {outcome}", operation_title(operation)));
-            }
-            if operations.iter().any(|op| matches!(op, Operation::Upgrade(id) if id.backend == "fwupd")) {
-                status.push_str("\nFirmware: Restart or shut down the device if the update asked for it.");
-            }
-            if !failure_output.is_empty() {
-                send(Reply::FailureOutput(failure_output.join("\n\n")));
-            }
-            Ok(Payload::Batch(status, outcomes))
+            } else {
+                None
+            };
+            let held: Vec<_> = held
+                .map(|reason| {
+                    operations
+                        .iter()
+                        .filter(|op| apt(op))
+                        .map(|op| (op.clone(), reason.clone()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            Ok(run_batch(engine, &operations, held, cancel, send))
         }
         Job::Write(op, _) => engine
             .execute(&op, cancel, &mut |event| {
@@ -863,18 +872,163 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
     send(Reply::Done(result));
 }
 
+/// Run a confirmed batch and summarize it. `held` changes are reported as
+/// failed with their reason and never run.
+fn run_batch(
+    engine: &mut Engine,
+    operations: &[Operation],
+    held: Vec<(Operation, String)>,
+    cancel: &Cancellation,
+    send: &mut dyn FnMut(Reply),
+) -> Payload {
+    let runnable: Vec<_> = operations
+        .iter()
+        .filter(|op| !held.iter().any(|(held, _)| held == *op))
+        .cloned()
+        .collect();
+    let ran = engine.execute_batch(&runnable, cancel, &mut |event| {
+        if let Event::Progress {
+            operation,
+            progress: Progress::Message(message),
+        } = &event
+        {
+            send(Reply::Progress(format!(
+                "{}: {message}",
+                operation_title(operation)
+            )));
+        }
+        if !matches!(
+            &event,
+            Event::Progress {
+                progress: Progress::Message(_),
+                ..
+            }
+        ) {
+            send(Reply::ProgressEvent(event));
+        }
+    });
+    let mut ran = ran.into_iter();
+    let results: Vec<Result<OperationOutcome, (EngineError, Option<String>)>> = operations
+        .iter()
+        .map(|op| match held.iter().find(|(held, _)| held == op) {
+            Some((_, reason)) => Err((EngineError::Cancelled, Some(reason.clone()))),
+            None => ran
+                .next()
+                .unwrap_or(Err(EngineError::Cancelled))
+                .map_err(|error| (error, None)),
+        })
+        .collect();
+    let completed = results.iter().filter(|r| r.is_ok()).count();
+    let noun = if operations
+        .iter()
+        .all(|op| matches!(op, Operation::Clean(_)))
+    {
+        "cleanup tasks"
+    } else {
+        "updates"
+    };
+    let mut status = format!("Completed {completed} of {} {noun}.", operations.len());
+    let mut outcomes = Vec::new();
+    let mut failure_output = Vec::new();
+    for (operation, result) in operations.iter().zip(results) {
+        if let Err((error, None)) = &result {
+            if let Some(output) = raw_failure_output(error) {
+                failure_output.push(format!("{}\n{output}", operation_title(operation)));
+            }
+        }
+        outcomes.push(match &result {
+            Ok(_) => Outcome::Finished,
+            Err((EngineError::Cancelled, None)) => Outcome::Cancelled,
+            Err(_) => Outcome::Failed,
+        });
+        let outcome = match result {
+            Ok(outcome) if outcome.cancellation_deferred => {
+                "Finished before it could be cancelled. Changes were kept.".into()
+            }
+            Ok(_) => "Completed".into(),
+            Err((_, Some(reason))) => reason,
+            // A denial keeps the engine's words; the frontend
+            // explains it for the chosen permission option. The App
+            // Store has its own explanation, independent of it.
+            Err((error, None)) if is_denied(&error) && operation.backend() != "mas" => {
+                error.to_string()
+            }
+            Err((error, None)) => plain_error(&error, Some(operation.backend()), false),
+        };
+        status.push_str(&format!("\n{}: {outcome}", operation_title(operation)));
+    }
+    if operations
+        .iter()
+        .any(|op| matches!(op, Operation::Upgrade(id) if id.backend == "fwupd"))
+    {
+        status.push_str("\nFirmware: Restart or shut down the device if the update asked for it.");
+    }
+    if !failure_output.is_empty() {
+        send(Reply::FailureOutput(failure_output.join("\n\n")));
+    }
+    Payload::Batch(status, outcomes)
+}
+
+/// The upgrade-only helper mode for Update all under the saved approval:
+/// always for an automatic run, and for a manual one when the approval
+/// still applies and every system change is one that mode allows. Other
+/// batches keep the reviewed mode and its password prompt.
+fn batch_mode(
+    job: &Job,
+    allow_removals: bool,
+    approved: impl FnOnce() -> bool,
+) -> Option<pkgdeck_core::batch::BatchMode> {
+    use pkgdeck_core::batch::{check_mode, BatchMode};
+    match job {
+        Job::AutoUpgrade(_, removals) => Some(BatchMode::UpgradeOnly {
+            removals: *removals,
+        }),
+        Job::UpgradeAll(operations, _)
+            if check_mode(BatchMode::UpgradeOnly { removals: false }, operations).is_ok()
+                && approved() =>
+        {
+            Some(BatchMode::UpgradeOnly {
+                removals: allow_removals,
+            })
+        }
+        _ => None,
+    }
+}
+/// Why saving or removing the system update approval failed, in a sentence.
+fn approval_error(error: &ExecutionError) -> String {
+    match error {
+        ExecutionError::AuthorizationCancelled => "The password prompt was cancelled.".into(),
+        ExecutionError::Disabled(reason) | ExecutionError::Invalid(reason) => reason.clone(),
+        ExecutionError::Failed(completion) => {
+            let stderr = String::from_utf8_lossy(&completion.stderr);
+            stderr
+                .lines()
+                .rev()
+                .map(|line| line.trim().trim_start_matches("pkgdeck-host-runner: "))
+                .find(|line| !line.is_empty())
+                .map_or_else(
+                    || "PkgDeck's helper could not save the setting.".into(),
+                    str::to_owned,
+                )
+        }
+        other => other.to_string(),
+    }
+}
 /// How workers reach the running system: its package managers, and the host
 /// and root that source lists are read from. Tests substitute synthetic ones.
 #[derive(Clone, Copy)]
 struct Natives {
     engine: fn(&[String], bool, Authorization, &Cancellation) -> Result<Engine, EngineError>,
     host: fn() -> pkgdeck_core::host::Host,
+    /// Saves or removes the system update approval, behind a password.
+    approve: fn(&pkgdeck_core::host::Host, bool, &Cancellation) -> Result<String, ExecutionError>,
     root: &'static str,
     metadata: crate::metadata::Sources,
 }
 const NATIVES: Natives = Natives {
     engine: pkgdeck_core::backends::native_engine,
     host: pkgdeck_core::host::Host::current,
+    approve: pkgdeck_core::unattended::set_approval,
     root: "/",
     metadata: crate::metadata::SYSTEM,
 };
@@ -907,6 +1061,12 @@ struct DetailsWorker {
     receiver: mpsc::Receiver<Reply>,
     cancel: Cancellation,
     id: PackageId,
+}
+/// Saving or removing the system update approval: the reply is the
+/// approval key, or why it failed.
+struct ApprovalWorker {
+    handle: thread::JoinHandle<()>,
+    receiver: mpsc::Receiver<Result<String, String>>,
 }
 struct CatalogWorker {
     handle: thread::JoinHandle<()>,
@@ -1024,6 +1184,9 @@ pub struct Controller {
     manifest_preview: QString,
     activity: QString,
     background_state: QString,
+    system_approval: QString,
+    approval_error: QString,
+    auto_update_result: QString,
     notification_history: QString,
     version: QString,
     busy: bool,
@@ -1080,6 +1243,11 @@ pub struct Controller {
     active_view: String,
     catalog_checked: bool,
     catalog_worker: Option<CatalogWorker>,
+    approval_worker: Option<ApprovalWorker>,
+    /// Install updates that background checks find.
+    auto_update: bool,
+    /// Let Update all remove packages when APT's plan does.
+    allow_removals: bool,
     source_filter: Vec<String>,
     sudo: bool,
     worker: Option<Worker>,
@@ -1103,6 +1271,9 @@ impl Default for Controller {
             manifest_preview: "{}".into(),
             activity: "[]".into(),
             background_state: "{}".into(),
+            system_approval: QString::default(),
+            approval_error: QString::default(),
+            auto_update_result: "{}".into(),
             notification_history: "{}".into(),
             version: pkgdeck_core::VERSION.into(),
             busy: false,
@@ -1159,6 +1330,9 @@ impl Default for Controller {
             active_view: "Search".into(),
             catalog_checked: false,
             catalog_worker: None,
+            approval_worker: None,
+            auto_update: false,
+            allow_removals: true,
             source_filter: Vec::new(),
             sudo: false,
             worker: None,
@@ -1198,9 +1372,27 @@ impl Controller {
             || self.prefetch_worker.is_some()
             || self.details_worker.is_some()
             || self.catalog_worker.is_some()
+            || self.approval_worker.is_some()
             || self.activity_worker.is_some()
             || self.awaiting_prefetch
             || !self.prefetch.is_empty() && !held
+    }
+    /// Whether the saved approval still covers the helper this app would
+    /// start, so an unattended update can't stop at a password prompt.
+    fn approval_current(&self) -> bool {
+        let saved = self.system_approval.to_string();
+        if saved.is_empty() {
+            return false;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            pkgdeck_core::unattended::macos::approved()
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            pkgdeck_core::unattended::current_runner(&(self.natives.host)()).as_ref()
+                == Some(&saved)
+        }
     }
     /// A read the user is waiting for owns the worker. A quiet refresh
     /// behind cached rows, or background work, gives way to a new request.
@@ -1306,7 +1498,7 @@ fn engine_source(job: &Job, filter: &[String]) -> Vec<String> {
         Job::PlanAdoption(_) => vec!["homebrew-cask".into()],
         Job::Write(operation, _) => vec![operation.backend().into()],
         Job::BackgroundUpdates(sources) => sources.clone(),
-        Job::UpgradeAll(operations, _) | Job::CleanAll(operations) => operations.iter().map(|op| op.backend().to_owned()).collect(),
+        Job::UpgradeAll(operations, _) | Job::AutoUpgrade(operations, _) | Job::CleanAll(operations) => operations.iter().map(|op| op.backend().to_owned()).collect(),
         Job::PlanCleanAll(operations) => operations.iter().map(|op| op.backend().to_owned()).collect(),
         // The picker needs to explain disabled and unavailable managers too.
         Job::Load(view, _) if view == "Sources" => vec![],
@@ -1427,6 +1619,7 @@ fn source_display_name(id: &str) -> String {
         "conda" => "Conda",
         "composer" => "Composer",
         "gem" => "RubyGems",
+        "oh-my-zsh" => "Oh My Zsh",
         "fwupd" => "Firmware",
         "codex" => "Codex (standalone)",
         "claude" => "Claude Code (standalone)",
@@ -2767,6 +2960,94 @@ impl ffi::PackageController {
         self.as_mut().rust_mut().background = true;
         self.start(Job::BackgroundUpdates(sources));
     }
+    pub fn set_auto_update(mut self: Pin<&mut Self>, enabled: bool) {
+        self.as_mut().rust_mut().auto_update = enabled;
+    }
+    pub fn set_allow_removals(mut self: Pin<&mut Self>, allowed: bool) {
+        self.as_mut().rust_mut().allow_removals = allowed;
+    }
+    pub fn restore_system_approval(self: Pin<&mut Self>, approval: QString) {
+        self.set_system_approval(approval);
+    }
+    pub fn allow_system_updates(mut self: Pin<&mut Self>, allow: bool) {
+        if self.rust().approval_worker.is_some() {
+            return;
+        }
+        self.as_mut().set_approval_error(QString::default());
+        let natives = self.rust().natives;
+        let host = (natives.host)();
+        let (sender, receiver) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            let result = (natives.approve)(&host, allow, &Cancellation::default())
+                .map(|key| if allow { key } else { String::new() })
+                .map_err(|error| approval_error(&error));
+            let _ = sender.send(result);
+        });
+        self.as_mut().rust_mut().approval_worker = Some(ApprovalWorker { handle, receiver });
+        self.sync_needs_poll();
+    }
+    fn poll_approval(mut self: Pin<&mut Self>) {
+        let Some(worker) = &self.rust().approval_worker else {
+            return;
+        };
+        let Ok(result) = worker.receiver.try_recv() else {
+            return;
+        };
+        let worker = self.as_mut().rust_mut().approval_worker.take().unwrap();
+        let _ = worker.handle.join();
+        match result {
+            Ok(key) => self.as_mut().set_system_approval(key.as_str().into()),
+            Err(error) => self.as_mut().set_approval_error(error.as_str().into()),
+        }
+    }
+    /// After a background check: queue the updates it found as one
+    /// automatic run, when that is on and nothing else is waiting. Returns
+    /// whether a run was queued.
+    fn schedule_auto_update(mut self: Pin<&mut Self>, report: &PackageReport) -> bool {
+        use pkgdeck_core::unattended::{unattended, Unattended};
+        let rust = self.rust();
+        if !rust.auto_update
+            || rust.worker.is_some()
+            || rust.pending.is_some()
+            || rust.queued.is_some()
+            || rust.validated_confirmed.is_some()
+            || !rust.confirmed_queue.is_empty()
+        {
+            return false;
+        }
+        let approved = rust.approval_current();
+        // A source whose check failed may have more to update than it said.
+        let packages: Vec<Package> = report
+            .packages
+            .iter()
+            .filter(|p| !report.failures.iter().any(|f| f.backend == p.id.backend))
+            .filter(|p| !pkgdeck_core::backends::inventory_only(&p.id.backend))
+            .filter(|p| match unattended(&p.id.backend) {
+                Unattended::User => true,
+                Unattended::Approved => approved,
+                Unattended::Never => false,
+            })
+            .cloned()
+            .collect();
+        let operations = upgrade_plan(&packages);
+        if operations.is_empty() {
+            return false;
+        }
+        let names = self.rust().names_for(&operations);
+        self.as_mut().rust_mut().names.extend(names);
+        let activity_id = self
+            .rust()
+            .activity_store
+            .clone()
+            .and_then(|store| store.begin("auto", operations.clone(), State::Queued).ok());
+        self.as_mut().rust_mut().validated_confirmed = Some(Confirmed {
+            job: Job::AutoUpgrade(operations, self.rust().allow_removals),
+            activity_id,
+            cleanup_preview: vec![],
+        });
+        self.sync_needs_poll();
+        true
+    }
     pub fn set_check_interval(mut self: Pin<&mut Self>, minutes: i32) {
         let seconds = u64::try_from(minutes).unwrap_or(0).saturating_mul(60);
         self.as_mut()
@@ -2807,10 +3088,19 @@ impl ffi::PackageController {
             .iter()
             .map(|failure| json!({"source": failure.backend, "kind": failure_kind(&failure.error)}))
             .collect();
+        // An automatic update tells what it did when it finishes, instead
+        // of announcing updates it is about to install.
+        let automatic = self.as_mut().schedule_auto_update(&report);
+        if automatic {
+            self.as_mut()
+                .rust_mut()
+                .background_schedule
+                .acknowledge_notification();
+        }
         let saved = self.rust().background_schedule.notification_history();
         self.as_mut()
             .set_notification_history(saved.as_str().into());
-        self.as_mut().set_background_state(encoded(json!({"last_check": checked, "available": result.count, "failures": failures, "notify": result.notify})));
+        self.as_mut().set_background_state(encoded(json!({"last_check": checked, "available": result.count, "failures": failures, "notify": result.notify && !automatic})));
     }
     fn finish_background_error(mut self: Pin<&mut Self>, error: &EngineError) {
         let available = serde_json::from_str::<Value>(&self.background_state().to_string())
@@ -3110,7 +3400,13 @@ impl ffi::PackageController {
             self.as_mut().set_confirmation_data("{}".into());
         }
         let source_filter = self.rust().source_filter.clone();
-        let authorization = if self.rust().sudo {
+        let batch_mode = batch_mode(&job, self.rust().allow_removals, || {
+            self.rust().approval_current()
+        });
+        // Under the saved approval Update all never shows a password
+        // dialog: Linux uses the polkit rule, macOS the sudoers entry (sudo -n).
+        let authorization = if self.rust().sudo || batch_mode.is_some() && cfg!(target_os = "macos")
+        {
             Authorization::SudoNonInteractive
         } else {
             Authorization::Polkit
@@ -3246,6 +3542,10 @@ impl ffi::PackageController {
                     if let Job::UpgradeAll(_, Some(plan)) = &job {
                         engine.remember_apt_upgrade_plan(plan.clone());
                     }
+                    if let Some(mode) = batch_mode {
+                        engine.set_batch_mode(mode);
+                    }
+                    engine.set_unattended(matches!(job, Job::AutoUpgrade(..)));
                     if let Job::Write(_, Some(plan)) = &job {
                         engine.remember_operation_plan((**plan).clone());
                     }
@@ -4021,6 +4321,33 @@ impl ffi::PackageController {
                     }
                     self.as_mut().fail_revalidation(entry);
                 }
+                // With removals turned off in Settings, APT is left out when
+                // its plan removes anything.
+                let apt_all = |op: &Operation| matches!(op, Operation::UpgradeAll { backend } if backend == "apt");
+                let (operations, apt_plan, count, left_out) = match apt_plan {
+                    Some(plan) if !self.rust().allow_removals && !plan.removals.is_empty() => {
+                        let apt_packages = self
+                            .rust()
+                            .packages
+                            .iter()
+                            .filter(|p| {
+                                p.id.backend == "apt" && p.update == UpdateAvailability::Available
+                            })
+                            .count();
+                        let note = format!(
+                            "\nAPT is left out: it would remove {}. Turn on \"Allow updates that remove packages\" in Settings to include it.",
+                            plan.removals.join(", ")
+                        );
+                        let rest: Vec<_> =
+                            operations.into_iter().filter(|op| !apt_all(op)).collect();
+                        (rest, None, count.saturating_sub(apt_packages), note)
+                    }
+                    plan => (operations, plan, count, String::new()),
+                };
+                if operations.is_empty() {
+                    self.as_mut().set_status(left_out.trim().into());
+                    return;
+                }
                 let labels = operations
                     .iter()
                     .map(|operation| confirmation_label(operation, &self.rust().packages))
@@ -4058,9 +4385,9 @@ impl ffi::PackageController {
                     };
                     format!("\n{failed_sources} {noun} could not be checked. Updates from {them} are not included.")
                 };
-                self.as_mut().set_confirmation_data(encoded(json!({"action":"Update", "body": format!("{count} listed {noun}{incomplete}{apt}\n\n{labels}"), "summary": format!("Update {count} {noun}{removals}{warning}{incomplete}"), "details": format!("{incomplete}{apt}\n\n{labels}")})));
+                self.as_mut().set_confirmation_data(encoded(json!({"action":"Update", "body": format!("{count} listed {noun}{incomplete}{left_out}{apt}\n\n{labels}"), "summary": format!("Update {count} {noun}{removals}{warning}{incomplete}{left_out}"), "details": format!("{incomplete}{left_out}{apt}\n\n{labels}")})));
                 self.as_mut().set_confirmation(
-                    format!("Update all {count} listed {noun}?{incomplete}{apt}\n\n{labels}\n\nContinue?")
+                    format!("Update all {count} listed {noun}?{incomplete}{left_out}{apt}\n\n{labels}\n\nContinue?")
                         .as_str()
                         .into(),
                 );
@@ -4726,6 +5053,7 @@ impl ffi::PackageController {
     /// Publish what background threads delivered and start queued work.
     /// Afterwards `needs_poll` says whether anything is still outstanding.
     pub fn poll(mut self: Pin<&mut Self>) {
+        self.as_mut().poll_approval();
         self.as_mut().poll_work();
         self.as_mut().poll_activity();
         self.sync_needs_poll();
@@ -4782,6 +5110,19 @@ impl ffi::PackageController {
             })
             .collect();
         if let Some((job, cancel, joined)) = finished {
+            if let Job::AutoUpgrade(operations, _) = &job {
+                if let Some(Reply::Done(Ok(Payload::Batch(_, outcomes)))) =
+                    replies.iter().find(|reply| matches!(reply, Reply::Done(_)))
+                {
+                    let count =
+                        |outcome: Outcome| outcomes.iter().filter(|o| **o == outcome).count();
+                    self.as_mut().set_auto_update_result(encoded(json!({
+                        "updated": count(Outcome::Finished),
+                        "failed": count(Outcome::Failed) + count(Outcome::Cancelled),
+                        "total": operations.len(),
+                    })));
+                }
+            }
             for reply in replies {
                 if self.rust().background {
                     if !cancel.requested() {
@@ -8876,6 +9217,218 @@ mod tests {
             Ok(OperationOutcome::default())
         }
     }
+    /// APT whose dry run removes `removals`, and whose writes succeed.
+    struct AptPlanFixture {
+        removals: Vec<String>,
+    }
+    impl Backend for AptPlanFixture {
+        fn id(&self) -> &str {
+            "apt"
+        }
+        fn capabilities(&self) -> &[Capability] {
+            &[Capability::Installed, Capability::Upgrade]
+        }
+        fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
+            Ok(Availability::Available)
+        }
+        fn apt_upgrade_plan(&mut self, _: &Cancellation) -> Result<AptUpgradePlan, EngineError> {
+            Ok(AptUpgradePlan {
+                preview: "Inst synthetic".into(),
+                upgrades: vec!["synthetic".into()],
+                installs: vec![],
+                removals: self.removals.clone(),
+            })
+        }
+        fn execute(
+            &mut self,
+            _: &Operation,
+            _: &Cancellation,
+            _: &mut dyn FnMut(Progress),
+        ) -> Result<OperationOutcome, EngineError> {
+            Ok(OperationOutcome::default())
+        }
+    }
+    #[test]
+    fn automatic_updates_hold_apt_back_when_it_would_remove_packages() {
+        let all = |backend: &str| Operation::UpgradeAll {
+            backend: backend.into(),
+        };
+        for (removals, allowed, apt_outcome) in [
+            (vec!["old-kernel".to_owned()], false, Outcome::Failed),
+            (vec!["old-kernel".to_owned()], true, Outcome::Finished),
+            (vec![], false, Outcome::Finished),
+        ] {
+            let mut engine = Engine::default();
+            engine
+                .register(AptPlanFixture {
+                    removals: removals.clone(),
+                })
+                .unwrap();
+            engine
+                .register(Scripted {
+                    id: "homebrew",
+                    progress: vec![],
+                })
+                .unwrap();
+            let replies = run_job(
+                &mut engine,
+                Job::AutoUpgrade(vec![all("apt"), all("homebrew")], allowed),
+                &Cancellation::default(),
+            );
+            let (status, outcomes) = expect!(
+                replies.into_iter().last(),
+                Some(Reply::Done(Ok(Payload::Batch(status, outcomes)))) => (status, outcomes)
+            );
+            assert_eq!(outcomes, [apt_outcome.clone(), Outcome::Finished]);
+            assert_eq!(
+                status.contains("it would remove 1 package. Review it with Update all."),
+                apt_outcome == Outcome::Failed,
+                "{status}"
+            );
+        }
+    }
+    #[test]
+    fn update_all_runs_without_a_password_only_under_a_current_approval() {
+        use pkgdeck_core::batch::BatchMode;
+        let all = |backend: &str| Operation::UpgradeAll {
+            backend: backend.into(),
+        };
+        let upgrade_only = |removals| Some(BatchMode::UpgradeOnly { removals });
+        let manual = Job::UpgradeAll(vec![all("apt"), all("homebrew")], None);
+        assert_eq!(batch_mode(&manual, true, || true), upgrade_only(true));
+        assert_eq!(batch_mode(&manual, false, || true), upgrade_only(false));
+        assert_eq!(batch_mode(&manual, true, || false), None);
+        // Firmware still asks, and the approval isn't even checked.
+        let firmware = Job::UpgradeAll(vec![all("apt"), all("fwupd")], None);
+        assert_eq!(batch_mode(&firmware, true, || panic!("not checked")), None);
+        // One named package always asks.
+        let mut id = synthetic_package("synthetic", "Synthetic").id;
+        id.backend = "dnf".into();
+        let one = Job::Write(Operation::Upgrade(id), None);
+        assert_eq!(batch_mode(&one, true, || panic!("not checked")), None);
+        // An automatic run always uses the mode it was queued with.
+        let auto = Job::AutoUpgrade(vec![all("apt")], false);
+        assert_eq!(batch_mode(&auto, true, || false), upgrade_only(false));
+    }
+    #[test]
+    fn update_all_leaves_apt_out_when_removals_are_off() {
+        let all = |backend: &str| Operation::UpgradeAll {
+            backend: backend.into(),
+        };
+        let plan = AptUpgradePlan {
+            preview: "Remv old-kernel".into(),
+            upgrades: vec!["linux".into()],
+            installs: vec![],
+            removals: vec!["old-kernel".into()],
+        };
+        let available = |backend: &str, name: &str| {
+            let mut package = synthetic_package(name, name);
+            package.id.backend = backend.into();
+            package.update = UpdateAvailability::Available;
+            package
+        };
+        for allowed in [true, false] {
+            let mut controller = ffi::create_controller();
+            let mut controller = controller.pin_mut();
+            controller.as_mut().set_allow_removals(allowed);
+            controller.as_mut().rust_mut().packages =
+                vec![available("apt", "linux"), available("homebrew", "wget")];
+            controller.as_mut().apply(Ok(Payload::UpgradePreview(
+                vec![all("apt"), all("homebrew")],
+                2,
+                Some(plan.clone()),
+            )));
+            let confirmation = controller.confirmation().to_string();
+            let pending = expect!(
+                &controller.rust().pending,
+                Some(Job::UpgradeAll(operations, apt)) => (operations.clone(), apt.clone())
+            );
+            if allowed {
+                assert_eq!(
+                    pending,
+                    (vec![all("apt"), all("homebrew")], Some(plan.clone()))
+                );
+                assert!(confirmation.starts_with("Update all 2 listed packages?"));
+            } else {
+                assert_eq!(pending, (vec![all("homebrew")], None));
+                assert!(confirmation.starts_with("Update all 1 listed package?"));
+                assert!(confirmation.contains("APT is left out: it would remove old-kernel."));
+            }
+        }
+        // With nothing else to update, nothing waits for confirmation.
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().set_allow_removals(false);
+        controller
+            .as_mut()
+            .apply(Ok(Payload::UpgradePreview(vec![all("apt")], 1, Some(plan))));
+        assert!(controller.rust().pending.is_none());
+        assert!(controller
+            .status()
+            .to_string()
+            .starts_with("APT is left out"));
+    }
+    #[test]
+    fn background_checks_queue_only_what_may_update_unattended() {
+        let available = |backend: &str, name: &str| {
+            let mut package = synthetic_package(name, name);
+            package.id.backend = backend.into();
+            package.update = UpdateAvailability::Available;
+            package.candidate_version = Some("2".into());
+            package
+        };
+        let report = PackageReport {
+            packages: vec![
+                available("homebrew", "wget"),
+                // No saved approval here, so system managers wait.
+                available("apt", "synthetic"),
+                available("fwupd", "firmware"),
+                // Its check failed, so it may have more than it listed.
+                available("cargo", "ripgrep"),
+            ],
+            failures: vec![BackendFailure {
+                backend: "cargo".into(),
+                error: EngineError::Cancelled,
+            }],
+            successful_sources: vec!["homebrew".into(), "apt".into(), "fwupd".into()],
+        };
+        for automatic in [false, true] {
+            let mut controller = ffi::create_controller();
+            let mut controller = controller.pin_mut();
+            controller.as_mut().rust_mut().prefetch.clear();
+            controller.as_mut().set_auto_update(automatic);
+            controller.as_mut().set_allow_removals(automatic);
+            controller.as_mut().finish_background_check(report.clone());
+            let state: Value =
+                serde_json::from_str(&controller.background_state().to_string()).unwrap();
+            assert_eq!(state["notify"], !automatic);
+            let queued = controller
+                .rust()
+                .validated_confirmed
+                .as_ref()
+                .map(|entry| entry.job.operations());
+            assert!(controller.rust().validated_confirmed.as_ref().is_none_or(
+                |entry| matches!(entry.job, Job::AutoUpgrade(_, removals) if removals)
+            ));
+            if automatic {
+                assert_eq!(
+                    queued,
+                    Some(vec![Operation::UpgradeAll {
+                        backend: "homebrew".into()
+                    }])
+                );
+            } else {
+                assert_eq!(queued, None);
+            }
+        }
+        // Nothing starts while a change waits for confirmation.
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().set_auto_update(true);
+        controller.as_mut().rust_mut().pending = Some(Job::Load("Search".into(), String::new()));
+        controller.as_mut().finish_background_check(report);
+        assert!(controller.rust().validated_confirmed.is_none());
+    }
     fn run_job(engine: &mut Engine, job: Job, cancel: &Cancellation) -> Vec<Reply> {
         let mut replies = Vec::new();
         execute(engine, job, cancel, &mut |reply| replies.push(reply));
@@ -11307,9 +11860,28 @@ mod tests {
         catalog: no_catalog,
         fetch: offline,
     };
+    /// A machine without the helper: approving never reaches a password prompt.
+    fn no_approval(
+        _: &pkgdeck_core::host::Host,
+        _: bool,
+        _: &Cancellation,
+    ) -> Result<String, ExecutionError> {
+        Err(ExecutionError::Disabled(
+            "PkgDeck's system helper is not installed".into(),
+        ))
+    }
+    /// The password was given: the approval names a synthetic helper.
+    fn synthetic_approval(
+        _: &pkgdeck_core::host::Host,
+        grant: bool,
+        _: &Cancellation,
+    ) -> Result<String, ExecutionError> {
+        Ok(if grant { "synthetic-helper" } else { "" }.into())
+    }
     pub(super) const NO_MANAGERS: Natives = Natives {
         engine: no_engine,
         host: bare_host,
+        approve: no_approval,
         root: "/nonexistent/pkgdeck-tests",
         metadata: NO_METADATA,
     };
@@ -11333,6 +11905,7 @@ mod tests {
     const SYNTHETIC: Natives = Natives {
         engine: fixture_engine,
         host: bare_host,
+        approve: no_approval,
         root: "/nonexistent/pkgdeck-tests",
         metadata: NO_METADATA,
     };
@@ -12013,6 +12586,193 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("The planned changes are different now."));
+    }
+    #[test]
+    fn automatic_runs_use_their_batch_mode_and_report_what_they_did() {
+        let mut controller = synthetic_controller();
+        let mut controller = controller.pin_mut();
+        let operations = vec![Operation::UpgradeAll {
+            backend: "fixture".into(),
+        }];
+        controller
+            .as_mut()
+            .start(Job::AutoUpgrade(operations.clone(), false));
+        settle(&mut controller);
+        let result: Value =
+            serde_json::from_str(&controller.auto_update_result().to_string()).unwrap();
+        assert_eq!(result, json!({"updated": 1, "failed": 0, "total": 1}));
+        // A run that never reached its batch leaves the last result alone.
+        controller.as_mut().set_auto_update_result("{}".into());
+        controller.as_mut().rust_mut().natives = Natives {
+            engine: missing_engine,
+            ..SYNTHETIC
+        };
+        controller
+            .as_mut()
+            .start(Job::AutoUpgrade(operations, false));
+        settle(&mut controller);
+        assert_eq!(controller.auto_update_result().to_string(), "{}");
+    }
+    #[test]
+    fn system_update_approval_is_saved_removed_and_explained() {
+        let mut controller = synthetic_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().rust_mut().natives = Natives {
+            approve: synthetic_approval,
+            ..SYNTHETIC
+        };
+        let approval_idle =
+            |controller: &ffi::PackageController| controller.rust().approval_worker.is_none();
+        controller.as_mut().allow_system_updates(true);
+        assert!(controller.needs_poll());
+        wait_until(&mut controller, approval_idle);
+        assert_eq!(controller.system_approval().to_string(), "synthetic-helper");
+        assert_eq!(controller.approval_error().to_string(), "");
+        controller.as_mut().allow_system_updates(false);
+        wait_until(&mut controller, approval_idle);
+        assert_eq!(controller.system_approval().to_string(), "");
+
+        // Without the helper, the reason is shown and nothing is saved.
+        controller.as_mut().rust_mut().natives = SYNTHETIC;
+        controller.as_mut().allow_system_updates(true);
+        wait_until(&mut controller, approval_idle);
+        assert_eq!(controller.system_approval().to_string(), "");
+        assert_eq!(
+            controller.approval_error().to_string(),
+            "PkgDeck's system helper is not installed"
+        );
+
+        // While the password prompt is open, another toggle waits and the
+        // answer is read once it arrives.
+        let (sender, receiver) = mpsc::channel();
+        controller.as_mut().rust_mut().approval_worker = Some(ApprovalWorker {
+            handle: thread::spawn(|| {}),
+            receiver,
+        });
+        controller.as_mut().allow_system_updates(false);
+        controller.as_mut().poll();
+        assert!(controller.rust().approval_worker.is_some());
+        assert_eq!(
+            controller.approval_error().to_string(),
+            "PkgDeck's system helper is not installed"
+        );
+        sender.send(Ok("later-helper".into())).unwrap();
+        controller.as_mut().poll();
+        assert!(controller.rust().approval_worker.is_none());
+        assert_eq!(controller.system_approval().to_string(), "later-helper");
+    }
+    #[test]
+    fn approval_failures_read_as_one_sentence() {
+        let failed = |stderr: &str| {
+            ExecutionError::Failed(pkgdeck_core::process::Completion {
+                code: Some(1),
+                signal: None,
+                stdout: vec![],
+                stderr: stderr.as_bytes().to_vec(),
+                truncated: false,
+                cancellation_deferred: false,
+            })
+        };
+        for (error, sentence) in [
+            (
+                ExecutionError::AuthorizationCancelled,
+                "The password prompt was cancelled.",
+            ),
+            (ExecutionError::Disabled("Not installed".into()), "Not installed"),
+            (ExecutionError::Invalid("Unexpected user".into()), "Unexpected user"),
+            (
+                failed("polkit noise\npkgdeck-host-runner: this system's polkit has no rules folder\n\n"),
+                "this system's polkit has no rules folder",
+            ),
+            (
+                failed(" \n"),
+                "PkgDeck's helper could not save the setting.",
+            ),
+            (ExecutionError::TimedOut, "host read timed out"),
+        ] {
+            assert_eq!(approval_error(&error), sentence);
+        }
+    }
+    #[test]
+    fn a_saved_approval_counts_only_for_the_helper_it_names() {
+        let mut controller = idle_controller();
+        let mut controller = controller.pin_mut();
+        assert!(!controller.rust().approval_current());
+        controller
+            .as_mut()
+            .restore_system_approval("some-other-helper".into());
+        let current = controller.rust().approval_current();
+        // The test binary has no root-owned helper beside it on Linux.
+        #[cfg(not(target_os = "macos"))]
+        assert!(!current);
+        #[cfg(target_os = "macos")]
+        let _ = current;
+        // Nothing that may update unattended: no run is queued.
+        controller.as_mut().set_auto_update(true);
+        let mut firmware = synthetic_package("firmware", "Firmware");
+        firmware.id.backend = "fwupd".into();
+        firmware.update = UpdateAvailability::Available;
+        firmware.candidate_version = Some("2".into());
+        let report = PackageReport {
+            packages: vec![firmware],
+            failures: vec![],
+            successful_sources: vec!["fwupd".into()],
+        };
+        assert!(!controller.as_mut().schedule_auto_update(&report));
+        assert!(controller.rust().validated_confirmed.is_none());
+    }
+    #[test]
+    fn automatic_runs_without_apt_skip_its_plan_and_hold_it_when_planning_fails() {
+        let all = |backend: &str| Operation::UpgradeAll {
+            backend: backend.into(),
+        };
+        let mut engine = Engine::default();
+        engine
+            .register(Scripted {
+                id: "homebrew",
+                progress: vec![],
+            })
+            .unwrap();
+        let cancel = Cancellation::default();
+        let replies = run_job(
+            &mut engine,
+            Job::AutoUpgrade(vec![all("homebrew")], false),
+            &cancel,
+        );
+        let outcomes = expect!(
+            replies.into_iter().last(),
+            Some(Reply::Done(Ok(Payload::Batch(_, outcomes)))) => outcomes
+        );
+        assert_eq!(outcomes, [Outcome::Finished]);
+        // APT isn't there to plan, so it is held with the reason and the
+        // rest still runs.
+        let replies = run_job(
+            &mut engine,
+            Job::AutoUpgrade(vec![all("apt"), all("homebrew")], true),
+            &cancel,
+        );
+        let outcomes = expect!(
+            replies.into_iter().last(),
+            Some(Reply::Done(Ok(Payload::Batch(_, outcomes)))) => outcomes
+        );
+        assert_eq!(outcomes, [Outcome::Failed, Outcome::Finished]);
+        // A cleanup batch names its tasks as such.
+        let replies = run_job(
+            &mut engine,
+            Job::CleanAll(vec![Operation::Clean(CleanupId {
+                backend: "fwupd".into(),
+                key: "cache".into(),
+            })]),
+            &cancel,
+        );
+        let status = expect!(
+            replies.into_iter().last(),
+            Some(Reply::Done(Ok(Payload::Batch(status, _)))) => status
+        );
+        assert!(
+            status.starts_with("Completed 0 of 1 cleanup tasks."),
+            "{status}"
+        );
     }
     #[test]
     fn details_workers_replace_older_lookups_and_report_failures() {

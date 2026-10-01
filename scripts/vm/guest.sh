@@ -12,6 +12,9 @@ useradd -m pkgdeck-test
 printf 'pkgdeck-test ALL=(root) NOPASSWD: /usr/bin/apt-get\n' >/etc/sudoers.d/pkgdeck-fixture
 chmod 440 /etc/sudoers.d/pkgdeck-fixture
 source scripts/vm/lifecycle.sh
+# The fixture repo is all the tests need. Without Ubuntu's own sources, a
+# refresh never waits on a slow mirror.
+rm -f /etc/apt/sources.list.d/ubuntu.sources
 apt_fixture
 apt_lifecycle
 brew_lifecycle

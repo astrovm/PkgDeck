@@ -94,17 +94,114 @@ DeckScrollView {
             }
             SettingRow {
                 label: "Check every"
-                ThemedComboBox {
+                Controls.Slider {
+                    id: interval
                     objectName: "checkIntervalSetting"
-                    readonly property var minutes: [15, 30, 60, 180, 360, 720, 1440]
+                    readonly property var minutes: [15, 30, 60, 180, 360, 720, 1440, 2880, 4320, 10080]
+                    readonly property var labels: ["15 minutes", "30 minutes", "1 hour", "3 hours", "6 hours", "12 hours", "1 day", "2 days", "3 days", "1 week"]
+                    readonly property string currentText: labels[Math.round(value)]
+                    // The step closest to the saved interval.
+                    function nearest(saved) {
+                        let best = 0;
+                        for (let i = 1; i < minutes.length; i++)
+                            if (Math.abs(minutes[i] - saved) < Math.abs(minutes[best] - saved))
+                                best = i;
+                        return best;
+                    }
                     Layout.fillWidth: page.stacked
                     Layout.preferredWidth: page.controlWidth()
                     enabled: page.store.backgroundMode
-                    model: ["15 minutes", "30 minutes", "Hour", "3 hours", "6 hours", "12 hours", "Day"]
-                    currentIndex: Math.max(0, minutes.indexOf(page.store.checkInterval))
-                    onActivated: page.store.checkInterval = minutes[currentIndex]
+                    from: 0
+                    to: minutes.length - 1
+                    stepSize: 1
+                    snapMode: Controls.Slider.SnapAlways
+                    value: nearest(page.store.checkInterval)
+                    onMoved: {
+                        page.store.checkInterval = minutes[Math.round(value)];
+                        // Dragging replaced the binding; follow the saved setting again.
+                        value = Qt.binding(() => nearest(page.store.checkInterval));
+                    }
                     Accessible.name: "Check for updates every"
+                    Accessible.description: currentText
+                    leftPadding: 0
+                    rightPadding: 0
+                    topPadding: 22
+                    background: Item {
+                        x: interval.leftPadding
+                        width: interval.availableWidth
+                        height: interval.height
+                        opacity: interval.enabled ? 1 : 0.45
+                        Text {
+                            objectName: "checkIntervalValue"
+                            text: interval.currentText
+                            color: Theme.ink
+                            font: interval.font
+                            anchors.right: parent.right
+                            anchors.top: parent.top
+                        }
+                        Rectangle {
+                            y: interval.topPadding + interval.availableHeight / 2 - height / 2
+                            width: parent.width
+                            height: 4
+                            radius: 2
+                            color: Theme.tint(Theme.ink, Theme.dark ? 0.18 : 0.16)
+                            Rectangle {
+                                width: interval.visualPosition * parent.width
+                                height: parent.height
+                                radius: 2
+                                color: Theme.accent
+                            }
+                        }
+                    }
+                    handle: Rectangle {
+                        x: interval.leftPadding + interval.visualPosition * (interval.availableWidth - width)
+                        y: interval.topPadding + interval.availableHeight / 2 - height / 2
+                        implicitWidth: 18
+                        implicitHeight: 18
+                        radius: 9
+                        color: Theme.dark ? "#e9edf3" : "#ffffff"
+                        border.color: interval.visualFocus ? Theme.accent : Theme.tint("#000000", 0.18)
+                        border.width: interval.visualFocus ? 2 : 1
+                        opacity: interval.enabled ? 1 : 0.45
+                    }
                 }
+            }
+            SettingCheckBox {
+                objectName: "autoUpdateSetting"
+                text: "Install updates automatically"
+                enabled: page.store.backgroundMode
+                checked: page.store.autoUpdate
+                onClicked: page.store.autoUpdate = checked
+                Accessible.name: text
+            }
+            SettingCheckBox {
+                objectName: "allowRemovalsSetting"
+                text: "Allow updates that remove packages"
+                tooltipText: "Like an old kernel replaced by a new one"
+                checked: page.store.allowRemovals
+                onClicked: page.store.allowRemovals = checked
+                Accessible.name: text
+            }
+            SettingCheckBox {
+                objectName: "systemApprovalSetting"
+                text: "Allow system updates without a password"
+                tooltipText: page.app.macOS ? "" : "Installing or removing still asks"
+                checked: page.store.systemApproval !== ""
+                onClicked: {
+                    page.app.backend.allowSystemUpdates(checked);
+                    // The saved setting decides once the password prompt is answered.
+                    checked = Qt.binding(() => page.store.systemApproval !== "");
+                }
+                Accessible.name: text
+            }
+            Controls.Label {
+                objectName: "systemApprovalHelp"
+                Layout.fillWidth: true
+                Layout.leftMargin: 28
+                wrapMode: Text.WordWrap
+                visible: text.length > 0
+                color: Theme.danger
+                text: page.app.backend.approval_error
             }
             SettingCheckBox {
                 objectName: "autostartSetting"
@@ -141,16 +238,6 @@ DeckScrollView {
                         wrapMode: Text.WordWrap
                         Layout.fillWidth: true
                     }
-                    Controls.Label {
-                        objectName: "notificationAvailability"
-                        text: !page.app.trayAvailable ? "Notifications unavailable: no " + (page.app.macOS ? "menu bar icon" : "system tray") + " found"
-                            : !page.app.notificationAvailable ? (page.app.macOS ? "Notifications are off: allow PkgDeck in System Settings > Notifications" : "This system tray does not support notifications")
-                            : page.app.notificationPermissionNeeded ? "macOS hasn't allowed PkgDeck's notifications yet, so they show Script Editor's icon. Allow PkgDeck in Notification settings."
-                            : "Notifications available"
-                        color: Theme.muted
-                        wrapMode: Text.WordWrap
-                        Layout.fillWidth: true
-                    }
                     ActionButton {
                         objectName: "notificationSettingsButton"
                         text: "Notification settings"
@@ -159,13 +246,38 @@ DeckScrollView {
                         onClicked: page.app.notificationSettingsRequested()
                     }
                 }
-                ActionButton {
-                    objectName: "testNotificationButton"
-                    text: "Test notification"
-                    symbol: "bell"
-                    enabled: page.store.backgroundMode && page.app.notificationAvailable
-                    onClicked: page.app.testNotificationRequested()
+                RowLayout {
+                    spacing: 8
                     Layout.alignment: page.stacked ? Qt.AlignLeft : (Qt.AlignRight | Qt.AlignVCenter)
+                    // A warning icon, only when notifications won't work as
+                    // expected; hover it for why.
+                    DeckIcon {
+                        id: notificationWarning
+                        objectName: "notificationAvailability"
+                        readonly property string text: !page.app.trayAvailable ? "No " + (page.app.macOS ? "menu bar icon" : "system tray") + ", so no notifications"
+                            : !page.app.notificationAvailable ? (page.app.macOS ? "Notifications are off in System Settings" : "This system tray can't show notifications")
+                            : page.app.notificationPermissionNeeded ? "Notifications show Script Editor's icon until you allow PkgDeck"
+                            : ""
+                        name: "warning"
+                        ink: Theme.warning
+                        visible: text.length > 0
+                        Layout.preferredWidth: 18
+                        Layout.preferredHeight: 18
+                        Accessible.ignored: false
+                        Accessible.role: Accessible.StaticText
+                        Accessible.name: text
+                        HoverHandler { id: notificationWarningHover }
+                        Controls.ToolTip.visible: notificationWarningHover.hovered
+                        Controls.ToolTip.delay: 300
+                        Controls.ToolTip.text: text
+                    }
+                    ActionButton {
+                        objectName: "testNotificationButton"
+                        text: "Test notification"
+                        symbol: "bell"
+                        enabled: page.store.backgroundMode && page.app.notificationAvailable
+                        onClicked: page.app.testNotificationRequested()
+                    }
                 }
             }
         }
