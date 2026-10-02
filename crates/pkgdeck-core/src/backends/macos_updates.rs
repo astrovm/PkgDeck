@@ -7,6 +7,8 @@
 //! installing it needs the owner's password, which PkgDeck never handles,
 //! and PkgDeck never restarts the Mac. System Settings finishes it.
 //! Upgrades to a new major macOS version are left to System Settings.
+//! Automatic updates only download (one fixed command the saved approval
+//! names, see [`crate::unattended::macos`]); installing stays with the person.
 use super::*;
 
 const ID: &str = "macos-updates";
@@ -221,6 +223,34 @@ impl<T: Transport> MacUpdates<T> {
     }
 }
 
+impl<T: Transport> MacUpdates<T> {
+    fn download_all(
+        &self,
+        cancel: &Cancellation,
+        progress: &mut dyn FnMut(Progress),
+    ) -> Result<OperationOutcome, EngineError> {
+        if self.packages(cancel)?.is_empty() {
+            return Ok(OperationOutcome::default());
+        }
+        let [_, args @ ..] = crate::unattended::macos::DOWNLOAD_UPDATES;
+        let args: Vec<OsString> = args.iter().map(OsString::from).collect();
+        let result = self
+            .transport
+            .system_manager("softwareupdate", &args, cancel, true)?;
+        let deferred = result.cancellation_deferred;
+        let output = bytes(ID, result)?;
+        if !output.is_empty() {
+            progress(Progress::Message(String::from_utf8_lossy(&output).into()));
+        }
+        progress(Progress::Message(
+            "macOS updates are downloaded. Install them from PkgDeck or System Settings > General > Software Update.".into(),
+        ));
+        Ok(OperationOutcome {
+            cancellation_deferred: deferred,
+        })
+    }
+}
+
 impl<T: Transport> Backend for MacUpdates<T> {
     fn id(&self) -> &str {
         ID
@@ -282,6 +312,9 @@ impl<T: Transport> Backend for MacUpdates<T> {
     ) -> Result<OperationOutcome, EngineError> {
         match operation {
             Operation::Upgrade(id) => self.update(id, cancel, progress),
+            Operation::UpgradeAll { backend } if backend == ID => {
+                self.download_all(cancel, progress)
+            }
             _ => Err(self.unsupported(operation.capability())),
         }
     }
@@ -496,5 +529,41 @@ mod tests {
             ]
         );
         assert!(messages.iter().any(|m| m.contains("System Settings")));
+    }
+
+    #[test]
+    fn downloading_everything_runs_the_approved_command_only_when_needed() {
+        let fake = Fake::default();
+        let mut backend = MacUpdates::new(fake.clone());
+        let all = Operation::UpgradeAll { backend: ID.into() };
+        let mut messages = vec![];
+        let mut record = |progress| {
+            if let Progress::Message(text) = progress {
+                messages.push(text);
+            }
+        };
+        backend
+            .execute(&all, &Cancellation::default(), &mut record)
+            .unwrap();
+        let writes = |fake: &Fake| {
+            fake.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(_, _, write)| *write)
+                .map(|(program, args, _)| {
+                    std::iter::once(format!("/usr/sbin/{program}"))
+                        .chain(args.iter().cloned())
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        };
+        assert!(writes(&fake).is_empty(), "nothing pending");
+        *fake.listing.lock().unwrap() = LISTING.into();
+        backend
+            .execute(&all, &Cancellation::default(), &mut record)
+            .unwrap();
+        assert_eq!(writes(&fake), [crate::unattended::macos::DOWNLOAD_UPDATES]);
+        assert!(messages.iter().any(|m| m.contains("downloaded")));
     }
 }

@@ -6,11 +6,12 @@
 //! [`UPGRADE_ONLY`] and nothing else; that helper only refreshes sources and
 //! updates every package (see [`crate::batch::check_mode`]). The rule names
 //! the helper's own root-owned path, so a program the user can replace never
-//! gets it. On macOS it is a sudoers entry that lets the user's sudo run
-//! without a password: Homebrew casks and the App Store run sudo themselves
-//! for whatever their installers need, so nothing narrower covers them.
-//! Changes the person starts still ask: the macOS app shows its own
-//! administrator dialog and the CLI asks sudo for the password first.
+//! gets it. On macOS it is a sudoers entry for exact commands of root-owned
+//! programs: downloading macOS updates and MacPorts' two update commands,
+//! with a clean environment. Homebrew casks and the App Store run sudo
+//! themselves for whatever their installers need, which no exact command
+//! covers, so they never get it. Only automatic updates use the approval;
+//! changes the person starts still ask for the password.
 use crate::{
     batch::{self, BatchMode, ALLOW_REMOVALS, UPGRADE_ONLY},
     host::{Host, Runtime},
@@ -30,19 +31,20 @@ pub enum Unattended {
     User,
     /// Needs root, so it updates only under the saved approval.
     Approved,
-    /// Never updated unattended: firmware (power and restarts),
-    /// inventories, and system managers the helper doesn't run.
+    /// Never updated unattended: firmware (power and restarts), the App
+    /// Store (mas runs sudo itself), inventories, and system managers the
+    /// helper doesn't run.
     Never,
 }
 
 pub fn unattended(backend: &str) -> Unattended {
     match backend {
         id if batch::UPGRADE_ONLY_BACKENDS.contains(&id)
-            || matches!(id, "macports" | "mas" | "macos-updates") =>
+            || matches!(id, "macports" | "macos-updates") =>
         {
             Unattended::Approved
         }
-        "fwupd" | "macos-apps" | "system-image" | "apk" | "xbps" | "aur" | "toolbox"
+        "fwupd" | "mas" | "macos-apps" | "system-image" | "apk" | "xbps" | "aur" | "toolbox"
         | "distrobox" => Unattended::Never,
         _ => Unattended::User,
     }
@@ -334,13 +336,38 @@ pub mod macos {
     use super::*;
 
     pub const KEY: &str = "sudoers:automatic-updates";
+    pub const PORT: &str = "/opt/local/bin/port";
+    /// What an automatic run asks of Software Update. Installing is left to
+    /// the person: an install command would have to take a label, and sudo
+    /// can't tell one label with spaces from extra options.
+    pub const DOWNLOAD_UPDATES: [&str; 4] = [
+        "/usr/sbin/softwareupdate",
+        "--download",
+        "--all",
+        "--no-scan",
+    ];
 
-    pub fn sudoers_line(user: &str) -> Result<String, ExecutionError> {
+    /// The exact commands automatic updates run through `sudo -n`, with no
+    /// wildcard. MacPorts is included when `macports` says it is installed
+    /// root-owned: sudo would otherwise run a program the user can replace.
+    /// Neither keeps the caller's environment, HOME included, so a user's
+    /// `~/.macports` or PATH can't steer what runs as root.
+    pub fn sudoers_line(user: &str, macports: bool) -> Result<String, ExecutionError> {
         if !safe_user(user) {
             return Err(invalid("unexpected user name"));
         }
-        // SETENV: Homebrew passes its environment with `sudo -E`.
-        Ok(format!("{user} ALL=(root) NOPASSWD:SETENV: ALL\n"))
+        let mut programs = vec![DOWNLOAD_UPDATES[0].to_owned()];
+        let mut commands = vec![DOWNLOAD_UPDATES.join(" ")];
+        if macports {
+            programs.push(PORT.into());
+            commands.push(format!("{PORT} -N selfupdate"));
+            commands.push(format!("{PORT} -N upgrade outdated"));
+        }
+        Ok(format!(
+            "Defaults!{} !env_keep, always_set_home, secure_path=\"/opt/local/bin:/opt/local/sbin:/usr/bin:/bin:/usr/sbin:/sbin\"\n{user} ALL=(root) NOPASSWD: {}\n",
+            programs.join(", "),
+            commands.join(", ")
+        ))
     }
     /// sudo skips files whose names contain a dot.
     pub fn sudoers_path(user: &str) -> PathBuf {
@@ -349,13 +376,13 @@ pub mod macos {
     }
     /// The shell script run as root: check the entry with visudo before it
     /// goes in place, so a mistake can never break sudo.
-    pub fn script(user: &str, grant: bool) -> Result<String, ExecutionError> {
+    pub fn script(user: &str, grant: bool, macports: bool) -> Result<String, ExecutionError> {
         let target = sudoers_path(user);
         let target = target.to_str().expect("built from checked text");
         if !grant {
             return Ok(format!("/bin/rm -f '{target}'"));
         }
-        let line = sudoers_line(user)?;
+        let line = sudoers_line(user, macports)?;
         Ok(format!(
             "set -e; umask 077; /bin/mkdir -p /private/etc/sudoers.d; \
              tmp=$(/usr/bin/mktemp /private/etc/sudoers.d/.pkgdeck.XXXXXX); \
@@ -373,7 +400,8 @@ pub mod macos {
             .arg("-un")
             .output()?;
         let user = String::from_utf8_lossy(&user.stdout).trim().to_owned();
-        let args = ["-c".into(), script(&user, grant)?.into()];
+        let macports = root_owned(Path::new(PORT));
+        let args = ["-c".into(), script(&user, grant, macports)?.into()];
         let shell = crate::host::shell_command(Path::new("/bin/sh"), &args)?;
         let apple = format!(
             "do shell script {} with administrator privileges",
@@ -399,18 +427,22 @@ pub mod macos {
         }
     }
 
-    /// Whether sudo runs a command now without asking. `sudo -l` can't
-    /// tell: it lists commands that still need a password.
+    /// Whether the entry is in place. `sudo -n -l` lists the user's rules
+    /// without asking once one of them needs no password.
     #[cfg(target_os = "macos")]
     pub fn approved() -> bool {
         std::process::Command::new("/usr/bin/sudo")
-            .args(["-n", "--", "/usr/bin/true"])
+            .args(["-n", "-l"])
             .env_clear()
             .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|status| status.success())
+            .output()
+            .is_ok_and(|output| output.status.success() && lists_entry(&output.stdout))
+    }
+    /// `sudo -l` prints the entry's commands after `NOPASSWD:`.
+    pub fn lists_entry(listing: &[u8]) -> bool {
+        String::from_utf8_lossy(listing)
+            .contains(&format!("NOPASSWD: {}", DOWNLOAD_UPDATES.join(" ")))
     }
 }
 
@@ -428,12 +460,19 @@ mod tests {
             "zypper",
             "snap",
             "macports",
-            "mas",
             "macos-updates",
         ] {
             assert_eq!(unattended(id), Unattended::Approved, "{id}");
         }
-        for id in ["fwupd", "macos-apps", "apk", "xbps", "aur", "toolbox"] {
+        for id in [
+            "fwupd",
+            "mas",
+            "macos-apps",
+            "apk",
+            "xbps",
+            "aur",
+            "toolbox",
+        ] {
             assert_eq!(unattended(id), Unattended::Never, "{id}");
         }
         for id in [
@@ -794,20 +833,47 @@ mod tests {
 
     #[test]
     fn the_sudoers_entry_names_one_user_and_is_checked_first() {
-        let line = macos::sudoers_line("astro").unwrap();
-        assert_eq!(line, "astro ALL=(root) NOPASSWD:SETENV: ALL\n");
-        assert!(macos::sudoers_line("a b").is_err());
+        assert_eq!(
+            macos::sudoers_line("astro", false).unwrap(),
+            "Defaults!/usr/sbin/softwareupdate !env_keep, always_set_home, secure_path=\"/opt/local/bin:/opt/local/sbin:/usr/bin:/bin:/usr/sbin:/sbin\"\nastro ALL=(root) NOPASSWD: /usr/sbin/softwareupdate --download --all --no-scan\n"
+        );
+        let line = macos::sudoers_line("astro", true).unwrap();
+        assert!(
+            line.starts_with("Defaults!/usr/sbin/softwareupdate, /opt/local/bin/port !env_keep")
+        );
+        assert!(line.ends_with(
+            "NOPASSWD: /usr/sbin/softwareupdate --download --all --no-scan, /opt/local/bin/port -N selfupdate, /opt/local/bin/port -N upgrade outdated\n"
+        ));
+        // Exact commands only.
+        assert!(!line.contains('*'));
+        assert!(macos::sudoers_line("a b", false).is_err());
+        let listing = "User astro may run the following commands:\n    (ALL) ALL\n    (root) NOPASSWD: /usr/sbin/softwareupdate --download --all --no-scan, /opt/local/bin/port -N selfupdate\n";
+        assert!(macos::lists_entry(listing.as_bytes()));
+        assert!(!macos::lists_entry(b"    (ALL) ALL\n"));
+        // visudo accepts it.
+        #[cfg(target_os = "macos")]
+        {
+            let file = std::env::temp_dir().join(format!("pkgdeck-sudoers-{}", std::process::id()));
+            std::fs::write(&file, &line).unwrap();
+            let checked = std::process::Command::new("/usr/sbin/visudo")
+                .arg("-cqf")
+                .arg(&file)
+                .status()
+                .unwrap();
+            std::fs::remove_file(&file).unwrap();
+            assert!(checked.success());
+        }
         assert_eq!(
             macos::sudoers_path("first.last"),
             Path::new("/private/etc/sudoers.d/pkgdeck-unattended-first_last")
         );
-        let script = macos::script("astro", true).unwrap();
+        let script = macos::script("astro", true, false).unwrap();
         let visudo = script.find("visudo -cqf").unwrap();
         let install = script.find("/bin/mv -f").unwrap();
         assert!(visudo < install);
         assert!(script.contains("chmod 0440"));
         assert_eq!(
-            macos::script("astro", false).unwrap(),
+            macos::script("astro", false, true).unwrap(),
             "/bin/rm -f '/private/etc/sudoers.d/pkgdeck-unattended-astro'"
         );
     }

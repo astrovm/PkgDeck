@@ -248,9 +248,8 @@ With [mas](https://github.com/mas-cli/mas) 7 or newer installed, the **Mac App
 Store** source lists apps installed from the App Store and shows which have
 updates. Updates need your Mac password, which mas can only ask for in a
 terminal. If PkgDeck can't get it, it says so; run `pkd upgrade --from mas` in
-Terminal, or update in the App Store app. With **Allow automatic updates
-without a password** on, automatic updates install them too. PkgDeck never
-installs App Store apps.
+Terminal, or update in the App Store app. Automatic updates skip them. PkgDeck
+never installs App Store apps.
 
 **Remove** moves an App Store app to your Trash, where you can drag it back
 out. App Store apps belong to the system, so macOS asks for your administrator
@@ -266,7 +265,8 @@ Apple's servers; every other page reads the last check. Installing asks for
 your administrator password. An update that needs a restart is downloaded, not
 installed: finish it from System Settings > General > Software Update. PkgDeck
 never restarts your Mac. Upgrades to a new major version of macOS aren't
-listed; System Settings offers those.
+listed; System Settings offers those. Automatic updates only download them;
+installing stays with you.
 
 ### macOS application inventory
 
@@ -361,8 +361,8 @@ updates, PkgDeck installs them and sends one notification.
   failed.
 - Sources that run as you (Homebrew, Oh My Zsh, Cargo, npm and other
   developer tools) update right away.
-- Firmware, apk, XBPS, the AUR, Toolbx and Distrobox never update
-  automatically.
+- Firmware, the Mac App Store, apk, XBPS, the AUR, Toolbx and Distrobox
+  never update automatically.
 
 #### Updating PkgDeck itself
 
@@ -392,13 +392,13 @@ What it saves:
   Zypper, system Flatpaks and Snaps, only in your active local session.
   The helper does nothing else in that mode.
 - macOS: a sudoers entry, `/private/etc/sudoers.d/pkgdeck-unattended-USER`,
-  that lets your sudo run without a password. Homebrew casks and the App
-  Store run sudo themselves for whatever their installers need, so it can't
-  be narrower. It covers casks, the Mac App Store, MacPorts and macOS
-  updates. Anything running as you can use it while it's on. It's checked
-  with `visudo` before it's saved. Casks and App Store updates you start
-  yourself don't ask either while it's on, because their tools run sudo
-  themselves; everything else PkgDeck runs as root shows its password dialog.
+  checked with `visudo` before it's saved. It allows exactly
+  `softwareupdate --download --all --no-scan` and, when MacPorts is
+  installed, `port -N selfupdate` and `port -N upgrade outdated`, without
+  your environment, so your settings can't change what runs as root. Nothing
+  else gets past sudo's password prompt. Homebrew casks and the App Store run
+  sudo themselves for whatever their installers need, which no exact command
+  covers, so they're left out.
 - Turning it off deletes the file.
 - On Linux this needs the system Flatpak, the Snap or your distro's
   package. AppImages, user Flatpaks and Homebrew can't use it.

@@ -1459,6 +1459,21 @@ fn upgrade_plan(packages: &[Package]) -> Vec<Operation> {
         )
         .collect()
 }
+/// [`upgrade_plan`] for an automatic run, which only downloads macOS
+/// updates, with the one command the saved approval names.
+fn automatic_plan(packages: &[Package]) -> Vec<Operation> {
+    let mut operations = upgrade_plan(packages);
+    if operations
+        .iter()
+        .any(|operation| operation.backend() == "macos-updates")
+    {
+        operations.retain(|operation| operation.backend() != "macos-updates");
+        operations.push(Operation::UpgradeAll {
+            backend: "macos-updates".into(),
+        });
+    }
+    operations
+}
 /// Passes on the lines of output that name a package one of `backends` is
 /// updating; everything else a manager prints stays in the worker.
 fn output_follower(
@@ -1883,7 +1898,7 @@ fn plain_error(error: &EngineError, backend: Option<&str>, sudo: bool) -> String
             if matches!(backend, Some("homebrew" | "homebrew-cask"))
                 && String::from_utf8_lossy(&result.stderr).contains("/usr/bin/sudo") =>
         {
-            "Homebrew needed your administrator password to finish this change and didn't get one. Update it again from Updates and enter your password when asked. Automatic updates need Allow automatic updates without a password for this.".into()
+            "Homebrew needed your administrator password to finish this change and didn't get one. Update it again from Updates and enter your password when asked.".into()
         }
         EngineError::Execution(E::Failed(result)) => {
             let output = String::from_utf8_lossy(&result.stderr);
@@ -3062,7 +3077,7 @@ impl ffi::PackageController {
             })
             .cloned()
             .collect();
-        let operations = upgrade_plan(&packages);
+        let operations = automatic_plan(&packages);
         if operations.is_empty() {
             return false;
         }
@@ -9415,6 +9430,30 @@ mod tests {
             .status()
             .to_string()
             .starts_with("APT is left out"));
+    }
+    #[test]
+    fn automatic_runs_download_macos_updates_in_one_step() {
+        let available = |backend: &str, name: &str| {
+            let mut package = synthetic_package(name, name);
+            package.id.backend = backend.into();
+            package.update = UpdateAvailability::Available;
+            package
+        };
+        let all = |backend: &str| Operation::UpgradeAll {
+            backend: backend.into(),
+        };
+        assert_eq!(
+            automatic_plan(&[
+                available("macos-updates", "Safari"),
+                available("homebrew", "wget"),
+                available("macos-updates", "macOS Tahoe 26.1"),
+            ]),
+            [all("homebrew"), all("macos-updates")]
+        );
+        assert_eq!(
+            automatic_plan(&[available("homebrew", "wget")]),
+            [all("homebrew")]
+        );
     }
     #[test]
     fn background_checks_queue_only_what_may_update_unattended() {

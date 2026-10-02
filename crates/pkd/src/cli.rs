@@ -538,7 +538,31 @@ fn refresh_sources(
     if !operations.is_empty() {
         authorize(&operations)?;
     }
-    let results = execute(engine, history, &operations, cancel, events);
+    // `brew update` refreshes formulae and casks together: with both
+    // sources, it runs once and its result stands for both.
+    let shared = ["homebrew", "homebrew-cask"].iter().all(|id| {
+        operations
+            .iter()
+            .any(|operation| operation.backend() == *id)
+    });
+    let run: Vec<Operation> = operations
+        .iter()
+        .filter(|operation| !(shared && operation.backend() == "homebrew-cask"))
+        .cloned()
+        .collect();
+    let mut results = execute(engine, history, &run, cancel, events);
+    if shared {
+        let brew = run
+            .iter()
+            .position(|operation| operation.backend() == "homebrew")
+            .expect("both Homebrew sources refresh");
+        let cask = operations
+            .iter()
+            .position(|operation| operation.backend() == "homebrew-cask")
+            .expect("both Homebrew sources refresh");
+        let result = results[brew].clone();
+        results.insert(cask, result);
+    }
     let failed = operations
         .iter()
         .zip(&results)
@@ -2584,6 +2608,28 @@ mod tests {
         assert_eq!(code, 0, "{data}");
         assert_eq!(data["operations"].as_array().unwrap().len(), 2);
         assert_eq!((count(&scans), count(&brews)), (1, 1));
+    }
+    #[test]
+    fn both_homebrew_sources_share_one_brew_update() {
+        let formulae = Indexed::new("homebrew", true, false);
+        let casks = Indexed::new("homebrew-cask", true, false);
+        let (formula_fetches, cask_fetches) = (formulae.fetches.clone(), casks.fetches.clone());
+        let mut engine = Engine::default();
+        engine.register(formulae).unwrap();
+        engine.register(casks).unwrap();
+        let (data, code) = call(&mut engine, &["refresh"], false);
+        assert_eq!(code, 0, "{data}");
+        let fetches = formula_fetches.load(std::sync::atomic::Ordering::Relaxed)
+            + cask_fetches.load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(fetches, 1);
+        // Both still read as refreshed.
+        let refreshed: Vec<_> = data["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["operation"]["refresh"]["backend"].as_str().unwrap())
+            .collect();
+        assert_eq!(refreshed, ["homebrew", "homebrew-cask"]);
     }
     #[test]
     fn update_refreshes_then_upgrades_with_one_review() {
