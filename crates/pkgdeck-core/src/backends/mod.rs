@@ -1019,6 +1019,8 @@ pub struct Homebrew<T = NativeTransport> {
     prefix: Option<PathBuf>,
     /// Set for an update check so formulae and casks share one `brew update`.
     update_check: Option<u64>,
+    /// Search details already read, while this engine is reused.
+    found: BrewFound,
 }
 pub struct HomebrewCask<T = NativeTransport> {
     pub transport: T,
@@ -1028,6 +1030,8 @@ pub struct HomebrewCask<T = NativeTransport> {
     adoption: Option<Box<dyn adopt::AdoptIo>>,
     /// Set for an update check so formulae and casks share one `brew update`.
     update_check: Option<u64>,
+    /// Search details already read, while this engine is reused.
+    found: BrewFound,
 }
 pub struct Flatpak<T = NativeTransport> {
     transport: T,
@@ -1063,6 +1067,7 @@ impl<T: Transport> Homebrew<T> {
             transport,
             prefix: None,
             update_check: None,
+            found: BrewFound::default(),
         }
     }
 }
@@ -1073,6 +1078,7 @@ impl<T: Transport> HomebrewCask<T> {
             prefix: None,
             adoption: None,
             update_check: None,
+            found: BrewFound::default(),
         }
     }
     /// Casks can take over apps someone installed themselves (macOS only).
@@ -2322,6 +2328,46 @@ fn formula_name(name: &str) -> bool {
 fn cask_token(name: &str) -> bool {
     formula_name(name)
 }
+/// Names per `brew info` call. Each call starts Homebrew again, which is
+/// most of its time, so a few big calls beat many small ones. Output stays
+/// well under the read limit (about 3 MB per 1,000 casks).
+const BREW_INFO_BATCH: usize = 1000;
+/// Packages a search already read from `brew info`, by name. `None` marks a
+/// name with no row here, such as a cask this system can't install. Typing
+/// one more letter only narrows a search, so most of it is answered from
+/// here. Changes and update checks clear it.
+#[derive(Default)]
+struct BrewFound(std::collections::HashMap<String, Option<Package>>);
+impl BrewFound {
+    /// `names` in order, reading the ones not seen yet with `read`.
+    fn search(
+        &mut self,
+        names: &[&str],
+        mut read: impl FnMut(&[&str]) -> Result<Vec<Package>, EngineError>,
+    ) -> Result<Vec<Package>, EngineError> {
+        let missing: Vec<_> = names
+            .iter()
+            .copied()
+            .filter(|name| !self.0.contains_key(*name))
+            .collect();
+        for chunk in missing.chunks(BREW_INFO_BATCH) {
+            let mut read = read(chunk)?
+                .into_iter()
+                .map(|package| (package.id.name.clone(), package))
+                .collect::<std::collections::HashMap<_, _>>();
+            for name in chunk {
+                self.0.insert((*name).to_owned(), read.remove(*name));
+            }
+        }
+        Ok(names
+            .iter()
+            .filter_map(|name| self.0.get(*name).cloned().flatten())
+            .collect())
+    }
+    fn clear(&mut self) {
+        self.0.clear();
+    }
+}
 #[derive(Deserialize)]
 struct CaskReport {
     casks: Vec<Cask>,
@@ -2495,6 +2541,7 @@ impl<T: Transport> Backend for Homebrew<T> {
         let Some(token) = self.update_check else {
             return Ok(());
         };
+        self.found.clear();
         // Formulae and casks both enter here. The first `brew update` wins;
         // the other waits and reuses its result. A different check waits its
         // turn, then fetches again.
@@ -2524,20 +2571,21 @@ impl<T: Transport> Backend for Homebrew<T> {
         let data = bytes("homebrew", self.call(&["formulae"], cancel, false)?)?;
         let names = String::from_utf8(data).map_err(|e| invalid("homebrew", e))?;
         let matches: Vec<_> = names.lines().filter(|n| search_matches(n, query)).collect();
-        let mut packages = Vec::new();
-        for chunk in matches.chunks(100) {
-            if chunk.iter().any(|n| !formula_name(n)) {
-                return Err(invalid("homebrew", "invalid formula name"));
-            }
+        if matches.iter().any(|n| !formula_name(n)) {
+            return Err(invalid("homebrew", "invalid formula name"));
+        }
+        let mut found = std::mem::take(&mut self.found);
+        let packages = found.search(&matches, |chunk| {
             let mut args = vec!["info", "--json=v2", "--formula", "--"];
             args.extend(chunk);
-            packages.extend(
-                self.parse(self.call(&args, cancel, false)?)?
-                    .into_iter()
-                    .map(|d| d.package),
-            );
-        }
-        Ok(packages)
+            Ok(self
+                .parse(self.call(&args, cancel, false)?)?
+                .into_iter()
+                .map(|d| d.package)
+                .collect())
+        });
+        self.found = found;
+        packages
     }
     fn installed(&mut self, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
         Ok(self
@@ -2605,6 +2653,8 @@ impl<T: Transport> Backend for Homebrew<T> {
         cancel: &Cancellation,
         progress: &mut dyn FnMut(Progress),
     ) -> Result<OperationOutcome, EngineError> {
+        // A change can make what searches read out of date.
+        self.found.clear();
         let args = match operation {
             Operation::Refresh { backend } if backend == "homebrew" => vec!["update"],
             Operation::Install(id) => vec!["install", "--formula", "--", self.target(id)?],
@@ -2795,6 +2845,7 @@ impl<T: Transport> Backend for HomebrewCask<T> {
         let Some(token) = self.update_check else {
             return Ok(());
         };
+        self.found.clear();
         crate::engine::once_per_check(token, || {
             let _turn = brew_update_turn();
             self.call(&["update"], cancel, true)?;
@@ -2832,20 +2883,21 @@ impl<T: Transport> Backend for HomebrewCask<T> {
             .lines()
             .filter(|n| !n.trim().is_empty() && search_matches(n, query))
             .collect();
-        let mut packages = Vec::new();
-        for chunk in matches.chunks(100) {
-            if chunk.iter().any(|n| !cask_token(n)) {
-                return Err(invalid("homebrew-cask", "invalid cask token"));
-            }
+        if matches.iter().any(|n| !cask_token(n)) {
+            return Err(invalid("homebrew-cask", "invalid cask token"));
+        }
+        let mut found = std::mem::take(&mut self.found);
+        let packages = found.search(&matches, |chunk| {
             let mut args = vec!["info", "--json=v2", "--cask", "--"];
             args.extend(chunk);
-            packages.extend(
-                self.parse(self.call(&args, cancel, false)?, true)?
-                    .into_iter()
-                    .map(|d| d.package),
-            );
-        }
-        Ok(packages)
+            Ok(self
+                .parse(self.call(&args, cancel, false)?, true)?
+                .into_iter()
+                .map(|d| d.package)
+                .collect())
+        });
+        self.found = found;
+        packages
     }
     /// An exact name is looked up directly, which also finds casks in a tap
     /// that `brew casks` hasn't listed yet, and skips reading every cask.
@@ -2902,6 +2954,8 @@ impl<T: Transport> Backend for HomebrewCask<T> {
         cancel: &Cancellation,
         progress: &mut dyn FnMut(Progress),
     ) -> Result<OperationOutcome, EngineError> {
+        // A change can make what searches read out of date.
+        self.found.clear();
         let args = match operation {
             // brew update refreshes formulae and casks together; both Homebrew
             // backends run it so each Refresh honestly refreshes its metadata.
@@ -6741,6 +6795,23 @@ mod tests {
                 "info --json=v2 --cask -- codex-cli" => {
                     cask("codex-cli", serde_json::json!([{"binary": ["codex"]}]))
                 }
+                "info --json=v2 --cask -- codex codex-cli" => {
+                    let mut both: serde_json::Value = serde_json::from_str(&cask(
+                        "codex",
+                        serde_json::json!([{"binary": ["codex"]}]),
+                    ))
+                    .unwrap();
+                    let other: serde_json::Value = serde_json::from_str(&cask(
+                        "codex-cli",
+                        serde_json::json!([{"binary": ["codex"]}]),
+                    ))
+                    .unwrap();
+                    both["casks"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(other["casks"][0].clone());
+                    both.to_string()
+                }
                 "upgrade --cask" => {
                     assert!(write);
                     String::new()
@@ -6834,6 +6905,54 @@ mod tests {
             );
         }
         assert!(casks.search("codex x", &cancel).unwrap().is_empty());
+    }
+
+    #[test]
+    fn narrower_cask_searches_reuse_what_brew_already_read() {
+        let brew = CaskBrew {
+            version: "7.0.6",
+            ..CaskBrew::default()
+        };
+        let mut casks = HomebrewCask::new(brew.clone());
+        let cancel = Cancellation::default();
+        casks.detect(&cancel).unwrap();
+        let names = |found: Vec<Package>| found.into_iter().map(|p| p.id.name).collect::<Vec<_>>();
+        let reads = || {
+            brew.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|call| call.starts_with("info "))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            names(casks.search("codex", &cancel).unwrap()),
+            ["codex", "codex-cli"]
+        );
+        assert_eq!(reads(), ["info --json=v2 --cask -- codex codex-cli"]);
+        // One more letter: answered without asking brew again.
+        assert_eq!(
+            names(casks.search("codex-c", &cancel).unwrap()),
+            ["codex-cli"]
+        );
+        assert_eq!(reads().len(), 1);
+        // A change may install or update any of them, so they're read again.
+        let _ = casks.execute(
+            &Operation::Refresh {
+                backend: "homebrew-cask".into(),
+            },
+            &cancel,
+            &mut |_| {},
+        );
+        assert_eq!(
+            names(casks.search("codex-c", &cancel).unwrap()),
+            ["codex-cli"]
+        );
+        assert_eq!(
+            reads().last().unwrap(),
+            "info --json=v2 --cask -- codex-cli"
+        );
     }
 
     #[test]
