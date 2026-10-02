@@ -22,6 +22,40 @@ finish-args:
   - --filesystem=/var
   - --filesystem=/tmp
 modules:
+  # APT's own library, so the bundled helper reads the host's APT like native
+  # builds do. Only libapt-pkg is built: apt-ftparchive (Berkeley DB) and
+  # the commands aren't needed. Paths stay the system's: the sandbox sees the
+  # host's /var, and the helper reads /etc/apt under /run/host.
+  - name: triehash
+    buildsystem: simple
+    build-commands:
+      - install -Dm755 triehash.pl /app/bin/triehash
+    cleanup:
+      - '*'
+    sources:
+      - type: archive
+        url: https://github.com/julian-klode/triehash/archive/refs/tags/v0.3.tar.gz
+        sha256: 289a0966c02c2008cd263d3913a8e3c84c97b8ded3e08373d63a382c71d2199c
+  - name: libapt-pkg
+    buildsystem: simple
+    build-commands:
+      - sed -i 's/^find_package(Berkeley REQUIRED)/find_package(Berkeley)/; /^add_subdirectory(ftparchive)/d' CMakeLists.txt
+      - >-
+        cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/app
+        -DWITH_DOC=OFF -DWITH_TESTS=OFF -DUSE_NLS=OFF
+        -DCOMMON_ARCH=$(case "$FLATPAK_ARCH" in aarch64) echo arm64;; x86_64) echo amd64;; *) echo "$FLATPAK_ARCH";; esac)
+        -DDPKG_DATADIR=/usr/share/dpkg -DROOT_GROUP=root -DCURRENT_VENDOR=debian
+        -DCONF_DIR=/etc/apt -DSTATE_DIR=/var/lib/apt -DCACHE_DIR=/var/cache/apt -DLOG_DIR=/var/log/apt
+      - ninja -C build apt-pkg
+      - install -d /app/lib /app/include
+      - cp -a build/apt-pkg/libapt-pkg.so* /app/lib/
+      - cp -a build/include/apt-pkg /app/include/
+    cleanup:
+      - /include
+    sources:
+      - type: archive
+        url: https://deb.debian.org/debian/pool/main/a/apt/apt_3.3.3.tar.xz
+        sha256: 1c06b4a145d6117917c390c79fe7d27d9d92ee922101134ad6446717b0a1c28f
   - name: pkgdeck
     buildsystem: simple
     build-options:
@@ -33,8 +67,11 @@ modules:
     build-commands:
       - cargo build --release --locked -p pkgdeck -p pkd
       - cargo build --release --locked -p pkgdeck-core --bin pkgdeck-host-runner
+      - CPPFLAGS=-I/app/include LDFLAGS=-L/app/lib bash scripts/build-apt.sh target/release
       - install -Dm755 target/release/pkgdeck /app/bin/pkgdeck
       - install -Dm755 target/release/pkd /app/bin/pkd
+      # Found next to pkd and pkgdeck; it links /app/lib/libapt-pkg.
+      - install -Dm755 target/release/pkgdeck-apt-query /app/bin/pkgdeck-apt-query
       # Both system and user installations use this runner for one
       # authorization session per confirmed batch.
       - install -Dm755 target/release/pkgdeck-host-runner /app/libexec/pkgdeck-host-runner

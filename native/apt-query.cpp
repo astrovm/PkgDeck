@@ -14,9 +14,11 @@
 #include <apt-pkg/version.h>
 #include <cctype>
 #include <climits>
+#include <cstdlib>
 #include <clocale>
 #include <cwchar>
 #include <cwctype>
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <unistd.h>
@@ -124,7 +126,29 @@ int main(int argc, char **argv) {
   if (mode != "detect" && mode != "search" && mode != "installed" &&
       mode != "details" && mode != "lookup")
     return 2;
-  if (!pkgInitConfig(*_config) || !pkgInitSystem(*_config, _system)) {
+  // Inside the Flatpak sandbox the host's /var is the real one, but its /etc
+  // shows up under PKGDECK_APT_HOST (/run/host). APT finds the machine id for
+  // phased updates next to Dir::Etc.
+  const char *host = std::getenv("PKGDECK_APT_HOST");
+  if (host != nullptr && *host != '\0')
+    _config->Set("Dir::Etc", std::string(host) + "/etc/apt/");
+  if (!pkgInitConfig(*_config)) {
+    _error->DumpErrors();
+    return 1;
+  }
+  // There's no dpkg in the sandbox to ask for foreign architectures; dpkg
+  // keeps them in its arch file. Settings that name them still win.
+  if (host != nullptr && *host != '\0' &&
+      _config->FindVector("APT::Architectures").empty()) {
+    const auto status =
+        _config->FindFile("Dir::State::status", "/var/lib/dpkg/status");
+    std::ifstream archs(flNotFile(status) + "arch");
+    _config->Set("APT::Architectures::", _config->Find("APT::Architecture"));
+    for (std::string line; std::getline(archs, line);)
+      if (!line.empty())
+        _config->Set("APT::Architectures::", line);
+  }
+  if (!pkgInitSystem(*_config, _system)) {
     _error->DumpErrors();
     return 1;
   }

@@ -2,7 +2,6 @@
 mod adopt;
 mod ai_catalog;
 mod appimage;
-mod apt_cli;
 mod aur;
 mod cleanup;
 mod conda;
@@ -361,17 +360,6 @@ pub trait Transport: Send {
     fn docker_is_podman(&self) -> bool {
         false
     }
-    /// Sandboxed host APT query; only the native transport implements it.
-    /// Fixtures keep the default because they bypass host execution.
-    fn apt_query_sandboxed(
-        &self,
-        _mode: &str,
-        _query: &str,
-        _arch: &str,
-        _cancel: &Cancellation,
-    ) -> Result<Completion, ExecutionError> {
-        Err(ExecutionError::Disabled("APT not found".into()))
-    }
     /// Read one sanitized host environment value, if the fixture provides it.
     fn env(&self, _name: &str) -> Option<OsString> {
         None
@@ -579,17 +567,19 @@ fn apt_query_executable(
 
 /// Everything the APT helper's answers depend on: installed state (dpkg
 /// status and its pending journal), package lists, APT configuration,
-/// sources, pins, and the machine id that phased updates use.
-fn apt_watches() -> Vec<crate::cache::Watch> {
+/// sources, pins, and the machine id that phased updates use. Inside the
+/// Flatpak, the host's /etc is under /run/host.
+fn apt_watches(host: &Host) -> Vec<crate::cache::Watch> {
     use crate::cache::Watch;
+    let etc = |path: &str| host.filesystem_path(std::path::Path::new(path));
     vec![
         Watch::file("/var/lib/dpkg/status"),
         Watch::tree("/var/lib/dpkg/updates", 1),
         Watch::file("/var/lib/dpkg/arch"),
         Watch::tree("/var/lib/apt/lists", 1),
         Watch::file("/var/lib/apt/extended_states"),
-        Watch::tree("/etc/apt", 2),
-        Watch::file("/etc/machine-id"),
+        Watch::tree(etc("/etc/apt"), 2),
+        Watch::file(etc("/etc/machine-id")),
     ]
 }
 
@@ -778,9 +768,10 @@ impl Transport for NativeTransport {
         if self.host.resolve("apt-get")?.is_none() {
             return Err(ExecutionError::Disabled("APT not found".into()));
         }
-        if self.host.runtime == crate::host::Runtime::Flatpak {
-            return self.apt_query_sandboxed(mode, query, arch, cancel);
-        }
+        // Inside the Flatpak the bundled helper reads the host's /var as is,
+        // and its /etc under /run/host.
+        let host_root = (self.host.runtime == crate::host::Runtime::Flatpak)
+            .then_some(("PKGDECK_APT_HOST", "/run/host"));
         let executable = apt_query_executable(
             &std::env::current_exe().map_err(|e| ExecutionError::Io(e.to_string()))?,
             option_env!("PKGDECK_BUILT_APT_QUERY"),
@@ -795,12 +786,13 @@ impl Transport for NativeTransport {
             "apt",
             mode,
             &[query, arch],
-            &apt_watches(),
+            &apt_watches(&self.host),
             &[helper.as_deref().unwrap_or_default()],
             || {
-                self.host.read(
+                self.host.read_bundled(
                     &executable,
                     &[mode.into(), query.into(), arch.into()],
+                    host_root.as_slice(),
                     Limits {
                         timeout: Duration::from_secs(120),
                         output_bytes: 32 * 1024 * 1024,
@@ -813,174 +805,6 @@ impl Transport for NativeTransport {
             Ok(result)
         } else {
             Err(ExecutionError::Failed(result))
-        }
-    }
-    /// Sandboxed host APT query without interpreter payloads: drives the
-    /// host's `dpkg-query`/`apt-cache` through the host bridge and assembles
-    /// the same records as the native helper. Read-only; never writes cache.
-    fn apt_query_sandboxed(
-        &self,
-        mode: &str,
-        query: &str,
-        arch: &str,
-        cancel: &Cancellation,
-    ) -> Result<Completion, ExecutionError> {
-        fn finish(details: Vec<PackageDetails>) -> Result<Completion, ExecutionError> {
-            Ok(Completion {
-                code: Some(0),
-                signal: None,
-                stdout: serde_json::to_vec(&details)
-                    .map_err(|error| ExecutionError::Io(error.to_string()))?,
-                stderr: vec![],
-                truncated: false,
-                cancellation_deferred: false,
-            })
-        }
-        let limits = Limits {
-            timeout: Duration::from_secs(120),
-            output_bytes: 32 * 1024 * 1024,
-        };
-        let missing = || ExecutionError::Disabled("APT not found".into());
-        let dpkg = self.host.resolve("dpkg-query")?.ok_or_else(missing)?;
-        let cache = self.host.resolve("apt-cache")?.ok_or_else(missing)?;
-        let output = |executable: &std::path::Path, args: &[OsString]| {
-            let result = self.host.read(executable, args, limits, cancel)?;
-            if result.code == Some(0) && !result.truncated {
-                Ok(String::from_utf8_lossy(&result.stdout).into_owned())
-            } else {
-                Err(ExecutionError::Failed(result))
-            }
-        };
-        let installed_rows = || {
-            output(
-                &dpkg,
-                &[
-                    OsString::from("-W"),
-                    OsString::from("-f${Package}\t${Architecture}\t${Version}\t${Status}\n"),
-                ],
-            )
-            .map(|text| apt_cli::parse_dpkg_table(&text))
-        };
-        match mode {
-            "detect" => finish(vec![]),
-            "installed" => {
-                let rows = installed_rows()?;
-                if rows.is_empty() {
-                    return finish(vec![]);
-                }
-                let mut names: Vec<OsString> = rows
-                    .iter()
-                    .map(|row| {
-                        if row.arch == "all" {
-                            OsString::from(&row.name)
-                        } else {
-                            OsString::from(format!("{}:{}", row.name, row.arch))
-                        }
-                    })
-                    .collect();
-                names.sort();
-                names.dedup();
-                let policy = output(&cache, &[&[OsString::from("policy")], &names[..]].concat())?;
-                let show = output(&cache, &[&[OsString::from("show")], &names[..]].concat())?;
-                finish(apt_cli::installed_packages(
-                    &rows,
-                    &apt_cli::parse_policy_dump(&policy),
-                    &apt_cli::parse_show_dump(&show),
-                ))
-            }
-            "search" => {
-                // Literal-substring semantics without handing user text to the
-                // native matcher: narrow server-side with escaped patterns,
-                // one per word (apt-cache needs all of them), then filter on
-                // name plus short description in Rust.
-                let escape = |word: &str| -> OsString {
-                    word.chars()
-                        .flat_map(|char| {
-                            if ".[{()*+?^$|\\".contains(char) {
-                                vec!['\\', char]
-                            } else {
-                                vec![char]
-                            }
-                        })
-                        .collect::<String>()
-                        .into()
-                };
-                let mut args = vec![OsString::from("search")];
-                args.extend(
-                    query
-                        .split(SEARCH_SEPARATORS)
-                        .filter(|word| !word.is_empty())
-                        .map(escape),
-                );
-                if args.len() == 1 {
-                    args.push(escape(query));
-                }
-                let dump = output(&cache, &args)?;
-                let candidates = apt_cli::parse_search_dump(&dump);
-                let mut names: Vec<OsString> = candidates
-                    .iter()
-                    .filter(|(name, summary)| search_matches(&format!("{name} {summary}"), query))
-                    .map(|(name, _)| OsString::from(name))
-                    .collect();
-                names.sort();
-                names.dedup();
-                if names.is_empty() {
-                    return finish(vec![]);
-                }
-                let policy = output(&cache, &[&[OsString::from("policy")], &names[..]].concat())?;
-                let show = output(&cache, &[&[OsString::from("show")], &names[..]].concat())?;
-                finish(apt_cli::search_packages(
-                    query,
-                    &apt_cli::parse_search_dump(&dump),
-                    &apt_cli::parse_policy_dump(&policy),
-                    &apt_cli::parse_show_dump(&show),
-                    &installed_rows()?,
-                ))
-            }
-            "details" => {
-                let target = if arch == "all" {
-                    query.to_owned()
-                } else {
-                    format!("{query}:{arch}")
-                };
-                let policy = output(&cache, &[OsString::from("policy"), OsString::from(&target)])?;
-                let show = output(&cache, &[OsString::from("show"), OsString::from(&target)])?;
-                let parsed = apt_cli::parse_policy_dump(&policy);
-                // An empty record lets the backend report NotFound exactly
-                // like the native helper does for unknown identities.
-                finish(
-                    apt_cli::details_package(
-                        query,
-                        arch,
-                        &parsed,
-                        &apt_cli::parse_show_dump(&show),
-                        &installed_rows()?,
-                    )
-                    .into_iter()
-                    .collect(),
-                )
-            }
-            "lookup" => {
-                // One exact name, every stanza apt-cache knows for it. An
-                // unknown name has no policy, and show would fail on it.
-                let name = OsString::from(query);
-                let policy = apt_cli::parse_policy_dump(&output(
-                    &cache,
-                    &[OsString::from("policy"), name.clone()],
-                )?);
-                if !policy.keys().any(|(id, _)| id == query) {
-                    return finish(vec![]);
-                }
-                let show = output(&cache, &[OsString::from("show"), name])?;
-                finish(apt_cli::search_packages(
-                    query,
-                    &[(query.to_owned(), String::new())],
-                    &policy,
-                    &apt_cli::parse_show_dump(&show),
-                    &installed_rows()?,
-                ))
-            }
-            _ => Err(ExecutionError::Invalid("unknown APT query".into())),
         }
     }
     fn apt_write(
@@ -6717,9 +6541,12 @@ mod tests {
                 .iter()
                 .any(|watch| watch.path.ends_with("appstream"))
         );
-        assert!(apt_watches()
-            .iter()
-            .any(|watch| watch.path == std::path::Path::new("/var/lib/dpkg/status")));
+        let watches = apt_watches(&Host::new(crate::host::Runtime::Native, Default::default()));
+        for path in ["/var/lib/dpkg/status", "/etc/apt", "/etc/machine-id"] {
+            assert!(watches
+                .iter()
+                .any(|watch| watch.path == std::path::Path::new(path)));
+        }
     }
 
     #[test]
@@ -7865,9 +7692,6 @@ mod native_transport_tests {
             authorization: Authorization::SudoNonInteractive,
         }
     }
-    fn records(result: Result<Completion, ExecutionError>) -> Vec<PackageDetails> {
-        serde_json::from_slice(&result.unwrap().stdout).unwrap()
-    }
 
     #[test]
     fn host_probes_report_what_the_sanitized_path_offers() {
@@ -8114,93 +7938,6 @@ mod native_transport_tests {
         let error = native.apt_query("detect", "", "", &cancel).unwrap_err();
         let cancelled = matches!(error, ExecutionError::Cancelled);
         assert_eq!(cancelled, refused, "{error:?}");
-        std::fs::remove_dir_all(base).unwrap();
-    }
-
-    /// `dpkg-query` and `apt-cache` stand-ins; `apt-cache` logs its
-    /// arguments beside itself.
-    fn apt_tools(dpkg: &str, search: &str, cache_exit: i32) -> (PathBuf, NativeTransport) {
-        let base = temp_dir("apt-sandbox");
-        let bin = base.join("bin");
-        std::fs::create_dir_all(&bin).unwrap();
-        script(&bin.join("dpkg-query"), &format!("printf '{dpkg}'"));
-        script(
-            &bin.join("apt-cache"),
-            &format!(
-                "printf '%s\\n' \"$*\" >> \"$0.log\"\ncase \"$1\" in\n\
-                 policy) printf 'tool:\\n  Installed: 1.0\\n  Candidate: 1.0\\n  Version table:\\n *** 1.0 500\\n';;\n\
-                 show) printf 'Package: tool\\nArchitecture: all\\nVersion: 1.0\\nDescription-en: A tool\\n\\n';;\n\
-                 search) printf '{search}';;\nesac\nexit {cache_exit}"
-            ),
-        );
-        let native = transport(&bin, &base);
-        (base, native)
-    }
-    fn cache_log(base: &Path) -> String {
-        std::fs::read_to_string(base.join("bin/apt-cache.log")).unwrap_or_default()
-    }
-
-    #[test]
-    fn sandboxed_apt_queries_handle_empty_and_architecture_independent_rows() {
-        let cancel = Cancellation::default();
-        // No installed rows: no apt-cache round trips.
-        let (base, native) = apt_tools("", "", 0);
-        assert!(records(native.apt_query_sandboxed("installed", "", "", &cancel)).is_empty());
-        assert_eq!(cache_log(&base), "");
-        std::fs::remove_dir_all(base).unwrap();
-        // Architecture-independent packages are named without a suffix.
-        let (base, native) = apt_tools(
-            "tool\\tall\\t1.0\\tinstall ok installed\\n",
-            "tool - A tool\\n",
-            0,
-        );
-        let installed = records(native.apt_query_sandboxed("installed", "", "", &cancel));
-        assert_eq!(installed.len(), 1);
-        assert_eq!(installed[0].package.id.name, "tool");
-        assert_eq!(cache_log(&base), "policy tool\nshow tool\n");
-        let details = records(native.apt_query_sandboxed("details", "tool", "all", &cancel));
-        assert_eq!(details.len(), 1);
-        assert!(cache_log(&base).ends_with("policy tool\nshow tool\n"));
-        // Pattern characters are escaped for apt-cache and matched literally.
-        assert!(records(native.apt_query_sandboxed("search", "c++", "", &cancel)).is_empty());
-        assert!(cache_log(&base).ends_with("search c\\+\\+\n"));
-        std::fs::remove_dir_all(base).unwrap();
-        // Each word narrows apt-cache, and separators don't have to match.
-        let (base, native) = apt_tools("", "kdeconnect - Phone integration\\n", 0);
-        native
-            .apt_query_sandboxed("search", "KDE connect", "", &cancel)
-            .unwrap();
-        assert!(cache_log(&base).starts_with("search KDE connect\npolicy kdeconnect\n"));
-        // A search of only separators is still sent, escaped.
-        native
-            .apt_query_sandboxed("search", ".", "", &cancel)
-            .unwrap();
-        assert!(cache_log(&base).contains("search \\.\n"));
-        std::fs::remove_dir_all(base).unwrap();
-    }
-
-    #[test]
-    fn sandboxed_apt_lookup_reads_one_exact_name_as_details_do() {
-        let cancel = Cancellation::default();
-        let (base, native) = apt_tools("tool\\tall\\t1.0\\tinstall ok installed\\n", "", 0);
-        let found = records(native.apt_query_sandboxed("lookup", "tool", "", &cancel));
-        assert_eq!(cache_log(&base), "policy tool\nshow tool\n");
-        let details = records(native.apt_query_sandboxed("details", "tool", "all", &cancel));
-        assert_eq!(found, details);
-        // APT has no policy for an unknown name, so show never runs.
-        assert!(records(native.apt_query_sandboxed("lookup", "ghost", "", &cancel)).is_empty());
-        assert!(cache_log(&base).ends_with("show tool\npolicy ghost\n"));
-        std::fs::remove_dir_all(base).unwrap();
-    }
-
-    #[test]
-    fn sandboxed_apt_queries_report_failed_reads() {
-        let (base, native) = apt_tools("", "", 1);
-        assert!(matches!(
-            native.apt_query_sandboxed("details", "tool", "amd64", &Cancellation::default()),
-            Err(ExecutionError::Failed(result)) if result.code == Some(1)
-        ));
-        assert_eq!(cache_log(&base), "policy tool:amd64\n");
         std::fs::remove_dir_all(base).unwrap();
     }
 
