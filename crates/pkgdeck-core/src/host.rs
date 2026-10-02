@@ -614,6 +614,18 @@ impl Host {
         cancel: &Cancellation,
         write: bool,
     ) -> Result<Completion, ExecutionError> {
+        self.brew_asking(args, cancel, write, true)
+    }
+    /// [`Self::brew`], with `ask` saying whether a cask's sudo may show the
+    /// password dialog. Automatic updates and the CLI pass false: sudo then
+    /// runs only under a saved approval, or asks in the CLI's terminal.
+    pub fn brew_asking(
+        &self,
+        args: &[OsString],
+        cancel: &Cancellation,
+        write: bool,
+        ask: bool,
+    ) -> Result<Completion, ExecutionError> {
         refuse_root(write)?;
         let path = self
             .resolve("brew")?
@@ -628,7 +640,9 @@ impl Host {
         ] {
             host.env.insert(name.into(), "1".into());
         }
-        use_askpass(&mut host.env, std::env::current_exe().ok().as_deref());
+        if ask {
+            use_askpass(&mut host.env, std::env::current_exe().ok().as_deref());
+        }
         let run = || {
             let command = host.command(&path, args)?;
             process::run(
@@ -1271,6 +1285,7 @@ impl Host {
             let dirs: &[&str] = match executable {
                 "apk" => &["/sbin", "/usr/sbin"],
                 "port" => &["/opt/local/bin"],
+                "softwareupdate" => &["/usr/sbin"],
                 // Moves a system-owned app to the Trash (see mac_apps.rs).
                 "mv" => &["/bin"],
                 _ => &["/usr/bin"],
@@ -1293,13 +1308,21 @@ impl Host {
                 {
                     PathBuf::from("/opt/local/bin/port")
                 }
+                None if executable == "softwareupdate"
+                    && self.host_file(Path::new("/usr/sbin/softwareupdate"))? =>
+                {
+                    PathBuf::from("/usr/sbin/softwareupdate")
+                }
                 None => return Err(ExecutionError::Disabled(format!("{executable} not found"))),
             }
         };
         if write {
             self.privileged(&path, args, authorization, cancel)
         } else {
-            let timeout = if matches!(executable, "snap" | "fwupdmgr") {
+            let timeout = if executable == "softwareupdate" {
+                // Its listing asks Apple's servers and can take minutes.
+                std::time::Duration::from_secs(300)
+            } else if matches!(executable, "snap" | "fwupdmgr") {
                 std::time::Duration::from_secs(60)
             } else {
                 Limits::default().timeout
@@ -2629,6 +2652,19 @@ mod boundary_tests {
             .unwrap();
         assert!(
             String::from_utf8_lossy(&result.stdout).ends_with("/opt/local/bin/port installed\n")
+        );
+        // softwareupdate lives in /usr/sbin, which PATH often leaves out.
+        let result = host
+            .system_manager(
+                "softwareupdate",
+                &["--list".into()],
+                &Cancellation::default(),
+                false,
+                Authorization::Polkit,
+            )
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&result.stdout).ends_with("/usr/sbin/softwareupdate --list\n")
         );
         fs::remove_dir_all(root).unwrap();
     }

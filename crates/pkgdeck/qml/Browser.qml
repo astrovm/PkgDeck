@@ -423,11 +423,11 @@ Controls.ApplicationWindow {
     // Sources PkgDeck never installs from. Their rows update, and remove
     // only when the source says it can.
     function neverInstalls(source) {
-        return ["fwupd", "mas", "conda", "system-image", "aur", "toolbox", "distrobox", "oh-my-zsh", "codex", "claude", "grok", "opencode", "cursor", "copilot", "kiro", "antigravity", "amp", "droid", "solana", "anchor", "foundry"].indexOf(source) >= 0;
+        return ["fwupd", "mas", "macos-updates", "conda", "system-image", "aur", "toolbox", "distrobox", "oh-my-zsh", "codex", "claude", "grok", "opencode", "cursor", "copilot", "kiro", "antigravity", "amp", "droid", "solana", "anchor", "foundry"].indexOf(source) >= 0;
     }
-    readonly property var knownSourceIds: ["apt", "dnf", "pacman", "zypper", "snap", "homebrew", "homebrew-cask", "macos-apps", "mas", "aur", "apk", "xbps", "system-image", "macports", "rustup", "nix", "go", "dotnet", "appimage", "flatpak", "docker", "podman", "toolbox", "distrobox", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "mise", "pixi", "conda", "composer", "gem", "oh-my-zsh", "fwupd", "codex", "claude", "grok", "opencode", "cursor", "copilot", "kiro", "antigravity", "amp", "droid", "solana", "anchor", "foundry"]
+    readonly property var knownSourceIds: ["apt", "dnf", "pacman", "zypper", "snap", "homebrew", "homebrew-cask", "macos-apps", "mas", "aur", "apk", "xbps", "system-image", "macports", "macos-updates", "rustup", "nix", "go", "dotnet", "appimage", "flatpak", "docker", "podman", "toolbox", "distrobox", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "mise", "pixi", "conda", "composer", "gem", "oh-my-zsh", "fwupd", "codex", "claude", "grok", "opencode", "cursor", "copilot", "kiro", "antigravity", "amp", "droid", "solana", "anchor", "foundry"]
     readonly property var sourceIds: knownSourceIds.concat(sourceCatalog.map((row) => row.source).filter((id) => knownSourceIds.indexOf(id) < 0))
-    readonly property var sourceNames: ["APT", "DNF", "Pacman", "Zypper", "Snap", "Homebrew", "Homebrew Casks", "macOS Applications", "Mac App Store", "AUR", "apk", "XBPS", "System image", "MacPorts", "rustup", "Nix", "Go", ".NET tools", "AppImage", "Flatpak", "Docker images", "Podman images", "Toolbx containers", "Distrobox containers", "Cargo", "npm", "pnpm", "Bun", "pip", "pipx", "uv", "mise", "pixi", "Conda", "Composer", "RubyGems", "Oh My Zsh", "Firmware", "Codex (standalone)", "Claude Code (standalone)", "Grok (standalone)", "OpenCode (standalone)", "Cursor CLI (standalone)", "GitHub Copilot CLI (standalone)", "Kiro CLI (standalone)", "Antigravity CLI (standalone)", "Amp (standalone)", "Factory Droid (standalone)", "Solana CLI (Agave)", "Anchor (AVM)", "Foundry"]
+    readonly property var sourceNames: ["APT", "DNF", "Pacman", "Zypper", "Snap", "Homebrew", "Homebrew Casks", "macOS Applications", "Mac App Store", "AUR", "apk", "XBPS", "System image", "MacPorts", "macOS Updates", "rustup", "Nix", "Go", ".NET tools", "AppImage", "Flatpak", "Docker images", "Podman images", "Toolbx containers", "Distrobox containers", "Cargo", "npm", "pnpm", "Bun", "pip", "pipx", "uv", "mise", "pixi", "Conda", "Composer", "RubyGems", "Oh My Zsh", "Firmware", "Codex (standalone)", "Claude Code (standalone)", "Grok (standalone)", "OpenCode (standalone)", "Cursor CLI (standalone)", "GitHub Copilot CLI (standalone)", "Kiro CLI (standalone)", "Antigravity CLI (standalone)", "Amp (standalone)", "Factory Droid (standalone)", "Solana CLI (Agave)", "Anchor (AVM)", "Foundry"]
     function containerSource(source) {
         return source === "docker" || source === "podman";
     }
@@ -490,7 +490,7 @@ Controls.ApplicationWindow {
         return sourceCatalog.find((row) => row.source === id) || {source: id, summary: sourceCatalog.length ? "Unsupported on this platform" : "Checking availability…", availability_kind: sourceCatalog.length ? "platform" : "checking", capabilities: []};
     }
     function sourceCategory(id) {
-        if (["apt", "dnf", "pacman", "aur", "zypper", "apk", "xbps", "macports", "system-image", "fwupd"].indexOf(id) >= 0)
+        if (["apt", "dnf", "pacman", "aur", "zypper", "apk", "xbps", "macports", "macos-updates", "system-image", "fwupd"].indexOf(id) >= 0)
             return "System";
         if (["snap", "homebrew", "homebrew-cask", "macos-apps", "mas", "appimage", "flatpak"].indexOf(id) >= 0)
             return "Applications";
@@ -2828,7 +2828,7 @@ Controls.ApplicationWindow {
                                         Layout.fillWidth: true
                                     }
                                     Controls.Label {
-                                        visible: parent.upgrade
+                                        visible: parent.upgrade && !!packageRow.modelData.installed
                                         text: "from " + (packageRow.modelData.installed || "")
                                         font.family: "monospace"
                                         color: root.muted

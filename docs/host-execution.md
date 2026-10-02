@@ -94,9 +94,12 @@ runs `/usr/bin/apt-get` through either:
   password-free rule, and never prompts.
 
 PkgDeck never stores passwords. It saves a polkit rule or a sudoers entry
-only when you turn on **Allow system updates without a password** for
+only when you turn on **Allow automatic updates without a password** for
 [automatic updates](gui.md#automatic-updates), and removes it when you turn
-that off. That rule covers only the helper's upgrade-only mode
+that off. Only automatic updates use it; changes you start still ask. On
+macOS the sudoers entry lets your sudo run without a password, since casks and
+the App Store run sudo themselves with whatever their installers need. On
+Linux the rule covers only the helper's upgrade-only mode
 (`pkgdeck-host-runner --upgrade-only`), which refuses everything except
 refreshing sources and updating every package of APT, DNF, Pacman, Zypper,
 system Flatpaks and Snaps; APT also gets `--no-remove` unless you allowed

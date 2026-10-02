@@ -422,6 +422,26 @@ its fixed location (`/sbin` or `/usr/sbin` for apk, `/usr/bin` for XBPS,
   finds MacPorts when started from Finder.
 - Local package files aren't supported for these three.
 
+## macOS updates
+
+```sh
+pkd list --from macos-updates
+pkd upgrade --from macos-updates    # every pending update
+pkd upgrade "Safari" --from macos-updates
+```
+
+The `macos-updates` source lists what `softwareupdate --list` reports:
+macOS point releases, Safari, the Command Line Tools and the like.
+`pkd upgrade` asks Apple's servers first; other commands read the last
+check (`--no-scan`). Updates run `/usr/sbin/softwareupdate` as root, so `pkd` asks
+for your password first. An update that needs a restart is only downloaded:
+finish it from System Settings > General > Software Update. `pkd` never
+restarts your Mac, and upgrades to a new major version of macOS aren't listed.
+
+Before a change that needs sudo on macOS (MacPorts, macOS updates, App Store
+updates, and Homebrew casks, whose installers may run sudo), `pkd` asks for
+your password once in the terminal. The tools it runs reuse that sudo login.
+
 ## Mac App Store apps
 
 ```sh
@@ -438,7 +458,8 @@ for updates. The check compares versions with the App Store catalog and never
 starts a download. Name an app by its name or its App Store ID.
 
 Updates run `mas update`. mas asks for your Mac password through sudo, which
-needs a terminal, so update from `pkd` in Terminal or from the App Store app.
+needs a terminal, so update from `pkd` in Terminal or from the App Store app;
+`pkd` asks for it before mas starts.
 You must be signed in to the App Store. PkgDeck checks that each app's version
 changed afterwards. It never installs App Store apps.
 

@@ -148,11 +148,24 @@ pub fn protected_sources(operations: &[Operation]) -> Vec<String> {
     let mut sources: Vec<String> = Vec::new();
     for (operation, commands) in operations.iter().zip(commands) {
         let backend = operation.backend().to_string();
-        if !commands.is_empty() && !sources.contains(&backend) {
+        if (!commands.is_empty() || runs_sudo(operation)) && !sources.contains(&backend) {
             sources.push(backend);
         }
     }
     sources
+}
+
+/// macOS changes that reach root through sudo outside the batch helper:
+/// MacPorts and macOS updates through `sudo -n`, and casks and the App
+/// Store through the sudo their own tools run. Asking first lets every one
+/// of them reuse this terminal's sudo login.
+fn runs_sudo(operation: &Operation) -> bool {
+    match operation.backend() {
+        "macports" => true,
+        "macos-updates" | "mas" => matches!(operation, Operation::Upgrade(_)),
+        "homebrew-cask" => !matches!(operation, Operation::Refresh { .. } | Operation::Clean(_)),
+        _ => false,
+    }
 }
 
 /// `sudo -n` only works with a cached login, so in a terminal ask sudo for
@@ -328,6 +341,18 @@ mod tests {
             ["apt"]
         );
         assert!(protected_sources(&[homebrew()]).is_empty());
+        // On macOS, sudo runs outside the batch helper too.
+        let all = |backend: &str| Operation::UpgradeAll {
+            backend: backend.into(),
+        };
+        let refresh = |backend: &str| Operation::Refresh {
+            backend: backend.into(),
+        };
+        assert_eq!(
+            protected_sources(&[all("homebrew-cask"), all("macports"), homebrew()]),
+            ["homebrew-cask", "macports"]
+        );
+        assert!(protected_sources(&[refresh("homebrew-cask")]).is_empty());
         // A plan that can't be turned into commands protects nothing.
         let unknown_cleanup = Operation::Clean(pkgdeck_core::package::CleanupId {
             backend: "apt".into(),

@@ -600,8 +600,9 @@ TestCase {
         const approval = findChild(browser, "systemApprovalSetting");
         const help = findChild(browser, "systemApprovalHelp");
         verify(!auto.checked);
-        // These apply to Update all too, so they work without automatic updates.
+        // Saving the approval works before automatic updates are on.
         verify(approval.enabled);
+        verify(approval.tooltipText.indexOf("still ask") >= 0);
         auto.checked = true;
         auto.clicked();
         compare(browser.store.autoUpdate, true);

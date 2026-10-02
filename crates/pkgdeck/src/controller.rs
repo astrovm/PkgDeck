@@ -97,7 +97,7 @@ pub mod ffi {
         #[qproperty(QString, activity)]
         #[qproperty(QString, background_state)]
         #[qproperty(QString, notification_history)]
-        /// The saved approval for system updates without a password: the
+        /// The saved approval for automatic updates without a password: the
         /// helper it covers, or empty when there is none.
         #[qproperty(QString, system_approval)]
         /// Why saving or removing that approval failed, or empty.
@@ -969,28 +969,14 @@ fn run_batch(
     Payload::Batch(status, outcomes)
 }
 
-/// The upgrade-only helper mode for Update all under the saved approval:
-/// always for an automatic run, and for a manual one when the approval
-/// still applies and every system change is one that mode allows. Other
-/// batches keep the reviewed mode and its password prompt.
-fn batch_mode(
-    job: &Job,
-    allow_removals: bool,
-    approved: impl FnOnce() -> bool,
-) -> Option<pkgdeck_core::batch::BatchMode> {
-    use pkgdeck_core::batch::{check_mode, BatchMode};
+/// The upgrade-only helper mode the saved approval covers, for automatic
+/// runs only. Changes the person starts, Update all included, keep the
+/// reviewed mode and its password prompt.
+fn batch_mode(job: &Job) -> Option<pkgdeck_core::batch::BatchMode> {
     match job {
-        Job::AutoUpgrade(_, removals) => Some(BatchMode::UpgradeOnly {
+        Job::AutoUpgrade(_, removals) => Some(pkgdeck_core::batch::BatchMode::UpgradeOnly {
             removals: *removals,
         }),
-        Job::UpgradeAll(operations, _)
-            if check_mode(BatchMode::UpgradeOnly { removals: false }, operations).is_ok()
-                && approved() =>
-        {
-            Some(BatchMode::UpgradeOnly {
-                removals: allow_removals,
-            })
-        }
         _ => None,
     }
 }
@@ -1386,7 +1372,8 @@ impl Controller {
         }
         #[cfg(target_os = "macos")]
         {
-            pkgdeck_core::unattended::macos::approved()
+            saved == pkgdeck_core::unattended::macos::KEY
+                && pkgdeck_core::unattended::macos::approved()
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -1598,6 +1585,7 @@ fn source_display_name(id: &str) -> String {
         "xbps" => "XBPS",
         "system-image" => "System image",
         "macports" => "MacPorts",
+        "macos-updates" => "macOS Updates",
         "rustup" => "rustup",
         "nix" => "Nix",
         "go" => "Go",
@@ -1877,7 +1865,7 @@ fn plain_error(error: &EngineError, backend: Option<&str>, sudo: bool) -> String
             if matches!(backend, Some("homebrew" | "homebrew-cask"))
                 && String::from_utf8_lossy(&result.stderr).contains("/usr/bin/sudo") =>
         {
-            "Homebrew needed your administrator password to finish this change and didn't get one. Try again and enter your password when asked.".into()
+            "Homebrew needed your administrator password to finish this change and didn't get one. Update it again from Updates and enter your password when asked. Automatic updates need Allow automatic updates without a password for this.".into()
         }
         EngineError::Execution(E::Failed(result)) => {
             let output = String::from_utf8_lossy(&result.stderr);
@@ -2967,6 +2955,14 @@ impl ffi::PackageController {
         self.as_mut().rust_mut().allow_removals = allowed;
     }
     pub fn restore_system_approval(self: Pin<&mut Self>, approval: QString) {
+        // The MacPorts-only entry of earlier versions covers too little to
+        // keep showing as on; turning it on again replaces it.
+        #[cfg(target_os = "macos")]
+        let approval = if approval.to_string() == "sudoers:macports" {
+            QString::default()
+        } else {
+            approval
+        };
         self.set_system_approval(approval);
     }
     pub fn allow_system_updates(mut self: Pin<&mut Self>, allow: bool) {
@@ -3400,11 +3396,11 @@ impl ffi::PackageController {
             self.as_mut().set_confirmation_data("{}".into());
         }
         let source_filter = self.rust().source_filter.clone();
-        let batch_mode = batch_mode(&job, self.rust().allow_removals, || {
-            self.rust().approval_current()
-        });
-        // Under the saved approval Update all never shows a password
-        // dialog: Linux uses the polkit rule, macOS the sudoers entry (sudo -n).
+        let batch_mode = batch_mode(&job);
+        // An automatic run never shows a password dialog: Linux uses the
+        // polkit rule, macOS sudo -n, which works only under the sudoers
+        // entry. Casks get no password dialog either, so without the entry
+        // one that needs sudo fails at once instead of waiting.
         let authorization = if self.rust().sudo || batch_mode.is_some() && cfg!(target_os = "macos")
         {
             Authorization::SudoNonInteractive
@@ -9288,27 +9284,22 @@ mod tests {
         }
     }
     #[test]
-    fn update_all_runs_without_a_password_only_under_a_current_approval() {
+    fn only_automatic_runs_skip_the_password() {
         use pkgdeck_core::batch::BatchMode;
         let all = |backend: &str| Operation::UpgradeAll {
             backend: backend.into(),
         };
-        let upgrade_only = |removals| Some(BatchMode::UpgradeOnly { removals });
+        // Update all is started by the person, so it asks.
         let manual = Job::UpgradeAll(vec![all("apt"), all("homebrew")], None);
-        assert_eq!(batch_mode(&manual, true, || true), upgrade_only(true));
-        assert_eq!(batch_mode(&manual, false, || true), upgrade_only(false));
-        assert_eq!(batch_mode(&manual, true, || false), None);
-        // Firmware still asks, and the approval isn't even checked.
-        let firmware = Job::UpgradeAll(vec![all("apt"), all("fwupd")], None);
-        assert_eq!(batch_mode(&firmware, true, || panic!("not checked")), None);
-        // One named package always asks.
+        assert_eq!(batch_mode(&manual), None);
         let mut id = synthetic_package("synthetic", "Synthetic").id;
         id.backend = "dnf".into();
-        let one = Job::Write(Operation::Upgrade(id), None);
-        assert_eq!(batch_mode(&one, true, || panic!("not checked")), None);
+        assert_eq!(batch_mode(&Job::Write(Operation::Upgrade(id), None)), None);
         // An automatic run always uses the mode it was queued with.
-        let auto = Job::AutoUpgrade(vec![all("apt")], false);
-        assert_eq!(batch_mode(&auto, true, || false), upgrade_only(false));
+        for removals in [false, true] {
+            let auto = Job::AutoUpgrade(vec![all("apt")], removals);
+            assert_eq!(batch_mode(&auto), Some(BatchMode::UpgradeOnly { removals }));
+        }
     }
     #[test]
     fn update_all_leaves_apt_out_when_removals_are_off() {
