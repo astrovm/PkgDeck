@@ -1577,6 +1577,9 @@ struct DevFixture {
     pip_outdated: Option<String>,
     extra_env: std::collections::BTreeMap<String, String>,
     registry: Option<String>,
+    /// `gem search --remote` keeps only the registry rows whose name
+    /// contains the pattern, ignoring case, as RubyGems does.
+    gem_matches: bool,
     /// A read subcommand that behaves as if the user cancelled it.
     cancel_on: Option<String>,
     /// A write subcommand that finishes after the user asked to cancel.
@@ -1752,6 +1755,18 @@ impl Transport for DevFixture {
         // … search`, `composer global search`).
         if !write && rendered.iter().any(|arg| arg == "search") {
             return match &self.registry {
+                Some(text) if self.gem_matches => {
+                    let pattern = rendered[2].replace("\\.", ".").to_ascii_lowercase();
+                    Ok(output(
+                        text.lines()
+                            .filter(|line| {
+                                let name = line.split(' ').next().unwrap_or_default();
+                                name.to_ascii_lowercase().contains(&pattern)
+                            })
+                            .map(|line| format!("{line}\n"))
+                            .collect::<String>(),
+                    ))
+                }
                 Some(text) => Ok(output(text)),
                 None => Err(ExecutionError::Failed(Completion {
                     code: Some(1),
@@ -2211,6 +2226,159 @@ fn searches_reach_each_registry_through_the_managers_own_search() {
         .calls()
         .iter()
         .all(|(_, args, _)| args.first().map(String::as_str) != Some("search")));
+}
+
+#[test]
+fn registry_searches_are_reused_while_typing() {
+    let cancel = Cancellation::default();
+    let searches = |fixture: &DevFixture| {
+        fixture
+            .calls()
+            .iter()
+            .filter(|(_, args, write)| !write && args.iter().any(|arg| arg == "search"))
+            .count()
+    };
+    let listed = |packages: Vec<Package>| {
+        packages
+            .into_iter()
+            .filter(|p| p.candidate_version.is_some())
+            .map(|p| (p.id.name, p.candidate_version.unwrap_or_default()))
+            .collect::<Vec<_>>()
+    };
+    // RubyGems lists every gem containing the query, so longer queries that
+    // contain a searched one narrow its list without asking again, and
+    // still rank as a fresh search would.
+    let gem_home = std::env::temp_dir().join(format!("pkgdeck-gem-reuse-{}", std::process::id()));
+    std::fs::create_dir_all(gem_home.join("specifications")).unwrap();
+    let rows: String = (0..25)
+        .map(|n| format!("a-kde-helper-{n:02} (1.0.{n})\n"))
+        .chain(
+            [
+                "akdec (0.1)",
+                "KDE-tools (2.0)",
+                "kdeconnect (1.0)",
+                "kdec (0.3)",
+                "kdx (0.2)",
+            ]
+            .map(|row| format!("{row}\n")),
+        )
+        .collect();
+    let gem_fixture = || DevFixture {
+        version: "4.0.20\n".into(),
+        root: Some(gem_home.display().to_string()),
+        registry: Some(rows.clone()),
+        gem_matches: true,
+        ..DevFixture::default()
+    };
+    let fixture = gem_fixture();
+    let mut gem = DevTool::gem(fixture.clone());
+    gem.detect(&cancel).unwrap();
+    let kde = listed(gem.search("kde", &cancel).unwrap());
+    assert_eq!(kde.len(), 20);
+    assert_eq!(kde[0], ("KDE-tools".into(), "2.0".into()));
+    assert_eq!(searches(&fixture), 1);
+    for query in ["kdec", "KDE", "kde-t", "kdeconnect", "kde"] {
+        let fresh_fixture = gem_fixture();
+        let mut fresh = DevTool::gem(fresh_fixture.clone());
+        fresh.detect(&cancel).unwrap();
+        assert_eq!(
+            listed(gem.search(query, &cancel).unwrap()),
+            listed(fresh.search(query, &cancel).unwrap()),
+            "{query}"
+        );
+        assert_eq!(searches(&fresh_fixture), 1);
+    }
+    assert_eq!(
+        listed(gem.search("kdec", &cancel).unwrap()),
+        [
+            ("kdec".into(), "0.3".into()),
+            ("kdeconnect".into(), "1.0".into()),
+            ("akdec".into(), "0.1".into()),
+        ]
+    );
+    assert_eq!(searches(&fixture), 1);
+    // A query that does not contain a searched one asks the registry.
+    assert_eq!(
+        listed(gem.search("kdx", &cancel).unwrap()),
+        [("kdx".into(), "0.2".into())]
+    );
+    assert_eq!(searches(&fixture), 2);
+    // Too short to search, so nothing is narrowed either.
+    assert!(listed(gem.search("kd", &cancel).unwrap()).is_empty());
+    assert_eq!(searches(&fixture), 2);
+    // Only the most recent answers are kept.
+    for n in 0..15 {
+        gem.search(&format!("q{n:02}"), &cancel).unwrap();
+    }
+    assert_eq!(searches(&fixture), 17);
+    gem.search("kdx", &cancel).unwrap();
+    assert_eq!(searches(&fixture), 17);
+    gem.search("kdec", &cancel).unwrap();
+    assert_eq!(searches(&fixture), 18);
+    // A change asks the registry again.
+    let offer = gem
+        .search("kdeconnect", &cancel)
+        .unwrap()
+        .into_iter()
+        .find(|p| p.id.name == "kdeconnect")
+        .unwrap();
+    assert_eq!(searches(&fixture), 18);
+    gem.execute(&Operation::Install(offer.id), &cancel, &mut |_| {})
+        .unwrap();
+    gem.search("kdeconnect", &cancel).unwrap();
+    assert_eq!(searches(&fixture), 19);
+    std::fs::remove_dir_all(&gem_home).unwrap();
+
+    // npm ranks and caps its answers, so only the same query is reused.
+    let npm_fixture = |registry: Option<&str>| DevFixture {
+        version: "12.0.2\n".into(),
+        root: Some("/home/test/lib/node_modules".into()),
+        list: NPM_LIST.into(),
+        registry: registry.map(Into::into),
+        ..DevFixture::default()
+    };
+    let fixture = npm_fixture(Some(
+        r#"[{"name": "lerna", "version": "9.0.0", "description": "Monorepos"}]"#,
+    ));
+    let mut npm = DevTool::npm(fixture.clone());
+    npm.detect(&cancel).unwrap();
+    for _ in 0..2 {
+        assert_eq!(
+            listed(npm.search("le", &cancel).unwrap()),
+            [
+                ("left-pad".into(), "1.3.0".into()),
+                ("lerna".into(), "9.0.0".into())
+            ]
+        );
+    }
+    assert_eq!(searches(&fixture), 1);
+    npm.search("ler", &cancel).unwrap();
+    assert_eq!(searches(&fixture), 2);
+    // The npm registry refuses 1 or more than 64 characters, so those are
+    // not sent; installed matches remain.
+    let long = "a".repeat(65);
+    for query in ["l", " l ", "é", long.as_str()] {
+        npm.search(query, &cancel).unwrap();
+    }
+    assert_eq!(
+        listed(npm.search("l", &cancel).unwrap()),
+        [
+            ("@scope/tool".into(), "2.0.0".into()),
+            ("left-pad".into(), "1.3.0".into())
+        ]
+    );
+    assert_eq!(searches(&fixture), 2);
+    npm.search(&long[1..], &cancel).unwrap();
+    assert_eq!(searches(&fixture), 3);
+    // Failed or unreadable answers are not kept.
+    for registry in [None, Some("not json")] {
+        let fixture = npm_fixture(registry);
+        let mut npm = DevTool::npm(fixture.clone());
+        npm.detect(&cancel).unwrap();
+        npm.search("left", &cancel).unwrap();
+        npm.search("left", &cancel).unwrap();
+        assert_eq!(searches(&fixture), 2);
+    }
 }
 
 #[test]

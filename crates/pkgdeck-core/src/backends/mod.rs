@@ -4004,6 +4004,12 @@ fn composer_name(name: &str) -> bool {
     }
 }
 
+/// Queries sent to `gem search --remote`: plain gem names, as it takes a
+/// regular expression, of at least three letters, as shorter ones list
+/// most of RubyGems.
+fn gem_searchable(query: &str) -> bool {
+    gem_name(query) && query.len() >= 3
+}
 /// RubyGems bare gem names.
 fn gem_name(name: &str) -> bool {
     !name.is_empty()
@@ -4139,7 +4145,20 @@ pub struct DevTool<T = NativeTransport> {
     kind: DevKind,
     transport: T,
     home: Option<PathBuf>,
+    /// Recent registry answers, oldest first. Typing runs one search per
+    /// keystroke, so going back to a query, or narrowing a complete one,
+    /// does not wait for the network again. Any change clears them.
+    searches: Vec<RegistrySearch>,
 }
+/// One registry answer, before ranking.
+struct RegistrySearch {
+    query: String,
+    hits: Vec<RegistryHit>,
+}
+/// A registry match: name, latest version and summary.
+type RegistryHit = (String, String, String);
+/// Registry answers kept per source.
+const REGISTRY_SEARCHES: usize = 16;
 pub type Cargo<T = NativeTransport> = DevTool<T>;
 pub type Npm<T = NativeTransport> = DevTool<T>;
 pub type Pnpm<T = NativeTransport> = DevTool<T>;
@@ -4157,6 +4176,7 @@ impl<T> DevTool<T> {
             kind,
             transport,
             home: None,
+            searches: vec![],
         }
     }
     pub fn cargo(transport: T) -> Self {
@@ -5201,7 +5221,67 @@ impl<T: Transport> DevTool<T> {
         &self,
         query: &str,
         cancel: &Cancellation,
-    ) -> Result<Vec<(String, String, String)>, EngineError> {
+    ) -> Result<Vec<RegistryHit>, EngineError> {
+        let hits = self.registry_search(query, cancel)?.unwrap_or_default();
+        Ok(self.rank(query, hits))
+    }
+    /// [`Self::registry_hits`] answered from recent searches when it can be.
+    /// The same query reuses its answer. RubyGems lists every gem whose name
+    /// contains the query, so a longer query that contains a searched one
+    /// keeps the matching rows of that complete list. Other registries cap
+    /// and rank their answers, so only the same query is reused there.
+    fn cached_registry_hits(
+        &mut self,
+        query: &str,
+        cancel: &Cancellation,
+    ) -> Result<Vec<RegistryHit>, EngineError> {
+        let lowered = query.to_ascii_lowercase();
+        let narrows = |searched: &str| {
+            self.kind == DevKind::Gem
+                && gem_searchable(query)
+                && lowered.contains(&searched.to_ascii_lowercase())
+        };
+        let known = self.searches.iter().rev().find_map(|search| {
+            if search.query == query {
+                Some(search.hits.clone())
+            } else if narrows(&search.query) {
+                Some(
+                    search
+                        .hits
+                        .iter()
+                        .filter(|(name, ..)| name.to_ascii_lowercase().contains(&lowered))
+                        .cloned()
+                        .collect(),
+                )
+            } else {
+                None
+            }
+        });
+        let hits = match known {
+            Some(hits) => hits,
+            None => {
+                let Some(hits) = self.registry_search(query, cancel)? else {
+                    return Ok(vec![]);
+                };
+                if self.searches.len() == REGISTRY_SEARCHES {
+                    self.searches.remove(0);
+                }
+                self.searches.push(RegistrySearch {
+                    query: query.into(),
+                    hits: hits.clone(),
+                });
+                hits
+            }
+        };
+        Ok(self.rank(query, hits))
+    }
+    /// The registry's answer for `query`, before ranking. `None` when no
+    /// registry was asked or it gave no usable answer, so nothing is reused.
+    fn registry_search(
+        &self,
+        query: &str,
+        cancel: &Cancellation,
+    ) -> Result<Option<Vec<RegistryHit>>, EngineError> {
         let limit = REGISTRY_RESULTS.to_string();
         // Cancellation propagates; any other failure (offline, npm not
         // installed) leaves only the installed matches.
@@ -5213,7 +5293,12 @@ impl<T: Transport> DevTool<T> {
                 .map(|result| String::from_utf8_lossy(&result.stdout).into_owned())),
         };
         Ok(match self.kind {
-            DevKind::Npm | DevKind::Pnpm | DevKind::Bun => {
+            // The npm registry refuses queries outside 2 to 64 characters
+            // (after trimming) with an error, after a Node start-up and a
+            // round trip, so those are not sent.
+            DevKind::Npm | DevKind::Pnpm | DevKind::Bun
+                if (2..=64).contains(&query.trim().chars().count()) =>
+            {
                 let limit = format!("--searchlimit={limit}");
                 // Without these caps an unreachable registry holds npm for
                 // about 70 seconds of retries; with them it fails at once.
@@ -5229,12 +5314,13 @@ impl<T: Transport> DevTool<T> {
                 .map(OsString::from);
                 text(self.transport.dev_tool("npm", &args, cancel, false))?
                     .and_then(|json| serde_json::from_str::<Vec<NpmSearchHit>>(&json).ok())
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|hit| {
-                        Some((hit.name, hit.version?, hit.description.unwrap_or_default()))
+                    .map(|hits| {
+                        hits.into_iter()
+                            .filter_map(|hit| {
+                                Some((hit.name, hit.version?, hit.description.unwrap_or_default()))
+                            })
+                            .collect()
                     })
-                    .collect()
             }
             DevKind::Cargo => {
                 // Offline, cargo retries for about 10 seconds without these.
@@ -5253,48 +5339,27 @@ impl<T: Transport> DevTool<T> {
                     cancel,
                     false,
                 ))?
-                .into_iter()
-                .flat_map(|output| {
+                .map(|output| {
                     output
                         .lines()
                         .filter_map(cargo_search_hit)
                         .map(|(name, version, summary)| {
                             (name.into(), version.into(), summary.into())
                         })
-                        .collect::<Vec<_>>()
+                        .collect()
                 })
-                .collect()
             }
             // `gem search` takes a regular expression and ignores `--`, so only
             // plain gem names are sent, with their dots escaped.
-            DevKind::Gem if gem_name(query) && query.len() >= 3 => {
+            DevKind::Gem if gem_searchable(query) => {
                 let pattern = query.replace('.', "\\.");
-                let mut hits: Vec<(String, String, String)> =
-                    text(self.call(&["search", "--remote", &pattern], cancel, false))?
-                        .into_iter()
-                        .flat_map(|output| {
-                            output
-                                .lines()
-                                .filter_map(gem_search_hit)
-                                .map(|(name, version)| (name.into(), version.into(), String::new()))
-                                .collect::<Vec<_>>()
-                        })
-                        .collect();
-                // RubyGems lists matches alphabetically, so rank exact and
-                // prefix matches first before keeping only the first few.
-                let lowered = query.to_ascii_lowercase();
-                hits.sort_by_key(|(name, ..)| {
-                    let name = name.to_ascii_lowercase();
-                    if name == lowered {
-                        0
-                    } else if name.starts_with(&lowered) {
-                        1
-                    } else {
-                        2
-                    }
-                });
-                hits.truncate(REGISTRY_RESULTS);
-                hits
+                text(self.call(&["search", "--remote", &pattern], cancel, false))?.map(|output| {
+                    output
+                        .lines()
+                        .filter_map(gem_search_hit)
+                        .map(|(name, version)| (name.into(), version.into(), String::new()))
+                        .collect()
+                })
             }
             // Packagist reports no version; `global require` takes the latest.
             // `global` searches the same COMPOSER_HOME repositories it installs from.
@@ -5304,19 +5369,40 @@ impl<T: Transport> DevTool<T> {
                 false,
             ))?
             .and_then(|json| serde_json::from_str::<Vec<ComposerSearchHit>>(&json).ok())
-            .into_iter()
-            .flatten()
-            .take(REGISTRY_RESULTS)
-            .map(|hit| {
-                (
-                    hit.name,
-                    "latest".into(),
-                    hit.description.unwrap_or_default(),
-                )
-            })
-            .collect(),
-            _ => vec![],
+            .map(|hits| {
+                hits.into_iter()
+                    .take(REGISTRY_RESULTS)
+                    .map(|hit| {
+                        (
+                            hit.name,
+                            "latest".into(),
+                            hit.description.unwrap_or_default(),
+                        )
+                    })
+                    .collect()
+            }),
+            _ => None,
         })
+    }
+    /// The registry answer in the order searches list it. RubyGems lists
+    /// matches alphabetically, so exact and prefix matches go first before
+    /// keeping only the first few.
+    fn rank(&self, query: &str, mut hits: Vec<RegistryHit>) -> Vec<RegistryHit> {
+        if self.kind == DevKind::Gem {
+            let lowered = query.to_ascii_lowercase();
+            hits.sort_by_key(|(name, ..)| {
+                let name = name.to_ascii_lowercase();
+                if name == lowered {
+                    0
+                } else if name.starts_with(&lowered) {
+                    1
+                } else {
+                    2
+                }
+            });
+            hits.truncate(REGISTRY_RESULTS);
+        }
+        hits
     }
     /// An offer to install exactly `query` by name, for registries PkgDeck
     /// cannot search. It has no version, so searches never list it as a
@@ -5649,7 +5735,7 @@ impl<T: Transport> Backend for DevTool<T> {
             }
             return Ok(results);
         }
-        for (name, version, summary) in self.registry_hits(query, cancel)? {
+        for (name, version, summary) in self.cached_registry_hits(query, cancel)? {
             if !self.kind.valid_name(&name) || results.iter().any(|package| package.id.name == name)
             {
                 continue;
@@ -5765,6 +5851,9 @@ impl<T: Transport> Backend for DevTool<T> {
         cancel: &Cancellation,
         progress: &mut dyn FnMut(Progress),
     ) -> Result<OperationOutcome, EngineError> {
+        // Installed state is read again on every search, but a change can
+        // follow a registry update, so later searches ask again.
+        self.searches.clear();
         let id = self.kind.id();
         if operation.backend() != id {
             return Err(invalid(id, "foreign operation"));
