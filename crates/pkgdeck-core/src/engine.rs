@@ -646,21 +646,22 @@ impl Engine {
     ) -> PackageReport {
         self.checking_updates(|engine| engine.installed_stream(cancel, emit))
     }
-    /// [`installed_for_mutation`](Self::installed_for_mutation) after the same
-    /// refresh as [`installed_for_updates`](Self::installed_for_updates).
-    /// `pkd upgrade` with no names uses it so a full upgrade sees a new cask.
-    pub fn installed_for_upgrade(&mut self, cancel: &Cancellation) -> PackageReport {
-        self.checking_updates(|engine| engine.installed_for_mutation(cancel))
-    }
-    /// Fetch update metadata without listing. Named upgrades call this once,
-    /// then look packages up. Failures are returned and not cached as a list.
-    pub fn refresh_update_indexes(&mut self, cancel: &Cancellation) -> Vec<BackendFailure> {
+    /// Fetch update metadata without listing, so later listings, even in
+    /// another process, see new versions. `pkd refresh` and `pkd update`
+    /// call this once after their refresh operations; `skip` names the
+    /// sources those already fetched (Homebrew's refresh is the same
+    /// `brew update`). Failures are returned and not cached as a list.
+    pub fn refresh_update_indexes(
+        &mut self,
+        skip: &[String],
+        cancel: &Cancellation,
+    ) -> Vec<BackendFailure> {
         self.checking_updates(|engine| {
             let mut failures = Vec::new();
             for (id, backend) in engine
                 .backends
                 .iter_mut()
-                .filter(|(_, backend)| backend.has_update_index())
+                .filter(|(id, backend)| backend.has_update_index() && !skip.contains(id))
             {
                 if cancel.requested() {
                     failures.push(BackendFailure {

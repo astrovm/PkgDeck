@@ -65,10 +65,12 @@ impl<'a> Session<'a> {
     }
     /// Approved changes are about to start. With `--yes` nothing was
     /// reviewed yet, so show what runs; a refresh needs no review.
+    /// `pkd update` starts two batches: its refresh, then the upgrade.
     pub fn start(&self, operations: &[Operation], review: bool) {
         if review && !self.reviewed.get() {
             self.review(operations);
         }
+        self.position.set(0);
         self.total.set(operations.len());
         self.executing.set(true);
     }
@@ -105,6 +107,10 @@ impl<'a> Session<'a> {
                 ..
             } => self.live.detail(&format!("Updating {name}")),
             Event::Finished { operation, result } => {
+                // Messages after the last change belong to the next review.
+                if self.position.get() == self.total.get() {
+                    self.executing.set(false);
+                }
                 if !self.show_results {
                     return;
                 }
@@ -307,6 +313,15 @@ mod tests {
         });
         assert!(session.results_shown());
         assert_eq!(session.position.get(), 2);
+        // A second batch plans and counts on its own.
+        session.event(Event::Progress {
+            operation: operations[1].clone(),
+            progress: Progress::Message("Update (2): fixture".into()),
+        });
+        assert_eq!(session.notes.borrow().len(), 2);
+        session.start(&operations[1..], true);
+        session.event(Event::Started(operations[1].clone()));
+        assert_eq!(session.position.get(), 1);
     }
 
     #[test]

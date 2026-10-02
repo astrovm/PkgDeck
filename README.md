@@ -69,8 +69,9 @@ With other installs, run `pkd` directly:
 pkd sources                      # list available package managers
 pkd search vlc --from flatpak    # search one source
 pkd list --from apt              # list installed packages
-pkd refresh                      # refresh package lists
-pkd upgrade                      # install available updates
+pkd refresh                      # check for updates
+pkd upgrade                      # install the updates found
+pkd update                       # check for updates, then install them
 ```
 
 ![pkd search showing ripgrep and related packages from APT and Flatpak](docs/screenshots/cli-search.png)

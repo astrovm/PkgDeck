@@ -110,11 +110,17 @@ fn commands_use_sanitized_host_transport_and_one_json_document() {
     fixture.call(&["install", "fixture"], 2);
     if !rustix_root() {
         fixture.call(&["--yes", "install", "fixture"], 0);
+        // Upgrading uses the tap as it is; only a refresh fetches.
+        fixture.call(&["--yes", "upgrade", "fixture"], 0);
+        assert_eq!(
+            fixture.call(&["list"], 0)["packages"][0]["installed_version"],
+            "1.0"
+        );
         // A failed fetch must not upgrade against the stale tap.
         fs::write(fixture.0.join("fail-update"), "").unwrap();
         let refused = fixture
             .command()
-            .args(["--json", "--yes", "upgrade", "fixture"])
+            .args(["--json", "--yes", "update", "fixture"])
             .output()
             .unwrap();
         assert!(!refused.status.success());
@@ -124,7 +130,8 @@ fn commands_use_sanitized_host_transport_and_one_json_document() {
             fixture.call(&["list"], 0)["packages"][0]["installed_version"],
             "1.0"
         );
-        fixture.call(&["--yes", "update"], 0);
+        let refreshed = fixture.call(&["refresh"], 0);
+        assert_eq!(refreshed["updates"][0]["candidate_version"], "2.0");
         assert_eq!(
             fixture.call(&["list"], 0)["packages"][0]["update"],
             "available"
@@ -134,6 +141,12 @@ fn commands_use_sanitized_host_transport_and_one_json_document() {
             fixture.call(&["list"], 0)["packages"][0]["installed_version"],
             "2.0"
         );
+        let updated = fixture.call(&["--yes", "update"], 0);
+        assert_eq!(
+            updated["refresh"]["operations"][0]["operation"]["refresh"]["backend"],
+            "homebrew"
+        );
+        assert_eq!(updated["operations"], serde_json::json!([]));
         fixture.call(&["--yes", "remove", "fixture"], 0);
     }
     assert!(fixture

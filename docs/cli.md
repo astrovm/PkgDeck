@@ -21,9 +21,10 @@ pkd info neovim --from homebrew          # show package details
 pkd list --json                          # list installed packages as JSON
 pkd install neovim --from apt --yes      # install
 pkd remove neovim --from apt --yes       # remove
-pkd refresh                              # refresh package lists (installs nothing)
-pkd upgrade neovim --from apt --yes      # update one package
-pkd upgrade                              # update everything
+pkd refresh                              # check for updates and list them (installs nothing)
+pkd upgrade neovim --from apt --yes      # install the update found for one package
+pkd upgrade                              # install every update found
+pkd update                               # check for updates, then install them
 pkd clean                                # list cleanup tasks
 pkd inspect git                          # find which package provides a command
 pkd audit                                # find apps installed more than once
@@ -31,7 +32,8 @@ pkd doctor                               # check that PkgDeck can reach your pac
 pkd completions bash                     # print a shell completion script
 ```
 
-`pkd update` still works. It's another name for `pkd refresh`.
+`pkd upgrade` installs the updates PkgDeck already knows about and never
+checks for new ones. Run `pkd refresh` first, or `pkd update` to do both.
 
 ## Global options
 
@@ -145,24 +147,38 @@ You can pass several names at once. PkgDeck finds every package before
 changing anything, then runs each change in order. If one fails, earlier
 changes are kept.
 
+## Updating
+
+`pkd refresh` checks for updates. It refreshes package lists (`apt update`,
+`brew update`, `dnf makecache`, `port selfupdate`, and so on), and fetches the
+update information of sources without a list: a `softwareupdate` scan for
+macOS updates, and a `git fetch` for Oh My Zsh. Each source fetches once;
+Homebrew's refresh is its fetch. Then it lists the updates it found. It never
+installs anything.
+
 `pkd upgrade` without names updates every installed package that has an
-update. `--from` and `--arch` narrow it down. Before it decides, it fetches
-Homebrew once (`brew update`); formulae and casks share that fetch. `pkd list`
-does not. If the fetch fails, an upgrade with no names stops and reports the
-failure. A named upgrade (`pkd upgrade NAME`) fetches once, then still looks
-the name up. `pkd refresh` (or `pkd update`) only refreshes package lists. It
-never installs updates, and when it finishes it reminds you to run `pkd upgrade`.
+update. `--from` and `--arch` narrow it down. It uses what the last refresh
+found and never fetches, like `pkd list`. Without a recent refresh it can
+miss an update, or install a version older than the newest one. Run
+`pkd refresh` first, or use `pkd update`.
+
+`pkd update` is `pkd refresh` followed by `pkd upgrade`, with the same names
+and options (`pkd update neovim`, `--allow-removals`) and one review for the
+upgrade. If a source can't refresh, `pkd update` without names stops before
+changing anything. With names, it refuses only packages from that source,
+since its old information could hide the new version.
 
 ## Confirmation and passwords
 
 In a terminal, PkgDeck shows what it will change and asks before doing it.
 While it works, a spinner shows the current step, and each change gets a
 ✓ or ✗ line as it finishes. In scripts, or with `--json`, you must pass `--yes`
-to install, remove, upgrade, or clean. Otherwise the command stops with exit
-code 2 before doing anything.
+to install, remove, upgrade, update, or clean. Otherwise the command stops with
+exit code 2 before doing anything.
 
-`pkd refresh` only refreshes package lists, so it never asks. It skips package
-managers that don't keep package lists, such as npm or Cargo.
+`pkd refresh` installs nothing, so it never asks. It skips refreshing package
+managers that don't keep package lists, such as npm or Cargo: they check for
+updates whenever they list packages. `pkd update` asks once, before upgrading.
 
 Approving a change doesn't give PkgDeck admin rights, and PkgDeck never reads
 your password:
@@ -432,8 +448,8 @@ pkd upgrade "Safari" --from macos-updates
 
 The `macos-updates` source lists what `softwareupdate --list` reports:
 macOS point releases, Safari, the Command Line Tools and the like.
-`pkd upgrade` asks Apple's servers first; other commands read the last
-check (`--no-scan`). Updates run `/usr/sbin/softwareupdate` as root, so `pkd` asks
+`pkd refresh` and `pkd update` ask Apple's servers; other commands, `pkd
+upgrade` included, read the last check (`--no-scan`). Updates run `/usr/sbin/softwareupdate` as root, so `pkd` asks
 for your password first. An update that needs a restart is only downloaded:
 finish it from System Settings > General > Software Update. `pkd` never
 restarts your Mac, and upgrades to a new major version of macOS aren't listed.
@@ -695,6 +711,8 @@ to stderr.
 | `sources` | `sources` |
 | `clean` | Cleanup `items` and `failures` |
 | Changes | `operations`, each with a `result` of `{"Ok":...}` or `{"Err":...}` |
+| `refresh` | `operations` (the refreshes), `updates` (packages with an update), and `failures` |
+| `update` | Also `refresh`: its `operations`, and `failures` for update information it couldn't fetch |
 | Errors | `error`, and a readable `message` when available |
 | No match | Also `offers`: sources that could try the name, such as `["npm", "pipx"]` |
 
