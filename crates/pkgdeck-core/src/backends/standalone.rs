@@ -2476,7 +2476,8 @@ mod tests {
         assert_eq!(installation.version, Version::new(1, 0, 0));
         // The fixture's updater changes only what it answers, not itself.
         let result = native.update(tool, &installation, &Version::new(2, 0, 0), &cancel);
-        // Updaters never run as root.
+        // Updaters and removal never run as root; the checks below need them to.
+        assert_eq!(result.is_err(), rustix::process::geteuid().is_root());
         let Ok(result) = result else { return };
         assert_eq!(result.code, Some(0));
         let updated = native.locate(tool, &cancel).unwrap().unwrap();
