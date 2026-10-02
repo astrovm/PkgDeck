@@ -146,14 +146,14 @@ impl Standalone {
 fn invalid_data(tool: StandaloneTool, reason: impl std::fmt::Display) -> EngineError {
     invalid(tool.id(), reason)
 }
-/// GitHub answers 403 or 429 once an address has used its 60 unsigned
-/// requests an hour. Say that instead of showing curl's words.
+/// GitHub answers 403 or 429 when an address checks too often. Say that
+/// instead of showing curl's words.
 fn github_rate_limit(tool: StandaloneTool, url: &str, error: EngineError) -> EngineError {
     let EngineError::Execution(ExecutionError::Failed(result)) = &error else {
         return error;
     };
     let stderr = String::from_utf8_lossy(&result.stderr);
-    if url.starts_with("https://api.github.com/")
+    if url.starts_with("https://github.com/")
         && (stderr.contains("error: 403") || stderr.contains("error: 429"))
     {
         return invalid_data(
@@ -162,6 +162,32 @@ fn github_rate_limit(tool: StandaloneTool, url: &str, error: EngineError) -> Eng
         );
     }
     error
+}
+enum ReleaseLink<'a> {
+    Tag(&'a str),
+    /// The repository moved; its latest link is at the new name.
+    Moved,
+}
+/// Where GitHub's latest-release link points: a release tag, or the same
+/// link under a moved repository's new name.
+fn release_link(location: &str) -> Option<ReleaseLink<'_>> {
+    let rest = location.strip_prefix("https://github.com/")?;
+    let mut parts = rest.splitn(5, '/');
+    let (owner, repo, releases) = (parts.next()?, parts.next()?, parts.next()?);
+    let plain = |part: &str| {
+        part.bytes().any(|b| b != b'.')
+            && part
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+    };
+    if !plain(owner) || !plain(repo) || releases != "releases" {
+        return None;
+    }
+    match (parts.next()?, parts.next()) {
+        ("latest", None) => Some(ReleaseLink::Moved),
+        ("tag", Some(tag)) if plain(tag) => Some(ReleaseLink::Tag(tag)),
+        _ => None,
+    }
 }
 fn version(tool: StandaloneTool, text: &str) -> Result<Version, EngineError> {
     // Foundry marks its stable builds `1.3.5-stable`; the suffix is not a
@@ -441,36 +467,67 @@ impl NativeStandalone {
         Ok(path)
     }
     fn fetch(&self, url: &str, cancel: &Cancellation) -> Result<String, EngineError> {
+        self.curl(
+            &[
+                "--location",
+                "--proto-redir",
+                "=https",
+                "--max-filesize",
+                "1048576",
+                url,
+            ],
+            1024 * 1024,
+            cancel,
+        )
+    }
+    /// Where `url` redirects, without following it.
+    fn redirect(&self, url: &str, cancel: &Cancellation) -> Result<String, EngineError> {
+        self.curl(
+            &[
+                "--output",
+                "/dev/null",
+                "--write-out",
+                "%{redirect_url}",
+                url,
+            ],
+            64 * 1024,
+            cancel,
+        )
+    }
+    /// curl over HTTPS only, with short timeouts, then `args`.
+    fn curl(
+        &self,
+        args: &[&str],
+        output_bytes: usize,
+        cancel: &Cancellation,
+    ) -> Result<String, EngineError> {
         let curl = self.host.resolve("curl")?.ok_or_else(|| {
             ExecutionError::Disabled("curl is required to check standalone updates".into())
         })?;
-        let args = [
+        let args: Vec<OsString> = [
             "-q",
             "--fail",
             "--silent",
             "--show-error",
-            "--location",
             "--proto",
-            "=https",
-            "--proto-redir",
             "=https",
             "--connect-timeout",
             "5",
             "--max-time",
             "15",
-            "--max-filesize",
-            "1048576",
             "--user-agent",
             "PkgDeck",
-            url,
         ]
-        .map(Into::into);
+        .iter()
+        .chain(args)
+        .map(Into::into)
+        .collect();
         let result = self.host.read(
             &curl,
             &args,
             Limits {
                 timeout: Duration::from_secs(20),
-                output_bytes: 1024 * 1024,
+                output_bytes,
             },
             cancel,
         )?;
@@ -848,27 +905,40 @@ impl StandaloneIo for NativeStandalone {
                     .ok_or_else(|| invalid_data(tool, "missing version"))?,
             );
         }
+        let repository = match tool {
+            StandaloneTool::OpenCode => Some("anomalyco/opencode"),
+            StandaloneTool::Anchor => Some("solana-foundation/anchor"),
+            StandaloneTool::Foundry => Some("foundry-rs/foundry"),
+            StandaloneTool::Copilot => Some("github/copilot-cli"),
+            _ => None,
+        };
+        if let Some(repository) = repository {
+            // The release page's latest link redirects to the newest stable
+            // release, never a draft or pre-release. GitHub's API would allow
+            // an address only 60 checks an hour.
+            // A moved repository redirects to its new name first.
+            let mut url = format!("https://github.com/{repository}/releases/latest");
+            for _ in 0..3 {
+                let location = self
+                    .redirect(&url, cancel)
+                    .map_err(|error| github_rate_limit(tool, &url, error))?;
+                match release_link(location.trim()) {
+                    Some(ReleaseLink::Tag(tag)) => return version(tool, tag),
+                    Some(ReleaseLink::Moved) => url = location.trim().to_owned(),
+                    None => break,
+                }
+            }
+            return Err(invalid_data(tool, "no stable release"));
+        }
         let url = match tool {
             StandaloneTool::Codex => "https://releases.openai.com/codex/channels/latest".into(),
-            StandaloneTool::Claude => format!(
+            // Claude; every other tool returned above.
+            _ => format!(
                 "https://downloads.claude.ai/claude-code-releases/{}",
                 installation.channel
             ),
-            StandaloneTool::OpenCode => {
-                "https://api.github.com/repos/anomalyco/opencode/releases/latest".into()
-            }
-            StandaloneTool::Anchor => {
-                "https://api.github.com/repos/solana-foundation/anchor/releases/latest".into()
-            }
-            StandaloneTool::Foundry => {
-                "https://api.github.com/repos/foundry-rs/foundry/releases/latest".into()
-            }
-            // Copilot; every other tool returned above.
-            _ => "https://api.github.com/repos/github/copilot-cli/releases/latest".into(),
         };
-        let text = self
-            .fetch(&url, cancel)
-            .map_err(|error| github_rate_limit(tool, &url, error))?;
+        let text = self.fetch(&url, cancel)?;
         if tool == StandaloneTool::Claude {
             return version(tool, &text);
         }
@@ -1992,6 +2062,28 @@ mod tests {
         );
     }
     #[test]
+    fn release_links_name_a_tag_or_a_moved_repository() {
+        assert!(matches!(
+            release_link("https://github.com/foundry-rs/foundry/releases/tag/v1.8.4"),
+            Some(ReleaseLink::Tag("v1.8.4"))
+        ));
+        assert!(matches!(
+            release_link("https://github.com/otter-sec/anchor/releases/latest"),
+            Some(ReleaseLink::Moved)
+        ));
+        for location in [
+            "",
+            "https://github.com/owner/repo/releases",
+            "https://github.com/owner/repo/releases/tag/",
+            "https://github.com/owner/repo/releases/tag/v1/extra",
+            "https://github.com/owner/repo/tree/main",
+            "https://github.com/../repo/releases/latest",
+            "https://example.com/owner/repo/releases/tag/v1",
+        ] {
+            assert!(release_link(location).is_none(), "{location}");
+        }
+    }
+    #[test]
     fn github_rate_limits_are_said_plainly() {
         let curl_failed = |stderr: &str| {
             EngineError::Execution(ExecutionError::Failed(Completion {
@@ -2003,7 +2095,7 @@ mod tests {
                 cancellation_deferred: false,
             }))
         };
-        let api = "https://api.github.com/repos/foundry-rs/foundry/releases/latest";
+        let api = "https://github.com/foundry-rs/foundry/releases/latest";
         for status in [403, 429] {
             let error = github_rate_limit(
                 StandaloneTool::Foundry,
@@ -2074,6 +2166,10 @@ mod tests {
                 StandaloneTool::Droid => "#!/bin/sh\nbinary_name=\"droid\"\nVER=\"2.0.0\"\n",
                 StandaloneTool::Cursor => "DOWNLOAD_URL=\"https://downloads.cursor.com/lab/2.0.0/${OS}/${ARCH}/agent-cli-package.tar.gz\"",
                 StandaloneTool::Kiro | StandaloneTool::Antigravity => r#"{"version":"2.0.0"}"#,
+                StandaloneTool::OpenCode
+                | StandaloneTool::Anchor
+                | StandaloneTool::Foundry
+                | StandaloneTool::Copilot => "https://github.com/owner/repo/releases/tag/v2.0.0",
                 _ => r#"{"tag_name":"rust-v2.0.0"}"#,
             });
             assert_eq!(
@@ -2087,6 +2183,10 @@ mod tests {
                 temp.network(r#"{"tag_name":"v2.0.0","prerelease":true}"#);
                 assert!(native.latest(tool, &installation, &cancel).is_err());
                 temp.network("{}");
+                assert!(native.latest(tool, &installation, &cancel).is_err());
+                // A repository that keeps redirecting to a new name has no
+                // release to offer.
+                temp.network("https://github.com/owner/moved/releases/latest");
                 assert!(native.latest(tool, &installation, &cancel).is_err());
             }
         }
