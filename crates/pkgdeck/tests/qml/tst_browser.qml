@@ -33,6 +33,7 @@ TestCase {
         property int sourceChecks: 0
         function checkSources() { sourceChecks++; }
         property string report_state: "{}"
+        property string pending_sources: "[]"
         property string manifest_preview: "{}"
         property string lastInventorySelection: ""
         function exportInventory(url, identities) { lastInventorySelection = identities; }
@@ -151,6 +152,7 @@ TestCase {
         fake.confirmation = "";
         fake.confirmation_data = "{}";
         fake.report_state = "{}";
+        fake.pending_sources = "[]";
         fake.activity = "[]";
         fake.background_state = "{}";
         fake.notification_history = "{}";
@@ -1399,6 +1401,31 @@ TestCase {
         verify(hint.mapToItem(browser.contentItem, 0, 0).y > field.mapToItem(browser.contentItem, 0, 0).y + field.height + 40);
         field.text = "vim";
         verify(!empty.visible);
+    }
+    function test_a_read_names_the_sources_it_still_waits_for() {
+        browser.openView("Installed");
+        const pending = findChild(browser, "pendingSources");
+        const heading = findChild(browser, "resultsHeading");
+        fake.busy = true;
+        fake.pending_sources = JSON.stringify(["npm", "gem"]);
+        verify(pending.visible);
+        compare(pending.text, "Waiting for npm, RubyGems");
+        const height = heading.height;
+        // Sources answer one by one; the row keeps its height.
+        fake.pending_sources = JSON.stringify(["gem"]);
+        compare(pending.text, "Waiting for RubyGems");
+        compare(heading.height, height);
+        fake.pending_sources = "[]";
+        verify(!pending.visible);
+        // Nothing is named once the read ends, or while a change runs.
+        fake.pending_sources = JSON.stringify(["npm"]);
+        fake.busy = false;
+        verify(!pending.visible);
+        fake.busy = true;
+        fake.writing = true;
+        verify(!pending.visible);
+        fake.writing = false;
+        fake.busy = false;
     }
     function test_refreshing_a_section_keeps_its_rows_labelled() {
         browser.openView("Installed");

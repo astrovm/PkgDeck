@@ -277,6 +277,9 @@ Controls.ApplicationWindow {
             sourcePopup.draftSources = root.effectiveSources().filter((id) => root.sourceInfo(id).availability_kind === "available" && root.sourceSupportsView(id));
     }
     readonly property var reportState: JSON.parse(backend.report_state || "{}")
+    // Sources the running read still waits for, so a slow one is named.
+    readonly property var pendingSourceNames: backend.busy && !backend.writing
+        ? JSON.parse(backend.pending_sources || "[]").map((id) => sourceDisplayName(id)) : []
     readonly property var readFailures: {
         if (currentView !== resultView)
             return [];
@@ -2412,6 +2415,16 @@ Controls.ApplicationWindow {
                             font.pointSize: root.font.pointSize * 0.9
                             elide: Text.ElideRight
                             Layout.fillWidth: true
+                        }
+                        Controls.Label {
+                            objectName: "pendingSources"
+                            visible: root.pendingSourceNames.length > 0
+                            text: "Waiting for " + root.pendingSourceNames.join(", ")
+                            color: root.muted
+                            font.pointSize: root.font.pointSize * 0.9
+                            elide: Text.ElideRight
+                            Layout.maximumWidth: resultsHeadingRow.width * 0.6
+                            Accessible.name: text
                         }
                         DeckIcon {
                             id: resultsSpinner
