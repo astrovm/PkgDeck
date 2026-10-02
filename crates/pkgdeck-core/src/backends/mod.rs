@@ -1841,24 +1841,65 @@ fn component_stem(id: &str) -> Option<String> {
     (!stem.is_empty()).then(|| stem.to_owned())
 }
 
-/// Map installed Debian packages to their AppStream component-id stems by
-/// scanning DEP-11 YAML (`<id>.yml.gz`) as a gzip line stream. Documents are
-/// `---`-separated with top-level `ID:`/`Package:` scalars; a package can
-/// own several components. Missing or unreadable data maps nothing.
+/// Map installed Debian packages to their AppStream component-id stems from
+/// the DEP-11 YAML in `yaml_dir`. Decompressing it takes a few hundred
+/// milliseconds on every list, so the map is kept in the user's cache.
 fn dep11_component_ids(
     yaml_dir: &std::path::Path,
 ) -> std::collections::BTreeMap<String, Vec<String>> {
+    dep11_cached(crate::cache::Store::user().as_ref(), yaml_dir, dep11_scan)
+}
+
+/// [`dep11_component_ids`] answered from `store` while the folder and every
+/// file its entries link to (APT's lists, refreshed in place) are unchanged.
+fn dep11_cached(
+    store: Option<&crate::cache::Store>,
+    yaml_dir: &std::path::Path,
+    scan: impl FnOnce(&[PathBuf]) -> std::collections::BTreeMap<String, Vec<String>>,
+) -> std::collections::BTreeMap<String, Vec<String>> {
+    use crate::cache::Watch;
+    let Ok(entries) = std::fs::read_dir(yaml_dir) else {
+        return std::collections::BTreeMap::new();
+    };
+    let mut files: Vec<PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "gz"))
+        .collect();
+    files.sort();
+    let folder = std::fs::canonicalize(yaml_dir).unwrap_or_else(|_| yaml_dir.to_owned());
+    let mut watches = vec![Watch::file(yaml_dir), Watch::tree(folder, 1)];
+    // A dangling link is watched where it points, so its target appearing
+    // counts as a change.
+    watches.extend(files.iter().map(|file| {
+        Watch::file(
+            std::fs::canonicalize(file)
+                .or_else(|_| std::fs::read_link(file).map(|target| yaml_dir.join(target)))
+                .unwrap_or_else(|_| file.clone()),
+        )
+    }));
+    let encoded = crate::cache::read_through(
+        store,
+        "dep11",
+        "components",
+        &[&yaml_dir.to_string_lossy()],
+        &watches,
+        &[],
+        || serde_json::to_vec(&scan(&files)),
+    )
+    .unwrap_or_default();
+    serde_json::from_slice(&encoded).unwrap_or_default()
+}
+
+/// Scan DEP-11 YAML (`<id>.yml.gz`) as a gzip line stream. Documents are
+/// `---`-separated with top-level `ID:`/`Package:` scalars; a package can
+/// own several components. Unreadable files map nothing.
+fn dep11_scan(files: &[PathBuf]) -> std::collections::BTreeMap<String, Vec<String>> {
     use std::io::{BufRead, BufReader};
     let mut map: std::collections::BTreeMap<String, Vec<String>> =
         std::collections::BTreeMap::new();
-    let Ok(entries) = std::fs::read_dir(yaml_dir) else {
-        return map;
-    };
-    for entry in entries.flatten() {
-        if entry.path().extension().is_none_or(|ext| ext != "gz") {
-            continue;
-        }
-        let Ok(file) = std::fs::File::open(entry.path()) else {
+    for path in files {
+        let Ok(file) = std::fs::File::open(path) else {
             continue;
         };
         let decoder = BufReader::new(flate2::read::GzDecoder::new(file));
@@ -6684,7 +6725,7 @@ mod tests {
         std::fs::write(base.join("notes.txt"), "ID: fake.desktop\nPackage: fake\n").unwrap();
         std::fs::write(base.join("broken.yml.gz"), b"not gzip data").unwrap();
         std::os::unix::fs::symlink(base.join("absent"), base.join("dangling.yml.gz")).unwrap();
-        let map = dep11_component_ids(&base);
+        let map = dep11_cached(None, &base, dep11_scan);
         assert_eq!(
             map.get("firefox"),
             Some(&vec![
@@ -6699,6 +6740,83 @@ mod tests {
         assert!(!map.contains_key("fake"));
         assert!(!map.contains_key("emptyid"));
         assert!(dep11_component_ids(&base.join("missing")).is_empty());
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn dep11_maps_are_cached_until_the_data_changes() {
+        use std::io::Write;
+        let base = std::env::temp_dir().join(format!(
+            "pkgdeck-dep11-cache-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        let lists = base.join("lists");
+        let yaml = base.join("yaml");
+        std::fs::create_dir_all(&lists).unwrap();
+        std::fs::create_dir_all(&yaml).unwrap();
+        let gz = |body: &str| {
+            let mut encoder =
+                flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            encoder.write_all(body.as_bytes()).unwrap();
+            encoder.finish().unwrap()
+        };
+        // Like AppStream's APT hook: the folder links into APT's lists.
+        let main = lists.join("main_dep11_Components-amd64.yml.gz");
+        std::fs::write(
+            &main,
+            gz("---\nID: org.example.Tool.desktop\nPackage: tool\n"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&main, yaml.join("main.yml.gz")).unwrap();
+        let store = crate::cache::Store::new(base.join("cache"));
+        let scans = std::cell::Cell::new(0);
+        let get = || {
+            dep11_cached(Some(&store), &yaml, |files| {
+                scans.set(scans.get() + 1);
+                dep11_scan(files)
+            })
+        };
+        let tool = |stems: &[&str]| {
+            std::collections::BTreeMap::from([(
+                "tool".to_string(),
+                stems
+                    .iter()
+                    .map(|stem| stem.to_string())
+                    .collect::<Vec<_>>(),
+            )])
+        };
+        assert_eq!(get(), tool(&["org.example.Tool"]));
+        assert_eq!(get(), tool(&["org.example.Tool"]));
+        assert_eq!(scans.get(), 1);
+        // `apt update` rewrites the list behind the unchanged link.
+        std::fs::write(
+            &main,
+            gz("---\nID: org.example.Tool.desktop\nPackage: tool\n---\nID: tool.desktop\nPackage: tool\n"),
+        )
+        .unwrap();
+        assert_eq!(get(), tool(&["org.example.Tool", "tool"]));
+        assert_eq!(scans.get(), 2);
+        // A link whose list appears later counts as a change too.
+        let universe = lists.join("universe_dep11_Components-amd64.yml.gz");
+        std::os::unix::fs::symlink(&universe, yaml.join("universe.yml.gz")).unwrap();
+        assert_eq!(get(), tool(&["org.example.Tool", "tool"]));
+        assert_eq!(get(), tool(&["org.example.Tool", "tool"]));
+        assert_eq!(scans.get(), 3);
+        std::fs::write(
+            &universe,
+            gz("---\nID: org.example.Other\nPackage: other\n"),
+        )
+        .unwrap();
+        assert_eq!(get()["other"], vec!["org.example.Other".to_string()]);
+        assert_eq!(scans.get(), 4);
+        // Without a store (root or PKGDECK_NO_CACHE) every call scans.
+        dep11_cached(None, &yaml, |files| {
+            scans.set(scans.get() + 1);
+            dep11_scan(files)
+        });
+        assert_eq!(scans.get(), 5);
         std::fs::remove_dir_all(&base).unwrap();
     }
 
