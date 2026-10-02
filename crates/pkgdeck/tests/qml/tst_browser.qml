@@ -1857,6 +1857,87 @@ TestCase {
         keyClick(Qt.Key_E);
         compare(browser.frozenOrder, null);
     }
+    function test_large_searches_rank_like_small_ones() {
+        browser.openView("Search");
+        const search = findChild(browser, "searchField");
+        search.text = "tool";
+        tryCompare(fake, "lastQuery", "tool");
+        const sources = ["apt", "flatpak", "homebrew", "snap"];
+        const rows = [];
+        for (let i = 0; i < 2000; i++) {
+            const name = ["tool", "Tool-" + i, "x-tool-" + i, "app-" + i, "org.example.Tool"][i % 5];
+            const row = {kind: "package", name: name, source: sources[i % 4], architecture: "all", installed: null, candidate: "1", scope: "system",
+                summary: i % 5 === 3 ? (i % 2 ? "Tool for " + i : "A tool " + i) : "Package " + i};
+            if (i % 7 === 0)
+                row.display_name = "TOOL";
+            rows.push(row);
+        }
+        fake.rows = JSON.stringify(rows);
+        // The same order as scoring each comparison from scratch.
+        const score = (row) => {
+            const name = row.name.toLowerCase();
+            const summary = row.summary.toLowerCase();
+            if (name === "tool" || (row.display_name || "").toLowerCase() === "tool" || (row.source === "flatpak" && name.split(".").pop() === "tool"))
+                return 0;
+            return name.indexOf("tool") === 0 ? 1 : name.indexOf("tool") >= 0 ? 2 : summary.indexOf("tool") === 0 ? 3 : summary.indexOf("tool") >= 0 ? 4 : 5;
+        };
+        const expected = rows.slice().sort((a, b) => (score(a) - score(b)) || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0) || (a.source < b.source ? -1 : a.source > b.source ? 1 : 0));
+        const order = (list) => list.map((row) => [row.name, row.source, score(row)].join(" ")).join("\n");
+        const shown = browser.viewItems;
+        compare(shown.length, 2000);
+        compare(order(shown), order(expected));
+        // Derived values stay off the rows the list shows.
+        const model = findChild(browser, "packageResults").model;
+        compare(model.count, 2000);
+        for (let i = 0; i < model.count; i++)
+            verify(model.get(i).rowJson.indexOf("_memo") < 0);
+        compare(model.get(0).rowJson, JSON.stringify(shown[0]));
+        // Narrowing filters through the same lowercase text.
+        search.text = "x-tool-1";
+        compare(browser.viewItems.length, rows.filter((row) => row.name.indexOf("x-tool-1") === 0).length);
+        search.text = "TOOL-1";
+        verify(browser.viewItems.length > 0);
+        verify(browser.viewItems.every((row) => (row.name + " " + (row.display_name || "") + " " + row.summary).toLowerCase().indexOf("tool-1") >= 0));
+    }
+    function test_group_copies_follow_their_group() {
+        browser.openView("Search");
+        const search = findChild(browser, "searchField");
+        search.text = "duo";
+        const row = (name, source) => ({kind: "package", name: name, source: source, architecture: "all", installed: null, candidate: "1", scope: "system", summary: "Duo", same_app_group: "duo"});
+        fake.rows = JSON.stringify([row("duo", "apt"), row("duo", "homebrew")]);
+        compare(browser.viewItems.map((r) => r.groupCount), [2, 2]);
+        // While the group is unchanged, its copies are the same objects.
+        const grouped = browser.viewItems.slice();
+        search.text = "du";
+        verify(browser.viewItems[0] === grouped[0] && browser.viewItems[1] === grouped[1]);
+        // A third source joining the group updates every copy.
+        const three = browser.groupInstalledRows(browser.items.concat([row("duo", "snap")]));
+        compare(three.map((r) => r.groupCount), [3, 3, 3]);
+        compare(three[0].groupSources.join(","), "APT,Homebrew,Snap");
+        const two = browser.groupInstalledRows(browser.items);
+        compare(two.map((r) => r.groupCount), [2, 2]);
+        compare(JSON.stringify(two[0]).indexOf("_memo"), -1);
+        // Rows the engine cannot extend still get their values.
+        const frozen = Object.freeze({kind: "package", name: "duo", source: "apt", architecture: "all", scope: "system"});
+        compare(browser.rowIdentity(frozen), JSON.stringify(["apt", "duo", "all", null, "system", null]));
+        compare(browser.rowIdentity(frozen), browser.rowIdentity(frozen));
+        compare(browser.searchKey(frozen), "duo   apt");
+    }
+    function test_updates_selection_handles_many_rows() {
+        browser.openView("Updates");
+        const rows = [];
+        for (let i = 0; i < 500; i++)
+            rows.push({kind: "package", name: "pkg-" + i, source: "apt", architecture: "all", installed: "1", candidate: "2", update: "available", scope: "system", summary: ""});
+        rows.push(rows[0]);
+        fake.rows = JSON.stringify(rows);
+        compare(browser.packageIdentities().length, 500);
+        compare(browser.selectedCount(), 500);
+        browser.selectNonePackages();
+        compare(browser.selectedCount(), 0);
+        verify(!browser.packageChecked(browser.viewItems[0]));
+        browser.togglePackage(browser.viewItems[3]);
+        compare(browser.checkedIdentities(), [browser.rowIdentity(browser.viewItems[3])]);
+    }
     function test_activity_navigation_stays_available_during_write() {
         populate();
         fake.activity = JSON.stringify([{id: 1, frontend: "gui", operations: [{install: {backend: "apt", name: "synthetic-tool", architecture: "all", scope: "system"}}], started_at: 1000, state: "queued", outcomes: []}]);
