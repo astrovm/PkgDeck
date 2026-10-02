@@ -362,7 +362,7 @@ impl<T: Transport> Backend for MacAppStore<T> {
             .list(cancel)?
             .iter()
             .filter(|app| {
-                app.name.to_lowercase().contains(&query)
+                search_matches(&app.name, &query)
                     || app.adam_id.to_string() == query
                     || app
                         .bundle_id

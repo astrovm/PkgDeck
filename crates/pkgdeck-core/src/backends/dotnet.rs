@@ -530,7 +530,7 @@ impl<T: Transport> Backend for DotnetTools<T> {
         let installed = self.list(cancel)?;
         let mut rows: Vec<Package> = installed
             .iter()
-            .filter(|tool| tool.id.to_lowercase().contains(&query))
+            .filter(|tool| search_matches(&tool.id, &query))
             .map(|tool| Self::package(tool, None))
             .collect();
         if query.is_empty() {

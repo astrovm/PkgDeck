@@ -493,17 +493,16 @@ impl<T: Transport> Backend for GoBinaries<T> {
     }
     fn search(&mut self, query: &str, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
         let query = query.trim();
-        let lower = query.to_lowercase();
         let mut rows: Vec<Package> = self
             .rows(false, cancel)?
             .into_iter()
             .filter(|row| {
-                row.id.name.to_lowercase().contains(&lower)
+                search_matches(&row.id.name, query)
                     || row
                         .id
                         .reference
                         .as_deref()
-                        .is_some_and(|path| path.to_lowercase().contains(&lower))
+                        .is_some_and(|path| search_matches(path, query))
             })
             .collect();
         // A package path can be installed when it isn't already.

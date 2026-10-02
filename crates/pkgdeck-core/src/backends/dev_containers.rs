@@ -703,11 +703,10 @@ impl<T: Transport> Backend for DevContainers<T> {
     }
     fn search(&mut self, query: &str, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
         // Only existing containers: creating one is left to the tool.
-        let query = query.to_lowercase();
         Ok(self
             .rows(cancel)?
             .into_iter()
-            .filter(|row| row.id.name.to_lowercase().contains(&query))
+            .filter(|row| search_matches(&row.id.name, query))
             .collect())
     }
     fn lookup(&mut self, name: &str, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
