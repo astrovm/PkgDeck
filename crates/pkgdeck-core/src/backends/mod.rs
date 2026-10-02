@@ -629,7 +629,78 @@ fn locale_key(var: impl Fn(&str) -> Option<OsString>) -> Vec<String> {
         .collect()
 }
 
+/// What `pacman -Ss` answers from below `root`: the synced databases, the
+/// local database for its "[installed]" marks, and the configuration that
+/// names the repositories. `None` when the configuration moves the
+/// databases or reads repositories from elsewhere.
+fn pacman_search_watches(root: &std::path::Path) -> Option<Vec<crate::cache::Watch>> {
+    use crate::cache::Watch;
+    let conf = root.join("etc/pacman.conf");
+    let text = std::fs::read_to_string(&conf).unwrap_or_default();
+    let moved = text.lines().any(|line| {
+        let (key, value) = line.split_once('=').unwrap_or((line, ""));
+        match key.trim() {
+            "DBPath" | "RootDir" => true,
+            // Only files right in pacman.d, which is watched one level deep.
+            "Include" => value
+                .trim()
+                .strip_prefix("/etc/pacman.d/")
+                .is_none_or(|file| file.contains('/') || file.starts_with('.')),
+            _ => false,
+        }
+    });
+    (!moved).then(|| {
+        vec![
+            Watch::tree(root.join("var/lib/pacman/sync"), 1),
+            // Every install, upgrade or removal adds or removes a
+            // "name-version" folder here, which changes the folder itself.
+            Watch::file(root.join("var/lib/pacman/local")),
+            Watch::file(conf),
+            Watch::tree(root.join("etc/pacman.d"), 1),
+            Watch::file(root.join("usr/bin/pacman")),
+        ]
+    })
+}
+
 impl NativeTransport {
+    /// System manager commands, with pacman searches answered from `store`
+    /// while the databases below `root` are unchanged.
+    fn system_manager_cached(
+        &self,
+        executable: &str,
+        args: &[OsString],
+        cancel: &Cancellation,
+        write: bool,
+        root: &std::path::Path,
+        store: impl FnOnce() -> Option<crate::cache::Store>,
+    ) -> Result<Completion, ExecutionError> {
+        let run = || {
+            self.host
+                .system_manager(executable, args, cancel, write, self.authorization)
+        };
+        // A search reads every synced database and takes about a second.
+        let search = !write
+            && self.host.runtime == crate::host::Runtime::Native
+            && executable == "pacman"
+            && args.first().is_some_and(|arg| arg == "-Ss");
+        let Some(watches) = search.then(|| pacman_search_watches(root)).flatten() else {
+            return run();
+        };
+        let args_text: Vec<String> = args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        let args_text: Vec<&str> = args_text.iter().map(String::as_str).collect();
+        crate::cache::completion(
+            store().as_ref(),
+            "pacman",
+            "search",
+            &args_text,
+            &watches,
+            &[],
+            run,
+        )
+    }
     /// Flatpak reads, with remote searches answered from `store` while the
     /// installation's AppStream data is unchanged.
     fn flatpak_cached(
@@ -971,8 +1042,14 @@ impl Transport for NativeTransport {
         cancel: &Cancellation,
         write: bool,
     ) -> Result<Completion, ExecutionError> {
-        self.host
-            .system_manager(executable, args, cancel, write, self.authorization)
+        self.system_manager_cached(
+            executable,
+            args,
+            cancel,
+            write,
+            std::path::Path::new("/"),
+            crate::cache::Store::user,
+        )
     }
     fn macos_tool(
         &self,
@@ -7342,6 +7419,67 @@ mod native_transport_tests {
             "second\tresult\n"
         );
         assert_eq!(cached(), entries);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn pacman_searches_are_answered_from_the_cache_until_its_databases_change() {
+        let base = temp_dir("pacman-search");
+        let bin = base.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(base.join("var/lib/pacman/sync")).unwrap();
+        std::fs::create_dir_all(base.join("var/lib/pacman/local")).unwrap();
+        std::fs::create_dir_all(base.join("etc")).unwrap();
+        let conf = base.join("etc/pacman.conf");
+        std::fs::write(
+            &conf,
+            "#DBPath = /elsewhere\n[core]\nInclude = /etc/pacman.d/mirrorlist\n",
+        )
+        .unwrap();
+        let pacman = bin.join("pacman");
+        script(&pacman, "printf 'core/first 1.0-1\\n    First\\n'");
+        let native = transport(&bin, &base);
+        let store = || Some(crate::cache::Store::new(base.join("cache")));
+        let cancel = Cancellation::default();
+        let read = |args: &[&str]| {
+            let args: Vec<OsString> = args.iter().map(OsString::from).collect();
+            let result =
+                native.system_manager_cached("pacman", &args, &cancel, false, &base, store);
+            String::from_utf8(result.unwrap().stdout).unwrap()
+        };
+        let search = ["-Ss", "first"];
+        assert_eq!(read(&search), "core/first 1.0-1\n    First\n");
+        script(&pacman, "printf 'core/first 2.0-1\\n    First\\n'");
+        assert_eq!(read(&search), "core/first 1.0-1\n    First\n");
+        // A refresh replaced a synced database: search again.
+        std::fs::write(base.join("var/lib/pacman/sync/core.db"), "").unwrap();
+        assert_eq!(read(&search), "core/first 2.0-1\n    First\n");
+        // An install changes the "[installed]" marks.
+        script(
+            &pacman,
+            "printf 'core/first 2.0-1 [installed]\\n    First\\n'",
+        );
+        assert_eq!(read(&search), "core/first 2.0-1\n    First\n");
+        std::fs::create_dir(base.join("var/lib/pacman/local/first-2.0-1")).unwrap();
+        assert_eq!(read(&search), "core/first 2.0-1 [installed]\n    First\n");
+        // Other reads always run.
+        let entries = || std::fs::read_dir(base.join("cache")).unwrap().count();
+        let cached = entries();
+        script(&pacman, "printf 'other\\n'");
+        assert_eq!(read(&["-Q"]), "other\n");
+        assert_eq!(entries(), cached);
+        // Databases or repositories configured elsewhere are not watched.
+        for line in [
+            "DBPath = /srv/pacman/",
+            "Include = /srv/repos.conf",
+            "Include = /etc/pacman.d/repos/extra.conf",
+            "Include = /etc/pacman.d/..",
+        ] {
+            std::fs::write(&conf, format!("[options]\n{line}\n")).unwrap();
+            assert!(pacman_search_watches(&base).is_none());
+            assert_eq!(read(&["-Ss", "other"]), "other\n");
+            assert_eq!(entries(), cached);
+        }
         std::fs::remove_dir_all(base).unwrap();
     }
 
