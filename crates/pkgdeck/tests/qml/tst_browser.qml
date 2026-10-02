@@ -47,6 +47,7 @@ TestCase {
         property bool simulateOpening: false
         property bool busy: false
         property bool writing: false
+        property bool reading: false
         property bool upgradable: false
         property string lastView: ""
         property string lastQuery: ""
@@ -160,6 +161,7 @@ TestCase {
         fake.simulateLoading = false;
         fake.simulateOpening = false;
         fake.busy = false;
+        fake.reading = false;
         fake.writing = false;
         fake.upgradable = false;
         fake.writes = 0;
@@ -496,7 +498,12 @@ TestCase {
         populate();
         browser.choose(0);
         fake.busy = true;
-        verify(!findChild(findChild(browser, "packageResults").itemAtIndex(0), "rowPackageAction").enabled);
+        const rowAction = findChild(findChild(browser, "packageResults").itemAtIndex(0), "rowPackageAction");
+        verify(!rowAction.enabled);
+        // Rows already on screen act while other sources still load.
+        fake.reading = true;
+        verify(rowAction.enabled);
+        fake.reading = false;
         // Reads do not lock navigation or selection. Section switches go
         // through the cache path, never forced.
         browser.openView("Updates");
@@ -1822,6 +1829,33 @@ TestCase {
         compare(browser.viewItems[0].name, "fire");
         compare(fake.lastForce, false);
         compare(fake.lastView, "Search");
+    }
+    function test_search_rows_hold_their_place_while_you_use_the_list() {
+        browser.openView("Search");
+        const search = findChild(browser, "searchField");
+        search.text = "fire";
+        const row = (name) => ({kind: "package", name: name, source: "apt", architecture: "all", installed: null, candidate: "1", scope: "system", summary: name});
+        fake.busy = true;
+        fake.rows = JSON.stringify([row("firefox"), row("x-fire")]);
+        waitForRendering(browser.contentItem);
+        const list = findChild(browser, "packageResults");
+        list.forceActiveFocus();
+        // A better match streams in: it goes below the rows in use.
+        fake.rows = JSON.stringify([row("firefox"), row("x-fire"), row("fire")]);
+        compare(browser.viewItems.map(r => r.name), ["firefox", "x-fire", "fire"]);
+        // Loading done but the list still in use: rows stay put.
+        fake.busy = false;
+        compare(browser.viewItems.map(r => r.name), ["firefox", "x-fire", "fire"]);
+        // Leaving the list sorts them best first again.
+        search.forceActiveFocus();
+        compare(browser.viewItems.map(r => r.name), ["fire", "firefox", "x-fire"]);
+        // Typing sorts from scratch even while the list holds them.
+        fake.busy = true;
+        list.forceActiveFocus();
+        verify(browser.frozenOrder !== null);
+        search.forceActiveFocus();
+        keyClick(Qt.Key_E);
+        compare(browser.frozenOrder, null);
     }
     function test_activity_navigation_stays_available_during_write() {
         populate();

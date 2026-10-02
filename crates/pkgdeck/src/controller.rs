@@ -113,6 +113,10 @@ pub mod ffi {
         #[qproperty(QString, version)]
         #[qproperty(bool, busy)]
         #[qproperty(bool, writing)]
+        /// True while the only work running reads rows (a section, a search
+        /// or details). Rows already on screen can be acted on meanwhile:
+        /// a confirmed change waits its turn.
+        #[qproperty(bool, reading)]
         #[qproperty(bool, upgradable)]
         /// True while anything can still arrive from a background thread
         /// (a load, details, a preload, an Activity read, a change, a
@@ -1048,6 +1052,8 @@ struct PrefetchWorker {
     key: String,
     /// Sources or elevation changed, or a write started: drop its result.
     stale: bool,
+    /// What its engine checked, so the next preload or search can reuse it.
+    scope: (Vec<String>, bool, Instant),
 }
 /// Loads one package's details while a search or section still streams,
 /// so a selection never waits for the slowest package manager.
@@ -1189,6 +1195,7 @@ pub struct Controller {
     version: QString,
     busy: bool,
     writing: bool,
+    reading: bool,
     upgradable: bool,
     needs_poll: bool,
     refreshing: bool,
@@ -1277,6 +1284,7 @@ impl Default for Controller {
             version: pkgdeck_core::VERSION.into(),
             busy: false,
             writing: false,
+            reading: false,
             upgradable: false,
             // Sections preload from startup, which poll() starts.
             needs_poll: true,
@@ -1370,6 +1378,18 @@ impl Controller {
     /// Whether poll() may still deliver something or start queued work:
     /// any worker thread, a section waiting for its preload, or preloads
     /// that are due and not held back by a change awaiting confirmation.
+    /// See the `reading` property.
+    fn only_reading(&self) -> bool {
+        self.worker
+            .as_ref()
+            .is_some_and(|worker| matches!(worker.job, Job::Load(..) | Job::Details(_)))
+            && self.confirmed_queue.is_empty()
+            && self.validated_confirmed.is_none()
+            && !matches!(
+                self.queued,
+                Some(Job::PlanOperation(..) | Job::PlanAdoption(..) | Job::PlanUpgrade(..))
+            )
+    }
     fn outstanding(&self) -> bool {
         let held = self.pending.is_some() || !self.confirmed_queue.is_empty();
         self.worker.is_some()
@@ -3223,6 +3243,8 @@ impl ffi::PackageController {
     fn sync_needs_poll(mut self: Pin<&mut Self>) {
         let outstanding = self.rust().outstanding();
         self.as_mut().set_needs_poll(outstanding);
+        let reading = self.rust().only_reading();
+        self.as_mut().set_reading(reading);
     }
     fn start_confirmed(mut self: Pin<&mut Self>, entry: Confirmed) {
         if let (Some(store), Some(id)) = (self.rust().activity_store.clone(), entry.activity_id) {
@@ -4214,7 +4236,7 @@ impl ffi::PackageController {
         match operation {
             Some(op)
                 if op.backend() == "apt"
-                    && !writing
+                    && self.rust().worker.is_none()
                     && matches!(
                         op,
                         Operation::Install(_) | Operation::Remove(_) | Operation::Upgrade(_)
@@ -4953,8 +4975,28 @@ impl ffi::PackageController {
         };
         let job = Job::Load(view.clone(), String::new());
         let scope = engine_source(&job, &sources);
+        let scope_for_worker = scope.clone();
         let sources_view = view == "Sources";
         let natives = self.rust().natives;
+        let sudo = self.rust().sudo;
+        // Installed, Updates and Clean read the same sources: the engine the
+        // last preload (or search) checked is reused for a minute, instead
+        // of checking every package manager again for each section.
+        let warm = !sources_view
+            && self
+                .rust()
+                .engine_scope
+                .as_ref()
+                .is_some_and(|(sources, was_sudo, born)| {
+                    *sources == scope && *was_sudo == sudo && born.elapsed() < VIEW_TTL
+                });
+        let (cached, born) = if warm {
+            let born = self.as_mut().rust_mut().engine_scope.take().map(|s| s.2);
+            (self.as_mut().rust_mut().engine.take(), born)
+        } else {
+            (None, None)
+        };
+        let born = born.unwrap_or_else(Instant::now);
         let cancel = Cancellation::default();
         let token = cancel.clone();
         let (sender, receiver) = mpsc::channel();
@@ -4970,8 +5012,18 @@ impl ffi::PackageController {
                     let _ = sender.send(reply);
                 }
             };
-            match (natives.engine)(&scope, sources_view, authorization, &token) {
-                Ok(mut engine) => execute(&mut engine, job, &token, &mut send),
+            let engine = match cached {
+                Some(engine) => Ok(engine),
+                None => (natives.engine)(&scope_for_worker, sources_view, authorization, &token),
+            };
+            match engine {
+                Ok(mut engine) => {
+                    execute(&mut engine, job, &token, &mut send);
+                    // Sources checks every manager, even unused ones.
+                    if !sources_view {
+                        send(Reply::Engine(Box::new(engine)));
+                    }
+                }
                 Err(error) => send(Reply::Done(Err(error))),
             }
         });
@@ -4982,6 +5034,7 @@ impl ffi::PackageController {
             view,
             key,
             stale: false,
+            scope: (scope, sudo, born),
         });
         self.sync_needs_poll();
     }
@@ -4990,6 +5043,7 @@ impl ffi::PackageController {
             let finished = worker.handle.is_finished();
             let replies: Vec<_> = worker.receiver.try_iter().collect();
             let (stale, key, view) = (worker.stale, worker.key.clone(), worker.view.clone());
+            let scope = worker.scope.clone();
             let replies = if finished {
                 let worker = self.as_mut().rust_mut().prefetch_worker.take().unwrap();
                 let _ = worker.handle.join();
@@ -5016,6 +5070,12 @@ impl ffi::PackageController {
                                 .rust_mut()
                                 .prefetched
                                 .insert(key.clone(), (Instant::now(), payload));
+                        }
+                        // Kept for the next preload or search, unless a
+                        // running job will leave its own.
+                        Reply::Engine(engine) if self.rust().worker.is_none() => {
+                            self.as_mut().rust_mut().engine = Some(*engine);
+                            self.as_mut().rust_mut().engine_scope = Some(scope.clone());
                         }
                         _ => {}
                     }
@@ -7786,6 +7846,7 @@ mod tests {
             view: view.into(),
             key,
             stale,
+            scope: (vec![], false, Instant::now()),
         }
     }
     #[test]
@@ -8413,6 +8474,73 @@ mod tests {
         assert!(controller.rows().to_string().contains("apt only"));
     }
     #[test]
+    fn rows_stay_actionable_only_while_rows_load() {
+        let mut controller = idle_controller();
+        let mut controller = controller.pin_mut();
+        let worker = |job| Worker {
+            handle: thread::spawn(|| {}),
+            receiver: mpsc::channel().1,
+            cancel: Cancellation::default(),
+            job,
+        };
+        let refresh = Operation::Refresh {
+            backend: "apt".into(),
+        };
+        assert!(!controller.rust().only_reading());
+        controller.as_mut().rust_mut().worker =
+            Some(worker(Job::Load("Search".into(), "x".into())));
+        controller.as_mut().sync_needs_poll();
+        assert!(*controller.reading());
+        // A change being prepared or queued blocks rows again.
+        controller.as_mut().rust_mut().queued = Some(Job::PlanOperation(refresh.clone()));
+        assert!(!controller.rust().only_reading());
+        controller.as_mut().rust_mut().queued = None;
+        controller.as_mut().rust_mut().worker = Some(worker(Job::Write(refresh, None)));
+        controller.as_mut().sync_needs_poll();
+        assert!(!*controller.reading());
+        controller.as_mut().rust_mut().worker = None;
+    }
+    #[test]
+    fn preloads_reuse_one_checked_engine_and_pass_it_on() {
+        let mut controller = idle_controller();
+        let mut controller = controller.pin_mut();
+        let scope = engine_source(&Job::Load("Installed".into(), String::new()), &[]);
+        let born = Instant::now() - Duration::from_secs(5);
+        controller.as_mut().rust_mut().engine = Some(Engine::default());
+        controller.as_mut().rust_mut().engine_scope = Some((scope.clone(), false, born));
+        controller
+            .as_mut()
+            .start_prefetch("Installed".into(), cache_key("Installed", "", &[], false));
+        assert!(controller.rust().engine.is_none());
+        wait_until(&mut controller, |c| c.rust().prefetch_worker.is_none());
+        // Handed back with its first check time, for the next preload or search.
+        assert_eq!(
+            controller.rust().engine_scope,
+            Some((scope.clone(), false, born))
+        );
+        assert!(controller.rust().engine.is_some());
+        // An engine checked over a minute ago is checked again.
+        let old = Instant::now() - VIEW_TTL;
+        controller.as_mut().rust_mut().engine_scope = Some((scope.clone(), false, old));
+        controller
+            .as_mut()
+            .start_prefetch("Updates".into(), cache_key("Updates", "", &[], false));
+        wait_until(&mut controller, |c| c.rust().prefetch_worker.is_none());
+        let (_, _, checked) = controller.rust().engine_scope.clone().unwrap();
+        assert!(checked > old);
+        // A preload made stale by a source change keeps nothing.
+        controller.as_mut().rust_mut().engine = None;
+        controller.as_mut().rust_mut().engine_scope = None;
+        controller.as_mut().rust_mut().prefetch_worker = Some(fake_prefetch(
+            "Clean",
+            cache_key("Clean", "", &[], false),
+            vec![Reply::Engine(Box::default())],
+            true,
+        ));
+        wait_until(&mut controller, |c| c.rust().prefetch_worker.is_none());
+        assert!(controller.rust().engine.is_none());
+    }
+    #[test]
     fn a_better_name_from_details_updates_cached_sections_too() {
         let mut controller = ffi::create_controller();
         let mut controller = controller.pin_mut();
@@ -8474,6 +8602,7 @@ mod tests {
             view: "Updates".into(),
             key: cache_key("Updates", "", &[], false),
             stale: false,
+            scope: (vec![], false, Instant::now()),
         });
         // An older foreground read is cancelled and its reply ignored.
         controller
@@ -8543,6 +8672,7 @@ mod tests {
             view: "Installed".into(),
             key,
             stale: false,
+            scope: (vec![], false, Instant::now()),
         });
         controller
             .as_mut()

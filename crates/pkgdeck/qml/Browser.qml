@@ -287,6 +287,22 @@ Controls.ApplicationWindow {
         return failures.filter((failure) => failure.kind !== "cancelled" && effectiveSources().indexOf(failure.source) >= 0);
     }
     // The last load was cancelled (the Cancel button, or a new page).
+    // Rows on screen take actions while other sources still load; a
+    // confirmed change waits its turn. Only preparing a change blocks them.
+    readonly property bool canAct: !backend.busy || backend.writing || !!backend.reading
+    // While a search still streams in, rows you point at or move through
+    // with the keys hold their order, so a click never lands on a row that
+    // just slid in. Identity -> position, or null when rows sort freely.
+    property var frozenOrder: null
+    readonly property bool listEngaged: resultsHover.hovered || results.activeFocus
+    function updateFrozenOrder() {
+        const streaming = backend.busy && !backend.writing && currentView === "Search";
+        if (frozenOrder === null && streaming && listEngaged && searchPane.text.trim() !== "")
+            frozenOrder = new Map(viewItems.map((row, i) => [rowIdentity(row), i]));
+        else if (frozenOrder !== null && (currentView !== "Search" || (!backend.busy && !listEngaged)))
+            frozenOrder = null;
+    }
+    onListEngagedChanged: updateFrozenOrder()
     readonly property bool loadStopped: currentView === resultView && !backend.busy
         && (reportState.failures || []).some((failure) => failure.kind === "cancelled")
     function sourceFailureTitle() {
@@ -809,6 +825,16 @@ Controls.ApplicationWindow {
                 rows = rows.filter((row) => ((row.name || "") + " " + (row.display_name || "") + " " + (row.summary || "")).toLowerCase().indexOf(query) >= 0);
             if (query !== "")
                 rows.sort((a, b) => ((isFabricated(a) ? 1 : 0) - (isFabricated(b) ? 1 : 0)) || (relevanceScore(a, query) - relevanceScore(b, query)) || relevanceTiebreak(a, b));
+            if (root.frozenOrder !== null) {
+                // Rows keep their place while you use the list; late rows
+                // go below them, best match first.
+                const best = new Map(rows.map((row, i) => [row, i]));
+                const place = (row) => {
+                    const at = root.frozenOrder.get(root.rowIdentity(row));
+                    return at === undefined ? Infinity : at;
+                };
+                rows.sort((a, b) => (place(a) - place(b)) || (best.get(a) - best.get(b)));
+            }
         }
         // One app offered by several sources reads as one group, app first.
         const appFirst = root.currentView === "Search" && sortColumn === "" && searchPane.text.trim() !== "";
@@ -1245,7 +1271,7 @@ Controls.ApplicationWindow {
     function runRowAction(index) {
         const row = viewItems[index];
         const action = rowActionName(row);
-        if (!action || retainingResults || (backend.busy && !backend.writing))
+        if (!action || retainingResults || !canAct)
             return;
         markActiveRows([rowIdentity(row)]);
         backend.propose(action, originalIndex(index));
@@ -1360,6 +1386,7 @@ Controls.ApplicationWindow {
                 detailsReveal.restart();
         }
         function onBusyChanged() {
+            root.updateFrozenOrder();
             if (!backend.busy) {
                 // The preview or an error has arrived. A queued opening can
                 // briefly transition through idle before its worker starts.
@@ -1448,6 +1475,7 @@ Controls.ApplicationWindow {
         easing.type: Easing.OutCubic
     }
     onCurrentViewChanged: {
+        updateFrozenOrder();
         Qt.callLater(updateOverflow);
         if (motionEnabled)
             pageSwitch.restart();
@@ -1988,6 +2016,8 @@ Controls.ApplicationWindow {
                     }
                     onQueryEdited: {
                         root.queryDirty = true;
+                        // A new query sorts its rows from scratch.
+                        root.frozenOrder = null;
                         if (searchPane.text.trim().length === 0)
                             root.submitSearch();
                         else
@@ -2558,6 +2588,7 @@ Controls.ApplicationWindow {
                         boundsBehavior: Theme.motionEnabled ? Flickable.DragAndOvershootBounds : Flickable.StopAtBounds
                         id: results
                         objectName: "packageResults"
+                        HoverHandler { id: resultsHover }
                         Layout.fillWidth: true
                         Layout.fillHeight: true
                         model: resultsModel
@@ -2903,7 +2934,7 @@ Controls.ApplicationWindow {
                                 ActionButton {
                                     objectName: "rowContainerPull"
                                     visible: packageRow.packageKind && root.containerSource(packageRow.modelData.source) && root.isInstalled(packageRow.modelData) && !!packageRow.modelData.reference && !packageRow.active
-                                    enabled: (!backend.busy || backend.writing) && !root.retainingResults
+                                    enabled: root.canAct && !root.retainingResults
                                     text: ""
                                     symbol: "updates"
                                     flat: true
@@ -2918,7 +2949,7 @@ Controls.ApplicationWindow {
                                 ActionButton {
                                     objectName: "rowPackageAction"
                                     visible: packageRow.rowAction.length > 0
-                                    enabled: packageRow.active || ((!backend.busy || backend.writing) && !root.retainingResults)
+                                    enabled: packageRow.active || (root.canAct && !root.retainingResults)
                                     readonly property string verb: ({install: "Install ", remove: "Remove ", upgrade: "Update ", clean: "Run cleanup ", adopt: "Manage "})[packageRow.rowAction] || ""
                                     text: ""
                                     symbol: packageRow.active ? "cancel" : packageRow.rowAction === "upgrade" ? "updates" : ["install", "adopt"].indexOf(packageRow.rowAction) >= 0 ? "install" : "remove"
@@ -3109,7 +3140,7 @@ Controls.ApplicationWindow {
                 actionAccessibleName: rowAction === "adopt" && root.selected ? "Manage " + (root.selected.display_name || root.selected.name) + " with Homebrew" : ""
                 actionSymbol: rowAction === "upgrade" ? "updates" : ["install", "adopt"].indexOf(rowAction) >= 0 ? "install" : "remove"
                 actionTone: ["upgrade", "adopt"].indexOf(rowAction) >= 0 ? "accent" : rowAction === "install" ? "success" : "danger"
-                actionEnabled: (!backend.busy || backend.writing) && !root.retainingResults
+                actionEnabled: root.canAct && !root.retainingResults
                 onActionRequested: root.runRowAction(results.currentIndex)
                 Behavior on Layout.preferredHeight {
                     enabled: detailsPanel.visible
