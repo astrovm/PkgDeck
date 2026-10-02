@@ -1402,19 +1402,29 @@ TestCase {
         field.text = "vim";
         verify(!empty.visible);
     }
-    function test_a_read_names_the_sources_it_still_waits_for() {
+    function test_a_slow_read_names_the_sources_it_still_waits_for() {
         browser.openView("Installed");
         const pending = findChild(browser, "pendingSources");
-        const heading = findChild(browser, "resultsHeading");
-        fake.busy = true;
+        const row = findChild(browser, "resultsHeadingRow");
         fake.pending_sources = JSON.stringify(["npm", "gem"]);
-        verify(pending.visible);
+        fake.busy = true;
+        waitForRendering(browser.contentItem);
+        const height = row.height;
+        // A fast read ends before anything is named.
+        verify(!pending.visible);
+        tryVerify(() => pending.visible, 3000);
         compare(pending.text, "Waiting for npm, RubyGems");
-        const height = heading.height;
-        // Sources answer one by one; the row keeps its height.
+        // Sources answer one by one; the row keeps its height and the
+        // list never crowds out the heading.
+        fake.pending_sources = JSON.stringify(["apt", "brew", "cargo", "flatpak", "gem", "npm", "pip", "snap"]);
+        waitForRendering(browser.contentItem);
+        compare(row.height, height);
+        verify(pending.height <= row.height);
+        verify(pending.width <= row.width * 0.6 + 0.5);
         fake.pending_sources = JSON.stringify(["gem"]);
         compare(pending.text, "Waiting for RubyGems");
-        compare(heading.height, height);
+        waitForRendering(browser.contentItem);
+        compare(row.height, height);
         fake.pending_sources = "[]";
         verify(!pending.visible);
         // Nothing is named once the read ends, or while a change runs.
@@ -1423,6 +1433,7 @@ TestCase {
         verify(!pending.visible);
         fake.busy = true;
         fake.writing = true;
+        wait(1000);
         verify(!pending.visible);
         fake.writing = false;
         fake.busy = false;

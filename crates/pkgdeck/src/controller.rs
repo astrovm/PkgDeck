@@ -337,6 +337,9 @@ enum Reply {
     FailureOutput(String),
     /// The sources a streaming load asked, sent before its first partial.
     Asked(Vec<String>),
+    /// The sources a preload's latest partial heard from: a preload keeps
+    /// its rows for the end, but the section waiting on it names the rest.
+    Answered(Vec<String>),
     Partial(PackageReport),
     /// Every installed package, and whether update indexes were refreshed
     /// first. Only a refreshed inventory may stand in for Updates.
@@ -1059,6 +1062,9 @@ struct PrefetchWorker {
     key: String,
     /// Sources or elevation changed, or a write started: drop its result.
     stale: bool,
+    /// The sources it asked, and those that answered so far.
+    asked: Vec<String>,
+    answered: Vec<String>,
     /// What its engine checked, so the next preload or search can reuse it.
     scope: (Vec<String>, bool, Instant),
 }
@@ -1530,6 +1536,16 @@ fn epoch_seconds() -> u64 {
 /// Wall-clock seconds at a monotonic instant in the past.
 fn epoch_seconds_at(instant: Instant) -> u64 {
     epoch_seconds().saturating_sub(instant.elapsed().as_secs())
+}
+/// The sources a streamed report heard from, as a success or a failure.
+fn answered(report: &PackageReport) -> Vec<String> {
+    let failed = report.failures.iter().map(|f| f.backend.clone());
+    report
+        .successful_sources
+        .iter()
+        .cloned()
+        .chain(failed)
+        .collect()
 }
 fn encoded(value: impl serde::Serialize) -> QString {
     serde_json::to_string(&value)
@@ -3662,8 +3678,29 @@ impl ffi::PackageController {
     }
     /// Remember the sources a visible load still waits for and show them.
     fn set_asked(mut self: Pin<&mut Self>, sources: Vec<String>) {
-        self.as_mut().set_pending_sources(encoded(&sources));
         self.as_mut().rust_mut().asked = sources;
+        self.show_pending();
+    }
+    /// Show what the visible section still waits for: its preload's
+    /// sources while it waits on one, else its own load's.
+    fn show_pending(mut self: Pin<&mut Self>) {
+        let rust = self.rust();
+        let pending: Vec<&String> = if rust.awaiting_prefetch {
+            rust.prefetch_worker
+                .iter()
+                .filter(|worker| !worker.stale && worker.view == rust.active_view)
+                .flat_map(|worker| {
+                    let answered = &worker.answered;
+                    worker.asked.iter().filter(|id| !answered.contains(id))
+                })
+                .collect()
+        } else {
+            rust.asked.iter().collect()
+        };
+        let pending = encoded(pending);
+        if self.pending_sources() != &pending {
+            self.as_mut().set_pending_sources(pending);
+        }
     }
     fn follow_output(mut self: Pin<&mut Self>, line: &str) {
         if let Some(state) = self.as_mut().rust_mut().progress_state.as_mut() {
@@ -3748,6 +3785,7 @@ impl ffi::PackageController {
         self.as_mut().set_refreshing(false);
         self.as_mut().rust_mut().active_view = view.clone();
         self.as_mut().rust_mut().awaiting_prefetch = false;
+        self.as_mut().show_pending();
         self.as_mut().rust_mut().hold_partials = refreshing;
         if view == "Search" && query.trim().is_empty() {
             // Seed the selected sources before the first query starts.
@@ -3892,6 +3930,7 @@ impl ffi::PackageController {
                 self.as_mut().rust_mut().background = true;
             }
             self.as_mut().set_busy(true);
+            self.as_mut().show_pending();
             return;
         }
         // Reads are preemptible: cancel the in-flight load or details
@@ -5025,10 +5064,13 @@ impl ffi::PackageController {
                         crate::metadata::enrich_cached(package);
                     }
                 }
-                // Streaming partials are only for a visible load.
-                if !matches!(reply, Reply::Partial(_)) {
-                    let _ = sender.send(reply);
-                }
+                // Rows stream only for a visible load; a section waiting
+                // on this preload only needs who answered.
+                let reply = match reply {
+                    Reply::Partial(report) => Reply::Answered(answered(&report)),
+                    reply => reply,
+                };
+                let _ = sender.send(reply);
             };
             let engine = match cached {
                 Some(engine) => Ok(engine),
@@ -5052,6 +5094,8 @@ impl ffi::PackageController {
             view,
             key,
             stale: false,
+            asked: vec![],
+            answered: vec![],
             scope: (scope, sudo, born),
         });
         self.sync_needs_poll();
@@ -5094,6 +5138,16 @@ impl ffi::PackageController {
                         Reply::Engine(engine) if self.rust().worker.is_none() => {
                             self.as_mut().rust_mut().engine = Some(*engine);
                             self.as_mut().rust_mut().engine_scope = Some(scope.clone());
+                        }
+                        Reply::Asked(sources) => {
+                            if let Some(worker) = &mut self.as_mut().rust_mut().prefetch_worker {
+                                worker.asked = sources;
+                            }
+                        }
+                        Reply::Answered(sources) => {
+                            if let Some(worker) = &mut self.as_mut().rust_mut().prefetch_worker {
+                                worker.answered = sources;
+                            }
                         }
                         _ => {}
                     }
@@ -5197,6 +5251,7 @@ impl ffi::PackageController {
             }
         }
         self.as_mut().poll_prefetch();
+        self.as_mut().show_pending();
         self.as_mut().poll_details();
         let Some(worker) = &self.rust().worker else {
             return;
@@ -5241,16 +5296,9 @@ impl ffi::PackageController {
                 // it succeeded or failed.
                 Reply::Partial(report) => {
                     if !self.rust().asked.is_empty() {
-                        let pending = self
-                            .rust()
-                            .asked
-                            .iter()
-                            .filter(|id| {
-                                !report.successful_sources.contains(id)
-                                    && !report.failures.iter().any(|f| f.backend == **id)
-                            })
-                            .cloned()
-                            .collect();
+                        let answered = answered(&report);
+                        let mut pending = self.rust().asked.clone();
+                        pending.retain(|id| !answered.contains(id));
                         self.as_mut().set_asked(pending);
                     }
                     Some(Reply::Partial(report))
@@ -5549,6 +5597,7 @@ impl ffi::PackageController {
                     | Reply::Output(_)
                     | Reply::FailureOutput(_)
                     | Reply::Asked(_)
+                    | Reply::Answered(_)
                     | Reply::Inventory(..) => {}
                 }
             }
@@ -7896,6 +7945,8 @@ mod tests {
             view: view.into(),
             key,
             stale,
+            asked: vec![],
+            answered: vec![],
             scope: (vec![], false, Instant::now()),
         }
     }
@@ -8652,6 +8703,8 @@ mod tests {
             view: "Updates".into(),
             key: cache_key("Updates", "", &[], false),
             stale: false,
+            asked: vec![],
+            answered: vec![],
             scope: (vec![], false, Instant::now()),
         });
         // An older foreground read is cancelled and its reply ignored.
@@ -8779,6 +8832,99 @@ mod tests {
         assert!(controller.rust().asked.is_empty());
     }
     #[test]
+    fn a_section_waiting_on_its_preload_names_the_sources_still_loading() {
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().rust_mut().prefetch.clear();
+        let pending = |c: &ffi::PackageController| c.pending_sources().to_string();
+        let (step, gate) = mpsc::channel::<()>();
+        let (sender, receiver) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            let _ = sender.send(Reply::Asked(vec!["apt".into(), "brew".into()]));
+            let _ = gate.recv();
+            let _ = sender.send(Reply::Answered(vec!["brew".into()]));
+            let _ = gate.recv();
+            let mut report = PackageReport::default();
+            report.successful_sources.push("brew".into());
+            let _ = sender.send(Reply::Done(Ok(Payload::Packages(report))));
+        });
+        controller.as_mut().rust_mut().prefetch_worker = Some(PrefetchWorker {
+            handle,
+            receiver,
+            cancel: Cancellation::default(),
+            view: "Updates".into(),
+            key: cache_key("Updates", "", &[], false),
+            stale: false,
+            asked: vec![],
+            answered: vec![],
+            scope: (vec![], false, Instant::now()),
+        });
+        // A preload nobody waits for stays quiet.
+        wait_until(&mut controller, |c| {
+            c.rust().prefetch_worker.as_ref().unwrap().asked.len() == 2
+        });
+        assert_eq!(pending(&controller), "[]");
+        controller
+            .as_mut()
+            .load("Updates".into(), "".into(), "".into(), false, false);
+        assert!(controller.rust().awaiting_prefetch);
+        assert_eq!(pending(&controller), r#"["apt","brew"]"#);
+        step.send(()).unwrap();
+        wait_until(&mut controller, |c| {
+            c.pending_sources().to_string() == r#"["apt"]"#
+        });
+        // Leaving the section stops naming them; coming back resumes.
+        controller
+            .as_mut()
+            .load("Search".into(), "".into(), "".into(), false, false);
+        assert_eq!(pending(&controller), "[]");
+        controller
+            .as_mut()
+            .load("Updates".into(), "".into(), "".into(), false, false);
+        assert_eq!(pending(&controller), r#"["apt"]"#);
+        step.send(()).unwrap();
+        wait_until(&mut controller, |c| c.rust().prefetch_worker.is_none());
+        assert!(!controller.rust().awaiting_prefetch);
+        assert_eq!(pending(&controller), "[]");
+    }
+    #[test]
+    fn a_stale_preload_names_nothing() {
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().rust_mut().prefetch.clear();
+        let key = cache_key("Installed", "", &[], false);
+        let mut worker = fake_prefetch("Installed", key, vec![], false);
+        worker.asked = vec!["apt".into()];
+        controller.as_mut().rust_mut().prefetch_worker = Some(worker);
+        controller.as_mut().rust_mut().active_view = "Installed".into();
+        controller.as_mut().rust_mut().awaiting_prefetch = true;
+        controller.as_mut().show_pending();
+        assert_eq!(controller.pending_sources().to_string(), r#"["apt"]"#);
+        controller.as_mut().rust_mut().invalidate_prefetch();
+        controller.as_mut().rust_mut().awaiting_prefetch = true;
+        controller.as_mut().show_pending();
+        assert_eq!(controller.pending_sources().to_string(), "[]");
+    }
+    #[test]
+    fn preloads_report_which_sources_answered_instead_of_rows() {
+        let mut controller = synthetic_controller();
+        let mut controller = controller.pin_mut();
+        controller
+            .as_mut()
+            .start_prefetch("Installed".into(), cache_key("Installed", "", &[], false));
+        let worker = controller
+            .as_mut()
+            .rust_mut()
+            .prefetch_worker
+            .take()
+            .unwrap();
+        worker.handle.join().unwrap();
+        let replies: Vec<_> = worker.receiver.try_iter().collect();
+        assert!(matches!(&replies[0], Reply::Asked(asked) if asked == &["fixture"]));
+        assert!(matches!(&replies[1], Reply::Answered(answered) if answered == &["fixture"]));
+        assert!(!replies.iter().any(|r| matches!(r, Reply::Partial(_))));
+    }
+    #[test]
     fn retrying_a_source_in_a_section_ignores_search_text() {
         let mut controller = ffi::create_controller();
         let mut controller = controller.pin_mut();
@@ -8833,6 +8979,8 @@ mod tests {
             view: "Installed".into(),
             key,
             stale: false,
+            asked: vec![],
+            answered: vec![],
             scope: (vec![], false, Instant::now()),
         });
         controller

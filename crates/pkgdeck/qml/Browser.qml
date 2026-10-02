@@ -277,9 +277,24 @@ Controls.ApplicationWindow {
             sourcePopup.draftSources = root.effectiveSources().filter((id) => root.sourceInfo(id).availability_kind === "available" && root.sourceSupportsView(id));
     }
     readonly property var reportState: JSON.parse(backend.report_state || "{}")
-    // Sources the running read still waits for, so a slow one is named.
-    readonly property var pendingSourceNames: backend.busy && !backend.writing
+    // Sources a slow read still waits for. A fast read ends before the
+    // delay, so its list never flashes by.
+    readonly property var pendingSourceNames: pendingDelay.elapsed
         ? JSON.parse(backend.pending_sources || "[]").map((id) => sourceDisplayName(id)) : []
+    Timer {
+        id: pendingDelay
+        readonly property bool reading: backend.busy && !backend.writing
+        property bool elapsed: false
+        interval: 800
+        onReadingChanged: {
+            elapsed = false;
+            if (reading)
+                restart();
+            else
+                stop();
+        }
+        onTriggered: elapsed = reading
+    }
     readonly property var readFailures: {
         if (currentView !== resultView)
             return [];
@@ -2405,6 +2420,7 @@ Controls.ApplicationWindow {
                     spacing: 0
                     RowLayout {
                         id: resultsHeadingRow
+                        objectName: "resultsHeadingRow"
                         visible: results.count > 0 || backend.busy || backend.writing || (root.currentView === "Sources" && root.items.some(row => row.kind === "source" && !row.available))
                         Layout.fillWidth: true
                         Layout.margins: 14
