@@ -53,6 +53,10 @@ bounded 900 sudo -n installer -pkg "$installer_pkg" -target /
 # writes only through the fixed /opt/local/bin/port.
 export PATH="/opt/local/bin:/opt/local/sbin:$PATH"
 port version
+# Prebuilt archives only: when one is missing, MacPorts would compile the
+# port and its toolchain for longer than any budget here. Fail at once with
+# its own reason instead.
+echo 'buildfromsource never' | sudo -n tee -a /opt/local/etc/macports/macports.conf >/dev/null
 
 run() { "$pkd" --json --yes --auth sudo --from macports "$@"; }
 success() {
@@ -90,7 +94,7 @@ bounded 900 success refresh
 installed | absent '^ *ripgrep '
 run search ripgrep > "$logs/search.json"
 jq -e '.data.packages[] | select(.id.name == "ripgrep") | .installed_version == null' "$logs/search.json"
-bounded 1200 success install ripgrep
+bounded 600 success install ripgrep
 port -q installed ripgrep | grep -E '^ *ripgrep @[^ ]+\+pcre.* \(active\)'
 /opt/local/bin/rg --version
 agree
