@@ -12783,6 +12783,17 @@ mod tests {
         let mut controller = synthetic_controller();
         let mut controller = controller.pin_mut();
         assert!(!controller.as_mut().restart_app(false));
+        // A Flatpak restarts through flatpak-spawn, missing outside one.
+        controller.as_mut().rust_mut().install = pkgdeck_core::relaunch::Install::detect(
+            &Default::default(),
+            Some("[Instance]\napp-path=/var/lib/flatpak/app/io.github.astrovm.PkgDeck/x86_64/stable/abc/files\n"),
+            std::path::Path::new("/app/bin/pkgdeck"),
+        );
+        assert!(!controller.as_mut().restart_app(false));
+        assert!(controller
+            .status()
+            .to_string()
+            .starts_with("PkgDeck couldn't restart:"));
     }
     #[test]
     fn system_update_approval_is_saved_removed_and_explained() {

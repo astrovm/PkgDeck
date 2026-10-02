@@ -63,13 +63,15 @@ impl Install {
     pub fn current() -> Option<Self> {
         let env: BTreeMap<OsString, OsString> = std::env::vars_os().collect();
         let flatpak_info = std::fs::read_to_string("/.flatpak-info").ok();
-        Self::from_parts(
+        Self::detect(
             &env,
             flatpak_info.as_deref(),
             &std::env::current_exe().ok()?,
         )
     }
-    fn from_parts(
+    /// The copy described by an environment, the sandbox's `/.flatpak-info`
+    /// when there is one, and the running program's path.
+    pub fn detect(
         env: &BTreeMap<OsString, OsString>,
         flatpak_info: Option<&str>,
         executable: &Path,
@@ -275,7 +277,7 @@ mod tests {
         let dir = scratch("program");
         let program = dir.join("pkgdeck");
         fs::write(&program, "old").unwrap();
-        let install = Install::from_parts(&env(&[]), None, &program).unwrap();
+        let install = Install::detect(&env(&[]), None, &program).unwrap();
         assert_eq!(Install::program(&program), install);
         assert!(!install.updated());
         // Package managers write the new file and move it into place.
@@ -306,7 +308,7 @@ mod tests {
         let link = dir.join("opt/pkgdeck");
         std::os::unix::fs::symlink(dir.join("Cellar/pkgdeck/1.0"), &link).unwrap();
         let running = dir.join("Cellar/pkgdeck/1.0/bin/pkgdeck");
-        let install = Install::from_parts(&env(&[]), None, &running).unwrap();
+        let install = Install::detect(&env(&[]), None, &running).unwrap();
         assert_eq!(
             install.kind,
             Kind::Program {
@@ -339,7 +341,7 @@ mod tests {
         let macos = dir.join("PkgDeck.app/Contents/MacOS");
         fs::create_dir_all(&macos).unwrap();
         fs::write(macos.join("pkgdeck"), "old").unwrap();
-        let install = Install::from_parts(&env(&[]), None, &macos.join("pkgdeck")).unwrap();
+        let install = Install::detect(&env(&[]), None, &macos.join("pkgdeck")).unwrap();
         let bundle = dir.join("PkgDeck.app");
         let bundle = bundle.to_str().unwrap();
         assert!(!install.updated());
@@ -373,7 +375,7 @@ mod tests {
     fn sandboxed_copies_compare_revisions_and_restart_through_their_runtime() {
         let info = "[Application]\nname=io.github.astrovm.PkgDeck\n\n[Instance]\napp-path=/var/lib/flatpak/app/io.github.astrovm.PkgDeck/x86_64/stable/abc123/files\n";
         let flatpak =
-            Install::from_parts(&env(&[]), Some(info), Path::new("/app/bin/pkgdeck")).unwrap();
+            Install::detect(&env(&[]), Some(info), Path::new("/app/bin/pkgdeck")).unwrap();
         assert_eq!(
             flatpak.kind,
             Kind::Flatpak {
@@ -400,14 +402,14 @@ mod tests {
                 "--background"
             ]
         );
-        assert!(Install::from_parts(
+        assert!(Install::detect(
             &env(&[]),
             Some("[Instance]\n"),
             Path::new("/app/bin/pkgdeck")
         )
         .is_none());
 
-        let snap = Install::from_parts(
+        let snap = Install::detect(
             &env(&[
                 ("SNAP", "/snap/pkgdeck/12"),
                 ("SNAP_NAME", "pkgdeck"),
@@ -420,11 +422,9 @@ mod tests {
         assert!(!snap.updated());
         let (_, args) = snap.waiter(3, false);
         assert_eq!(strings(&args)[3..], ["/snap/bin/pkgdeck"]);
-        assert!(
-            Install::from_parts(&env(&[("SNAP", "/snap/x/1")]), None, Path::new("/x")).is_none()
-        );
+        assert!(Install::detect(&env(&[("SNAP", "/snap/x/1")]), None, Path::new("/x")).is_none());
 
-        let appimage = Install::from_parts(
+        let appimage = Install::detect(
             &env(&[("APPIMAGE", "/home/me/PkgDeck.AppImage")]),
             None,
             Path::new("/tmp/.mount/usr/bin/pkgdeck"),
@@ -489,7 +489,7 @@ mod tests {
             std::os::unix::fs::PermissionsExt::from_mode(0o755),
         )
         .unwrap();
-        let install = Install::from_parts(&env(&[]), None, &program).unwrap();
+        let install = Install::detect(&env(&[]), None, &program).unwrap();
         // Waiting on this test's process, the program starts only after the
         // test run ends; a missing program fails to spawn here.
         install.relaunch(true).unwrap();
