@@ -95,5 +95,10 @@ Description: Synthetic package installed after the cache was built
 STATUS
 query installed '' '' | jq -e 'length==2 and (map(.package.id.name) | sort)==["pkgdeck-fixture","pkgdeck-local"]'
 query search 'built' '' | jq -e 'length==1 and .[0].package.installed_version=="0.1"'
+# APT's cache debug log shows the reuse: the lists come from srcpkgcache.bin
+# instead of being parsed again.
+printf '#include "%s";\nDebug::pkgCacheGen "true";\n' "$work/config" >"$work/debug-config"
+log=$(APT_CONFIG="$work/debug-config" "$helper" installed '' '' 2>&1 >/dev/null)
+[[ $log == *'srcpkgcache.bin is valid'* && $log != *'NOT valid'* ]]
 [[ $(sha256sum "$work/var/cache/apt/"*.bin) == "$caches" ]]
 echo 'PASS native APT candidates, pinning, phasing, holds, multiarch, installed state, read-only caches and JSON escaping'
