@@ -56,9 +56,10 @@ query() { APT_CONFIG="$work/config" "$helper" "$@"; }
 query detect '' '' | jq -e '.==[]'
 query details pkgdeck-fixture amd64 | jq -e 'length==1 and .[0].package.installed_version=="1.0" and .[0].package.candidate_version=="2.0" and .[0].package.update=="available" and .[0].description=="Synthetic \"quoted\" café fixture\nLong description with a backslash \\ and a newline.\n\nSecond paragraph." and .[0].homepage=="https://example.invalid/pkgdeck" and .[0].dependencies==["synthetic-dependency (>= 1)"]'
 query details pkgdeck-fixture arm64 | jq -e 'length==1 and .[0].package.id.architecture=="arm64" and .[0].package.installed_version==null'
-query search QUOTED '' | jq -e 'length==1'
+# Lists carry only what their rows use; details reads the rest.
+query search QUOTED '' | jq -e 'length==1 and .[0].description=="" and .[0].homepage==null and .[0].dependencies==[]'
 query search CAFÉ '' | jq -e 'length==1'
-query installed '' '' | jq -e 'length==1'
+query installed '' '' | jq -e 'length==1 and .[0].description=="" and .[0].homepage=="https://example.invalid/pkgdeck" and .[0].dependencies==[]'
 cat >"$work/etc/apt/preferences" <<'PINS'
 Package: pkgdeck-fixture
 Pin: version 1.0

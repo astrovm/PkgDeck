@@ -75,18 +75,15 @@ static std::string search_text(const std::string &s) {
   return folded;
 }
 // Modern indexes keep only a checksum in Packages; the long text lives in
-// Translation-* files, which apt-cache show reads the same way. Only details
-// pays for the extra lookup. Returns Debian's folded text unfolded: one
-// leading space removed per line and " ." as an empty line.
+// Translation-* files, which apt-cache show reads the same way. Returns
+// Debian's folded text unfolded: one leading space removed per line and " ."
+// as an empty line.
 static std::string description(pkgRecords &records,
-                               pkgCache::VerIterator version,
-                               const std::string &mode) {
+                               pkgCache::VerIterator version) {
   std::string text;
-  if (mode == "details") {
-    auto translated = version.TranslatedDescription();
-    if (!translated.end())
-      text = records.Lookup(translated.FileList()).LongDesc();
-  }
+  auto translated = version.TranslatedDescription();
+  if (!translated.end())
+    text = records.Lookup(translated.FileList()).LongDesc();
   if (text.empty())
     text = records.Lookup(version.FileList()).LongDesc();
   std::string unfolded;
@@ -185,11 +182,14 @@ int main(int argc, char **argv) {
     const std::string name = item.Name(), architecture = version.Arch();
     auto &record = records.Lookup(version.FileList());
     const std::string summary = record.ShortDesc();
-    const std::string homepage = record.Homepage();
-    const std::string depends = record.RecordField("Depends");
     if (mode == "search" &&
         search_text(name + " " + summary).find(needle) == std::string::npos)
       continue;
+    // Lists show only the package; installed rows also group by homepage.
+    // Details reads the rest.
+    const std::string homepage = mode == "search" ? "" : record.Homepage();
+    const std::string depends =
+        mode == "details" ? record.RecordField("Depends") : "";
     const bool upgradable =
         !installed.end() && !candidate.end() &&
         cache.VS->CmpVersion(candidate.VerStr(), installed.VerStr()) > 0 &&
@@ -209,7 +209,8 @@ int main(int argc, char **argv) {
               << json(upgradable        ? "available"
                       : installed.end() ? "unknown"
                                         : "current")
-              << "},\"description\":" << json(description(records, version, mode))
+              << "},\"description\":"
+              << json(mode == "details" ? description(records, version) : "")
               << ",\"homepage\":"
               << (homepage.empty() ? "null" : json(homepage))
               << ",\"dependencies\":[";
