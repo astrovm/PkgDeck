@@ -2411,14 +2411,26 @@ impl BrewFound {
 struct BrewDisk {
     store: crate::cache::Store,
     watches: Vec<crate::cache::Watch>,
+    /// What else the details depend on: the architecture this program reads
+    /// them for, and the OS release brew picks variations for.
+    system: [String; 2],
 }
 impl BrewDisk {
     fn find(transport: &impl Transport) -> Option<Self> {
         let (store, watches) = transport.brew_cache()?;
-        Some(Self { store, watches })
+        let release = rustix::system::uname()
+            .release()
+            .to_string_lossy()
+            .into_owned();
+        Some(Self {
+            store,
+            watches,
+            system: [std::env::consts::ARCH.into(), release],
+        })
     }
     fn fingerprint(&self) -> Option<String> {
-        crate::cache::fingerprint(&self.watches, &[])
+        let [arch, release] = &self.system;
+        crate::cache::fingerprint(&self.watches, &[arch, release])
     }
     fn load(
         &self,
@@ -7068,7 +7080,11 @@ mod tests {
             );
             Some((
                 crate::cache::Store::new(self.root.join("store")),
-                host.brew_watches(&self.root.join("prefix/Homebrew/bin/brew")),
+                host.brew_details_watches(
+                    &self.root.join("prefix/Homebrew/bin/brew"),
+                    &self.root.join("cache"),
+                )
+                .unwrap(),
             ))
         }
     }
@@ -7077,6 +7093,7 @@ mod tests {
     fn cask_details_are_kept_between_runs_until_homebrew_changes() {
         let root = std::env::temp_dir().join(format!("pkgdeck-brew-kept-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("cache/api")).unwrap();
         let brew = KeptBrew {
             brew: CaskBrew {
                 version: "7.0.6",
@@ -7141,6 +7158,28 @@ mod tests {
         assert_eq!(run("codex"), ["codex", "codex-cli"]);
         assert_eq!(reads(), 10);
         std::fs::remove_dir_all(&brew.root).unwrap();
+    }
+
+    #[test]
+    fn kept_details_belong_to_one_architecture_and_os_release() {
+        let root = std::env::temp_dir().join(format!("pkgdeck-brew-system-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let disk = |system: [&str; 2]| BrewDisk {
+            store: crate::cache::Store::new(root.join("store")),
+            watches: vec![crate::cache::Watch::tree(root.join("Cellar"), 2)],
+            system: system.map(String::from),
+        };
+        let here = disk(["aarch64", "25.0.0"]);
+        let key = here.fingerprint().unwrap();
+        here.save("homebrew", &key, &[("git".to_owned(), None)].into());
+        assert!(here.load("homebrew", &key).is_some());
+        // Another build sharing the cache, or the same Mac after an upgrade.
+        for other in [disk(["x86_64", "25.0.0"]), disk(["aarch64", "26.0.0"])] {
+            let other_key = other.fingerprint().unwrap();
+            assert_ne!(other_key, key);
+            assert!(other.load("homebrew", &other_key).is_none());
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -7447,7 +7486,11 @@ mod native_transport_tests {
         let base = temp_dir("user-cache");
         let bin = base.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
-        script(&bin.join("brew"), "exit 0");
+        std::fs::create_dir_all(base.join("cache/api")).unwrap();
+        script(
+            &bin.join("brew"),
+            &format!("echo {}", base.join("cache").display()),
+        );
         let native = transport(&bin, &base);
         assert_eq!(
             native.brew_cache().is_some(),

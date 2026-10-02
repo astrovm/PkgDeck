@@ -670,7 +670,7 @@ impl Host {
                 source,
                 "brew",
                 &text,
-                &self.brew_watches(&path),
+                &self.brew_watches(&path, self.brew_cache_folder().as_deref()),
                 &[],
                 run,
             )?,
@@ -685,17 +685,61 @@ impl Host {
 
     /// Where Homebrew answers may be kept between runs, and everything they
     /// depend on. `None` in a sandbox, without a cache, or without Homebrew.
+    /// Homebrew says where its data is, since `brew.env` files can move it.
     pub fn brew_cache(&self) -> Option<(crate::cache::Store, Vec<crate::cache::Watch>)> {
         if self.runtime != Runtime::Native {
             return None;
         }
         let brew = self.resolve("brew").ok().flatten()?;
-        Some((crate::cache::Store::user()?, self.brew_watches(&brew)))
-            .filter(|(_, watches)| !watches.is_empty())
+        let asked = self
+            .brew_asking(&["--cache".into()], &Cancellation::default(), false, false)
+            .ok()?;
+        let cache = PathBuf::from(String::from_utf8_lossy(&asked.stdout).trim());
+        Some((
+            crate::cache::Store::user()?,
+            self.brew_details_watches(&brew, &cache)?,
+        ))
     }
 
-    /// Everything a Homebrew installed-package listing depends on.
-    pub(crate) fn brew_watches(&self, brew: &Path) -> Vec<crate::cache::Watch> {
+    /// Everything Homebrew package details depend on, with `cache` being
+    /// Homebrew's cache folder. `None` when its fetched data isn't there, so
+    /// a wrong folder turns keeping off instead of keeping stale details.
+    pub(crate) fn brew_details_watches(
+        &self,
+        brew: &Path,
+        cache: &Path,
+    ) -> Option<Vec<crate::cache::Watch>> {
+        if !cache.is_absolute() || !cache.join("api").is_dir() {
+            return None;
+        }
+        Some(self.brew_watches(brew, Some(cache))).filter(|watches| !watches.is_empty())
+    }
+
+    /// Homebrew's cache folder as its default or `HOMEBREW_CACHE` puts it.
+    fn brew_cache_folder(&self) -> Option<PathBuf> {
+        self.var("HOMEBREW_CACHE")
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+            .or_else(|| {
+                let home = self.var("HOME").map(PathBuf::from)?;
+                Some(if cfg!(target_os = "macos") {
+                    home.join("Library/Caches/Homebrew")
+                } else {
+                    self.var("XDG_CACHE_HOME")
+                        .map(PathBuf::from)
+                        .unwrap_or_else(|| home.join(".cache"))
+                        .join("Homebrew")
+                })
+            })
+    }
+
+    /// Everything a Homebrew installed-package listing depends on, with
+    /// `cache` being Homebrew's cache folder.
+    pub(crate) fn brew_watches(
+        &self,
+        brew: &Path,
+        cache: Option<&Path>,
+    ) -> Vec<crate::cache::Watch> {
         use crate::cache::Watch;
         let brew = fs::canonicalize(brew).unwrap_or_else(|_| brew.to_owned());
         // bin/brew lives in the Homebrew repository, which is the prefix on
@@ -713,21 +757,6 @@ impl Host {
         } else {
             repository.clone()
         };
-        let cache = self
-            .var("HOMEBREW_CACHE")
-            .map(PathBuf::from)
-            .filter(|path| path.is_absolute())
-            .or_else(|| {
-                let home = self.var("HOME").map(PathBuf::from)?;
-                Some(if cfg!(target_os = "macos") {
-                    home.join("Library/Caches/Homebrew")
-                } else {
-                    self.var("XDG_CACHE_HOME")
-                        .map(PathBuf::from)
-                        .unwrap_or_else(|| home.join(".cache"))
-                        .join("Homebrew")
-                })
-            });
         let mut watches = vec![
             Watch::tree(prefix.join("Caskroom"), 2),
             Watch::tree(prefix.join("Cellar"), 2),
@@ -1486,7 +1515,10 @@ mod brew_cache_tests {
             .map(|(key, value)| (OsString::from(key), value.into_os_string()))
             .collect();
             let host = Host::new(Runtime::Native, env);
-            let watches = host.brew_watches(&repository.join("bin/brew"));
+            let watches = host.brew_watches(
+                &repository.join("bin/brew"),
+                host.brew_cache_folder().as_deref(),
+            );
             let now = || crate::cache::fingerprint(&watches, &[]).unwrap();
             let before = now();
             assert_eq!(before, now(), "nothing changed");
@@ -2470,20 +2502,45 @@ mod boundary_tests {
     }
 
     #[test]
-    fn homebrew_answers_are_kept_only_for_a_native_homebrew() {
+    fn homebrew_answers_are_kept_only_where_homebrew_keeps_its_data() {
         let root = scratch("brew-kept");
-        let path = [("PATH", root.join("bin")), ("HOME", root.clone())];
-        let path: Vec<(&str, &Path)> = path.iter().map(|(k, v)| (*k, v.as_path())).collect();
-        assert!(host(Runtime::Native, &path).brew_cache().is_none());
-        executable(&root.join("bin/brew"), "exit 0");
-        assert!(host(Runtime::Flatpak, &path).brew_cache().is_none());
+        let cache = root.join("cache");
+        let env = [
+            ("PATH", root.join("bin")),
+            ("HOME", root.clone()),
+            ("HOMEBREW_CACHE", cache.clone()),
+        ];
+        let env: Vec<(&str, &Path)> = env.iter().map(|(k, v)| (*k, v.as_path())).collect();
+        assert!(host(Runtime::Native, &env).brew_cache().is_none());
+        // Like brew, which also reads HOMEBREW_CACHE from brew.env files.
+        executable(&root.join("bin/brew"), "echo \"$HOMEBREW_CACHE\"");
+        assert!(host(Runtime::Flatpak, &env).brew_cache().is_none());
+        // A cache folder without fetched data, or no answer at all.
+        assert!(host(Runtime::Native, &env).brew_cache().is_none());
+        assert!(host(Runtime::Native, &env[..2]).brew_cache().is_none());
+        fs::create_dir_all(cache.join("api")).unwrap();
         let cellar = fs::canonicalize(&root).unwrap().join("Cellar");
-        let watches = host(Runtime::Native, &path)
+        let watches = host(Runtime::Native, &env)
             .brew_cache()
             .map(|(_, watches)| watches)
             .unwrap_or_default();
-        let watched = watches.iter().any(|watch| watch.path == cellar);
-        assert_eq!(watched, crate::cache::Store::user().is_some());
+        let watched = |path: &Path| watches.iter().any(|watch| watch.path == path);
+        assert_eq!(watched(&cellar), crate::cache::Store::user().is_some());
+        assert_eq!(
+            watched(&cache.join("api")),
+            crate::cache::Store::user().is_some()
+        );
+        // Homebrew failing keeps nothing.
+        executable(&root.join("bin/brew"), "exit 1");
+        assert!(host(Runtime::Native, &env).brew_cache().is_none());
+        // Nor does a Homebrew outside a repository.
+        let host = host(Runtime::Native, &env);
+        assert!(host
+            .brew_details_watches(Path::new("/brew"), &cache)
+            .is_none());
+        assert!(host
+            .brew_details_watches(Path::new("/brew"), Path::new("cache"))
+            .is_none());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -2491,11 +2548,11 @@ mod boundary_tests {
     fn homebrew_watches_need_a_repository_and_follow_the_cache_folder() {
         let host_without_home = host(Runtime::Native, &[]);
         assert!(host_without_home
-            .brew_watches(Path::new("/brew"))
+            .brew_watches(Path::new("/brew"), None)
             .is_empty());
         assert_eq!(
             host_without_home
-                .brew_watches(Path::new("/synthetic/bin/brew"))
+                .brew_watches(Path::new("/synthetic/bin/brew"), None)
                 .len(),
             5
         );
@@ -2503,11 +2560,14 @@ mod boundary_tests {
         let home = root.join("home");
         let xdg = root.join("xdg");
         let cache_watch = |host: &Host| {
-            host.brew_watches(Path::new("/synthetic/bin/brew"))
-                .last()
-                .unwrap()
-                .path
-                .clone()
+            host.brew_watches(
+                Path::new("/synthetic/bin/brew"),
+                host.brew_cache_folder().as_deref(),
+            )
+            .last()
+            .unwrap()
+            .path
+            .clone()
         };
         let plain = host(Runtime::Native, &[("HOME", &home)]);
         let custom = host(
