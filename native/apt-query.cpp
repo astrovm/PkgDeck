@@ -63,6 +63,15 @@ static std::string lower(const std::string &s) {
   }
   return folded;
 }
+// Matches PkgDeck search: case folded, and spaces, dashes, underscores and
+// dots ignored, so "kde connect" finds kdeconnect.
+static std::string search_text(const std::string &s) {
+  std::string folded;
+  for (char c : lower(s))
+    if (c != ' ' && c != '-' && c != '_' && c != '.')
+      folded += c;
+  return folded;
+}
 // Modern indexes keep only a checksum in Packages; the long text lives in
 // Translation-* files, which apt-cache show reads the same way. Only details
 // pays for the extra lookup. Returns Debian's folded text unfolded: one
@@ -110,7 +119,7 @@ int main(int argc, char **argv) {
     std::cerr << "C.UTF-8 locale is unavailable\n";
     return 1;
   }
-  const auto needle = lower(query);
+  const auto needle = search_text(query);
   if (mode != "detect" && mode != "search" && mode != "installed" &&
       mode != "details")
     return 2;
@@ -168,7 +177,7 @@ int main(int argc, char **argv) {
     const std::string homepage = record.Homepage();
     const std::string depends = record.RecordField("Depends");
     if (mode == "search" &&
-        lower(name + " " + summary).find(needle) == std::string::npos)
+        search_text(name + " " + summary).find(needle) == std::string::npos)
       continue;
     const bool upgradable =
         !installed.end() && !candidate.end() &&

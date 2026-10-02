@@ -183,7 +183,7 @@ impl<T: Transport> Backend for Nix<T> {
         let installed = self.profile(cancel)?;
         let mut rows: Vec<Package> = installed
             .iter()
-            .filter(|(name, _)| name.to_lowercase().contains(&query))
+            .filter(|(name, _)| search_matches(name, &query))
             .map(|(name, element)| Self::package(name, element))
             .collect();
         // Searching nixpkgs evaluates all of it (minutes); offer the exact

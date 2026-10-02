@@ -478,11 +478,10 @@ pub(crate) fn search_packages(
     show: &[ShowRecord],
     installed_rows: &[DpkgRow],
 ) -> Vec<PackageDetails> {
-    let folded = needle.to_lowercase();
     let mut seen = BTreeSet::new();
     let mut details = Vec::new();
     for (name, summary) in candidates {
-        if !format!("{name} {summary}").to_lowercase().contains(&folded) {
+        if !search_matches(&format!("{name} {summary}"), needle) {
             continue;
         }
         // One identity per name: prefer the native-arch stanza, mirroring the

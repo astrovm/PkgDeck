@@ -64,6 +64,20 @@ pub struct Package {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adopt_with: Option<String>,
 }
+/// Search text matching shared by the sources that filter names
+/// themselves: case-insensitive, and spaces, dashes, underscores and dots
+/// are ignored, so `kde connect` finds `kde-connect` and `KDE Connect`.
+pub fn search_matches(text: &str, query: &str) -> bool {
+    fold_search_text(text).contains(&fold_search_text(query))
+}
+fn fold_search_text(text: &str) -> String {
+    text.chars()
+        .filter(|c| !SEARCH_SEPARATORS.contains(c))
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+/// Characters that only split words in package names and search text.
+pub const SEARCH_SEPARATORS: [char; 4] = [' ', '-', '_', '.'];
 /// Normalize a homepage for grouping: case-insensitive, no scheme, no
 /// `www.` prefix, no query/fragment, no trailing slash. Empty or
 /// unparseable values are `None` so they never join unrelated rows.
@@ -585,6 +599,22 @@ mod tests {
         rank_search_matches(&mut packages, "fire");
         assert_eq!(packages[0].id.backend, "apt");
         assert_eq!(packages[1].id.backend, "npm");
+    }
+    #[test]
+    fn search_ignores_case_and_word_separators() {
+        for query in [
+            "kde connect",
+            "KDE-Connect",
+            "kde_connect",
+            "kdeconnect",
+            "de co",
+        ] {
+            assert!(search_matches("kde-connect", query), "{query}");
+            assert!(search_matches("KDE Connect", query), "{query}");
+        }
+        assert!(search_matches("github.com/x/tool", "githubcom"));
+        assert!(!search_matches("kde-connect", "kde connected"));
+        assert!(search_matches("anything", ""));
     }
     #[test]
     fn normalize_homepage_strips_scheme_www_and_trailing_slash() {

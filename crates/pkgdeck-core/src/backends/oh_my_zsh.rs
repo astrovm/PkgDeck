@@ -299,12 +299,11 @@ impl<T: Transport> Backend for OhMyZsh<T> {
         first.map_or(Ok(()), Err)
     }
     fn search(&mut self, query: &str, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
-        let query = query.to_lowercase();
         Ok(self
             .rows(cancel)?
             .into_iter()
             .filter(|row| {
-                row.id.name.contains(&query) || row.display_name.to_lowercase().contains(&query)
+                search_matches(&row.id.name, query) || search_matches(&row.display_name, query)
             })
             .collect())
     }

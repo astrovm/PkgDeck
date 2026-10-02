@@ -1112,14 +1112,10 @@ impl Backend for MacApps {
         }
     }
     fn search(&mut self, query: &str, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
-        let query = query.to_lowercase();
         Ok(self
             .installed(cancel)?
             .into_iter()
-            .filter(|p| {
-                p.id.name.to_lowercase().contains(&query)
-                    || p.display_name.to_lowercase().contains(&query)
-            })
+            .filter(|p| search_matches(&p.id.name, query) || search_matches(&p.display_name, query))
             .collect())
     }
     fn details(

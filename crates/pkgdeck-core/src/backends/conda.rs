@@ -357,11 +357,10 @@ impl<T: Transport> Backend for Conda<T> {
     }
     fn search(&mut self, query: &str, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
         // Installing needs a chosen environment, which is the manager's job.
-        let query = query.to_lowercase();
         Ok(self
             .rows(false, cancel)?
             .into_iter()
-            .filter(|package| package.id.name.to_lowercase().contains(&query))
+            .filter(|package| search_matches(&package.id.name, query))
             .collect())
     }
     fn installed(&mut self, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {

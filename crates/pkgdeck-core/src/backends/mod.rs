@@ -814,26 +814,36 @@ impl Transport for NativeTransport {
             }
             "search" => {
                 // Literal-substring semantics without handing user text to the
-                // native matcher: narrow server-side with an escaped pattern,
-                // then filter on name plus short description in Rust.
-                let escaped: String = query
-                    .chars()
-                    .flat_map(|char| {
-                        if ".[{()*+?^$|\\".contains(char) {
-                            vec!['\\', char]
-                        } else {
-                            vec![char]
-                        }
-                    })
-                    .collect();
-                let dump = output(&cache, &[OsString::from("search"), OsString::from(escaped)])?;
+                // native matcher: narrow server-side with escaped patterns,
+                // one per word (apt-cache needs all of them), then filter on
+                // name plus short description in Rust.
+                let escape = |word: &str| -> OsString {
+                    word.chars()
+                        .flat_map(|char| {
+                            if ".[{()*+?^$|\\".contains(char) {
+                                vec!['\\', char]
+                            } else {
+                                vec![char]
+                            }
+                        })
+                        .collect::<String>()
+                        .into()
+                };
+                let mut args = vec![OsString::from("search")];
+                args.extend(
+                    query
+                        .split(SEARCH_SEPARATORS)
+                        .filter(|word| !word.is_empty())
+                        .map(escape),
+                );
+                if args.len() == 1 {
+                    args.push(escape(query));
+                }
+                let dump = output(&cache, &args)?;
                 let candidates = apt_cli::parse_search_dump(&dump);
-                let folded = query.to_lowercase();
                 let mut names: Vec<OsString> = candidates
                     .iter()
-                    .filter(|(name, summary)| {
-                        format!("{name} {summary}").to_lowercase().contains(&folded)
-                    })
+                    .filter(|(name, summary)| search_matches(&format!("{name} {summary}"), query))
                     .map(|(name, _)| OsString::from(name))
                     .collect();
                 names.sort();
@@ -2513,10 +2523,7 @@ impl<T: Transport> Backend for Homebrew<T> {
     fn search(&mut self, query: &str, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
         let data = bytes("homebrew", self.call(&["formulae"], cancel, false)?)?;
         let names = String::from_utf8(data).map_err(|e| invalid("homebrew", e))?;
-        let matches: Vec<_> = names
-            .lines()
-            .filter(|n| n.to_lowercase().contains(&query.to_lowercase()))
-            .collect();
+        let matches: Vec<_> = names.lines().filter(|n| search_matches(n, query)).collect();
         let mut packages = Vec::new();
         for chunk in matches.chunks(100) {
             if chunk.iter().any(|n| !formula_name(n)) {
@@ -2823,7 +2830,7 @@ impl<T: Transport> Backend for HomebrewCask<T> {
         let names = String::from_utf8(data).map_err(|e| invalid("homebrew-cask", e))?;
         let matches: Vec<_> = names
             .lines()
-            .filter(|n| !n.trim().is_empty() && n.to_lowercase().contains(&query.to_lowercase()))
+            .filter(|n| !n.trim().is_empty() && search_matches(n, query))
             .collect();
         let mut packages = Vec::new();
         for chunk in matches.chunks(100) {
@@ -6720,6 +6727,7 @@ mod tests {
             let stdout = match line.as_str() {
                 "--prefix" => "/home/linuxbrew/.linuxbrew\n".into(),
                 "--version" => format!("Homebrew {}\n", self.version),
+                "casks" => "codex\nvisual-studio-code\n".into(),
                 "info --json=v2 --cask -- visual-studio-code" => cask(
                     "visual-studio-code",
                     serde_json::json!([
@@ -6803,6 +6811,25 @@ mod tests {
         fn discard(&self, _: &Path) {
             self.0.lock().unwrap().push("discard");
         }
+    }
+
+    #[test]
+    fn cask_search_reads_spaces_as_the_dashes_in_tokens() {
+        let mut casks = HomebrewCask::new(CaskBrew {
+            version: "7.0.6",
+            ..CaskBrew::default()
+        });
+        let cancel = Cancellation::default();
+        assert_eq!(casks.detect(&cancel).unwrap(), Availability::Available);
+        for query in ["visual studio", "Studio Code", "visual-studio-code"] {
+            let found = casks.search(query, &cancel).unwrap();
+            assert_eq!(
+                found.iter().map(|p| p.id.name.as_str()).collect::<Vec<_>>(),
+                ["visual-studio-code"],
+                "{query}"
+            );
+        }
+        assert!(casks.search("studio x", &cancel).unwrap().is_empty());
     }
 
     #[test]
@@ -7222,6 +7249,13 @@ mod native_transport_tests {
         // Pattern characters are escaped for apt-cache and matched literally.
         assert!(records(native.apt_query_sandboxed("search", "c++", "", &cancel)).is_empty());
         assert!(cache_log(&base).ends_with("search c\\+\\+\n"));
+        std::fs::remove_dir_all(base).unwrap();
+        // Each word narrows apt-cache, and separators don't have to match.
+        let (base, native) = apt_tools("", "kdeconnect - Phone integration\\n", 0);
+        native
+            .apt_query_sandboxed("search", "KDE connect", "", &cancel)
+            .unwrap();
+        assert!(cache_log(&base).starts_with("search KDE connect\npolicy kdeconnect\n"));
         std::fs::remove_dir_all(base).unwrap();
     }
 
