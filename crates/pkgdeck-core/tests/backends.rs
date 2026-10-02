@@ -254,7 +254,14 @@ impl Transport for Fixture {
                         .unwrap_or_default(),
                 ));
             }
-            return Ok(output("core/synthetic-fixture 1.0\nSynthetic package\n"));
+            let marker = match self.installed.lock().unwrap().as_deref() {
+                Some("1.0") => " [installed]".to_owned(),
+                Some(version) => format!(" [installed: {version}]"),
+                None => String::new(),
+            };
+            return Ok(output(format!(
+                "core/synthetic-fixture 1.0{marker}\nSynthetic package\n"
+            )));
         }
         assert_eq!(executable, "dnf");
         if write {
@@ -272,7 +279,12 @@ impl Transport for Fixture {
         }
         let installed = args.contains(&"--installed".into());
         let matches = (installed && self.installed.lock().unwrap().is_some())
-            || (!installed && args.last().is_some_and(|arg| *arg == "synthetic-fixture"));
+            || (!installed
+                && args.last().is_some_and(|arg| {
+                    // Search asks for names containing the query.
+                    let query = arg.strip_prefix('*').unwrap().strip_suffix('*');
+                    "synthetic-fixture".contains(query.unwrap())
+                }));
         if !matches {
             return Ok(output(""));
         }
@@ -5671,4 +5683,122 @@ fn pacman_leaves_aur_packages_to_the_aur_source() {
         Pacman::pacman(unsynced).installed(&cancel).unwrap().len(),
         2
     );
+}
+
+#[test]
+fn pacman_detects_and_searches_with_one_command_each() {
+    let cancel = Cancellation::default();
+    let script = Script::new(&[
+        ("pacman -Q", "bash 5.3-1\nyay 12.0.0-1\n"),
+        (
+            "pacman -Ss edit",
+            "extra/ed 1.22-1\n    A line editor\n\
+             extra/kate 26.08-1 (kde-applications kde-utilities) [installed]\n    Advanced editor\n\
+             extra/vim 9.2-1 [installed: 9.1-1]\n    Vi Improved\n",
+        ),
+    ]);
+    let mut pacman = Pacman::pacman(script.clone());
+    assert_eq!(pacman.detect(&cancel).unwrap(), Availability::Available);
+    let rows: Vec<_> = pacman
+        .search("edit", &cancel)
+        .unwrap()
+        .into_iter()
+        .map(|p| (p.id.name, p.installed_version, p.candidate_version))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            ("ed".into(), None, Some("1.22-1".into())),
+            (
+                "kate".into(),
+                Some("26.08-1".into()),
+                Some("26.08-1".into())
+            ),
+            ("vim".into(), Some("9.1-1".into()), Some("9.2-1".into())),
+        ]
+    );
+    // Neither asks for foreign packages, and search needs no installed list.
+    assert_eq!(
+        *script.calls.lock().unwrap(),
+        ["pacman -Q", "pacman -Ss edit"]
+    );
+    // pacman -Ss exits 1 when nothing matches: no rows, not a failure.
+    let none = Script::new(&[("pacman -Ss", "exit 1")]);
+    assert!(Pacman::pacman(none)
+        .search("missing", &cancel)
+        .unwrap()
+        .is_empty());
+    let broken = Script::new(&[("pacman -Ss", "exit 2")]);
+    assert!(matches!(
+        Pacman::pacman(broken).search("missing", &cancel),
+        Err(EngineError::Execution(ExecutionError::Failed(_)))
+    ));
+}
+
+#[test]
+fn dnf_searches_names_containing_the_query_from_cached_metadata() {
+    let cancel = Cancellation::default();
+    let format =
+        "--latest-limit 1 --queryformat %{name}|%{arch}|%{version}-%{release}|%{summary}\n";
+    let search = format!("dnf -C --quiet repoquery {format} *vim*");
+    let script = Script::new(&[
+        (
+            search.as_str(),
+            "neovim|aarch64|0.12-1|Vim fork\nvim-enhanced|aarch64|9.2-1|Vim\n",
+        ),
+        (
+            "dnf --quiet repoquery --latest-limit 1 --installed",
+            "vim-enhanced|aarch64|9.1-1|Vim\n",
+        ),
+    ]);
+    let rows: Vec<_> = Dnf::dnf(script.clone())
+        .search("vim", &cancel)
+        .unwrap()
+        .into_iter()
+        .map(|p| (p.id.name, p.installed_version))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            ("neovim".into(), None),
+            ("vim-enhanced".into(), Some("9.1-1".into()))
+        ]
+    );
+    assert_eq!(script.calls.lock().unwrap()[0], search);
+    // Without a metadata cache, cache-only mode fails; DNF then fetches it.
+    let uncached = Script::new(&[
+        (search.as_str(), "exit 1"),
+        (
+            &format!("dnf --quiet repoquery {format} *vim*"),
+            "vim-enhanced|aarch64|9.2-1|Vim\n",
+        ),
+        ("dnf --quiet repoquery --latest-limit 1 --installed", ""),
+    ]);
+    assert_eq!(
+        Dnf::dnf(uncached.clone()).search("vim", &cancel).unwrap()[0]
+            .id
+            .name,
+        "vim-enhanced"
+    );
+    assert_eq!(uncached.calls.lock().unwrap().len(), 3);
+    // A missing DNF is not retried.
+    let calls = Arc::new(Mutex::new(0));
+    struct Missing(Arc<Mutex<usize>>);
+    impl Transport for Missing {
+        fn system_manager(
+            &self,
+            executable: &str,
+            _: &[OsString],
+            _: &Cancellation,
+            _: bool,
+        ) -> Result<Completion, ExecutionError> {
+            *self.0.lock().unwrap() += 1;
+            Err(ExecutionError::Disabled(format!("{executable} not found")))
+        }
+    }
+    assert!(matches!(
+        Dnf::dnf(Missing(calls.clone())).search("vim", &cancel),
+        Err(EngineError::Execution(ExecutionError::Disabled(_)))
+    ));
+    assert_eq!(*calls.lock().unwrap(), 1);
 }
