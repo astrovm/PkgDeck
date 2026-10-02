@@ -8,7 +8,7 @@
 //! and PkgDeck never restarts the Mac. System Settings finishes it.
 //! Upgrades to a new major macOS version are left to System Settings.
 //! Automatic updates only download (one fixed command the saved approval
-//! names, see [`crate::unattended::macos`]); installing stays with the person.
+//! names, see [`crate::unattended::DOWNLOAD_MACOS_UPDATES`]); installing stays with the person.
 use super::*;
 
 const ID: &str = "macos-updates";
@@ -232,7 +232,7 @@ impl<T: Transport> MacUpdates<T> {
         if self.packages(cancel)?.is_empty() {
             return Ok(OperationOutcome::default());
         }
-        let [_, args @ ..] = crate::unattended::macos::DOWNLOAD_UPDATES;
+        let [_, args @ ..] = crate::unattended::DOWNLOAD_MACOS_UPDATES;
         let args: Vec<OsString> = args.iter().map(OsString::from).collect();
         let result = self
             .transport
@@ -563,7 +563,7 @@ mod tests {
         backend
             .execute(&all, &Cancellation::default(), &mut record)
             .unwrap();
-        assert_eq!(writes(&fake), [crate::unattended::macos::DOWNLOAD_UPDATES]);
+        assert_eq!(writes(&fake), [crate::unattended::DOWNLOAD_MACOS_UPDATES]);
         assert!(messages.iter().any(|m| m.contains("downloaded")));
     }
 }

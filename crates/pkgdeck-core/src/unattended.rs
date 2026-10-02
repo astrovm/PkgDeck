@@ -24,6 +24,17 @@ use std::{
     process::Output,
 };
 
+/// What an automatic run asks of Software Update on macOS, the one command
+/// the saved approval names for it. Installing is left to the person: an
+/// install command would have to take a label, and sudo can't tell one
+/// label with spaces from extra options.
+pub const DOWNLOAD_MACOS_UPDATES: [&str; 4] = [
+    "/usr/sbin/softwareupdate",
+    "--download",
+    "--all",
+    "--no-scan",
+];
+
 /// How a source may be updated with nobody watching.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Unattended {
@@ -337,15 +348,7 @@ pub mod macos {
 
     pub const KEY: &str = "sudoers:automatic-updates";
     pub const PORT: &str = "/opt/local/bin/port";
-    /// What an automatic run asks of Software Update. Installing is left to
-    /// the person: an install command would have to take a label, and sudo
-    /// can't tell one label with spaces from extra options.
-    pub const DOWNLOAD_UPDATES: [&str; 4] = [
-        "/usr/sbin/softwareupdate",
-        "--download",
-        "--all",
-        "--no-scan",
-    ];
+    use super::DOWNLOAD_MACOS_UPDATES as DOWNLOAD_UPDATES;
 
     /// The exact commands automatic updates run through `sudo -n`, with no
     /// wildcard. MacPorts is included when `macports` says it is installed
