@@ -5746,7 +5746,10 @@ fn pacman_details_after_a_lookup_reuse_its_rows_until_a_change() {
     let cancel = Cancellation::default();
     let script = Script::new(&[
         // pacman marks an older installed version in its search rows.
-        ("pacman -Ss tool", "extra/tool 2.0-1 [installed: 1.0-1]\n    A tool\n"),
+        (
+            "pacman -Ss tool",
+            "extra/tool 2.0-1 [installed: 1.0-1]\n    A tool\n",
+        ),
         ("pacman -Q", "tool 1.0-1\n"),
         ("pacman -Qmq", "exit 1"),
         ("pacman -Rns", ""),
