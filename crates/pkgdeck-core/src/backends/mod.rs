@@ -3077,15 +3077,26 @@ impl ManagerKind {
                 "--queryformat",
                 "%{name}|%{arch}|%{version}-%{release}|%{summary}\n",
             ],
-            (Self::Dnf, false) => vec![
-                "--quiet",
-                "repoquery",
-                "--latest-limit",
-                "1",
-                "--queryformat",
-                "%{name}|%{arch}|%{version}-%{release}|%{summary}\n",
-                query,
-            ],
+            // -C reads the cached metadata instead of checking every
+            // repository online first; a missing cache is retried without.
+            // A bare name only matches that exact package, so the glob
+            // finds names containing the query, ignoring case. Valid
+            // queries never hold glob characters.
+            (Self::Dnf, false) => {
+                return [
+                    "-C",
+                    "--quiet",
+                    "repoquery",
+                    "--latest-limit",
+                    "1",
+                    "--queryformat",
+                    "%{name}|%{arch}|%{version}-%{release}|%{summary}\n",
+                ]
+                .into_iter()
+                .map(OsString::from)
+                .chain([OsString::from(format!("*{query}*"))])
+                .collect();
+            }
             (Self::Pacman, true) => vec!["-Q"],
             (Self::Pacman, false) => vec!["-Ss", query],
             (Self::Zypper, true) => vec![
@@ -3360,6 +3371,13 @@ impl<T: Transport> SystemManager<T> {
                     if installed {
                         package.installed_version = Some(version.into());
                         package.update = UpdateAvailability::Current;
+                    } else {
+                        // Search marks installed packages "[installed]", or
+                        // "[installed: 1.0-1]" when another version is.
+                        package.installed_version = line
+                            .rsplit_once(" [installed")
+                            .and_then(|(_, tail)| tail.strip_suffix(']'))
+                            .map(|tail| tail.strip_prefix(": ").unwrap_or(version).into());
                     }
                     packages.push(package);
                 }
@@ -3507,31 +3525,50 @@ impl<T: Transport> SystemManager<T> {
             return Err(invalid(self.kind.id(), "invalid package query"));
         }
         let args = self.kind.read_args(installed, query);
-        let mut packages = self.parse(
-            bytes(self.kind.id(), self.call(args, cancel, false)?)?,
-            installed,
-        )?;
-        if installed && matches!(self.kind, ManagerKind::Pacman) {
-            // Packages no repository has (AUR builds) are the AUR source's
-            // rows. Without synced databases every package looks foreign;
-            // then Pacman keeps them all.
-            let foreign = match self.call(vec!["-Qmq".into()], cancel, false) {
-                // pacman -Q exits 1 when nothing matches: no foreign packages.
-                Err(EngineError::Execution(ExecutionError::Failed(result)))
-                    if result.code == Some(1) && result.stdout.is_empty() =>
-                {
-                    String::new()
-                }
-                result => String::from_utf8(bytes("pacman", result?)?)
-                    .map_err(|e| invalid("pacman", e))?,
-            };
-            let foreign: std::collections::BTreeSet<&str> =
-                foreign.lines().map(str::trim).collect();
-            if foreign.len() < packages.len() {
-                packages.retain(|package| !foreign.contains(package.id.name.as_str()));
+        let output = match self.call(args.clone(), cancel, false) {
+            // Without cached metadata (never refreshed, or cleaned), DNF's
+            // cache-only mode fails; ask again and let it fetch.
+            Err(EngineError::Execution(ExecutionError::Failed(_)))
+                if args.first().is_some_and(|arg| arg == "-C") =>
+            {
+                self.call(args[1..].to_vec(), cancel, false)
             }
+            // pacman exits 1 when nothing matches.
+            Err(EngineError::Execution(ExecutionError::Failed(result)))
+                if matches!(self.kind, ManagerKind::Pacman)
+                    && result.code == Some(1)
+                    && result.stdout.is_empty() =>
+            {
+                return Ok(vec![]);
+            }
+            result => result,
+        };
+        self.parse(bytes(self.kind.id(), output?)?, installed)
+    }
+    /// Drops packages no repository has (AUR builds): they are the AUR
+    /// source's rows. Without synced databases every package looks foreign;
+    /// then Pacman keeps them all.
+    fn drop_foreign(
+        &self,
+        packages: &mut Vec<Package>,
+        cancel: &Cancellation,
+    ) -> Result<(), EngineError> {
+        let foreign = match self.call(vec!["-Qmq".into()], cancel, false) {
+            // pacman -Q exits 1 when nothing matches: no foreign packages.
+            Err(EngineError::Execution(ExecutionError::Failed(result)))
+                if result.code == Some(1) && result.stdout.is_empty() =>
+            {
+                String::new()
+            }
+            result => {
+                String::from_utf8(bytes("pacman", result?)?).map_err(|e| invalid("pacman", e))?
+            }
+        };
+        let foreign: std::collections::BTreeSet<&str> = foreign.lines().map(str::trim).collect();
+        if foreign.len() < packages.len() {
+            packages.retain(|package| !foreign.contains(package.id.name.as_str()));
         }
-        Ok(packages)
+        Ok(())
     }
     fn target(&self, id: &PackageId) -> Result<String, EngineError> {
         if id.backend != self.kind.id() || id.scope != Scope::System || !self.valid_name(&id.name) {
@@ -3579,6 +3616,10 @@ impl<T: Transport> Backend for SystemManager<T> {
     }
     fn search(&mut self, query: &str, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
         let mut packages = self.query(false, query, cancel)?;
+        if matches!(self.kind, ManagerKind::Pacman) {
+            // Its search rows already carry the installed version.
+            return Ok(packages);
+        }
         let installed = self.query(true, "", cancel)?;
         let versions: std::collections::BTreeMap<_, _> = installed
             .iter()
@@ -3600,6 +3641,9 @@ impl<T: Transport> Backend for SystemManager<T> {
     }
     fn installed(&mut self, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
         let mut packages = self.query(true, "", cancel)?;
+        if matches!(self.kind, ManagerKind::Pacman) {
+            self.drop_foreign(&mut packages, cancel)?;
+        }
         let updates = self.updates(cancel)?;
         for package in &mut packages {
             self.snap_icon(package);
