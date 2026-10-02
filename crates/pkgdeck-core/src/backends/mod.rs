@@ -6727,7 +6727,7 @@ mod tests {
             let stdout = match line.as_str() {
                 "--prefix" => "/home/linuxbrew/.linuxbrew\n".into(),
                 "--version" => format!("Homebrew {}\n", self.version),
-                "casks" => "codex\nvisual-studio-code\n".into(),
+                "casks" => "codex\ncodex-cli\nvisual-studio-code\n".into(),
                 "info --json=v2 --cask -- visual-studio-code" => cask(
                     "visual-studio-code",
                     serde_json::json!([
@@ -6737,6 +6737,9 @@ mod tests {
                 ),
                 "info --json=v2 --cask -- codex" => {
                     cask("codex", serde_json::json!([{"binary": ["codex"]}]))
+                }
+                "info --json=v2 --cask -- codex-cli" => {
+                    cask("codex-cli", serde_json::json!([{"binary": ["codex"]}]))
                 }
                 "upgrade --cask" => {
                     assert!(write);
@@ -6821,15 +6824,16 @@ mod tests {
         });
         let cancel = Cancellation::default();
         assert_eq!(casks.detect(&cancel).unwrap(), Availability::Available);
-        for query in ["visual studio", "Studio Code", "visual-studio-code"] {
+        // A binary-only cask, so Linux searches offer it too.
+        for query in ["codex cli", "Codex_CLI", "codex-cli"] {
             let found = casks.search(query, &cancel).unwrap();
             assert_eq!(
                 found.iter().map(|p| p.id.name.as_str()).collect::<Vec<_>>(),
-                ["visual-studio-code"],
+                ["codex-cli"],
                 "{query}"
             );
         }
-        assert!(casks.search("studio x", &cancel).unwrap().is_empty());
+        assert!(casks.search("codex x", &cancel).unwrap().is_empty());
     }
 
     #[test]
