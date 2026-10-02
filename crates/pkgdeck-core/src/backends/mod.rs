@@ -5263,6 +5263,11 @@ impl<T: Transport> DevTool<T> {
                 let Some(hits) = self.registry_search(query, cancel)? else {
                     return Ok(vec![]);
                 };
+                // `gem search` exits cleanly with no rows when it cannot
+                // reach a source, so an empty gem answer is asked again.
+                if self.kind == DevKind::Gem && hits.is_empty() {
+                    return Ok(hits);
+                }
                 if self.searches.len() == REGISTRY_SEARCHES {
                     self.searches.remove(0);
                 }

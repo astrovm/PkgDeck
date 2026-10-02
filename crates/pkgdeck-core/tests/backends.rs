@@ -2306,15 +2306,21 @@ fn registry_searches_are_reused_while_typing() {
     // Too short to search, so nothing is narrowed either.
     assert!(listed(gem.search("kd", &cancel).unwrap()).is_empty());
     assert_eq!(searches(&fixture), 2);
+    // `gem search` exits cleanly with no rows when it cannot reach a
+    // source, so empty answers are asked again rather than reused.
+    for query in ["qqq", "qqq", "qqqx"] {
+        assert!(listed(gem.search(query, &cancel).unwrap()).is_empty());
+    }
+    assert_eq!(searches(&fixture), 5);
     // Only the most recent answers are kept.
     for n in 0..15 {
-        gem.search(&format!("q{n:02}"), &cancel).unwrap();
+        gem.search(&format!("helper-{n:02}"), &cancel).unwrap();
     }
-    assert_eq!(searches(&fixture), 17);
+    assert_eq!(searches(&fixture), 20);
     gem.search("kdx", &cancel).unwrap();
-    assert_eq!(searches(&fixture), 17);
+    assert_eq!(searches(&fixture), 20);
     gem.search("kdec", &cancel).unwrap();
-    assert_eq!(searches(&fixture), 18);
+    assert_eq!(searches(&fixture), 21);
     // A change asks the registry again.
     let offer = gem
         .search("kdeconnect", &cancel)
@@ -2322,11 +2328,11 @@ fn registry_searches_are_reused_while_typing() {
         .into_iter()
         .find(|p| p.id.name == "kdeconnect")
         .unwrap();
-    assert_eq!(searches(&fixture), 18);
+    assert_eq!(searches(&fixture), 21);
     gem.execute(&Operation::Install(offer.id), &cancel, &mut |_| {})
         .unwrap();
     gem.search("kdeconnect", &cancel).unwrap();
-    assert_eq!(searches(&fixture), 19);
+    assert_eq!(searches(&fixture), 22);
     std::fs::remove_dir_all(&gem_home).unwrap();
 
     // npm ranks and caps its answers, so only the same query is reused.
