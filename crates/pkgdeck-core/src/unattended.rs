@@ -326,12 +326,21 @@ fn polkit_approval(
     let command = host.command(Path::new(program), &args)?;
     polkit_result(process::run(command, Limits::default(), cancel, true))
 }
-/// pkexec exits with 126 when the password dialog is dismissed.
+/// pkexec exits with 126 when the password dialog is dismissed. A system
+/// without polkit can't ask for the password at all.
 #[cfg(any(not(target_os = "macos"), test))]
 fn polkit_result(
     result: Result<process::Completion, ExecutionError>,
 ) -> Result<String, ExecutionError> {
-    let result = result?;
+    let result = result.map_err(|error| match error {
+        ExecutionError::Io(reason) if reason.starts_with("spawn /usr/bin/pkexec:") => {
+            ExecutionError::Disabled(
+                "This needs polkit to ask for your password, and it isn't installed. Install polkit (pkexec), then try again."
+                    .into(),
+            )
+        }
+        error => error,
+    })?;
     match result.code {
         Some(0) => Ok(String::from_utf8_lossy(&result.stdout).trim().to_owned()),
         Some(126) => Err(ExecutionError::AuthorizationCancelled),
@@ -797,6 +806,12 @@ mod tests {
             polkit_result(Err(ExecutionError::Cancelled)),
             Err(ExecutionError::Cancelled)
         );
+        assert!(matches!(
+            polkit_result(Err(ExecutionError::Io(
+                "spawn /usr/bin/pkexec: No such file or directory (os error 2)".into()
+            ))),
+            Err(ExecutionError::Disabled(reason)) if reason.contains("needs polkit")
+        ));
     }
 
     #[test]
