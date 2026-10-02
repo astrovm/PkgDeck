@@ -5171,6 +5171,35 @@ impl ffi::PackageController {
                     })));
                 }
             }
+            // A source that just refreshed was checked successfully, even
+            // before any page has listed it.
+            let finished: Vec<Operation> =
+                match replies.iter().find(|reply| matches!(reply, Reply::Done(_))) {
+                    Some(Reply::Done(Ok(Payload::Batch(_, outcomes)))) => job
+                        .operations()
+                        .into_iter()
+                        .zip(outcomes)
+                        .filter(|(_, outcome)| **outcome == Outcome::Finished)
+                        .map(|(operation, _)| operation)
+                        .collect(),
+                    Some(Reply::Done(Ok(_))) => job.operations(),
+                    _ => vec![],
+                };
+            let refreshed: Vec<String> = finished
+                .iter()
+                .filter(|operation| matches!(operation, Operation::Refresh { .. }))
+                .map(|operation| operation.backend().to_string())
+                .collect();
+            if !refreshed.is_empty() {
+                let now = epoch_seconds();
+                for backend in refreshed {
+                    self.as_mut().rust_mut().last_success.insert(backend, now);
+                }
+                let mut state: Value = serde_json::from_str(&self.report_state().to_string())
+                    .unwrap_or_else(|_| json!({}));
+                state["last_success"] = json!(self.rust().last_success);
+                self.as_mut().set_report_state(encoded(state));
+            }
             // A change can replace PkgDeck itself; the new copy runs once
             // this one restarts.
             if job.writes()
@@ -12699,6 +12728,28 @@ mod tests {
             .start(Job::AutoUpgrade(operations, false));
         settle(&mut controller);
         assert_eq!(controller.auto_update_result().to_string(), "{}");
+    }
+    #[test]
+    fn a_finished_refresh_counts_as_a_successful_check() {
+        let mut controller = synthetic_controller();
+        let mut controller = controller.pin_mut();
+        let refresh = Operation::Refresh {
+            backend: "fixture".into(),
+        };
+        controller.as_mut().start(Job::Write(refresh.clone(), None));
+        settle(&mut controller);
+        let state: Value = serde_json::from_str(&controller.report_state().to_string()).unwrap();
+        assert!(
+            state["last_success"]["fixture"].as_u64().unwrap() > 0,
+            "{state}"
+        );
+        // A batch records only the refreshes that finished.
+        controller.as_mut().rust_mut().last_success.clear();
+        controller
+            .as_mut()
+            .start(Job::UpgradeAll(vec![refresh], None));
+        settle(&mut controller);
+        assert!(controller.rust().last_success.contains_key("fixture"));
     }
     #[test]
     fn a_change_that_replaces_pkgdeck_asks_for_a_restart() {

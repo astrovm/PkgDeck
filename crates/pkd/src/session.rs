@@ -232,8 +232,9 @@ fn sudo_prompt(
             sources.join(", ")
         ))
     );
+    // sudo's own prompt: sudo-rs wraps a custom one in its own text.
     let granted = std::process::Command::new(sudo)
-        .args(["-v", "-p", "Password for %p: "])
+        .arg("-v")
         .status()
         .is_ok_and(|status| status.success());
     if granted {

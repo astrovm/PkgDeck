@@ -3143,6 +3143,7 @@ Controls.ApplicationWindow {
                 onScreenshotFailed: (url, identity) => root.hideFailedScreenshot(url, identity)
             }
             Flow {
+                id: pageActions
                 objectName: "updatesActions"
                 Layout.fillWidth: true
                 spacing: 8
@@ -3714,6 +3715,15 @@ Controls.ApplicationWindow {
         markActiveRows([identity]);
         backend.propose(undo.action, index);
     }
+    // Toasts float above the page's action buttons when those reach the
+    // bottom of the window, as on a full Sources list, instead of covering them.
+    function toastMargin(toastHeight) {
+        const area = root.contentItem;
+        if (!pageActions.visible || pageActions.height <= 0)
+            return 24;
+        const top = pageActions.mapToItem(area, 0, 0).y;
+        return top + pageActions.height > area.height - 24 - toastHeight ? Math.max(24, area.height - top + 12) : 24;
+    }
     Toast {
         id: changeToast
         objectName: "changeToast"
@@ -3721,7 +3731,7 @@ Controls.ApplicationWindow {
         z: 30
         anchors.horizontalCenter: parent.horizontalCenter
         anchors.bottom: parent.bottom
-        anchors.bottomMargin: 24
+        anchors.bottomMargin: open ? root.toastMargin(height) : 24
         width: Math.min(460, parent.width - 32)
         onActionTriggered: root.undoLastChange()
         onDismissed: if (backend.notice && backend.notice !== "{}") backend.dismissNotice()
@@ -3733,7 +3743,7 @@ Controls.ApplicationWindow {
         z: 30
         anchors.horizontalCenter: parent.horizontalCenter
         anchors.bottom: parent.bottom
-        anchors.bottomMargin: 24 + (changeToast.visible ? changeToast.height + 12 : 0)
+        anchors.bottomMargin: (open ? root.toastMargin(height) : 24) + (changeToast.visible ? changeToast.height + 12 : 0)
         width: Math.min(460, parent.width - 32)
         // Stays until the person restarts or closes it.
         timeout: 24 * 60 * 60 * 1000
