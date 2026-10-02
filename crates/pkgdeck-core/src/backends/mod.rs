@@ -376,6 +376,11 @@ pub trait Transport: Send {
     fn env(&self, _name: &str) -> Option<OsString> {
         None
     }
+    /// Where Homebrew answers may be kept between runs, with everything
+    /// they depend on. Fixtures keep none.
+    fn brew_cache(&self) -> Option<(crate::cache::Store, Vec<crate::cache::Watch>)> {
+        None
+    }
     /// How system changes get permission; tools that call sudo themselves
     /// (AUR helpers) are pointed at the same prompt.
     fn authorization(&self) -> Authorization {
@@ -930,6 +935,9 @@ impl Transport for NativeTransport {
     }
     fn env(&self, name: &str) -> Option<OsString> {
         self.host.var(name)
+    }
+    fn brew_cache(&self) -> Option<(crate::cache::Store, Vec<crate::cache::Watch>)> {
+        self.host.brew_cache()
     }
     fn authorization(&self) -> Authorization {
         self.authorization
@@ -2335,20 +2343,39 @@ const BREW_INFO_BATCH: usize = 1000;
 /// Packages a search already read from `brew info`, by name. `None` marks a
 /// name with no row here, such as a cask this system can't install. Typing
 /// one more letter only narrows a search, so most of it is answered from
-/// here. Changes and update checks clear it.
+/// here. Changes and update checks clear it. With a [`BrewDisk`], they are
+/// also kept between runs, so the first search after a start is fast too.
 #[derive(Default)]
-struct BrewFound(std::collections::HashMap<String, Option<Package>>);
+struct BrewFound {
+    packages: std::collections::HashMap<String, Option<Package>>,
+    /// The fingerprint `packages` were read under, when kept on disk.
+    key: Option<String>,
+    /// Looked up on the first search.
+    disk: Option<Option<BrewDisk>>,
+}
 impl BrewFound {
     /// `names` in order, reading the ones not seen yet with `read`.
     fn search(
         &mut self,
         names: &[&str],
+        source: &str,
+        find: impl FnOnce() -> Option<BrewDisk>,
         mut read: impl FnMut(&[&str]) -> Result<Vec<Package>, EngineError>,
     ) -> Result<Vec<Package>, EngineError> {
+        let disk = self.disk.get_or_insert_with(find).as_ref();
+        let key = disk.and_then(BrewDisk::fingerprint);
+        if key != self.key {
+            // The first search of this run, or Homebrew changed since.
+            self.packages = disk
+                .zip(key.as_deref())
+                .and_then(|(disk, key)| disk.load(source, key))
+                .unwrap_or_default();
+            self.key = key;
+        }
         let missing: Vec<_> = names
             .iter()
             .copied()
-            .filter(|name| !self.0.contains_key(*name))
+            .filter(|name| !self.packages.contains_key(*name))
             .collect();
         for chunk in missing.chunks(BREW_INFO_BATCH) {
             let mut read = read(chunk)?
@@ -2356,16 +2383,70 @@ impl BrewFound {
                 .map(|package| (package.id.name.clone(), package))
                 .collect::<std::collections::HashMap<_, _>>();
             for name in chunk {
-                self.0.insert((*name).to_owned(), read.remove(*name));
+                self.packages.insert((*name).to_owned(), read.remove(*name));
             }
         }
-        Ok(names
+        let found = names
             .iter()
-            .filter_map(|name| self.0.get(*name).cloned().flatten())
-            .collect())
+            .filter_map(|name| self.packages.get(*name).cloned().flatten())
+            .collect();
+        if let (Some(disk), Some(key), false) = (disk, &self.key, missing.is_empty()) {
+            // Homebrew changed while brew read: keep none of it.
+            if disk.fingerprint().as_ref() == Some(key) {
+                disk.save(source, key, &self.packages);
+            } else {
+                self.packages.clear();
+                self.key = None;
+            }
+        }
+        Ok(found)
     }
     fn clear(&mut self) {
-        self.0.clear();
+        self.packages.clear();
+        self.key = None;
+    }
+}
+/// Where Homebrew search details are kept between runs, and everything
+/// they depend on (see [`Transport::brew_cache`]).
+struct BrewDisk {
+    store: crate::cache::Store,
+    watches: Vec<crate::cache::Watch>,
+    /// What else the details depend on: the architecture this program reads
+    /// them for, and the OS release brew picks variations for.
+    system: [String; 2],
+}
+impl BrewDisk {
+    fn find(transport: &impl Transport) -> Option<Self> {
+        let (store, watches) = transport.brew_cache()?;
+        let release = rustix::system::uname()
+            .release()
+            .to_string_lossy()
+            .into_owned();
+        Some(Self {
+            store,
+            watches,
+            system: [std::env::consts::ARCH.into(), release],
+        })
+    }
+    fn fingerprint(&self) -> Option<String> {
+        let [arch, release] = &self.system;
+        crate::cache::fingerprint(&self.watches, &[arch, release])
+    }
+    fn load(
+        &self,
+        source: &str,
+        key: &str,
+    ) -> Option<std::collections::HashMap<String, Option<Package>>> {
+        serde_json::from_slice(&self.store.get(source, "found", &[], key)?).ok()
+    }
+    fn save(
+        &self,
+        source: &str,
+        key: &str,
+        packages: &std::collections::HashMap<String, Option<Package>>,
+    ) {
+        let value = serde_json::to_vec(packages).unwrap_or_default();
+        self.store.put(source, "found", &[], key, &value);
     }
 }
 #[derive(Deserialize)]
@@ -2575,15 +2656,20 @@ impl<T: Transport> Backend for Homebrew<T> {
             return Err(invalid("homebrew", "invalid formula name"));
         }
         let mut found = std::mem::take(&mut self.found);
-        let packages = found.search(&matches, |chunk| {
-            let mut args = vec!["info", "--json=v2", "--formula", "--"];
-            args.extend(chunk);
-            Ok(self
-                .parse(self.call(&args, cancel, false)?)?
-                .into_iter()
-                .map(|d| d.package)
-                .collect())
-        });
+        let packages = found.search(
+            &matches,
+            "homebrew",
+            || BrewDisk::find(&self.transport),
+            |chunk| {
+                let mut args = vec!["info", "--json=v2", "--formula", "--"];
+                args.extend(chunk);
+                Ok(self
+                    .parse(self.call(&args, cancel, false)?)?
+                    .into_iter()
+                    .map(|d| d.package)
+                    .collect())
+            },
+        );
         self.found = found;
         packages
     }
@@ -2887,15 +2973,20 @@ impl<T: Transport> Backend for HomebrewCask<T> {
             return Err(invalid("homebrew-cask", "invalid cask token"));
         }
         let mut found = std::mem::take(&mut self.found);
-        let packages = found.search(&matches, |chunk| {
-            let mut args = vec!["info", "--json=v2", "--cask", "--"];
-            args.extend(chunk);
-            Ok(self
-                .parse(self.call(&args, cancel, false)?, true)?
-                .into_iter()
-                .map(|d| d.package)
-                .collect())
-        });
+        let packages = found.search(
+            &matches,
+            "homebrew-cask",
+            || BrewDisk::find(&self.transport),
+            |chunk| {
+                let mut args = vec!["info", "--json=v2", "--cask", "--"];
+                args.extend(chunk);
+                Ok(self
+                    .parse(self.call(&args, cancel, false)?, true)?
+                    .into_iter()
+                    .map(|d| d.package)
+                    .collect())
+            },
+        );
         self.found = found;
         packages
     }
@@ -7052,6 +7143,142 @@ mod tests {
         );
     }
 
+    /// [`CaskBrew`] on a Homebrew laid out in `root`, with a cache there.
+    #[derive(Clone)]
+    struct KeptBrew {
+        brew: CaskBrew,
+        root: PathBuf,
+        /// Someone installs a formula while brew reads.
+        busy: Arc<Mutex<bool>>,
+    }
+    impl Transport for KeptBrew {
+        fn brew(
+            &self,
+            args: &[OsString],
+            cancel: &Cancellation,
+            write: bool,
+        ) -> Result<Completion, ExecutionError> {
+            if *self.busy.lock().unwrap() {
+                let keg = self.root.join("prefix/Cellar/busy");
+                std::fs::create_dir_all(&keg).unwrap();
+                let calls = self.brew.calls.lock().unwrap().len();
+                std::fs::write(keg.join(calls.to_string()), "").unwrap();
+            }
+            self.brew.brew(args, cancel, write)
+        }
+        fn brew_cache(&self) -> Option<(crate::cache::Store, Vec<crate::cache::Watch>)> {
+            let host = Host::new(
+                crate::host::Runtime::Native,
+                [
+                    ("HOME".into(), self.root.clone().into_os_string()),
+                    ("HOMEBREW_CACHE".into(), self.root.join("cache").into()),
+                ]
+                .into(),
+            );
+            Some((
+                crate::cache::Store::new(self.root.join("store")),
+                host.brew_details_watches(
+                    &self.root.join("prefix/Homebrew/bin/brew"),
+                    &self.root.join("cache"),
+                )
+                .unwrap(),
+            ))
+        }
+    }
+
+    #[test]
+    fn cask_details_are_kept_between_runs_until_homebrew_changes() {
+        let root = std::env::temp_dir().join(format!("pkgdeck-brew-kept-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("cache/api")).unwrap();
+        let brew = KeptBrew {
+            brew: CaskBrew {
+                version: "7.0.6",
+                ..CaskBrew::default()
+            },
+            root,
+            busy: Arc::default(),
+        };
+        let cancel = Cancellation::default();
+        let names = |found: Vec<Package>| found.into_iter().map(|p| p.id.name).collect::<Vec<_>>();
+        // Each run is a new process, so a new backend.
+        let run = |query: &str| {
+            let mut casks = HomebrewCask::new(brew.clone());
+            casks.detect(&cancel).unwrap();
+            names(casks.search(query, &cancel).unwrap())
+        };
+        let reads = || {
+            brew.brew
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|call| call.starts_with("info "))
+                .count()
+        };
+        assert_eq!(run("codex"), ["codex", "codex-cli"]);
+        assert_eq!(reads(), 1);
+        // The next run answers from disk, narrower searches too.
+        assert_eq!(run("codex"), ["codex", "codex-cli"]);
+        assert_eq!(run("codex-c"), ["codex-cli"]);
+        assert_eq!(reads(), 1);
+        // New Homebrew data, installs and links made outside PkgDeck, taps,
+        // or a Homebrew update: brew reads again, once.
+        for change in [
+            "cache/api/internal/packages.jws.json",
+            "prefix/Caskroom/codex/1.0",
+            "prefix/Cellar/git/2.0",
+            "prefix/var/homebrew/linked/git",
+            "prefix/Homebrew/Library/Taps/someone/homebrew-tap/Casks/tool.rb",
+            "prefix/Homebrew/.git/HEAD",
+        ] {
+            let before = reads();
+            let file = brew.root.join(change);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, "changed").unwrap();
+            assert_eq!(run("codex"), ["codex", "codex-cli"]);
+            assert_eq!(run("codex"), ["codex", "codex-cli"]);
+            assert_eq!(reads(), before + 1, "{change}");
+        }
+        // A running app notices an outside install too.
+        let mut casks = HomebrewCask::new(brew.clone());
+        casks.detect(&cancel).unwrap();
+        assert_eq!(names(casks.search("codex", &cancel).unwrap()).len(), 2);
+        std::fs::create_dir_all(brew.root.join("prefix/Caskroom/codex-cli/1.0")).unwrap();
+        assert_eq!(names(casks.search("codex", &cancel).unwrap()).len(), 2);
+        assert_eq!(reads(), 8);
+        // Something installed while brew read: nothing is kept.
+        *brew.busy.lock().unwrap() = true;
+        assert_eq!(run("codex-cli"), ["codex-cli"]);
+        *brew.busy.lock().unwrap() = false;
+        assert_eq!(run("codex"), ["codex", "codex-cli"]);
+        assert_eq!(run("codex"), ["codex", "codex-cli"]);
+        assert_eq!(reads(), 10);
+        std::fs::remove_dir_all(&brew.root).unwrap();
+    }
+
+    #[test]
+    fn kept_details_belong_to_one_architecture_and_os_release() {
+        let root = std::env::temp_dir().join(format!("pkgdeck-brew-system-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let disk = |system: [&str; 2]| BrewDisk {
+            store: crate::cache::Store::new(root.join("store")),
+            watches: vec![crate::cache::Watch::tree(root.join("Cellar"), 2)],
+            system: system.map(String::from),
+        };
+        let here = disk(["aarch64", "25.0.0"]);
+        let key = here.fingerprint().unwrap();
+        here.save("homebrew", &key, &[("git".to_owned(), None)].into());
+        assert!(here.load("homebrew", &key).is_some());
+        // Another build sharing the cache, or the same Mac after an upgrade.
+        for other in [disk(["x86_64", "25.0.0"]), disk(["aarch64", "26.0.0"])] {
+            let other_key = other.fingerprint().unwrap();
+            assert_ne!(other_key, key);
+            assert!(other.load("homebrew", &other_key).is_none());
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn a_cask_install_adopts_the_copy_already_in_place() {
         let brew = CaskBrew {
@@ -7376,6 +7603,24 @@ mod native_transport_tests {
         assert_eq!(
             missing.failures[0].error,
             EngineError::UnknownBackend("npm".into())
+        );
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn the_native_transport_keeps_homebrew_answers_in_the_user_cache() {
+        let base = temp_dir("user-cache");
+        let bin = base.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(base.join("cache/api")).unwrap();
+        script(
+            &bin.join("brew"),
+            &format!("echo {}", base.join("cache").display()),
+        );
+        let native = transport(&bin, &base);
+        assert_eq!(
+            native.brew_cache().is_some(),
+            crate::cache::Store::user().is_some()
         );
         std::fs::remove_dir_all(base).unwrap();
     }
