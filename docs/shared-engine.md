@@ -90,11 +90,17 @@ for reuse. Cancellation works per backend, the same as a normal query, and
 nothing is rolled back. The synchronous `search` and `installed` used by the
 CLI are unchanged.
 
-`native_engine` remembers successful detection results, so the next query
+Without chosen sources, `native_engine` registers every source without
+checking it first. Each source checks itself in its own query worker, so a
+slow check only delays that source. A source found missing is left out
+quietly, as if it was never registered. Chosen sources (`--from`) and the
+Sources view check every source first, and report missing ones.
+
+The engine remembers successful detection results, so the next query on it
 doesn't detect again. Failed detections aren't remembered and are retried.
-Engines only live for one query, so the cache can't go stale. `details_reuse`
-does the same for details on an engine that has already run a query. Use
-`details` on a fresh engine, which checks availability first.
+The GUI reuses an engine for up to a minute, then builds a fresh one.
+`details_reuse` does the same for details on an engine that has already run a
+query. Use `details` on a fresh engine, which checks availability first.
 
 ## Running changes
 
