@@ -44,14 +44,14 @@ apt_lifecycle() {
     write apt install pkgdeck-fixture
     [[ $(dpkg-query -W '-f=${Version}' pkgdeck-fixture) == 1.0 ]]
     apt_version 2.0
-    write apt update
+    write apt refresh
     cli apt list | jq -e 'any(.packages[]; .id.name=="pkgdeck-fixture" and .installed_version=="1.0" and .candidate_version=="2.0" and .update=="available")'
     write apt upgrade pkgdeck-fixture
     [[ $(dpkg-query -W '-f=${Version}' pkgdeck-fixture) == 2.0 && $(cat /usr/share/pkgdeck-fixture/version) == 2.0 ]]
     write apt remove pkgdeck-fixture
     [[ ! -e /usr/share/pkgdeck-fixture/version ]]
     cli apt list | jq -e 'all(.packages[]; .id.name!="pkgdeck-fixture")'
-    echo 'PASS package lifecycle APT detect/search/details/install/update/upgrade/remove 1.0 → 2.0'
+    echo 'PASS package lifecycle APT detect/search/details/install/refresh/upgrade/remove 1.0 → 2.0'
 }
 brew() { runuser -u linuxbrew -- env HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ANALYTICS=1 /home/linuxbrew/.linuxbrew/bin/brew "$@"; }
 brew_version() {
@@ -90,7 +90,7 @@ brew_lifecycle() {
     write homebrew install "$name"
     brew info --json=v2 "$name" | jq -e '.formulae[0].installed[0].version=="1.0"'
     brew_version 2.0
-    write homebrew update
+    write homebrew refresh
     cli homebrew list | jq -e --arg n "$name" 'any(.packages[];.id.name==$n and .installed_version=="1.0" and .candidate_version=="2.0" and .update=="available")'
     write homebrew upgrade "$name"
     brew info --json=v2 "$name" | jq -e '[.formulae[0].installed[].version] | contains(["1.0","2.0"])'
@@ -99,7 +99,7 @@ brew_lifecycle() {
     write homebrew remove "$name"
     [[ ! -e /home/linuxbrew/.linuxbrew/bin/pkgdeck-fixture ]]
     brew info --json=v2 "$name" | jq -e '.formulae[0].installed==[]'
-    echo 'PASS package lifecycle Homebrew detect/search/details/install/update/upgrade/remove 1.0 → 2.0'
+    echo 'PASS package lifecycle Homebrew detect/search/details/install/refresh/upgrade/remove 1.0 → 2.0'
 }
 # A Linux cask ships a binary from a local archive, like the formula fixture.
 brew_cask_version() {
@@ -129,14 +129,14 @@ RUBY
 brew_cask_lifecycle() {
     local name=pkgdeck/fixtures/pkgdeck-cask-fixture
     brew_cask_version 1.0
-    write homebrew-cask update
+    write homebrew-cask refresh
     cli homebrew-cask sources | jq -e '.sources[0].availability=={Ok:"available"}'
     cli homebrew-cask search pkgdeck-cask-fixture | jq -e --arg n "$name" 'any(.packages[];.id.name==$n)'
     cli homebrew-cask info "$name" | jq -e '.package.candidate_version=="1.0"'
     write homebrew-cask install "$name"
     [[ $(/home/linuxbrew/.linuxbrew/bin/pkgdeck-cask-fixture) == 1.0 ]]
     brew_cask_version 2.0
-    write homebrew-cask update
+    write homebrew-cask refresh
     cli homebrew-cask list | jq -e --arg n "$name" 'any(.packages[];.id.name==$n and .installed_version=="1.0" and .candidate_version=="2.0" and .update=="available")'
     write homebrew-cask upgrade "$name"
     [[ $(/home/linuxbrew/.linuxbrew/bin/pkgdeck-cask-fixture) == 2.0 ]]
@@ -144,5 +144,5 @@ brew_cask_lifecycle() {
     write homebrew-cask remove "$name"
     [[ ! -e /home/linuxbrew/.linuxbrew/bin/pkgdeck-cask-fixture ]]
     cli homebrew-cask list | jq -e --arg n "$name" 'all(.packages[];.id.name!=$n)'
-    echo 'PASS package lifecycle Homebrew Casks on Linux detect/search/details/install/update/upgrade/remove 1.0 → 2.0'
+    echo 'PASS package lifecycle Homebrew Casks on Linux detect/search/details/install/refresh/upgrade/remove 1.0 → 2.0'
 }

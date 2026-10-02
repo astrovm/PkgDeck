@@ -71,7 +71,12 @@ for ((run=1; run<=runs; run++)); do
         "$binary" --smoke-test >"$logs/cocoa-$run.log" 2>&1 &
     pid=$!
     status=
-    for ((second=0; second<60; second++)); do
+    # The first launch of a freshly installed app waits on macOS services
+    # (registration, security checks) that a busy runner can take minutes
+    # to answer; later launches must start promptly.
+    limit=60
+    ((run == 1)) && limit=180
+    for ((second=0; second<limit; second++)); do
         if ! kill -0 "$pid" 2>/dev/null; then
             status=0
             wait "$pid" || status=$?
@@ -87,7 +92,7 @@ for ((run=1; run<=runs; run++)); do
         # Print the stacks here too: a failed step can end the job before
         # its diagnostics are uploaded.
         sed -n '/^Call graph:/,/^Total number in stack/p' "$logs/cocoa-$run.sample.txt" 2>/dev/null | head -n 200 || true
-        echo "Installed Cocoa startup did not exit within 60 seconds (run $run of $runs)" >&2
+        echo "Installed Cocoa startup did not exit within $limit seconds (run $run of $runs)" >&2
         exit 1
     fi
     if [[ $status != 0 ]]; then

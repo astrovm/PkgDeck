@@ -184,8 +184,8 @@ DeckScrollView {
             }
             SettingCheckBox {
                 objectName: "systemApprovalSetting"
-                text: "Allow system updates without a password"
-                tooltipText: page.app.macOS ? "" : "Installing or removing still asks"
+                text: "Allow automatic updates without a password"
+                tooltipText: "Changes you start still ask"
                 checked: page.store.systemApproval !== ""
                 onClicked: {
                     page.app.backend.allowSystemUpdates(checked);

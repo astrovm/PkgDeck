@@ -6,7 +6,12 @@
 //! [`UPGRADE_ONLY`] and nothing else; that helper only refreshes sources and
 //! updates every package (see [`crate::batch::check_mode`]). The rule names
 //! the helper's own root-owned path, so a program the user can replace never
-//! gets it. On macOS it is a sudoers entry for MacPorts' two update commands.
+//! gets it. On macOS it is a sudoers entry for exact commands of root-owned
+//! programs: downloading macOS updates and MacPorts' two update commands,
+//! with a clean environment. Homebrew casks and the App Store run sudo
+//! themselves for whatever their installers need, which no exact command
+//! covers, so they never get it. Only automatic updates use the approval;
+//! changes the person starts still ask for the password.
 use crate::{
     batch::{self, BatchMode, ALLOW_REMOVALS, UPGRADE_ONLY},
     host::{Host, Runtime},
@@ -19,6 +24,17 @@ use std::{
     process::Output,
 };
 
+/// What an automatic run asks of Software Update on macOS, the one command
+/// the saved approval names for it. Installing is left to the person: an
+/// install command would have to take a label, and sudo can't tell one
+/// label with spaces from extra options.
+pub const DOWNLOAD_MACOS_UPDATES: [&str; 4] = [
+    "/usr/sbin/softwareupdate",
+    "--download",
+    "--all",
+    "--no-scan",
+];
+
 /// How a source may be updated with nobody watching.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Unattended {
@@ -27,14 +43,16 @@ pub enum Unattended {
     /// Needs root, so it updates only under the saved approval.
     Approved,
     /// Never updated unattended: firmware (power and restarts), the App
-    /// Store (its own sign-in and sudo), inventories, and system managers
-    /// the helper doesn't run.
+    /// Store (mas runs sudo itself), inventories, and system managers the
+    /// helper doesn't run.
     Never,
 }
 
 pub fn unattended(backend: &str) -> Unattended {
     match backend {
-        id if batch::UPGRADE_ONLY_BACKENDS.contains(&id) || id == "macports" => {
+        id if batch::UPGRADE_ONLY_BACKENDS.contains(&id)
+            || matches!(id, "macports" | "macos-updates") =>
+        {
             Unattended::Approved
         }
         "fwupd" | "mas" | "macos-apps" | "system-image" | "apk" | "xbps" | "aur" | "toolbox"
@@ -137,7 +155,7 @@ pub fn polkit_rule(user: &str, runner: &RunnerMatch) -> Result<String, Execution
         return Err(invalid("unexpected user name"));
     }
     Ok(format!(
-        r#"// Written by PkgDeck: "Allow system updates without a password" is on for {user}.
+        r#"// Written by PkgDeck: "Allow automatic updates without a password" is on for {user}.
 // It lets PkgDeck's helper refresh sources and update every system package
 // for {user}, in an active local session, and nothing else. Turn the setting
 // off in PkgDeck to remove this file.
@@ -308,12 +326,21 @@ fn polkit_approval(
     let command = host.command(Path::new(program), &args)?;
     polkit_result(process::run(command, Limits::default(), cancel, true))
 }
-/// pkexec exits with 126 when the password dialog is dismissed.
+/// pkexec exits with 126 when the password dialog is dismissed. A system
+/// without polkit can't ask for the password at all.
 #[cfg(any(not(target_os = "macos"), test))]
 fn polkit_result(
     result: Result<process::Completion, ExecutionError>,
 ) -> Result<String, ExecutionError> {
-    let result = result?;
+    let result = result.map_err(|error| match error {
+        ExecutionError::Io(reason) if reason.starts_with("spawn /usr/bin/pkexec:") => {
+            ExecutionError::Disabled(
+                "This needs polkit to ask for your password, and it isn't installed. Install polkit (pkexec), then try again."
+                    .into(),
+            )
+        }
+        error => error,
+    })?;
     match result.code {
         Some(0) => Ok(String::from_utf8_lossy(&result.stdout).trim().to_owned()),
         Some(126) => Err(ExecutionError::AuthorizationCancelled),
@@ -321,21 +348,37 @@ fn polkit_result(
     }
 }
 
-/// MacPorts is the one system manager PkgDeck runs on macOS; sudo runs its
-/// two update commands without a password once this entry is saved.
+/// macOS: a sudoers entry for the user. Casks, the App Store, MacPorts and
+/// macOS updates all reach root through sudo, casks with whatever programs
+/// their installers name, so the entry can't list commands.
 #[cfg(any(target_os = "macos", test))]
 pub mod macos {
     use super::*;
 
+    pub const KEY: &str = "sudoers:automatic-updates";
     pub const PORT: &str = "/opt/local/bin/port";
-    pub const KEY: &str = "sudoers:macports";
+    use super::DOWNLOAD_MACOS_UPDATES as DOWNLOAD_UPDATES;
 
-    pub fn sudoers_line(user: &str) -> Result<String, ExecutionError> {
+    /// The exact commands automatic updates run through `sudo -n`, with no
+    /// wildcard. MacPorts is included when `macports` says it is installed
+    /// root-owned: sudo would otherwise run a program the user can replace.
+    /// Neither keeps the caller's environment, HOME included, so a user's
+    /// `~/.macports` or PATH can't steer what runs as root.
+    pub fn sudoers_line(user: &str, macports: bool) -> Result<String, ExecutionError> {
         if !safe_user(user) {
             return Err(invalid("unexpected user name"));
         }
+        let mut programs = vec![DOWNLOAD_UPDATES[0].to_owned()];
+        let mut commands = vec![DOWNLOAD_UPDATES.join(" ")];
+        if macports {
+            programs.push(PORT.into());
+            commands.push(format!("{PORT} -N selfupdate"));
+            commands.push(format!("{PORT} -N upgrade outdated"));
+        }
         Ok(format!(
-            "{user} ALL=(root) NOPASSWD: {PORT} -N selfupdate, {PORT} -N upgrade outdated\n"
+            "Defaults!{} !env_keep, always_set_home, secure_path=\"/opt/local/bin:/opt/local/sbin:/usr/bin:/bin:/usr/sbin:/sbin\"\n{user} ALL=(root) NOPASSWD: {}\n",
+            programs.join(", "),
+            commands.join(", ")
         ))
     }
     /// sudo skips files whose names contain a dot.
@@ -345,13 +388,13 @@ pub mod macos {
     }
     /// The shell script run as root: check the entry with visudo before it
     /// goes in place, so a mistake can never break sudo.
-    pub fn script(user: &str, grant: bool) -> Result<String, ExecutionError> {
+    pub fn script(user: &str, grant: bool, macports: bool) -> Result<String, ExecutionError> {
         let target = sudoers_path(user);
         let target = target.to_str().expect("built from checked text");
         if !grant {
             return Ok(format!("/bin/rm -f '{target}'"));
         }
-        let line = sudoers_line(user)?;
+        let line = sudoers_line(user, macports)?;
         Ok(format!(
             "set -e; umask 077; /bin/mkdir -p /private/etc/sudoers.d; \
              tmp=$(/usr/bin/mktemp /private/etc/sudoers.d/.pkgdeck.XXXXXX); \
@@ -365,26 +408,12 @@ pub mod macos {
 
     #[cfg(target_os = "macos")]
     pub fn set_approval(grant: bool, cancel: &Cancellation) -> Result<String, ExecutionError> {
-        set_approval_as(grant, root_owned(Path::new(PORT)), cancel)
-    }
-    /// `macports` says whether MacPorts is installed root-owned, which the
-    /// entry needs: sudo would otherwise run a program the user can replace.
-    #[cfg(target_os = "macos")]
-    pub(crate) fn set_approval_as(
-        grant: bool,
-        macports: bool,
-        cancel: &Cancellation,
-    ) -> Result<String, ExecutionError> {
         let user = std::process::Command::new("/usr/bin/id")
             .arg("-un")
             .output()?;
         let user = String::from_utf8_lossy(&user.stdout).trim().to_owned();
-        if grant && !macports {
-            return Err(ExecutionError::Disabled(
-                "MacPorts isn't installed in /opt/local".into(),
-            ));
-        }
-        let args = ["-c".into(), script(&user, grant)?.into()];
+        let macports = root_owned(Path::new(PORT));
+        let args = ["-c".into(), script(&user, grant, macports)?.into()];
         let shell = crate::host::shell_command(Path::new("/bin/sh"), &args)?;
         let apple = format!(
             "do shell script {} with administrator privileges",
@@ -410,17 +439,22 @@ pub mod macos {
         }
     }
 
-    /// Whether sudo would run MacPorts' update now without asking.
+    /// Whether the entry is in place. `sudo -n -l` lists the user's rules
+    /// without asking once one of them needs no password.
     #[cfg(target_os = "macos")]
     pub fn approved() -> bool {
         std::process::Command::new("/usr/bin/sudo")
-            .args(["-n", "-l", PORT, "-N", "upgrade", "outdated"])
+            .args(["-n", "-l"])
             .env_clear()
             .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|status| status.success())
+            .output()
+            .is_ok_and(|output| output.status.success() && lists_entry(&output.stdout))
+    }
+    /// `sudo -l` prints the entry's commands after `NOPASSWD:`.
+    pub fn lists_entry(listing: &[u8]) -> bool {
+        String::from_utf8_lossy(listing)
+            .contains(&format!("NOPASSWD: {}", DOWNLOAD_UPDATES.join(" ")))
     }
 }
 
@@ -431,7 +465,14 @@ mod tests {
     #[test]
     fn sources_are_sorted_by_what_unattended_updates_may_do() {
         for id in [
-            "apt", "flatpak", "dnf", "pacman", "zypper", "snap", "macports",
+            "apt",
+            "flatpak",
+            "dnf",
+            "pacman",
+            "zypper",
+            "snap",
+            "macports",
+            "macos-updates",
         ] {
             assert_eq!(unattended(id), Unattended::Approved, "{id}");
         }
@@ -765,6 +806,12 @@ mod tests {
             polkit_result(Err(ExecutionError::Cancelled)),
             Err(ExecutionError::Cancelled)
         );
+        assert!(matches!(
+            polkit_result(Err(ExecutionError::Io(
+                "spawn /usr/bin/pkexec: No such file or directory (os error 2)".into()
+            ))),
+            Err(ExecutionError::Disabled(reason)) if reason.contains("needs polkit")
+        ));
     }
 
     #[test]
@@ -789,17 +836,12 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn the_macports_entry_is_saved_only_for_a_root_owned_macports() {
+    fn a_cancelled_job_never_shows_the_password_dialog() {
         let cancel = Cancellation::default();
         cancel.cancel();
-        assert!(matches!(
-            macos::set_approval_as(true, false, &cancel),
-            Err(ExecutionError::Disabled(_))
-        ));
-        // A cancelled job never shows the password dialog.
         for grant in [true, false] {
             assert_eq!(
-                macos::set_approval_as(grant, true, &cancel),
+                macos::set_approval(grant, &cancel),
                 Err(ExecutionError::Cancelled)
             );
         }
@@ -808,24 +850,48 @@ mod tests {
     }
 
     #[test]
-    fn the_macports_entry_names_only_its_update_commands_and_is_checked_first() {
-        let line = macos::sudoers_line("astro").unwrap();
+    fn the_sudoers_entry_names_one_user_and_is_checked_first() {
         assert_eq!(
-            line,
-            "astro ALL=(root) NOPASSWD: /opt/local/bin/port -N selfupdate, /opt/local/bin/port -N upgrade outdated\n"
+            macos::sudoers_line("astro", false).unwrap(),
+            "Defaults!/usr/sbin/softwareupdate !env_keep, always_set_home, secure_path=\"/opt/local/bin:/opt/local/sbin:/usr/bin:/bin:/usr/sbin:/sbin\"\nastro ALL=(root) NOPASSWD: /usr/sbin/softwareupdate --download --all --no-scan\n"
         );
-        assert!(macos::sudoers_line("a b").is_err());
+        let line = macos::sudoers_line("astro", true).unwrap();
+        assert!(
+            line.starts_with("Defaults!/usr/sbin/softwareupdate, /opt/local/bin/port !env_keep")
+        );
+        assert!(line.ends_with(
+            "NOPASSWD: /usr/sbin/softwareupdate --download --all --no-scan, /opt/local/bin/port -N selfupdate, /opt/local/bin/port -N upgrade outdated\n"
+        ));
+        // Exact commands only.
+        assert!(!line.contains('*'));
+        assert!(macos::sudoers_line("a b", false).is_err());
+        let listing = "User astro may run the following commands:\n    (ALL) ALL\n    (root) NOPASSWD: /usr/sbin/softwareupdate --download --all --no-scan, /opt/local/bin/port -N selfupdate\n";
+        assert!(macos::lists_entry(listing.as_bytes()));
+        assert!(!macos::lists_entry(b"    (ALL) ALL\n"));
+        // visudo accepts it.
+        #[cfg(target_os = "macos")]
+        {
+            let file = std::env::temp_dir().join(format!("pkgdeck-sudoers-{}", std::process::id()));
+            std::fs::write(&file, &line).unwrap();
+            let checked = std::process::Command::new("/usr/sbin/visudo")
+                .arg("-cqf")
+                .arg(&file)
+                .status()
+                .unwrap();
+            std::fs::remove_file(&file).unwrap();
+            assert!(checked.success());
+        }
         assert_eq!(
             macos::sudoers_path("first.last"),
             Path::new("/private/etc/sudoers.d/pkgdeck-unattended-first_last")
         );
-        let script = macos::script("astro", true).unwrap();
+        let script = macos::script("astro", true, false).unwrap();
         let visudo = script.find("visudo -cqf").unwrap();
         let install = script.find("/bin/mv -f").unwrap();
         assert!(visudo < install);
         assert!(script.contains("chmod 0440"));
         assert_eq!(
-            macos::script("astro", false).unwrap(),
+            macos::script("astro", false, true).unwrap(),
             "/bin/rm -f '/private/etc/sudoers.d/pkgdeck-unattended-astro'"
         );
     }

@@ -221,15 +221,18 @@ jobs:
           path: build/macos-native
       # Last, since these install whole toolchains. They still run after a
       # native test failure, so one job reports both. Main skips these;
-      # release tags run them when PR proof is unavailable.
+      # release tags run them when PR proof is unavailable. Pull requests run
+      # them on Apple silicon only: the Intel runner is the slowest by far
+      # (over half an hour for the same installs), and Linux runs the same
+      # development managers on every pull request.
       - name: Run backend lifecycle tests
-        if: ${{ !cancelled() && steps.build-cli.outcome == 'success' && (github.event_name != 'push' || (startsWith(github.ref, 'refs/tags/v') && needs.release-proof.outputs.tested != 'true')) }}
+        if: ${{ !cancelled() && steps.build-cli.outcome == 'success' && ((github.event_name != 'push' && matrix.arch == 'aarch64') || (startsWith(github.ref, 'refs/tags/v') && needs.release-proof.outputs.tested != 'true')) }}
         run: |
           # These ran with the macOS tools, not the GNU coreutils added above.
           PATH=$(tr ':' '\n' <<<"$PATH" | grep -v '/coreutils/libexec/gnubin$' | paste -sd: -)
           scripts/tests/backends.sh dev "$PWD/target/debug/pkd"
       - name: Upload MacPorts logs
-        if: ${{ !cancelled() && (github.event_name != 'push' || (startsWith(github.ref, 'refs/tags/v') && needs.release-proof.outputs.tested != 'true')) }}
+        if: ${{ !cancelled() && ((github.event_name != 'push' && matrix.arch == 'aarch64') || (startsWith(github.ref, 'refs/tags/v') && needs.release-proof.outputs.tested != 'true')) }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: macports-macos-${{ matrix.arch }}

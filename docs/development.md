@@ -93,7 +93,7 @@ The workflow is called `CI`. Check names follow `Category / Scope (architecture)
 | Check | What it does |
 | --- | --- |
 | `Test / Linux (x86_64, aarch64)` | Everything on Linux once per architecture: format and infrastructure checks, the APT helper, clippy (x86_64), all workspace tests (measured for coverage on x86_64), and real sudo/polkit and APT lock tests |
-| `Test / macOS (x86_64, aarch64)` | All core/CLI tests (measured for coverage on Apple Silicon), real app inventory, Homebrew cask ownership and adoption, including recovery from a failed adoption, then real lifecycle tests for every development manager and MacPorts. One job per Mac, since only 5 macOS runners run at once |
+| `Test / macOS (x86_64, aarch64)` | All core/CLI tests (measured for coverage on Apple Silicon), real app inventory, Homebrew cask ownership and adoption, including recovery from a failed adoption, then real lifecycle tests for every development manager and MacPorts (prebuilt archives only). Pull requests run the lifecycle tests on Apple Silicon only; the Intel runner takes over half an hour for them, and Linux covers the same managers. Release tags without PR proof run them on both. One job per Mac, since only 5 macOS runners run at once |
 | `Coverage / Combined` | The 100% gate: merges the Linux and macOS reports; a line counts once and is covered when a test ran it on any platform |
 | `Test / Podman (x86_64, aarch64)` | CLI build in the development container and CLI APT/Homebrew install/remove tests |
 | `Test / Backends / native (linux-x86_64, linux-aarch64)` | Real DNF, Zypper, apk, XBPS, Snap, Toolbx and Distrobox lifecycle tests, plus Pacman and the AUR on x86_64 |

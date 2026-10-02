@@ -423,11 +423,11 @@ Controls.ApplicationWindow {
     // Sources PkgDeck never installs from. Their rows update, and remove
     // only when the source says it can.
     function neverInstalls(source) {
-        return ["fwupd", "mas", "conda", "system-image", "aur", "toolbox", "distrobox", "oh-my-zsh", "codex", "claude", "grok", "opencode", "cursor", "copilot", "kiro", "antigravity", "amp", "droid", "solana", "anchor", "foundry"].indexOf(source) >= 0;
+        return ["fwupd", "mas", "macos-updates", "conda", "system-image", "aur", "toolbox", "distrobox", "oh-my-zsh", "codex", "claude", "grok", "opencode", "cursor", "copilot", "kiro", "antigravity", "amp", "droid", "solana", "anchor", "foundry"].indexOf(source) >= 0;
     }
-    readonly property var knownSourceIds: ["apt", "dnf", "pacman", "zypper", "snap", "homebrew", "homebrew-cask", "macos-apps", "mas", "aur", "apk", "xbps", "system-image", "macports", "rustup", "nix", "go", "dotnet", "appimage", "flatpak", "docker", "podman", "toolbox", "distrobox", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "mise", "pixi", "conda", "composer", "gem", "oh-my-zsh", "fwupd", "codex", "claude", "grok", "opencode", "cursor", "copilot", "kiro", "antigravity", "amp", "droid", "solana", "anchor", "foundry"]
+    readonly property var knownSourceIds: ["apt", "dnf", "pacman", "zypper", "snap", "homebrew", "homebrew-cask", "macos-apps", "mas", "aur", "apk", "xbps", "system-image", "macports", "macos-updates", "rustup", "nix", "go", "dotnet", "appimage", "flatpak", "docker", "podman", "toolbox", "distrobox", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "mise", "pixi", "conda", "composer", "gem", "oh-my-zsh", "fwupd", "codex", "claude", "grok", "opencode", "cursor", "copilot", "kiro", "antigravity", "amp", "droid", "solana", "anchor", "foundry"]
     readonly property var sourceIds: knownSourceIds.concat(sourceCatalog.map((row) => row.source).filter((id) => knownSourceIds.indexOf(id) < 0))
-    readonly property var sourceNames: ["APT", "DNF", "Pacman", "Zypper", "Snap", "Homebrew", "Homebrew Casks", "macOS Applications", "Mac App Store", "AUR", "apk", "XBPS", "System image", "MacPorts", "rustup", "Nix", "Go", ".NET tools", "AppImage", "Flatpak", "Docker images", "Podman images", "Toolbx containers", "Distrobox containers", "Cargo", "npm", "pnpm", "Bun", "pip", "pipx", "uv", "mise", "pixi", "Conda", "Composer", "RubyGems", "Oh My Zsh", "Firmware", "Codex (standalone)", "Claude Code (standalone)", "Grok (standalone)", "OpenCode (standalone)", "Cursor CLI (standalone)", "GitHub Copilot CLI (standalone)", "Kiro CLI (standalone)", "Antigravity CLI (standalone)", "Amp (standalone)", "Factory Droid (standalone)", "Solana CLI (Agave)", "Anchor (AVM)", "Foundry"]
+    readonly property var sourceNames: ["APT", "DNF", "Pacman", "Zypper", "Snap", "Homebrew", "Homebrew Casks", "macOS Applications", "Mac App Store", "AUR", "apk", "XBPS", "System image", "MacPorts", "macOS Updates", "rustup", "Nix", "Go", ".NET tools", "AppImage", "Flatpak", "Docker images", "Podman images", "Toolbx containers", "Distrobox containers", "Cargo", "npm", "pnpm", "Bun", "pip", "pipx", "uv", "mise", "pixi", "Conda", "Composer", "RubyGems", "Oh My Zsh", "Firmware", "Codex (standalone)", "Claude Code (standalone)", "Grok (standalone)", "OpenCode (standalone)", "Cursor CLI (standalone)", "GitHub Copilot CLI (standalone)", "Kiro CLI (standalone)", "Antigravity CLI (standalone)", "Amp (standalone)", "Factory Droid (standalone)", "Solana CLI (Agave)", "Anchor (AVM)", "Foundry"]
     function containerSource(source) {
         return source === "docker" || source === "podman";
     }
@@ -490,7 +490,7 @@ Controls.ApplicationWindow {
         return sourceCatalog.find((row) => row.source === id) || {source: id, summary: sourceCatalog.length ? "Unsupported on this platform" : "Checking availability…", availability_kind: sourceCatalog.length ? "platform" : "checking", capabilities: []};
     }
     function sourceCategory(id) {
-        if (["apt", "dnf", "pacman", "aur", "zypper", "apk", "xbps", "macports", "system-image", "fwupd"].indexOf(id) >= 0)
+        if (["apt", "dnf", "pacman", "aur", "zypper", "apk", "xbps", "macports", "macos-updates", "system-image", "fwupd"].indexOf(id) >= 0)
             return "System";
         if (["snap", "homebrew", "homebrew-cask", "macos-apps", "mas", "appimage", "flatpak"].indexOf(id) >= 0)
             return "Applications";
@@ -1485,6 +1485,34 @@ Controls.ApplicationWindow {
     Connections {
         target: backend
         function onSystem_approvalChanged() { preferences.systemApproval = backend.system_approval; }
+        // PkgDeck replaced itself. After an automatic run the new copy takes
+        // over on its own; after a change the person made, they choose when.
+        function onSelf_updateChanged() {
+            if (backend.self_update === "automatic")
+                selfRestart.start();
+            else if (backend.self_update === "manual")
+                restartToast.show("PkgDeck was updated. Restart it to use the new version.", "Restart", "success");
+        }
+    }
+    // Waits a moment so the automatic update's notification shows first,
+    // and for any change still running.
+    Timer {
+        id: selfRestart
+        objectName: "selfRestart"
+        interval: 5000
+        onTriggered: {
+            if (backend.writing)
+                restart();
+            else
+                root.restartPkgDeck();
+        }
+    }
+    // Starts the updated copy, hidden if this one is, and quits.
+    function restartPkgDeck() {
+        if (!backend.restartApp(!root.visible))
+            return;
+        forceQuit = true;
+        Qt.quit();
     }
     Component.onCompleted: {
         backend.setCheckInterval(preferences.checkInterval);
@@ -2828,7 +2856,7 @@ Controls.ApplicationWindow {
                                         Layout.fillWidth: true
                                     }
                                     Controls.Label {
-                                        visible: parent.upgrade
+                                        visible: parent.upgrade && !!packageRow.modelData.installed
                                         text: "from " + (packageRow.modelData.installed || "")
                                         font.family: "monospace"
                                         color: root.muted
@@ -3115,6 +3143,7 @@ Controls.ApplicationWindow {
                 onScreenshotFailed: (url, identity) => root.hideFailedScreenshot(url, identity)
             }
             Flow {
+                id: pageActions
                 objectName: "updatesActions"
                 Layout.fillWidth: true
                 spacing: 8
@@ -3686,6 +3715,15 @@ Controls.ApplicationWindow {
         markActiveRows([identity]);
         backend.propose(undo.action, index);
     }
+    // Toasts float above the page's action buttons when those reach the
+    // bottom of the window, as on a full Sources list, instead of covering them.
+    function toastMargin(toastHeight) {
+        const area = root.contentItem;
+        if (!pageActions.visible || pageActions.height <= 0)
+            return 24;
+        const top = pageActions.mapToItem(area, 0, 0).y;
+        return top + pageActions.height > area.height - 24 - toastHeight ? Math.max(24, area.height - top + 12) : 24;
+    }
     Toast {
         id: changeToast
         objectName: "changeToast"
@@ -3693,10 +3731,23 @@ Controls.ApplicationWindow {
         z: 30
         anchors.horizontalCenter: parent.horizontalCenter
         anchors.bottom: parent.bottom
-        anchors.bottomMargin: 24
+        anchors.bottomMargin: open ? root.toastMargin(height) : 24
         width: Math.min(460, parent.width - 32)
         onActionTriggered: root.undoLastChange()
         onDismissed: if (backend.notice && backend.notice !== "{}") backend.dismissNotice()
+    }
+    Toast {
+        id: restartToast
+        objectName: "restartToast"
+        parent: root.contentItem
+        z: 30
+        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.bottom: parent.bottom
+        anchors.bottomMargin: (open ? root.toastMargin(height) : 24) + (changeToast.visible ? changeToast.height + 12 : 0)
+        width: Math.min(460, parent.width - 32)
+        // Stays until the person restarts or closes it.
+        timeout: 24 * 60 * 60 * 1000
+        onActionTriggered: root.restartPkgDeck()
     }
     // The Activity drawer, over any page.
     Rectangle {

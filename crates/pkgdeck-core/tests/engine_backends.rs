@@ -606,7 +606,7 @@ fn index_refresh_does_not_probe_npm_before_a_named_upgrade_lookup() {
     let mut engine = Engine::default();
     engine.register(DevTool::npm(script.clone())).unwrap();
 
-    assert!(engine.refresh_update_indexes(&cancel).is_empty());
+    assert!(engine.refresh_update_indexes(&[], &cancel).is_empty());
     assert!(script.calls().is_empty());
 
     let report = engine.lookup_for_mutation("eslint", &cancel);
@@ -638,7 +638,7 @@ fn index_refresh_skips_homebrew_cached_as_unavailable() {
         Ok(Availability::Unavailable("casks require Homebrew 6".into())),
     );
 
-    let failures = engine.refresh_update_indexes(&cancel);
+    let failures = engine.refresh_update_indexes(&[], &cancel);
     assert_eq!(failures.len(), 1);
     assert_eq!(
         failures[0],
@@ -668,7 +668,7 @@ fn index_refresh_detects_homebrew_before_writing() {
     let mut engine = Engine::default();
     engine.register(Homebrew::new(script.clone())).unwrap();
 
-    let failures = engine.refresh_update_indexes(&cancel);
+    let failures = engine.refresh_update_indexes(&[], &cancel);
     assert_eq!(failures.len(), 1);
     assert!(matches!(failures[0].error, EngineError::Unavailable { .. }));
     assert_eq!(script.calls(), ["brew --prefix"]);
@@ -688,7 +688,7 @@ fn index_refresh_shares_one_fetch_for_available_homebrew_sources() {
         engine.note_detected(id.into(), Ok(Availability::Available));
     }
 
-    assert!(engine.refresh_update_indexes(&cancel).is_empty());
+    assert!(engine.refresh_update_indexes(&[], &cancel).is_empty());
     assert_eq!(script.calls(), ["w:brew update"]);
 }
 
@@ -703,8 +703,21 @@ fn index_refresh_fetches_for_casks_alone() {
     engine.register(HomebrewCask::new(script.clone())).unwrap();
     engine.note_detected("homebrew-cask".into(), Ok(Availability::Available));
 
-    assert!(engine.refresh_update_indexes(&cancel).is_empty());
+    assert!(engine.refresh_update_indexes(&[], &cancel).is_empty());
     assert_eq!(script.calls(), ["w:brew update"]);
+}
+
+#[test]
+fn index_refresh_skips_sources_a_refresh_already_fetched() {
+    let cancel = Cancellation::default();
+    let script = Script::new(|line| panic!("skipped sources must not run {line}"));
+    let mut engine = Engine::default();
+    engine.register(Homebrew::new(script.clone())).unwrap();
+    engine.register(HomebrewCask::new(script.clone())).unwrap();
+
+    let skip = ["homebrew".to_string(), "homebrew-cask".to_string()];
+    assert!(engine.refresh_update_indexes(&skip, &cancel).is_empty());
+    assert!(script.calls().is_empty());
 }
 
 #[test]
@@ -717,7 +730,7 @@ fn a_cancelled_index_refresh_stops_before_fetching() {
     engine.register(HomebrewCask::new(script.clone())).unwrap();
 
     assert_eq!(
-        engine.refresh_update_indexes(&cancel),
+        engine.refresh_update_indexes(&[], &cancel),
         [BackendFailure {
             backend: "homebrew".into(),
             error: EngineError::Cancelled,

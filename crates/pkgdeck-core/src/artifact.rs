@@ -106,13 +106,17 @@ fn invalid(reason: impl ToString) -> EngineError {
     }
 }
 fn temporary(suffix: &str) -> Result<PathBuf, EngineError> {
+    // The clock can read the same on two threads (macOS counts
+    // microseconds), so a counter keeps each name in this process unique.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let name = format!(
-        "pkgdeck-input-{}-{}{}",
+        "pkgdeck-input-{}-{}-{}{}",
         std::process::id(),
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         suffix
     );
     let path = std::env::temp_dir().join(name);

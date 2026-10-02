@@ -10,6 +10,10 @@ TestCase {
     width: 1100
     height: 760
     property var browser
+    // The window's saved settings outlive a test run; these start each test
+    // from their defaults, as on a fresh install. Made once the application
+    // names are set, so they open the window's settings file.
+    property var savedSettings
     QtObject {
         id: fake
         property string repositories: "{}"
@@ -115,6 +119,10 @@ TestCase {
         function restoreNotificationHistory(history) { lastRestoredHistory = history; notification_history = history; }
         function acknowledgeNotification() {}
         function setAutostart(enabled) { return true; }
+        property string self_update: ""
+        property var restarts: []
+        // Never true here: restarting quits, which would end the test run.
+        function restartApp(background) { restarts.push(background); return false; }
     }
     Component {
         id: window
@@ -127,6 +135,7 @@ TestCase {
     function initTestCase() {
         Qt.application.organization = "PkgDeck-tests";
         Qt.application.domain = "example.invalid";
+        savedSettings = Qt.createQmlObject('import QtCore; Settings { category: "Browser"; property int checkInterval: 30; property string lastBackgroundState: "{}" }', test);
     }
     function init() {
         fake.repositories = "{}";
@@ -160,6 +169,9 @@ TestCase {
         fake.lastFlatpakScope = "";
         fake.lastForce = false;
         fake.loadCount = 0;
+        savedSettings.checkInterval = 30;
+        savedSettings.lastBackgroundState = "{}";
+        savedSettings.sync();
         browser = createTemporaryObject(window, test);
         verify(browser !== null);
         fake.source_catalog = JSON.stringify(browser.sourceIds.map((id) => ({source: id, summary: "Available", availability_kind: "available", capabilities: ["search", "installed", "upgrade", "clean"]})));
@@ -593,6 +605,52 @@ TestCase {
         browser.store.checkInterval = 1500;
         compare(interval.currentText, "1 day");
     }
+    function test_an_updated_pkgdeck_restarts_or_offers_to() {
+        fake.restarts = [];
+        fake.self_update = "";
+        fake.self_update = "manual";
+        const toast = findChild(browser, "restartToast");
+        tryVerify(() => toast.open);
+        compare(toast.actionText, "Restart");
+        toast.actionTriggered();
+        compare(fake.restarts.length, 1);
+        compare(fake.restarts[0], false);
+        toast.hide();
+        // An automatic run restarts on its own, once nothing is changing.
+        const timer = findChild(browser, "selfRestart");
+        fake.writing = true;
+        fake.self_update = "automatic";
+        verify(timer.running);
+        timer.triggered();
+        compare(fake.restarts.length, 1);
+        fake.writing = false;
+        timer.triggered();
+        compare(fake.restarts.length, 2);
+        timer.stop();
+        fake.self_update = "";
+    }
+    function test_toasts_stay_clear_of_the_page_actions() {
+        browser.openView("Sources");
+        const rows = [];
+        for (let i = 0; i < 30; i++)
+            rows.push({kind: "source", name: "Source " + i, source: "apt", summary: "Available", available: true});
+        fake.rows = JSON.stringify(rows);
+        wait(30);
+        browser.choose(0);
+        const button = findChild(browser, "refreshButton");
+        tryVerify(() => button.visible);
+        fake.self_update = "";
+        fake.self_update = "manual";
+        const toast = findChild(browser, "restartToast");
+        tryVerify(() => toast.open);
+        wait(50);
+        const area = browser.contentItem;
+        const toastBottom = toast.mapToItem(area, 0, 0).y + toast.height;
+        const buttonTop = button.mapToItem(area, 0, 0).y;
+        verify(toastBottom <= buttonTop, "toast ends at " + toastBottom + ", button starts at " + buttonTop);
+        toast.hide();
+        fake.self_update = "";
+    }
     function test_automatic_updates_settings_reach_the_backend() {
         browser.backgroundMode = true;
         browser.openView("Settings");
@@ -600,8 +658,9 @@ TestCase {
         const approval = findChild(browser, "systemApprovalSetting");
         const help = findChild(browser, "systemApprovalHelp");
         verify(!auto.checked);
-        // These apply to Update all too, so they work without automatic updates.
+        // Saving the approval works before automatic updates are on.
         verify(approval.enabled);
+        verify(approval.tooltipText.indexOf("still ask") >= 0);
         auto.checked = true;
         auto.clicked();
         compare(browser.store.autoUpdate, true);

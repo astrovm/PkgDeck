@@ -12,6 +12,7 @@ mod dotnet;
 mod firmware;
 mod go_bin;
 mod mac_apps;
+mod macos_updates;
 mod mas;
 mod nix;
 mod oh_my_zsh;
@@ -34,6 +35,7 @@ pub use dotnet::DotnetTools;
 pub use firmware::Firmware;
 pub use go_bin::GoBinaries;
 pub use mac_apps::MacApps;
+pub use macos_updates::MacUpdates;
 pub use mas::MacAppStore;
 pub use nix::Nix;
 pub use oh_my_zsh::OhMyZsh;
@@ -87,6 +89,7 @@ pub const BACKEND_IDS: &[&str] = &[
     "homebrew-cask",
     "macos-apps",
     "mas",
+    "macos-updates",
     "macports",
     "appimage",
     "flatpak",
@@ -132,7 +135,15 @@ pub const BACKEND_IDS: &[&str] = &[
 pub fn never_installs(id: &str) -> bool {
     matches!(
         id,
-        "fwupd" | "mas" | "conda" | "system-image" | "aur" | "toolbox" | "distrobox" | "oh-my-zsh"
+        "fwupd"
+            | "mas"
+            | "macos-updates"
+            | "conda"
+            | "system-image"
+            | "aur"
+            | "toolbox"
+            | "distrobox"
+            | "oh-my-zsh"
     ) || StandaloneTool::ALL.iter().any(|tool| tool.id() == id)
 }
 
@@ -238,6 +249,7 @@ pub fn display_name(id: &str) -> &str {
         "homebrew-cask" => "Homebrew Casks",
         "macos-apps" => "macOS Applications",
         "mas" => "Mac App Store",
+        "macos-updates" => "macOS Updates",
         "macports" => "MacPorts",
         "aur" => "AUR",
         "xbps" => "XBPS",
@@ -878,7 +890,12 @@ impl Transport for NativeTransport {
         cancel: &Cancellation,
         write: bool,
     ) -> Result<Completion, ExecutionError> {
-        self.host.brew(args, cancel, write)
+        self.host.brew_asking(
+            args,
+            cancel,
+            write,
+            matches!(self.authorization, Authorization::Polkit),
+        )
     }
     fn flatpak(
         &self,
@@ -5853,6 +5870,9 @@ fn native_engine_on(
     }
     if allowed("mas") {
         candidates.push((Box::new(MacAppStore::new(transport())), true));
+    }
+    if allowed("macos-updates") {
+        candidates.push((Box::new(MacUpdates::new(transport())), true));
     }
     for (backend, make) in [
         (

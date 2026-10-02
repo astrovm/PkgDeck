@@ -286,9 +286,73 @@ pub fn result_line(op: &Operation, error: Option<&str>, deferred: bool, color: b
     }
     line
 }
-/// Closing line for a batch of changes.
+/// Closing line for a batch of changes. After `pkd update`, sources whose
+/// update information couldn't be fetched follow it.
 pub fn operations_summary(data: &Value, color: bool) -> String {
     let paint = Paint(color);
+    if data["updates"].is_array() {
+        return refresh_summary(data, paint);
+    }
+    let mut summary = changes_summary(data, paint);
+    for failure in data["refresh"]["failures"].as_array().into_iter().flatten() {
+        summary.push_str(&failure_line(paint, &failure_text(failure)));
+    }
+    summary
+}
+/// The end of `pkd refresh`: the updates `pkd upgrade` would install, then
+/// the sources that couldn't be refreshed or read.
+fn refresh_summary(data: &Value, paint: Paint) -> String {
+    let updates = data["updates"].as_array().map_or(&[][..], Vec::as_slice);
+    let failures = data["failures"].as_array().map_or(&[][..], Vec::as_slice);
+    let incomplete = !failures.is_empty()
+        || data["operations"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|item| item["result"].get("Err").is_some());
+    let mut output = if updates.is_empty() && incomplete {
+        "No updates found in the sources that answered.".to_string()
+    } else if updates.is_empty() {
+        paint.green("Everything is up to date.")
+    } else {
+        let count = updates.len();
+        let mut text = paint.bold(&format!(
+            "{count} update{} available:",
+            if count == 1 { "" } else { "s" }
+        ));
+        for package in updates {
+            let (name, _) = package_name(package);
+            let version = if package["candidate_version"].is_null() {
+                value(&package["installed_version"])
+            } else {
+                format!(
+                    "{} → {}",
+                    value(&package["installed_version"]),
+                    value(&package["candidate_version"])
+                )
+            };
+            text.push_str(&format!(
+                "\n  {} {name}  {}  {}",
+                paint.cyan("↑"),
+                paint.dim(&source_name(
+                    package["id"]["backend"].as_str().unwrap_or_default()
+                )),
+                paint.cyan(&version)
+            ));
+        }
+        text.push_str(&format!(
+            "\n{}",
+            paint.dim("Run `pkd upgrade` to install them.")
+        ));
+        text
+    };
+    for failure in failures {
+        output.push_str(&failure_line(paint, &failure_text(failure)));
+    }
+    output
+}
+/// How a batch of changes went.
+fn changes_summary(data: &Value, paint: Paint) -> String {
     let operations = data["operations"].as_array().map_or(&[][..], Vec::as_slice);
     let total = operations.len();
     let failed = operations
@@ -297,16 +361,6 @@ pub fn operations_summary(data: &Value, color: bool) -> String {
         .count();
     if total == 0 {
         paint.green("Nothing to do. Everything is up to date.")
-    } else if failed == 0
-        && operations
-            .iter()
-            .all(|item| item["operation"].get("refresh").is_some())
-    {
-        format!(
-            "{} {}",
-            paint.green("Package lists refreshed."),
-            paint.dim("Run `pkd upgrade` to install updates.")
-        )
     } else if failed == 0 {
         paint.green(&format!(
             "Done. {total} change{} applied.",
@@ -1016,7 +1070,11 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
             paint,
         ));
     } else if let Some(operations) = data["operations"].as_array() {
-        for item in operations {
+        // `pkd update` refreshed first.
+        let refreshed = data["refresh"]["operations"]
+            .as_array()
+            .map_or(&[][..], Vec::as_slice);
+        for item in refreshed.iter().chain(operations) {
             let op: Operation =
                 serde_json::from_value(item["operation"].clone()).expect("typed operation");
             let error = item["result"].get("Err").map(|error| {
@@ -1028,7 +1086,7 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
             output.push_str(&result_line(&op, error.as_deref(), deferred, color));
             output.push('\n');
         }
-        if !operations.is_empty() {
+        if !refreshed.is_empty() || !operations.is_empty() {
             output.push('\n');
         }
         output.push_str(&operations_summary(data, color));
@@ -1736,11 +1794,6 @@ mod tests {
         let install = |result: Value| json!({"operation": {"install": {"name": "tool", "backend": "apt", "architecture": "all", "scope": "system"}}, "result": result});
         for (operations, expected) in [
             (vec![], "Nothing to do"),
-            (vec![op(json!({"Ok": {}}))], "Package lists refreshed."),
-            (
-                vec![op(json!({"Ok": {}}))],
-                "Run `pkd upgrade` to install updates.",
-            ),
             (
                 vec![install(json!({"Ok": {}})), install(json!({"Ok": {}}))],
                 "Done. 2 changes applied.",
@@ -1760,6 +1813,51 @@ mod tests {
                 assert!(summary.contains(expected), "{summary}");
             }
         }
+        // `pkd refresh` ends with the updates it found.
+        let id =
+            json!({"name": "tool", "backend": "apt", "architecture": "all", "scope": "system"});
+        let failure = json!({"backend": "macos-updates", "error": {"InvalidResponse": {"backend": "macos-updates", "reason": "offline"}}});
+        for (data, expected) in [
+            (
+                json!({"operations": [op(json!({"Ok": {}}))], "updates": [], "failures": []}),
+                "Everything is up to date.",
+            ),
+            (
+                json!({"operations": [op(json!({"Err": "x"}))], "updates": [], "failures": []}),
+                "No updates found in the sources that answered.",
+            ),
+            (
+                json!({"operations": [], "updates": [], "failures": [failure]}),
+                "! macOS Updates: offline",
+            ),
+            (
+                json!({"operations": [], "updates": [
+                    {"id": id, "installed_version": "1.0", "candidate_version": "2.0"},
+                    {"id": id, "display_name": "Tool", "installed_version": "1.0", "candidate_version": null}
+                ], "failures": []}),
+                "2 updates available:\n  ↑ tool  APT  1.0 → 2.0\n  ↑ Tool (tool)  APT  1.0\nRun `pkd upgrade` to install them.",
+            ),
+            (
+                json!({"operations": [], "updates": [{"id": id, "installed_version": "1.0"}], "failures": []}),
+                "1 update available:",
+            ),
+        ] {
+            let text = human(&data, 80, false);
+            assert!(text.contains(expected), "{text}");
+            assert!(!operations_summary(&data, true).is_empty());
+        }
+        // `pkd update` shows its refresh before the upgrade, and sources it
+        // couldn't check after the summary.
+        let updated = json!({
+            "refresh": {"operations": [op(json!({"Ok": {}}))], "failures": [failure]},
+            "operations": [install(json!({"Ok": {}}))]
+        });
+        let text = human(&updated, 80, false);
+        assert!(
+            text.starts_with("✓ Refresh APT\n✓ Install tool")
+                && text.ends_with("Done. 1 change applied.\n! macOS Updates: offline"),
+            "{text}"
+        );
     }
     #[test]
     fn details_failures_and_operations_are_readable() {

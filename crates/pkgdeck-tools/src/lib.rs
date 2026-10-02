@@ -331,10 +331,10 @@ impl Desktop {
             "install" => ("ctrl+i", "alt+i"),
             "remove" => ("ctrl+d", "alt+r"),
             "upgrade" => ("ctrl+u", "alt+u"),
-            "update" => ("ctrl+m", "alt+r"),
+            "refresh" => ("ctrl+m", "alt+r"),
             _ => panic!("unknown operation"),
         };
-        if op == "update" {
+        if op == "refresh" {
             self.key("ctrl+5");
             self.key("ctrl+l");
             self.key("Down");
@@ -435,7 +435,7 @@ pub fn gui_lifecycle(args: &[String]) {
     let queries = stable_bytes(&dir.0.join("queries.log"));
     gui.key("Up");
     assert_eq!(fs::read(dir.0.join("queries.log")).unwrap(), queries);
-    for (op, installed) in [("install", json!("2.0")), ("update", json!("2.0"))] {
+    for (op, installed) in [("install", json!("2.0")), ("refresh", json!("2.0"))] {
         gui.write(op, "fixture");
         assert!(
             dir.0.join("state.json").exists(),
@@ -449,7 +449,7 @@ pub fn gui_lifecycle(args: &[String]) {
                     .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
                     .is_some_and(|current| {
                         current["installed"] == installed
-                            && (op != "update" || current["candidate"] == "2.0")
+                            && (op != "refresh" || current["candidate"] == "2.0")
                     })
             },
             15,
@@ -460,7 +460,7 @@ pub fn gui_lifecycle(args: &[String]) {
             "operation {op}: {}",
             gui.logs()
         );
-        if op == "update" {
+        if op == "refresh" {
             assert_eq!(
                 state(&dir.0)["candidate"],
                 "2.0",

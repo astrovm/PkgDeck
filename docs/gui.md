@@ -248,14 +248,25 @@ With [mas](https://github.com/mas-cli/mas) 7 or newer installed, the **Mac App
 Store** source lists apps installed from the App Store and shows which have
 updates. Updates need your Mac password, which mas can only ask for in a
 terminal. If PkgDeck can't get it, it says so; run `pkd upgrade --from mas` in
-Terminal, or update in the App Store app. PkgDeck never installs App Store
-apps.
+Terminal, or update in the App Store app. Automatic updates skip them. PkgDeck
+never installs App Store apps.
 
 **Remove** moves an App Store app to your Trash, where you can drag it back
 out. App Store apps belong to the system, so macOS asks for your administrator
 password first; Cancel leaves the app where it is. Quit the app before removing
 it: PkgDeck refuses apps that are open. Afterwards PkgDeck checks that the app
 left and that the App Store no longer lists it.
+
+### macOS updates
+
+The **macOS Updates** source lists what Software Update has pending: macOS
+point releases, Safari, the Command Line Tools and the like. Update checks ask
+Apple's servers; every other page reads the last check. Installing asks for
+your administrator password. An update that needs a restart is downloaded, not
+installed: finish it from System Settings > General > Software Update. PkgDeck
+never restarts your Mac. Upgrades to a new major version of macOS aren't
+listed; System Settings offers those. Automatic updates only download them;
+installing stays with you.
 
 ### macOS application inventory
 
@@ -353,15 +364,25 @@ updates, PkgDeck installs them and sends one notification.
 - Firmware, the Mac App Store, apk, XBPS, the AUR, Toolbx and Distrobox
   never update automatically.
 
+#### Updating PkgDeck itself
+
+When an update replaces PkgDeck (its Homebrew cask or formula, Flatpak, Snap,
+AppImage or system package), the running copy is still the old one:
+
+- After an automatic update, PkgDeck restarts on its own a few seconds later,
+  once nothing else is changing. A hidden window stays hidden.
+- After an update you started, PkgDeck offers a **Restart** button.
+
 #### System packages
 
-System packages need **Allow system updates without a password**.
+System packages need **Allow automatic updates without a password**.
 
 - It asks for your password once, to turn it on.
-- It also lets **Update all** skip the password.
-- Installing or removing a package still asks.
+- It only covers automatic updates. Anything you start yourself, **Update
+  all** included, still asks.
 - Without it, system updates only notify you. Automatic updates never show
-  a password prompt.
+  a password prompt: a Homebrew cask whose installer needs your password
+  fails right away and stays in **Updates** for you to install.
 
 What it saves:
 
@@ -371,7 +392,13 @@ What it saves:
   Zypper, system Flatpaks and Snaps, only in your active local session.
   The helper does nothing else in that mode.
 - macOS: a sudoers entry, `/private/etc/sudoers.d/pkgdeck-unattended-USER`,
-  for MacPorts' two update commands only.
+  checked with `visudo` before it's saved. It allows exactly
+  `softwareupdate --download --all --no-scan` and, when MacPorts is
+  installed, `port -N selfupdate` and `port -N upgrade outdated`, without
+  your environment, so your settings can't change what runs as root. Nothing
+  else gets past sudo's password prompt. Homebrew casks and the App Store run
+  sudo themselves for whatever their installers need, which no exact command
+  covers, so they're left out.
 - Turning it off deletes the file.
 - On Linux this needs the system Flatpak, the Snap or your distro's
   package. AppImages, user Flatpaks and Homebrew can't use it.
@@ -385,8 +412,8 @@ What it saves:
 - Turn it off to skip APT updates that would remove packages. This applies
   to **Update all** and automatic updates.
 
-A Homebrew cask whose installer needs an administrator password still asks
-for it.
+A Homebrew cask whose installer needs an administrator password asks for it
+when you update it yourself.
 
 ## Performance
 

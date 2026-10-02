@@ -27,7 +27,7 @@ pub struct Args {
     /// Only use this source, such as apt or flatpak. Repeat to pick
     /// several; omit to use every available source. `pkd sources` lists
     /// them.
-    #[arg(long, global = true, value_name = "SOURCE", hide_possible_values = true, value_parser = ["fwupd", "apt", "dnf", "pacman", "zypper", "snap", "homebrew", "homebrew-cask", "macos-apps", "mas", "aur", "apk", "xbps", "system-image", "macports", "rustup", "nix", "go", "dotnet", "appimage", "flatpak", "docker", "podman", "toolbox", "distrobox", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "mise", "pixi", "conda", "composer", "gem", "oh-my-zsh", "codex", "claude", "grok", "opencode", "cursor", "copilot", "kiro", "antigravity", "amp", "droid", "solana", "anchor", "foundry"])]
+    #[arg(long, global = true, value_name = "SOURCE", hide_possible_values = true, value_parser = ["fwupd", "apt", "dnf", "pacman", "zypper", "snap", "homebrew", "homebrew-cask", "macos-apps", "mas", "macos-updates", "aur", "apk", "xbps", "system-image", "macports", "rustup", "nix", "go", "dotnet", "appimage", "flatpak", "docker", "podman", "toolbox", "distrobox", "cargo", "npm", "pnpm", "bun", "pip", "pipx", "uv", "mise", "pixi", "conda", "composer", "gem", "oh-my-zsh", "codex", "claude", "grok", "opencode", "cursor", "copilot", "kiro", "antigravity", "amp", "droid", "solana", "anchor", "foundry"])]
     pub from: Vec<String>,
     /// Pick a package architecture when the same name exists for several.
     #[arg(long, global = true)]
@@ -78,7 +78,8 @@ Examples:
   pkd info cowsay                 Show one package
   pkd install cowsay              Install by exact name
   pkd install --from flatpak org.videolan.VLC
-  pkd refresh && pkd upgrade      Refresh package lists, then update
+  pkd refresh                     Check for updates; installs nothing
+  pkd update                      Check for updates, then install them
   pkd list --from npm             List what one source installed
   pkd completions bash > ~/.local/share/bash-completion/completions/pkd";
 #[derive(Subcommand)]
@@ -105,7 +106,10 @@ pub enum Commands {
         #[arg(required = true)]
         names: Vec<String>,
     },
-    /// Update the named packages, or everything if no names are given.
+    /// Install available updates for the named packages, or everything.
+    ///
+    /// Uses the update information already on this machine and never checks
+    /// for new updates: run `pkd refresh` first, or use `pkd update`.
     Upgrade {
         /// Installed packages to update. Omit to update everything.
         names: Vec<String>,
@@ -113,8 +117,20 @@ pub enum Commands {
         #[arg(long)]
         allow_removals: bool,
     },
-    /// Refresh package lists. Does not install updates; run `pkd upgrade` next.
-    #[command(visible_alias = "update")]
+    /// Check for updates, then install them: `pkd refresh`, then `pkd upgrade`.
+    ///
+    /// Takes the same names and options as `pkd upgrade`, and asks once.
+    Update {
+        /// Installed packages to update. Omit to update everything.
+        names: Vec<String>,
+        /// Allow an APT full upgrade to remove packages.
+        #[arg(long)]
+        allow_removals: bool,
+    },
+    /// Check every source for updates and list them. Installs nothing.
+    ///
+    /// Refreshes package lists (such as `apt update` or `brew update`) and
+    /// fetches other update information, such as Apple's software updates.
     Refresh,
     /// List installed packages.
     List,
@@ -241,7 +257,10 @@ impl Commands {
         matches!(self, Self::Repos { command: Some(command) } if !matches!(command, RepoCommand::List))
             || matches!(
                 self,
-                Self::Install { .. } | Self::Remove { .. } | Self::Upgrade { .. }
+                Self::Install { .. }
+                    | Self::Remove { .. }
+                    | Self::Upgrade { .. }
+                    | Self::Update { .. }
             )
             || matches!(self.cleanup_request(), (targets, all) if all || !targets.is_empty())
     }
@@ -276,7 +295,7 @@ fn failure(error: EngineError) -> (Value, u8) {
 fn inventory_only_mutation(args: &Args) -> Option<EngineError> {
     let capability = match args.command.as_ref()? {
         Commands::Install { .. } => Capability::Install,
-        Commands::Upgrade { .. } => Capability::Upgrade,
+        Commands::Upgrade { .. } | Commands::Update { .. } => Capability::Upgrade,
         _ => return None,
     };
     if args
@@ -404,6 +423,209 @@ pub fn dispatch_with(
             2,
         );
     }
+    match command {
+        Commands::Refresh => refresh_report(engine, args, history, cancel, authorize, events),
+        // Refresh, then upgrade from what it found, with one review. A full
+        // update stops if any source couldn't refresh, as a full upgrade
+        // stops on a source it can't read. A named update refuses only
+        // packages from such a source: its stale lists could hide the new
+        // version.
+        Commands::Update {
+            names,
+            allow_removals,
+        } => {
+            if let Some(error) = inventory_only_mutation(args) {
+                return failure(error);
+            }
+            let refreshed = match refresh_sources(engine, args, history, cancel, authorize, events)
+            {
+                Ok(refreshed) => refreshed,
+                Err(error) => return failure(error),
+            };
+            let failures: Vec<_> = refreshed
+                .failed
+                .iter()
+                .chain(&refreshed.index_failures)
+                .cloned()
+                .collect();
+            let (mut data, code) = if names.is_empty() && !failures.is_empty() {
+                failure(EngineError::Incomplete(failures.clone()))
+            } else {
+                let upgrade = Commands::Upgrade {
+                    names: names.clone(),
+                    allow_removals: *allow_removals,
+                };
+                dispatch_command(
+                    engine, args, &upgrade, &failures, history, cancel, confirm, authorize, events,
+                )
+            };
+            data["refresh"] = json!({
+                "operations": refreshed.operations,
+                "failures": refreshed.index_failures,
+            });
+            // Upgrades that worked beside a failed refresh are a partial result.
+            let code = if code == 0 && !failures.is_empty() {
+                8
+            } else {
+                code
+            };
+            (data, code)
+        }
+        command => dispatch_command(
+            engine,
+            args,
+            command,
+            &[],
+            history,
+            cancel,
+            confirm,
+            authorize,
+            events,
+        ),
+    }
+}
+/// What a refresh did, for its report or for the upgrade `update` runs next.
+struct Refreshed {
+    /// Each refresh operation and its result, as `operations` shows them.
+    operations: Vec<Value>,
+    /// Sources whose refresh operation failed.
+    failed: Vec<BackendFailure>,
+    /// Update indexes that couldn't be fetched.
+    index_failures: Vec<BackendFailure>,
+    /// The refresh operations' exit code.
+    code: u8,
+}
+/// Fetch every update index, then refresh package lists. Only sources that
+/// keep package lists can refresh them; the rest, such as npm, check for
+/// updates whenever they list, even when asked for by name. Missing
+/// managers are skipped unless they were asked for by name. A source whose
+/// refresh operation fetches
+/// its index too (Homebrew's `brew update`) fetches once. Refreshing
+/// changes nothing you would review, so it runs without asking, like the
+/// app's background refresh.
+fn refresh_sources(
+    engine: &mut Engine,
+    args: &Args,
+    history: Option<&History>,
+    cancel: &Cancellation,
+    authorize: &mut dyn FnMut(&[Operation]) -> Result<(), EngineError>,
+    events: &mut dyn FnMut(Event),
+) -> Result<Refreshed, EngineError> {
+    let mut operations = Vec::new();
+    for source in engine.discover(cancel) {
+        match source.availability {
+            Ok(Availability::Available) if source.capabilities.contains(&Capability::Refresh) => {
+                operations.push(Operation::Refresh {
+                    backend: source.backend,
+                })
+            }
+            Ok(Availability::Unavailable(reason)) if !args.from.is_empty() => {
+                return Err(EngineError::Unavailable {
+                    backend: source.backend,
+                    reason,
+                })
+            }
+            Err(error) if !args.from.is_empty() => return Err(error),
+            _ => {}
+        }
+    }
+    // Before the operations, while the spinner still says what is happening.
+    let refreshing: Vec<_> = operations
+        .iter()
+        .map(|operation| operation.backend().to_string())
+        .collect();
+    let index_failures = engine.refresh_update_indexes(&refreshing, cancel);
+    if !operations.is_empty() {
+        authorize(&operations)?;
+    }
+    // `brew update` refreshes formulae and casks together: with both
+    // sources, it runs once and its result stands for both.
+    let shared = ["homebrew", "homebrew-cask"].iter().all(|id| {
+        operations
+            .iter()
+            .any(|operation| operation.backend() == *id)
+    });
+    let run: Vec<Operation> = operations
+        .iter()
+        .filter(|operation| !(shared && operation.backend() == "homebrew-cask"))
+        .cloned()
+        .collect();
+    let mut results = execute(engine, history, &run, cancel, events);
+    if shared {
+        let brew = run
+            .iter()
+            .position(|operation| operation.backend() == "homebrew")
+            .expect("both Homebrew sources refresh");
+        let cask = operations
+            .iter()
+            .position(|operation| operation.backend() == "homebrew-cask")
+            .expect("both Homebrew sources refresh");
+        let result = results[brew].clone();
+        results.insert(cask, result);
+    }
+    let failed = operations
+        .iter()
+        .zip(&results)
+        .filter_map(|(operation, result)| {
+            result.as_ref().err().map(|error| BackendFailure {
+                backend: operation.backend().into(),
+                error: error.clone(),
+            })
+        })
+        .collect();
+    Ok(Refreshed {
+        code: exit_code(&results),
+        operations: results_json(operations, results),
+        failed,
+        index_failures,
+    })
+}
+/// `pkd refresh`: refresh, then list the updates `pkd upgrade` would
+/// install. Sources that couldn't be refreshed or read make it partial.
+fn refresh_report(
+    engine: &mut Engine,
+    args: &Args,
+    history: Option<&History>,
+    cancel: &Cancellation,
+    authorize: &mut dyn FnMut(&[Operation]) -> Result<(), EngineError>,
+    events: &mut dyn FnMut(Event),
+) -> (Value, u8) {
+    let refreshed = match refresh_sources(engine, args, history, cancel, authorize, events) {
+        Ok(refreshed) => refreshed,
+        Err(error) => return failure(error),
+    };
+    let report = engine.installed_for_mutation(cancel);
+    let mut failures = refreshed.index_failures;
+    failures.extend(report.failures);
+    let updates: Vec<_> = report
+        .packages
+        .into_iter()
+        .filter(|p| p.update == UpdateAvailability::Available)
+        .collect();
+    let code = if refreshed.code == 0 && !failures.is_empty() {
+        8
+    } else {
+        refreshed.code
+    };
+    (
+        json!({"operations": refreshed.operations, "updates": updates, "failures": failures}),
+        code,
+    )
+}
+/// Every command but `refresh` and `update`, plus the upgrade `update` runs
+/// after its refresh, with the sources that refresh failed for.
+#[allow(clippy::too_many_arguments)]
+fn dispatch_command(
+    engine: &mut Engine,
+    args: &Args,
+    command: &Commands,
+    refresh_failures: &[BackendFailure],
+    history: Option<&History>,
+    cancel: &Cancellation,
+    confirm: &mut dyn FnMut(&[Operation]) -> bool,
+    authorize: &mut dyn FnMut(&[Operation]) -> Result<(), EngineError>,
+    events: &mut dyn FnMut(Event),
+) -> (Value, u8) {
     match command {
         Commands::Repos { .. } => {
             return (
@@ -600,39 +822,9 @@ pub fn dispatch_with(
     let mut alternatives: Vec<(Operation, Vec<String>)> = Vec::new();
     let planned = (|| -> Result<Vec<Operation>, EngineError> {
         match command {
-            // Only sources that keep package lists can refresh them. Missing
-            // managers are skipped unless they were asked for by name.
-            Commands::Refresh => {
-                let mut operations = Vec::new();
-                for source in engine.discover(cancel) {
-                    match source.availability {
-                        Ok(Availability::Available)
-                            if source.capabilities.contains(&Capability::Refresh) =>
-                        {
-                            operations.push(Operation::Refresh {
-                                backend: source.backend,
-                            })
-                        }
-                        Ok(Availability::Available) if !args.from.is_empty() => {
-                            return Err(EngineError::Unsupported {
-                                backend: source.backend,
-                                capability: Capability::Refresh,
-                            })
-                        }
-                        Ok(Availability::Unavailable(reason)) if !args.from.is_empty() => {
-                            return Err(EngineError::Unavailable {
-                                backend: source.backend,
-                                reason,
-                            })
-                        }
-                        Err(error) if !args.from.is_empty() => return Err(error),
-                        _ => {}
-                    }
-                }
-                Ok(operations)
-            }
+            // Reads what the last refresh found; `update` refreshes first.
             Commands::Upgrade { names, .. } if names.is_empty() => {
-                let report = engine.installed_for_upgrade(cancel);
+                let report = engine.installed_for_mutation(cancel);
                 if !report.failures.is_empty() {
                     return Err(EngineError::Incomplete(report.failures));
                 }
@@ -672,15 +864,6 @@ pub fn dispatch_with(
             Commands::Install { names }
             | Commands::Remove { names }
             | Commands::Upgrade { names, .. } => {
-                // One fetch for the whole command. Each name is then looked
-                // up against the tap `brew update` just wrote. A failed
-                // fetch stops only upgrades from that source: the stale tap
-                // could hide the new version.
-                let refresh_failures = if matches!(command, Commands::Upgrade { .. }) {
-                    engine.refresh_update_indexes(cancel)
-                } else {
-                    Vec::new()
-                };
                 let mut operations = Vec::new();
                 let lookup = match command {
                     Commands::Install { .. } => Lookup::Install,
@@ -842,11 +1025,7 @@ pub fn dispatch_with(
             }
         }
     }
-    if !operations.is_empty()
-        && !args.yes
-        && !matches!(command, Commands::Refresh)
-        && !confirm(&operations)
-    {
+    if !operations.is_empty() && !args.yes && !confirm(&operations) {
         return (
             json!({"error": "confirmation_declined", "message": "Cancelled. Nothing was changed."}),
             7,
@@ -857,9 +1036,24 @@ pub fn dispatch_with(
             return failure(error);
         }
     }
+    let results = execute(engine, history, &operations, cancel, events);
+    let code = exit_code(&results);
+    (
+        json!({ "operations": results_json(operations, results) }),
+        code,
+    )
+}
+/// Run approved operations, recording them in `history` when there is one.
+fn execute(
+    engine: &mut Engine,
+    history: Option<&History>,
+    operations: &[Operation],
+    cancel: &Cancellation,
+    events: &mut dyn FnMut(Event),
+) -> Vec<Result<OperationOutcome, EngineError>> {
     let activity_id =
-        history.and_then(|store| store.begin("cli", operations.clone(), State::Running).ok());
-    let results = engine.execute_batch(&operations, cancel, events);
+        history.and_then(|store| store.begin("cli", operations.to_vec(), State::Running).ok());
+    let results = engine.execute_batch(operations, cancel, events);
     if let (Some(store), Some(id)) = (history, activity_id) {
         let outcomes = results
             .iter()
@@ -871,15 +1065,25 @@ pub fn dispatch_with(
             .collect();
         let _ = store.finish(id, outcomes);
     }
+    results
+}
+/// 0 when every change worked, 8 when some did, else the first error's code.
+fn exit_code(results: &[Result<OperationOutcome, EngineError>]) -> u8 {
     let failed = results.iter().filter(|r| r.is_err()).count();
-    let code = if failed == 0 {
+    if failed == 0 {
         0
     } else if failed != results.len() {
         8
     } else {
         error_code(results.iter().find_map(|r| r.as_ref().err()).unwrap())
-    };
-    let operations = operations
+    }
+}
+/// Each change with its result, and a readable message when it failed.
+fn results_json(
+    operations: Vec<Operation>,
+    results: Vec<Result<OperationOutcome, EngineError>>,
+) -> Vec<Value> {
+    operations
         .into_iter()
         .zip(results)
         .map(|(operation, result)| match &result {
@@ -890,8 +1094,7 @@ pub fn dispatch_with(
                 "message": crate::presentation::error_message(error),
             }),
         })
-        .collect::<Vec<_>>();
-    (json!({ "operations": operations }), code)
+        .collect()
 }
 pub(crate) fn color_for(stream: &impl IsTerminal) -> bool {
     stream.is_terminal()
@@ -939,8 +1142,8 @@ fn working_label(command: &Commands) -> Option<String> {
         Commands::List | Commands::Inventory { .. } => "Reading installed packages".into(),
         Commands::Audit => "Looking for duplicates and leftovers".into(),
         Commands::Sources => "Checking package managers".into(),
-        Commands::Refresh => "Checking package managers".into(),
-        Commands::Upgrade { names, .. } if names.is_empty() => "Checking for updates".into(),
+        Commands::Refresh | Commands::Update { .. } => "Checking for updates".into(),
+        Commands::Upgrade { names, .. } if names.is_empty() => "Reading available updates".into(),
         Commands::Install { .. } | Commands::Remove { .. } | Commands::Upgrade { .. } => {
             "Finding packages".into()
         }
@@ -1126,7 +1329,10 @@ pub fn run(args: &Args) -> u8 {
                 crate::session::sudo_login(&live, operations, &cancel)?;
             }
             // A refresh changes nothing to review, so it just starts.
-            session.start(operations, !matches!(command, Commands::Refresh));
+            let refresh = operations
+                .iter()
+                .all(|operation| matches!(operation, Operation::Refresh { .. }));
+            session.start(operations, !refresh);
             Ok(())
         },
         &mut |event| session.event(event),
@@ -1334,7 +1540,12 @@ mod tests {
             call(&mut engine, &["--scope", "user", "upgrade"], true).0["operations"],
             json!([])
         );
-        assert_eq!(call(&mut engine, &["--scope", "user", "update"], true).1, 2);
+        let (updated, code) = call(&mut engine, &["--scope", "user", "update"], true);
+        assert_eq!((code, &updated["operations"]), (0, &json!([])));
+        assert_eq!(
+            call(&mut engine, &["--scope", "user", "refresh"], true).1,
+            2
+        );
     }
     #[test]
     fn inventory_cli_exports_and_previews_exact_packages_without_writes() {
@@ -1809,20 +2020,25 @@ mod tests {
         }
     }
     #[test]
-    fn help_completions_and_the_refresh_alias() {
+    fn help_completions_and_the_update_commands() {
         use clap::CommandFactory;
-        // `update` stays as a visible alias of `refresh`.
-        for name in ["refresh", "update"] {
-            let args = Args::try_parse_from(["pkd", name]).unwrap();
-            assert!(matches!(args.command, Some(Commands::Refresh)));
-        }
+        // `update` is no longer another name for `refresh`.
+        let args = Args::try_parse_from(["pkd", "refresh"]).unwrap();
+        assert!(matches!(args.command, Some(Commands::Refresh)));
+        let args = Args::try_parse_from(["pkd", "update", "vim", "--allow-removals"]).unwrap();
+        assert!(matches!(
+            args.command,
+            Some(Commands::Update { names, allow_removals: true }) if names == ["vim"]
+        ));
         let mut command = Args::command();
         let help = command.render_long_help().to_string();
         assert!(
-            help.contains("Examples:") && help.contains("pkd refresh"),
+            help.contains("Examples:")
+                && help.contains("pkd refresh")
+                && help.contains("pkd update"),
             "{help}"
         );
-        assert!(help.contains("[alias: update]"), "{help}");
+        assert!(!help.contains("[alias: update]"), "{help}");
         assert!(!help.contains("homebrew-cask"), "{help}");
         // Everyday commands come first.
         let order: Vec<_> = command
@@ -1839,7 +2055,7 @@ mod tests {
             completions(shell, &mut script);
             let script = String::from_utf8(script).unwrap();
             assert!(
-                script.contains(marker) && script.contains("refresh"),
+                script.contains(marker) && script.contains("refresh") && script.contains("update"),
                 "{script}"
             );
         }
@@ -2022,7 +2238,12 @@ mod tests {
             call(&mut engine, &["--from", "apt", "install", "fixture"], true).1,
             0
         );
-        assert_eq!(call(&mut engine, &["update"], true).1, 8);
+        assert_eq!(call(&mut engine, &["refresh"], true).1, 8);
+        // A full update stops when a source couldn't refresh.
+        let (data, code) = call(&mut engine, &["update"], true);
+        assert_eq!(code, 4, "{data}");
+        assert_eq!(data["error"]["Incomplete"][0]["backend"], "homebrew");
+        assert_eq!(data["refresh"]["operations"].as_array().unwrap().len(), 2);
         assert_eq!(
             call(
                 &mut engine,
@@ -2199,8 +2420,9 @@ mod tests {
             ),
             (vec!["audit"], "Looking for duplicates and leftovers"),
             (vec!["sources"], "Checking package managers"),
-            (vec!["update"], "Checking package managers"),
-            (vec!["upgrade"], "Checking for updates"),
+            (vec!["refresh"], "Checking for updates"),
+            (vec!["update"], "Checking for updates"),
+            (vec!["upgrade"], "Reading available updates"),
             (vec!["upgrade", "vim"], "Finding packages"),
             (vec!["install", "vim"], "Finding packages"),
             (vec!["remove", "vim"], "Finding packages"),
@@ -2227,12 +2449,15 @@ mod tests {
         fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
             Ok(Availability::Available)
         }
+        fn installed(&mut self, _: &Cancellation) -> Result<Vec<Package>, EngineError> {
+            Ok(vec![])
+        }
     }
     #[test]
-    fn update_refreshes_only_capable_sources_without_asking() {
+    fn refresh_refreshes_only_capable_sources_without_asking() {
         let mut engine = engine();
         engine.register(NoRefresh("npm")).unwrap();
-        let args = Args::try_parse_from(["pkd", "update"]).unwrap();
+        let args = Args::try_parse_from(["pkd", "refresh"]).unwrap();
         assert!(!args.command.as_ref().unwrap().writes());
         let (data, code) = dispatch(
             &mut engine,
@@ -2246,8 +2471,229 @@ mod tests {
             data["operations"],
             json!([{"operation":{"refresh":{"backend":"apt"}},"result":{"Ok":{"cancellation_deferred":false}}}])
         );
-        // Asking for a source that cannot refresh by name is still an error.
-        assert_eq!(call(&mut engine, &["--from", "npm", "update"], true).1, 1);
+        assert_eq!(data["updates"][0]["id"]["backend"], "apt");
+        // A source without package lists, even asked for by name, checks
+        // for updates as it lists.
+        let mut engine = Engine::default();
+        engine.register(NoRefresh("npm")).unwrap();
+        let (data, code) = call(&mut engine, &["--from", "npm", "refresh"], true);
+        assert_eq!((code, &data["operations"]), (0, &json!([])), "{data}");
+        let (data, code) = call(&mut engine, &["--from", "npm", "update"], true);
+        assert_eq!((code, &data["operations"]), (0, &json!([])), "{data}");
+    }
+    /// A source with an update index, like macOS updates or Homebrew: it
+    /// fetches only during an update check or its own refresh, and shows
+    /// its one package, `indexed`, as updatable only once it has fetched.
+    struct Indexed {
+        id: &'static str,
+        refresh: bool,
+        fail: bool,
+        armed: bool,
+        fetched: bool,
+        fetches: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    }
+    impl Indexed {
+        fn new(id: &'static str, refresh: bool, fail: bool) -> Self {
+            Self {
+                id,
+                refresh,
+                fail,
+                armed: false,
+                fetched: false,
+                fetches: Default::default(),
+            }
+        }
+        fn fetch(&mut self) {
+            self.fetches
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.fetched = true;
+        }
+    }
+    impl Backend for Indexed {
+        fn id(&self) -> &str {
+            self.id
+        }
+        fn capabilities(&self) -> &[Capability] {
+            if self.refresh {
+                &[
+                    Capability::Installed,
+                    Capability::Upgrade,
+                    Capability::Refresh,
+                ]
+            } else {
+                &[Capability::Installed, Capability::Upgrade]
+            }
+        }
+        fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
+            Ok(Availability::Available)
+        }
+        fn has_update_index(&self) -> bool {
+            true
+        }
+        fn arm_update_check(&mut self, token: Option<u64>) {
+            self.armed = token.is_some();
+        }
+        fn refresh_update_index(&mut self, _: &Cancellation) -> Result<(), EngineError> {
+            if !self.armed {
+                return Ok(());
+            }
+            if self.fail {
+                return Err(EngineError::InvalidResponse {
+                    backend: self.id.into(),
+                    reason: "synthetic fetch failure".into(),
+                });
+            }
+            self.fetch();
+            Ok(())
+        }
+        fn installed(&mut self, _: &Cancellation) -> Result<Vec<Package>, EngineError> {
+            let mut package = fixture(self.id).package();
+            package.id.name = "indexed".into();
+            if !self.fetched {
+                package.update = UpdateAvailability::Current;
+            }
+            Ok(vec![package])
+        }
+        fn execute(
+            &mut self,
+            op: &Operation,
+            _: &Cancellation,
+            _: &mut dyn FnMut(Progress),
+        ) -> Result<OperationOutcome, EngineError> {
+            if matches!(op, Operation::Refresh { .. }) {
+                self.fetch();
+            }
+            Ok(OperationOutcome::default())
+        }
+    }
+    #[test]
+    fn refresh_fetches_every_index_once_and_upgrade_never_fetches() {
+        let scan = Indexed::new("macos-updates", false, false);
+        let brew = Indexed::new("homebrew", true, false);
+        let (scans, brews) = (scan.fetches.clone(), brew.fetches.clone());
+        let count = |counter: &std::sync::Arc<std::sync::atomic::AtomicU32>| {
+            counter.load(std::sync::atomic::Ordering::Relaxed)
+        };
+        let mut engine = Engine::default();
+        engine.register(scan).unwrap();
+        engine.register(brew).unwrap();
+        // Before a refresh, upgrade finds nothing and fetches nothing.
+        assert_eq!(
+            call(&mut engine, &["upgrade"], true).0["operations"],
+            json!([])
+        );
+        call(
+            &mut engine,
+            &["upgrade", "indexed", "--from", "homebrew"],
+            true,
+        );
+        assert_eq!((count(&scans), count(&brews)), (0, 0));
+        // Homebrew's refresh is its fetch; the scan has no refresh of its own.
+        let (data, code) = call(&mut engine, &["refresh"], false);
+        assert_eq!(code, 0, "{data}");
+        assert_eq!((count(&scans), count(&brews)), (1, 1));
+        assert_eq!(
+            data["operations"][0]["operation"],
+            json!({"refresh":{"backend":"homebrew"}})
+        );
+        let updated: Vec<_> = data["updates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|package| package["id"]["backend"].as_str().unwrap())
+            .collect();
+        assert_eq!(updated, ["homebrew", "macos-updates"]);
+        // Upgrade then uses what the refresh found, without fetching.
+        let (data, code) = call(&mut engine, &["upgrade"], true);
+        assert_eq!(code, 0, "{data}");
+        assert_eq!(data["operations"].as_array().unwrap().len(), 2);
+        assert_eq!((count(&scans), count(&brews)), (1, 1));
+    }
+    #[test]
+    fn both_homebrew_sources_share_one_brew_update() {
+        let formulae = Indexed::new("homebrew", true, false);
+        let casks = Indexed::new("homebrew-cask", true, false);
+        let (formula_fetches, cask_fetches) = (formulae.fetches.clone(), casks.fetches.clone());
+        let mut engine = Engine::default();
+        engine.register(formulae).unwrap();
+        engine.register(casks).unwrap();
+        let (data, code) = call(&mut engine, &["refresh"], false);
+        assert_eq!(code, 0, "{data}");
+        let fetches = formula_fetches.load(std::sync::atomic::Ordering::Relaxed)
+            + cask_fetches.load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(fetches, 1);
+        // Both still read as refreshed.
+        let refreshed: Vec<_> = data["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["operation"]["refresh"]["backend"].as_str().unwrap())
+            .collect();
+        assert_eq!(refreshed, ["homebrew", "homebrew-cask"]);
+    }
+    #[test]
+    fn update_refreshes_then_upgrades_with_one_review() {
+        let mut engine = engine();
+        let mut reviews = vec![];
+        let args = Args::try_parse_from(["pkd", "update"]).unwrap();
+        let (data, code) = dispatch(
+            &mut engine,
+            &args,
+            &Cancellation::default(),
+            &mut |operations| {
+                reviews.push(operations.to_vec());
+                true
+            },
+            &mut ignore,
+        );
+        assert_eq!(code, 0, "{data}");
+        assert_eq!(
+            reviews,
+            [vec![Operation::UpgradeAll {
+                backend: "apt".into()
+            }]]
+        );
+        assert_eq!(
+            data["refresh"]["operations"][0]["operation"],
+            json!({"refresh":{"backend":"apt"}})
+        );
+        assert_eq!(
+            data["operations"][0]["operation"],
+            json!({"upgrade_all":{"backend":"apt"}})
+        );
+        // Declining keeps the refresh, which needed no approval.
+        let (data, code) = call(&mut engine, &["update", "fixture"], false);
+        assert_eq!(code, 7, "{data}");
+        assert_eq!(data["refresh"]["operations"].as_array().unwrap().len(), 1);
+        // Install and upgrade only sources still refuse before refreshing.
+        let (data, code) = call(&mut engine, &["--from", "macos-apps", "update"], true);
+        assert_eq!(code, 1);
+        assert!(data.get("refresh").is_none(), "{data}");
+    }
+    #[test]
+    fn a_failed_fetch_stops_updates_from_its_source_only_when_named() {
+        let mut engine = engine();
+        engine
+            .register(Indexed::new("macos-updates", false, true))
+            .unwrap();
+        let (data, code) = call(&mut engine, &["refresh"], false);
+        assert_eq!(code, 8, "{data}");
+        assert_eq!(data["failures"][0]["backend"], "macos-updates");
+        // Nothing is upgraded in a full update.
+        let (data, code) = call(&mut engine, &["update"], true);
+        assert_eq!(code, 4, "{data}");
+        assert_eq!(data["error"]["Incomplete"][0]["backend"], "macos-updates");
+        // A named update goes on for other sources, as a partial result.
+        let (data, code) = call(&mut engine, &["update", "fixture"], true);
+        assert_eq!(code, 8, "{data}");
+        assert_eq!(
+            data["operations"][0]["operation"]["upgrade"]["backend"],
+            "apt"
+        );
+        assert_eq!(data["refresh"]["failures"][0]["backend"], "macos-updates");
+        let (data, code) = call(&mut engine, &["update", "indexed"], true);
+        assert_eq!(code, 1, "{data}");
+        assert_eq!(data["error"]["InvalidResponse"]["backend"], "macos-updates");
     }
     #[test]
     fn upgrade_all_handles_empty_and_incomplete_installed_reports() {
@@ -2441,6 +2887,19 @@ mod tests {
         assert_eq!(code, 5, "{data}");
         assert_eq!(authorized, [1]);
         assert!(history.entries().unwrap().is_empty());
+        // A refresh gets permission the same way.
+        let refresh = Args::try_parse_from(["pkd", "refresh"]).unwrap();
+        let (data, code) = dispatch_with(
+            &mut engine(),
+            &refresh,
+            Some(&history),
+            &Cancellation::default(),
+            &mut decline,
+            &mut |_| Err(ExecutionError::AuthorizationDenied.into()),
+            &mut ignore,
+        );
+        assert_eq!(code, 5, "{data}");
+        assert!(history.entries().unwrap().is_empty());
         for (fail, state) in [
             (None, State::Finished),
             (Some(EngineError::Cancelled), State::Cancelled),
@@ -2482,6 +2941,8 @@ mod tests {
             (&["list"][..], true),
             (&["install", "vim"], true),
             (&["inventory", "export", "saved.json"], true),
+            (&["upgrade"], true),
+            (&["update"], true),
             (&["refresh"], false),
             (&["sources"], false),
             (&["doctor"], false),
