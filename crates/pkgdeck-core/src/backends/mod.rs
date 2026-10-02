@@ -7260,6 +7260,11 @@ mod native_transport_tests {
             .apt_query_sandboxed("search", "KDE connect", "", &cancel)
             .unwrap();
         assert!(cache_log(&base).starts_with("search KDE connect\npolicy kdeconnect\n"));
+        // A search of only separators is still sent, escaped.
+        native
+            .apt_query_sandboxed("search", ".", "", &cancel)
+            .unwrap();
+        assert!(cache_log(&base).contains("search \\.\n"));
         std::fs::remove_dir_all(base).unwrap();
     }
 
