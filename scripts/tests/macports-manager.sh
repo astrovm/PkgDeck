@@ -55,8 +55,10 @@ export PATH="/opt/local/bin:/opt/local/sbin:$PATH"
 port version
 # Prebuilt archives only: when one is missing, MacPorts would compile the
 # port and its toolchain for longer than any budget here. Fail at once with
-# its own reason instead.
-echo 'buildfromsource never' | sudo -n tee -a /opt/local/etc/macports/macports.conf >/dev/null
+# its own reason instead. Its post-install link scan flags the prebuilt
+# ripgrep and rebuilds it from source, so it only reports here; running
+# rg below still catches a binary that is really broken.
+printf 'buildfromsource never\nrevupgrade_mode report\n' | sudo -n tee -a /opt/local/etc/macports/macports.conf >/dev/null
 
 run() { "$pkd" --json --yes --auth sudo --from macports "$@"; }
 success() {
