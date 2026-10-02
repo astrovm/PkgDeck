@@ -562,6 +562,25 @@ fn exact_lookups_only_ask_sources_that_can_have_the_name() {
 }
 
 #[test]
+fn exact_lookups_skip_sources_that_cannot_search() {
+    // Like macOS Updates: it lists installed updates but holds no names.
+    let mut engine = engine(Fault::None);
+    let mut updates = Synthetic::new("updates", Fault::None);
+    updates.capabilities = &[Capability::Installed, Capability::Upgrade];
+    let calls = updates.calls.clone();
+    engine.register(updates).unwrap();
+    let cancel = Cancellation::default();
+    for report in [
+        engine.lookup("fixture-tool", &cancel),
+        engine.lookup_for_mutation("fixture-tool", &cancel),
+    ] {
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert_eq!(report.successful_sources, ["synthetic"]);
+    }
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+}
+
+#[test]
 fn only_removals_of_an_app_path_read_the_macos_inventory() {
     /// The macOS Applications inventory: it can only hold absolute app paths.
     struct Inventory(Synthetic);

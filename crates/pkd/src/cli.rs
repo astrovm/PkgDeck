@@ -649,7 +649,16 @@ fn dispatch_command(
                     && args.scope.is_none_or(|scope| scope.native() == p.id.scope)
             });
             rank_search_matches(&mut report.packages, query);
-            let code = if report.failures.is_empty() { 0 } else { 8 };
+            // A source that can't search is a note, not a failed search.
+            let code = if report
+                .failures
+                .iter()
+                .any(|failure| !matches!(failure.error, EngineError::Unsupported { .. }))
+            {
+                8
+            } else {
+                0
+            };
             return (json!(report), code);
         }
         Commands::List => {

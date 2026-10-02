@@ -448,6 +448,11 @@ pub struct Engine {
     batch_mode: crate::batch::BatchMode,
     unattended: bool,
 }
+/// Whether an exact-name lookup should ask `backend`. A source that can't
+/// search, such as macOS Updates, holds no name to look up.
+fn can_look_up(backend: &dyn Backend, name: &str) -> bool {
+    backend.capabilities().contains(&Capability::Search) && backend.may_have(name)
+}
 impl Engine {
     /// Native engines use one trusted runner for the protected part of a
     /// confirmed batch when it is installed by the host package.
@@ -715,7 +720,7 @@ impl Engine {
     pub fn installed_for_removal(&mut self, name: &str, cancel: &Cancellation) -> PackageReport {
         let mut report = self.installed_for_mutation(cancel);
         let inventory = self.query_where(Some(name), true, cancel, &|backend| {
-            crate::backends::inventory_only(backend.id()) && backend.may_have(name)
+            crate::backends::inventory_only(backend.id()) && can_look_up(backend, name)
         });
         report.packages.extend(inventory.packages);
         report.packages.sort_by(|a, b| a.id.cmp(&b.id));
@@ -727,7 +732,7 @@ impl Engine {
     }
     pub fn lookup_for_mutation(&mut self, name: &str, cancel: &Cancellation) -> PackageReport {
         self.query_where(Some(name), true, cancel, &|backend| {
-            !crate::backends::inventory_only(backend.id()) && backend.may_have(name)
+            !crate::backends::inventory_only(backend.id()) && can_look_up(backend, name)
         })
     }
     /// Whether a registered backend declares `capability`. Frontends check
@@ -805,12 +810,13 @@ impl Engine {
         self.query_where(query, false, cancel, &|_: &dyn Backend| true)
     }
     /// Search for one exact package name. Backends whose package names can
-    /// never be `name` (see [`Backend::may_have`]) are not asked at all, so
-    /// they appear neither as failures nor as successful sources. Selection
-    /// on the result behaves as on a full [`search`](Self::search).
+    /// never be `name` (see [`Backend::may_have`]), or that can't search at
+    /// all, are not asked, so they appear neither as failures nor as
+    /// successful sources. Selection on the result behaves as on a full
+    /// [`search`](Self::search).
     pub fn lookup(&mut self, name: &str, cancel: &Cancellation) -> PackageReport {
         self.query_where(Some(name), true, cancel, &|backend: &dyn Backend| {
-            backend.may_have(name)
+            can_look_up(backend, name)
         })
     }
     fn query_where(
