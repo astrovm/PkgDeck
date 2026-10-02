@@ -1464,3 +1464,274 @@ fn cancelling_at_the_authorization_boundary_stops_every_batch_write() {
         matches!(events.first(), Some(Event::Started(operation)) if operation == &operations[0])
     );
 }
+
+/// A source that may be missing: counts its probes and index refreshes.
+struct Maybe {
+    name: &'static str,
+    status: Result<Availability, EngineError>,
+    capabilities: &'static [Capability],
+    detects: Arc<AtomicUsize>,
+    refreshes: Arc<AtomicUsize>,
+}
+impl Maybe {
+    fn new(name: &'static str, status: Result<Availability, EngineError>) -> Self {
+        Self {
+            name,
+            status,
+            capabilities: ALL_WITH_CLEAN,
+            detects: Arc::default(),
+            refreshes: Arc::default(),
+        }
+    }
+    fn present(name: &'static str) -> Self {
+        Self::new(name, Ok(Availability::Available))
+    }
+    fn missing(name: &'static str) -> Self {
+        Self::new(name, Ok(Availability::Unavailable("not installed".into())))
+    }
+    fn broken(name: &'static str) -> Self {
+        Self::new(name, Err(ExecutionError::TimedOut.into()))
+    }
+    fn row(&self) -> Package {
+        let mut row = package(id(self.name));
+        row.installed_version = Some("1.0".into());
+        row
+    }
+}
+impl Backend for Maybe {
+    fn id(&self) -> &str {
+        self.name
+    }
+    fn capabilities(&self) -> &[Capability] {
+        self.capabilities
+    }
+    fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
+        self.detects.fetch_add(1, Ordering::Relaxed);
+        self.status.clone()
+    }
+    fn has_update_index(&self) -> bool {
+        true
+    }
+    fn refresh_update_index(&mut self, _: &Cancellation) -> Result<(), EngineError> {
+        self.refreshes.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+    fn search(&mut self, _: &str, _: &Cancellation) -> Result<Vec<Package>, EngineError> {
+        Ok(vec![self.row()])
+    }
+    fn installed(&mut self, _: &Cancellation) -> Result<Vec<Package>, EngineError> {
+        Ok(vec![self.row()])
+    }
+    fn details(&mut self, _: &PackageId, _: &Cancellation) -> Result<PackageDetails, EngineError> {
+        Ok(PackageDetails {
+            package: self.row(),
+            description: String::new(),
+            homepage: None,
+            dependencies: vec![],
+        })
+    }
+    fn cleanup(&mut self, _: &Cancellation) -> Result<Vec<CleanupItem>, EngineError> {
+        Ok(vec![cleanup_item(self.name, "cache", "Synthetic cache")])
+    }
+}
+
+/// An engine of optional sources: one present, one missing, one whose
+/// probe fails. Returns the probe counters in that order.
+fn optional_engine() -> (Engine, [Arc<AtomicUsize>; 3]) {
+    let mut engine = Engine::default();
+    let sources = [
+        Maybe::present("present"),
+        Maybe::missing("missing"),
+        Maybe::broken("broken"),
+    ];
+    let detects = sources.each_ref().map(|source| source.detects.clone());
+    for source in sources {
+        engine.register_optional(Box::new(source)).unwrap();
+    }
+    (engine, detects)
+}
+fn probes(detects: &[Arc<AtomicUsize>; 3]) -> [usize; 3] {
+    detects
+        .each_ref()
+        .map(|count| count.load(Ordering::Relaxed))
+}
+fn failed(failures: &[BackendFailure]) -> Vec<&str> {
+    failures
+        .iter()
+        .map(|failure| failure.backend.as_str())
+        .collect()
+}
+
+#[test]
+fn optional_sources_detect_in_their_own_query_and_remember_it() {
+    let cancel = Cancellation::default();
+    let (mut engine, detects) = optional_engine();
+    assert_eq!(probes(&detects), [0, 0, 0]);
+    // A missing source is neither a failure nor a source that answered; a
+    // failing probe is still reported.
+    let report = engine.search("fixture", &cancel);
+    assert_eq!(report.successful_sources, ["present"]);
+    assert_eq!(failed(&report.failures), ["broken"]);
+    assert_eq!(report.packages.len(), 1);
+    assert_eq!(probes(&detects), [1, 1, 1]);
+    // Later queries on the same engine reuse what detection learned. A
+    // failed probe runs again.
+    let installed = engine.installed(&cancel);
+    assert_eq!(installed.successful_sources, ["present"]);
+    assert_eq!(failed(&installed.failures), ["broken"]);
+    assert_eq!(probes(&detects), [1, 1, 2]);
+    let lookup = engine.lookup("fixture-tool", &cancel);
+    assert_eq!(lookup.successful_sources, ["present"]);
+    assert_eq!(probes(&detects), [1, 1, 3]);
+}
+
+#[test]
+fn optional_sources_stream_without_a_trace_when_missing() {
+    let cancel = Cancellation::default();
+    let (mut engine, detects) = optional_engine();
+    let mut partials = Vec::new();
+    let report = engine.search_stream("fixture", &cancel, &mut |partial| partials.push(partial));
+    // Only the present and broken sources answer.
+    assert_eq!(partials.len(), 2);
+    assert_eq!(partials.last(), Some(&report));
+    assert_eq!(report.successful_sources, ["present"]);
+    assert_eq!(failed(&report.failures), ["broken"]);
+    // Every backend returns to the engine and keeps what it learned.
+    let mut again = Vec::new();
+    let report = engine.installed_stream(&cancel, &mut |partial| again.push(partial));
+    assert_eq!(again.len(), 2);
+    assert_eq!(report.successful_sources, ["present"]);
+    assert_eq!(probes(&detects), [1, 1, 2]);
+    assert_eq!(
+        engine.search("fixture", &cancel).successful_sources,
+        ["present"]
+    );
+    assert_eq!(probes(&detects), [1, 1, 3]);
+}
+
+#[test]
+fn optional_sources_found_missing_are_not_listed_or_acted_on() {
+    let cancel = Cancellation::default();
+    let (mut engine, detects) = optional_engine();
+    let listed: Vec<_> = engine
+        .discover(&cancel)
+        .into_iter()
+        .map(|source| source.backend)
+        .collect();
+    assert_eq!(listed, ["broken", "present"]);
+    // Discovery's outcome serves the next query.
+    assert_eq!(engine.installed(&cancel).successful_sources, ["present"]);
+    assert_eq!(probes(&detects), [1, 1, 2]);
+    // A missing source reads as unknown, as if it was never registered.
+    assert_eq!(
+        engine.details(&id("missing"), &cancel),
+        Err(EngineError::UnknownBackend("missing".into()))
+    );
+    assert_eq!(
+        engine.details_reuse(&id("missing"), &cancel),
+        Err(EngineError::UnknownBackend("missing".into()))
+    );
+    assert_eq!(
+        engine.details(&id("broken"), &cancel),
+        Err(ExecutionError::TimedOut.into())
+    );
+    // Acting on a source checks it again first.
+    assert!(engine.details(&id("present"), &cancel).is_ok());
+    assert_eq!(probes(&detects), [2, 2, 3]);
+    assert!(engine.details_reuse(&id("present"), &cancel).is_ok());
+    let mut bare = Engine::default();
+    let mut search_only = Maybe::present("present");
+    search_only.capabilities = &[Capability::Search];
+    bare.register_optional(Box::new(search_only)).unwrap();
+    assert!(matches!(
+        bare.details(&id("present"), &cancel),
+        Err(EngineError::Unsupported { .. })
+    ));
+    // Before any query has found it, a warm reuse doesn't trust it.
+    let (mut cold, _) = optional_engine();
+    assert_eq!(
+        cold.details_reuse(&id("present"), &cancel),
+        Err(EngineError::UnknownBackend("present".into()))
+    );
+    assert_eq!(
+        cold.register_optional(Box::new(Maybe::present("present"))),
+        Err(EngineError::DuplicateBackend("present".into()))
+    );
+}
+
+#[test]
+fn optional_sources_found_missing_skip_cleanup_and_index_refreshes() {
+    let cancel = Cancellation::default();
+    let (mut engine, detects) = optional_engine();
+    let report = engine.cleanup(&cancel);
+    let items: Vec<_> = report
+        .items
+        .iter()
+        .map(|item| item.id.backend.as_str())
+        .collect();
+    assert_eq!(items, ["present"]);
+    assert_eq!(failed(&report.failures), ["broken"]);
+    // Cleanup remembers detection too.
+    engine.cleanup(&cancel);
+    assert_eq!(probes(&detects), [1, 1, 2]);
+
+    let (mut engine, detects) = optional_engine();
+    let mut refreshed = Maybe::present("refreshed");
+    let refreshes = refreshed.refreshes.clone();
+    refreshed.capabilities = &[Capability::Installed];
+    engine.register_optional(Box::new(refreshed)).unwrap();
+    let failures = engine.refresh_update_indexes(&[], &cancel);
+    assert_eq!(failed(&failures), ["broken"]);
+    assert_eq!(refreshes.load(Ordering::Relaxed), 1);
+    engine.refresh_update_indexes(&[], &cancel);
+    assert_eq!(probes(&detects), [1, 1, 2]);
+
+    // Cancelling before detection can tell keeps optional sources quiet;
+    // only a source known to be present reports it was cancelled.
+    let cancelled = Cancellation::default();
+    cancelled.cancel();
+    let (mut engine, _) = optional_engine();
+    assert!(engine.cleanup(&cancelled).failures.is_empty());
+    assert!(engine.refresh_update_indexes(&[], &cancelled).is_empty());
+    engine.search("fixture", &cancel);
+    let report = engine.cleanup(&cancelled);
+    assert_eq!(failed(&report.failures), ["present"]);
+    assert_eq!(report.failures[0].error, EngineError::Cancelled);
+    let failures = engine.refresh_update_indexes(&[], &cancelled);
+    assert_eq!(failed(&failures), ["present"]);
+    assert_eq!(failures[0].error, EngineError::Cancelled);
+}
+
+#[test]
+fn optional_sources_stay_quiet_when_cancelled_before_detection() {
+    let cancel = Cancellation::default();
+    cancel.cancel();
+    let (mut engine, detects) = optional_engine();
+    let report = engine.search("fixture", &cancel);
+    assert!(report.failures.is_empty());
+    assert!(report.successful_sources.is_empty());
+    let mut partials = Vec::new();
+    let report = engine.installed_stream(&cancel, &mut |partial| partials.push(partial));
+    assert!(partials.is_empty());
+    assert!(report.failures.is_empty());
+    assert_eq!(probes(&detects), [0, 0, 0]);
+
+    // Once detection found a source, a cancelled query reports it, both
+    // directly and streamed, while the missing and unknown ones stay quiet.
+    let (mut engine, _) = optional_engine();
+    engine.search("fixture", &Cancellation::default());
+    assert_eq!(
+        failed(&engine.search("fixture", &cancel).failures),
+        ["present"]
+    );
+    let report = engine.installed_stream(&cancel, &mut |_| {});
+    assert_eq!(failed(&report.failures), ["present"]);
+    assert_eq!(report.failures[0].error, EngineError::Cancelled);
+    // Every backend went back to the engine.
+    assert_eq!(
+        engine
+            .search("fixture", &Cancellation::default())
+            .successful_sources,
+        ["present"]
+    );
+}

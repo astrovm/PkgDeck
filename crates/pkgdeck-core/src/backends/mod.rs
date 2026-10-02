@@ -5876,6 +5876,8 @@ impl<T: Transport> Backend for DevTool<T> {
 
 /// Missing optional managers are omitted from automatic queries, but explicit selections
 /// and source discovery retain their unavailability. Detection failures are never hidden.
+/// Automatic engines detect each source inside its own query, so a slow probe
+/// holds back only that source.
 ///
 /// `sources` selects backends by id: empty means every available backend,
 /// while a non-empty set registers exactly those members (unavailable ones
@@ -5906,13 +5908,11 @@ fn native_engine_on(
         host: host.clone(),
         authorization,
     };
-    // Every candidate in registration order, with whether it is probed now.
-    // Detection spawns native tools (a Node or Python start-up each), so the
-    // probes run concurrently instead of one after another.
+    // Every candidate in registration order, with whether a listing or an
+    // explicit selection probes it now. Detection spawns native tools (a Node
+    // or Python start-up each), so the probes run concurrently instead of one
+    // after another. Sources whose query runs detection anyway are not probed.
     let mut candidates: Vec<(Box<dyn Backend>, bool)> = Vec::new();
-    // Listed or explicitly selected sources register without a probe when
-    // their query runs detection anyway.
-    let probe_unless_listed = !(discover || explicit);
     if allowed("apt") {
         candidates.push((Box::new(Apt::new(transport())), true));
     }
@@ -5948,7 +5948,7 @@ fn native_engine_on(
         ("macports", SystemManager::macports),
     ] {
         if allowed(backend) {
-            candidates.push((Box::new(make(transport())), probe_unless_listed));
+            candidates.push((Box::new(make(transport())), false));
         }
     }
     if allowed("fwupd") {
@@ -6004,30 +6004,30 @@ fn native_engine_on(
         ("gem", DevTool::gem),
     ] {
         if allowed(id) {
-            candidates.push((Box::new(make(transport())), probe_unless_listed));
+            candidates.push((Box::new(make(transport())), false));
         }
     }
     if allowed("pixi") {
-        candidates.push((Box::new(Pixi::new(transport())), probe_unless_listed));
+        candidates.push((Box::new(Pixi::new(transport())), false));
     }
     if allowed("conda") {
         // Detection picks conda, mamba, or micromamba, so it always runs.
         candidates.push((Box::new(Conda::new(transport())), true));
     }
     if allowed("rustup") {
-        candidates.push((Box::new(Rustup::new(transport())), probe_unless_listed));
+        candidates.push((Box::new(Rustup::new(transport())), false));
     }
     if allowed("oh-my-zsh") {
-        candidates.push((Box::new(OhMyZsh::new(transport())), probe_unless_listed));
+        candidates.push((Box::new(OhMyZsh::new(transport())), false));
     }
     if allowed("nix") {
-        candidates.push((Box::new(Nix::new(transport())), probe_unless_listed));
+        candidates.push((Box::new(Nix::new(transport())), false));
     }
     if allowed("go") {
-        candidates.push((Box::new(GoBinaries::new(transport())), probe_unless_listed));
+        candidates.push((Box::new(GoBinaries::new(transport())), false));
     }
     if allowed("dotnet") {
-        candidates.push((Box::new(DotnetTools::new(transport())), probe_unless_listed));
+        candidates.push((Box::new(DotnetTools::new(transport())), false));
     }
     // Both check the platform first, so probing is cheap elsewhere.
     if allowed("aur") {
@@ -6048,6 +6048,12 @@ fn native_engine_on(
     if allowed("system-image") {
         candidates.push((Box::new(SystemImage::new(transport())), true));
     }
+    if !(discover || explicit) {
+        for (backend, _) in candidates {
+            engine.register_optional(backend)?;
+        }
+        return Ok(engine);
+    }
     type Probed = (Box<dyn Backend>, Option<Result<Availability, EngineError>>);
     let probed: Vec<Probed> = std::thread::scope(|scope| {
         let workers: Vec<_> = candidates
@@ -6066,13 +6072,10 @@ fn native_engine_on(
     });
     for (backend, status) in probed {
         let id = backend.id().to_string();
-        match status {
-            // Missing optional managers are left out of automatic queries.
-            Some(Ok(Availability::Unavailable(_))) if !(discover || explicit) => continue,
-            // A detected backend keeps what detection learned (such as a
-            // manager's home), so the following query skips its own probe.
-            Some(status) => engine.note_detected(id, status),
-            None => {}
+        // A detected backend keeps what detection learned (such as a
+        // manager's home), so the following query skips its own probe.
+        if let Some(status) = status {
+            engine.note_detected(id, status);
         }
         engine.register_boxed(backend)?;
     }
@@ -7251,6 +7254,35 @@ mod native_transport_tests {
         assert_eq!(sources(&["docker", "podman"]), ["podman"]);
         // Asked for alone, Docker stays so it can explain itself.
         assert_eq!(sources(&["docker"]), ["docker"]);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn automatic_engines_skip_missing_managers_without_probing_upfront() {
+        let base = temp_dir("automatic");
+        let bin = base.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let probed = base.join("probed");
+        // Cargo is present; its probe leaves a mark.
+        script(
+            &bin.join("cargo"),
+            &format!("echo >> '{}'; exit 0", probed.display()),
+        );
+        let host = transport(&bin, &base).host;
+        let cancel = Cancellation::default();
+        let mut engine =
+            native_engine_on(host, &[], false, Authorization::SudoNonInteractive, &cancel).unwrap();
+        assert!(!probed.exists());
+        // Its own query probes it.
+        engine.search_backend("cargo", "fixture", &cancel);
+        assert!(probed.exists());
+        // A missing manager reads as never registered, as before.
+        let missing = engine.search_backend("npm", "fixture", &cancel);
+        assert!(missing.successful_sources.is_empty());
+        assert_eq!(
+            missing.failures[0].error,
+            EngineError::UnknownBackend("npm".into())
+        );
         std::fs::remove_dir_all(base).unwrap();
     }
 
