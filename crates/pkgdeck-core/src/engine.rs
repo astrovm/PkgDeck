@@ -535,10 +535,21 @@ impl Engine {
         self.optional.insert(id);
         Ok(())
     }
-    /// An optional source detection found missing.
-    fn skipped(&self, id: &str) -> bool {
-        self.optional.contains(id)
-            && matches!(self.detected.get(id), Some(Availability::Unavailable(_)))
+    /// Whether a worker's outcome for `id`, already learned, stays out of
+    /// reports.
+    fn quiet(&self, id: &str, error: Option<&EngineError>) -> bool {
+        Self::silent(self.optional.contains(id), self.detected.get(id), error)
+    }
+    /// Whether an optional source's outcome stays out of reports: detection
+    /// found it missing, or the query was cancelled before detection could
+    /// tell, so a missing source never shows up as cancelled.
+    fn silent(optional: bool, noted: Option<&Availability>, error: Option<&EngineError>) -> bool {
+        optional
+            && match noted {
+                Some(Availability::Unavailable(_)) => true,
+                Some(Availability::Available) => false,
+                None => matches!(error, Some(EngineError::Cancelled)),
+            }
     }
 
     /// Remember a detection outcome for the query that follows registration.
@@ -586,7 +597,7 @@ impl Engine {
         }
         sources
             .into_iter()
-            .filter(|source| !self.skipped(&source.backend))
+            .filter(|source| !self.quiet(&source.backend, None))
             .collect()
     }
 
@@ -719,6 +730,13 @@ impl Engine {
                 .filter(|(id, backend)| backend.has_update_index() && !skip.contains(id))
             {
                 if cancel.requested() {
+                    if Self::silent(
+                        engine.optional.contains(id),
+                        engine.detected.get(id),
+                        Some(&EngineError::Cancelled),
+                    ) {
+                        continue;
+                    }
                     failures.push(BackendFailure {
                         backend: id.clone(),
                         error: EngineError::Cancelled,
@@ -730,9 +748,11 @@ impl Engine {
                 if let Some(availability) = noted {
                     engine.detected.insert(id.clone(), availability);
                 }
-                if engine.optional.contains(id)
-                    && matches!(engine.detected.get(id), Some(Availability::Unavailable(_)))
-                {
+                if Self::silent(
+                    engine.optional.contains(id),
+                    engine.detected.get(id),
+                    available.as_ref().err(),
+                ) {
                     continue;
                 }
                 let result = available.and_then(|()| backend.refresh_update_index(cancel));
@@ -836,7 +856,7 @@ impl Engine {
         });
         for (id, noted, result) in results {
             self.learn(&id, noted);
-            if self.skipped(&id) {
+            if self.quiet(&id, result.as_ref().err()) {
                 continue;
             }
             let mut seen = BTreeSet::new();
@@ -932,7 +952,7 @@ impl Engine {
         let mut report = PackageReport::default();
         for (id, noted, result) in results {
             self.learn(&id, noted);
-            if self.skipped(&id) {
+            if self.quiet(&id, result.as_ref().err()) {
                 continue;
             }
             match result {
@@ -1018,9 +1038,13 @@ impl Engine {
             let mut stash = Vec::new();
             let mut learned = Vec::new();
             for (id, backend, noted, result) in rx {
-                // A missing optional source answers nothing at all.
-                let missing =
-                    optional.contains(&id) && matches!(noted, Some(Availability::Unavailable(_)));
+                // A missing optional source answers nothing at all, even
+                // when cancelled before detection could tell.
+                let missing = Self::silent(
+                    optional.contains(&id),
+                    noted.as_ref(),
+                    result.as_ref().err(),
+                );
                 learned.push((id.clone(), noted));
                 if missing {
                     stash.push((id, backend));

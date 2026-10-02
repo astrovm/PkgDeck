@@ -1686,14 +1686,52 @@ fn optional_sources_found_missing_skip_cleanup_and_index_refreshes() {
     engine.refresh_update_indexes(&[], &cancel);
     assert_eq!(probes(&detects), [1, 1, 2]);
 
-    // A cancelled cleanup reports each optional source as cancelled.
+    // Cancelling before detection can tell keeps optional sources quiet;
+    // only a source known to be present reports it was cancelled.
     let cancelled = Cancellation::default();
     cancelled.cancel();
     let (mut engine, _) = optional_engine();
+    assert!(engine.cleanup(&cancelled).failures.is_empty());
+    assert!(engine.refresh_update_indexes(&[], &cancelled).is_empty());
+    engine.search("fixture", &cancel);
     let report = engine.cleanup(&cancelled);
-    assert_eq!(report.failures.len(), 3);
-    assert!(report
-        .failures
-        .iter()
-        .all(|failure| failure.error == EngineError::Cancelled));
+    assert_eq!(failed(&report.failures), ["present"]);
+    assert_eq!(report.failures[0].error, EngineError::Cancelled);
+    let failures = engine.refresh_update_indexes(&[], &cancelled);
+    assert_eq!(failed(&failures), ["present"]);
+    assert_eq!(failures[0].error, EngineError::Cancelled);
+}
+
+#[test]
+fn optional_sources_stay_quiet_when_cancelled_before_detection() {
+    let cancel = Cancellation::default();
+    cancel.cancel();
+    let (mut engine, detects) = optional_engine();
+    let report = engine.search("fixture", &cancel);
+    assert!(report.failures.is_empty());
+    assert!(report.successful_sources.is_empty());
+    let mut partials = Vec::new();
+    let report = engine.installed_stream(&cancel, &mut |partial| partials.push(partial));
+    assert!(partials.is_empty());
+    assert!(report.failures.is_empty());
+    assert_eq!(probes(&detects), [0, 0, 0]);
+
+    // Once detection found a source, a cancelled query reports it, both
+    // directly and streamed, while the missing and unknown ones stay quiet.
+    let (mut engine, _) = optional_engine();
+    engine.search("fixture", &Cancellation::default());
+    assert_eq!(
+        failed(&engine.search("fixture", &cancel).failures),
+        ["present"]
+    );
+    let report = engine.installed_stream(&cancel, &mut |_| {});
+    assert_eq!(failed(&report.failures), ["present"]);
+    assert_eq!(report.failures[0].error, EngineError::Cancelled);
+    // Every backend went back to the engine.
+    assert_eq!(
+        engine
+            .search("fixture", &Cancellation::default())
+            .successful_sources,
+        ["present"]
+    );
 }
