@@ -889,6 +889,26 @@ impl Transport for NativeTransport {
                     .collect(),
                 )
             }
+            "lookup" => {
+                // One exact name, every stanza apt-cache knows for it. An
+                // unknown name has no policy, and show would fail on it.
+                let name = OsString::from(query);
+                let policy = apt_cli::parse_policy_dump(&output(
+                    &cache,
+                    &[OsString::from("policy"), name.clone()],
+                )?);
+                if !policy.keys().any(|(id, _)| id == query) {
+                    return finish(vec![]);
+                }
+                let show = output(&cache, &[OsString::from("show"), name])?;
+                finish(apt_cli::search_packages(
+                    query,
+                    &[(query.to_owned(), String::new())],
+                    &policy,
+                    &apt_cli::parse_show_dump(&show),
+                    &installed_rows()?,
+                ))
+            }
             _ => Err(ExecutionError::Invalid("unknown APT query".into())),
         }
     }
@@ -1012,6 +1032,10 @@ pub struct Apt<T = NativeTransport> {
     pub transport: T,
     desktop_entries: Option<std::collections::BTreeMap<String, PathBuf>>,
     components: Option<std::collections::BTreeMap<String, Vec<String>>>,
+    /// What the last exact lookup read, in full. The details that follow it
+    /// (`pkd info`) come from here instead of a second helper run. Read
+    /// once; changes clear it.
+    looked_up: Vec<PackageDetails>,
 }
 impl<T> Apt<T> {
     pub fn new(transport: T) -> Self {
@@ -1019,6 +1043,7 @@ impl<T> Apt<T> {
             transport,
             desktop_entries: None,
             components: None,
+            looked_up: vec![],
         }
     }
 }
@@ -2177,6 +2202,29 @@ impl<T: Transport> Backend for Apt<T> {
             })
             .collect())
     }
+    /// Every architecture of one exact name, with the full details search
+    /// rows leave out, kept for the details call that usually follows.
+    fn lookup(&mut self, name: &str, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
+        self.looked_up.clear();
+        // A name APT can't have is never sent to it.
+        if name.contains(':') || AptAction::Install(name.into()).arguments().is_err() {
+            return Ok(vec![]);
+        }
+        let found = self.query("lookup", name, "", cancel)?;
+        let home = self.transport.env("HOME").map(PathBuf::from);
+        let packages = found
+            .iter()
+            .map(|d| {
+                let mut package = d.package.clone();
+                if let Some(desktop) = self.desktop_entries().get(&package.id.name).cloned() {
+                    package.icon = desktop_icon(home.as_deref(), &desktop);
+                }
+                package
+            })
+            .collect();
+        self.looked_up = found;
+        Ok(packages)
+    }
     fn installed(&mut self, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
         let home = self.transport.env("HOME").map(PathBuf::from);
         let packages = self.query("installed", "", "", cancel)?;
@@ -2205,11 +2253,17 @@ impl<T: Transport> Backend for Apt<T> {
         cancel: &Cancellation,
     ) -> Result<PackageDetails, EngineError> {
         self.target(id)?;
-        let mut details = self
-            .query("details", &id.name, &id.architecture, cancel)?
+        let looked_up = std::mem::take(&mut self.looked_up)
             .into_iter()
-            .find(|d| d.package.id == *id)
-            .ok_or(EngineError::NotFound)?;
+            .find(|d| d.package.id == *id);
+        let mut details = match looked_up {
+            Some(details) => details,
+            None => self
+                .query("details", &id.name, &id.architecture, cancel)?
+                .into_iter()
+                .find(|d| d.package.id == *id)
+                .ok_or(EngineError::NotFound)?,
+        };
         if details.package.installed_version.is_some() {
             let home = self.transport.env("HOME").map(PathBuf::from);
             if let Some(desktop) = self.desktop_entries().get(&id.name).cloned() {
@@ -2262,6 +2316,8 @@ impl<T: Transport> Backend for Apt<T> {
         cancel: &Cancellation,
         progress: &mut dyn FnMut(Progress),
     ) -> Result<OperationOutcome, EngineError> {
+        // A change can make what a lookup read out of date.
+        self.looked_up.clear();
         let staged_artifact = match operation {
             Operation::Install(id) => crate::artifact::stage(id, cancel)?,
             _ => None,
@@ -2309,6 +2365,7 @@ impl<T: Transport> Backend for Apt<T> {
         if operations.len() < 2 {
             return None;
         }
+        self.looked_up.clear();
         let grouped = (|| {
             let actions = operations
                 .iter()
@@ -3321,6 +3378,10 @@ fn xbps_pkgver(pkgver: &str) -> Option<(&str, String)> {
 pub struct SystemManager<T = NativeTransport> {
     kind: ManagerKind,
     transport: T,
+    /// Rows the last exact lookup read. Details are a search of the same
+    /// name, so the details that follow it (`pkd info`) come from here.
+    /// Read once; changes clear it.
+    looked_up: Vec<Package>,
 }
 pub type Dnf<T = NativeTransport> = SystemManager<T>;
 pub type Pacman<T = NativeTransport> = SystemManager<T>;
@@ -3328,7 +3389,11 @@ pub type Zypper<T = NativeTransport> = SystemManager<T>;
 pub type Snap<T = NativeTransport> = SystemManager<T>;
 impl<T: Transport> SystemManager<T> {
     fn new(kind: ManagerKind, transport: T) -> Self {
-        Self { kind, transport }
+        Self {
+            kind,
+            transport,
+            looked_up: vec![],
+        }
     }
     pub fn dnf(transport: T) -> Self {
         Self::new(ManagerKind::Dnf, transport)
@@ -3730,6 +3795,12 @@ impl<T: Transport> Backend for SystemManager<T> {
         }
         Ok(packages)
     }
+    fn lookup(&mut self, name: &str, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
+        self.looked_up.clear();
+        let packages = self.search(name, cancel)?;
+        self.looked_up = packages.clone();
+        Ok(packages)
+    }
     fn installed(&mut self, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
         let mut packages = self.query(true, "", cancel)?;
         let updates = self.updates(cancel)?;
@@ -3749,12 +3820,18 @@ impl<T: Transport> Backend for SystemManager<T> {
         cancel: &Cancellation,
     ) -> Result<PackageDetails, EngineError> {
         let name = self.target(id)?;
-        // Search merges the installed version into catalog rows.
-        let mut package = self
-            .search(&name, cancel)?
+        let looked_up = std::mem::take(&mut self.looked_up)
             .into_iter()
-            .find(|package| package.id == *id)
-            .ok_or(EngineError::NotFound)?;
+            .find(|package| package.id == *id);
+        // Search merges the installed version into catalog rows.
+        let mut package = match looked_up {
+            Some(package) => package,
+            None => self
+                .search(&name, cancel)?
+                .into_iter()
+                .find(|package| package.id == *id)
+                .ok_or(EngineError::NotFound)?,
+        };
         self.snap_icon(&mut package);
         self.snap_components(&mut package);
         Ok(PackageDetails {
@@ -3770,6 +3847,8 @@ impl<T: Transport> Backend for SystemManager<T> {
         cancel: &Cancellation,
         progress: &mut dyn FnMut(Progress),
     ) -> Result<OperationOutcome, EngineError> {
+        // A change can make what a lookup read out of date.
+        self.looked_up.clear();
         if operation.backend() != self.kind.id() {
             return Err(invalid(self.kind.id(), "foreign operation"));
         }
@@ -7877,6 +7956,20 @@ mod native_transport_tests {
     }
 
     #[test]
+    fn sandboxed_apt_lookup_reads_one_exact_name_as_details_do() {
+        let cancel = Cancellation::default();
+        let (base, native) = apt_tools("tool\\tall\\t1.0\\tinstall ok installed\\n", "", 0);
+        let found = records(native.apt_query_sandboxed("lookup", "tool", "", &cancel));
+        assert_eq!(cache_log(&base), "policy tool\nshow tool\n");
+        let details = records(native.apt_query_sandboxed("details", "tool", "all", &cancel));
+        assert_eq!(found, details);
+        // APT has no policy for an unknown name, so show never runs.
+        assert!(records(native.apt_query_sandboxed("lookup", "ghost", "", &cancel)).is_empty());
+        assert!(cache_log(&base).ends_with("show tool\npolicy ghost\n"));
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
     fn sandboxed_apt_queries_report_failed_reads() {
         let (base, native) = apt_tools("", "", 1);
         assert!(matches!(
@@ -7950,6 +8043,128 @@ mod native_transport_tests {
         assert_eq!(details.package.icon.as_ref(), Some(&icon));
         assert_eq!(details.package.component_ids, ["org.example.Tool"]);
         assert_eq!(details.package.homepages, ["https://example.invalid"]);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn apt_details_after_a_lookup_reuse_what_it_read_until_a_change() {
+        /// Answers every query with the same rows, described by the mode
+        /// that read them, and logs each helper run.
+        #[derive(Clone, Default)]
+        struct Helper(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+        fn done(stdout: Vec<u8>) -> Completion {
+            Completion {
+                code: Some(0),
+                signal: None,
+                stdout,
+                stderr: vec![],
+                truncated: false,
+                cancellation_deferred: false,
+            }
+        }
+        impl Transport for Helper {
+            fn apt_query(
+                &self,
+                mode: &str,
+                query: &str,
+                arch: &str,
+                _: &Cancellation,
+            ) -> Result<Completion, ExecutionError> {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push(format!("{mode} {query} {arch}"));
+                let rows: Vec<_> = ["amd64", "i386"]
+                    .map(|arch| {
+                        serde_json::json!({
+                            "package": {
+                                "id": {
+                                    "backend": "apt", "name": "tool", "architecture": arch,
+                                    "scope": "system", "remote": null, "reference": null,
+                                },
+                                "display_name": "tool", "summary": "A tool",
+                                "installed_version": "1.0", "candidate_version": "1.0",
+                                "update": "current", "icon": null, "component_ids": [], "homepages": [],
+                            },
+                            "description": format!("A tool, read by {mode}"),
+                            "homepage": "https://example.invalid", "dependencies": [],
+                        })
+                    })
+                    .into();
+                Ok(done(serde_json::to_vec(&rows).unwrap()))
+            }
+            fn apt_write(
+                &self,
+                _: AptAction,
+                _: &Cancellation,
+            ) -> Result<Completion, ExecutionError> {
+                self.0.lock().unwrap().push("write".into());
+                Ok(done(vec![]))
+            }
+            fn apt_write_group(
+                &self,
+                _: &[AptAction],
+                _: &Cancellation,
+            ) -> Result<Completion, ExecutionError> {
+                self.0.lock().unwrap().push("write group".into());
+                Ok(done(vec![]))
+            }
+        }
+        let base = temp_dir("apt-lookup");
+        let icon = base.join("tool.png");
+        std::fs::write(&icon, "png").unwrap();
+        let desktop = base.join("tool.desktop");
+        std::fs::write(
+            &desktop,
+            format!("[Desktop Entry]\nIcon={}\n", icon.display()),
+        )
+        .unwrap();
+        let helper = Helper::default();
+        let log = || std::mem::take(&mut *helper.0.lock().unwrap());
+        let mut apt = Apt::new(helper.clone());
+        apt.desktop_entries = Some([("tool".to_string(), desktop)].into());
+        apt.components = Some([("tool".to_string(), vec!["org.example.Tool".into()])].into());
+        let cancel = Cancellation::default();
+        // One helper run finds every architecture of the exact name.
+        let found = apt.lookup("tool", &cancel).unwrap();
+        assert_eq!(log(), ["lookup tool "]);
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0].icon.as_ref(), Some(&icon));
+        let (amd64, i386) = (found[0].id.clone(), found[1].id.clone());
+        // `pkd info`: details come from the lookup, dressed like a fresh read.
+        let details = apt.details(&amd64, &cancel).unwrap();
+        assert!(log().is_empty());
+        assert_eq!(details.description, "A tool, read by lookup");
+        assert_eq!(details.package.icon.as_ref(), Some(&icon));
+        assert_eq!(details.package.component_ids, ["org.example.Tool"]);
+        assert_eq!(details.package.homepages, ["https://example.invalid"]);
+        // Read once: the next details ask the helper.
+        let details = apt.details(&i386, &cancel).unwrap();
+        assert_eq!(log(), ["details tool i386"]);
+        assert_eq!(details.description, "A tool, read by details");
+        // A change, alone or grouped, clears what the lookup read.
+        apt.lookup("tool", &cancel).unwrap();
+        apt.execute(&Operation::Remove(amd64.clone()), &cancel, &mut |_| {})
+            .unwrap();
+        apt.details(&amd64, &cancel).unwrap();
+        assert_eq!(log(), ["lookup tool ", "write", "details tool amd64"]);
+        apt.lookup("tool", &cancel).unwrap();
+        apt.execute_group(
+            &[Operation::Remove(amd64.clone()), Operation::Remove(i386)],
+            &cancel,
+            &mut |_| {},
+        )
+        .unwrap()
+        .unwrap();
+        apt.details(&amd64, &cancel).unwrap();
+        assert_eq!(log(), ["lookup tool ", "write group", "details tool amd64"]);
+        // Names APT can't have are never sent, and leave nothing behind.
+        apt.lookup("tool", &cancel).unwrap();
+        for name in ["Tool Name", "tool:amd64", "-o"] {
+            assert!(apt.lookup(name, &cancel).unwrap().is_empty());
+        }
+        apt.details(&amd64, &cancel).unwrap();
+        assert_eq!(log(), ["lookup tool ", "details tool amd64"]);
         std::fs::remove_dir_all(base).unwrap();
     }
 }

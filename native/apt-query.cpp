@@ -75,7 +75,8 @@ static std::string search_text(const std::string &s) {
   return folded;
 }
 // Modern indexes keep only a checksum in Packages; the long text lives in
-// Translation-* files, which apt-cache show reads the same way. Returns
+// Translation-* files, which apt-cache show reads the same way. Only details
+// and lookup read it. Returns
 // Debian's folded text unfolded: one leading space removed per line and " ."
 // as an empty line.
 static std::string description(pkgRecords &records,
@@ -108,7 +109,8 @@ static std::string description(pkgRecords &records,
 
 int main(int argc, char **argv) {
   if (argc != 4) {
-    std::cerr << "Usage: pkgdeck-apt-query detect|search|installed|details "
+    std::cerr << "Usage: pkgdeck-apt-query "
+                 "detect|search|installed|details|lookup "
                  "query architecture\n";
     return 2;
   }
@@ -120,7 +122,7 @@ int main(int argc, char **argv) {
   }
   const auto needle = search_text(query);
   if (mode != "detect" && mode != "search" && mode != "installed" &&
-      mode != "details")
+      mode != "details" && mode != "lookup")
     return 2;
   if (!pkgInitConfig(*_config) || !pkgInitSystem(*_config, _system)) {
     _error->DumpErrors();
@@ -160,6 +162,9 @@ int main(int argc, char **argv) {
     const std::string name = item.Name(), architecture = version.Arch();
     if (mode == "details" && (name != query || architecture != arch))
       continue;
+    // Lookup: every architecture of one exact name, read as fully as details.
+    if (mode == "lookup" && name != query)
+      continue;
     if (version.FileList().end())
       continue;
     entries.emplace_back(item, version);
@@ -186,10 +191,11 @@ int main(int argc, char **argv) {
         search_text(name + " " + summary).find(needle) == std::string::npos)
       continue;
     // Lists show only the package; installed rows also group by homepage.
-    // Details reads the rest.
+    // Details and lookup read the rest.
+    const bool full = mode == "details" || mode == "lookup";
     const std::string homepage = mode == "search" ? "" : record.Homepage();
     const std::string depends =
-        mode == "details" ? record.RecordField("Depends") : "";
+        full ? record.RecordField("Depends") : "";
     const bool upgradable =
         !installed.end() && !candidate.end() &&
         cache.VS->CmpVersion(candidate.VerStr(), installed.VerStr()) > 0 &&
@@ -210,7 +216,7 @@ int main(int argc, char **argv) {
                       : installed.end() ? "unknown"
                                         : "current")
               << "},\"description\":"
-              << json(mode == "details" ? description(records, version) : "")
+              << json(full ? description(records, version) : "")
               << ",\"homepage\":"
               << (homepage.empty() ? "null" : json(homepage))
               << ",\"dependencies\":[";

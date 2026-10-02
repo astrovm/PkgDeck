@@ -58,6 +58,13 @@ query details pkgdeck-fixture amd64 | jq -e 'length==1 and .[0].package.installe
 query details pkgdeck-fixture arm64 | jq -e 'length==1 and .[0].package.id.architecture=="arm64" and .[0].package.installed_version==null'
 # Lists carry only what their rows use; details reads the rest.
 query search QUOTED '' | jq -e 'length==1 and .[0].description=="" and .[0].homepage==null and .[0].dependencies==[]'
+# Lookup returns every architecture of the exact name, each read like details.
+query lookup pkgdeck-fixture '' | jq -e 'length==2 and ([.[].package.id.architecture]|sort)==["amd64","arm64"]'
+for arch in amd64 arm64; do
+    diff <(query lookup pkgdeck-fixture '' | jq -S --arg a "$arch" '[.[] | select(.package.id.architecture==$a)]') \
+        <(query details pkgdeck-fixture "$arch" | jq -S .)
+done
+query lookup pkgdeck '' | jq -e 'length==0'
 query search CAFÉ '' | jq -e 'length==1'
 query installed '' '' | jq -e 'length==1 and .[0].description=="" and .[0].homepage=="https://example.invalid/pkgdeck" and .[0].dependencies==[]'
 cat >"$work/etc/apt/preferences" <<'PINS'

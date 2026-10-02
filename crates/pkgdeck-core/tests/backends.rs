@@ -5602,6 +5602,46 @@ fn macports_keeps_variants_and_lists_only_active_ports() {
 }
 
 #[test]
+fn pacman_details_after_a_lookup_reuse_its_rows_until_a_change() {
+    let cancel = Cancellation::default();
+    let script = Script::new(&[
+        ("pacman -Ss tool", "extra/tool 2.0-1\n    A tool\n"),
+        ("pacman -Q", "tool 1.0-1\n"),
+        ("pacman -Qmq", "exit 1"),
+        ("pacman -Rns", ""),
+    ]);
+    let calls = || script.calls.lock().unwrap().len();
+    let mut pacman = Pacman::pacman(script.clone());
+    let found = pacman.lookup("tool", &cancel).unwrap();
+    let id = found[0].id.clone();
+    let after_lookup = calls();
+    // `pkd info`: the lookup's row answers, with the installed version merged.
+    let details = pacman.details(&id, &cancel).unwrap();
+    assert_eq!(calls(), after_lookup);
+    assert_eq!(details.package, found[0]);
+    assert_eq!(details.package.installed_version.as_deref(), Some("1.0-1"));
+    assert_eq!(details.description, "A tool");
+    // Read once: asking again searches again.
+    pacman.details(&id, &cancel).unwrap();
+    let searched = calls() - after_lookup;
+    assert!(searched > 0);
+    // A change clears what the lookup read.
+    pacman.lookup("tool", &cancel).unwrap();
+    pacman
+        .execute(&Operation::Remove(id.clone()), &cancel, &mut |_| {})
+        .unwrap();
+    let before = calls();
+    pacman.details(&id, &cancel).unwrap();
+    assert_eq!(calls() - before, searched);
+    // A failed lookup leaves nothing behind either.
+    pacman.lookup("tool", &cancel).unwrap();
+    assert!(pacman.lookup("-bad", &cancel).is_err());
+    let before = calls();
+    pacman.details(&id, &cancel).unwrap();
+    assert_eq!(calls() - before, searched);
+}
+
+#[test]
 fn pacman_leaves_aur_packages_to_the_aur_source() {
     let cancel = Cancellation::default();
     let script = Script::new(&[
