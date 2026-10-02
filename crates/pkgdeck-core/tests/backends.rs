@@ -1565,6 +1565,134 @@ fn flatpak_search_survives_failing_system_scope() {
     assert!(matches!(results[0].id.scope, Scope::User { .. }));
 }
 
+/// Holds each Flatpak read until every read of its group has started, so
+/// reads that run one after another time out instead of answering.
+#[derive(Clone, Default)]
+struct FlatpakGate {
+    state: Arc<(Mutex<FlatpakGateState>, std::sync::Condvar)>,
+}
+#[derive(Default)]
+struct FlatpakGateState {
+    /// How many reads of each group must be in flight together.
+    groups: std::collections::BTreeMap<&'static str, usize>,
+    arrived: std::collections::BTreeMap<&'static str, usize>,
+    timed_out: Vec<String>,
+}
+impl FlatpakGate {
+    fn expect(&self, groups: &[(&'static str, usize)]) {
+        let mut state = self.state.0.lock().unwrap();
+        state.groups = groups.iter().copied().collect();
+        state.arrived.clear();
+    }
+    fn timed_out(&self) -> Vec<String> {
+        self.state.0.lock().unwrap().timed_out.clone()
+    }
+}
+impl Transport for FlatpakGate {
+    fn flatpak(
+        &self,
+        args: &[OsString],
+        _: &Cancellation,
+        _: bool,
+        system: bool,
+    ) -> Result<Completion, ExecutionError> {
+        let args: Vec<_> = args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        // Searches and listings are local reads; update checks name a
+        // remote once asking every remote failed.
+        let group = match (args[1].as_str(), args.len()) {
+            ("search" | "list", _) => "read",
+            (_, 4) => "updates",
+            _ => "remote",
+        };
+        let (lock, ready) = &*self.state;
+        let mut state = lock.lock().unwrap();
+        *state.arrived.entry(group).or_default() += 1;
+        ready.notify_all();
+        let target = state.groups[group];
+        let (mut state, wait) = ready
+            .wait_timeout_while(state, std::time::Duration::from_secs(10), |state| {
+                state.arrived[group] < target
+            })
+            .unwrap();
+        if wait.timed_out() {
+            state.timed_out.push(args.join(" "));
+        }
+        drop(state);
+        let arch = std::env::consts::ARCH;
+        let name = if system { "System" } else { "User" };
+        if group == "updates" {
+            return Err(ExecutionError::Failed(Completion {
+                code: Some(1),
+                signal: None,
+                stdout: vec![],
+                stderr: b"error: Unable to load summary from remote astrovm".to_vec(),
+                truncated: false,
+                cancellation_deferred: false,
+            }));
+        }
+        Ok(output(match args[1].as_str() {
+            "search" => format!(
+                "{name} app\tSynthetic description\tio.example.{name}\t1.0\tstable\tflathub\n"
+            ),
+            "list" => format!(
+                "io.example.{name}\t{arch}\tstable\t1.0\tSynthetic app\tflathub\n\
+                 io.example.Other\t{arch}\tstable\t1.0\tSynthetic app\tastrovm\n"
+            ),
+            _ if args[4] == "flathub" => {
+                format!("app/io.example.{name}/{arch}/stable\t2.0\tflathub\n")
+            }
+            _ => String::new(),
+        }))
+    }
+}
+
+#[test]
+fn flatpak_reads_both_installations_at_once() {
+    let cancel = Cancellation::default();
+    let gate = FlatpakGate::default();
+    let mut backend = Flatpak::new(gate.clone());
+    // Both catalogs and both inventories are read together.
+    gate.expect(&[("read", 4)]);
+    let offers = backend.search("example", &cancel).unwrap();
+    let names: Vec<_> = offers.iter().map(|offer| offer.id.name.as_str()).collect();
+    assert_eq!(
+        names,
+        ["io.example.User", "io.example.System"],
+        "user first"
+    );
+    assert!(matches!(offers[0].id.scope, Scope::User { .. }));
+    assert_eq!(offers[1].id.scope, Scope::System);
+    assert!(offers.iter().all(|offer| offer.installed_version.is_some()));
+    // Each installation lists and checks updates alongside the other, and
+    // every remote of both installations is asked at once.
+    gate.expect(&[("read", 2), ("updates", 2), ("remote", 4)]);
+    let installed = backend.installed(&cancel).unwrap();
+    let rows: Vec<_> = installed
+        .iter()
+        .map(|package| {
+            (
+                package.id.name.as_str(),
+                package.id.scope == Scope::System,
+                package.update == UpdateAvailability::Available,
+            )
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            ("io.example.User", false, true),
+            ("io.example.Other", false, false),
+            ("io.example.System", true, true),
+            ("io.example.Other", true, false),
+        ]
+    );
+    assert!(backend.query_errors().is_empty());
+    assert!(gate.timed_out().is_empty(), "{:?}", gate.timed_out());
+}
+
 const CARGO_LIST: &str = "cargo-install-test v1.2.3 (registry+https://github.com/rust-lang/crates.io-index):\n    cargo-install-test\n\nripgrep v14.1.0:\n    rg\nsourceless v2.0.0:\n    sourceless\n";
 const NPM_LIST: &str =
     r#"{"dependencies": {"left-pad": {"version": "1.3.0"}, "@scope/tool": {"version": "2.0.0"}}}"#;

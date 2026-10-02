@@ -18,7 +18,7 @@ struct UnusedRef {
     bytes: u64,
 }
 
-impl<T: Transport> Flatpak<T> {
+impl<T: Transport + Sync> Flatpak<T> {
     pub(super) fn cleanup_unused(
         &self,
         cancel: &Cancellation,
