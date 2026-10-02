@@ -1057,6 +1057,8 @@ fn streaming_reports_cumulative_partials_equal_to_the_sync_query() {
     let mut live = Engine::default();
     live.register(Synthetic::new("one", Fault::None)).unwrap();
     live.register(Synthetic::new("two", Fault::Query)).unwrap();
+    // Every source asked answers once, as a success or a failure.
+    assert_eq!(live.source_ids(), ["one", "two"]);
     let mut partials = vec![];
     let final_report = live.search_stream("fixture", &cancel, &mut |partial| {
         assert!(partial.packages.windows(2).all(|w| w[0].id <= w[1].id));
@@ -1069,6 +1071,7 @@ fn streaming_reports_cumulative_partials_equal_to_the_sync_query() {
         assert!(partial.failures.iter().all(|f| f.backend == "two"));
     }
     assert_eq!(final_report.failures.len(), 1);
+    assert_eq!(final_report.successful_sources, ["one"]);
     assert_eq!(partials.last().unwrap(), &final_report);
     // The terminal emission matches a synchronous query on the same state.
     assert_eq!(live.search("fixture", &cancel), final_report);

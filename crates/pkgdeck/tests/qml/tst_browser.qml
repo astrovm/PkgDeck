@@ -33,6 +33,7 @@ TestCase {
         property int sourceChecks: 0
         function checkSources() { sourceChecks++; }
         property string report_state: "{}"
+        property string pending_sources: "[]"
         property string manifest_preview: "{}"
         property string lastInventorySelection: ""
         function exportInventory(url, identities) { lastInventorySelection = identities; }
@@ -151,6 +152,7 @@ TestCase {
         fake.confirmation = "";
         fake.confirmation_data = "{}";
         fake.report_state = "{}";
+        fake.pending_sources = "[]";
         fake.activity = "[]";
         fake.background_state = "{}";
         fake.notification_history = "{}";
@@ -1399,6 +1401,42 @@ TestCase {
         verify(hint.mapToItem(browser.contentItem, 0, 0).y > field.mapToItem(browser.contentItem, 0, 0).y + field.height + 40);
         field.text = "vim";
         verify(!empty.visible);
+    }
+    function test_a_slow_read_names_the_sources_it_still_waits_for() {
+        browser.openView("Installed");
+        const pending = findChild(browser, "pendingSources");
+        const row = findChild(browser, "resultsHeadingRow");
+        fake.pending_sources = JSON.stringify(["npm", "gem"]);
+        fake.busy = true;
+        waitForRendering(browser.contentItem);
+        const height = row.height;
+        // A fast read ends before anything is named.
+        verify(!pending.visible);
+        tryVerify(() => pending.visible, 3000);
+        compare(pending.text, "Waiting for npm, RubyGems");
+        // Sources answer one by one; the row keeps its height and the
+        // list never crowds out the heading.
+        fake.pending_sources = JSON.stringify(["apt", "brew", "cargo", "flatpak", "gem", "npm", "pip", "snap"]);
+        waitForRendering(browser.contentItem);
+        compare(row.height, height);
+        verify(pending.height <= row.height);
+        verify(pending.width <= row.width * 0.6 + 0.5);
+        fake.pending_sources = JSON.stringify(["gem"]);
+        compare(pending.text, "Waiting for RubyGems");
+        waitForRendering(browser.contentItem);
+        compare(row.height, height);
+        fake.pending_sources = "[]";
+        verify(!pending.visible);
+        // Nothing is named once the read ends, or while a change runs.
+        fake.pending_sources = JSON.stringify(["npm"]);
+        fake.busy = false;
+        verify(!pending.visible);
+        fake.busy = true;
+        fake.writing = true;
+        wait(1000);
+        verify(!pending.visible);
+        fake.writing = false;
+        fake.busy = false;
     }
     function test_refreshing_a_section_keeps_its_rows_labelled() {
         browser.openView("Installed");

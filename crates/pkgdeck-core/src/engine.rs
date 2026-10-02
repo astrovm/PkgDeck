@@ -809,6 +809,11 @@ impl Engine {
             !crate::backends::inventory_only(backend.id()) && can_look_up(backend, name)
         })
     }
+    /// Every registered source, sorted: the ones a stream will answer for,
+    /// so a frontend can show which are still pending.
+    pub fn source_ids(&self) -> Vec<String> {
+        self.backends.keys().cloned().collect()
+    }
     /// Whether a registered backend declares `capability`. Frontends check
     /// this before asking for confirmation; [`execute`](Self::execute)
     /// refuses unsupported changes regardless.

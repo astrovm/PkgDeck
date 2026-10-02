@@ -277,6 +277,24 @@ Controls.ApplicationWindow {
             sourcePopup.draftSources = root.effectiveSources().filter((id) => root.sourceInfo(id).availability_kind === "available" && root.sourceSupportsView(id));
     }
     readonly property var reportState: JSON.parse(backend.report_state || "{}")
+    // Sources a slow read still waits for. A fast read ends before the
+    // delay, so its list never flashes by.
+    readonly property var pendingSourceNames: pendingDelay.elapsed
+        ? JSON.parse(backend.pending_sources || "[]").map((id) => sourceDisplayName(id)) : []
+    Timer {
+        id: pendingDelay
+        readonly property bool reading: backend.busy && !backend.writing
+        property bool elapsed: false
+        interval: 800
+        onReadingChanged: {
+            elapsed = false;
+            if (reading)
+                restart();
+            else
+                stop();
+        }
+        onTriggered: elapsed = reading
+    }
     readonly property var readFailures: {
         if (currentView !== resultView)
             return [];
@@ -2402,6 +2420,7 @@ Controls.ApplicationWindow {
                     spacing: 0
                     RowLayout {
                         id: resultsHeadingRow
+                        objectName: "resultsHeadingRow"
                         visible: results.count > 0 || backend.busy || backend.writing || (root.currentView === "Sources" && root.items.some(row => row.kind === "source" && !row.available))
                         Layout.fillWidth: true
                         Layout.margins: 14
@@ -2412,6 +2431,16 @@ Controls.ApplicationWindow {
                             font.pointSize: root.font.pointSize * 0.9
                             elide: Text.ElideRight
                             Layout.fillWidth: true
+                        }
+                        Controls.Label {
+                            objectName: "pendingSources"
+                            visible: root.pendingSourceNames.length > 0
+                            text: "Waiting for " + root.pendingSourceNames.join(", ")
+                            color: root.muted
+                            font.pointSize: root.font.pointSize * 0.9
+                            elide: Text.ElideRight
+                            Layout.maximumWidth: resultsHeadingRow.width * 0.6
+                            Accessible.name: text
                         }
                         DeckIcon {
                             id: resultsSpinner
