@@ -4,7 +4,7 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 helper=$(realpath "${CARGO_TARGET_DIR:-target}/debug/pkgdeck-apt-query")
 work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT
+trap 'chmod -R u+w "$work"; rm -rf "$work"' EXIT
 mkdir -p "$work/"{etc/apt,repo,var/lib/apt/lists/partial,var/lib/dpkg,var/cache/apt/archives/partial}
 cat >"$work/config" <<CONFIG
 Dir "$work";
@@ -56,9 +56,10 @@ query() { APT_CONFIG="$work/config" "$helper" "$@"; }
 query detect '' '' | jq -e '.==[]'
 query details pkgdeck-fixture amd64 | jq -e 'length==1 and .[0].package.installed_version=="1.0" and .[0].package.candidate_version=="2.0" and .[0].package.update=="available" and .[0].description=="Synthetic \"quoted\" café fixture\nLong description with a backslash \\ and a newline.\n\nSecond paragraph." and .[0].homepage=="https://example.invalid/pkgdeck" and .[0].dependencies==["synthetic-dependency (>= 1)"]'
 query details pkgdeck-fixture arm64 | jq -e 'length==1 and .[0].package.id.architecture=="arm64" and .[0].package.installed_version==null'
-query search QUOTED '' | jq -e 'length==1'
+# Lists carry only what their rows use; details reads the rest.
+query search QUOTED '' | jq -e 'length==1 and .[0].description=="" and .[0].homepage==null and .[0].dependencies==[]'
 query search CAFÉ '' | jq -e 'length==1'
-query installed '' '' | jq -e 'length==1'
+query installed '' '' | jq -e 'length==1 and .[0].description=="" and .[0].homepage=="https://example.invalid/pkgdeck" and .[0].dependencies==[]'
 cat >"$work/etc/apt/preferences" <<'PINS'
 Package: pkgdeck-fixture
 Pin: version 1.0
@@ -78,4 +79,26 @@ query installed '' '' | jq -e '.[0].package.update=="available"'
 sed -i 's/^Status: install ok installed$/Status: hold ok installed/' "$work/var/lib/dpkg/status"
 query installed '' '' | jq -e '.[0].package.update=="current"'
 [[ ! -e $work/var/cache/apt/pkgcache.bin && ! -e $work/var/cache/apt/srcpkgcache.bin ]]
-echo 'PASS native APT candidates, pinning, phasing, holds, multiarch, installed state and JSON escaping'
+# A cache directory the helper can't write holds apt-get's files: they are
+# read as is, and dpkg changes made after they were built still show.
+APT_CONFIG="$work/config" apt-cache gencaches
+chmod a-w "$work/var/cache/apt"
+caches=$(sha256sum "$work/var/cache/apt/"*.bin)
+cat >>"$work/var/lib/dpkg/status" <<'STATUS'
+
+Package: pkgdeck-local
+Status: install ok installed
+Architecture: amd64
+Version: 0.1
+Description: Synthetic package installed after the cache was built
+
+STATUS
+query installed '' '' | jq -e 'length==2 and (map(.package.id.name) | sort)==["pkgdeck-fixture","pkgdeck-local"]'
+query search 'built' '' | jq -e 'length==1 and .[0].package.installed_version=="0.1"'
+# APT's cache debug log shows the reuse: the lists come from srcpkgcache.bin
+# instead of being parsed again.
+printf '#include "%s";\nDebug::pkgCacheGen "true";\n' "$work/config" >"$work/debug-config"
+log=$(APT_CONFIG="$work/debug-config" "$helper" installed '' '' 2>&1 >/dev/null)
+[[ $log == *'srcpkgcache.bin is valid'* && $log != *'NOT valid'* ]]
+[[ $(sha256sum "$work/var/cache/apt/"*.bin) == "$caches" ]]
+echo 'PASS native APT candidates, pinning, phasing, holds, multiarch, installed state, read-only caches and JSON escaping'
