@@ -709,8 +709,8 @@ impl Transport for NativeTransport {
             &std::env::current_exe().map_err(|e| ExecutionError::Io(e.to_string()))?,
             option_env!("PKGDECK_BUILT_APT_QUERY"),
         )?;
-        // The helper rebuilds APT's cache in memory on every run (about a
-        // second). Its answer only depends on the APT and dpkg databases.
+        // The helper opens APT's cache on every run (half a second or more).
+        // Its answer only depends on the APT and dpkg databases.
         let cacheable = mode != "detect" && self.host.var("APT_CONFIG").is_none();
         let store = cacheable.then(crate::cache::Store::user).flatten();
         let helper = crate::cache::fingerprint(&[crate::cache::Watch::file(&executable)], &[]);

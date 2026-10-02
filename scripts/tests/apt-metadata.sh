@@ -4,7 +4,7 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 helper=$(realpath "${CARGO_TARGET_DIR:-target}/debug/pkgdeck-apt-query")
 work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT
+trap 'chmod -R u+w "$work"; rm -rf "$work"' EXIT
 mkdir -p "$work/"{etc/apt,repo,var/lib/apt/lists/partial,var/lib/dpkg,var/cache/apt/archives/partial}
 cat >"$work/config" <<CONFIG
 Dir "$work";
@@ -78,4 +78,21 @@ query installed '' '' | jq -e '.[0].package.update=="available"'
 sed -i 's/^Status: install ok installed$/Status: hold ok installed/' "$work/var/lib/dpkg/status"
 query installed '' '' | jq -e '.[0].package.update=="current"'
 [[ ! -e $work/var/cache/apt/pkgcache.bin && ! -e $work/var/cache/apt/srcpkgcache.bin ]]
-echo 'PASS native APT candidates, pinning, phasing, holds, multiarch, installed state and JSON escaping'
+# A cache directory the helper can't write holds apt-get's files: they are
+# read as is, and dpkg changes made after they were built still show.
+APT_CONFIG="$work/config" apt-cache gencaches
+chmod a-w "$work/var/cache/apt"
+caches=$(sha256sum "$work/var/cache/apt/"*.bin)
+cat >>"$work/var/lib/dpkg/status" <<'STATUS'
+
+Package: pkgdeck-local
+Status: install ok installed
+Architecture: amd64
+Version: 0.1
+Description: Synthetic package installed after the cache was built
+
+STATUS
+query installed '' '' | jq -e 'length==2 and (map(.package.id.name) | sort)==["pkgdeck-fixture","pkgdeck-local"]'
+query search 'built' '' | jq -e 'length==1 and .[0].package.installed_version=="0.1"'
+[[ $(sha256sum "$work/var/cache/apt/"*.bin) == "$caches" ]]
+echo 'PASS native APT candidates, pinning, phasing, holds, multiarch, installed state, read-only caches and JSON escaping'

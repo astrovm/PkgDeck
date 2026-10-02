@@ -6,6 +6,7 @@
 #include <apt-pkg/configuration.h>
 #include <apt-pkg/depcache.h>
 #include <apt-pkg/error.h>
+#include <apt-pkg/fileutl.h>
 #include <apt-pkg/init.h>
 #include <apt-pkg/pkgrecords.h>
 #include <apt-pkg/pkgsystem.h>
@@ -18,6 +19,7 @@
 #include <cwctype>
 #include <iostream>
 #include <string>
+#include <unistd.h>
 #include <utility>
 #include <vector>
 
@@ -132,8 +134,17 @@ int main(int argc, char **argv) {
     return 0;
   }
   // Never publish cache files, including when invoked by a privileged caller.
-  _config->Set("Dir::Cache::pkgcache", "");
-  _config->Set("Dir::Cache::srcpkgcache", "");
+  // APT saves them wherever their directory is writable, so only then build
+  // the cache in memory. Otherwise reuse apt-get's files read-only: APT
+  // rebuilds just the parts that are out of date instead of everything.
+  for (const char *key : {"Dir::Cache::pkgcache", "Dir::Cache::srcpkgcache"}) {
+    const auto path = _config->FindFile(key);
+    if (!path.empty() && access(flNotFile(path).c_str(), W_OK) == 0) {
+      _config->Set("Dir::Cache::pkgcache", "");
+      _config->Set("Dir::Cache::srcpkgcache", "");
+      break;
+    }
+  }
   pkgCacheFile file;
   if (!file.ReadOnlyOpen()) {
     _error->DumpErrors();
