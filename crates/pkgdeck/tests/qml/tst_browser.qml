@@ -115,6 +115,10 @@ TestCase {
         function restoreNotificationHistory(history) { lastRestoredHistory = history; notification_history = history; }
         function acknowledgeNotification() {}
         function setAutostart(enabled) { return true; }
+        property string self_update: ""
+        property var restarts: []
+        // Never true here: restarting quits, which would end the test run.
+        function restartApp(background) { restarts.push(background); return false; }
     }
     Component {
         id: window
@@ -592,6 +596,30 @@ TestCase {
         // A saved interval between steps shows the closest one.
         browser.store.checkInterval = 1500;
         compare(interval.currentText, "1 day");
+    }
+    function test_an_updated_pkgdeck_restarts_or_offers_to() {
+        fake.restarts = [];
+        fake.self_update = "";
+        fake.self_update = "manual";
+        const toast = findChild(browser, "restartToast");
+        tryVerify(() => toast.open);
+        compare(toast.actionText, "Restart");
+        toast.actionTriggered();
+        compare(fake.restarts.length, 1);
+        compare(fake.restarts[0], false);
+        toast.hide();
+        // An automatic run restarts on its own, once nothing is changing.
+        const timer = findChild(browser, "selfRestart");
+        fake.writing = true;
+        fake.self_update = "automatic";
+        verify(timer.running);
+        timer.triggered();
+        compare(fake.restarts.length, 1);
+        fake.writing = false;
+        timer.triggered();
+        compare(fake.restarts.length, 2);
+        timer.stop();
+        fake.self_update = "";
     }
     function test_automatic_updates_settings_reach_the_backend() {
         browser.backgroundMode = true;

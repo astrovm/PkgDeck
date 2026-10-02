@@ -19,6 +19,7 @@ pub mod flatpak_ref;
 pub mod local_deb;
 pub mod manifest;
 pub mod package;
+pub mod relaunch;
 pub mod unattended;
 
 pub mod backends;

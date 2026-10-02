@@ -105,6 +105,9 @@ pub mod ffi {
         /// The last automatic update, for a notification:
         /// {updated, failed, total}.
         #[qproperty(QString, auto_update_result)]
+        /// PkgDeck updated itself: "automatic" after an automatic run,
+        /// "manual" after a change the person started, empty otherwise.
+        #[qproperty(QString, self_update)]
         #[qproperty(QString, confirmation)]
         #[qproperty(QString, confirmation_data)]
         #[qproperty(QString, version)]
@@ -226,6 +229,12 @@ pub mod ffi {
         #[qinvokable]
         #[cxx_name = "allowSystemUpdates"]
         fn allow_system_updates(self: Pin<&mut PackageController>, allow: bool);
+        /// Start the updated copy once this one quits, to the tray or menu
+        /// bar when `background`. False when it couldn't be started; the
+        /// caller quits only on true.
+        #[qinvokable]
+        #[cxx_name = "restartApp"]
+        fn restart_app(self: Pin<&mut PackageController>, background: bool) -> bool;
     }
 }
 
@@ -1173,6 +1182,9 @@ pub struct Controller {
     system_approval: QString,
     approval_error: QString,
     auto_update_result: QString,
+    self_update: QString,
+    /// The running copy, to tell after a change whether it was replaced.
+    install: Option<pkgdeck_core::relaunch::Install>,
     notification_history: QString,
     version: QString,
     busy: bool,
@@ -1260,6 +1272,7 @@ impl Default for Controller {
             system_approval: QString::default(),
             approval_error: QString::default(),
             auto_update_result: "{}".into(),
+            self_update: QString::default(),
             notification_history: "{}".into(),
             version: pkgdeck_core::VERSION.into(),
             busy: false,
@@ -1296,6 +1309,11 @@ impl Default for Controller {
                 None
             } else {
                 background::autostart_path()
+            },
+            install: if cfg!(test) {
+                None
+            } else {
+                pkgdeck_core::relaunch::Install::current()
             },
             background_schedule: Schedule::default(),
             selected: None,
@@ -2953,6 +2971,25 @@ impl ffi::PackageController {
     }
     pub fn set_allow_removals(mut self: Pin<&mut Self>, allowed: bool) {
         self.as_mut().rust_mut().allow_removals = allowed;
+    }
+    pub fn restart_app(mut self: Pin<&mut Self>, background: bool) -> bool {
+        let Some(install) = self.rust().install.clone() else {
+            return false;
+        };
+        match install.relaunch(background) {
+            Ok(()) => true,
+            Err(error) => {
+                self.as_mut().set_status(
+                    format!(
+                        "PkgDeck couldn't restart: {}",
+                        sentence_tail(&plain_text(&error.to_string(), None))
+                    )
+                    .as_str()
+                    .into(),
+                );
+                false
+            }
+        }
     }
     pub fn restore_system_approval(self: Pin<&mut Self>, approval: QString) {
         // The MacPorts-only entry of earlier versions covers too little to
@@ -5118,6 +5155,26 @@ impl ffi::PackageController {
                         "total": operations.len(),
                     })));
                 }
+            }
+            // A change can replace PkgDeck itself; the new copy runs once
+            // this one restarts.
+            if job.writes()
+                && self.rust().self_update.is_empty()
+                && replies
+                    .iter()
+                    .any(|reply| matches!(reply, Reply::Done(Ok(_))))
+                && self
+                    .rust()
+                    .install
+                    .as_ref()
+                    .is_some_and(pkgdeck_core::relaunch::Install::updated)
+            {
+                let how = if matches!(job, Job::AutoUpgrade(..)) {
+                    "automatic"
+                } else {
+                    "manual"
+                };
+                self.as_mut().set_self_update(how.into());
             }
             for reply in replies {
                 if self.rust().background {
@@ -12603,6 +12660,39 @@ mod tests {
             .start(Job::AutoUpgrade(operations, false));
         settle(&mut controller);
         assert_eq!(controller.auto_update_result().to_string(), "{}");
+    }
+    #[test]
+    fn a_change_that_replaces_pkgdeck_asks_for_a_restart() {
+        let dir = std::env::temp_dir().join(format!("pkgdeck-self-update-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let program = dir.join("pkgdeck");
+        let operations = vec![Operation::UpgradeAll {
+            backend: "fixture".into(),
+        }];
+        for (job, expected) in [
+            (Job::UpgradeAll(operations.clone(), None), "manual"),
+            (Job::AutoUpgrade(operations.clone(), false), "automatic"),
+        ] {
+            std::fs::write(&program, "old").unwrap();
+            let mut controller = synthetic_controller();
+            let mut controller = controller.pin_mut();
+            let install = pkgdeck_core::relaunch::Install::program(&program);
+            controller.as_mut().rust_mut().install = Some(install.clone());
+            // Nothing replaced yet.
+            controller.as_mut().start(job.clone());
+            settle(&mut controller);
+            assert_eq!(controller.self_update().to_string(), "");
+            std::fs::write(dir.join("new"), "new").unwrap();
+            std::fs::rename(dir.join("new"), &program).unwrap();
+            controller.as_mut().start(job);
+            settle(&mut controller);
+            assert_eq!(controller.self_update().to_string(), expected);
+            // The updated copy starts once this test process exits.
+            assert!(controller.as_mut().restart_app(true));
+        }
+        let mut controller = synthetic_controller();
+        let mut controller = controller.pin_mut();
+        assert!(!controller.as_mut().restart_app(false));
     }
     #[test]
     fn system_update_approval_is_saved_removed_and_explained() {

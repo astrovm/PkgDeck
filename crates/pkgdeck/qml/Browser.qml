@@ -1485,6 +1485,34 @@ Controls.ApplicationWindow {
     Connections {
         target: backend
         function onSystem_approvalChanged() { preferences.systemApproval = backend.system_approval; }
+        // PkgDeck replaced itself. After an automatic run the new copy takes
+        // over on its own; after a change the person made, they choose when.
+        function onSelf_updateChanged() {
+            if (backend.self_update === "automatic")
+                selfRestart.start();
+            else if (backend.self_update === "manual")
+                restartToast.show("PkgDeck was updated. Restart it to use the new version.", "Restart", "success");
+        }
+    }
+    // Waits a moment so the automatic update's notification shows first,
+    // and for any change still running.
+    Timer {
+        id: selfRestart
+        objectName: "selfRestart"
+        interval: 5000
+        onTriggered: {
+            if (backend.writing)
+                restart();
+            else
+                root.restartPkgDeck();
+        }
+    }
+    // Starts the updated copy, hidden if this one is, and quits.
+    function restartPkgDeck() {
+        if (!backend.restartApp(!root.visible))
+            return;
+        forceQuit = true;
+        Qt.quit();
     }
     Component.onCompleted: {
         backend.setCheckInterval(preferences.checkInterval);
@@ -3697,6 +3725,19 @@ Controls.ApplicationWindow {
         width: Math.min(460, parent.width - 32)
         onActionTriggered: root.undoLastChange()
         onDismissed: if (backend.notice && backend.notice !== "{}") backend.dismissNotice()
+    }
+    Toast {
+        id: restartToast
+        objectName: "restartToast"
+        parent: root.contentItem
+        z: 30
+        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.bottom: parent.bottom
+        anchors.bottomMargin: 24 + (changeToast.visible ? changeToast.height + 12 : 0)
+        width: Math.min(460, parent.width - 32)
+        // Stays until the person restarts or closes it.
+        timeout: 24 * 60 * 60 * 1000
+        onActionTriggered: root.restartPkgDeck()
     }
     // The Activity drawer, over any page.
     Rectangle {

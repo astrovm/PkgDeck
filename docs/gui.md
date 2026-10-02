@@ -364,6 +364,15 @@ updates, PkgDeck installs them and sends one notification.
 - Firmware, apk, XBPS, the AUR, Toolbx and Distrobox never update
   automatically.
 
+#### Updating PkgDeck itself
+
+When an update replaces PkgDeck (its Homebrew cask or formula, Flatpak, Snap,
+AppImage or system package), the running copy is still the old one:
+
+- After an automatic update, PkgDeck restarts on its own a few seconds later,
+  once nothing else is changing. A hidden window stays hidden.
+- After an update you started, PkgDeck offers a **Restart** button.
+
 #### System packages
 
 System packages need **Allow automatic updates without a password**.
