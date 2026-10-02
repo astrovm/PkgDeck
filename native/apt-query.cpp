@@ -74,13 +74,13 @@ static std::string search_text(const std::string &s) {
 }
 // Modern indexes keep only a checksum in Packages; the long text lives in
 // Translation-* files, which apt-cache show reads the same way. Only details
-// pays for the extra lookup. Returns Debian's folded text unfolded: one
+// and lookup pay for the extra lookup. Returns Debian's folded text unfolded: one
 // leading space removed per line and " ." as an empty line.
 static std::string description(pkgRecords &records,
                                pkgCache::VerIterator version,
                                const std::string &mode) {
   std::string text;
-  if (mode == "details") {
+  if (mode == "details" || mode == "lookup") {
     auto translated = version.TranslatedDescription();
     if (!translated.end())
       text = records.Lookup(translated.FileList()).LongDesc();
@@ -109,7 +109,8 @@ static std::string description(pkgRecords &records,
 
 int main(int argc, char **argv) {
   if (argc != 4) {
-    std::cerr << "Usage: pkgdeck-apt-query detect|search|installed|details "
+    std::cerr << "Usage: pkgdeck-apt-query "
+                 "detect|search|installed|details|lookup "
                  "query architecture\n";
     return 2;
   }
@@ -121,7 +122,7 @@ int main(int argc, char **argv) {
   }
   const auto needle = search_text(query);
   if (mode != "detect" && mode != "search" && mode != "installed" &&
-      mode != "details")
+      mode != "details" && mode != "lookup")
     return 2;
   if (!pkgInitConfig(*_config) || !pkgInitSystem(*_config, _system)) {
     _error->DumpErrors();
@@ -151,6 +152,9 @@ int main(int argc, char **argv) {
       continue;
     const std::string name = item.Name(), architecture = version.Arch();
     if (mode == "details" && (name != query || architecture != arch))
+      continue;
+    // Lookup: every architecture of one exact name, read as fully as details.
+    if (mode == "lookup" && name != query)
       continue;
     if (version.FileList().end())
       continue;
