@@ -1110,7 +1110,13 @@ fn flatpak_reference(reference: &str) -> Option<(&str, &str, &str, &str)> {
         && parts.next().is_none())
     .then_some((kind, name, arch, branch))
 }
-impl<T: Transport> Flatpak<T> {
+/// The answer of a Flatpak query run on its own thread.
+fn joined<R>(worker: std::thread::ScopedJoinHandle<'_, R>) -> R {
+    worker.join().expect("Flatpak worker panicked")
+}
+// User and system installations are separate, and each `flatpak` read is
+// its own process, so their queries run at once.
+impl<T: Transport + Sync> Flatpak<T> {
     fn call(
         &self,
         args: &[&str],
@@ -1229,9 +1235,17 @@ impl<T: Transport> Flatpak<T> {
             // One unreachable remote makes flatpak refuse to list any. Ask
             // each remote on its own so the others still show their updates.
             Err(first) if !cancel.requested() && remotes.len() > 1 => {
+                let remote_updates = &remote_updates;
+                let answers: Vec<_> = std::thread::scope(|scope| {
+                    let workers: Vec<_> = remotes
+                        .into_iter()
+                        .map(|remote| scope.spawn(move || remote_updates(Some(remote))))
+                        .collect();
+                    workers.into_iter().map(joined).collect()
+                });
                 let mut failures = Vec::new();
-                for remote in remotes {
-                    match remote_updates(Some(remote)) {
+                for answer in answers {
+                    match answer {
                         Ok(text) => texts.push(text),
                         Err(error) => failures.push(error),
                     }
@@ -1365,7 +1379,7 @@ impl<T: Transport> Flatpak<T> {
         }
     }
 }
-impl<T: Transport> Backend for Flatpak<T> {
+impl<T: Transport + Sync> Backend for Flatpak<T> {
     fn id(&self) -> &str {
         "flatpak"
     }
@@ -1414,20 +1428,34 @@ impl<T: Transport> Backend for Flatpak<T> {
                     .collect()
             });
         }
+        // Local inventory is enough to choose Install versus Remove. Search
+        // must not fetch remote update metadata just to establish this state.
+        // Both catalogs and both inventories are read at once.
+        let this = &*self;
+        let (user, system, user_installed, system_installed) = std::thread::scope(|scope| {
+            let system = scope.spawn(|| this.search_scope(query, cancel, true));
+            let user_installed = scope.spawn(|| this.list(cancel, false, false, &mut vec![]));
+            let system_installed = scope.spawn(|| this.list(cancel, true, false, &mut vec![]));
+            let user = this.search_scope(query, cancel, false);
+            (
+                user,
+                joined(system),
+                joined(user_installed),
+                joined(system_installed),
+            )
+        });
         // The user catalog is the primary source; a failing system query
         // (for example, a machine with no system remotes) must not fail
         // the whole search when user results are available.
-        let mut result = self.search_scope(query, cancel, false)?;
-        if let Ok(system) = self.search_scope(query, cancel, true) {
+        let mut result = user?;
+        if let Ok(system) = system {
             result.extend(system);
         }
         // Offers in separate installations remain independently selectable.
         let mut seen = std::collections::BTreeSet::new();
         result.retain(|package| seen.insert(package.id.clone()));
-        // Local inventory is enough to choose Install versus Remove. Search
-        // must not fetch remote update metadata just to establish this state.
-        let mut installed = self.list(cancel, false, false, &mut vec![])?;
-        installed.extend(self.list(cancel, true, false, &mut vec![])?);
+        let mut installed = user_installed?;
+        installed.extend(system_installed?);
         let mut offers = Vec::new();
         for offer in result {
             let matches: Vec<_> =
@@ -1456,9 +1484,23 @@ impl<T: Transport> Backend for Flatpak<T> {
     }
     fn installed(&mut self, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
         let home = self.transport.env("HOME").map(PathBuf::from);
-        let mut skipped = Vec::new();
-        let mut result = self.list(cancel, false, true, &mut skipped)?;
-        result.extend(self.list(cancel, true, true, &mut skipped)?);
+        let this = &*self;
+        let (user, system) = std::thread::scope(|scope| {
+            let system = scope.spawn(|| {
+                let mut skipped = Vec::new();
+                this.list(cancel, true, true, &mut skipped)
+                    .map(|packages| (packages, skipped))
+            });
+            let mut skipped = Vec::new();
+            let user = this
+                .list(cancel, false, true, &mut skipped)
+                .map(|packages| (packages, skipped));
+            (user, joined(system))
+        });
+        let (mut result, mut skipped) = user?;
+        let (system, system_skipped) = system?;
+        result.extend(system);
+        skipped.extend(system_skipped);
         self.skipped = skipped;
         for package in &mut result {
             // Exported icons double as the installed check per scope; `list`
