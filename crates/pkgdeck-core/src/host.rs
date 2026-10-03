@@ -548,6 +548,37 @@ impl Host {
         process::run(self.command(executable, args)?, limits, cancel, false)
     }
 
+    /// Run a program PkgDeck ships, such as the APT helper. Inside the
+    /// Flatpak it runs in the sandbox next to PkgDeck, never on the host,
+    /// with only the locale and `env`: host variables don't fit the sandbox.
+    pub fn read_bundled(
+        &self,
+        executable: &Path,
+        args: &[OsString],
+        env: &[(&str, &str)],
+        limits: Limits,
+        cancel: &Cancellation,
+    ) -> Result<Completion, ExecutionError> {
+        if self.runtime != Runtime::Flatpak {
+            let mut command = self.command(executable, args)?;
+            command.envs(env.iter().copied());
+            return process::run(command, limits, cancel, false);
+        }
+        let mut command = Command::new(executable);
+        command
+            .args(args)
+            .env_clear()
+            .envs(self.env.iter().filter(|(name, _)| {
+                matches!(
+                    name.to_str(),
+                    Some("LANG" | "LANGUAGE" | "LC_ALL" | "LC_MESSAGES")
+                )
+            }))
+            .envs(env.iter().copied())
+            .current_dir("/");
+        process::run(command, limits, cancel, false)
+    }
+
     /// The fixed macOS programs app removal runs as the invoking user:
     /// `/bin/ps` to see which apps are open and `/usr/bin/trash` to move an
     /// app the user owns to their Trash. Nothing else runs through here.
@@ -2095,166 +2126,6 @@ mod docker_shim_tests {
     }
 }
 
-#[cfg(test)]
-mod apt_sandboxed_tests {
-    use super::*;
-    use crate::backends::{NativeTransport, Transport};
-    use std::os::unix::fs::PermissionsExt;
-
-    const BRIDGE: &str = r#"#!/bin/sh
-exe=""
-trailing=""
-collect=0
-for arg in "$@"; do
-  if [ "$collect" = "0" ]; then
-    if [ "$arg" = "--directory=/" ]; then collect=1; fi
-    continue
-  fi
-  case "$arg" in --env=*) continue;; esac
-  if [ -z "$exe" ]; then exe=$arg; else trailing="$trailing $arg"; fi
-done
-case "$exe" in
-  /usr/bin/test)
-    flag=""
-    target=""
-    for token in $trailing; do
-      case "$token" in -*) flag=$token;; *) target=$token;; esac
-    done
-    if [ "$flag" = "-x" ]; then test -f "$target" -a -x "$target"; else test -f "$target"; fi
-    exit $?;;
-  *dpkg-query) cat "$(dirname "$exe")/dpkg.txt";;
-  *apt-cache)
-    case "$trailing" in
-      *policy*) cat "$(dirname "$exe")/policy.txt";;
-      *search*) cat "$(dirname "$exe")/search.txt";;
-      *show*) cat "$(dirname "$exe")/show.txt";;
-      *) exit 99;;
-    esac;;
-  *) exit 99;;
-esac
-"#;
-
-    fn sandboxed_transport() -> (NativeTransport, PathBuf) {
-        let root = std::env::temp_dir().join(format!(
-            "pkgdeck-apt-sandbox-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let bin = root.join("bin");
-        std::fs::create_dir_all(&bin).unwrap();
-        for name in ["apt-get", "dpkg-query", "apt-cache", "fake-spawn"] {
-            let path = bin.join(name);
-            let body = if name == "fake-spawn" {
-                BRIDGE.into()
-            } else {
-                "#!/bin/sh\nexit 0\n".to_owned()
-            };
-            std::fs::write(&path, body).unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        std::fs::write(
-            bin.join("dpkg.txt"),
-            "bash\tamd64\t5.3-2ubuntu1\tinstall ok installed\n\
-             oldpkg\tamd64\t1.0\thold ok installed\n",
-        )
-        .unwrap();
-        std::fs::write(
-            bin.join("policy.txt"),
-            "bash:\n  Installed: 5.3-2ubuntu1\n  Candidate: 5.3-2ubuntu1\n  Version table:\n *** 5.3-2ubuntu1 500\n\
-             oldpkg:\n  Installed: 1.0\n  Candidate: 2.0\n  Version table:\n     2.0 500\n *** 1.0 500\n",
-        )
-        .unwrap();
-        std::fs::write(
-            bin.join("search.txt"),
-            "bash - Bourne Again SHell\noldpkg - Old package\n",
-        )
-        .unwrap();
-        std::fs::write(
-            bin.join("show.txt"),
-            "Package: bash\nArchitecture: amd64\nVersion: 5.3-2ubuntu1\nDescription-en: Bourne Again SHell\n\n\
-             Package: oldpkg\nArchitecture: amd64\nVersion: 2.0\nDescription-en: Old package\n",
-        )
-        .unwrap();
-        let mut env = BTreeMap::new();
-        env.insert("PATH".into(), bin.as_os_str().into());
-        let host = Host {
-            runtime: Runtime::Flatpak,
-            env,
-            excluded: Vec::new(),
-            bridge: bin.join("fake-spawn"),
-        };
-        (
-            NativeTransport {
-                host,
-                authorization: Authorization::Polkit,
-            },
-            root,
-        )
-    }
-
-    fn records(completion: Completion) -> Vec<serde_json::Value> {
-        assert_eq!(completion.code, Some(0));
-        let details: Vec<crate::package::PackageDetails> =
-            serde_json::from_slice(&completion.stdout).unwrap();
-        details
-            .into_iter()
-            .map(|details| serde_json::to_value(details).unwrap())
-            .collect()
-    }
-
-    #[test]
-    fn sandboxed_modes_match_native_records() {
-        let (transport, root) = sandboxed_transport();
-        let cancel = Cancellation::default();
-        let installed = transport
-            .apt_query("installed", "", "", &cancel)
-            .map(records)
-            .unwrap();
-        assert_eq!(installed.len(), 2);
-        assert_eq!(installed[0]["package"]["id"]["name"], "bash");
-        assert_eq!(installed[0]["package"]["update"], "current");
-        // Held packages never report an upgrade end to end.
-        assert_eq!(installed[1]["package"]["id"]["name"], "oldpkg");
-        assert_eq!(installed[1]["package"]["update"], "current");
-        let found = transport
-            .apt_query("search", "bash", "", &cancel)
-            .map(records)
-            .unwrap();
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0]["package"]["id"]["name"], "bash");
-        let details = transport
-            .apt_query("details", "bash", "amd64", &cancel)
-            .map(records)
-            .unwrap();
-        assert_eq!(details.len(), 1);
-        assert_eq!(details[0]["package"]["summary"], "Bourne Again SHell");
-        // Unknown identities and architectures read as empty records, which
-        // the backend reports as NotFound like the native helper.
-        assert!(transport
-            .apt_query("details", "bash", "i386", &cancel)
-            .map(records)
-            .unwrap()
-            .is_empty());
-        assert!(transport
-            .apt_query("details", "ghost", "amd64", &cancel)
-            .map(records)
-            .unwrap()
-            .is_empty());
-        assert!(transport
-            .apt_query("detect", "", "", &cancel)
-            .map(records)
-            .unwrap()
-            .is_empty());
-        assert!(matches!(
-            transport.apt_query("erase", "", "", &cancel),
-            Err(ExecutionError::Invalid(_))
-        ));
-        std::fs::remove_dir_all(root).unwrap();
-    }
-}
-
 #[derive(Clone, Copy, Debug)]
 pub enum Authorization {
     /// Uses an existing desktop polkit agent; never reads passwords from application pipes.
@@ -2454,6 +2325,37 @@ mod boundary_tests {
         let cancel = Cancellation::default();
         cancel.cancel();
         cancel
+    }
+
+    #[test]
+    fn bundled_programs_run_in_the_flatpak_sandbox_with_only_the_locale() {
+        let root = scratch("bundled");
+        let tool = root.join("tool");
+        executable(&tool, "env | sort");
+        let env = [("HOME", root.as_path())];
+        let run = |host: Host| {
+            let result = host
+                .read_bundled(
+                    &tool,
+                    &[],
+                    &[("PKGDECK_APT_HOST", "/run/host")],
+                    Limits::default(),
+                    &Cancellation::default(),
+                )
+                .unwrap();
+            String::from_utf8(result.stdout).unwrap()
+        };
+        // Run here, not through flatpak-spawn, which this machine lacks.
+        let sandboxed = run(host(Runtime::Flatpak, &env));
+        // Host tools always read the C locale; so does the helper.
+        assert!(sandboxed.contains("LANG=C\n"));
+        assert!(sandboxed.contains("PKGDECK_APT_HOST=/run/host\n"));
+        assert!(!sandboxed.contains("HOME="));
+        // A native build runs it like any host program.
+        let native = run(host(Runtime::Native, &env));
+        assert!(native.contains("HOME="));
+        assert!(native.contains("PKGDECK_APT_HOST=/run/host\n"));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

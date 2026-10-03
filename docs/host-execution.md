@@ -28,8 +28,10 @@ The Flatpak runs host commands with `flatpak-spawn --host`, which needs access
 to `org.freedesktop.Flatpak` on the session bus. It reads your environment
 once, keeps only the allowed variables, and starts each command with a clean
 environment. If host access is missing, commands fail instead of falling back
-to something else. Inside the Flatpak, APT data comes from the host's
-`dpkg-query` and `apt-cache`. Native builds use the bundled APT reader. Unused
+to something else. APT data comes from the bundled APT reader, as in native
+builds. The Flatpak bundles APT's own library and runs the reader inside the
+sandbox: it reads the host's `/var` directly, and its APT settings from
+`/run/host/etc/apt`. APT changes still run the host's `apt-get`. Unused
 runtime cleanup isn't offered yet. See the
 [Flatpak command reference](https://docs.flatpak.org/en/latest/flatpak-command-reference.html#flatpak-spawn).
 

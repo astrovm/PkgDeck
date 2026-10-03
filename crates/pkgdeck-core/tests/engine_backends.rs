@@ -181,10 +181,6 @@ fn transport_defaults_refuse_previews_and_grouped_writes() {
         other => panic!("expected {expected:?}, got {other:?}"),
     };
     disabled(
-        Bare.apt_query_sandboxed("search", "x", "", &cancel),
-        "APT not found",
-    );
-    disabled(
         Bare.apt_write_group(&[AptAction::Install("x".into())], &cancel),
         "grouped APT transaction unavailable",
     );
