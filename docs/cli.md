@@ -685,15 +685,29 @@ pkd completions fish > ~/.config/fish/completions/pkd.fish
 
 ## Cache
 
-To answer faster, PkgDeck keeps APT search and list results, Flatpak search
-results, and Homebrew's installed formula and cask listings in
-`$XDG_CACHE_HOME/pkgdeck` (or `~/.cache/pkgdeck`). The app and `pkd` share
-it. An entry is used only while what it depends on is exactly as it was when
-it was saved: for APT the package lists, the package database, the helper and
-your locale; for Homebrew the installed kegs and casks, your taps, the cask and
-formula data `brew update` fetched, and Homebrew itself. Any change there, and any change PkgDeck makes, discards
-it. Only successful, complete answers are saved, readable only by you. Set
-`PKGDECK_NO_CACHE=1` to turn it off. It's never used when running as root.
+To answer faster, PkgDeck keeps some answers in `$XDG_CACHE_HOME/pkgdeck`
+(or `~/.cache/pkgdeck`). The app and `pkd` share it. It keeps:
+
+- APT search and list results, and APT's app data (DEP-11) for matching apps
+- Flatpak search results
+- Homebrew's installed formula and cask listings, and the package details
+  searches read
+- Pacman search results
+- Each standalone tool's version, such as OpenCode's
+
+An entry is used only while what it depends on is exactly as it was when it
+was saved:
+
+- APT: the package lists, the package database, the app data, the helper and
+  your locale
+- Homebrew: the installed kegs and casks, your taps, the cask and formula data
+  `brew update` fetched, and Homebrew itself
+- Pacman: the synced databases, the installed packages and `pacman.conf`
+- Standalone tools: the tool's program file
+
+Any change there, and any change PkgDeck makes, discards it. Only successful,
+complete answers are saved, readable only by you. Set `PKGDECK_NO_CACHE=1` to
+turn it off. It's never used when running as root.
 
 ## JSON output
 

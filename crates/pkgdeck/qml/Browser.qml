@@ -261,8 +261,43 @@ Controls.ApplicationWindow {
     property bool closePending: false
     property bool queryDirty: false
     property var selectedIdentity: null
+    // Values derived from a parsed row, computed once and kept on the row,
+    // hidden from JSON.stringify and Object.assign. Rows never change once
+    // parsed. Lookups over rows use plain objects: this engine's Map, Set
+    // and WeakMap search linearly, too slow for thousands of rows.
+    function rowMemo(row) {
+        let memo = row._memo;
+        if (memo === undefined) {
+            memo = {};
+            if (Object.isExtensible(row))
+                Object.defineProperty(row, "_memo", {value: memo});
+        }
+        return memo;
+    }
     function rowIdentity(row) {
-        return row ? JSON.stringify([row.source, row.name, row.architecture, row.remote || null, row.scope, row.reference || null]) : "";
+        if (!row)
+            return "";
+        const memo = rowMemo(row);
+        if (memo.identity === undefined)
+            memo.identity = JSON.stringify([row.source, row.name, row.architecture, row.remote || null, row.scope, row.reference || null]);
+        return memo.identity;
+    }
+    function rowJson(row) {
+        const memo = rowMemo(row);
+        if (memo.json === undefined)
+            memo.json = JSON.stringify(row);
+        return memo.json;
+    }
+    // Lower-cased name, display name and summary, and the three joined.
+    function rowText(row) {
+        const memo = rowMemo(row);
+        if (memo.text === undefined) {
+            memo.name = (row.name || "").toLowerCase();
+            memo.displayName = (row.display_name || "").toLowerCase();
+            memo.summary = (row.summary || "").toLowerCase();
+            memo.text = memo.name + " " + memo.displayName + " " + memo.summary;
+        }
+        return memo;
     }
     property var selected: !retainingResults && results.currentIndex >= 0 && results.currentIndex < viewItems.length ? viewItems[results.currentIndex] : null
     // Persistent manager enablement. Empty means every known manager;
@@ -277,6 +312,24 @@ Controls.ApplicationWindow {
             sourcePopup.draftSources = root.effectiveSources().filter((id) => root.sourceInfo(id).availability_kind === "available" && root.sourceSupportsView(id));
     }
     readonly property var reportState: JSON.parse(backend.report_state || "{}")
+    // Sources a slow read still waits for. A fast read ends before the
+    // delay, so its list never flashes by.
+    readonly property var pendingSourceNames: pendingDelay.elapsed
+        ? JSON.parse(backend.pending_sources || "[]").map((id) => sourceDisplayName(id)) : []
+    Timer {
+        id: pendingDelay
+        readonly property bool reading: backend.busy && !backend.writing
+        property bool elapsed: false
+        interval: 800
+        onReadingChanged: {
+            elapsed = false;
+            if (reading)
+                restart();
+            else
+                stop();
+        }
+        onTriggered: elapsed = reading
+    }
     readonly property var readFailures: {
         if (currentView !== resultView)
             return [];
@@ -297,9 +350,11 @@ Controls.ApplicationWindow {
     readonly property bool listEngaged: resultsHover.hovered || results.activeFocus
     function updateFrozenOrder() {
         const streaming = backend.busy && !backend.writing && currentView === "Search";
-        if (frozenOrder === null && streaming && listEngaged && searchPane.text.trim() !== "")
-            frozenOrder = new Map(viewItems.map((row, i) => [rowIdentity(row), i]));
-        else if (frozenOrder !== null && (currentView !== "Search" || (!backend.busy && !listEngaged)))
+        if (frozenOrder === null && streaming && listEngaged && searchPane.text.trim() !== "") {
+            const order = Object.create(null);
+            viewItems.forEach((row, i) => { order[rowIdentity(row)] = i; });
+            frozenOrder = order;
+        } else if (frozenOrder !== null && (currentView !== "Search" || (!backend.busy && !listEngaged)))
             frozenOrder = null;
     }
     onListEngagedChanged: updateFrozenOrder()
@@ -611,9 +666,14 @@ Controls.ApplicationWindow {
     // streaming partials re-sort rows, so the controller re-resolves each
     // identity and skips stale ones, never guessing.
     property var uncheckedPackages: []
-    readonly property var uncheckedIdentitySet: new Set(uncheckedPackages)
+    readonly property var uncheckedIdentitySet: {
+        const unchecked = Object.create(null);
+        for (const id of uncheckedPackages)
+            unchecked[id] = true;
+        return unchecked;
+    }
     function packageChecked(row) {
-        return !uncheckedIdentitySet.has(rowIdentity(row));
+        return !uncheckedIdentitySet[rowIdentity(row)];
     }
     function togglePackage(row) {
         const id = rowIdentity(row);
@@ -630,13 +690,13 @@ Controls.ApplicationWindow {
     // Only the Updates checkboxes use identities; other pages skip the work.
     readonly property var allPackageIdentities: {
         const all = [];
-        const seen = new Set();
+        const seen = Object.create(null);
         const rows = root.currentView === "Updates" ? root.items : [];
         for (let i = 0; i < rows.length; i++) {
             if (rows[i].kind === "package") {
                 const id = rowIdentity(rows[i]);
-                if (id && !seen.has(id)) {
-                    seen.add(id);
+                if (id && !seen[id]) {
+                    seen[id] = true;
                     all.push(id);
                 }
             }
@@ -648,7 +708,7 @@ Controls.ApplicationWindow {
     }
     readonly property var checkedPackageIds: {
         const unchecked = uncheckedIdentitySet;
-        return allPackageIdentities.filter((id) => !unchecked.has(id));
+        return allPackageIdentities.filter((id) => !unchecked[id]);
     }
     function checkedIdentities() {
         return checkedPackageIds;
@@ -717,9 +777,10 @@ Controls.ApplicationWindow {
         return row.kind === "package" && !isInstalled(row) && (row.candidate === null || row.candidate === undefined);
     }
     function relevanceScore(row, query) {
-        const name = (row.name || "").toLowerCase();
-        const summary = (row.summary || "").toLowerCase();
-        if (name === query || (row.display_name || "").toLowerCase() === query
+        const text = rowText(row);
+        const name = text.name;
+        const summary = text.summary;
+        if (name === query || text.displayName === query
                 || (row.source === "flatpak" && name.split(".").pop() === query))
             return 0;
         if (name.indexOf(query) === 0)
@@ -740,44 +801,51 @@ Controls.ApplicationWindow {
         return 0;
     }
     function groupInstalledRows(rows) {
-        const members = new Map();
+        const members = Object.create(null);
         for (const row of rows) {
             if (row.kind === "package" && row.same_app_group) {
-                if (!members.has(row.same_app_group))
-                    members.set(row.same_app_group, []);
-                members.get(row.same_app_group).push(row);
+                if (!members[row.same_app_group])
+                    members[row.same_app_group] = [];
+                members[row.same_app_group].push(row);
             }
         }
-        const emitted = new Set();
+        const emitted = Object.create(null);
         const grouped = [];
         for (const row of rows) {
             const key = row.same_app_group;
-            const group = key ? members.get(key) : null;
+            const group = key ? members[key] : null;
             if (!group || group.length < 2) {
                 grouped.push(row);
                 continue;
             }
-            if (emitted.has(key))
+            if (emitted[key])
                 continue;
-            emitted.add(key);
+            emitted[key] = true;
             const named = group.find((member) => !!member.display_name);
             const title = named ? named.display_name
                 : group.reduce((best, member) => member.name.length < best.length ? member.name : best, group[0].name);
             const sources = [...new Set(group.map((member) => root.sourceDisplayName(member.source)))];
-            for (let i = 0; i < group.length; i++)
-                grouped.push(Object.assign({}, group[i], {groupStart: i === 0, groupTitle: title, groupCount: group.length, groupSources: sources}));
+            const shape = JSON.stringify([title, group.length, sources]);
+            for (let i = 0; i < group.length; i++) {
+                // The same copy while the group is unchanged, so its JSON
+                // is made once too (see rowJson).
+                const memo = rowMemo(group[i]);
+                const copyShape = shape + (i === 0);
+                if (memo.groupShape !== copyShape) {
+                    memo.groupShape = copyShape;
+                    memo.groupCopy = Object.assign({}, group[i], {groupStart: i === 0, groupTitle: title, groupCount: group.length, groupSources: sources});
+                }
+                grouped.push(memo.groupCopy);
+            }
         }
         return grouped;
     }
     // Lower-cased filter text per parsed row, computed once per load.
-    readonly property var searchKeys: new WeakMap()
     function searchKey(row) {
-        let key = searchKeys.get(row);
-        if (key === undefined) {
-            key = ((row.name || "") + " " + (row.display_name || "") + " " + (row.summary || "") + " " + (row.source || "")).toLowerCase();
-            searchKeys.set(row, key);
-        }
-        return key;
+        const memo = rowText(row);
+        if (memo.searchKey === undefined)
+            memo.searchKey = memo.text + " " + (row.source || "").toLowerCase();
+        return memo.searchKey;
     }
     readonly property var cleanupFailures: currentView === "Clean" ? items.filter(row => row.kind === "failure") : []
     property var viewItems: {
@@ -787,8 +855,10 @@ Controls.ApplicationWindow {
         if (root.currentView === "Sources" && !root.showUnavailableSources)
             rows = rows.filter(row => row.kind !== "source" || row.available);
         if (root.currentView !== "Sources") {
-            const shown = new Set(root.effectiveSources());
-            rows = rows.filter((row) => shown.has(row.source));
+            const shown = Object.create(null);
+            for (const source of root.effectiveSources())
+                shown[source] = true;
+            rows = rows.filter((row) => shown[row.source] === true);
         }
         // The Installed filter narrows the loaded rows as you type; the
         // backend is queried once with an empty query (see reload).
@@ -796,8 +866,12 @@ Controls.ApplicationWindow {
             const filter = root.installedFilter.trim().toLowerCase();
             if (filter !== "") {
                 const matches = (row) => root.searchKey(row).indexOf(filter) >= 0;
-                const matchingGroups = new Set(rows.filter((row) => row.kind === "package" && matches(row)).map((row) => row.same_app_group).filter(Boolean));
-                rows = rows.filter((row) => row.kind !== "package" || matchingGroups.has(row.same_app_group) || matches(row));
+                const matchingGroups = Object.create(null);
+                for (const row of rows) {
+                    if (row.kind === "package" && row.same_app_group && matches(row))
+                        matchingGroups[row.same_app_group] = true;
+                }
+                rows = rows.filter((row) => row.kind !== "package" || (!!row.same_app_group && matchingGroups[row.same_app_group] === true) || matches(row));
             }
             if (root.multiSourceOnly)
                 rows = rows.filter((row) => row.kind !== "package" || ((row.same_app_from || []).length > 0));
@@ -805,14 +879,17 @@ Controls.ApplicationWindow {
         if (sortColumn !== "") {
             const column = sortColumn;
             const dir = sortAscending ? 1 : -1;
-            rows.sort((a, b) => {
-                const x = sortValue(column, a).toLowerCase();
-                const y = sortValue(column, b).toLowerCase();
+            // Each row's sort key is computed once, not once per comparison.
+            const keyed = rows.map((row) => ({row: row, key: sortValue(column, row).toLowerCase()}));
+            keyed.sort((a, b) => {
+                const x = a.key;
+                const y = b.key;
                 // Total order: the engine sort is not stable for equal
                 // keys, so same-name rows from several sources would flip
                 // on every keystroke without a direction-aware tiebreak.
-                return (x < y ? -dir : (x > y ? dir : 0)) || relevanceTiebreak(a, b) * dir;
+                return (x < y ? -dir : (x > y ? dir : 0)) || relevanceTiebreak(a.row, b.row) * dir;
             });
+            rows = keyed.map((entry) => entry.row);
         } else if (root.currentView === "Sources") {
             // Keep enabled managers first so the sources in use are easy to find.
             const enabled = root.checkedSources();
@@ -822,18 +899,24 @@ Controls.ApplicationWindow {
             // Previous matches narrow instantly while the new query runs.
             const shownFor = (root.retainingResults ? root.retainedQuery : root.resultQuery).toLowerCase();
             if (query !== "" && shownFor !== query)
-                rows = rows.filter((row) => ((row.name || "") + " " + (row.display_name || "") + " " + (row.summary || "")).toLowerCase().indexOf(query) >= 0);
-            if (query !== "")
-                rows.sort((a, b) => ((isFabricated(a) ? 1 : 0) - (isFabricated(b) ? 1 : 0)) || (relevanceScore(a, query) - relevanceScore(b, query)) || relevanceTiebreak(a, b));
+                rows = rows.filter((row) => root.rowText(row).text.indexOf(query) >= 0);
+            if (query !== "") {
+                // Scored once per row; unverifiable offers rank below every
+                // score (6 is past the worst one).
+                const ranked = rows.map((row) => ({row: row, score: (isFabricated(row) ? 6 : 0) + relevanceScore(row, query)}));
+                ranked.sort((a, b) => (a.score - b.score) || relevanceTiebreak(a.row, b.row));
+                rows = ranked.map((entry) => entry.row);
+            }
             if (root.frozenOrder !== null) {
                 // Rows keep their place while you use the list; late rows
                 // go below them, best match first.
-                const best = new Map(rows.map((row, i) => [row, i]));
-                const place = (row) => {
-                    const at = root.frozenOrder.get(root.rowIdentity(row));
-                    return at === undefined ? Infinity : at;
-                };
-                rows.sort((a, b) => (place(a) - place(b)) || (best.get(a) - best.get(b)));
+                const frozen = root.frozenOrder;
+                const placed = rows.map((row, i) => {
+                    const at = frozen[root.rowIdentity(row)];
+                    return {row: row, place: at === undefined ? Infinity : at, best: i};
+                });
+                placed.sort((a, b) => (a.place - b.place) || (a.best - b.best));
+                rows = placed.map((entry) => entry.row);
             }
         }
         // One app offered by several sources reads as one group, app first.
@@ -849,20 +932,23 @@ Controls.ApplicationWindow {
     // Few changes animate; bulk loads replace the rows at once.
     property bool animateListChanges: false
     function rowKeys(rows) {
-        const seen = new Map();
+        const seen = Object.create(null);
         return rows.map((row) => {
             const base = row.kind + "|" + rowIdentity(row);
-            const count = seen.get(base) || 0;
-            seen.set(base, count + 1);
+            const count = seen[base] || 0;
+            seen[base] = count + 1;
             return count ? base + "#" + count : base;
         });
     }
     function syncResults() {
         const rows = viewItems;
         const keys = rowKeys(rows);
-        const json = rows.map((row) => JSON.stringify(row));
-        const wanted = new Set(keys);
-        const kept = modelKeys.filter((key) => wanted.has(key)).length;
+        // Unchanged rows reuse the JSON made when they were first shown.
+        const json = rows.map((row) => rowJson(row));
+        const wanted = Object.create(null);
+        for (const key of keys)
+            wanted[key] = true;
+        const kept = modelKeys.filter((key) => wanted[key] === true).length;
         // Mostly new rows (another page, a new search): replace them all.
         if (modelKeys.length === 0 || kept < Math.min(modelKeys.length, keys.length) / 2) {
             animateListChanges = false;
@@ -877,16 +963,20 @@ Controls.ApplicationWindow {
         const currentJson = modelJson.slice();
         animateListChanges = Math.abs(currentKeys.length - keys.length) + (currentKeys.length - kept) < 12;
         for (let i = currentKeys.length - 1; i >= 0; i--) {
-            if (!wanted.has(currentKeys[i])) {
+            if (wanted[currentKeys[i]] !== true) {
                 resultsModel.remove(i);
                 currentKeys.splice(i, 1);
                 currentJson.splice(i, 1);
             }
         }
+        // Only rows already in the list are searched for; new rows insert.
+        const present = Object.create(null);
+        for (const key of currentKeys)
+            present[key] = true;
         let moves = 0;
         for (let i = 0; i < keys.length; i++) {
             if (currentKeys[i] !== keys[i]) {
-                const from = currentKeys.indexOf(keys[i], i + 1);
+                const from = present[keys[i]] === true ? currentKeys.indexOf(keys[i], i + 1) : -1;
                 if (from >= 0) {
                     // A re-sort moves many rows: replace them all instead.
                     if (++moves > 48) {
@@ -2402,6 +2492,7 @@ Controls.ApplicationWindow {
                     spacing: 0
                     RowLayout {
                         id: resultsHeadingRow
+                        objectName: "resultsHeadingRow"
                         visible: results.count > 0 || backend.busy || backend.writing || (root.currentView === "Sources" && root.items.some(row => row.kind === "source" && !row.available))
                         Layout.fillWidth: true
                         Layout.margins: 14
@@ -2412,6 +2503,16 @@ Controls.ApplicationWindow {
                             font.pointSize: root.font.pointSize * 0.9
                             elide: Text.ElideRight
                             Layout.fillWidth: true
+                        }
+                        Controls.Label {
+                            objectName: "pendingSources"
+                            visible: root.pendingSourceNames.length > 0
+                            text: "Waiting for " + root.pendingSourceNames.join(", ")
+                            color: root.muted
+                            font.pointSize: root.font.pointSize * 0.9
+                            elide: Text.ElideRight
+                            Layout.maximumWidth: resultsHeadingRow.width * 0.6
+                            Accessible.name: text
                         }
                         DeckIcon {
                             id: resultsSpinner

@@ -93,6 +93,9 @@ pub mod ffi {
         #[qproperty(QString, repositories)]
         #[qproperty(QString, source_catalog)]
         #[qproperty(QString, report_state)]
+        /// Sources the visible section or search still waits for, as a
+        /// JSON array of source ids. Empty once the load ends.
+        #[qproperty(QString, pending_sources)]
         #[qproperty(QString, manifest_preview)]
         #[qproperty(QString, activity)]
         #[qproperty(QString, background_state)]
@@ -332,6 +335,11 @@ enum Reply {
     Output(String),
     /// What the failed steps of a batch printed, for the banner's details.
     FailureOutput(String),
+    /// The sources a streaming load asked, sent before its first partial.
+    Asked(Vec<String>),
+    /// The sources a preload's latest partial heard from: a preload keeps
+    /// its rows for the end, but the section waiting on it names the rest.
+    Answered(Vec<String>),
     Partial(PackageReport),
     /// Every installed package, and whether update indexes were refreshed
     /// first. Only a refreshed inventory may stand in for Updates.
@@ -737,6 +745,7 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
                 // Stream cumulative partials so fast backends render while
                 // slow ones still query; the terminal emission below carries
                 // the same deterministic report as a synchronous query.
+                send(Reply::Asked(engine.source_ids()));
                 let mut send_partial = |mut partial: PackageReport| {
                     partial.packages.retain(|p| !unverified_search_offer(p));
                     send(Reply::Partial(partial));
@@ -750,6 +759,7 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
                 // the same view filter as the terminal report below.
                 // Upgrade gating still waits for the terminal report with
                 // complete failures (see apply); partials only fill rows.
+                send(Reply::Asked(engine.source_ids()));
                 let mut send_partial = |mut partial: PackageReport| {
                     if view == "Updates" {
                         filter_updates(&mut partial);
@@ -1052,6 +1062,9 @@ struct PrefetchWorker {
     key: String,
     /// Sources or elevation changed, or a write started: drop its result.
     stale: bool,
+    /// The sources it asked, and those that answered so far.
+    asked: Vec<String>,
+    answered: Vec<String>,
     /// What its engine checked, so the next preload or search can reuse it.
     scope: (Vec<String>, bool, Instant),
 }
@@ -1182,6 +1195,9 @@ pub struct Controller {
     repositories: QString,
     source_catalog: QString,
     report_state: QString,
+    pending_sources: QString,
+    /// Sources the visible load asked that have not answered yet.
+    asked: Vec<String>,
     manifest_preview: QString,
     activity: QString,
     background_state: QString,
@@ -1273,6 +1289,8 @@ impl Default for Controller {
             repositories: "{}".into(),
             source_catalog: "[]".into(),
             report_state: r#"{"phase":"idle"}"#.into(),
+            pending_sources: "[]".into(),
+            asked: vec![],
             manifest_preview: "{}".into(),
             activity: "[]".into(),
             background_state: "{}".into(),
@@ -1518,6 +1536,16 @@ fn epoch_seconds() -> u64 {
 /// Wall-clock seconds at a monotonic instant in the past.
 fn epoch_seconds_at(instant: Instant) -> u64 {
     epoch_seconds().saturating_sub(instant.elapsed().as_secs())
+}
+/// The sources a streamed report heard from, as a success or a failure.
+fn answered(report: &PackageReport) -> Vec<String> {
+    let failed = report.failures.iter().map(|f| f.backend.clone());
+    report
+        .successful_sources
+        .iter()
+        .cloned()
+        .chain(failed)
+        .collect()
 }
 fn encoded(value: impl serde::Serialize) -> QString {
     serde_json::to_string(&value)
@@ -3648,6 +3676,32 @@ impl ffi::PackageController {
         self.as_mut().set_busy(foreground);
         self.set_writing(writing);
     }
+    /// Remember the sources a visible load still waits for and show them.
+    fn set_asked(mut self: Pin<&mut Self>, sources: Vec<String>) {
+        self.as_mut().rust_mut().asked = sources;
+        self.show_pending();
+    }
+    /// Show what the visible section still waits for: its preload's
+    /// sources while it waits on one, else its own load's.
+    fn show_pending(mut self: Pin<&mut Self>) {
+        let rust = self.rust();
+        let pending: Vec<&String> = if rust.awaiting_prefetch {
+            rust.prefetch_worker
+                .iter()
+                .filter(|worker| !worker.stale && worker.view == rust.active_view)
+                .flat_map(|worker| {
+                    let answered = &worker.answered;
+                    worker.asked.iter().filter(|id| !answered.contains(id))
+                })
+                .collect()
+        } else {
+            rust.asked.iter().collect()
+        };
+        let pending = encoded(pending);
+        if self.pending_sources() != &pending {
+            self.as_mut().set_pending_sources(pending);
+        }
+    }
     fn follow_output(mut self: Pin<&mut Self>, line: &str) {
         if let Some(state) = self.as_mut().rust_mut().progress_state.as_mut() {
             if state.observe(line) {
@@ -3731,6 +3785,7 @@ impl ffi::PackageController {
         self.as_mut().set_refreshing(false);
         self.as_mut().rust_mut().active_view = view.clone();
         self.as_mut().rust_mut().awaiting_prefetch = false;
+        self.as_mut().show_pending();
         self.as_mut().rust_mut().hold_partials = refreshing;
         if view == "Search" && query.trim().is_empty() {
             // Seed the selected sources before the first query starts.
@@ -3875,6 +3930,7 @@ impl ffi::PackageController {
                 self.as_mut().rust_mut().background = true;
             }
             self.as_mut().set_busy(true);
+            self.as_mut().show_pending();
             return;
         }
         // Reads are preemptible: cancel the in-flight load or details
@@ -4315,6 +4371,7 @@ impl ffi::PackageController {
             if let Some(worker) = &self.rust().worker {
                 worker.cancel.cancel();
             }
+            self.as_mut().set_asked(vec![]);
             self.as_mut()
                 .set_status("Cancelling… Waiting for the package manager to finish safely.".into());
         }
@@ -5007,10 +5064,13 @@ impl ffi::PackageController {
                         crate::metadata::enrich_cached(package);
                     }
                 }
-                // Streaming partials are only for a visible load.
-                if !matches!(reply, Reply::Partial(_)) {
-                    let _ = sender.send(reply);
-                }
+                // Rows stream only for a visible load; a section waiting
+                // on this preload only needs who answered.
+                let reply = match reply {
+                    Reply::Partial(report) => Reply::Answered(answered(&report)),
+                    reply => reply,
+                };
+                let _ = sender.send(reply);
             };
             let engine = match cached {
                 Some(engine) => Ok(engine),
@@ -5034,6 +5094,8 @@ impl ffi::PackageController {
             view,
             key,
             stale: false,
+            asked: vec![],
+            answered: vec![],
             scope: (scope, sudo, born),
         });
         self.sync_needs_poll();
@@ -5076,6 +5138,16 @@ impl ffi::PackageController {
                         Reply::Engine(engine) if self.rust().worker.is_none() => {
                             self.as_mut().rust_mut().engine = Some(*engine);
                             self.as_mut().rust_mut().engine_scope = Some(scope.clone());
+                        }
+                        Reply::Asked(sources) => {
+                            if let Some(worker) = &mut self.as_mut().rust_mut().prefetch_worker {
+                                worker.asked = sources;
+                            }
+                        }
+                        Reply::Answered(sources) => {
+                            if let Some(worker) = &mut self.as_mut().rust_mut().prefetch_worker {
+                                worker.answered = sources;
+                            }
                         }
                         _ => {}
                     }
@@ -5179,6 +5251,7 @@ impl ffi::PackageController {
             }
         }
         self.as_mut().poll_prefetch();
+        self.as_mut().show_pending();
         self.as_mut().poll_details();
         let Some(worker) = &self.rust().worker else {
             return;
@@ -5187,6 +5260,10 @@ impl ffi::PackageController {
         let complete =
             replies.iter().any(|r| matches!(r, Reply::Done(_))) || worker.handle.is_finished();
         let cancelled = worker.cancel.requested();
+        // A load another request replaced no longer waits on screen.
+        if (cancelled || self.rust().background) && !self.rust().asked.is_empty() {
+            self.as_mut().set_asked(vec![]);
+        }
         // A finished worker's thread may still have sent its last replies.
         let finished = complete.then(|| {
             let Worker {
@@ -5208,6 +5285,24 @@ impl ffi::PackageController {
                     }
                     None
                 }
+                // Only a visible load shows what it still waits for.
+                Reply::Asked(sources) => {
+                    if !cancelled && !self.rust().background {
+                        self.as_mut().set_asked(sources);
+                    }
+                    None
+                }
+                // Partials are cumulative: a source counts as answered once
+                // it succeeded or failed.
+                Reply::Partial(report) => {
+                    if !self.rust().asked.is_empty() {
+                        let answered = answered(&report);
+                        let mut pending = self.rust().asked.clone();
+                        pending.retain(|id| !answered.contains(id));
+                        self.as_mut().set_asked(pending);
+                    }
+                    Some(Reply::Partial(report))
+                }
                 // Sent just before Done, which reads it, so it is kept
                 // whether or not the worker has finished by now.
                 Reply::FailureOutput(output) => {
@@ -5218,6 +5313,8 @@ impl ffi::PackageController {
             })
             .collect();
         if let Some((job, cancel, joined)) = finished {
+            // A source that never answered is not waited for any more.
+            self.as_mut().set_asked(vec![]);
             if let Job::AutoUpgrade(operations, _) = &job {
                 if let Some(Reply::Done(Ok(Payload::Batch(_, outcomes)))) =
                     replies.iter().find(|reply| matches!(reply, Reply::Done(_)))
@@ -5499,6 +5596,8 @@ impl ffi::PackageController {
                     | Reply::ProgressEvent(_)
                     | Reply::Output(_)
                     | Reply::FailureOutput(_)
+                    | Reply::Asked(_)
+                    | Reply::Answered(_)
                     | Reply::Inventory(..) => {}
                 }
             }
@@ -7846,6 +7945,8 @@ mod tests {
             view: view.into(),
             key,
             stale,
+            asked: vec![],
+            answered: vec![],
             scope: (vec![], false, Instant::now()),
         }
     }
@@ -8602,6 +8703,8 @@ mod tests {
             view: "Updates".into(),
             key: cache_key("Updates", "", &[], false),
             stale: false,
+            asked: vec![],
+            answered: vec![],
             scope: (vec![], false, Instant::now()),
         });
         // An older foreground read is cancelled and its reply ignored.
@@ -8616,6 +8719,210 @@ mod tests {
         release.send(()).unwrap();
         wait_until(&mut controller, |c| !*c.busy() && c.rust().worker.is_none());
         assert!(controller.rows().to_string().contains("pending"));
+    }
+    #[test]
+    fn pending_sources_shrink_as_partials_arrive_and_clear_when_the_load_ends() {
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().rust_mut().prefetch.clear();
+        let pending = |c: &ffi::PackageController| -> Vec<String> {
+            serde_json::from_str(&c.pending_sources().to_string()).unwrap()
+        };
+        assert!(pending(&controller).is_empty());
+        let (step, gate) = mpsc::channel::<()>();
+        let (sender, receiver) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            let asked = vec!["apt".to_string(), "gem".into(), "npm".into()];
+            let _ = sender.send(Reply::Asked(asked));
+            let _ = gate.recv();
+            let mut report = PackageReport::default();
+            report.packages.push(synthetic_package("fast", "fast"));
+            report.successful_sources.push("apt".into());
+            let _ = sender.send(Reply::Partial(report.clone()));
+            let _ = gate.recv();
+            report.failures.push(BackendFailure {
+                backend: "npm".into(),
+                error: EngineError::Cancelled,
+            });
+            let _ = sender.send(Reply::Partial(report.clone()));
+            let _ = gate.recv();
+            // Gem never answers, as a source skipped quietly would not.
+            let _ = sender.send(Reply::Done(Ok(Payload::Packages(report))));
+        });
+        controller.as_mut().rust_mut().worker = Some(Worker {
+            handle,
+            receiver,
+            cancel: Cancellation::default(),
+            job: Job::Load("Search".into(), "fast".into()),
+        });
+        controller.as_mut().set_busy(true);
+        wait_until(&mut controller, |c| !c.rust().asked.is_empty());
+        assert_eq!(pending(&controller), ["apt", "gem", "npm"]);
+        step.send(()).unwrap();
+        wait_until(&mut controller, |c| c.rust().asked.len() == 2);
+        assert_eq!(pending(&controller), ["gem", "npm"]);
+        assert!(controller.rows().to_string().contains("fast"));
+        step.send(()).unwrap();
+        wait_until(&mut controller, |c| c.rust().asked.len() == 1);
+        assert_eq!(pending(&controller), ["gem"]);
+        step.send(()).unwrap();
+        wait_until(&mut controller, |c| c.rust().worker.is_none());
+        assert!(pending(&controller).is_empty());
+    }
+    #[test]
+    fn pending_sources_clear_on_cancel_and_skip_background_loads() {
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().rust_mut().prefetch.clear();
+        let pending = |c: &ffi::PackageController| c.pending_sources().to_string();
+        let worker = |job: Job| {
+            let (step, gate) = mpsc::channel::<()>();
+            let (sender, receiver) = mpsc::channel();
+            let handle = thread::spawn(move || {
+                let _ = sender.send(Reply::Asked(vec!["apt".into(), "npm".into()]));
+                let _ = gate.recv();
+                let mut report = PackageReport::default();
+                report.successful_sources.push("apt".into());
+                let _ = sender.send(Reply::Partial(report.clone()));
+                let _ = gate.recv();
+                let _ = sender.send(Reply::Done(Ok(Payload::Packages(report))));
+            });
+            let worker = Worker {
+                handle,
+                receiver,
+                cancel: Cancellation::default(),
+                job,
+            };
+            (worker, step)
+        };
+        // Cancelling stops showing what the load waited for, and a partial
+        // that still arrives does not bring it back.
+        let (running, step) = worker(Job::Load("Installed".into(), "".into()));
+        controller.as_mut().rust_mut().worker = Some(running);
+        wait_until(&mut controller, |c| !c.rust().asked.is_empty());
+        assert_eq!(pending(&controller), r#"["apt","npm"]"#);
+        controller.as_mut().cancel();
+        assert_eq!(pending(&controller), "[]");
+        step.send(()).unwrap();
+        step.send(()).unwrap();
+        wait_until(&mut controller, |c| c.rust().worker.is_none());
+        assert_eq!(pending(&controller), "[]");
+        // Another request replacing the load hides it at the next poll,
+        // before the replaced load winds down.
+        let (running, step) = worker(Job::Load("Search".into(), "vim".into()));
+        controller.as_mut().rust_mut().worker = Some(running);
+        wait_until(&mut controller, |c| !c.rust().asked.is_empty());
+        controller.rust().worker.as_ref().unwrap().cancel.cancel();
+        controller.as_mut().rust_mut().background = true;
+        controller.as_mut().poll();
+        assert_eq!(pending(&controller), "[]");
+        assert!(controller.rust().worker.is_some());
+        step.send(()).unwrap();
+        step.send(()).unwrap();
+        wait_until(&mut controller, |c| c.rust().worker.is_none());
+        assert_eq!(pending(&controller), "[]");
+        // A section reloading out of sight never lists its sources.
+        let (running, step) = worker(Job::Load("Updates".into(), "".into()));
+        controller.as_mut().rust_mut().worker = Some(running);
+        controller.as_mut().rust_mut().background = true;
+        step.send(()).unwrap();
+        step.send(()).unwrap();
+        wait_until(&mut controller, |c| c.rust().worker.is_none());
+        assert_eq!(pending(&controller), "[]");
+        assert!(controller.rust().asked.is_empty());
+    }
+    #[test]
+    fn a_section_waiting_on_its_preload_names_the_sources_still_loading() {
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().rust_mut().prefetch.clear();
+        let pending = |c: &ffi::PackageController| c.pending_sources().to_string();
+        let (step, gate) = mpsc::channel::<()>();
+        let (sender, receiver) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            let _ = sender.send(Reply::Asked(vec!["apt".into(), "brew".into()]));
+            let _ = gate.recv();
+            let _ = sender.send(Reply::Answered(vec!["brew".into()]));
+            let _ = gate.recv();
+            let mut report = PackageReport::default();
+            report.successful_sources.push("brew".into());
+            let _ = sender.send(Reply::Done(Ok(Payload::Packages(report))));
+        });
+        controller.as_mut().rust_mut().prefetch_worker = Some(PrefetchWorker {
+            handle,
+            receiver,
+            cancel: Cancellation::default(),
+            view: "Updates".into(),
+            key: cache_key("Updates", "", &[], false),
+            stale: false,
+            asked: vec![],
+            answered: vec![],
+            scope: (vec![], false, Instant::now()),
+        });
+        // A preload nobody waits for stays quiet.
+        wait_until(&mut controller, |c| {
+            c.rust().prefetch_worker.as_ref().unwrap().asked.len() == 2
+        });
+        assert_eq!(pending(&controller), "[]");
+        controller
+            .as_mut()
+            .load("Updates".into(), "".into(), "".into(), false, false);
+        assert!(controller.rust().awaiting_prefetch);
+        assert_eq!(pending(&controller), r#"["apt","brew"]"#);
+        step.send(()).unwrap();
+        wait_until(&mut controller, |c| {
+            c.pending_sources().to_string() == r#"["apt"]"#
+        });
+        // Leaving the section stops naming them; coming back resumes.
+        controller
+            .as_mut()
+            .load("Search".into(), "".into(), "".into(), false, false);
+        assert_eq!(pending(&controller), "[]");
+        controller
+            .as_mut()
+            .load("Updates".into(), "".into(), "".into(), false, false);
+        assert_eq!(pending(&controller), r#"["apt"]"#);
+        step.send(()).unwrap();
+        wait_until(&mut controller, |c| c.rust().prefetch_worker.is_none());
+        assert!(!controller.rust().awaiting_prefetch);
+        assert_eq!(pending(&controller), "[]");
+    }
+    #[test]
+    fn a_stale_preload_names_nothing() {
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().rust_mut().prefetch.clear();
+        let key = cache_key("Installed", "", &[], false);
+        let mut worker = fake_prefetch("Installed", key, vec![], false);
+        worker.asked = vec!["apt".into()];
+        controller.as_mut().rust_mut().prefetch_worker = Some(worker);
+        controller.as_mut().rust_mut().active_view = "Installed".into();
+        controller.as_mut().rust_mut().awaiting_prefetch = true;
+        controller.as_mut().show_pending();
+        assert_eq!(controller.pending_sources().to_string(), r#"["apt"]"#);
+        controller.as_mut().rust_mut().invalidate_prefetch();
+        controller.as_mut().rust_mut().awaiting_prefetch = true;
+        controller.as_mut().show_pending();
+        assert_eq!(controller.pending_sources().to_string(), "[]");
+    }
+    #[test]
+    fn preloads_report_which_sources_answered_instead_of_rows() {
+        let mut controller = synthetic_controller();
+        let mut controller = controller.pin_mut();
+        controller
+            .as_mut()
+            .start_prefetch("Installed".into(), cache_key("Installed", "", &[], false));
+        let worker = controller
+            .as_mut()
+            .rust_mut()
+            .prefetch_worker
+            .take()
+            .unwrap();
+        worker.handle.join().unwrap();
+        let replies: Vec<_> = worker.receiver.try_iter().collect();
+        assert!(matches!(&replies[0], Reply::Asked(asked) if asked == &["fixture"]));
+        assert!(matches!(&replies[1], Reply::Answered(answered) if answered == &["fixture"]));
+        assert!(!replies.iter().any(|r| matches!(r, Reply::Partial(_))));
     }
     #[test]
     fn retrying_a_source_in_a_section_ignores_search_text() {
@@ -8672,6 +8979,8 @@ mod tests {
             view: "Installed".into(),
             key,
             stale: false,
+            asked: vec![],
+            answered: vec![],
             scope: (vec![], false, Instant::now()),
         });
         controller
@@ -10310,7 +10619,9 @@ mod tests {
             &Cancellation::default(),
             &mut |r| replies.push(r),
         );
-        assert_eq!(replies.len(), 2);
+        assert_eq!(replies.len(), 3);
+        let asked = expect!(replies.remove(0), Reply::Asked(sources) => sources);
+        assert_eq!(asked, ["fixture"]);
         let partial = expect!(replies.remove(0), Reply::Partial(report) => report);
         let terminal =
             expect!(replies.remove(0), Reply::Done(Ok(Payload::Packages(report))) => report);
@@ -10354,7 +10665,9 @@ mod tests {
                 &Cancellation::default(),
                 &mut |r| replies.push(r),
             );
-            assert_eq!(replies.len(), 3);
+            assert_eq!(replies.len(), 4);
+            let asked = expect!(replies.remove(0), Reply::Asked(sources) => sources);
+            assert_eq!(asked, ["fixture"]);
             let partial = expect!(replies.remove(0), Reply::Partial(report) => report);
             assert_eq!(partial.packages, vec![package.clone()]);
             assert!(matches!(

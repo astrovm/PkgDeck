@@ -254,7 +254,14 @@ impl Transport for Fixture {
                         .unwrap_or_default(),
                 ));
             }
-            return Ok(output("core/synthetic-fixture 1.0\nSynthetic package\n"));
+            let marker = match self.installed.lock().unwrap().as_deref() {
+                Some("1.0") => " [installed]".to_owned(),
+                Some(version) => format!(" [installed: {version}]"),
+                None => String::new(),
+            };
+            return Ok(output(format!(
+                "core/synthetic-fixture 1.0{marker}\nSynthetic package\n"
+            )));
         }
         assert_eq!(executable, "dnf");
         if write {
@@ -272,7 +279,12 @@ impl Transport for Fixture {
         }
         let installed = args.contains(&"--installed".into());
         let matches = (installed && self.installed.lock().unwrap().is_some())
-            || (!installed && args.last().is_some_and(|arg| *arg == "synthetic-fixture"));
+            || (!installed
+                && args.last().is_some_and(|arg| {
+                    // Search asks for names containing the query.
+                    let query = arg.strip_prefix('*').unwrap().strip_suffix('*');
+                    "synthetic-fixture".contains(query.unwrap())
+                }));
         if !matches {
             return Ok(output(""));
         }
@@ -1553,6 +1565,134 @@ fn flatpak_search_survives_failing_system_scope() {
     assert!(matches!(results[0].id.scope, Scope::User { .. }));
 }
 
+/// Holds each Flatpak read until every read of its group has started, so
+/// reads that run one after another time out instead of answering.
+#[derive(Clone, Default)]
+struct FlatpakGate {
+    state: Arc<(Mutex<FlatpakGateState>, std::sync::Condvar)>,
+}
+#[derive(Default)]
+struct FlatpakGateState {
+    /// How many reads of each group must be in flight together.
+    groups: std::collections::BTreeMap<&'static str, usize>,
+    arrived: std::collections::BTreeMap<&'static str, usize>,
+    timed_out: Vec<String>,
+}
+impl FlatpakGate {
+    fn expect(&self, groups: &[(&'static str, usize)]) {
+        let mut state = self.state.0.lock().unwrap();
+        state.groups = groups.iter().copied().collect();
+        state.arrived.clear();
+    }
+    fn timed_out(&self) -> Vec<String> {
+        self.state.0.lock().unwrap().timed_out.clone()
+    }
+}
+impl Transport for FlatpakGate {
+    fn flatpak(
+        &self,
+        args: &[OsString],
+        _: &Cancellation,
+        _: bool,
+        system: bool,
+    ) -> Result<Completion, ExecutionError> {
+        let args: Vec<_> = args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        // Searches and listings are local reads; update checks name a
+        // remote once asking every remote failed.
+        let group = match (args[1].as_str(), args.len()) {
+            ("search" | "list", _) => "read",
+            (_, 4) => "updates",
+            _ => "remote",
+        };
+        let (lock, ready) = &*self.state;
+        let mut state = lock.lock().unwrap();
+        *state.arrived.entry(group).or_default() += 1;
+        ready.notify_all();
+        let target = state.groups[group];
+        let (mut state, wait) = ready
+            .wait_timeout_while(state, std::time::Duration::from_secs(10), |state| {
+                state.arrived[group] < target
+            })
+            .unwrap();
+        if wait.timed_out() {
+            state.timed_out.push(args.join(" "));
+        }
+        drop(state);
+        let arch = std::env::consts::ARCH;
+        let name = if system { "System" } else { "User" };
+        if group == "updates" {
+            return Err(ExecutionError::Failed(Completion {
+                code: Some(1),
+                signal: None,
+                stdout: vec![],
+                stderr: b"error: Unable to load summary from remote astrovm".to_vec(),
+                truncated: false,
+                cancellation_deferred: false,
+            }));
+        }
+        Ok(output(match args[1].as_str() {
+            "search" => format!(
+                "{name} app\tSynthetic description\tio.example.{name}\t1.0\tstable\tflathub\n"
+            ),
+            "list" => format!(
+                "io.example.{name}\t{arch}\tstable\t1.0\tSynthetic app\tflathub\n\
+                 io.example.Other\t{arch}\tstable\t1.0\tSynthetic app\tastrovm\n"
+            ),
+            _ if args[4] == "flathub" => {
+                format!("app/io.example.{name}/{arch}/stable\t2.0\tflathub\n")
+            }
+            _ => String::new(),
+        }))
+    }
+}
+
+#[test]
+fn flatpak_reads_both_installations_at_once() {
+    let cancel = Cancellation::default();
+    let gate = FlatpakGate::default();
+    let mut backend = Flatpak::new(gate.clone());
+    // Both catalogs and both inventories are read together.
+    gate.expect(&[("read", 4)]);
+    let offers = backend.search("example", &cancel).unwrap();
+    let names: Vec<_> = offers.iter().map(|offer| offer.id.name.as_str()).collect();
+    assert_eq!(
+        names,
+        ["io.example.User", "io.example.System"],
+        "user first"
+    );
+    assert!(matches!(offers[0].id.scope, Scope::User { .. }));
+    assert_eq!(offers[1].id.scope, Scope::System);
+    assert!(offers.iter().all(|offer| offer.installed_version.is_some()));
+    // Each installation lists and checks updates alongside the other, and
+    // every remote of both installations is asked at once.
+    gate.expect(&[("read", 2), ("updates", 2), ("remote", 4)]);
+    let installed = backend.installed(&cancel).unwrap();
+    let rows: Vec<_> = installed
+        .iter()
+        .map(|package| {
+            (
+                package.id.name.as_str(),
+                package.id.scope == Scope::System,
+                package.update == UpdateAvailability::Available,
+            )
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            ("io.example.User", false, true),
+            ("io.example.Other", false, false),
+            ("io.example.System", true, true),
+            ("io.example.Other", true, false),
+        ]
+    );
+    assert!(backend.query_errors().is_empty());
+    assert!(gate.timed_out().is_empty(), "{:?}", gate.timed_out());
+}
+
 const CARGO_LIST: &str = "cargo-install-test v1.2.3 (registry+https://github.com/rust-lang/crates.io-index):\n    cargo-install-test\n\nripgrep v14.1.0:\n    rg\nsourceless v2.0.0:\n    sourceless\n";
 const NPM_LIST: &str =
     r#"{"dependencies": {"left-pad": {"version": "1.3.0"}, "@scope/tool": {"version": "2.0.0"}}}"#;
@@ -1577,6 +1717,9 @@ struct DevFixture {
     pip_outdated: Option<String>,
     extra_env: std::collections::BTreeMap<String, String>,
     registry: Option<String>,
+    /// `gem search --remote` keeps only the registry rows whose name
+    /// contains the pattern, ignoring case, as RubyGems does.
+    gem_matches: bool,
     /// A read subcommand that behaves as if the user cancelled it.
     cancel_on: Option<String>,
     /// A write subcommand that finishes after the user asked to cancel.
@@ -1752,6 +1895,18 @@ impl Transport for DevFixture {
         // … search`, `composer global search`).
         if !write && rendered.iter().any(|arg| arg == "search") {
             return match &self.registry {
+                Some(text) if self.gem_matches => {
+                    let pattern = rendered[2].replace("\\.", ".").to_ascii_lowercase();
+                    Ok(output(
+                        text.lines()
+                            .filter(|line| {
+                                let name = line.split(' ').next().unwrap_or_default();
+                                name.to_ascii_lowercase().contains(&pattern)
+                            })
+                            .map(|line| format!("{line}\n"))
+                            .collect::<String>(),
+                    ))
+                }
                 Some(text) => Ok(output(text)),
                 None => Err(ExecutionError::Failed(Completion {
                     code: Some(1),
@@ -2211,6 +2366,165 @@ fn searches_reach_each_registry_through_the_managers_own_search() {
         .calls()
         .iter()
         .all(|(_, args, _)| args.first().map(String::as_str) != Some("search")));
+}
+
+#[test]
+fn registry_searches_are_reused_while_typing() {
+    let cancel = Cancellation::default();
+    let searches = |fixture: &DevFixture| {
+        fixture
+            .calls()
+            .iter()
+            .filter(|(_, args, write)| !write && args.iter().any(|arg| arg == "search"))
+            .count()
+    };
+    let listed = |packages: Vec<Package>| {
+        packages
+            .into_iter()
+            .filter(|p| p.candidate_version.is_some())
+            .map(|p| (p.id.name, p.candidate_version.unwrap_or_default()))
+            .collect::<Vec<_>>()
+    };
+    // RubyGems lists every gem containing the query, so longer queries that
+    // contain a searched one narrow its list without asking again, and
+    // still rank as a fresh search would.
+    let gem_home = std::env::temp_dir().join(format!("pkgdeck-gem-reuse-{}", std::process::id()));
+    std::fs::create_dir_all(gem_home.join("specifications")).unwrap();
+    let rows: String = (0..25)
+        .map(|n| format!("a-kde-helper-{n:02} (1.0.{n})\n"))
+        .chain(
+            [
+                "akdec (0.1)",
+                "KDE-tools (2.0)",
+                "kdeconnect (1.0)",
+                "kdec (0.3)",
+                "kdx (0.2)",
+            ]
+            .map(|row| format!("{row}\n")),
+        )
+        .collect();
+    let gem_fixture = || DevFixture {
+        version: "4.0.20\n".into(),
+        root: Some(gem_home.display().to_string()),
+        registry: Some(rows.clone()),
+        gem_matches: true,
+        ..DevFixture::default()
+    };
+    let fixture = gem_fixture();
+    let mut gem = DevTool::gem(fixture.clone());
+    gem.detect(&cancel).unwrap();
+    let kde = listed(gem.search("kde", &cancel).unwrap());
+    assert_eq!(kde.len(), 20);
+    assert_eq!(kde[0], ("KDE-tools".into(), "2.0".into()));
+    assert_eq!(searches(&fixture), 1);
+    for query in ["kdec", "KDE", "kde-t", "kdeconnect", "kde"] {
+        let fresh_fixture = gem_fixture();
+        let mut fresh = DevTool::gem(fresh_fixture.clone());
+        fresh.detect(&cancel).unwrap();
+        assert_eq!(
+            listed(gem.search(query, &cancel).unwrap()),
+            listed(fresh.search(query, &cancel).unwrap()),
+            "{query}"
+        );
+        assert_eq!(searches(&fresh_fixture), 1);
+    }
+    assert_eq!(
+        listed(gem.search("kdec", &cancel).unwrap()),
+        [
+            ("kdec".into(), "0.3".into()),
+            ("kdeconnect".into(), "1.0".into()),
+            ("akdec".into(), "0.1".into()),
+        ]
+    );
+    assert_eq!(searches(&fixture), 1);
+    // A query that does not contain a searched one asks the registry.
+    assert_eq!(
+        listed(gem.search("kdx", &cancel).unwrap()),
+        [("kdx".into(), "0.2".into())]
+    );
+    assert_eq!(searches(&fixture), 2);
+    // Too short to search, so nothing is narrowed either.
+    assert!(listed(gem.search("kd", &cancel).unwrap()).is_empty());
+    assert_eq!(searches(&fixture), 2);
+    // `gem search` exits cleanly with no rows when it cannot reach a
+    // source, so empty answers are asked again rather than reused.
+    for query in ["qqq", "qqq", "qqqx"] {
+        assert!(listed(gem.search(query, &cancel).unwrap()).is_empty());
+    }
+    assert_eq!(searches(&fixture), 5);
+    // Only the most recent answers are kept.
+    for n in 0..15 {
+        gem.search(&format!("helper-{n:02}"), &cancel).unwrap();
+    }
+    assert_eq!(searches(&fixture), 20);
+    gem.search("kdx", &cancel).unwrap();
+    assert_eq!(searches(&fixture), 20);
+    gem.search("kdec", &cancel).unwrap();
+    assert_eq!(searches(&fixture), 21);
+    // A change asks the registry again.
+    let offer = gem
+        .search("kdeconnect", &cancel)
+        .unwrap()
+        .into_iter()
+        .find(|p| p.id.name == "kdeconnect")
+        .unwrap();
+    assert_eq!(searches(&fixture), 21);
+    gem.execute(&Operation::Install(offer.id), &cancel, &mut |_| {})
+        .unwrap();
+    gem.search("kdeconnect", &cancel).unwrap();
+    assert_eq!(searches(&fixture), 22);
+    std::fs::remove_dir_all(&gem_home).unwrap();
+
+    // npm ranks and caps its answers, so only the same query is reused.
+    let npm_fixture = |registry: Option<&str>| DevFixture {
+        version: "12.0.2\n".into(),
+        root: Some("/home/test/lib/node_modules".into()),
+        list: NPM_LIST.into(),
+        registry: registry.map(Into::into),
+        ..DevFixture::default()
+    };
+    let fixture = npm_fixture(Some(
+        r#"[{"name": "lerna", "version": "9.0.0", "description": "Monorepos"}]"#,
+    ));
+    let mut npm = DevTool::npm(fixture.clone());
+    npm.detect(&cancel).unwrap();
+    for _ in 0..2 {
+        assert_eq!(
+            listed(npm.search("le", &cancel).unwrap()),
+            [
+                ("left-pad".into(), "1.3.0".into()),
+                ("lerna".into(), "9.0.0".into())
+            ]
+        );
+    }
+    assert_eq!(searches(&fixture), 1);
+    npm.search("ler", &cancel).unwrap();
+    assert_eq!(searches(&fixture), 2);
+    // The npm registry refuses 1 or more than 64 characters, so those are
+    // not sent; installed matches remain.
+    let long = "a".repeat(65);
+    for query in ["l", " l ", "é", long.as_str()] {
+        npm.search(query, &cancel).unwrap();
+    }
+    assert_eq!(
+        listed(npm.search("l", &cancel).unwrap()),
+        [
+            ("@scope/tool".into(), "2.0.0".into()),
+            ("left-pad".into(), "1.3.0".into())
+        ]
+    );
+    assert_eq!(searches(&fixture), 2);
+    npm.search(&long[1..], &cancel).unwrap();
+    assert_eq!(searches(&fixture), 3);
+    // Failed or unreadable answers are not kept.
+    for registry in [None, Some("not json")] {
+        let fixture = npm_fixture(registry);
+        let mut npm = DevTool::npm(fixture.clone());
+        npm.detect(&cancel).unwrap();
+        npm.search("left", &cancel).unwrap();
+        npm.search("left", &cancel).unwrap();
+        assert_eq!(searches(&fixture), 2);
+    }
 }
 
 #[test]
@@ -5428,6 +5742,50 @@ fn macports_keeps_variants_and_lists_only_active_ports() {
 }
 
 #[test]
+fn pacman_details_after_a_lookup_reuse_its_rows_until_a_change() {
+    let cancel = Cancellation::default();
+    let script = Script::new(&[
+        // pacman marks an older installed version in its search rows.
+        (
+            "pacman -Ss tool",
+            "extra/tool 2.0-1 [installed: 1.0-1]\n    A tool\n",
+        ),
+        ("pacman -Q", "tool 1.0-1\n"),
+        ("pacman -Qmq", "exit 1"),
+        ("pacman -Rns", ""),
+    ]);
+    let calls = || script.calls.lock().unwrap().len();
+    let mut pacman = Pacman::pacman(script.clone());
+    let found = pacman.lookup("tool", &cancel).unwrap();
+    let id = found[0].id.clone();
+    let after_lookup = calls();
+    // `pkd info`: the lookup's row answers, with the installed version merged.
+    let details = pacman.details(&id, &cancel).unwrap();
+    assert_eq!(calls(), after_lookup);
+    assert_eq!(details.package, found[0]);
+    assert_eq!(details.package.installed_version.as_deref(), Some("1.0-1"));
+    assert_eq!(details.description, "A tool");
+    // Read once: asking again searches again.
+    pacman.details(&id, &cancel).unwrap();
+    let searched = calls() - after_lookup;
+    assert!(searched > 0);
+    // A change clears what the lookup read.
+    pacman.lookup("tool", &cancel).unwrap();
+    pacman
+        .execute(&Operation::Remove(id.clone()), &cancel, &mut |_| {})
+        .unwrap();
+    let before = calls();
+    pacman.details(&id, &cancel).unwrap();
+    assert_eq!(calls() - before, searched);
+    // A failed lookup leaves nothing behind either.
+    pacman.lookup("tool", &cancel).unwrap();
+    assert!(pacman.lookup("-bad", &cancel).is_err());
+    let before = calls();
+    pacman.details(&id, &cancel).unwrap();
+    assert_eq!(calls() - before, searched);
+}
+
+#[test]
 fn pacman_leaves_aur_packages_to_the_aur_source() {
     let cancel = Cancellation::default();
     let script = Script::new(&[
@@ -5457,4 +5815,122 @@ fn pacman_leaves_aur_packages_to_the_aur_source() {
         Pacman::pacman(unsynced).installed(&cancel).unwrap().len(),
         2
     );
+}
+
+#[test]
+fn pacman_detects_and_searches_with_one_command_each() {
+    let cancel = Cancellation::default();
+    let script = Script::new(&[
+        ("pacman -Q", "bash 5.3-1\nyay 12.0.0-1\n"),
+        (
+            "pacman -Ss edit",
+            "extra/ed 1.22-1\n    A line editor\n\
+             extra/kate 26.08-1 (kde-applications kde-utilities) [installed]\n    Advanced editor\n\
+             extra/vim 9.2-1 [installed: 9.1-1]\n    Vi Improved\n",
+        ),
+    ]);
+    let mut pacman = Pacman::pacman(script.clone());
+    assert_eq!(pacman.detect(&cancel).unwrap(), Availability::Available);
+    let rows: Vec<_> = pacman
+        .search("edit", &cancel)
+        .unwrap()
+        .into_iter()
+        .map(|p| (p.id.name, p.installed_version, p.candidate_version))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            ("ed".into(), None, Some("1.22-1".into())),
+            (
+                "kate".into(),
+                Some("26.08-1".into()),
+                Some("26.08-1".into())
+            ),
+            ("vim".into(), Some("9.1-1".into()), Some("9.2-1".into())),
+        ]
+    );
+    // Neither asks for foreign packages, and search needs no installed list.
+    assert_eq!(
+        *script.calls.lock().unwrap(),
+        ["pacman -Q", "pacman -Ss edit"]
+    );
+    // pacman -Ss exits 1 when nothing matches: no rows, not a failure.
+    let none = Script::new(&[("pacman -Ss", "exit 1")]);
+    assert!(Pacman::pacman(none)
+        .search("missing", &cancel)
+        .unwrap()
+        .is_empty());
+    let broken = Script::new(&[("pacman -Ss", "exit 2")]);
+    assert!(matches!(
+        Pacman::pacman(broken).search("missing", &cancel),
+        Err(EngineError::Execution(ExecutionError::Failed(_)))
+    ));
+}
+
+#[test]
+fn dnf_searches_names_containing_the_query_from_cached_metadata() {
+    let cancel = Cancellation::default();
+    let format =
+        "--latest-limit 1 --queryformat %{name}|%{arch}|%{version}-%{release}|%{summary}\n";
+    let search = format!("dnf -C --quiet repoquery {format} *vim*");
+    let script = Script::new(&[
+        (
+            search.as_str(),
+            "neovim|aarch64|0.12-1|Vim fork\nvim-enhanced|aarch64|9.2-1|Vim\n",
+        ),
+        (
+            "dnf --quiet repoquery --latest-limit 1 --installed",
+            "vim-enhanced|aarch64|9.1-1|Vim\n",
+        ),
+    ]);
+    let rows: Vec<_> = Dnf::dnf(script.clone())
+        .search("vim", &cancel)
+        .unwrap()
+        .into_iter()
+        .map(|p| (p.id.name, p.installed_version))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            ("neovim".into(), None),
+            ("vim-enhanced".into(), Some("9.1-1".into()))
+        ]
+    );
+    assert_eq!(script.calls.lock().unwrap()[0], search);
+    // Without a metadata cache, cache-only mode fails; DNF then fetches it.
+    let uncached = Script::new(&[
+        (search.as_str(), "exit 1"),
+        (
+            &format!("dnf --quiet repoquery {format} *vim*"),
+            "vim-enhanced|aarch64|9.2-1|Vim\n",
+        ),
+        ("dnf --quiet repoquery --latest-limit 1 --installed", ""),
+    ]);
+    assert_eq!(
+        Dnf::dnf(uncached.clone()).search("vim", &cancel).unwrap()[0]
+            .id
+            .name,
+        "vim-enhanced"
+    );
+    assert_eq!(uncached.calls.lock().unwrap().len(), 3);
+    // A missing DNF is not retried.
+    let calls = Arc::new(Mutex::new(0));
+    struct Missing(Arc<Mutex<usize>>);
+    impl Transport for Missing {
+        fn system_manager(
+            &self,
+            executable: &str,
+            _: &[OsString],
+            _: &Cancellation,
+            _: bool,
+        ) -> Result<Completion, ExecutionError> {
+            *self.0.lock().unwrap() += 1;
+            Err(ExecutionError::Disabled(format!("{executable} not found")))
+        }
+    }
+    assert!(matches!(
+        Dnf::dnf(Missing(calls.clone())).search("vim", &cancel),
+        Err(EngineError::Execution(ExecutionError::Disabled(_)))
+    ));
+    assert_eq!(*calls.lock().unwrap(), 1);
 }

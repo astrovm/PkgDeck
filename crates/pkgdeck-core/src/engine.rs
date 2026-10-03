@@ -436,11 +436,14 @@ pub enum Event {
 #[derive(Default)]
 pub struct Engine {
     backends: BTreeMap<String, Box<dyn Backend>>,
-    /// Successful detections remembered by [`native_engine`](crate::backends::native_engine)
-    /// (and friends) so the immediately following query skips its own round.
-    /// Failed detections are never cached: the query retries them. Engines
-    /// are short-lived per query, so entries cannot go stale.
+    /// Successful detections, noted by [`native_engine`](crate::backends::native_engine)
+    /// (and friends) or learned by a query, so later queries on the same
+    /// engine skip their own round. Failed detections are never cached: the
+    /// next query retries them. Frontends reuse an engine only briefly.
     detected: BTreeMap<String, Availability>,
+    /// Sources registered without a probe that drop out silently once
+    /// detection finds them missing, as if never registered.
+    optional: BTreeSet<String>,
     cleanup_plans: BTreeMap<CleanupId, CleanupItem>,
     apt_upgrade_plan: Option<AptUpgradePlan>,
     operation_plan: Option<TransactionPlan>,
@@ -523,6 +526,31 @@ impl Engine {
         self.backends.insert(id, backend);
         Ok(())
     }
+    /// Register a source that may be missing. Each query detects it in its
+    /// own worker, so a slow probe never holds back the other sources, and a
+    /// missing one is skipped instead of reported.
+    pub fn register_optional(&mut self, backend: Box<dyn Backend>) -> Result<(), EngineError> {
+        let id = backend.id().to_owned();
+        self.register_boxed(backend)?;
+        self.optional.insert(id);
+        Ok(())
+    }
+    /// Whether a worker's outcome for `id`, already learned, stays out of
+    /// reports.
+    fn quiet(&self, id: &str, error: Option<&EngineError>) -> bool {
+        Self::silent(self.optional.contains(id), self.detected.get(id), error)
+    }
+    /// Whether an optional source's outcome stays out of reports: detection
+    /// found it missing, or the query was cancelled before detection could
+    /// tell, so a missing source never shows up as cancelled.
+    fn silent(optional: bool, noted: Option<&Availability>, error: Option<&EngineError>) -> bool {
+        optional
+            && match noted {
+                Some(Availability::Unavailable(_)) => true,
+                Some(Availability::Available) => false,
+                None => matches!(error, Some(EngineError::Cancelled)),
+            }
+    }
 
     /// Remember a detection outcome for the query that follows registration.
     /// Only definitive outcomes are kept; failures fall through to a fresh
@@ -536,7 +564,7 @@ impl Engine {
     pub fn discover(&mut self, cancel: &Cancellation) -> Vec<Source> {
         // Detection spawns native tools; probe every backend concurrently and
         // keep the registration order in the result.
-        std::thread::scope(|s| {
+        let sources: Vec<Source> = std::thread::scope(|s| {
             let workers: Vec<_> = self
                 .backends
                 .iter_mut()
@@ -556,7 +584,21 @@ impl Engine {
                 .into_iter()
                 .map(|worker| worker.join().expect("detection worker panicked"))
                 .collect()
-        })
+        });
+        // Optional sources keep what this learned; missing ones stay hidden.
+        for source in &sources {
+            if let (true, Ok(availability)) = (
+                self.optional.contains(&source.backend),
+                &source.availability,
+            ) {
+                self.detected
+                    .insert(source.backend.clone(), availability.clone());
+            }
+        }
+        sources
+            .into_iter()
+            .filter(|source| !self.quiet(&source.backend, None))
+            .collect()
     }
 
     fn ready(
@@ -572,6 +614,25 @@ impl Engine {
             .backends
             .get_mut(id)
             .ok_or_else(|| EngineError::UnknownBackend(id.into()))?;
+        if self.optional.contains(id) {
+            // Detect again before acting, as for any source. A missing one
+            // was never there.
+            let mut noted = None;
+            let available = Self::available_backend(&mut **backend, id, &mut noted, cancel);
+            if let Some(availability) = noted {
+                self.detected.insert(id.into(), availability);
+            }
+            match available {
+                Err(EngineError::Unavailable { .. }) => {
+                    return Err(EngineError::UnknownBackend(id.into()))
+                }
+                result => result?,
+            }
+            if !backend.capabilities().contains(&capability) {
+                return Err(backend.unsupported(capability));
+            }
+            return Ok(backend);
+        }
         Self::ready_backend(&mut **backend, id, capability, cancel)?;
         Ok(backend)
     }
@@ -669,19 +730,32 @@ impl Engine {
                 .filter(|(id, backend)| backend.has_update_index() && !skip.contains(id))
             {
                 if cancel.requested() {
+                    if Self::silent(
+                        engine.optional.contains(id),
+                        engine.detected.get(id),
+                        Some(&EngineError::Cancelled),
+                    ) {
+                        continue;
+                    }
                     failures.push(BackendFailure {
                         backend: id.clone(),
                         error: EngineError::Cancelled,
                     });
                     break;
                 }
-                let result = Self::available_backend(
-                    &mut **backend,
-                    id,
-                    engine.detected.get(id).cloned(),
-                    cancel,
-                )
-                .and_then(|()| backend.refresh_update_index(cancel));
+                let mut noted = engine.detected.get(id).cloned();
+                let available = Self::available_backend(&mut **backend, id, &mut noted, cancel);
+                if let Some(availability) = noted {
+                    engine.detected.insert(id.clone(), availability);
+                }
+                if Self::silent(
+                    engine.optional.contains(id),
+                    engine.detected.get(id),
+                    available.as_ref().err(),
+                ) {
+                    continue;
+                }
+                let result = available.and_then(|()| backend.refresh_update_index(cancel));
                 if let Err(error) = result {
                     failures.push(BackendFailure {
                         backend: id.clone(),
@@ -735,6 +809,11 @@ impl Engine {
             !crate::backends::inventory_only(backend.id()) && can_look_up(backend, name)
         })
     }
+    /// Every registered source, sorted: the ones a stream will answer for,
+    /// so a frontend can show which are still pending.
+    pub fn source_ids(&self) -> Vec<String> {
+        self.backends.keys().cloned().collect()
+    }
     /// Whether a registered backend declares `capability`. Frontends check
     /// this before asking for confirmation; [`execute`](Self::execute)
     /// refuses unsupported changes regardless.
@@ -750,17 +829,28 @@ impl Engine {
         let mut report = CleanupReport::default();
         // Each backend previews its cleanup independently, so run them
         // concurrently and merge the results in registration order.
+        let (noted, optional) = (&self.detected, &self.optional);
         let results: Vec<_> = std::thread::scope(|s| {
             let workers: Vec<_> = self
                 .backends
                 .iter_mut()
                 .filter(|(_, backend)| backend.capabilities().contains(&Capability::Clean))
                 .map(|(id, backend)| {
+                    let mut noted = noted.get(id).cloned();
+                    let optional = optional.contains(id);
                     s.spawn(move || {
-                        let result =
+                        // An optional source detects once per engine; the
+                        // others detect before each preview, as always.
+                        let result = if !optional {
                             Self::ready_backend(&mut **backend, id, Capability::Clean, cancel)
-                                .map(|backend| backend.cleanup_report(cancel));
-                        (id.clone(), result)
+                                .map(|backend| backend.cleanup_report(cancel))
+                        } else if cancel.requested() {
+                            Err(EngineError::Cancelled)
+                        } else {
+                            Self::available_backend(&mut **backend, id, &mut noted, cancel)
+                                .map(|()| backend.cleanup_report(cancel))
+                        };
+                        (id.clone(), noted, result)
                     })
                 })
                 .collect();
@@ -769,7 +859,11 @@ impl Engine {
                 .map(|worker| worker.join().expect("cleanup worker panicked"))
                 .collect()
         });
-        for (id, result) in results {
+        for (id, noted, result) in results {
+            self.learn(&id, noted);
+            if self.quiet(&id, result.as_ref().err()) {
+                continue;
+            }
             let mut seen = BTreeSet::new();
             match result {
                 Ok(partial)
@@ -840,18 +934,18 @@ impl Engine {
                 .iter_mut()
                 .filter(|(_, backend)| ask(&***backend))
                 .map(|(id, backend)| {
-                    let noted = noted.get(id).cloned();
+                    let mut noted = noted.get(id).cloned();
                     s.spawn(move || {
                         let result = Self::query_backend(
                             &mut **backend,
                             id,
-                            noted,
+                            &mut noted,
                             capability,
                             query,
                             exact,
                             cancel,
                         );
-                        (id.clone(), result)
+                        (id.clone(), noted, result)
                     })
                 })
                 .collect();
@@ -861,7 +955,11 @@ impl Engine {
                 .collect()
         });
         let mut report = PackageReport::default();
-        for (id, result) in results {
+        for (id, noted, result) in results {
+            self.learn(&id, noted);
+            if self.quiet(&id, result.as_ref().err()) {
+                continue;
+            }
             match result {
                 Ok((packages, errors)) => {
                     report.packages.extend(packages);
@@ -916,9 +1014,9 @@ impl Engine {
         // Workers own their backends so queries run concurrently; the engine
         // reassembles itself afterwards for reuse.
         let backends = std::mem::take(&mut self.backends);
-        let noted = &self.detected;
+        let (noted, optional) = (&self.detected, &self.optional);
         let (tx, rx) = std::sync::mpsc::channel();
-        let (accumulated, stash) = std::thread::scope(|s| {
+        let (accumulated, stash, learned) = std::thread::scope(|s| {
             for (id, mut backend) in backends {
                 let tx = tx.clone();
                 let capability = if query.is_some() {
@@ -926,24 +1024,37 @@ impl Engine {
                 } else {
                     Capability::Installed
                 };
-                let noted = noted.get(&id).cloned();
+                let mut noted = noted.get(&id).cloned();
                 s.spawn(move || {
                     let result = Self::query_backend(
                         &mut *backend,
                         &id,
-                        noted,
+                        &mut noted,
                         capability,
                         query,
                         false,
                         cancel,
                     );
-                    let _ = tx.send((id, backend, result));
+                    let _ = tx.send((id, backend, noted, result));
                 });
             }
             drop(tx);
             let mut accumulated = PackageReport::default();
             let mut stash = Vec::new();
-            for (id, backend, result) in rx {
+            let mut learned = Vec::new();
+            for (id, backend, noted, result) in rx {
+                // A missing optional source answers nothing at all, even
+                // when cancelled before detection could tell.
+                let missing = Self::silent(
+                    optional.contains(&id),
+                    noted.as_ref(),
+                    result.as_ref().err(),
+                );
+                learned.push((id.clone(), noted));
+                if missing {
+                    stash.push((id, backend));
+                    continue;
+                }
                 match result {
                     Ok((packages, errors)) => {
                         accumulated.packages.extend(packages);
@@ -970,10 +1081,13 @@ impl Engine {
                 stash.push((id, backend));
                 emit(accumulated.clone());
             }
-            (accumulated, stash)
+            (accumulated, stash, learned)
         });
         for (id, backend) in stash {
             self.backends.insert(id, backend);
+        }
+        for (id, noted) in learned {
+            self.learn(&id, noted);
         }
         accumulated
     }
@@ -984,7 +1098,7 @@ impl Engine {
     fn query_backend(
         backend: &mut dyn Backend,
         id: &str,
-        noted: Option<Availability>,
+        noted: &mut Option<Availability>,
         capability: Capability,
         query: Option<&str>,
         exact: bool,
@@ -1031,36 +1145,37 @@ impl Engine {
     }
 
     /// Queries and index refreshes honor the same cached detection outcomes.
-    /// Callers check cancellation first.
+    /// A fresh detection's outcome is left in `noted` for the engine to
+    /// remember. Callers check cancellation first.
     fn available_backend(
         backend: &mut dyn Backend,
         id: &str,
-        noted: Option<Availability>,
+        noted: &mut Option<Availability>,
         cancel: &Cancellation,
     ) -> Result<(), EngineError> {
-        match noted {
-            Some(Availability::Available) => {}
-            Some(Availability::Unavailable(reason)) => {
-                return Err(EngineError::Unavailable {
-                    backend: id.into(),
-                    reason,
-                });
-            }
-            None => {
-                if let Availability::Unavailable(reason) = backend.detect(cancel)? {
-                    return Err(EngineError::Unavailable {
-                        backend: id.into(),
-                        reason,
-                    });
-                }
-                // Detection may have taken time; do not start a query after
-                // cancellation.
-                if cancel.requested() {
-                    return Err(EngineError::Cancelled);
-                }
-            }
+        let fresh = noted.is_none();
+        let availability = match noted {
+            Some(availability) => availability.clone(),
+            None => noted.insert(backend.detect(cancel)?).clone(),
+        };
+        if let Availability::Unavailable(reason) = availability {
+            return Err(EngineError::Unavailable {
+                backend: id.into(),
+                reason,
+            });
+        }
+        // Detection may have taken time; do not start a query after
+        // cancellation.
+        if fresh && cancel.requested() {
+            return Err(EngineError::Cancelled);
         }
         Ok(())
+    }
+    /// Keep what a worker's detection learned for later queries.
+    fn learn(&mut self, id: &str, noted: Option<Availability>) {
+        if let Some(availability) = noted {
+            self.detected.insert(id.into(), availability);
+        }
     }
 
     pub fn details(
@@ -1094,9 +1209,16 @@ impl Engine {
         if cancel.requested() {
             return Err(EngineError::Cancelled);
         }
+        // An optional source counts as registered once a query found it.
+        let found = !self.optional.contains(&id.backend)
+            || matches!(
+                self.detected.get(&id.backend),
+                Some(Availability::Available)
+            );
         let backend = self
             .backends
             .get_mut(&id.backend)
+            .filter(|_| found)
             .ok_or_else(|| EngineError::UnknownBackend(id.backend.clone()))?;
         if !backend.capabilities().contains(&Capability::Details) {
             return Err(backend.unsupported(Capability::Details));

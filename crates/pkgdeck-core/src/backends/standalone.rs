@@ -7,6 +7,7 @@ use std::{
     io::Read,
     os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
     path::Path,
+    sync::Mutex,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -127,6 +128,63 @@ struct NativeStandalone {
     /// Removal moves files here instead of deleting them, so a mistake can
     /// be undone: macOS's `trash`. Linux deletes them.
     trash: Option<PathBuf>,
+    /// Remembered `--version` answers; `None` asks every time.
+    versions: Option<Versions>,
+}
+/// Each binary's `--version` answer, kept until the binary changes. Some
+/// tools take seconds to answer it.
+struct Versions {
+    store: Option<crate::cache::Store>,
+    /// Clean answers by fingerprint of the launcher and its binary.
+    seen: Mutex<BTreeMap<String, Completion>>,
+}
+impl Versions {
+    fn new(store: Option<crate::cache::Store>) -> Self {
+        Self {
+            store,
+            seen: Mutex::default(),
+        }
+    }
+    fn seen(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, Completion>> {
+        self.seen
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+    fn read(
+        &self,
+        tool: StandaloneTool,
+        launcher: &Path,
+        run: impl FnOnce() -> Result<Completion, ExecutionError>,
+    ) -> Result<Completion, ExecutionError> {
+        use crate::cache::{fingerprint, Watch};
+        let binary = fs::canonicalize(launcher).unwrap_or_else(|_| launcher.into());
+        let watches = [Watch::file(launcher), Watch::file(binary)];
+        let before = fingerprint(&watches, &[]).unwrap_or_default();
+        if let Some(known) = self.seen().get(&before) {
+            return Ok(known.clone());
+        }
+        let result = crate::cache::completion(
+            self.store.as_ref(),
+            tool.id(),
+            "version",
+            &[&launcher.to_string_lossy()],
+            &watches,
+            &[],
+            run,
+        )?;
+        let clean = result.code == Some(0) && !result.truncated;
+        if clean && fingerprint(&watches, &[]).unwrap_or_default() == before {
+            self.seen().insert(before, result.clone());
+        }
+        Ok(result)
+    }
+    /// After an update or removal, which may change more than the binary.
+    fn forget(&self, tool: StandaloneTool) {
+        self.seen().clear();
+        if let Some(store) = &self.store {
+            store.invalidate(tool.id());
+        }
+    }
 }
 pub struct Standalone {
     tool: StandaloneTool,
@@ -139,6 +197,7 @@ impl Standalone {
             io: Box::new(NativeStandalone {
                 host: Host::current(),
                 trash: cfg!(target_os = "macos").then(|| "/usr/bin/trash".into()),
+                versions: Some(Versions::new(crate::cache::Store::user())),
             }),
         }
     }
@@ -540,9 +599,14 @@ impl NativeStandalone {
         launcher: &Path,
         cancel: &Cancellation,
     ) -> Result<Option<Version>, EngineError> {
-        let output = self
-            .host
-            .read(launcher, &["--version".into()], Limits::default(), cancel)?;
+        let run = || {
+            self.host
+                .read(launcher, &["--version".into()], Limits::default(), cancel)
+        };
+        let output = match &self.versions {
+            Some(versions) => versions.read(tool, launcher, run)?,
+            None => run()?,
+        };
         let text = String::from_utf8_lossy(&bytes(tool.id(), output)?).into_owned();
         // A binary with the right name that does not identify as the tool is
         // someone else's.
@@ -960,6 +1024,35 @@ impl StandaloneIo for NativeStandalone {
         candidate: &Version,
         cancel: &Cancellation,
     ) -> Result<Completion, EngineError> {
+        let result = self.run_update(tool, installation, candidate, cancel);
+        self.forget(tool);
+        result
+    }
+    fn remove(
+        &self,
+        tool: StandaloneTool,
+        installation: &Installation,
+        cancel: &Cancellation,
+    ) -> Result<Completion, EngineError> {
+        let result = self.run_remove(tool, installation, cancel);
+        self.forget(tool);
+        result
+    }
+}
+
+impl NativeStandalone {
+    fn forget(&self, tool: StandaloneTool) {
+        if let Some(versions) = &self.versions {
+            versions.forget(tool);
+        }
+    }
+    fn run_update(
+        &self,
+        tool: StandaloneTool,
+        installation: &Installation,
+        candidate: &Version,
+        cancel: &Cancellation,
+    ) -> Result<Completion, EngineError> {
         // Recheck ownership/layout immediately before invoking any updater.
         let current = self.locate(tool, cancel)?.ok_or(EngineError::NotFound)?;
         if current.launcher != installation.launcher {
@@ -1008,7 +1101,7 @@ impl StandaloneIo for NativeStandalone {
             .host
             .standalone_write(&installation.updater, &args, &[], cancel)?)
     }
-    fn remove(
+    fn run_remove(
         &self,
         tool: StandaloneTool,
         installation: &Installation,
@@ -1419,6 +1512,9 @@ mod tests {
                     ]),
                 ),
                 trash: None,
+                // The fixture reads its version from a file beside it, which
+                // real tools don't; see `versions_are_asked_once_per_binary`.
+                versions: None,
             }
         }
         /// Like `native`, moving removals to the Trash the way macOS does:
@@ -2272,10 +2368,132 @@ mod tests {
         assert!(!root.exists());
     }
     #[test]
+    fn versions_are_asked_once_per_binary() {
+        let temp = Temp::new();
+        let cancel = Cancellation::default();
+        let store = || Some(crate::cache::Store::new(temp.0.join("cache")));
+        let remembering = |store| NativeStandalone {
+            versions: Some(Versions::new(store)),
+            ..temp.native()
+        };
+        // Updaters replace the binary with a new file, as these do.
+        let release = |path: &str, body: &str| {
+            let fresh = temp.script(
+                "fresh",
+                &format!("#!/bin/sh\necho run >> \"$HOME/runs\"\n{body}\n"),
+            );
+            fs::rename(fresh, temp.0.join(path)).unwrap();
+        };
+        let runs = || {
+            fs::read_to_string(temp.0.join("runs"))
+                .unwrap_or_default()
+                .lines()
+                .count()
+        };
+        let tool = StandaloneTool::OpenCode;
+        let launcher = temp.0.join(".opencode/bin/opencode");
+        fs::create_dir_all(launcher.parent().unwrap()).unwrap();
+        release(".opencode/bin/opencode", "echo 1.2.3");
+        let version = |native: &NativeStandalone| native.version_at(tool, &launcher, &cancel);
+
+        let native = remembering(store());
+        assert_eq!(version(&native).unwrap(), Some(Version::new(1, 2, 3)));
+        assert_eq!(version(&native).unwrap(), Some(Version::new(1, 2, 3)));
+        assert_eq!(runs(), 1);
+        // A later run, such as the next `pkd` command, reads it back.
+        assert_eq!(
+            version(&remembering(store())).unwrap(),
+            Some(Version::new(1, 2, 3))
+        );
+        assert_eq!(runs(), 1);
+        // A new binary is asked again.
+        release(".opencode/bin/opencode", "echo 1.2.4");
+        assert_eq!(version(&native).unwrap(), Some(Version::new(1, 2, 4)));
+        assert_eq!(
+            version(&remembering(store())).unwrap(),
+            Some(Version::new(1, 2, 4))
+        );
+        assert_eq!(runs(), 2);
+        // A failed answer is never kept.
+        release(".opencode/bin/opencode", "echo 1.2.5; exit 3");
+        assert!(version(&native).is_err());
+        assert!(version(&native).is_err());
+        assert!(version(&remembering(store())).is_err());
+        assert_eq!(runs(), 5);
+        // Without a cache folder, one backend still asks once.
+        release(".opencode/bin/opencode", "echo 1.2.6");
+        let uncached = remembering(None);
+        assert_eq!(version(&uncached).unwrap(), Some(Version::new(1, 2, 6)));
+        assert_eq!(version(&uncached).unwrap(), Some(Version::new(1, 2, 6)));
+        assert_eq!(runs(), 6);
+        assert_eq!(
+            version(&remembering(None)).unwrap(),
+            Some(Version::new(1, 2, 6))
+        );
+        assert_eq!(runs(), 7);
+        // Nor is a binary that can't run.
+        fs::set_permissions(&launcher, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(version(&native).is_err());
+        assert_eq!(runs(), 7);
+
+        // A launcher link follows the binary it points to.
+        let claude = temp.0.join(".local/bin/claude");
+        fs::create_dir_all(claude.parent().unwrap()).unwrap();
+        fs::create_dir_all(temp.0.join(".local/share/claude/versions")).unwrap();
+        release(".local/share/claude/versions/1.0.0", "echo 1.0.0");
+        symlink(temp.0.join(".local/share/claude/versions/1.0.0"), &claude).unwrap();
+        let claude_version =
+            |native: &NativeStandalone| native.version_at(StandaloneTool::Claude, &claude, &cancel);
+        assert_eq!(
+            claude_version(&native).unwrap(),
+            Some(Version::new(1, 0, 0))
+        );
+        assert_eq!(
+            claude_version(&native).unwrap(),
+            Some(Version::new(1, 0, 0))
+        );
+        assert_eq!(runs(), 8);
+        release(".local/share/claude/versions/1.0.0", "echo 1.0.1");
+        assert_eq!(
+            claude_version(&native).unwrap(),
+            Some(Version::new(1, 0, 1))
+        );
+        assert_eq!(runs(), 9);
+    }
+    #[test]
+    fn updates_and_removals_forget_remembered_versions() {
+        let temp = Temp::new();
+        let cancel = Cancellation::default();
+        let native = NativeStandalone {
+            versions: Some(Versions::new(Some(crate::cache::Store::new(
+                temp.0.join("cache"),
+            )))),
+            ..temp.native()
+        };
+        let tool = StandaloneTool::OpenCode;
+        temp.install(tool);
+        let installation = native.locate(tool, &cancel).unwrap().unwrap();
+        assert_eq!(installation.version, Version::new(1, 0, 0));
+        // The fixture's updater changes only what it answers, not itself.
+        let result = native.update(tool, &installation, &Version::new(2, 0, 0), &cancel);
+        // Updaters and removal never run as root; the checks below need them to.
+        assert_eq!(result.is_err(), rustix::process::geteuid().is_root());
+        let Ok(result) = result else { return };
+        assert_eq!(result.code, Some(0));
+        let updated = native.locate(tool, &cancel).unwrap().unwrap();
+        assert_eq!(updated.version, Version::new(2, 0, 0));
+        assert_eq!(
+            native.remove(tool, &updated, &cancel).unwrap().code,
+            Some(0)
+        );
+        assert!(native.locate(tool, &cancel).unwrap().is_none());
+    }
+    #[test]
     fn native_rejects_sandbox_missing_home_and_invalid_paths() {
         let native = NativeStandalone {
             host: Host::new(Runtime::Flatpak, BTreeMap::new()),
             trash: None,
+            versions: None,
         };
         assert!(native
             .locate(StandaloneTool::Codex, &Cancellation::default())
@@ -2283,6 +2501,7 @@ mod tests {
         let native = NativeStandalone {
             host: Host::new(Runtime::Native, BTreeMap::new()),
             trash: None,
+            versions: None,
         };
         assert!(native.home().is_err());
         let native = NativeStandalone {
@@ -2291,6 +2510,7 @@ mod tests {
                 BTreeMap::from([("CODEX_HOME".into(), "relative".into())]),
             ),
             trash: None,
+            versions: None,
         };
         assert!(native
             .setting_path("CODEX_HOME", "/fallback".into())
@@ -2419,6 +2639,7 @@ mod tests {
                 ]),
             ),
             trash: None,
+            versions: None,
         };
         assert!(matches!(
             offline.latest(StandaloneTool::Amp, &amp, &cancel),
@@ -2733,6 +2954,7 @@ mod tests {
                 ]),
             ),
             trash: None,
+            versions: None,
         };
         let installation = native
             .locate(StandaloneTool::Foundry, &cancel)
@@ -2812,6 +3034,7 @@ mod tests {
                 ]),
             ),
             trash,
+            versions: None,
         };
         temp.install(StandaloneTool::Grok);
         let binary = temp.0.join(".grok/downloads/grok-linux-test");

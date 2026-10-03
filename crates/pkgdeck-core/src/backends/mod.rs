@@ -376,6 +376,11 @@ pub trait Transport: Send {
     fn env(&self, _name: &str) -> Option<OsString> {
         None
     }
+    /// Where Homebrew answers may be kept between runs, with everything
+    /// they depend on. Fixtures keep none.
+    fn brew_cache(&self) -> Option<(crate::cache::Store, Vec<crate::cache::Watch>)> {
+        None
+    }
     /// How system changes get permission; tools that call sudo themselves
     /// (AUR helpers) are pointed at the same prompt.
     fn authorization(&self) -> Authorization {
@@ -629,7 +634,78 @@ fn locale_key(var: impl Fn(&str) -> Option<OsString>) -> Vec<String> {
         .collect()
 }
 
+/// What `pacman -Ss` answers from below `root`: the synced databases, the
+/// local database for its "[installed]" marks, and the configuration that
+/// names the repositories. `None` when the configuration moves the
+/// databases or reads repositories from elsewhere.
+fn pacman_search_watches(root: &std::path::Path) -> Option<Vec<crate::cache::Watch>> {
+    use crate::cache::Watch;
+    let conf = root.join("etc/pacman.conf");
+    let text = std::fs::read_to_string(&conf).unwrap_or_default();
+    let moved = text.lines().any(|line| {
+        let (key, value) = line.split_once('=').unwrap_or((line, ""));
+        match key.trim() {
+            "DBPath" | "RootDir" => true,
+            // Only files right in pacman.d, which is watched one level deep.
+            "Include" => value
+                .trim()
+                .strip_prefix("/etc/pacman.d/")
+                .is_none_or(|file| file.contains('/') || file.starts_with('.')),
+            _ => false,
+        }
+    });
+    (!moved).then(|| {
+        vec![
+            Watch::tree(root.join("var/lib/pacman/sync"), 1),
+            // Every install, upgrade or removal adds or removes a
+            // "name-version" folder here, which changes the folder itself.
+            Watch::file(root.join("var/lib/pacman/local")),
+            Watch::file(conf),
+            Watch::tree(root.join("etc/pacman.d"), 1),
+            Watch::file(root.join("usr/bin/pacman")),
+        ]
+    })
+}
+
 impl NativeTransport {
+    /// System manager commands, with pacman searches answered from `store`
+    /// while the databases below `root` are unchanged.
+    fn system_manager_cached(
+        &self,
+        executable: &str,
+        args: &[OsString],
+        cancel: &Cancellation,
+        write: bool,
+        root: &std::path::Path,
+        store: impl FnOnce() -> Option<crate::cache::Store>,
+    ) -> Result<Completion, ExecutionError> {
+        let run = || {
+            self.host
+                .system_manager(executable, args, cancel, write, self.authorization)
+        };
+        // A search reads every synced database and takes about a second.
+        let search = !write
+            && self.host.runtime == crate::host::Runtime::Native
+            && executable == "pacman"
+            && args.first().is_some_and(|arg| arg == "-Ss");
+        let Some(watches) = search.then(|| pacman_search_watches(root)).flatten() else {
+            return run();
+        };
+        let args_text: Vec<String> = args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        let args_text: Vec<&str> = args_text.iter().map(String::as_str).collect();
+        crate::cache::completion(
+            store().as_ref(),
+            "pacman",
+            "search",
+            &args_text,
+            &watches,
+            &[],
+            run,
+        )
+    }
     /// Flatpak reads, with remote searches answered from `store` while the
     /// installation's AppStream data is unchanged.
     fn flatpak_cached(
@@ -709,8 +785,8 @@ impl Transport for NativeTransport {
             &std::env::current_exe().map_err(|e| ExecutionError::Io(e.to_string()))?,
             option_env!("PKGDECK_BUILT_APT_QUERY"),
         )?;
-        // The helper rebuilds APT's cache in memory on every run (about a
-        // second). Its answer only depends on the APT and dpkg databases.
+        // The helper opens APT's cache on every run (half a second or more).
+        // Its answer only depends on the APT and dpkg databases.
         let cacheable = mode != "detect" && self.host.var("APT_CONFIG").is_none();
         let store = cacheable.then(crate::cache::Store::user).flatten();
         let helper = crate::cache::fingerprint(&[crate::cache::Watch::file(&executable)], &[]);
@@ -884,6 +960,26 @@ impl Transport for NativeTransport {
                     .collect(),
                 )
             }
+            "lookup" => {
+                // One exact name, every stanza apt-cache knows for it. An
+                // unknown name has no policy, and show would fail on it.
+                let name = OsString::from(query);
+                let policy = apt_cli::parse_policy_dump(&output(
+                    &cache,
+                    &[OsString::from("policy"), name.clone()],
+                )?);
+                if !policy.keys().any(|(id, _)| id == query) {
+                    return finish(vec![]);
+                }
+                let show = output(&cache, &[OsString::from("show"), name])?;
+                finish(apt_cli::search_packages(
+                    query,
+                    &[(query.to_owned(), String::new())],
+                    &policy,
+                    &apt_cli::parse_show_dump(&show),
+                    &installed_rows()?,
+                ))
+            }
             _ => Err(ExecutionError::Invalid("unknown APT query".into())),
         }
     }
@@ -931,6 +1027,9 @@ impl Transport for NativeTransport {
     fn env(&self, name: &str) -> Option<OsString> {
         self.host.var(name)
     }
+    fn brew_cache(&self) -> Option<(crate::cache::Store, Vec<crate::cache::Watch>)> {
+        self.host.brew_cache()
+    }
     fn authorization(&self) -> Authorization {
         self.authorization
     }
@@ -971,8 +1070,14 @@ impl Transport for NativeTransport {
         cancel: &Cancellation,
         write: bool,
     ) -> Result<Completion, ExecutionError> {
-        self.host
-            .system_manager(executable, args, cancel, write, self.authorization)
+        self.system_manager_cached(
+            executable,
+            args,
+            cancel,
+            write,
+            std::path::Path::new("/"),
+            crate::cache::Store::user,
+        )
     }
     fn macos_tool(
         &self,
@@ -1004,6 +1109,10 @@ pub struct Apt<T = NativeTransport> {
     pub transport: T,
     desktop_entries: Option<std::collections::BTreeMap<String, PathBuf>>,
     components: Option<std::collections::BTreeMap<String, Vec<String>>>,
+    /// What the last exact lookup read, in full. The details that follow it
+    /// (`pkd info`) come from here instead of a second helper run. Read
+    /// once; changes clear it.
+    looked_up: Vec<PackageDetails>,
 }
 impl<T> Apt<T> {
     pub fn new(transport: T) -> Self {
@@ -1011,6 +1120,7 @@ impl<T> Apt<T> {
             transport,
             desktop_entries: None,
             components: None,
+            looked_up: vec![],
         }
     }
 }
@@ -1110,7 +1220,13 @@ fn flatpak_reference(reference: &str) -> Option<(&str, &str, &str, &str)> {
         && parts.next().is_none())
     .then_some((kind, name, arch, branch))
 }
-impl<T: Transport> Flatpak<T> {
+/// The answer of a Flatpak query run on its own thread.
+fn joined<R>(worker: std::thread::ScopedJoinHandle<'_, R>) -> R {
+    worker.join().expect("Flatpak worker panicked")
+}
+// User and system installations are separate, and each `flatpak` read is
+// its own process, so their queries run at once.
+impl<T: Transport + Sync> Flatpak<T> {
     fn call(
         &self,
         args: &[&str],
@@ -1229,9 +1345,17 @@ impl<T: Transport> Flatpak<T> {
             // One unreachable remote makes flatpak refuse to list any. Ask
             // each remote on its own so the others still show their updates.
             Err(first) if !cancel.requested() && remotes.len() > 1 => {
+                let remote_updates = &remote_updates;
+                let answers: Vec<_> = std::thread::scope(|scope| {
+                    let workers: Vec<_> = remotes
+                        .into_iter()
+                        .map(|remote| scope.spawn(move || remote_updates(Some(remote))))
+                        .collect();
+                    workers.into_iter().map(joined).collect()
+                });
                 let mut failures = Vec::new();
-                for remote in remotes {
-                    match remote_updates(Some(remote)) {
+                for answer in answers {
+                    match answer {
                         Ok(text) => texts.push(text),
                         Err(error) => failures.push(error),
                     }
@@ -1365,7 +1489,7 @@ impl<T: Transport> Flatpak<T> {
         }
     }
 }
-impl<T: Transport> Backend for Flatpak<T> {
+impl<T: Transport + Sync> Backend for Flatpak<T> {
     fn id(&self) -> &str {
         "flatpak"
     }
@@ -1414,20 +1538,34 @@ impl<T: Transport> Backend for Flatpak<T> {
                     .collect()
             });
         }
+        // Local inventory is enough to choose Install versus Remove. Search
+        // must not fetch remote update metadata just to establish this state.
+        // Both catalogs and both inventories are read at once.
+        let this = &*self;
+        let (user, system, user_installed, system_installed) = std::thread::scope(|scope| {
+            let system = scope.spawn(|| this.search_scope(query, cancel, true));
+            let user_installed = scope.spawn(|| this.list(cancel, false, false, &mut vec![]));
+            let system_installed = scope.spawn(|| this.list(cancel, true, false, &mut vec![]));
+            let user = this.search_scope(query, cancel, false);
+            (
+                user,
+                joined(system),
+                joined(user_installed),
+                joined(system_installed),
+            )
+        });
         // The user catalog is the primary source; a failing system query
         // (for example, a machine with no system remotes) must not fail
         // the whole search when user results are available.
-        let mut result = self.search_scope(query, cancel, false)?;
-        if let Ok(system) = self.search_scope(query, cancel, true) {
+        let mut result = user?;
+        if let Ok(system) = system {
             result.extend(system);
         }
         // Offers in separate installations remain independently selectable.
         let mut seen = std::collections::BTreeSet::new();
         result.retain(|package| seen.insert(package.id.clone()));
-        // Local inventory is enough to choose Install versus Remove. Search
-        // must not fetch remote update metadata just to establish this state.
-        let mut installed = self.list(cancel, false, false, &mut vec![])?;
-        installed.extend(self.list(cancel, true, false, &mut vec![])?);
+        let mut installed = user_installed?;
+        installed.extend(system_installed?);
         let mut offers = Vec::new();
         for offer in result {
             let matches: Vec<_> =
@@ -1456,9 +1594,23 @@ impl<T: Transport> Backend for Flatpak<T> {
     }
     fn installed(&mut self, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
         let home = self.transport.env("HOME").map(PathBuf::from);
-        let mut skipped = Vec::new();
-        let mut result = self.list(cancel, false, true, &mut skipped)?;
-        result.extend(self.list(cancel, true, true, &mut skipped)?);
+        let this = &*self;
+        let (user, system) = std::thread::scope(|scope| {
+            let system = scope.spawn(|| {
+                let mut skipped = Vec::new();
+                this.list(cancel, true, true, &mut skipped)
+                    .map(|packages| (packages, skipped))
+            });
+            let mut skipped = Vec::new();
+            let user = this
+                .list(cancel, false, true, &mut skipped)
+                .map(|packages| (packages, skipped));
+            (user, joined(system))
+        });
+        let (mut result, mut skipped) = user?;
+        let (system, system_skipped) = system?;
+        result.extend(system);
+        skipped.extend(system_skipped);
         self.skipped = skipped;
         for package in &mut result {
             // Exported icons double as the installed check per scope; `list`
@@ -1833,24 +1985,65 @@ fn component_stem(id: &str) -> Option<String> {
     (!stem.is_empty()).then(|| stem.to_owned())
 }
 
-/// Map installed Debian packages to their AppStream component-id stems by
-/// scanning DEP-11 YAML (`<id>.yml.gz`) as a gzip line stream. Documents are
-/// `---`-separated with top-level `ID:`/`Package:` scalars; a package can
-/// own several components. Missing or unreadable data maps nothing.
+/// Map installed Debian packages to their AppStream component-id stems from
+/// the DEP-11 YAML in `yaml_dir`. Decompressing it takes a few hundred
+/// milliseconds on every list, so the map is kept in the user's cache.
 fn dep11_component_ids(
     yaml_dir: &std::path::Path,
 ) -> std::collections::BTreeMap<String, Vec<String>> {
+    dep11_cached(crate::cache::Store::user().as_ref(), yaml_dir, dep11_scan)
+}
+
+/// [`dep11_component_ids`] answered from `store` while the folder and every
+/// file its entries link to (APT's lists, refreshed in place) are unchanged.
+fn dep11_cached(
+    store: Option<&crate::cache::Store>,
+    yaml_dir: &std::path::Path,
+    scan: impl FnOnce(&[PathBuf]) -> std::collections::BTreeMap<String, Vec<String>>,
+) -> std::collections::BTreeMap<String, Vec<String>> {
+    use crate::cache::Watch;
+    let Ok(entries) = std::fs::read_dir(yaml_dir) else {
+        return std::collections::BTreeMap::new();
+    };
+    let mut files: Vec<PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "gz"))
+        .collect();
+    files.sort();
+    let folder = std::fs::canonicalize(yaml_dir).unwrap_or_else(|_| yaml_dir.to_owned());
+    let mut watches = vec![Watch::file(yaml_dir), Watch::tree(folder, 1)];
+    // A dangling link is watched where it points, so its target appearing
+    // counts as a change.
+    watches.extend(files.iter().map(|file| {
+        Watch::file(
+            std::fs::canonicalize(file)
+                .or_else(|_| std::fs::read_link(file).map(|target| yaml_dir.join(target)))
+                .unwrap_or_else(|_| file.clone()),
+        )
+    }));
+    let encoded = crate::cache::read_through(
+        store,
+        "dep11",
+        "components",
+        &[&yaml_dir.to_string_lossy()],
+        &watches,
+        &[],
+        || serde_json::to_vec(&scan(&files)),
+    )
+    .unwrap_or_default();
+    serde_json::from_slice(&encoded).unwrap_or_default()
+}
+
+/// Scan DEP-11 YAML (`<id>.yml.gz`) as a gzip line stream. Documents are
+/// `---`-separated with top-level `ID:`/`Package:` scalars; a package can
+/// own several components. Unreadable files map nothing.
+fn dep11_scan(files: &[PathBuf]) -> std::collections::BTreeMap<String, Vec<String>> {
     use std::io::{BufRead, BufReader};
     let mut map: std::collections::BTreeMap<String, Vec<String>> =
         std::collections::BTreeMap::new();
-    let Ok(entries) = std::fs::read_dir(yaml_dir) else {
-        return map;
-    };
-    for entry in entries.flatten() {
-        if entry.path().extension().is_none_or(|ext| ext != "gz") {
-            continue;
-        }
-        let Ok(file) = std::fs::File::open(entry.path()) else {
+    for path in files {
+        let Ok(file) = std::fs::File::open(path) else {
             continue;
         };
         let decoder = BufReader::new(flate2::read::GzDecoder::new(file));
@@ -2128,6 +2321,29 @@ impl<T: Transport> Backend for Apt<T> {
             })
             .collect())
     }
+    /// Every architecture of one exact name, with the full details search
+    /// rows leave out, kept for the details call that usually follows.
+    fn lookup(&mut self, name: &str, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
+        self.looked_up.clear();
+        // A name APT can't have is never sent to it.
+        if name.contains(':') || AptAction::Install(name.into()).arguments().is_err() {
+            return Ok(vec![]);
+        }
+        let found = self.query("lookup", name, "", cancel)?;
+        let home = self.transport.env("HOME").map(PathBuf::from);
+        let packages = found
+            .iter()
+            .map(|d| {
+                let mut package = d.package.clone();
+                if let Some(desktop) = self.desktop_entries().get(&package.id.name).cloned() {
+                    package.icon = desktop_icon(home.as_deref(), &desktop);
+                }
+                package
+            })
+            .collect();
+        self.looked_up = found;
+        Ok(packages)
+    }
     fn installed(&mut self, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
         let home = self.transport.env("HOME").map(PathBuf::from);
         let packages = self.query("installed", "", "", cancel)?;
@@ -2156,11 +2372,17 @@ impl<T: Transport> Backend for Apt<T> {
         cancel: &Cancellation,
     ) -> Result<PackageDetails, EngineError> {
         self.target(id)?;
-        let mut details = self
-            .query("details", &id.name, &id.architecture, cancel)?
+        let looked_up = std::mem::take(&mut self.looked_up)
             .into_iter()
-            .find(|d| d.package.id == *id)
-            .ok_or(EngineError::NotFound)?;
+            .find(|d| d.package.id == *id);
+        let mut details = match looked_up {
+            Some(details) => details,
+            None => self
+                .query("details", &id.name, &id.architecture, cancel)?
+                .into_iter()
+                .find(|d| d.package.id == *id)
+                .ok_or(EngineError::NotFound)?,
+        };
         if details.package.installed_version.is_some() {
             let home = self.transport.env("HOME").map(PathBuf::from);
             if let Some(desktop) = self.desktop_entries().get(&id.name).cloned() {
@@ -2213,6 +2435,8 @@ impl<T: Transport> Backend for Apt<T> {
         cancel: &Cancellation,
         progress: &mut dyn FnMut(Progress),
     ) -> Result<OperationOutcome, EngineError> {
+        // A change can make what a lookup read out of date.
+        self.looked_up.clear();
         let staged_artifact = match operation {
             Operation::Install(id) => crate::artifact::stage(id, cancel)?,
             _ => None,
@@ -2260,6 +2484,7 @@ impl<T: Transport> Backend for Apt<T> {
         if operations.len() < 2 {
             return None;
         }
+        self.looked_up.clear();
         let grouped = (|| {
             let actions = operations
                 .iter()
@@ -2335,20 +2560,39 @@ const BREW_INFO_BATCH: usize = 1000;
 /// Packages a search already read from `brew info`, by name. `None` marks a
 /// name with no row here, such as a cask this system can't install. Typing
 /// one more letter only narrows a search, so most of it is answered from
-/// here. Changes and update checks clear it.
+/// here. Changes and update checks clear it. With a [`BrewDisk`], they are
+/// also kept between runs, so the first search after a start is fast too.
 #[derive(Default)]
-struct BrewFound(std::collections::HashMap<String, Option<Package>>);
+struct BrewFound {
+    packages: std::collections::HashMap<String, Option<Package>>,
+    /// The fingerprint `packages` were read under, when kept on disk.
+    key: Option<String>,
+    /// Looked up on the first search.
+    disk: Option<Option<BrewDisk>>,
+}
 impl BrewFound {
     /// `names` in order, reading the ones not seen yet with `read`.
     fn search(
         &mut self,
         names: &[&str],
+        source: &str,
+        find: impl FnOnce() -> Option<BrewDisk>,
         mut read: impl FnMut(&[&str]) -> Result<Vec<Package>, EngineError>,
     ) -> Result<Vec<Package>, EngineError> {
+        let disk = self.disk.get_or_insert_with(find).as_ref();
+        let key = disk.and_then(BrewDisk::fingerprint);
+        if key != self.key {
+            // The first search of this run, or Homebrew changed since.
+            self.packages = disk
+                .zip(key.as_deref())
+                .and_then(|(disk, key)| disk.load(source, key))
+                .unwrap_or_default();
+            self.key = key;
+        }
         let missing: Vec<_> = names
             .iter()
             .copied()
-            .filter(|name| !self.0.contains_key(*name))
+            .filter(|name| !self.packages.contains_key(*name))
             .collect();
         for chunk in missing.chunks(BREW_INFO_BATCH) {
             let mut read = read(chunk)?
@@ -2356,16 +2600,70 @@ impl BrewFound {
                 .map(|package| (package.id.name.clone(), package))
                 .collect::<std::collections::HashMap<_, _>>();
             for name in chunk {
-                self.0.insert((*name).to_owned(), read.remove(*name));
+                self.packages.insert((*name).to_owned(), read.remove(*name));
             }
         }
-        Ok(names
+        let found = names
             .iter()
-            .filter_map(|name| self.0.get(*name).cloned().flatten())
-            .collect())
+            .filter_map(|name| self.packages.get(*name).cloned().flatten())
+            .collect();
+        if let (Some(disk), Some(key), false) = (disk, &self.key, missing.is_empty()) {
+            // Homebrew changed while brew read: keep none of it.
+            if disk.fingerprint().as_ref() == Some(key) {
+                disk.save(source, key, &self.packages);
+            } else {
+                self.packages.clear();
+                self.key = None;
+            }
+        }
+        Ok(found)
     }
     fn clear(&mut self) {
-        self.0.clear();
+        self.packages.clear();
+        self.key = None;
+    }
+}
+/// Where Homebrew search details are kept between runs, and everything
+/// they depend on (see [`Transport::brew_cache`]).
+struct BrewDisk {
+    store: crate::cache::Store,
+    watches: Vec<crate::cache::Watch>,
+    /// What else the details depend on: the architecture this program reads
+    /// them for, and the OS release brew picks variations for.
+    system: [String; 2],
+}
+impl BrewDisk {
+    fn find(transport: &impl Transport) -> Option<Self> {
+        let (store, watches) = transport.brew_cache()?;
+        let release = rustix::system::uname()
+            .release()
+            .to_string_lossy()
+            .into_owned();
+        Some(Self {
+            store,
+            watches,
+            system: [std::env::consts::ARCH.into(), release],
+        })
+    }
+    fn fingerprint(&self) -> Option<String> {
+        let [arch, release] = &self.system;
+        crate::cache::fingerprint(&self.watches, &[arch, release])
+    }
+    fn load(
+        &self,
+        source: &str,
+        key: &str,
+    ) -> Option<std::collections::HashMap<String, Option<Package>>> {
+        serde_json::from_slice(&self.store.get(source, "found", &[], key)?).ok()
+    }
+    fn save(
+        &self,
+        source: &str,
+        key: &str,
+        packages: &std::collections::HashMap<String, Option<Package>>,
+    ) {
+        let value = serde_json::to_vec(packages).unwrap_or_default();
+        self.store.put(source, "found", &[], key, &value);
     }
 }
 #[derive(Deserialize)]
@@ -2575,15 +2873,20 @@ impl<T: Transport> Backend for Homebrew<T> {
             return Err(invalid("homebrew", "invalid formula name"));
         }
         let mut found = std::mem::take(&mut self.found);
-        let packages = found.search(&matches, |chunk| {
-            let mut args = vec!["info", "--json=v2", "--formula", "--"];
-            args.extend(chunk);
-            Ok(self
-                .parse(self.call(&args, cancel, false)?)?
-                .into_iter()
-                .map(|d| d.package)
-                .collect())
-        });
+        let packages = found.search(
+            &matches,
+            "homebrew",
+            || BrewDisk::find(&self.transport),
+            |chunk| {
+                let mut args = vec!["info", "--json=v2", "--formula", "--"];
+                args.extend(chunk);
+                Ok(self
+                    .parse(self.call(&args, cancel, false)?)?
+                    .into_iter()
+                    .map(|d| d.package)
+                    .collect())
+            },
+        );
         self.found = found;
         packages
     }
@@ -2887,15 +3190,20 @@ impl<T: Transport> Backend for HomebrewCask<T> {
             return Err(invalid("homebrew-cask", "invalid cask token"));
         }
         let mut found = std::mem::take(&mut self.found);
-        let packages = found.search(&matches, |chunk| {
-            let mut args = vec!["info", "--json=v2", "--cask", "--"];
-            args.extend(chunk);
-            Ok(self
-                .parse(self.call(&args, cancel, false)?, true)?
-                .into_iter()
-                .map(|d| d.package)
-                .collect())
-        });
+        let packages = found.search(
+            &matches,
+            "homebrew-cask",
+            || BrewDisk::find(&self.transport),
+            |chunk| {
+                let mut args = vec!["info", "--json=v2", "--cask", "--"];
+                args.extend(chunk);
+                Ok(self
+                    .parse(self.call(&args, cancel, false)?, true)?
+                    .into_iter()
+                    .map(|d| d.package)
+                    .collect())
+            },
+        );
         self.found = found;
         packages
     }
@@ -3077,15 +3385,26 @@ impl ManagerKind {
                 "--queryformat",
                 "%{name}|%{arch}|%{version}-%{release}|%{summary}\n",
             ],
-            (Self::Dnf, false) => vec![
-                "--quiet",
-                "repoquery",
-                "--latest-limit",
-                "1",
-                "--queryformat",
-                "%{name}|%{arch}|%{version}-%{release}|%{summary}\n",
-                query,
-            ],
+            // -C reads the cached metadata instead of checking every
+            // repository online first; a missing cache is retried without.
+            // A bare name only matches that exact package, so the glob
+            // finds names containing the query, ignoring case. Valid
+            // queries never hold glob characters.
+            (Self::Dnf, false) => {
+                return [
+                    "-C",
+                    "--quiet",
+                    "repoquery",
+                    "--latest-limit",
+                    "1",
+                    "--queryformat",
+                    "%{name}|%{arch}|%{version}-%{release}|%{summary}\n",
+                ]
+                .into_iter()
+                .map(OsString::from)
+                .chain([OsString::from(format!("*{query}*"))])
+                .collect();
+            }
             (Self::Pacman, true) => vec!["-Q"],
             (Self::Pacman, false) => vec!["-Ss", query],
             (Self::Zypper, true) => vec![
@@ -3189,6 +3508,10 @@ fn xbps_pkgver(pkgver: &str) -> Option<(&str, String)> {
 pub struct SystemManager<T = NativeTransport> {
     kind: ManagerKind,
     transport: T,
+    /// Rows the last exact lookup read. Details are a search of the same
+    /// name, so the details that follow it (`pkd info`) come from here.
+    /// Read once; changes clear it.
+    looked_up: Vec<Package>,
 }
 pub type Dnf<T = NativeTransport> = SystemManager<T>;
 pub type Pacman<T = NativeTransport> = SystemManager<T>;
@@ -3196,7 +3519,11 @@ pub type Zypper<T = NativeTransport> = SystemManager<T>;
 pub type Snap<T = NativeTransport> = SystemManager<T>;
 impl<T: Transport> SystemManager<T> {
     fn new(kind: ManagerKind, transport: T) -> Self {
-        Self { kind, transport }
+        Self {
+            kind,
+            transport,
+            looked_up: vec![],
+        }
     }
     pub fn dnf(transport: T) -> Self {
         Self::new(ManagerKind::Dnf, transport)
@@ -3360,6 +3687,13 @@ impl<T: Transport> SystemManager<T> {
                     if installed {
                         package.installed_version = Some(version.into());
                         package.update = UpdateAvailability::Current;
+                    } else {
+                        // Search marks installed packages "[installed]", or
+                        // "[installed: 1.0-1]" when another version is.
+                        package.installed_version = line
+                            .rsplit_once(" [installed")
+                            .and_then(|(_, tail)| tail.strip_suffix(']'))
+                            .map(|tail| tail.strip_prefix(": ").unwrap_or(version).into());
                     }
                     packages.push(package);
                 }
@@ -3507,31 +3841,50 @@ impl<T: Transport> SystemManager<T> {
             return Err(invalid(self.kind.id(), "invalid package query"));
         }
         let args = self.kind.read_args(installed, query);
-        let mut packages = self.parse(
-            bytes(self.kind.id(), self.call(args, cancel, false)?)?,
-            installed,
-        )?;
-        if installed && matches!(self.kind, ManagerKind::Pacman) {
-            // Packages no repository has (AUR builds) are the AUR source's
-            // rows. Without synced databases every package looks foreign;
-            // then Pacman keeps them all.
-            let foreign = match self.call(vec!["-Qmq".into()], cancel, false) {
-                // pacman -Q exits 1 when nothing matches: no foreign packages.
-                Err(EngineError::Execution(ExecutionError::Failed(result)))
-                    if result.code == Some(1) && result.stdout.is_empty() =>
-                {
-                    String::new()
-                }
-                result => String::from_utf8(bytes("pacman", result?)?)
-                    .map_err(|e| invalid("pacman", e))?,
-            };
-            let foreign: std::collections::BTreeSet<&str> =
-                foreign.lines().map(str::trim).collect();
-            if foreign.len() < packages.len() {
-                packages.retain(|package| !foreign.contains(package.id.name.as_str()));
+        let output = match self.call(args.clone(), cancel, false) {
+            // Without cached metadata (never refreshed, or cleaned), DNF's
+            // cache-only mode fails; ask again and let it fetch.
+            Err(EngineError::Execution(ExecutionError::Failed(_)))
+                if args.first().is_some_and(|arg| arg == "-C") =>
+            {
+                self.call(args[1..].to_vec(), cancel, false)
             }
+            // pacman exits 1 when nothing matches.
+            Err(EngineError::Execution(ExecutionError::Failed(result)))
+                if matches!(self.kind, ManagerKind::Pacman)
+                    && result.code == Some(1)
+                    && result.stdout.is_empty() =>
+            {
+                return Ok(vec![]);
+            }
+            result => result,
+        };
+        self.parse(bytes(self.kind.id(), output?)?, installed)
+    }
+    /// Drops packages no repository has (AUR builds): they are the AUR
+    /// source's rows. Without synced databases every package looks foreign;
+    /// then Pacman keeps them all.
+    fn drop_foreign(
+        &self,
+        packages: &mut Vec<Package>,
+        cancel: &Cancellation,
+    ) -> Result<(), EngineError> {
+        let foreign = match self.call(vec!["-Qmq".into()], cancel, false) {
+            // pacman -Q exits 1 when nothing matches: no foreign packages.
+            Err(EngineError::Execution(ExecutionError::Failed(result)))
+                if result.code == Some(1) && result.stdout.is_empty() =>
+            {
+                String::new()
+            }
+            result => {
+                String::from_utf8(bytes("pacman", result?)?).map_err(|e| invalid("pacman", e))?
+            }
+        };
+        let foreign: std::collections::BTreeSet<&str> = foreign.lines().map(str::trim).collect();
+        if foreign.len() < packages.len() {
+            packages.retain(|package| !foreign.contains(package.id.name.as_str()));
         }
-        Ok(packages)
+        Ok(())
     }
     fn target(&self, id: &PackageId) -> Result<String, EngineError> {
         if id.backend != self.kind.id() || id.scope != Scope::System || !self.valid_name(&id.name) {
@@ -3579,6 +3932,10 @@ impl<T: Transport> Backend for SystemManager<T> {
     }
     fn search(&mut self, query: &str, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
         let mut packages = self.query(false, query, cancel)?;
+        if matches!(self.kind, ManagerKind::Pacman) {
+            // Its search rows already carry the installed version.
+            return Ok(packages);
+        }
         let installed = self.query(true, "", cancel)?;
         let versions: std::collections::BTreeMap<_, _> = installed
             .iter()
@@ -3598,8 +3955,17 @@ impl<T: Transport> Backend for SystemManager<T> {
         }
         Ok(packages)
     }
+    fn lookup(&mut self, name: &str, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
+        self.looked_up.clear();
+        let packages = self.search(name, cancel)?;
+        self.looked_up = packages.clone();
+        Ok(packages)
+    }
     fn installed(&mut self, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
         let mut packages = self.query(true, "", cancel)?;
+        if matches!(self.kind, ManagerKind::Pacman) {
+            self.drop_foreign(&mut packages, cancel)?;
+        }
         let updates = self.updates(cancel)?;
         for package in &mut packages {
             self.snap_icon(package);
@@ -3617,12 +3983,18 @@ impl<T: Transport> Backend for SystemManager<T> {
         cancel: &Cancellation,
     ) -> Result<PackageDetails, EngineError> {
         let name = self.target(id)?;
-        // Search merges the installed version into catalog rows.
-        let mut package = self
-            .search(&name, cancel)?
+        let looked_up = std::mem::take(&mut self.looked_up)
             .into_iter()
-            .find(|package| package.id == *id)
-            .ok_or(EngineError::NotFound)?;
+            .find(|package| package.id == *id);
+        // Search merges the installed version into catalog rows.
+        let mut package = match looked_up {
+            Some(package) => package,
+            None => self
+                .search(&name, cancel)?
+                .into_iter()
+                .find(|package| package.id == *id)
+                .ok_or(EngineError::NotFound)?,
+        };
         self.snap_icon(&mut package);
         self.snap_components(&mut package);
         Ok(PackageDetails {
@@ -3638,6 +4010,8 @@ impl<T: Transport> Backend for SystemManager<T> {
         cancel: &Cancellation,
         progress: &mut dyn FnMut(Progress),
     ) -> Result<OperationOutcome, EngineError> {
+        // A change can make what a lookup read out of date.
+        self.looked_up.clear();
         if operation.backend() != self.kind.id() {
             return Err(invalid(self.kind.id(), "foreign operation"));
         }
@@ -4004,6 +4378,12 @@ fn composer_name(name: &str) -> bool {
     }
 }
 
+/// Queries sent to `gem search --remote`: plain gem names, as it takes a
+/// regular expression, of at least three letters, as shorter ones list
+/// most of RubyGems.
+fn gem_searchable(query: &str) -> bool {
+    gem_name(query) && query.len() >= 3
+}
 /// RubyGems bare gem names.
 fn gem_name(name: &str) -> bool {
     !name.is_empty()
@@ -4139,7 +4519,20 @@ pub struct DevTool<T = NativeTransport> {
     kind: DevKind,
     transport: T,
     home: Option<PathBuf>,
+    /// Recent registry answers, oldest first. Typing runs one search per
+    /// keystroke, so going back to a query, or narrowing a complete one,
+    /// does not wait for the network again. Any change clears them.
+    searches: Vec<RegistrySearch>,
 }
+/// One registry answer, before ranking.
+struct RegistrySearch {
+    query: String,
+    hits: Vec<RegistryHit>,
+}
+/// A registry match: name, latest version and summary.
+type RegistryHit = (String, String, String);
+/// Registry answers kept per source.
+const REGISTRY_SEARCHES: usize = 16;
 pub type Cargo<T = NativeTransport> = DevTool<T>;
 pub type Npm<T = NativeTransport> = DevTool<T>;
 pub type Pnpm<T = NativeTransport> = DevTool<T>;
@@ -4157,6 +4550,7 @@ impl<T> DevTool<T> {
             kind,
             transport,
             home: None,
+            searches: vec![],
         }
     }
     pub fn cargo(transport: T) -> Self {
@@ -5201,7 +5595,72 @@ impl<T: Transport> DevTool<T> {
         &self,
         query: &str,
         cancel: &Cancellation,
-    ) -> Result<Vec<(String, String, String)>, EngineError> {
+    ) -> Result<Vec<RegistryHit>, EngineError> {
+        let hits = self.registry_search(query, cancel)?.unwrap_or_default();
+        Ok(self.rank(query, hits))
+    }
+    /// [`Self::registry_hits`] answered from recent searches when it can be.
+    /// The same query reuses its answer. RubyGems lists every gem whose name
+    /// contains the query, so a longer query that contains a searched one
+    /// keeps the matching rows of that complete list. Other registries cap
+    /// and rank their answers, so only the same query is reused there.
+    fn cached_registry_hits(
+        &mut self,
+        query: &str,
+        cancel: &Cancellation,
+    ) -> Result<Vec<RegistryHit>, EngineError> {
+        let lowered = query.to_ascii_lowercase();
+        let narrows = |searched: &str| {
+            self.kind == DevKind::Gem
+                && gem_searchable(query)
+                && lowered.contains(&searched.to_ascii_lowercase())
+        };
+        let known = self.searches.iter().rev().find_map(|search| {
+            if search.query == query {
+                Some(search.hits.clone())
+            } else if narrows(&search.query) {
+                Some(
+                    search
+                        .hits
+                        .iter()
+                        .filter(|(name, ..)| name.to_ascii_lowercase().contains(&lowered))
+                        .cloned()
+                        .collect(),
+                )
+            } else {
+                None
+            }
+        });
+        let hits = match known {
+            Some(hits) => hits,
+            None => {
+                let Some(hits) = self.registry_search(query, cancel)? else {
+                    return Ok(vec![]);
+                };
+                // `gem search` exits cleanly with no rows when it cannot
+                // reach a source, so an empty gem answer is asked again.
+                if self.kind == DevKind::Gem && hits.is_empty() {
+                    return Ok(hits);
+                }
+                if self.searches.len() == REGISTRY_SEARCHES {
+                    self.searches.remove(0);
+                }
+                self.searches.push(RegistrySearch {
+                    query: query.into(),
+                    hits: hits.clone(),
+                });
+                hits
+            }
+        };
+        Ok(self.rank(query, hits))
+    }
+    /// The registry's answer for `query`, before ranking. `None` when no
+    /// registry was asked or it gave no usable answer, so nothing is reused.
+    fn registry_search(
+        &self,
+        query: &str,
+        cancel: &Cancellation,
+    ) -> Result<Option<Vec<RegistryHit>>, EngineError> {
         let limit = REGISTRY_RESULTS.to_string();
         // Cancellation propagates; any other failure (offline, npm not
         // installed) leaves only the installed matches.
@@ -5213,7 +5672,12 @@ impl<T: Transport> DevTool<T> {
                 .map(|result| String::from_utf8_lossy(&result.stdout).into_owned())),
         };
         Ok(match self.kind {
-            DevKind::Npm | DevKind::Pnpm | DevKind::Bun => {
+            // The npm registry refuses queries outside 2 to 64 characters
+            // (after trimming) with an error, after a Node start-up and a
+            // round trip, so those are not sent.
+            DevKind::Npm | DevKind::Pnpm | DevKind::Bun
+                if (2..=64).contains(&query.trim().chars().count()) =>
+            {
                 let limit = format!("--searchlimit={limit}");
                 // Without these caps an unreachable registry holds npm for
                 // about 70 seconds of retries; with them it fails at once.
@@ -5229,12 +5693,13 @@ impl<T: Transport> DevTool<T> {
                 .map(OsString::from);
                 text(self.transport.dev_tool("npm", &args, cancel, false))?
                     .and_then(|json| serde_json::from_str::<Vec<NpmSearchHit>>(&json).ok())
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|hit| {
-                        Some((hit.name, hit.version?, hit.description.unwrap_or_default()))
+                    .map(|hits| {
+                        hits.into_iter()
+                            .filter_map(|hit| {
+                                Some((hit.name, hit.version?, hit.description.unwrap_or_default()))
+                            })
+                            .collect()
                     })
-                    .collect()
             }
             DevKind::Cargo => {
                 // Offline, cargo retries for about 10 seconds without these.
@@ -5253,48 +5718,27 @@ impl<T: Transport> DevTool<T> {
                     cancel,
                     false,
                 ))?
-                .into_iter()
-                .flat_map(|output| {
+                .map(|output| {
                     output
                         .lines()
                         .filter_map(cargo_search_hit)
                         .map(|(name, version, summary)| {
                             (name.into(), version.into(), summary.into())
                         })
-                        .collect::<Vec<_>>()
+                        .collect()
                 })
-                .collect()
             }
             // `gem search` takes a regular expression and ignores `--`, so only
             // plain gem names are sent, with their dots escaped.
-            DevKind::Gem if gem_name(query) && query.len() >= 3 => {
+            DevKind::Gem if gem_searchable(query) => {
                 let pattern = query.replace('.', "\\.");
-                let mut hits: Vec<(String, String, String)> =
-                    text(self.call(&["search", "--remote", &pattern], cancel, false))?
-                        .into_iter()
-                        .flat_map(|output| {
-                            output
-                                .lines()
-                                .filter_map(gem_search_hit)
-                                .map(|(name, version)| (name.into(), version.into(), String::new()))
-                                .collect::<Vec<_>>()
-                        })
-                        .collect();
-                // RubyGems lists matches alphabetically, so rank exact and
-                // prefix matches first before keeping only the first few.
-                let lowered = query.to_ascii_lowercase();
-                hits.sort_by_key(|(name, ..)| {
-                    let name = name.to_ascii_lowercase();
-                    if name == lowered {
-                        0
-                    } else if name.starts_with(&lowered) {
-                        1
-                    } else {
-                        2
-                    }
-                });
-                hits.truncate(REGISTRY_RESULTS);
-                hits
+                text(self.call(&["search", "--remote", &pattern], cancel, false))?.map(|output| {
+                    output
+                        .lines()
+                        .filter_map(gem_search_hit)
+                        .map(|(name, version)| (name.into(), version.into(), String::new()))
+                        .collect()
+                })
             }
             // Packagist reports no version; `global require` takes the latest.
             // `global` searches the same COMPOSER_HOME repositories it installs from.
@@ -5304,19 +5748,40 @@ impl<T: Transport> DevTool<T> {
                 false,
             ))?
             .and_then(|json| serde_json::from_str::<Vec<ComposerSearchHit>>(&json).ok())
-            .into_iter()
-            .flatten()
-            .take(REGISTRY_RESULTS)
-            .map(|hit| {
-                (
-                    hit.name,
-                    "latest".into(),
-                    hit.description.unwrap_or_default(),
-                )
-            })
-            .collect(),
-            _ => vec![],
+            .map(|hits| {
+                hits.into_iter()
+                    .take(REGISTRY_RESULTS)
+                    .map(|hit| {
+                        (
+                            hit.name,
+                            "latest".into(),
+                            hit.description.unwrap_or_default(),
+                        )
+                    })
+                    .collect()
+            }),
+            _ => None,
         })
+    }
+    /// The registry answer in the order searches list it. RubyGems lists
+    /// matches alphabetically, so exact and prefix matches go first before
+    /// keeping only the first few.
+    fn rank(&self, query: &str, mut hits: Vec<RegistryHit>) -> Vec<RegistryHit> {
+        if self.kind == DevKind::Gem {
+            let lowered = query.to_ascii_lowercase();
+            hits.sort_by_key(|(name, ..)| {
+                let name = name.to_ascii_lowercase();
+                if name == lowered {
+                    0
+                } else if name.starts_with(&lowered) {
+                    1
+                } else {
+                    2
+                }
+            });
+            hits.truncate(REGISTRY_RESULTS);
+        }
+        hits
     }
     /// An offer to install exactly `query` by name, for registries PkgDeck
     /// cannot search. It has no version, so searches never list it as a
@@ -5649,7 +6114,7 @@ impl<T: Transport> Backend for DevTool<T> {
             }
             return Ok(results);
         }
-        for (name, version, summary) in self.registry_hits(query, cancel)? {
+        for (name, version, summary) in self.cached_registry_hits(query, cancel)? {
             if !self.kind.valid_name(&name) || results.iter().any(|package| package.id.name == name)
             {
                 continue;
@@ -5765,6 +6230,9 @@ impl<T: Transport> Backend for DevTool<T> {
         cancel: &Cancellation,
         progress: &mut dyn FnMut(Progress),
     ) -> Result<OperationOutcome, EngineError> {
+        // Installed state is read again on every search, but a change can
+        // follow a registry update, so later searches ask again.
+        self.searches.clear();
         let id = self.kind.id();
         if operation.backend() != id {
             return Err(invalid(id, "foreign operation"));
@@ -5876,6 +6344,8 @@ impl<T: Transport> Backend for DevTool<T> {
 
 /// Missing optional managers are omitted from automatic queries, but explicit selections
 /// and source discovery retain their unavailability. Detection failures are never hidden.
+/// Automatic engines detect each source inside its own query, so a slow probe
+/// holds back only that source.
 ///
 /// `sources` selects backends by id: empty means every available backend,
 /// while a non-empty set registers exactly those members (unavailable ones
@@ -5906,13 +6376,11 @@ fn native_engine_on(
         host: host.clone(),
         authorization,
     };
-    // Every candidate in registration order, with whether it is probed now.
-    // Detection spawns native tools (a Node or Python start-up each), so the
-    // probes run concurrently instead of one after another.
+    // Every candidate in registration order, with whether a listing or an
+    // explicit selection probes it now. Detection spawns native tools (a Node
+    // or Python start-up each), so the probes run concurrently instead of one
+    // after another. Sources whose query runs detection anyway are not probed.
     let mut candidates: Vec<(Box<dyn Backend>, bool)> = Vec::new();
-    // Listed or explicitly selected sources register without a probe when
-    // their query runs detection anyway.
-    let probe_unless_listed = !(discover || explicit);
     if allowed("apt") {
         candidates.push((Box::new(Apt::new(transport())), true));
     }
@@ -5948,7 +6416,7 @@ fn native_engine_on(
         ("macports", SystemManager::macports),
     ] {
         if allowed(backend) {
-            candidates.push((Box::new(make(transport())), probe_unless_listed));
+            candidates.push((Box::new(make(transport())), false));
         }
     }
     if allowed("fwupd") {
@@ -6004,30 +6472,30 @@ fn native_engine_on(
         ("gem", DevTool::gem),
     ] {
         if allowed(id) {
-            candidates.push((Box::new(make(transport())), probe_unless_listed));
+            candidates.push((Box::new(make(transport())), false));
         }
     }
     if allowed("pixi") {
-        candidates.push((Box::new(Pixi::new(transport())), probe_unless_listed));
+        candidates.push((Box::new(Pixi::new(transport())), false));
     }
     if allowed("conda") {
         // Detection picks conda, mamba, or micromamba, so it always runs.
         candidates.push((Box::new(Conda::new(transport())), true));
     }
     if allowed("rustup") {
-        candidates.push((Box::new(Rustup::new(transport())), probe_unless_listed));
+        candidates.push((Box::new(Rustup::new(transport())), false));
     }
     if allowed("oh-my-zsh") {
-        candidates.push((Box::new(OhMyZsh::new(transport())), probe_unless_listed));
+        candidates.push((Box::new(OhMyZsh::new(transport())), false));
     }
     if allowed("nix") {
-        candidates.push((Box::new(Nix::new(transport())), probe_unless_listed));
+        candidates.push((Box::new(Nix::new(transport())), false));
     }
     if allowed("go") {
-        candidates.push((Box::new(GoBinaries::new(transport())), probe_unless_listed));
+        candidates.push((Box::new(GoBinaries::new(transport())), false));
     }
     if allowed("dotnet") {
-        candidates.push((Box::new(DotnetTools::new(transport())), probe_unless_listed));
+        candidates.push((Box::new(DotnetTools::new(transport())), false));
     }
     // Both check the platform first, so probing is cheap elsewhere.
     if allowed("aur") {
@@ -6048,6 +6516,12 @@ fn native_engine_on(
     if allowed("system-image") {
         candidates.push((Box::new(SystemImage::new(transport())), true));
     }
+    if !(discover || explicit) {
+        for (backend, _) in candidates {
+            engine.register_optional(backend)?;
+        }
+        return Ok(engine);
+    }
     type Probed = (Box<dyn Backend>, Option<Result<Availability, EngineError>>);
     let probed: Vec<Probed> = std::thread::scope(|scope| {
         let workers: Vec<_> = candidates
@@ -6066,13 +6540,10 @@ fn native_engine_on(
     });
     for (backend, status) in probed {
         let id = backend.id().to_string();
-        match status {
-            // Missing optional managers are left out of automatic queries.
-            Some(Ok(Availability::Unavailable(_))) if !(discover || explicit) => continue,
-            // A detected backend keeps what detection learned (such as a
-            // manager's home), so the following query skips its own probe.
-            Some(status) => engine.note_detected(id, status),
-            None => {}
+        // A detected backend keeps what detection learned (such as a
+        // manager's home), so the following query skips its own probe.
+        if let Some(status) = status {
+            engine.note_detected(id, status);
         }
         engine.register_boxed(backend)?;
     }
@@ -6496,7 +6967,7 @@ mod tests {
         std::fs::write(base.join("notes.txt"), "ID: fake.desktop\nPackage: fake\n").unwrap();
         std::fs::write(base.join("broken.yml.gz"), b"not gzip data").unwrap();
         std::os::unix::fs::symlink(base.join("absent"), base.join("dangling.yml.gz")).unwrap();
-        let map = dep11_component_ids(&base);
+        let map = dep11_cached(None, &base, dep11_scan);
         assert_eq!(
             map.get("firefox"),
             Some(&vec![
@@ -6511,6 +6982,83 @@ mod tests {
         assert!(!map.contains_key("fake"));
         assert!(!map.contains_key("emptyid"));
         assert!(dep11_component_ids(&base.join("missing")).is_empty());
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn dep11_maps_are_cached_until_the_data_changes() {
+        use std::io::Write;
+        let base = std::env::temp_dir().join(format!(
+            "pkgdeck-dep11-cache-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        let lists = base.join("lists");
+        let yaml = base.join("yaml");
+        std::fs::create_dir_all(&lists).unwrap();
+        std::fs::create_dir_all(&yaml).unwrap();
+        let gz = |body: &str| {
+            let mut encoder =
+                flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            encoder.write_all(body.as_bytes()).unwrap();
+            encoder.finish().unwrap()
+        };
+        // Like AppStream's APT hook: the folder links into APT's lists.
+        let main = lists.join("main_dep11_Components-amd64.yml.gz");
+        std::fs::write(
+            &main,
+            gz("---\nID: org.example.Tool.desktop\nPackage: tool\n"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&main, yaml.join("main.yml.gz")).unwrap();
+        let store = crate::cache::Store::new(base.join("cache"));
+        let scans = std::cell::Cell::new(0);
+        let get = || {
+            dep11_cached(Some(&store), &yaml, |files| {
+                scans.set(scans.get() + 1);
+                dep11_scan(files)
+            })
+        };
+        let tool = |stems: &[&str]| {
+            std::collections::BTreeMap::from([(
+                "tool".to_string(),
+                stems
+                    .iter()
+                    .map(|stem| stem.to_string())
+                    .collect::<Vec<_>>(),
+            )])
+        };
+        assert_eq!(get(), tool(&["org.example.Tool"]));
+        assert_eq!(get(), tool(&["org.example.Tool"]));
+        assert_eq!(scans.get(), 1);
+        // `apt update` rewrites the list behind the unchanged link.
+        std::fs::write(
+            &main,
+            gz("---\nID: org.example.Tool.desktop\nPackage: tool\n---\nID: tool.desktop\nPackage: tool\n"),
+        )
+        .unwrap();
+        assert_eq!(get(), tool(&["org.example.Tool", "tool"]));
+        assert_eq!(scans.get(), 2);
+        // A link whose list appears later counts as a change too.
+        let universe = lists.join("universe_dep11_Components-amd64.yml.gz");
+        std::os::unix::fs::symlink(&universe, yaml.join("universe.yml.gz")).unwrap();
+        assert_eq!(get(), tool(&["org.example.Tool", "tool"]));
+        assert_eq!(get(), tool(&["org.example.Tool", "tool"]));
+        assert_eq!(scans.get(), 3);
+        std::fs::write(
+            &universe,
+            gz("---\nID: org.example.Other\nPackage: other\n"),
+        )
+        .unwrap();
+        assert_eq!(get()["other"], vec!["org.example.Other".to_string()]);
+        assert_eq!(scans.get(), 4);
+        // Without a store (root or PKGDECK_NO_CACHE) every call scans.
+        dep11_cached(None, &yaml, |files| {
+            scans.set(scans.get() + 1);
+            dep11_scan(files)
+        });
+        assert_eq!(scans.get(), 5);
         std::fs::remove_dir_all(&base).unwrap();
     }
 
@@ -6955,6 +7503,142 @@ mod tests {
         );
     }
 
+    /// [`CaskBrew`] on a Homebrew laid out in `root`, with a cache there.
+    #[derive(Clone)]
+    struct KeptBrew {
+        brew: CaskBrew,
+        root: PathBuf,
+        /// Someone installs a formula while brew reads.
+        busy: Arc<Mutex<bool>>,
+    }
+    impl Transport for KeptBrew {
+        fn brew(
+            &self,
+            args: &[OsString],
+            cancel: &Cancellation,
+            write: bool,
+        ) -> Result<Completion, ExecutionError> {
+            if *self.busy.lock().unwrap() {
+                let keg = self.root.join("prefix/Cellar/busy");
+                std::fs::create_dir_all(&keg).unwrap();
+                let calls = self.brew.calls.lock().unwrap().len();
+                std::fs::write(keg.join(calls.to_string()), "").unwrap();
+            }
+            self.brew.brew(args, cancel, write)
+        }
+        fn brew_cache(&self) -> Option<(crate::cache::Store, Vec<crate::cache::Watch>)> {
+            let host = Host::new(
+                crate::host::Runtime::Native,
+                [
+                    ("HOME".into(), self.root.clone().into_os_string()),
+                    ("HOMEBREW_CACHE".into(), self.root.join("cache").into()),
+                ]
+                .into(),
+            );
+            Some((
+                crate::cache::Store::new(self.root.join("store")),
+                host.brew_details_watches(
+                    &self.root.join("prefix/Homebrew/bin/brew"),
+                    &self.root.join("cache"),
+                )
+                .unwrap(),
+            ))
+        }
+    }
+
+    #[test]
+    fn cask_details_are_kept_between_runs_until_homebrew_changes() {
+        let root = std::env::temp_dir().join(format!("pkgdeck-brew-kept-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("cache/api")).unwrap();
+        let brew = KeptBrew {
+            brew: CaskBrew {
+                version: "7.0.6",
+                ..CaskBrew::default()
+            },
+            root,
+            busy: Arc::default(),
+        };
+        let cancel = Cancellation::default();
+        let names = |found: Vec<Package>| found.into_iter().map(|p| p.id.name).collect::<Vec<_>>();
+        // Each run is a new process, so a new backend.
+        let run = |query: &str| {
+            let mut casks = HomebrewCask::new(brew.clone());
+            casks.detect(&cancel).unwrap();
+            names(casks.search(query, &cancel).unwrap())
+        };
+        let reads = || {
+            brew.brew
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|call| call.starts_with("info "))
+                .count()
+        };
+        assert_eq!(run("codex"), ["codex", "codex-cli"]);
+        assert_eq!(reads(), 1);
+        // The next run answers from disk, narrower searches too.
+        assert_eq!(run("codex"), ["codex", "codex-cli"]);
+        assert_eq!(run("codex-c"), ["codex-cli"]);
+        assert_eq!(reads(), 1);
+        // New Homebrew data, installs and links made outside PkgDeck, taps,
+        // or a Homebrew update: brew reads again, once.
+        for change in [
+            "cache/api/internal/packages.jws.json",
+            "prefix/Caskroom/codex/1.0",
+            "prefix/Cellar/git/2.0",
+            "prefix/var/homebrew/linked/git",
+            "prefix/Homebrew/Library/Taps/someone/homebrew-tap/Casks/tool.rb",
+            "prefix/Homebrew/.git/HEAD",
+        ] {
+            let before = reads();
+            let file = brew.root.join(change);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, "changed").unwrap();
+            assert_eq!(run("codex"), ["codex", "codex-cli"]);
+            assert_eq!(run("codex"), ["codex", "codex-cli"]);
+            assert_eq!(reads(), before + 1, "{change}");
+        }
+        // A running app notices an outside install too.
+        let mut casks = HomebrewCask::new(brew.clone());
+        casks.detect(&cancel).unwrap();
+        assert_eq!(names(casks.search("codex", &cancel).unwrap()).len(), 2);
+        std::fs::create_dir_all(brew.root.join("prefix/Caskroom/codex-cli/1.0")).unwrap();
+        assert_eq!(names(casks.search("codex", &cancel).unwrap()).len(), 2);
+        assert_eq!(reads(), 8);
+        // Something installed while brew read: nothing is kept.
+        *brew.busy.lock().unwrap() = true;
+        assert_eq!(run("codex-cli"), ["codex-cli"]);
+        *brew.busy.lock().unwrap() = false;
+        assert_eq!(run("codex"), ["codex", "codex-cli"]);
+        assert_eq!(run("codex"), ["codex", "codex-cli"]);
+        assert_eq!(reads(), 10);
+        std::fs::remove_dir_all(&brew.root).unwrap();
+    }
+
+    #[test]
+    fn kept_details_belong_to_one_architecture_and_os_release() {
+        let root = std::env::temp_dir().join(format!("pkgdeck-brew-system-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let disk = |system: [&str; 2]| BrewDisk {
+            store: crate::cache::Store::new(root.join("store")),
+            watches: vec![crate::cache::Watch::tree(root.join("Cellar"), 2)],
+            system: system.map(String::from),
+        };
+        let here = disk(["aarch64", "25.0.0"]);
+        let key = here.fingerprint().unwrap();
+        here.save("homebrew", &key, &[("git".to_owned(), None)].into());
+        assert!(here.load("homebrew", &key).is_some());
+        // Another build sharing the cache, or the same Mac after an upgrade.
+        for other in [disk(["x86_64", "25.0.0"]), disk(["aarch64", "26.0.0"])] {
+            let other_key = other.fingerprint().unwrap();
+            assert_ne!(other_key, key);
+            assert!(other.load("homebrew", &other_key).is_none());
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn a_cask_install_adopts_the_copy_already_in_place() {
         let brew = CaskBrew {
@@ -7255,6 +7939,53 @@ mod native_transport_tests {
     }
 
     #[test]
+    fn automatic_engines_skip_missing_managers_without_probing_upfront() {
+        let base = temp_dir("automatic");
+        let bin = base.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let probed = base.join("probed");
+        // Cargo is present; its probe leaves a mark.
+        script(
+            &bin.join("cargo"),
+            &format!("echo >> '{}'; exit 0", probed.display()),
+        );
+        let host = transport(&bin, &base).host;
+        let cancel = Cancellation::default();
+        let mut engine =
+            native_engine_on(host, &[], false, Authorization::SudoNonInteractive, &cancel).unwrap();
+        assert!(!probed.exists());
+        // Its own query probes it.
+        engine.search_backend("cargo", "fixture", &cancel);
+        assert!(probed.exists());
+        // A missing manager reads as never registered, as before.
+        let missing = engine.search_backend("npm", "fixture", &cancel);
+        assert!(missing.successful_sources.is_empty());
+        assert_eq!(
+            missing.failures[0].error,
+            EngineError::UnknownBackend("npm".into())
+        );
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn the_native_transport_keeps_homebrew_answers_in_the_user_cache() {
+        let base = temp_dir("user-cache");
+        let bin = base.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(base.join("cache/api")).unwrap();
+        script(
+            &bin.join("brew"),
+            &format!("echo {}", base.join("cache").display()),
+        );
+        let native = transport(&bin, &base);
+        assert_eq!(
+            native.brew_cache().is_some(),
+            crate::cache::Store::user().is_some()
+        );
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
     fn remote_flatpak_searches_are_answered_from_the_cache_until_appstream_changes() {
         let base = temp_dir("flatpak-search");
         let bin = base.join("bin");
@@ -7298,6 +8029,67 @@ mod native_transport_tests {
             "second\tresult\n"
         );
         assert_eq!(cached(), entries);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn pacman_searches_are_answered_from_the_cache_until_its_databases_change() {
+        let base = temp_dir("pacman-search");
+        let bin = base.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(base.join("var/lib/pacman/sync")).unwrap();
+        std::fs::create_dir_all(base.join("var/lib/pacman/local")).unwrap();
+        std::fs::create_dir_all(base.join("etc")).unwrap();
+        let conf = base.join("etc/pacman.conf");
+        std::fs::write(
+            &conf,
+            "#DBPath = /elsewhere\n[core]\nInclude = /etc/pacman.d/mirrorlist\n",
+        )
+        .unwrap();
+        let pacman = bin.join("pacman");
+        script(&pacman, "printf 'core/first 1.0-1\\n    First\\n'");
+        let native = transport(&bin, &base);
+        let store = || Some(crate::cache::Store::new(base.join("cache")));
+        let cancel = Cancellation::default();
+        let read = |args: &[&str]| {
+            let args: Vec<OsString> = args.iter().map(OsString::from).collect();
+            let result =
+                native.system_manager_cached("pacman", &args, &cancel, false, &base, store);
+            String::from_utf8(result.unwrap().stdout).unwrap()
+        };
+        let search = ["-Ss", "first"];
+        assert_eq!(read(&search), "core/first 1.0-1\n    First\n");
+        script(&pacman, "printf 'core/first 2.0-1\\n    First\\n'");
+        assert_eq!(read(&search), "core/first 1.0-1\n    First\n");
+        // A refresh replaced a synced database: search again.
+        std::fs::write(base.join("var/lib/pacman/sync/core.db"), "").unwrap();
+        assert_eq!(read(&search), "core/first 2.0-1\n    First\n");
+        // An install changes the "[installed]" marks.
+        script(
+            &pacman,
+            "printf 'core/first 2.0-1 [installed]\\n    First\\n'",
+        );
+        assert_eq!(read(&search), "core/first 2.0-1\n    First\n");
+        std::fs::create_dir(base.join("var/lib/pacman/local/first-2.0-1")).unwrap();
+        assert_eq!(read(&search), "core/first 2.0-1 [installed]\n    First\n");
+        // Other reads always run.
+        let entries = || std::fs::read_dir(base.join("cache")).unwrap().count();
+        let cached = entries();
+        script(&pacman, "printf 'other\\n'");
+        assert_eq!(read(&["-Q"]), "other\n");
+        assert_eq!(entries(), cached);
+        // Databases or repositories configured elsewhere are not watched.
+        for line in [
+            "DBPath = /srv/pacman/",
+            "Include = /srv/repos.conf",
+            "Include = /etc/pacman.d/repos/extra.conf",
+            "Include = /etc/pacman.d/..",
+        ] {
+            std::fs::write(&conf, format!("[options]\n{line}\n")).unwrap();
+            assert!(pacman_search_watches(&base).is_none());
+            assert_eq!(read(&["-Ss", "other"]), "other\n");
+            assert_eq!(entries(), cached);
+        }
         std::fs::remove_dir_all(base).unwrap();
     }
 
@@ -7388,6 +8180,20 @@ mod native_transport_tests {
     }
 
     #[test]
+    fn sandboxed_apt_lookup_reads_one_exact_name_as_details_do() {
+        let cancel = Cancellation::default();
+        let (base, native) = apt_tools("tool\\tall\\t1.0\\tinstall ok installed\\n", "", 0);
+        let found = records(native.apt_query_sandboxed("lookup", "tool", "", &cancel));
+        assert_eq!(cache_log(&base), "policy tool\nshow tool\n");
+        let details = records(native.apt_query_sandboxed("details", "tool", "all", &cancel));
+        assert_eq!(found, details);
+        // APT has no policy for an unknown name, so show never runs.
+        assert!(records(native.apt_query_sandboxed("lookup", "ghost", "", &cancel)).is_empty());
+        assert!(cache_log(&base).ends_with("show tool\npolicy ghost\n"));
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
     fn sandboxed_apt_queries_report_failed_reads() {
         let (base, native) = apt_tools("", "", 1);
         assert!(matches!(
@@ -7461,6 +8267,128 @@ mod native_transport_tests {
         assert_eq!(details.package.icon.as_ref(), Some(&icon));
         assert_eq!(details.package.component_ids, ["org.example.Tool"]);
         assert_eq!(details.package.homepages, ["https://example.invalid"]);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn apt_details_after_a_lookup_reuse_what_it_read_until_a_change() {
+        /// Answers every query with the same rows, described by the mode
+        /// that read them, and logs each helper run.
+        #[derive(Clone, Default)]
+        struct Helper(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+        fn done(stdout: Vec<u8>) -> Completion {
+            Completion {
+                code: Some(0),
+                signal: None,
+                stdout,
+                stderr: vec![],
+                truncated: false,
+                cancellation_deferred: false,
+            }
+        }
+        impl Transport for Helper {
+            fn apt_query(
+                &self,
+                mode: &str,
+                query: &str,
+                arch: &str,
+                _: &Cancellation,
+            ) -> Result<Completion, ExecutionError> {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push(format!("{mode} {query} {arch}"));
+                let rows: Vec<_> = ["amd64", "i386"]
+                    .map(|arch| {
+                        serde_json::json!({
+                            "package": {
+                                "id": {
+                                    "backend": "apt", "name": "tool", "architecture": arch,
+                                    "scope": "system", "remote": null, "reference": null,
+                                },
+                                "display_name": "tool", "summary": "A tool",
+                                "installed_version": "1.0", "candidate_version": "1.0",
+                                "update": "current", "icon": null, "component_ids": [], "homepages": [],
+                            },
+                            "description": format!("A tool, read by {mode}"),
+                            "homepage": "https://example.invalid", "dependencies": [],
+                        })
+                    })
+                    .into();
+                Ok(done(serde_json::to_vec(&rows).unwrap()))
+            }
+            fn apt_write(
+                &self,
+                _: AptAction,
+                _: &Cancellation,
+            ) -> Result<Completion, ExecutionError> {
+                self.0.lock().unwrap().push("write".into());
+                Ok(done(vec![]))
+            }
+            fn apt_write_group(
+                &self,
+                _: &[AptAction],
+                _: &Cancellation,
+            ) -> Result<Completion, ExecutionError> {
+                self.0.lock().unwrap().push("write group".into());
+                Ok(done(vec![]))
+            }
+        }
+        let base = temp_dir("apt-lookup");
+        let icon = base.join("tool.png");
+        std::fs::write(&icon, "png").unwrap();
+        let desktop = base.join("tool.desktop");
+        std::fs::write(
+            &desktop,
+            format!("[Desktop Entry]\nIcon={}\n", icon.display()),
+        )
+        .unwrap();
+        let helper = Helper::default();
+        let log = || std::mem::take(&mut *helper.0.lock().unwrap());
+        let mut apt = Apt::new(helper.clone());
+        apt.desktop_entries = Some([("tool".to_string(), desktop)].into());
+        apt.components = Some([("tool".to_string(), vec!["org.example.Tool".into()])].into());
+        let cancel = Cancellation::default();
+        // One helper run finds every architecture of the exact name.
+        let found = apt.lookup("tool", &cancel).unwrap();
+        assert_eq!(log(), ["lookup tool "]);
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0].icon.as_ref(), Some(&icon));
+        let (amd64, i386) = (found[0].id.clone(), found[1].id.clone());
+        // `pkd info`: details come from the lookup, dressed like a fresh read.
+        let details = apt.details(&amd64, &cancel).unwrap();
+        assert!(log().is_empty());
+        assert_eq!(details.description, "A tool, read by lookup");
+        assert_eq!(details.package.icon.as_ref(), Some(&icon));
+        assert_eq!(details.package.component_ids, ["org.example.Tool"]);
+        assert_eq!(details.package.homepages, ["https://example.invalid"]);
+        // Read once: the next details ask the helper.
+        let details = apt.details(&i386, &cancel).unwrap();
+        assert_eq!(log(), ["details tool i386"]);
+        assert_eq!(details.description, "A tool, read by details");
+        // A change, alone or grouped, clears what the lookup read.
+        apt.lookup("tool", &cancel).unwrap();
+        apt.execute(&Operation::Remove(amd64.clone()), &cancel, &mut |_| {})
+            .unwrap();
+        apt.details(&amd64, &cancel).unwrap();
+        assert_eq!(log(), ["lookup tool ", "write", "details tool amd64"]);
+        apt.lookup("tool", &cancel).unwrap();
+        apt.execute_group(
+            &[Operation::Remove(amd64.clone()), Operation::Remove(i386)],
+            &cancel,
+            &mut |_| {},
+        )
+        .unwrap()
+        .unwrap();
+        apt.details(&amd64, &cancel).unwrap();
+        assert_eq!(log(), ["lookup tool ", "write group", "details tool amd64"]);
+        // Names APT can't have are never sent, and leave nothing behind.
+        apt.lookup("tool", &cancel).unwrap();
+        for name in ["Tool Name", "tool:amd64", "-o"] {
+            assert!(apt.lookup(name, &cancel).unwrap().is_empty());
+        }
+        apt.details(&amd64, &cancel).unwrap();
+        assert_eq!(log(), ["lookup tool ", "details tool amd64"]);
         std::fs::remove_dir_all(base).unwrap();
     }
 }
