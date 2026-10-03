@@ -10,6 +10,7 @@ use pkgdeck_core::{
     engine::*,
     host::Authorization,
     manifest,
+    needs_password::NeedsPassword,
     package::*,
     process::{Cancellation, ExecutionError},
 };
@@ -335,6 +336,8 @@ enum Reply {
     Output(String),
     /// What the failed steps of a batch printed, for the banner's details.
     FailureOutput(String),
+    /// A cask whose update stopped for the administrator password.
+    NeedsPassword(PackageId),
     /// The sources a streaming load asked, sent before its first partial.
     Asked(Vec<String>),
     /// The sources a preload's latest partial heard from: a preload keeps
@@ -958,6 +961,11 @@ fn run_batch(
             if let Some(output) = raw_failure_output(error) {
                 failure_output.push(format!("{}\n{output}", operation_title(operation)));
             }
+            if let Operation::Upgrade(id) = operation {
+                if cask_needed_password(error, Some(&id.backend)) {
+                    send(Reply::NeedsPassword(id.clone()));
+                }
+            }
         }
         outcomes.push(match &result {
             Ok(_) => Outcome::Finished,
@@ -1254,6 +1262,12 @@ pub struct Controller {
     /// What the failed steps of the running batch printed, until its notice
     /// takes it.
     failure_output: String,
+    /// Casks of the running batch that stopped for the password.
+    password_casks: Vec<PackageId>,
+    /// Casks automatic runs skip until a newer version.
+    needs_password: NeedsPassword,
+    /// The version each cask of the queued automatic run updates to.
+    cask_versions: BTreeMap<PackageId, String>,
     /// The change the banner's Retry runs again.
     retry_job: Option<Job>,
     last_rewarm: Instant,
@@ -1353,6 +1367,13 @@ impl Default for Controller {
             awaiting_prefetch: false,
             hold_partials: false,
             failure_output: String::new(),
+            password_casks: Vec::new(),
+            needs_password: if cfg!(test) {
+                NeedsPassword::default()
+            } else {
+                NeedsPassword::default_store()
+            },
+            cask_versions: BTreeMap::new(),
             retry_job: None,
             last_rewarm: Instant::now(),
             engine_scope: None,
@@ -1498,9 +1519,26 @@ fn upgrade_plan(packages: &[Package]) -> Vec<Operation> {
         .collect()
 }
 /// [`upgrade_plan`] for an automatic run, which only downloads macOS
-/// updates, with the one command the saved approval names.
-fn automatic_plan(packages: &[Package]) -> Vec<Operation> {
-    let mut operations = upgrade_plan(packages);
+/// updates, with the one command the saved approval names. Casks update
+/// one at a time, so one that needs the password stops only itself, and
+/// those that needed it before wait for a newer version.
+fn automatic_plan(packages: &[Package], needs_password: &NeedsPassword) -> Vec<Operation> {
+    let mut seen = std::collections::BTreeSet::new();
+    let casks: Vec<Operation> = packages
+        .iter()
+        .filter(|p| p.id.backend == "homebrew-cask")
+        .filter(|p| p.installed_version.is_some() && p.update == UpdateAvailability::Available)
+        .filter(|p| !needs_password.skips(&p.id.name, cask_version(p)))
+        .filter(|p| seen.insert(&p.id))
+        .map(|p| Operation::Upgrade(p.id.clone()))
+        .collect();
+    let mut operations: Vec<Operation> = upgrade_plan(packages)
+        .into_iter()
+        .flat_map(|operation| match operation {
+            Operation::UpgradeAll { backend } if backend == "homebrew-cask" => casks.clone(),
+            operation => vec![operation],
+        })
+        .collect();
     if operations
         .iter()
         .any(|operation| operation.backend() == "macos-updates")
@@ -1511,6 +1549,11 @@ fn automatic_plan(packages: &[Package]) -> Vec<Operation> {
         });
     }
     operations
+}
+/// The version a cask update goes to, which an automatic run remembers
+/// when the update needs the password.
+fn cask_version(package: &Package) -> &str {
+    package.candidate_version.as_deref().unwrap_or_default()
 }
 /// Passes on the lines of output that name a package one of `backends` is
 /// updating; everything else a manager prints stays in the worker.
@@ -1920,6 +1963,16 @@ fn skipped_app_entry(error: &EngineError) -> Option<(&str, &str)> {
         .or_else(|| reason.strip_prefix("skipped entry "))?
         .rsplit_once(": ")
 }
+/// A cask script ran sudo and got no password: the dialog was cancelled,
+/// the run was automatic, or this build has no dialog to show.
+fn cask_needed_password(error: &EngineError, backend: Option<&str>) -> bool {
+    matches!(
+        error,
+        EngineError::Execution(pkgdeck_core::process::ExecutionError::Failed(result))
+            if matches!(backend, Some("homebrew" | "homebrew-cask"))
+                && String::from_utf8_lossy(&result.stderr).contains("/usr/bin/sudo")
+    )
+}
 /// A plain explanation of an engine error, naming the tool when known.
 fn plain_error(error: &EngineError, backend: Option<&str>, sudo: bool) -> String {
     use pkgdeck_core::process::ExecutionError as E;
@@ -1940,12 +1993,7 @@ fn plain_error(error: &EngineError, backend: Option<&str>, sudo: bool) -> String
         EngineError::Execution(E::Interrupted) => "The package manager was interrupted. Check its state before trying again.".into(),
         EngineError::Execution(E::TimedOut) => "The package manager took too long to answer. Try again.".into(),
         EngineError::Cancelled | EngineError::Execution(E::Cancelled) => "Cancelled.".into(),
-        // A cask script ran sudo and got no password: the dialog was
-        // cancelled, or this build has no dialog to show.
-        EngineError::Execution(E::Failed(result))
-            if matches!(backend, Some("homebrew" | "homebrew-cask"))
-                && String::from_utf8_lossy(&result.stderr).contains("/usr/bin/sudo") =>
-        {
+        error if cask_needed_password(error, backend) => {
             "Homebrew needed your administrator password to finish this change and didn't get one. Update it again from Updates and enter your password when asked.".into()
         }
         EngineError::Execution(E::Failed(result)) => {
@@ -2337,6 +2385,46 @@ fn retry_job(job: &Job, result: &Result<Payload, EngineError>) -> Option<Job> {
         }
         _ => None,
     }
+}
+/// An automatic run whose only failures are casks that need the password:
+/// nothing is broken, the person just updates them by hand.
+fn password_notice(
+    job: &Job,
+    result: &Result<Payload, EngineError>,
+    password_casks: &[PackageId],
+    names: &Names,
+) -> Option<Value> {
+    let (Job::AutoUpgrade(operations, _), Ok(Payload::Batch(_, outcomes))) = (job, result) else {
+        return None;
+    };
+    let failed: Vec<&PackageId> = operations
+        .iter()
+        .zip(outcomes)
+        .filter(|(_, outcome)| **outcome != Outcome::Finished)
+        .map(|(operation, _)| match operation {
+            Operation::Upgrade(id) if password_casks.contains(id) => Some(id),
+            _ => None,
+        })
+        .collect::<Option<_>>()?;
+    let (title, it) = match failed.as_slice() {
+        [] => return None,
+        [one] => (
+            format!(
+                "{} needs your password to update",
+                display_name_for(one, names)
+            ),
+            "it",
+        ),
+        many => (
+            format!("{} apps need your password to update", many.len()),
+            "them",
+        ),
+    };
+    Some(json!({
+        "kind": "info",
+        "title": title,
+        "detail": format!("Update {it} here and enter your password when asked. Automatic updates skip {it} until there's a newer version."),
+    }))
 }
 /// What the banner says once a change finishes.
 fn write_notice(
@@ -3125,10 +3213,28 @@ impl ffi::PackageController {
             })
             .cloned()
             .collect();
-        let operations = automatic_plan(&packages);
+        let casks: Vec<(String, String)> = packages
+            .iter()
+            .filter(|p| p.id.backend == "homebrew-cask")
+            .map(|p| (p.id.name.clone(), cask_version(p).to_owned()))
+            .collect();
+        // Updated by hand or replaced by a newer version: try it again.
+        if !report.failures.iter().any(|f| f.backend == "homebrew-cask") {
+            self.as_mut()
+                .rust_mut()
+                .needs_password
+                .remember(&[], &casks);
+        }
+        let operations = automatic_plan(&packages, &self.rust().needs_password);
         if operations.is_empty() {
             return false;
         }
+        let versions = packages
+            .iter()
+            .filter(|p| p.id.backend == "homebrew-cask")
+            .map(|p| (p.id.clone(), cask_version(p).to_owned()))
+            .collect();
+        self.as_mut().rust_mut().cask_versions = versions;
         let names = self.rust().names_for(&operations);
         self.as_mut().rust_mut().names.extend(names);
         let activity_id = self
@@ -5309,12 +5415,36 @@ impl ffi::PackageController {
                     self.as_mut().rust_mut().failure_output = output;
                     None
                 }
+                Reply::NeedsPassword(id) => {
+                    self.as_mut().rust_mut().password_casks.push(id);
+                    None
+                }
                 reply => Some(reply),
             })
             .collect();
         if let Some((job, cancel, joined)) = finished {
             // A source that never answered is not waited for any more.
             self.as_mut().set_asked(vec![]);
+            let password_casks = std::mem::take(&mut self.as_mut().rust_mut().password_casks);
+            if matches!(job, Job::AutoUpgrade(..)) && !password_casks.is_empty() {
+                let needed: Vec<(String, String)> = password_casks
+                    .iter()
+                    .filter_map(|id| {
+                        let version = self.rust().cask_versions.get(id)?.clone();
+                        Some((id.name.clone(), version))
+                    })
+                    .collect();
+                let waiting: Vec<(String, String)> = self
+                    .rust()
+                    .cask_versions
+                    .iter()
+                    .map(|(id, version)| (id.name.clone(), version.clone()))
+                    .collect();
+                self.as_mut()
+                    .rust_mut()
+                    .needs_password
+                    .remember(&needed, &waiting);
+            }
             if let Job::AutoUpgrade(operations, _) = &job {
                 if let Some(Reply::Done(Ok(Payload::Batch(_, outcomes)))) =
                     replies.iter().find(|reply| matches!(reply, Reply::Done(_)))
@@ -5462,12 +5592,11 @@ impl ffi::PackageController {
                             {
                                 json!({"kind": "info", "title": "The planned changes are different now. Review them again."})
                             } else {
-                                write_notice(
-                                    &job,
-                                    &result,
-                                    self.rust().sudo,
-                                    &self.rust().names_for(&job.operations()),
-                                )
+                                let names = self.rust().names_for(&job.operations());
+                                password_notice(&job, &result, &password_casks, &names)
+                                    .unwrap_or_else(|| {
+                                        write_notice(&job, &result, self.rust().sudo, &names)
+                                    })
                             };
                             let batch_output =
                                 std::mem::take(&mut self.as_mut().rust_mut().failure_output);
@@ -5596,6 +5725,7 @@ impl ffi::PackageController {
                     | Reply::ProgressEvent(_)
                     | Reply::Output(_)
                     | Reply::FailureOutput(_)
+                    | Reply::NeedsPassword(_)
                     | Reply::Asked(_)
                     | Reply::Answered(_)
                     | Reply::Inventory(..) => {}
@@ -9911,17 +10041,79 @@ mod tests {
             backend: backend.into(),
         };
         assert_eq!(
-            automatic_plan(&[
-                available("macos-updates", "Safari"),
-                available("homebrew", "wget"),
-                available("macos-updates", "macOS Tahoe 26.1"),
-            ]),
+            automatic_plan(
+                &[
+                    available("macos-updates", "Safari"),
+                    available("homebrew", "wget"),
+                    available("macos-updates", "macOS Tahoe 26.1"),
+                ],
+                &NeedsPassword::default()
+            ),
             [all("homebrew"), all("macos-updates")]
         );
         assert_eq!(
-            automatic_plan(&[available("homebrew", "wget")]),
+            automatic_plan(&[available("homebrew", "wget")], &NeedsPassword::default()),
             [all("homebrew")]
         );
+    }
+    #[test]
+    fn automatic_runs_skip_casks_that_needed_the_password() {
+        let cask = |name: &str, version: &str| {
+            let mut package = synthetic_package(name, name);
+            package.id.backend = "homebrew-cask".into();
+            package.installed_version = Some("1".into());
+            package.candidate_version = Some(version.into());
+            package.update = UpdateAvailability::Available;
+            package
+        };
+        let (mail, editor) = (cask("mail-app", "2"), cask("editor-app", "5"));
+        let upgrade = |package: &Package| Operation::Upgrade(package.id.clone());
+        let dir = std::env::temp_dir().join(format!("pkgdeck-auto-casks-{}", std::process::id()));
+        let mut needs = NeedsPassword::at(&dir.join("needs-password.json"));
+        // One at a time, so one cask's password stops only that cask.
+        assert_eq!(
+            automatic_plan(&[mail.clone(), editor.clone()], &needs),
+            [upgrade(&mail), upgrade(&editor)]
+        );
+        needs.remember(&[("mail-app".into(), "2".into())], &[]);
+        assert_eq!(
+            automatic_plan(&[mail.clone(), editor.clone()], &needs),
+            [upgrade(&editor)]
+        );
+        assert_eq!(
+            automatic_plan(&[cask("mail-app", "3")], &needs),
+            [upgrade(&cask("mail-app", "3"))]
+        );
+
+        let job = Job::AutoUpgrade(vec![upgrade(&mail), upgrade(&editor)], false);
+        let names = Names::from([(mail.id.clone(), "Mail App".to_owned())]);
+        let batch = |outcomes: Vec<Outcome>| Ok(Payload::Batch(String::new(), outcomes));
+        let notice = password_notice(
+            &job,
+            &batch(vec![Outcome::Failed, Outcome::Finished]),
+            std::slice::from_ref(&mail.id),
+            &names,
+        )
+        .unwrap();
+        assert_eq!(notice["kind"], "info");
+        assert_eq!(notice["title"], "Mail App needs your password to update");
+        // Any other failure keeps the error banner.
+        assert!(password_notice(
+            &job,
+            &batch(vec![Outcome::Failed, Outcome::Failed]),
+            std::slice::from_ref(&mail.id),
+            &names,
+        )
+        .is_none());
+        let manual = Job::UpgradeAll(vec![upgrade(&mail)], None);
+        assert!(password_notice(
+            &manual,
+            &batch(vec![Outcome::Failed]),
+            std::slice::from_ref(&mail.id),
+            &names
+        )
+        .is_none());
+        let _ = std::fs::remove_dir_all(dir);
     }
     #[test]
     fn background_checks_queue_only_what_may_update_unattended() {
