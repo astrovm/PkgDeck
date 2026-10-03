@@ -25,7 +25,9 @@ modules:
   # APT's own library, so the bundled helper reads the host's APT like native
   # builds do. Only libapt-pkg is built: apt-ftparchive (Berkeley DB) and
   # the commands aren't needed. Paths stay the system's: the sandbox sees the
-  # host's /var, and the helper reads /etc/apt under /run/host.
+  # host's /var, and the helper reads /etc/apt under /run/host. APT reads
+  # dpkg's CPU and architecture tables, which the sandbox lacks, from the
+  # host's dpkg under /run/host.
   - name: triehash
     buildsystem: simple
     build-commands:
@@ -44,7 +46,7 @@ modules:
         cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/app
         -DWITH_DOC=OFF -DWITH_TESTS=OFF -DUSE_NLS=OFF
         -DCOMMON_ARCH=$(case "$FLATPAK_ARCH" in aarch64) echo arm64;; x86_64) echo amd64;; *) echo "$FLATPAK_ARCH";; esac)
-        -DDPKG_DATADIR=/usr/share/dpkg -DROOT_GROUP=root -DCURRENT_VENDOR=debian
+        -DDPKG_DATADIR=/run/host/usr/share/dpkg -DROOT_GROUP=root -DCURRENT_VENDOR=debian
         -DCONF_DIR=/etc/apt -DSTATE_DIR=/var/lib/apt -DCACHE_DIR=/var/cache/apt -DLOG_DIR=/var/log/apt
       - ninja -C build apt-pkg
       - install -d /app/lib /app/include
