@@ -9883,6 +9883,87 @@ mod tests {
             Ok(OperationOutcome::default())
         }
     }
+    /// Homebrew Casks where updating `locked` stops at sudo's password.
+    struct PasswordCask {
+        locked: &'static str,
+    }
+    impl Backend for PasswordCask {
+        fn id(&self) -> &str {
+            "homebrew-cask"
+        }
+        fn capabilities(&self) -> &[Capability] {
+            &[Capability::Installed, Capability::Upgrade]
+        }
+        fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
+            Ok(Availability::Available)
+        }
+        fn execute(
+            &mut self,
+            operation: &Operation,
+            _: &Cancellation,
+            _: &mut dyn FnMut(Progress),
+        ) -> Result<OperationOutcome, EngineError> {
+            match operation {
+                Operation::Upgrade(id) if id.name == self.locked => Err(
+                    pkgdeck_core::process::ExecutionError::Failed(
+                        pkgdeck_core::process::Completion {
+                            code: Some(1),
+                            signal: None,
+                            stdout: vec![],
+                            stderr: format!("sudo: a password is required\nError: {}: Failure while executing; `/usr/bin/sudo -E -- /bin/rm` exited with 1.\n", id.name).into_bytes(),
+                            truncated: false,
+                            cancellation_deferred: false,
+                        },
+                    )
+                    .into(),
+                ),
+                _ => Ok(OperationOutcome::default()),
+            }
+        }
+    }
+    #[test]
+    fn an_automatic_run_remembers_casks_that_stopped_for_the_password() {
+        let cask = |name: &str| {
+            let mut package = synthetic_package(name, name);
+            package.id.backend = "homebrew-cask".into();
+            package
+        };
+        let (mail, editor) = (cask("mail-app"), cask("editor-app"));
+        let job = Job::AutoUpgrade(
+            vec![
+                Operation::Upgrade(mail.id.clone()),
+                Operation::Upgrade(editor.id.clone()),
+            ],
+            false,
+        );
+        let mut engine = Engine::default();
+        engine
+            .register(PasswordCask { locked: "mail-app" })
+            .unwrap();
+        let replies = run_job(&mut engine, job.clone(), &Cancellation::default());
+        assert!(replies
+            .iter()
+            .any(|reply| matches!(reply, Reply::NeedsPassword(id) if *id == mail.id)));
+
+        let mut controller = synthetic_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().rust_mut().cask_versions = BTreeMap::from([
+            (mail.id.clone(), "2".to_owned()),
+            (editor.id.clone(), "5".to_owned()),
+        ]);
+        let replies = replies
+            .into_iter()
+            .filter(|reply| matches!(reply, Reply::NeedsPassword(_) | Reply::Done(_)))
+            .collect();
+        controller.as_mut().rust_mut().worker = Some(fake_worker(job, replies));
+        controller.as_mut().poll();
+        let notice: Value = serde_json::from_str(&controller.notice().to_string()).unwrap();
+        assert_eq!(notice["kind"], "info");
+        assert_eq!(notice["title"], "mail-app needs your password to update");
+        assert!(controller.rust().needs_password.skips("mail-app", "2"));
+        assert!(!controller.rust().needs_password.skips("editor-app", "5"));
+        assert!(controller.rust().password_casks.is_empty());
+    }
     /// APT whose dry run removes `removals`, and whose writes succeed.
     struct AptPlanFixture {
         removals: Vec<String>,
@@ -10102,6 +10183,21 @@ mod tests {
             &job,
             &batch(vec![Outcome::Failed, Outcome::Failed]),
             std::slice::from_ref(&mail.id),
+            &names,
+        )
+        .is_none());
+        let both = password_notice(
+            &job,
+            &batch(vec![Outcome::Failed, Outcome::Failed]),
+            &[mail.id.clone(), editor.id.clone()],
+            &names,
+        )
+        .unwrap();
+        assert_eq!(both["title"], "2 apps need your password to update");
+        assert!(password_notice(
+            &job,
+            &batch(vec![Outcome::Finished, Outcome::Finished]),
+            &[],
             &names,
         )
         .is_none());
