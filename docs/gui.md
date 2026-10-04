@@ -482,6 +482,15 @@ and **Environment variables**, then **Save**. They go into the app's menu
 entry, so starting it from the app menu uses them too. **Manage** keeps the
 arguments and variables the old entry had (set in Gear Lever, say).
 
+Many AppImages can't update themselves (Obsidian, Trezor Suite). For those
+PkgDeck manages, set **Updates from GitHub** on their page to the project
+that publishes them (`owner/name`, or its link) and **Save**. Update checks
+then look at that project's newest release with an AppImage for your
+computer, and updating downloads it, checks it against GitHub's checksum,
+and replaces the file. GitHub answers are reused for 15 minutes, since it
+allows few questions without signing in. AppImages that update themselves
+show **Updates itself** until you set a project.
+
 PkgDeck's menu entries use the app's own name, description, icon,
 categories and launch arguments (such as `--no-sandbox`), read from inside
 the AppImage without running it. Versions also come from inside the file,

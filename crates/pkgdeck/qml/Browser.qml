@@ -282,7 +282,10 @@ Controls.ApplicationWindow {
     readonly property var pageLaunch: pageLaunchable && launchRevision >= 0
         ? JSON.parse(backend.appLaunchSettings(originalIndex(results.currentIndex)) || "{}") : null
     property string pageLaunchError: ""
-    onPageRowChanged: pageLaunchError = ""
+    readonly property var pageUpdateSource: pageLaunchable && launchRevision >= 0
+        ? JSON.parse(backend.appUpdateSource(originalIndex(results.currentIndex)) || "{}") : null
+    property string pageUpdateError: ""
+    onPageRowChanged: { pageLaunchError = ""; pageUpdateError = ""; }
     // Values derived from a parsed row, computed once and kept on the row,
     // hidden from JSON.stringify and Object.assign. Rows never change once
     // parsed. Lookups over rows use plain objects: this engine's Map, Set
@@ -1577,9 +1580,14 @@ Controls.ApplicationWindow {
                 const preview = JSON.parse(backend.confirmation_data || "{}");
                 const quick = root.quickChange;
                 root.quickChange = false;
-                // Just that app, nothing else changes: go ahead.
+                // Just that app, nothing else changes: go ahead, once the
+                // controller has finished preparing the change it announced.
                 if (quick && preview.review === false) {
-                    backend.confirm(true);
+                    const confirmation = backend.confirmation;
+                    Qt.callLater(() => {
+                        if (backend.confirmation === confirmation)
+                            backend.confirm(true);
+                    });
                     return;
                 }
                 // On the app page, the changes show there; a choice (the
@@ -3468,6 +3476,13 @@ Controls.ApplicationWindow {
         launchText: root.pageLaunchable && root.pageLaunch && !root.pageLaunch.error ? "Launch" : ""
         launchSettings: root.pageLaunch && !root.pageLaunch.error ? root.pageLaunch : null
         launchError: root.pageLaunchError || (root.pageLaunch && root.pageLaunch.error ? root.pageLaunch.error : "")
+        updateSource: root.pageUpdateSource && !root.pageUpdateSource.error ? root.pageUpdateSource : null
+        updateError: root.pageUpdateError
+        onUpdateSourceSaved: (github) => {
+            root.pageUpdateError = backend.saveAppUpdateSource(root.originalIndex(results.currentIndex), github);
+            if (!root.pageUpdateError)
+                root.launchRevision++;
+        }
         onLaunchRequested: root.pageLaunchError = backend.launchApp(root.originalIndex(results.currentIndex))
         onLaunchSettingsSaved: (arguments, environment) => {
             root.pageLaunchError = backend.saveAppLaunchSettings(root.originalIndex(results.currentIndex), arguments, JSON.stringify(environment));
@@ -3494,6 +3509,25 @@ Controls.ApplicationWindow {
         }
         onScreenshotFailed: (url, identity) => root.hideFailedScreenshot(url, identity)
         onVisibleChanged: if (visible) Qt.callLater(() => appPage.forceActiveFocus())
+    }
+    // A change running while an app page is open shows its progress there,
+    // since the list's own progress bar is behind the page.
+    ActionProgress {
+        objectName: "pageProgress"
+        cancelable: true
+        onCancelRequested: backend.cancel()
+        visible: root.appPageOpen && backend.writing && !!root.actionProgress.label
+        x: appPage.x + Theme.gutter
+        width: appPage.width - 2 * Theme.gutter
+        y: appPage.y + appPage.height - height - Theme.gutter
+        label: root.actionProgress.label || ""
+        done: root.actionProgress.done || 0
+        total: root.actionProgress.total || 1
+        transferred: root.actionProgress.transferred || 0
+        transferTotal: root.actionProgress.transfer_total || 0
+        ink: root.ink
+        muted: root.muted
+        accent: root.accent
     }
     ThemedDialog {
         id: repositoriesDialog
