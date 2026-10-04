@@ -32,6 +32,12 @@ Rectangle {
     property string reviewDetails: ""
     property string reviewActionText: ""
     property bool reviewDanger: false
+    // Starts the installed app; empty text hides the button.
+    property string launchText: ""
+    // How an installed AppImage starts ({arguments, environment, editable}),
+    // shown for editing on its page when PkgDeck manages it.
+    property var launchSettings: null
+    property string launchError: ""
     property bool compact: false
     property bool motionEnabled: Theme.motionEnabled
     property bool detailMatchesSelection: false
@@ -86,6 +92,8 @@ Rectangle {
     signal closeRequested()
     signal reviewAccepted()
     signal reviewRejected()
+    signal launchRequested()
+    signal launchSettingsSaved(string arguments, var environment)
     signal screenshotRequested(string url, string caption)
     signal screenshotFailed(string url, string identity)
     signal actionRequested()
@@ -107,10 +115,12 @@ Rectangle {
         property string symbol: "install"
         property color tone: panel.accent
         property string accessibleName: ""
+        // Just the icon; the label is still its spoken name and tooltip.
+        property bool iconOnly: false
         visible: label.length > 0
-        text: panel.compact ? "" : label
+        text: panel.compact || iconOnly ? "" : label
         Accessible.name: accessibleName || (label + (panel.selected ? " " + (panel.selected.display_name || panel.selected.name || "") : ""))
-        Controls.ToolTip.visible: hovered && panel.compact
+        Controls.ToolTip.visible: hovered && (panel.compact || iconOnly)
         Controls.ToolTip.delay: 500
         Controls.ToolTip.text: label
         implicitHeight: Theme.controlHeight
@@ -311,6 +321,14 @@ Rectangle {
                     }
                     Item { Layout.fillWidth: true }
                 }
+            }
+            DetailsAction {
+                objectName: "pageLaunchButton"
+                label: panel.launchText
+                symbol: "launch"
+                tone: panel.accent
+                enabled: panel.actionEnabled
+                onClicked: panel.launchRequested()
             }
             DetailsAction {
                 id: secondaryActionButton
@@ -570,6 +588,119 @@ Rectangle {
                         textFormat: TextEdit.PlainText
                         text: panel.description
                         Accessible.name: "Package details"
+                    }
+                    // How an AppImage PkgDeck manages starts, from here and
+                    // from the app menu: arguments and environment variables.
+                    ColumnLayout {
+                        id: launchEditor
+                        objectName: "launchSettings"
+                        visible: panel.page && !!panel.launchSettings && panel.launchSettings.editable === true
+                        Layout.fillWidth: true
+                        spacing: Theme.spacingSmall
+                        property var environment: []
+                        property bool dirty: false
+                        function reset() {
+                            const settings = panel.launchSettings || {};
+                            argumentsField.text = settings.arguments || "";
+                            environment = (settings.environment || []).map(pair => ({name: pair.name, value: pair.value}));
+                            dirty = false;
+                        }
+                        Connections {
+                            target: panel
+                            function onLaunchSettingsChanged() { launchEditor.reset(); }
+                        }
+                        Component.onCompleted: reset()
+                        Controls.Label {
+                            text: "Command line arguments"
+                            color: panel.muted
+                            font.pointSize: Theme.pointSize(Theme.smallScale)
+                        }
+                        ThemedTextField {
+                            id: argumentsField
+                            objectName: "launchArguments"
+                            Layout.fillWidth: true
+                            font.family: "monospace"
+                            Accessible.name: "Command line arguments"
+                            onTextEdited: launchEditor.dirty = true
+                        }
+                        Controls.Label {
+                            text: "Environment variables"
+                            color: panel.muted
+                            font.pointSize: Theme.pointSize(Theme.smallScale)
+                            Layout.topMargin: Theme.spacingSmall
+                        }
+                        Repeater {
+                            objectName: "launchEnvironment"
+                            model: launchEditor.environment
+                            delegate: RowLayout {
+                                required property var modelData
+                                required property int index
+                                Layout.fillWidth: true
+                                spacing: Theme.spacingSmall
+                                ThemedTextField {
+                                    objectName: "environmentName"
+                                    Layout.preferredWidth: 220
+                                    text: modelData.name
+                                    font.family: "monospace"
+                                    placeholderText: "NAME"
+                                    Accessible.name: "Variable name"
+                                    onTextEdited: { launchEditor.environment[index].name = text; launchEditor.dirty = true; }
+                                }
+                                Controls.Label { text: "="; color: panel.muted }
+                                ThemedTextField {
+                                    objectName: "environmentValue"
+                                    Layout.fillWidth: true
+                                    text: modelData.value
+                                    font.family: "monospace"
+                                    Accessible.name: "Variable value"
+                                    onTextEdited: { launchEditor.environment[index].value = text; launchEditor.dirty = true; }
+                                }
+                                DetailsAction {
+                                    objectName: "removeVariable"
+                                    label: "Remove variable"
+                                    iconOnly: true
+                                    symbol: "remove"
+                                    tone: Theme.danger
+                                    accessibleName: "Remove " + (modelData.name || "variable")
+                                    // Flag the change first: the new list rebuilds this row.
+                                    onClicked: {
+                                        launchEditor.dirty = true;
+                                        launchEditor.environment = launchEditor.environment.filter((_, i) => i !== index);
+                                    }
+                                }
+                            }
+                        }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: Theme.spacingSmall
+                            DetailsAction {
+                                objectName: "addVariable"
+                                label: "Add variable"
+                                symbol: "add"
+                                tone: panel.accent
+                                onClicked: {
+                                    launchEditor.dirty = true;
+                                    launchEditor.environment = launchEditor.environment.concat([{name: "", value: ""}]);
+                                }
+                            }
+                            Item { Layout.fillWidth: true }
+                            DetailsAction {
+                                objectName: "saveLaunchSettings"
+                                label: "Save"
+                                symbol: "installed"
+                                tone: panel.accent
+                                enabled: launchEditor.dirty
+                                onClicked: panel.launchSettingsSaved(argumentsField.text, launchEditor.environment)
+                            }
+                        }
+                        Controls.Label {
+                            objectName: "launchError"
+                            visible: text.length > 0
+                            Layout.fillWidth: true
+                            text: panel.launchError
+                            wrapMode: Text.Wrap
+                            color: Theme.danger
+                        }
                     }
                     // Facts as a two-column grid, then the dependency list.
                     ColumnLayout {
