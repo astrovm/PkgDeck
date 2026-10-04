@@ -2,6 +2,7 @@
 mod adopt;
 mod ai_catalog;
 mod appimage;
+mod appimage_contents;
 mod aur;
 mod cleanup;
 mod conda;

@@ -491,6 +491,36 @@ TestCase {
         fake.source_catalog = "[]";
         compare(browser.rowActionName(row), "");
     }
+    function test_external_appimages_offer_manage_next_to_remove() {
+        fake.confirm(false);
+        browser.openView("Installed");
+        const row = {kind: "package", name: "/home/user/AppImages/demo.appimage", display_name: "Demo", source: "appimage", architecture: "x86_64", scope: {user: {uid: 1000}}, installed: "2.0", update: "current", summary: "~/AppImages/demo.appimage", adopt_with: "appimage"};
+        fake.rows = JSON.stringify([row]);
+        const list = findChild(browser, "packageResults");
+        tryCompare(list, "count", 1);
+        // The row's own button still removes; Manage lives in the details.
+        compare(browser.rowActionName(row), "remove");
+        verify(browser.canAdopt(row));
+        browser.choose(0);
+        const panel = findChild(browser, "detailsPanel");
+        tryCompare(panel, "visible", true);
+        compare(panel.actionText, "Remove");
+        compare(panel.secondaryActionText, "Manage");
+        const manage = findChild(panel, "detailsSecondaryActionButton");
+        verify(manage.visible);
+        compare(manage.Accessible.name, "Manage Demo");
+        waitForRendering(panel);
+        compare(fake.confirmation, "");
+        mouseClick(manage);
+        verify(fake.confirmation.indexOf("adopt") === 0, fake.confirmation);
+        fake.confirm(false);
+        // AppImages PkgDeck already manages have no Manage button.
+        const managed = Object.assign({}, row, {adopt_with: null});
+        verify(!browser.canAdopt(managed));
+        fake.rows = JSON.stringify([managed]);
+        tryCompare(panel, "secondaryActionText", "");
+        verify(!manage.visible);
+    }
     function test_reads_never_lock_navigation_and_results_fit_small_windows() {
         for (const view of ["Search", "Installed", "Updates", "Clean", "Sources", "Settings"]) {
             browser.openView(view);
