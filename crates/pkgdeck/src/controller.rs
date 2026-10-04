@@ -1134,6 +1134,9 @@ fn batch_mode(job: &Job) -> Option<pkgdeck_core::batch::BatchMode> {
 fn approval_error(error: &ExecutionError) -> String {
     match error {
         ExecutionError::AuthorizationCancelled => "The password prompt was cancelled.".into(),
+        ExecutionError::AuthorizationDenied => {
+            "Your password wasn't accepted, so nothing changed.".into()
+        }
         ExecutionError::Disabled(reason) | ExecutionError::Invalid(reason) => reason.clone(),
         ExecutionError::Failed(completion) => {
             let stderr = String::from_utf8_lossy(&completion.stderr);
@@ -14624,6 +14627,10 @@ mod tests {
             (
                 ExecutionError::AuthorizationCancelled,
                 "The password prompt was cancelled.",
+            ),
+            (
+                ExecutionError::AuthorizationDenied,
+                "Your password wasn't accepted, so nothing changed.",
             ),
             (ExecutionError::Disabled("Not installed".into()), "Not installed"),
             (ExecutionError::Invalid("Unexpected user".into()), "Unexpected user"),

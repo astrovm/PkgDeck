@@ -1234,9 +1234,19 @@ Controls.ApplicationWindow {
         const branch = parts.length >= 3 ? parts[parts.length - 1] : "";
         return branch && branch !== "stable" ? branch : "";
     }
+    // The package name, when the row shows an app's name instead: a package
+    // such as neovim-runtime ships the Neovim launcher and is named after
+    // it, next to the neovim package itself. Sources whose ids are app ids
+    // or files keep just the app's name.
+    function packageNameNote(row) {
+        if (!row || !row.display_name || !row.name || ["flatpak", "macos-apps", "mas", "appimage"].indexOf(row.source) >= 0)
+            return "";
+        const plain = (text) => text.toLowerCase().replace(/[^a-z0-9]/g, "");
+        return plain(row.display_name) === plain(row.name) ? "" : row.name;
+    }
     function sourceLine(row) {
         const scoped = row.source === "flatpak" || containerSource(row.source);
-        return [sourceDisplayName(row.source), row.remote || "", scoped ? (row.scope === "system" ? "System" : "User") : "", flatpakBranch(row)]
+        return [packageNameNote(row), sourceDisplayName(row.source), row.remote || "", scoped ? (row.scope === "system" ? "System" : "User") : "", flatpakBranch(row)]
             .filter(Boolean).join(", ");
     }
     function sameAppNames(row) {
@@ -2788,10 +2798,12 @@ Controls.ApplicationWindow {
                         Layout.fillHeight: true
                         model: resultsModel
                         clip: true
-                        // Pooled delegates and the add/remove transitions do not mix:
-                        // a delegate reused mid-transition can stay on screen over
-                        // its successor, and keeps text measured for its old row.
-                        reuseItems: false
+                        // Rows are pooled so a fast scroll through thousands of
+                        // them never builds each row again. Pooled delegates and
+                        // the add/remove transitions do not mix: a delegate reused
+                        // mid-transition can stay on screen over its successor.
+                        // So pooling stops while a few changes animate.
+                        reuseItems: !(root.motionEnabled && root.animateListChanges)
                         add: Transition {
                             enabled: root.motionEnabled && root.animateListChanges
                             NumberAnimation { property: "opacity"; from: 0; to: 1; duration: Theme.revealDuration; easing.type: Easing.OutCubic }

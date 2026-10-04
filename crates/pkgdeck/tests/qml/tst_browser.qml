@@ -2451,6 +2451,11 @@ TestCase {
         compare(browser.sourceLine({source: "flatpak", remote: "flathub", scope: "user", reference: "runtime/org.freedesktop.Sdk.Extension.typescript/x86_64/24.08"}), "Flatpak, flathub, User, 24.08");
         compare(browser.sourceLine({source: "flatpak", remote: "flathub", scope: "system", reference: "app/org.mozilla.firefox/x86_64/stable"}), "Flatpak, flathub, System");
         compare(browser.sourceLine({source: "apt"}), "APT");
+        // A package named after the app it ships says its own name too.
+        compare(browser.sourceLine({source: "apt", name: "neovim-runtime", display_name: "Neovim"}), "neovim-runtime, APT");
+        compare(browser.sourceLine({source: "apt", name: "neovim", display_name: "Neovim"}), "APT");
+        compare(browser.sourceLine({source: "snap", name: "nvim", display_name: "Neovim"}), "nvim, Snap");
+        compare(browser.sourceLine({source: "flatpak", name: "io.neovim.nvim", display_name: "Neovim", remote: "flathub", scope: "user"}), "Flatpak, flathub, User");
         compare(findChild(systemRow, "packageSourceLine").text, "Flatpak, flathub, System");
         mouseClick(findChild(systemRow, "rowPackageAction"));
         compare(fake.selection, 1);
@@ -3092,6 +3097,35 @@ TestCase {
         // Small replies always parse fresh.
         const small = JSON.stringify(rows.slice(0, 2));
         verify(browser.parseRows(small) !== browser.parseRows(small));
+    }
+    function test_fast_scrolls_reuse_rows_that_show_their_own_package() {
+        browser.openView("Installed");
+        fake.rows = JSON.stringify(Array.from({length: 3000}, (_, i) => ({kind: "package", name: "pooled-" + String(i).padStart(4, "0"), source: "apt",
+            installed: "1", candidate: "1", scope: "system", summary: "Synthetic"})));
+        const list = findChild(browser, "packageResults");
+        tryCompare(list, "count", 3000);
+        verify(list.reuseItems);
+        // Jump far down, as dragging the scroll bar does: every row shown
+        // names the package at its own place.
+        for (const at of [1500, 2999, 40]) {
+            list.positionViewAtIndex(at, ListView.Center);
+            waitForRendering(browser.contentItem);
+            // Pooled rows wait out of view; only rows in view are checked.
+            const shown = list.contentItem.children.filter((row) => row.visible && row.rowJson !== undefined
+                && row.y + row.height > list.contentY && row.y < list.contentY + list.height);
+            verify(shown.length > 3);
+            for (const row of shown) {
+                const at = list.indexAt(row.x + row.width / 2, row.y + row.height / 2);
+                verify(at >= 0, "row at " + row.y);
+                const expected = list.model.get(at).rowJson;
+                compare(row.rowJson, expected);
+                compare(findChild(row, "packageName").text, JSON.parse(expected).name);
+            }
+        }
+        // While a few changes animate, rows are built fresh instead.
+        browser.animateListChanges = true;
+        verify(!list.reuseItems || !browser.motionEnabled);
+        browser.animateListChanges = false;
     }
     function test_sidebar_title_lines_up_with_the_page_title() {
         for (const width of [1100, 900, 700]) {
