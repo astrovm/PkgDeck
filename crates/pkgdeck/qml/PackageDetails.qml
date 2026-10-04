@@ -34,6 +34,11 @@ Rectangle {
     property bool actionEnabled: true
     // Spoken name for the action; empty means the action text plus the package.
     property string actionAccessibleName: ""
+    // An optional second action beside the main one (e.g. Manage next to
+    // Remove for an AppImage installed some other way).
+    property string secondaryActionText: ""
+    property string secondaryActionSymbol: "install"
+    property string secondaryActionTone: "accent"
     // Maps a raw source id to its display name for the header.
     property var sourceName: (id) => id
     property color canvas: Theme.canvas
@@ -63,14 +68,62 @@ Rectangle {
     signal screenshotRequested(string url, string caption)
     signal screenshotFailed(string url, string identity)
     signal actionRequested()
+    signal secondaryActionRequested()
 
     onContentIdealHeightChanged: if (!loading && selected) settledHeight = contentIdealHeight
     onLoadingChanged: if (!loading && selected) settledHeight = contentIdealHeight
     onSelectedChanged: if (!selected) settledHeight = 0
     onSelectionIdentityChanged: dependenciesExpanded = false
 
-    readonly property color actionColor: actionTone === "success" ? Theme.success
-        : actionTone === "danger" ? Theme.danger : accent
+    readonly property color actionColor: toneColor(actionTone)
+    readonly property color secondaryActionColor: toneColor(secondaryActionTone)
+    function toneColor(tone) {
+        return tone === "success" ? Theme.success : tone === "danger" ? Theme.danger : accent;
+    }
+    component DetailsAction: Controls.Button {
+        id: chip
+        property string label: ""
+        property string symbol: "install"
+        property color tone: panel.accent
+        property string accessibleName: ""
+        visible: label.length > 0
+        text: panel.compact ? "" : label
+        Accessible.name: accessibleName || (label + (panel.selected ? " " + (panel.selected.display_name || panel.selected.name || "") : ""))
+        Controls.ToolTip.visible: hovered && panel.compact
+        Controls.ToolTip.delay: 500
+        Controls.ToolTip.text: label
+        implicitHeight: Theme.controlHeight
+        horizontalPadding: panel.compact ? 9 : 14
+        Layout.alignment: Qt.AlignVCenter
+        scale: down && panel.motionEnabled ? 0.97 : 1
+        Behavior on scale { NumberAnimation { duration: Theme.feedbackDuration; easing.type: Easing.OutCubic } }
+        background: Rectangle {
+            radius: Theme.controlRadius
+            color: !chip.enabled ? "transparent"
+                : Theme.tint(chip.tone, chip.down ? 0.26 : chip.hovered ? 0.2 : 0.13)
+            border.color: chip.enabled ? Theme.tint(chip.tone, 0.4) : panel.line
+            Behavior on color { ColorAnimation { duration: Theme.feedbackDuration } }
+            FocusFrame { shown: chip.visualFocus }
+        }
+        contentItem: RowLayout {
+            spacing: 8
+            DeckIcon {
+                name: chip.symbol
+                ink: chip.enabled ? chip.tone : panel.muted
+                Layout.preferredWidth: 18
+                Layout.preferredHeight: 18
+                Layout.alignment: Qt.AlignCenter
+            }
+            Text {
+                visible: text.length > 0
+                text: chip.text
+                color: chip.enabled ? chip.tone : panel.muted
+                font.family: panel.textFont.family
+                font.pointSize: panel.textFont.pointSize
+                font.weight: Font.DemiBold
+            }
+        }
+    }
     readonly property string homepage: detailMatchesSelection && detailsData.homepage ? String(detailsData.homepage) : ""
     readonly property bool homepageOpens: /^https?:\/\//i.test(homepage)
     readonly property var dependencies: detailMatchesSelection ? (detailsData.dependencies || []) : []
@@ -205,48 +258,24 @@ Rectangle {
                     Item { Layout.fillWidth: true }
                 }
             }
-            Controls.Button {
+            DetailsAction {
+                id: secondaryActionButton
+                objectName: "detailsSecondaryActionButton"
+                label: panel.secondaryActionText
+                symbol: panel.secondaryActionSymbol
+                tone: panel.secondaryActionColor
+                enabled: panel.actionEnabled
+                onClicked: panel.secondaryActionRequested()
+            }
+            DetailsAction {
                 id: actionButton
                 objectName: "detailsActionButton"
-                visible: panel.actionText.length > 0
+                label: panel.actionText
+                symbol: panel.actionSymbol
+                tone: panel.actionColor
+                accessibleName: panel.actionAccessibleName
                 enabled: panel.actionEnabled
-                text: panel.compact ? "" : panel.actionText
-                Accessible.name: panel.actionAccessibleName || (panel.actionText + (panel.selected ? " " + (panel.selected.display_name || panel.selected.name || "") : ""))
-                Controls.ToolTip.visible: hovered && panel.compact
-                Controls.ToolTip.delay: 500
-                Controls.ToolTip.text: panel.actionText
-                implicitHeight: Theme.controlHeight
-                horizontalPadding: panel.compact ? 9 : 14
-                Layout.alignment: Qt.AlignVCenter
                 onClicked: panel.actionRequested()
-                scale: down && panel.motionEnabled ? 0.97 : 1
-                Behavior on scale { NumberAnimation { duration: Theme.feedbackDuration; easing.type: Easing.OutCubic } }
-                background: Rectangle {
-                    radius: Theme.controlRadius
-                    color: !actionButton.enabled ? "transparent"
-                        : Theme.tint(panel.actionColor, actionButton.down ? 0.26 : actionButton.hovered ? 0.2 : 0.13)
-                    border.color: actionButton.enabled ? Theme.tint(panel.actionColor, 0.4) : panel.line
-                    Behavior on color { ColorAnimation { duration: Theme.feedbackDuration } }
-                    FocusFrame { shown: actionButton.visualFocus }
-                }
-                contentItem: RowLayout {
-                    spacing: 8
-                    DeckIcon {
-                        name: panel.actionSymbol
-                        ink: actionButton.enabled ? panel.actionColor : panel.muted
-                        Layout.preferredWidth: 18
-                        Layout.preferredHeight: 18
-                        Layout.alignment: Qt.AlignCenter
-                    }
-                    Text {
-                        visible: text.length > 0
-                        text: actionButton.text
-                        color: actionButton.enabled ? panel.actionColor : panel.muted
-                        font.family: panel.textFont.family
-                        font.pointSize: panel.textFont.pointSize
-                        font.weight: Font.DemiBold
-                    }
-                }
             }
             Controls.Button {
                 id: closeButton

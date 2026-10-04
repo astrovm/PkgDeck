@@ -39,15 +39,17 @@ confirmation.
 
 | Kind | Formats |
 | --- | --- |
-| Packages | `.AppImage`, `.deb`, `.rpm`, `.pkg.tar.zst` (also `.xz`, `.gz`, `.bz2`, `.lz4`), `.flatpak`, `.flatpakref`, `.snap` with its `.assert` file |
+| Packages | `.AppImage` (any capitalization), `.deb`, `.rpm`, `.pkg.tar.zst` (also `.xz`, `.gz`, `.bz2`, `.lz4`), `.flatpak`, `.flatpakref`, `.snap` with its `.assert` file |
 | Repositories | `.flatpakrepo`, `.repo`, `.sources`, `.list`, openSUSE `.ymp` |
 | Links | HTTPS links to any of the files above, and `flatpak+https://` links |
 
 What the preview shows:
 
-- AppImage: where the app will be copied, its desktop entry, and whether it
-  can update itself. PkgDeck never runs the file to inspect it, and your
-  original file is kept.
+- AppImage: the app's name, icon, description and version, read from inside
+  the file. PkgDeck never runs the file to inspect it. Your original file is
+  kept, unless that AppImage is already installed some other way (for
+  example by Gear Lever): then the preview offers **Manage** instead, which
+  moves it into PkgDeck's folder.
 - Debian package (`.deb`): the changes APT would make, before it asks for
   your password.
 - Flatpak reference: the app, its repository, whether a signing key is
@@ -455,6 +457,20 @@ later, Homebrew Casks also work on Linux: search shows only casks Linux can
 install (AppImages, command-line tools and fonts), and AppImages a cask
 installed are listed under Homebrew Casks rather than as unmanaged AppImages. On macOS, AppImage
 support is hidden.
+
+### AppImages
+
+**Installed** lists the AppImages PkgDeck manages, and the ones it finds
+through their menu entries (for example installed by Gear Lever). Those show
+where the file is instead of a description. Their details offer **Manage**
+next to **Remove**: PkgDeck moves the file into its own folder, replaces
+every menu entry for it with one of its own, and from then on lists it like
+any AppImage it installed.
+
+PkgDeck's menu entries use the app's own name, description, icon,
+categories and launch arguments (such as `--no-sandbox`), read from inside
+the AppImage without running it. Versions also come from inside the file,
+so an app that updated itself shows its real version.
 
 When a change needs administrator rights, the app always asks with your
 system's password prompt: polkit on Linux, and the standard administrator
