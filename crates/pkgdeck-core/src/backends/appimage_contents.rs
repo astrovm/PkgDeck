@@ -57,13 +57,9 @@ pub(super) fn read(path: &Path) -> Result<Contents, String> {
             })
         })
         .chain([".DirIcon".to_string()]);
-    let mut icon = None;
-    for candidate in candidates {
-        if let Some(found) = image.read(&candidate, MAX_ICON_BYTES).and_then(Icon::new) {
-            icon = Some(found);
-            break;
-        }
-    }
+    let icon = candidates
+        .into_iter()
+        .find_map(|candidate| image.read(&candidate, MAX_ICON_BYTES).and_then(Icon::new));
     Ok(Contents {
         name: field("Name"),
         comment: field("Comment"),
@@ -507,6 +503,8 @@ mod tests {
         assert_eq!(image.read("usr", 16), None);
         assert_eq!(image.read("usr/icon.png", 2), None);
         assert_eq!(image.read("missing", 16), None);
+        // No desktop entry and no icon anywhere: nothing to show.
+        assert_eq!(read(&path).unwrap(), Contents::default());
         std::fs::remove_dir_all(dir).unwrap();
     }
 
