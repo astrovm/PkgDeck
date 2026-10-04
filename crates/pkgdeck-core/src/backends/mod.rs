@@ -3662,9 +3662,43 @@ impl<T: Transport> SystemManager<T> {
         query: &str,
         cancel: &Cancellation,
     ) -> Result<Vec<Package>, EngineError> {
-        if !installed && !self.valid_name(query) {
-            return Err(invalid(self.kind.id(), "invalid package query"));
+        // Several words ("balena etcher") can't go to the manager as one
+        // name: ask for the longest word, then keep what matches them all.
+        let words: Vec<&str> = query
+            .split(SEARCH_SEPARATORS)
+            .filter(|word| !word.is_empty())
+            .collect();
+        let narrowed = !installed && !self.valid_name(query);
+        let term = if narrowed {
+            // Text that starts like an option is never a search.
+            if query.starts_with('-')
+                || words.is_empty()
+                || !words.iter().all(|word| self.valid_name(word))
+            {
+                return Err(invalid(self.kind.id(), "invalid package query"));
+            }
+            words
+                .iter()
+                .max_by_key(|word| word.len())
+                .copied()
+                .unwrap_or(query)
+        } else {
+            query
+        };
+        let mut packages = self.query_term(installed, term, cancel)?;
+        if narrowed {
+            packages.retain(|package| {
+                search_matches(&format!("{} {}", package.id.name, package.summary), query)
+            });
         }
+        Ok(packages)
+    }
+    fn query_term(
+        &self,
+        installed: bool,
+        query: &str,
+        cancel: &Cancellation,
+    ) -> Result<Vec<Package>, EngineError> {
         let args = self.kind.read_args(installed, query);
         let output = match self.call(args.clone(), cancel, false) {
             // Without cached metadata (never refreshed, or cleaned), DNF's
