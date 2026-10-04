@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Build static Linux pkd and host runner binaries for the Homebrew formula.
+# Build static Linux pkd and host runner binaries for the Homebrew formula,
+# with the AppImage updater every Linux build ships.
 # musl makes one archive per architecture run on any distribution.
 set -euo pipefail
 [[ $(uname -s) == Linux ]] || { echo 'package-cli.sh requires Linux' >&2; exit 1; }
@@ -17,6 +18,8 @@ rm -rf "$stage"
 mkdir -p "$stage/bin" "$stage/libexec" build/artifacts
 cp "$built/pkd" "$stage/bin/"
 cp "$built/pkgdeck-host-runner" "$stage/libexec/"
+scripts/appimage-updater.sh "$stage"
+scripts/bundle-cli-apt.sh "$stage"
 cp LICENSE "$stage/"
 for binary in "$stage/bin/pkd" "$stage/libexec/pkgdeck-host-runner"; do
     file "$binary" | grep -Eq 'statically linked|static-pie linked' || { file "$binary"; echo "$binary is not static" >&2; exit 1; }

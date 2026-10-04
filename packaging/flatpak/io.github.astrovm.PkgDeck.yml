@@ -58,6 +58,23 @@ modules:
       - type: archive
         url: https://deb.debian.org/debian/pool/main/a/apt/apt_3.3.3.tar.xz
         sha256: 1c06b4a145d6117917c390c79fe7d27d9d92ee922101134ad6446717b0a1c28f
+  # The AppImage updater every Linux build ships, pinned like
+  # scripts/appimage-updater.sh. PkgDeck finds it at /app/lib/pkgdeck.
+  - name: appimageupdatetool
+    buildsystem: simple
+    build-commands:
+      - install -Dm755 appimageupdatetool.AppImage /app/lib/pkgdeck/appimageupdatetool.AppImage
+    sources:
+      - type: file
+        only-arches: [x86_64]
+        url: https://github.com/AppImageCommunity/AppImageUpdate/releases/download/2.0.0-alpha-1-20251018/appimageupdatetool-x86_64.AppImage
+        sha256: d976cdac667b03dee8cb23fb95ef74b042c406c5cbab3ff294d2b16efeaff84f
+        dest-filename: appimageupdatetool.AppImage
+      - type: file
+        only-arches: [aarch64]
+        url: https://github.com/AppImageCommunity/AppImageUpdate/releases/download/2.0.0-alpha-1-20251018/appimageupdatetool-aarch64.AppImage
+        sha256: 7aaf89dd4cf66ebd940d416c67e1c240c57a139cee38d9c0ed3bb9387bc435b0
+        dest-filename: appimageupdatetool.AppImage
   - name: pkgdeck
     buildsystem: simple
     build-options:

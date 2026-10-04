@@ -48,9 +48,11 @@ brew install astrovm/pkgdeck/pkgdeck
 
 [`scripts/package-cli.sh`](../scripts/package-cli.sh) builds static (musl)
 `pkd` and host runner binaries, so one archive per architecture works on any
-distribution. The optional APT helper links the distro's `libapt-pkg`, so it
-isn't included; APT is unavailable in this build but other package managers
-still work. Use the Flatpak, Snap or AppImage for APT support. The formula
+distribution. It also includes the same AppImage updater as every other Linux
+build, from [`scripts/appimage-updater.sh`](../scripts/appimage-updater.sh).
+The separate APT helper ships with its own libraries and loader under
+`lib/pkgdeck/apt`, so it reads the host's APT database without requiring the
+host to provide a matching library version. The formula
 never installs system packages or runs Homebrew as root.
 
 Before 0.1.10 the Linux CLI was the `pkgdeck` formula. It is not renamed
