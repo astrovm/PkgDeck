@@ -1158,19 +1158,26 @@ impl<T: Transport + Sync> Flatpak<T> {
         // Flatpak compares commits, not version labels: rebuilds and runtimes
         // can have an update even when the version is unchanged or empty.
         let remote_updates = |remote: Option<&str>| -> Result<String, EngineError> {
-            let mut args = vec![
-                prefix,
-                "remote-ls",
-                "--updates",
-                "--columns=ref,version,origin",
-            ];
-            // Flatpak still downloads a summary it has never cached.
-            if self.update_check.is_none() {
-                args.push("--cached");
+            let ask = |cached: bool| -> Result<String, EngineError> {
+                let mut args = vec![
+                    prefix,
+                    "remote-ls",
+                    "--updates",
+                    "--columns=ref,version,origin",
+                ];
+                if cached {
+                    args.push("--cached");
+                }
+                args.extend(remote);
+                let output = bytes("flatpak", self.call(&args, cancel, false, system)?)?;
+                String::from_utf8(output).map_err(|e| invalid("flatpak", e))
+            };
+            // Outside an update check, use the summaries Flatpak already has.
+            // A remote it never fetched has none, so that one is asked.
+            match self.update_check {
+                None => ask(true).or_else(|_| ask(false)),
+                Some(_) => ask(false),
             }
-            args.extend(remote);
-            let output = bytes("flatpak", self.call(&args, cancel, false, system)?)?;
-            String::from_utf8(output).map_err(|e| invalid("flatpak", e))
         };
         let remotes: std::collections::BTreeSet<_> =
             origins.iter().filter(|origin| !origin.is_empty()).collect();
