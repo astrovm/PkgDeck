@@ -2,7 +2,7 @@
 # APT uses only synthetic metadata under this temporary root; no host writes.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
-helper=$(realpath "${CARGO_TARGET_DIR:-target}/debug/pkgdeck-apt-query")
+helper=$(realpath "${PKGDECK_APT_HELPER:-${CARGO_TARGET_DIR:-target}/debug/pkgdeck-apt-query}")
 work=$(mktemp -d)
 trap 'chmod -R u+w "$work"; rm -rf "$work"' EXIT
 mkdir -p "$work/"{etc/apt,repo,var/lib/apt/lists/partial,var/lib/dpkg,var/cache/apt/archives/partial}

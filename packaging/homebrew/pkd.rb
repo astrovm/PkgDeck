@@ -17,15 +17,25 @@ class Pkd < Formula
 
   def install
     bin.install "bin/pkd"
+    bin.install "bin/pkgdeck-apt-query"
     libexec.install "libexec/pkgdeck-host-runner"
     # pkd finds it at ../lib/pkgdeck from its own (resolved) path.
-    (lib/"pkgdeck").install "lib/pkgdeck/appimageupdatetool.AppImage"
+    (lib/"pkgdeck").install Dir["lib/pkgdeck/*"]
+    (share/"licenses/pkgdeck").install "share/licenses/pkgdeck/apt"
   end
 
   test do
     assert_match "pkd", shell_output("#{bin}/pkd --version")
     assert_match "Usage:", shell_output("#{bin}/pkd --help")
     assert_path_exists libexec/"pkgdeck-host-runner"
+    # The helper uses its private loader and libraries, even when the system
+    # has a different APT ABI. It reads the host database without changing it.
+    if which("apt-get")
+      arch = Hardware::CPU.arm? ? "arm64" : "amd64"
+      apt = JSON.parse(shell_output("#{bin}/pkd --json --from apt --arch #{arch} info bash"))
+      assert_equal "bash", apt.fetch("data").fetch("package").fetch("id").fetch("name")
+      refute_nil apt.fetch("data").fetch("package").fetch("installed_version")
+    end
     updater = lib/"pkgdeck/appimageupdatetool.AppImage"
     assert_predicate updater, :executable?
     assert_match "appimageupdatetool version", shell_output("#{updater} --appimage-extract-and-run --version 2>&1")

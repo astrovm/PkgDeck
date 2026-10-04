@@ -342,8 +342,8 @@ impl AppImage {
             summary: format!("AppImage managed by PkgDeck ({digest})"),
             installed_version: Some(digest.into()),
             candidate_version: Some(digest.into()),
-            update: if Self::has_update_metadata(&path)? && self.updater().is_ok() {
-                UpdateAvailability::Available
+            update: if Self::has_update_metadata(&path)? {
+                UpdateAvailability::Unknown
             } else {
                 UpdateAvailability::Current
             },
@@ -483,10 +483,8 @@ impl AppImage {
                         summary: "AppImage not managed by PkgDeck".into(),
                         installed_version: Some(version.clone()),
                         candidate_version: Some(version),
-                        update: if Self::has_update_metadata(&canonical).ok()?
-                            && self.updater().is_ok()
-                        {
-                            UpdateAvailability::Available
+                        update: if Self::has_update_metadata(&canonical).ok()? {
+                            UpdateAvailability::Unknown
                         } else {
                             UpdateAvailability::Current
                         },
@@ -631,6 +629,34 @@ impl AppImage {
             .then_some(helper)
             .ok_or_else(|| Self::invalid("bundled AppImage updater is unavailable"))
     }
+    /// Metadata identifies the update source, not whether it has a newer file.
+    /// Only the bundled updater's read-only probe can establish availability.
+    fn check_update(
+        &self,
+        path: &Path,
+        cancel: &Cancellation,
+    ) -> Result<UpdateAvailability, EngineError> {
+        let Ok(updater) = self.updater() else {
+            return Ok(UpdateAvailability::Unknown);
+        };
+        let mut command = std::process::Command::new(updater);
+        command.args(["--appimage-extract-and-run", "--check-for-update", "--"]);
+        command.arg(path);
+        let result = process::run(
+            command,
+            Limits {
+                timeout: std::time::Duration::from_secs(60),
+                ..Limits::default()
+            },
+            cancel,
+            false,
+        )?;
+        match result.code {
+            Some(0) => Ok(UpdateAvailability::Current),
+            Some(1) => Ok(UpdateAvailability::Available),
+            _ => Err(ExecutionError::Failed(result).into()),
+        }
+    }
     fn update(&self, id: &PackageId, cancel: &Cancellation) -> Result<(), EngineError> {
         let target = if Self::managed_name(&id.name) && id.scope == self.scope() {
             self.root.join(&id.name)
@@ -731,8 +757,22 @@ adopt_with: None,
             })
             .collect())
     }
-    fn installed(&mut self, _: &Cancellation) -> Result<Vec<Package>, EngineError> {
-        self.installed_packages()
+    fn installed(&mut self, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
+        if cancel.requested() {
+            return Err(EngineError::Cancelled);
+        }
+        let mut packages = self.installed_packages()?;
+        for package in &mut packages {
+            if package.update == UpdateAvailability::Unknown {
+                let path = if Self::managed_name(&package.id.name) {
+                    self.root.join(&package.id.name)
+                } else {
+                    PathBuf::from(&package.id.name)
+                };
+                package.update = self.check_update(&path, cancel)?;
+            }
+        }
+        Ok(packages)
     }
     fn details(&mut self, id: &PackageId, _: &Cancellation) -> Result<PackageDetails, EngineError> {
         let package = self
@@ -792,8 +832,10 @@ adopt_with: None,
                 self.update(id, cancel)?;
             }
             Operation::UpgradeAll { backend } if backend == "appimage" => {
-                for package in self.installed_packages()? {
-                    self.update(&package.id, cancel)?;
+                for package in self.installed(cancel)? {
+                    if package.update == UpdateAvailability::Available {
+                        self.update(&package.id, cancel)?;
+                    }
                 }
             }
             _ => return Err(Self::invalid("foreign or unsupported AppImage operation")),
@@ -1230,6 +1272,7 @@ mod tests {
         let (updater, calls) = updater(&base, 0);
         let source = base.join("source.AppImage");
         type2(&source);
+        with_update_info(&source);
         let root = base.join("owned");
         let mut backend = AppImage::new(
             root.clone(),
@@ -1249,6 +1292,7 @@ mod tests {
 
         let external = base.join("external.AppImage");
         type2(&external);
+        with_update_info(&external);
         fs::write(
             applications.join("external.desktop"),
             format!("[Desktop Entry]\nExec={}\n", external.display()),
@@ -1278,6 +1322,14 @@ mod tests {
             .unwrap()
             .contains(&external.id.name));
         fs::write(&calls, "").unwrap();
+        fs::write(
+            &updater,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" >> {}\n[ \"$2\" != --check-for-update ]\n",
+                calls.display()
+            ),
+        )
+        .unwrap();
         backend
             .execute(
                 &Operation::UpgradeAll {
@@ -1287,7 +1339,7 @@ mod tests {
                 &mut ignore,
             )
             .unwrap();
-        assert_eq!(fs::read_to_string(&calls).unwrap().lines().count(), 10);
+        assert_eq!(fs::read_to_string(&calls).unwrap().lines().count(), 18);
 
         fs::write(&updater, "#!/bin/sh\nexit 9\n").unwrap();
         assert!(backend
@@ -1686,7 +1738,7 @@ mod tests {
         let base = test_base("offers");
         let applications = base.join("applications");
         fs::create_dir_all(&applications).unwrap();
-        let (updater, _) = updater(&base, 0);
+        let (updater, calls) = updater(&base, 1);
         let source = base.join("source.AppImage");
         type2(&source);
         with_update_info(&source);
@@ -1703,7 +1755,7 @@ mod tests {
             applications,
             rustix::process::getuid().as_raw(),
         )
-        .with_updater(updater);
+        .with_updater(updater.clone());
         let cancel = Cancellation::default();
         let candidate = backend
             .search(source.to_str().unwrap(), &cancel)
@@ -1717,6 +1769,84 @@ mod tests {
         assert!(installed
             .iter()
             .all(|package| package.update == UpdateAvailability::Available));
+        assert!(fs::read_to_string(&calls)
+            .unwrap()
+            .contains("--check-for-update"));
+        let original = fs::read(&source).unwrap();
+        // Current files stay out of Updates even though metadata is present.
+        fs::write(&updater, "#!/bin/sh\nexit 0\n").unwrap();
+        assert!(backend
+            .installed(&cancel)
+            .unwrap()
+            .iter()
+            .all(|package| package.update == UpdateAvailability::Current));
+        assert_eq!(fs::read(&source).unwrap(), original);
+        assert!(
+            backend
+                .details(&installed[0].id, &cancel)
+                .unwrap()
+                .package
+                .update
+                == UpdateAvailability::Unknown
+        );
+        let _ = self::updater(&base, 0);
+        fs::write(&calls, "").unwrap();
+        backend
+            .execute(
+                &Operation::UpgradeAll {
+                    backend: "appimage".into(),
+                },
+                &cancel,
+                &mut ignore,
+            )
+            .unwrap();
+        let probes = fs::read_to_string(&calls).unwrap();
+        assert_eq!(probes.matches("--check-for-update").count(), 2);
+        assert!(!probes.contains("--overwrite"));
+        // Failed network/probe operations must never become Current or Available.
+        fs::write(
+            &updater,
+            "#!/bin/sh\necho 'error: unavailable source' >&2\nexit 2\n",
+        )
+        .unwrap();
+        assert!(matches!(
+            backend.installed(&cancel),
+            Err(EngineError::Execution(_))
+        ));
+        fs::remove_file(&updater).unwrap();
+        assert!(matches!(
+            backend.installed(&cancel),
+            Err(EngineError::Execution(_))
+        ));
+        // Cancellation applies to the read-only check, including while it runs.
+        fs::write(&updater, "#!/bin/sh\nexec sleep 30\n").unwrap();
+        fs::set_permissions(&updater, fs::Permissions::from_mode(0o755)).unwrap();
+        let interrupted = Cancellation::default();
+        let signal = interrupted.clone();
+        let thread = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            signal.cancel();
+        });
+        assert!(matches!(
+            backend.installed(&interrupted),
+            Err(EngineError::Cancelled)
+        ));
+        thread.join().unwrap();
+        assert!(matches!(
+            backend.installed(&interrupted),
+            Err(EngineError::Cancelled)
+        ));
+        // A build missing its bundled updater cannot establish availability.
+        let mut unavailable = AppImage::new(
+            base.join("owned"),
+            base.join("applications"),
+            rustix::process::getuid().as_raw(),
+        );
+        assert!(unavailable
+            .installed(&cancel)
+            .unwrap()
+            .iter()
+            .all(|package| package.update == UpdateAvailability::Unknown));
         // An updater that cannot start fails the update.
         let mut broken = AppImage::new(
             base.join("owned"),

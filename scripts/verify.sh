@@ -74,6 +74,7 @@ if want checks; then
     stage check-no-python scripts/check-no-python.sh
     stage build-apt-helper scripts/build-apt.sh
     stage test-apt-metadata scripts/tests/apt-metadata.sh
+    stage test-cli-apt scripts/tests/cli-apt.sh
 fi
 if [[ "$mode" == fast ]]; then
     stage lint-terminal cargo clippy --locked -p pkgdeck-core -p pkd --all-targets -- -D warnings

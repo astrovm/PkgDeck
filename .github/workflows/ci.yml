@@ -502,10 +502,10 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install static toolchain
+      - name: Install static toolchain and APT headers
         run: |
           sudo apt-get update
-          sudo apt-get install -y musl-tools
+          sudo apt-get install -y musl-tools libapt-pkg-dev
           rustup show
       - name: Cache Rust build outputs
         uses: ./.github/actions/rust-cache
@@ -526,7 +526,17 @@ jobs:
             bin/pkd --help | grep -F Usage:
             test -x libexec/pkgdeck-host-runner
             test -x lib/pkgdeck/appimageupdatetool.AppImage
+            lib/pkgdeck/apt/ld.so --library-path "$PWD/lib/pkgdeck/apt" --list "$PWD/lib/pkgdeck/apt/pkgdeck-apt-query"
           '
+          # Prove the archive reads native APT using its bundled runtime.
+          cli=("$unpacked"/*)
+          scripts/tests/host-package.sh direct "${cli[0]}/bin/pkd"
+          PKGDECK_APT_HELPER="${cli[0]}/bin/pkgdeck-apt-query" scripts/tests/apt-metadata.sh
+          # An older glibc and APT ABI must also work without host libraries.
+          docker run --rm -v "$unpacked:/cli:ro" ubuntu:24.04 sh -euc '
+            cd /cli/*
+            bin/pkd --json --from apt --arch "$(dpkg --print-architecture)" info bash
+          ' | jq -e '.exit_code == 0 and .data.package.id.name == "bash" and .data.package.installed_version != null'
       - name: Upload CLI
         if: needs.reviewed.outputs.tested != 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -596,8 +606,8 @@ jobs:
           fi
       - name: Check formula and cask style
         run: |
-          brew style astrovm/pkgdeck/pkd
-          brew style --cask astrovm/pkgdeck/pkgdeck
+          scripts/homebrew-style.sh astrovm/pkgdeck/pkd
+          scripts/homebrew-style.sh --cask astrovm/pkgdeck/pkgdeck
       - name: Install and test Linux CLI
         if: runner.os == 'Linux'
         run: |

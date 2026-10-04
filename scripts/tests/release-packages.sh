@@ -96,5 +96,5 @@ done < <(scripts/appimage-updater.sh --pins)
     || { echo 'Flatpak manifest pins a different AppImage updater set' >&2; exit 1; }
 grep -Fq 'scripts/appimage-updater.sh "$out/usr"' scripts/bundle.sh
 grep -Fq 'scripts/appimage-updater.sh "$stage"' scripts/package-cli.sh
-grep -Fq 'lib/pkgdeck/appimageupdatetool.AppImage' packaging/homebrew/pkd.rb
+grep -Fq '(lib/"pkgdeck").install Dir["lib/pkgdeck/*"]' packaging/homebrew/pkd.rb
 echo 'PASS versioned AppImage, Flatpak, and Snap names, update metadata, and one AppImage updater'

@@ -25,7 +25,7 @@ trap cleanup EXIT
 tap=$(brew --repository astrovm/pkgdeck)
 (cd "$dist" && shasum -a 256 PkgDeck-v*-macos-*.zip > SHA256SUMS)
 PKGDECK_RENDER_PLACEHOLDERS=1 scripts/homebrew-render.sh "$version" "$dist/SHA256SUMS" "file://$dist" "$tap"
-brew style --cask astrovm/pkgdeck/pkgdeck
+scripts/homebrew-style.sh --cask astrovm/pkgdeck/pkgdeck
 # The unqualified name must reach the cask, not the Linux-only formula.
 brew install astrovm/pkgdeck/pkgdeck
 brew info --json=v2 --cask astrovm/pkgdeck/pkgdeck | jq -e '.casks[0].installed != null' >/dev/null
