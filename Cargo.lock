@@ -812,7 +812,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "pkd"
-version = "0.6.3"
+version = "0.7.0"
 dependencies = [
  "clap",
  "clap_complete",
@@ -832,7 +832,7 @@ checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
 name = "pkgdeck"
-version = "0.6.3"
+version = "0.7.0"
 dependencies = [
  "cxx",
  "cxx-gen",
@@ -851,7 +851,7 @@ dependencies = [
 
 [[package]]
 name = "pkgdeck-core"
-version = "0.6.3"
+version = "0.7.0"
 dependencies = [
  "backhand",
  "dwarfs",
@@ -867,7 +867,7 @@ dependencies = [
 
 [[package]]
 name = "pkgdeck-tools"
-version = "0.6.3"
+version = "0.7.0"
 dependencies = [
  "libc",
  "serde_json",
