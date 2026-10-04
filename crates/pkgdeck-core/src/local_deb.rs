@@ -2,7 +2,7 @@
 use crate::{
     engine::EngineError,
     host::Host,
-    package::{Package, PackageId, Scope, UpdateAvailability},
+    package::{Package, PackageDetails, PackageId, Scope, UpdateAvailability},
     process::{Cancellation, Limits},
 };
 use sha2::{Digest, Sha256};
@@ -62,6 +62,27 @@ fn field<'a>(text: &'a str, name: &str) -> Option<&'a str> {
             .map(str::trim)
     })
 }
+/// A Debian `Description`'s extended text: the indented lines after the
+/// first, with ` .` marking an empty line between paragraphs.
+fn extended_description(text: &str) -> String {
+    let mut lines = text
+        .lines()
+        .skip_while(|line| !line.starts_with("Description:"));
+    lines.next();
+    let mut out = String::new();
+    for line in lines.take_while(|line| line.starts_with(' ') || line.starts_with('\t')) {
+        let line = line.trim();
+        if line == "." {
+            out.push_str("\n\n");
+        } else {
+            if !out.is_empty() && !out.ends_with('\n') {
+                out.push(' ');
+            }
+            out.push_str(line);
+        }
+    }
+    out.trim().to_owned()
+}
 fn package_name(value: &str) -> bool {
     value.len() >= 2
         && value.as_bytes()[0].is_ascii_lowercase()
@@ -83,9 +104,18 @@ fn valid_version(value: &str) -> bool {
 }
 
 pub fn inspect(path: &Path, cancel: &Cancellation) -> Result<Package, EngineError> {
+    inspect_details(path, cancel).map(|details| details.package)
+}
+/// The archive's package with what its control file says about it: the
+/// extended description, homepage and dependencies.
+pub fn inspect_details(path: &Path, cancel: &Cancellation) -> Result<PackageDetails, EngineError> {
     inspect_with(path, cancel, &Host::current())
 }
-fn inspect_with(path: &Path, cancel: &Cancellation, host: &Host) -> Result<Package, EngineError> {
+fn inspect_with(
+    path: &Path,
+    cancel: &Cancellation,
+    host: &Host,
+) -> Result<PackageDetails, EngineError> {
     if !path.is_absolute() || path.extension().is_none_or(|ext| ext != "deb") {
         return Err(invalid("expected an absolute .deb path"));
     }
@@ -113,7 +143,20 @@ fn inspect_with(path: &Path, cancel: &Cancellation, host: &Host) -> Result<Packa
     let summary = field(&metadata, "Description")
         .unwrap_or("Local Debian archive")
         .to_owned();
-    Ok(Package {
+    let homepage = field(&metadata, "Homepage")
+        .filter(|url| url.starts_with("https://") || url.starts_with("http://"))
+        .map(str::to_owned);
+    let dependencies = field(&metadata, "Depends")
+        .map(|depends| {
+            depends
+                .split(',')
+                .map(str::trim)
+                .filter(|dependency| !dependency.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    let package = Package {
         id: PackageId {
             backend: "apt".into(),
             name: name.into(),
@@ -129,8 +172,14 @@ fn inspect_with(path: &Path, cancel: &Cancellation, host: &Host) -> Result<Packa
         update: UpdateAvailability::Unknown,
         icon: None,
         component_ids: vec![],
-        homepages: vec![],
+        homepages: homepage.iter().cloned().collect(),
         adopt_with: None,
+    };
+    Ok(PackageDetails {
+        description: extended_description(&metadata),
+        homepage,
+        dependencies,
+        package,
     })
 }
 
@@ -159,7 +208,7 @@ fn verified_path_with(
     if digest(&path, cancel)? != expected {
         return Err(invalid("Debian archive changed since preview"));
     }
-    let current = inspect_with(&path, cancel, host)?;
+    let current = inspect_with(&path, cancel, host)?.package;
     if current.id != *id {
         return Err(invalid("Debian package identity changed since preview"));
     }
@@ -284,7 +333,7 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
         let control = base.join("staging/DEBIAN");
         fs::create_dir_all(&control).unwrap();
-        fs::write(control.join("control"), "Package: pkgdeck-synthetic\nVersion: 1.2.3\nArchitecture: all\nMaintainer: PkgDeck tests <nobody@example.invalid>\nDescription: Synthetic fixture\n").unwrap();
+        fs::write(control.join("control"), "Package: pkgdeck-synthetic\nVersion: 1.2.3\nArchitecture: all\nMaintainer: PkgDeck tests <nobody@example.invalid>\nDepends: libc6 (>= 2.34), zlib1g\nHomepage: https://example.invalid/synthetic\nDescription: Synthetic fixture\n A fixture that\n spans lines.\n .\n Second paragraph.\n").unwrap();
         let archive = base.join("Synthetic package.deb");
         let status = Command::new("dpkg-deb")
             .arg("--build")
@@ -294,7 +343,19 @@ mod tests {
             .unwrap();
         assert!(status.success());
         let cancel = Cancellation::default();
+        let details = inspect_details(&archive, &cancel).unwrap();
+        assert_eq!(
+            details.description,
+            "A fixture that spans lines.\n\nSecond paragraph."
+        );
+        assert_eq!(
+            details.homepage.as_deref(),
+            Some("https://example.invalid/synthetic")
+        );
+        assert_eq!(details.dependencies, ["libc6 (>= 2.34)", "zlib1g"]);
         let package = inspect(&archive, &cancel).unwrap();
+        assert_eq!(package, details.package);
+        assert_eq!(package.homepages, ["https://example.invalid/synthetic"]);
         assert_eq!(package.id.name, "pkgdeck-synthetic");
         assert_eq!(package.candidate_version.as_deref(), Some("1.2.3"));
         assert_eq!(
@@ -338,7 +399,7 @@ mod tests {
             [(OsString::from("PATH"), base.as_os_str().to_owned())].into(),
         );
         let cancel = Cancellation::default();
-        let package = inspect_with(&archive, &cancel, &host).unwrap();
+        let package = inspect_with(&archive, &cancel, &host).unwrap().package;
         assert_eq!(package.id.name, "synthetic");
         assert_eq!(package.candidate_version.as_deref(), Some("1.0"));
         let staged = stage_with(&package.id, &cancel, &host).unwrap().unwrap();

@@ -261,6 +261,20 @@ Controls.ApplicationWindow {
     property bool closePending: false
     property bool queryDirty: false
     property var selectedIdentity: null
+    // The app page: one package as a store page. An opened file or link
+    // has one; so does a row someone opened (clicked), until Back.
+    readonly property var opened: backend.opened.length ? JSON.parse(backend.opened) : null
+    property var pageIdentity: null
+    readonly property bool rowPageOpen: selected !== null && selected.kind === "package"
+        && listViews.indexOf(currentView) >= 0 && rowIdentity(selected) === pageIdentity
+    readonly property bool appPageOpen: opened !== null || rowPageOpen
+    readonly property var pageRow: opened !== null ? opened.package : (rowPageOpen ? selected : null)
+    // A change started from a page or a row button: with nothing to review
+    // (just that app), it runs without asking.
+    property bool quickChange: false
+    // The confirmation shown on the page instead of a dialog.
+    readonly property var pageReview: appPageOpen && backend.confirmation.length && reviewOnPage ? JSON.parse(backend.confirmation_data || "{}") : null
+    property bool reviewOnPage: false
     // Values derived from a parsed row, computed once and kept on the row,
     // hidden from JSON.stringify and Object.assign. Rows never change once
     // parsed. Lookups over rows use plain objects: this engine's Map, Set
@@ -1377,12 +1391,35 @@ Controls.ApplicationWindow {
         if (!action || retainingResults || !canAct)
             return;
         markActiveRows([rowIdentity(row)]);
+        quickChange = true;
         backend.propose(action, originalIndex(index));
     }
-    function choose(index) {
+    // The app page's main button: the opened file's Install or Manage, or
+    // the row's own action.
+    function runPageAction() {
+        if (opened !== null) {
+            if (!canAct)
+                return;
+            quickChange = true;
+            backend.installOpened();
+        } else
+            runRowAction(results.currentIndex);
+    }
+    function closePage() {
+        if (opened !== null)
+            backend.closeOpened();
+        else
+            pageIdentity = null;
+        Qt.callLater(() => results.forceActiveFocus());
+    }
+    // Select a row; `open` (a click) also opens its app page. Arrow keys
+    // only move the selection.
+    function choose(index, open) {
         if (retainingResults || index < 0 || index >= viewItems.length)
             return;
         const identity = rowIdentity(viewItems[index]);
+        if (open !== false)
+            pageIdentity = identity;
         // Arrowing into the row that is already open must not load it again.
         const same = results.currentIndex === index && selectedIdentity === identity;
         results.currentIndex = index;
@@ -1529,11 +1566,27 @@ Controls.ApplicationWindow {
         function onConfirmationChanged() {
             if (backend.confirmation.length) {
                 root.openingInput = false;
+                const preview = JSON.parse(backend.confirmation_data || "{}");
+                const quick = root.quickChange;
+                root.quickChange = false;
+                // Just that app, nothing else changes: go ahead.
+                if (quick && preview.review === false) {
+                    backend.confirm(true);
+                    return;
+                }
+                // On the app page, the changes show there; a choice (the
+                // Flatpak scope) still needs the dialog.
+                if (root.appPageOpen && !preview.flatpak_ref_scope) {
+                    root.reviewOnPage = true;
+                    return;
+                }
                 if (!confirmation.opened)
                     root.rememberDialogFocus();
                 confirmation.open();
-            } else
+            } else {
+                root.reviewOnPage = false;
                 confirmation.close();
+            }
         }
     }
     Timer {
@@ -1585,7 +1638,7 @@ Controls.ApplicationWindow {
     }
     NumberAnimation {
         id: detailsReveal
-        target: detailsPanel.detailsContentItem
+        target: appPage.detailsContentItem
         property: "opacity"
         from: 0.55
         to: 1
@@ -1848,6 +1901,8 @@ Controls.ApplicationWindow {
         }
         ColumnLayout {
             id: pageContent
+            // Behind the app page, out of reach until Back.
+            enabled: !root.appPageOpen
             onImplicitHeightChanged: Qt.callLater(root.updateOverflow)
             Layout.fillWidth: true
             Layout.fillHeight: true
@@ -2115,7 +2170,7 @@ Controls.ApplicationWindow {
                     onDownRequested: {
                         results.forceActiveFocus();
                         if (root.viewItems.length > 0)
-                            root.choose(0);
+                            root.choose(0, false);
                     }
                     onQueryEdited: {
                         root.queryDirty = true;
@@ -2258,12 +2313,12 @@ Controls.ApplicationWindow {
                     onAccepted: {
                         results.forceActiveFocus();
                         if (root.viewItems.length > 0)
-                            root.choose(0);
+                            root.choose(0, false);
                     }
                     Keys.onDownPressed: {
                         results.forceActiveFocus();
                         if (root.viewItems.length > 0)
-                            root.choose(0);
+                            root.choose(0, false);
                     }
                     ClearFieldButton {
                         objectName: "clearInstalledFilterButton"
@@ -2738,18 +2793,20 @@ Controls.ApplicationWindow {
                         keyNavigationEnabled: false
                         activeFocusOnTab: true
                         Controls.ScrollBar.vertical: DeckScrollBar { ink: root.muted }
-                        Keys.onDownPressed: { root.keyboardNavigation = true; root.choose(Math.min(count - 1, currentIndex + 1)); }
-                        Keys.onUpPressed: { root.keyboardNavigation = true; root.choose(Math.max(0, currentIndex - 1)); }
+                        Keys.onDownPressed: { root.keyboardNavigation = true; root.choose(Math.min(count - 1, currentIndex + 1), false); }
+                        Keys.onUpPressed: { root.keyboardNavigation = true; root.choose(Math.max(0, currentIndex - 1), false); }
                         Keys.onPressed: (event) => {
                             root.keyboardNavigation = true;
                             if (event.key === Qt.Key_PageDown)
-                                root.choose(Math.min(count - 1, (currentIndex < 0 ? 0 : currentIndex) + 10));
+                                root.choose(Math.min(count - 1, (currentIndex < 0 ? 0 : currentIndex) + 10), false);
                             else if (event.key === Qt.Key_PageUp)
-                                root.choose(Math.max(0, (currentIndex < 0 ? 0 : currentIndex) - 10));
+                                root.choose(Math.max(0, (currentIndex < 0 ? 0 : currentIndex) - 10), false);
                             else if (event.key === Qt.Key_Home)
-                                root.choose(0);
+                                root.choose(0, false);
                             else if (event.key === Qt.Key_End)
-                                root.choose(count - 1);
+                                root.choose(count - 1, false);
+                            else if (event.key === Qt.Key_Space && currentIndex >= 0)
+                                root.choose(currentIndex);
                             else if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter) && currentIndex >= 0)
                                 root.runRowAction(currentIndex);
                             else
@@ -3234,9 +3291,10 @@ Controls.ApplicationWindow {
             }
             PackageDetails {
                 id: detailsPanel
-                // Opens with the selection and stays open while the next row's
-                // details load (the panel shows a placeholder meanwhile).
-                visible: root.selected !== null && root.listViews.indexOf(root.currentView) >= 0
+                objectName: "infoPanel"
+                // Sources and failures open here, under the list; packages
+                // open their app page instead.
+                visible: root.selected !== null && root.selected.kind !== "package" && root.listViews.indexOf(root.currentView) >= 0
                 Layout.fillWidth: true
                 // Never taller than the page leaves after the list's minimum, so
                 // short windows keep the actions below on screen; the panel
@@ -3351,6 +3409,74 @@ Controls.ApplicationWindow {
                 Layout.fillHeight: true
             }
         }
+    }
+    // Hides the list behind the app page, rounded corners included.
+    Rectangle {
+        visible: root.appPageOpen
+        x: pageContent.x - root.pageMargin
+        y: pageContent.y - root.pageMargin
+        width: pageContent.width + 2 * root.pageMargin
+        height: pageContent.height + 2 * root.pageMargin
+        color: root.canvas
+    }
+    // A package's store page, over the list: an opened file or link, or a
+    // row someone opened. Back returns to the list as it was.
+    PackageDetails {
+        id: appPage
+        objectName: "detailsPanel"
+        page: true
+        visible: root.appPageOpen
+        x: pageContent.x
+        y: pageContent.y
+        width: pageContent.width
+        height: pageContent.height
+        readonly property bool fromFile: root.opened !== null
+        selected: root.pageRow
+        selectionIdentity: root.rowIdentity(root.pageRow)
+        sourceName: root.sourceDisplayName
+        installed: root.pageRow !== null && root.isInstalled(root.pageRow)
+        readonly property string rowAction: fromFile ? "" : root.rowActionName(root.pageRow)
+        actionText: fromFile ? (root.opened.action || "") : (({install: "Install", remove: "Remove", upgrade: "Update", clean: "Clean", adopt: "Manage with Homebrew"})[rowAction] || "")
+        secondaryActionText: !fromFile && rowAction !== "adopt" && root.pageRow && root.pageRow.source === "appimage" && root.canAdopt(root.pageRow) ? "Manage" : ""
+        secondaryActionSymbol: "install"
+        secondaryActionTone: "accent"
+        onSecondaryActionRequested: root.runAdopt(results.currentIndex)
+        actionAccessibleName: rowAction === "adopt" && root.pageRow ? "Manage " + (root.pageRow.display_name || root.pageRow.name) + " with Homebrew" : ""
+        actionSymbol: rowAction === "upgrade" ? "updates" : rowAction === "remove" ? "remove" : "install"
+        actionTone: fromFile ? "success" : ["upgrade", "adopt"].indexOf(rowAction) >= 0 ? "accent" : rowAction === "install" ? "success" : "danger"
+        actionEnabled: root.canAct && !root.retainingResults && root.pageReview === null
+        onActionRequested: root.runPageAction()
+        screenshots: fromFile ? (root.opened.screenshots || []) : root.visibleScreenshots
+        description: fromFile ? (root.opened.description || "") : root.detailText()
+        detailsData: fromFile ? root.opened : (root.detailMatchesSelection ? root.detail : ({}))
+        detailMatchesSelection: fromFile || root.detailMatchesSelection
+        iconSource: root.iconUrl(fromFile ? (root.opened.package.icon || "") : root.selectedIcon)
+        // The header already names the app, its source and version: say
+        // what happens, and what else changes.
+        reviewSummary: root.pageReview ? [((root.pageReview.action || "Apply") + "?")].concat(root.pageReview.notes || []).join("\n") : ""
+        reviewDetails: root.pageReview ? (root.pageReview.changes || []).join("\n") : ""
+        reviewActionText: root.pageReview ? ((root.pageReview.action || "Apply").trim().split(/\s+/)[0]) : ""
+        reviewDanger: reviewActionText === "Remove"
+        onReviewAccepted: backend.confirm(true)
+        onReviewRejected: { root.activeRows = []; backend.confirm(false); }
+        compact: root.compact
+        motionEnabled: root.motionEnabled
+        textFont: root.font
+        canvas: root.canvas
+        surface: root.surface
+        ink: root.ink
+        muted: root.muted
+        line: root.line
+        accent: root.accent
+        onCloseRequested: root.closePage()
+        onScreenshotRequested: (url, caption) => {
+            root.rememberDialogFocus();
+            root.screenshotUrl = url;
+            root.screenshotCaption = caption;
+            screenshotDialog.open();
+        }
+        onScreenshotFailed: (url, identity) => root.hideFailedScreenshot(url, identity)
+        onVisibleChanged: if (visible) Qt.callLater(() => appPage.forceActiveFocus())
     }
     ThemedDialog {
         id: repositoriesDialog
@@ -4086,10 +4212,14 @@ Controls.ApplicationWindow {
     // In the search field it clears the query; in the list it closes details.
     Shortcut {
         sequence: "Escape"
-        enabled: !root.activityOpen && !!root.activeFocusItem && ((root.activeFocusItem.objectName === "searchField" && searchPane.text.length > 0)
-            || (root.activeFocusItem === results && root.selected !== null))
+        enabled: !root.activityOpen && !confirmation.opened && (root.appPageOpen || !!root.activeFocusItem && ((root.activeFocusItem.objectName === "searchField" && searchPane.text.length > 0)
+            || (root.activeFocusItem === results && root.selected !== null)))
         onActivated: {
-            if (root.activeFocusItem === results)
+            if (root.pageReview !== null)
+                backend.confirm(false);
+            else if (root.appPageOpen)
+                root.closePage();
+            else if (root.activeFocusItem === results)
                 detailsPanel.closeRequested();
             else
                 searchPane.text = "";
