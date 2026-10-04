@@ -3127,6 +3127,55 @@ TestCase {
         verify(!list.reuseItems || !browser.motionEnabled);
         browser.animateListChanges = false;
     }
+    function test_scrolling_reuses_rows_after_a_small_refresh_data() {
+        const cases = [];
+        for (const reduceMotion of [false, true]) {
+            for (const change of ["metadata", "insert", "remove", "unchanged"])
+                cases.push({tag: change + (reduceMotion ? " without motion" : " with motion"), change: change, reduceMotion: reduceMotion});
+        }
+        return cases;
+    }
+    function test_scrolling_reuses_rows_after_a_small_refresh(data) {
+        browser.reduceMotion = data.reduceMotion;
+        browser.openView("Installed");
+        const rows = Array.from({length: 3000}, (_, i) => ({kind: "package", name: "refresh-" + String(i).padStart(4, "0"), source: "apt",
+            installed: "1", candidate: "1", scope: "system", summary: "Synthetic"}));
+        fake.rows = JSON.stringify(rows);
+        const list = findChild(browser, "packageResults");
+        tryCompare(list, "count", rows.length);
+        verify(list.reuseItems);
+        // Streaming metadata or a single changed package must not leave
+        // every later scroll constructing fresh delegates indefinitely.
+        if (data.change === "metadata")
+            rows[2].summary = "Refreshed synthetic metadata";
+        else if (data.change === "insert")
+            rows.splice(2, 0, Object.assign({}, rows[2], {name: "refresh-0001-added"}));
+        else if (data.change === "remove")
+            rows.splice(2, 1);
+        fake.rows = JSON.stringify(rows) + " ";
+        tryCompare(list, "count", rows.length);
+        tryCompare(browser, "modelJson", browser.viewItems.map((row) => browser.rowJson(row)));
+        tryVerify(() => list.reuseItems, 1000);
+        for (const at of [2500, 15, 2990]) {
+            list.positionViewAtIndex(at, ListView.Center);
+            waitForRendering(browser.contentItem);
+            const shown = list.contentItem.children.filter((row) => row.visible && row.rowJson !== undefined
+                && row.y + row.height > list.contentY && row.y < list.contentY + list.height);
+            verify(shown.length > 3);
+            for (const row of shown) {
+                compare(row.opacity, 1);
+                compare(row.rowJson, list.model.get(row.index).rowJson);
+                compare(findChild(row, "packageName").text, JSON.parse(row.rowJson).name);
+            }
+        }
+        // A refresh of identical rows keeps the live pool intact.
+        browser.flushResults();
+        verify(list.reuseItems);
+        const before = list.contentY;
+        mouseWheel(list, list.width / 2, list.height / 2, 0, 120 * 50);
+        tryVerify(() => list.contentY < before);
+        verify(list.reuseItems);
+    }
     function test_sidebar_title_lines_up_with_the_page_title() {
         for (const width of [1100, 900, 700]) {
             browser.width = width;
