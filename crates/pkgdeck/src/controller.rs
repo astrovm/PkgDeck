@@ -179,6 +179,19 @@ pub mod ffi {
             arguments: QString,
             environment: QString,
         ) -> QString;
+        /// Where the installed AppImage at `index` updates from: {github,
+        /// builtin, editable}, {error}, or {} for anything else.
+        #[qinvokable]
+        #[cxx_name = "appUpdateSource"]
+        fn app_update_source(self: Pin<&mut PackageController>, index: i32) -> QString;
+        /// Set its GitHub project (empty stops); returns the error.
+        #[qinvokable]
+        #[cxx_name = "saveAppUpdateSource"]
+        fn save_app_update_source(
+            self: Pin<&mut PackageController>,
+            index: i32,
+            github: QString,
+        ) -> QString;
         /// Start the installed AppImage at `index`; returns the error.
         #[qinvokable]
         #[cxx_name = "launchApp"]
@@ -3224,6 +3237,35 @@ impl ffi::PackageController {
             &environment,
         ) {
             Ok(()) => QString::default(),
+            Err(error) => plain_error(&error, None, false).as_str().into(),
+        }
+    }
+    pub fn app_update_source(self: Pin<&mut Self>, index: i32) -> QString {
+        let Some(package) = self.installed_appimage(index) else {
+            return "{}".into();
+        };
+        encoded(match self.appimages().update_source(&package.id) {
+            Ok(source) => json!(source),
+            Err(error) => json!({"error": plain_error(&error, None, false)}),
+        })
+    }
+    pub fn save_app_update_source(
+        mut self: Pin<&mut Self>,
+        index: i32,
+        github: QString,
+    ) -> QString {
+        let Some(package) = self.installed_appimage(index) else {
+            return "Nothing to change.".into();
+        };
+        match self
+            .appimages()
+            .set_update_source(&package.id, &github.to_string())
+        {
+            Ok(()) => {
+                // Sections loaded before don't know about the new source.
+                self.as_mut().rust_mut().view_cache.expire();
+                QString::default()
+            }
             Err(error) => plain_error(&error, None, false).as_str().into(),
         }
     }
@@ -6694,6 +6736,42 @@ mod tests {
             })
             .expect("the AppImage never started");
         assert_eq!(text, "hi|--other\n");
+        // Where it updates from, saved for the next check.
+        let source: Value =
+            serde_json::from_str(&controller.as_mut().app_update_source(0).to_string()).unwrap();
+        assert_eq!(
+            source,
+            json!({"github": null, "builtin": false, "editable": true})
+        );
+        assert!(!controller
+            .as_mut()
+            .save_app_update_source(0, "not a project".into())
+            .is_empty());
+        assert_eq!(
+            controller
+                .as_mut()
+                .save_app_update_source(0, "example/demo".into())
+                .to_string(),
+            ""
+        );
+        let source: Value =
+            serde_json::from_str(&controller.as_mut().app_update_source(0).to_string()).unwrap();
+        assert_eq!(source["github"], "example/demo");
+        assert_eq!(controller.as_mut().app_update_source(5).to_string(), "{}");
+        assert_eq!(
+            controller
+                .as_mut()
+                .save_app_update_source(5, "x/y".into())
+                .to_string(),
+            "Nothing to change."
+        );
+        // An AppImage that's gone says why.
+        let mut gone = controller.rust().packages[0].clone();
+        gone.id.name = "/nonexistent/pkgdeck-test/other.appimage".into();
+        controller.as_mut().rust_mut().packages.push(gone);
+        let gone: Value =
+            serde_json::from_str(&controller.as_mut().app_update_source(1).to_string()).unwrap();
+        assert!(gone["error"].is_string(), "{gone}");
         std::fs::remove_dir_all(data).unwrap();
     }
     #[test]

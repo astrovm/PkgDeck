@@ -38,6 +38,10 @@ Rectangle {
     // shown for editing on its page when PkgDeck manages it.
     property var launchSettings: null
     property string launchError: ""
+    // Where an AppImage PkgDeck manages updates from ({github, builtin,
+    // editable}), set on its page.
+    property var updateSource: null
+    property string updateError: ""
     property bool compact: false
     property bool motionEnabled: Theme.motionEnabled
     property bool detailMatchesSelection: false
@@ -94,6 +98,7 @@ Rectangle {
     signal reviewRejected()
     signal launchRequested()
     signal launchSettingsSaved(string arguments, var environment)
+    signal updateSourceSaved(string github)
     signal screenshotRequested(string url, string caption)
     signal screenshotFailed(string url, string identity)
     signal actionRequested()
@@ -698,6 +703,66 @@ Rectangle {
                             visible: text.length > 0
                             Layout.fillWidth: true
                             text: panel.launchError
+                            wrapMode: Text.Wrap
+                            color: Theme.danger
+                        }
+                    }
+                    // A GitHub project's releases, for AppImages that can't
+                    // update themselves (or update from somewhere better).
+                    ColumnLayout {
+                        id: updateEditor
+                        objectName: "updateSource"
+                        visible: panel.page && !!panel.updateSource && panel.updateSource.editable === true
+                        Layout.fillWidth: true
+                        spacing: Theme.spacingSmall
+                        property bool dirty: false
+                        function reset() {
+                            githubField.text = (panel.updateSource && panel.updateSource.github) || "";
+                            dirty = false;
+                        }
+                        Connections {
+                            target: panel
+                            function onUpdateSourceChanged() { updateEditor.reset(); }
+                        }
+                        Component.onCompleted: reset()
+                        Controls.Label {
+                            text: "Updates from GitHub"
+                            color: panel.muted
+                            font.pointSize: Theme.pointSize(Theme.smallScale)
+                        }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: Theme.spacingSmall
+                            ThemedTextField {
+                                id: githubField
+                                objectName: "githubRepository"
+                                Layout.fillWidth: true
+                                placeholderText: "owner/name"
+                                Accessible.name: "GitHub project"
+                                onTextEdited: updateEditor.dirty = true
+                                onAccepted: if (updateEditor.dirty) panel.updateSourceSaved(text)
+                            }
+                            DetailsAction {
+                                objectName: "saveUpdateSource"
+                                label: "Save"
+                                symbol: "installed"
+                                tone: panel.accent
+                                enabled: updateEditor.dirty
+                                onClicked: panel.updateSourceSaved(githubField.text)
+                            }
+                        }
+                        Controls.Label {
+                            objectName: "builtinUpdates"
+                            visible: !!panel.updateSource && panel.updateSource.builtin === true && !panel.updateSource.github
+                            text: "Updates itself"
+                            color: panel.muted
+                            font.pointSize: Theme.pointSize(Theme.smallScale)
+                        }
+                        Controls.Label {
+                            objectName: "updateError"
+                            visible: text.length > 0
+                            Layout.fillWidth: true
+                            text: panel.updateError
                             wrapMode: Text.Wrap
                             color: Theme.danger
                         }

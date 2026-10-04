@@ -1,4 +1,5 @@
 use super::appimage_contents::{self, Contents, Icon};
+use super::appimage_github;
 use super::desktop_exec;
 use crate::{
     engine::*,
@@ -37,6 +38,19 @@ pub struct LaunchSettings {
     pub editable: bool,
 }
 
+/// Where an AppImage PkgDeck manages gets its updates: a GitHub project's
+/// releases when one is set, else its own update address (`builtin`).
+#[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize)]
+pub struct UpdateSource {
+    pub github: Option<String>,
+    pub builtin: bool,
+    pub editable: bool,
+}
+
+/// How long a GitHub answer is used before asking again. GitHub allows 60
+/// questions an hour without signing in, shared by everything on the network.
+const GITHUB_REUSE_SECONDS: u64 = 15 * 60;
+
 /// Imports only Type 2 AppImages into PkgDeck-owned storage. Metadata inspection
 /// reads the ELF header; imported files are never executed by this backend.
 pub struct AppImage {
@@ -47,6 +61,8 @@ pub struct AppImage {
     caskrooms: Vec<PathBuf>,
     #[cfg(test)]
     updater: Option<PathBuf>,
+    #[cfg(test)]
+    curl: Option<PathBuf>,
 }
 
 impl AppImage {
@@ -87,6 +103,8 @@ impl AppImage {
             caskrooms: vec![],
             #[cfg(test)]
             updater: None,
+            #[cfg(test)]
+            curl: None,
         }
     }
     #[cfg(test)]
@@ -97,6 +115,7 @@ impl AppImage {
             uid,
             caskrooms: vec![],
             updater: None,
+            curl: None,
         }
     }
     #[cfg(test)]
@@ -487,7 +506,7 @@ impl AppImage {
             summary: contents.comment.clone().unwrap_or_default(),
             installed_version: Some(version.clone()),
             candidate_version: Some(version),
-            update: if Self::has_update_metadata(&path)? {
+            update: if Self::has_update_metadata(&path)? || self.github_source(name).is_some() {
                 UpdateAvailability::Unknown
             } else {
                 UpdateAvailability::Current
@@ -977,6 +996,284 @@ impl AppImage {
             .spawn()
             .map(drop)
     }
+    /// Saved GitHub projects, by managed file name.
+    fn sources_file(&self) -> PathBuf {
+        self.root.with_file_name("appimage-sources.json")
+    }
+    fn sources(&self) -> std::collections::BTreeMap<String, String> {
+        fs::read(self.sources_file())
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default()
+    }
+    fn github_source(&self, name: &str) -> Option<String> {
+        self.sources().remove(name)
+    }
+    fn save_github_source(&self, name: &str, repository: Option<&str>) -> Result<(), EngineError> {
+        let mut sources = self.sources();
+        match repository {
+            Some(repository) => sources.insert(name.to_owned(), repository.to_owned()),
+            None => sources.remove(name),
+        };
+        let file = self.sources_file();
+        let temporary = file.with_extension(format!("json.{}", std::process::id()));
+        fs::create_dir_all(file.parent().unwrap_or(Path::new("/")))
+            .and_then(|()| {
+                fs::write(
+                    &temporary,
+                    serde_json::to_vec_pretty(&sources).unwrap_or_default(),
+                )
+            })
+            .and_then(|()| fs::rename(&temporary, &file))
+            .map_err(|e| {
+                let _ = fs::remove_file(&temporary);
+                Self::invalid(format!("couldn't save where it updates from: {e}"))
+            })
+    }
+    pub fn update_source(&self, id: &PackageId) -> Result<UpdateSource, EngineError> {
+        let (_, file, managed) = self.entry_of(id)?;
+        Ok(UpdateSource {
+            github: managed.then(|| self.github_source(&id.name)).flatten(),
+            builtin: Self::has_update_metadata(&file).unwrap_or(false),
+            editable: managed,
+        })
+    }
+    /// Update an AppImage PkgDeck manages from a GitHub project's releases
+    /// (`owner/name` or a link), or stop: an empty `github`.
+    pub fn set_update_source(&self, id: &PackageId, github: &str) -> Result<(), EngineError> {
+        let (_, _, managed) = self.entry_of(id)?;
+        if !managed {
+            return Err(Self::invalid(
+                "PkgDeck can change only AppImages it manages. Manage it first.",
+            ));
+        }
+        if github.trim().is_empty() {
+            return self.save_github_source(&id.name, None);
+        }
+        let repository = appimage_github::repository(github)
+            .ok_or_else(|| Self::invalid("that isn't a GitHub project (owner/name)"))?;
+        self.save_github_source(&id.name, Some(&repository))
+    }
+    fn curl(&self) -> Result<PathBuf, EngineError> {
+        #[cfg(test)]
+        if let Some(curl) = &self.curl {
+            return Ok(curl.clone());
+        }
+        Host::current()
+            .resolve("curl")?
+            .ok_or_else(|| Self::invalid("curl is unavailable"))
+    }
+    /// A project's releases, newest first. Answers are kept and reused for a
+    /// while, and asked again with their ETag, which GitHub doesn't count.
+    fn github_releases(
+        &self,
+        repository: &str,
+        cancel: &Cancellation,
+    ) -> Result<serde_json::Value, EngineError> {
+        let cache = self.root.with_file_name("appimage-github");
+        let file = cache.join(format!("{}.json", repository.replace('/', "__")));
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let kept: Option<serde_json::Value> = fs::read(&file)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok());
+        if let Some(kept) = kept.as_ref().filter(|kept| {
+            kept["fetched"]
+                .as_u64()
+                .is_some_and(|fetched| now.saturating_sub(fetched) < GITHUB_REUSE_SECONDS)
+        }) {
+            return Ok(kept["releases"].clone());
+        }
+        fs::create_dir_all(&cache).map_err(|e| Self::invalid(e.to_string()))?;
+        let stamp = format!("{}-{}", std::process::id(), now);
+        let headers = cache.join(format!(".headers-{stamp}"));
+        let body = cache.join(format!(".body-{stamp}"));
+        let mut command = std::process::Command::new(self.curl()?);
+        command.args([
+            "--silent",
+            "--show-error",
+            "--location",
+            "--proto",
+            "=https",
+            "--proto-redir",
+            "=https",
+            "--max-filesize",
+            "16777216",
+            "--connect-timeout",
+            "5",
+            "--max-time",
+            "30",
+            "--header",
+            "Accept: application/vnd.github+json",
+            "--write-out",
+            "%{http_code}",
+        ]);
+        if let Some(etag) = kept.as_ref().and_then(|kept| kept["etag"].as_str()) {
+            command
+                .arg("--header")
+                .arg(format!("If-None-Match: {etag}"));
+        }
+        command
+            .arg("--dump-header")
+            .arg(&headers)
+            .arg("--output")
+            .arg(&body)
+            .arg(format!(
+                "https://api.github.com/repos/{repository}/releases?per_page=20"
+            ));
+        let result = process::run(
+            command,
+            Limits {
+                timeout: std::time::Duration::from_secs(35),
+                output_bytes: 1024,
+            },
+            cancel,
+            false,
+        );
+        let header_text = fs::read_to_string(&headers).unwrap_or_default();
+        let body_bytes = fs::read(&body).unwrap_or_default();
+        let _ = fs::remove_file(&headers);
+        let _ = fs::remove_file(&body);
+        let result = result?;
+        let status = String::from_utf8_lossy(&result.stdout).trim().to_owned();
+        let releases = match (status.as_str(), kept) {
+            ("304", Some(kept)) => kept["releases"].clone(),
+            ("200", _) => serde_json::from_slice(&body_bytes)
+                .map_err(|_| Self::invalid("GitHub's answer couldn't be read"))?,
+            ("403" | "429", _) => {
+                return Err(Self::invalid(
+                    "GitHub is limiting how often PkgDeck can ask. It tries again later.",
+                ))
+            }
+            ("404", _) => return Err(Self::invalid(format!("GitHub has no project {repository}"))),
+            _ => return Err(Self::invalid(format!("GitHub didn't answer ({status})"))),
+        };
+        let etag = header_text.lines().rev().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.trim()
+                .eq_ignore_ascii_case("etag")
+                .then(|| value.trim().to_owned())
+        });
+        let record = serde_json::json!({"fetched": now, "etag": etag, "releases": releases});
+        let _ = fs::write(&file, serde_json::to_vec(&record).unwrap_or_default());
+        Ok(releases)
+    }
+    /// Whether the project has a newer AppImage than the file at `path`: by
+    /// version when both have one (in order when both read as versions),
+    /// else by GitHub's checksum.
+    fn github_check(
+        &self,
+        path: &Path,
+        repository: &str,
+        architecture: &str,
+        cancel: &Cancellation,
+    ) -> Result<(UpdateAvailability, Option<String>), EngineError> {
+        let releases = self.github_releases(repository, cancel)?;
+        let Some(asset) = appimage_github::newest(&releases, architecture) else {
+            return Ok((UpdateAvailability::Unknown, None));
+        };
+        let theirs = appimage_github::plain_version(&asset.tag);
+        let offered = Some(theirs.to_owned());
+        if let Some(ours) = Self::contents(path).version.clone() {
+            let ours = appimage_github::plain_version(&ours);
+            let newer = match (
+                appimage_github::ordered(theirs),
+                appimage_github::ordered(ours),
+            ) {
+                (Some(theirs), Some(ours)) => theirs > ours,
+                _ => theirs != ours,
+            };
+            let update = if newer {
+                UpdateAvailability::Available
+            } else {
+                UpdateAvailability::Current
+            };
+            return Ok((update, offered));
+        }
+        let Some(sha256) = asset.sha256 else {
+            return Ok((UpdateAvailability::Unknown, None));
+        };
+        let update = if Self::digest(path, cancel)? == sha256 {
+            UpdateAvailability::Current
+        } else {
+            UpdateAvailability::Available
+        };
+        Ok((update, offered))
+    }
+    /// Replace the managed file at `target` with the project's newest
+    /// AppImage, checked against GitHub's checksum when it has one, and
+    /// only if it is a Type 2 AppImage for the same computer.
+    fn github_update(
+        &self,
+        target: &Path,
+        repository: &str,
+        architecture: &str,
+        cancel: &Cancellation,
+    ) -> Result<(), EngineError> {
+        let releases = self.github_releases(repository, cancel)?;
+        let asset = appimage_github::newest(&releases, architecture).ok_or_else(|| {
+            Self::invalid(format!("{repository} has no AppImage for this computer"))
+        })?;
+        if asset.size > MAX_IMPORT_BYTES {
+            return Err(Self::invalid("its newest AppImage is larger than 2 GiB"));
+        }
+        let temporary = self.root.join(format!(
+            ".pkgdeck-update-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let result = (|| {
+            let mut command = std::process::Command::new(self.curl()?);
+            command
+                .args([
+                    "--silent",
+                    "--show-error",
+                    "--fail",
+                    "--location",
+                    "--proto",
+                    "=https",
+                    "--proto-redir",
+                    "=https",
+                    "--max-redirs",
+                    "5",
+                    "--max-filesize",
+                ])
+                .arg(MAX_IMPORT_BYTES.to_string())
+                .args(["--connect-timeout", "5", "--max-time", "1800", "--output"])
+                .arg(&temporary)
+                .arg(&asset.url);
+            let result = process::run(
+                command,
+                Limits {
+                    timeout: std::time::Duration::from_secs(1805),
+                    output_bytes: 16 * 1024,
+                },
+                cancel,
+                true,
+            )?;
+            if result.code != Some(0) {
+                return Err(Self::invalid(format!("downloading {} failed", asset.name)));
+            }
+            if let Some(sha256) = &asset.sha256 {
+                Self::verify_digest(&temporary, sha256, cancel)?;
+            }
+            if Self::type2(&temporary)? != architecture {
+                return Err(Self::invalid(
+                    "the new AppImage is for another kind of computer",
+                ));
+            }
+            fs::set_permissions(&temporary, fs::Permissions::from_mode(0o755))
+                .and_then(|()| fs::rename(&temporary, target))
+                .map_err(|e| Self::invalid(e.to_string()))
+        })();
+        let _ = fs::remove_file(&temporary);
+        result
+    }
     fn updater(&self) -> Result<PathBuf, EngineError> {
         #[cfg(test)]
         if let Some(updater) = &self.updater {
@@ -1022,7 +1319,16 @@ impl AppImage {
         }
     }
     fn update(&self, id: &PackageId, cancel: &Cancellation) -> Result<(), EngineError> {
-        let target = if Self::managed_name(&id.name) && id.scope == self.scope() {
+        let managed = Self::managed_name(&id.name) && id.scope == self.scope();
+        if let Some(repository) = managed.then(|| self.github_source(&id.name)).flatten() {
+            return self.github_update(
+                &self.root.join(&id.name),
+                &repository,
+                &id.architecture,
+                cancel,
+            );
+        }
+        let target = if managed {
             self.root.join(&id.name)
         } else {
             self.external_entries()?
@@ -1133,12 +1439,30 @@ impl Backend for AppImage {
         let mut packages = self.installed_packages()?;
         for package in &mut packages {
             if package.update == UpdateAvailability::Unknown {
-                let path = if Self::managed_name(&package.id.name) {
+                let managed = Self::managed_name(&package.id.name);
+                let path = if managed {
                     self.root.join(&package.id.name)
                 } else {
                     PathBuf::from(&package.id.name)
                 };
-                package.update = self.check_update(&path, cancel)?;
+                package.update = match managed
+                    .then(|| self.github_source(&package.id.name))
+                    .flatten()
+                {
+                    // GitHub not answering leaves it unknown, never the list.
+                    Some(repository) => {
+                        let (update, offered) = self
+                            .github_check(&path, &repository, &package.id.architecture, cancel)
+                            .unwrap_or((UpdateAvailability::Unknown, None));
+                        if update == UpdateAvailability::Available {
+                            // The version on offer, when GitHub names one.
+                            package.candidate_version =
+                                offered.or(package.candidate_version.take());
+                        }
+                        update
+                    }
+                    None => self.check_update(&path, cancel)?,
+                };
             }
         }
         Ok(packages)
@@ -1231,6 +1555,7 @@ impl Backend for AppImage {
                         .join(format!("pkgdeck-{}.desktop", &id.name[8..72])),
                 );
                 self.remove_icons(&id.name[..72]);
+                let _ = self.save_github_source(&id.name, None);
             }
             Operation::Remove(id)
                 if id.backend == "appimage" && id.scope == self.scope() && id.remote.is_none() =>
@@ -1769,6 +2094,390 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("Manage it first"));
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    /// A stand-in for curl: GitHub's API from `releases.json`, `status` and
+    /// `etag` in `dir` (304 when asked again with that ETag), and downloads
+    /// from `download`. Every call is logged to `calls`.
+    #[cfg(target_os = "linux")]
+    fn fake_curl(dir: &Path) -> PathBuf {
+        let curl = dir.join("curl");
+        fs::write(
+            &curl,
+            format!(
+                r#"#!/bin/sh
+dir='{}'
+out=''; headers=''; known=''; url=''
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --output) shift; out="$1" ;;
+    --dump-header) shift; headers="$1" ;;
+    --header) shift; case "$1" in If-None-Match:*) known="${{1#If-None-Match: }}" ;; esac ;;
+    --max-filesize|--connect-timeout|--max-time|--proto|--proto-redir|--max-redirs|--write-out) shift ;;
+    --*) ;;
+    *) url="$1" ;;
+  esac
+  shift
+done
+echo "$url $known" >> "$dir/calls"
+case "$url" in
+  https://api.github.com/*)
+    status=$(cat "$dir/status")
+    if [ -n "$known" ] && [ "$known" = "$(cat "$dir/etag")" ]; then status=304; : > "$out"; else cat "$dir/releases.json" > "$out"; fi
+    printf 'HTTP/2 %s\r\nETag: %s\r\n\r\n' "$status" "$(cat "$dir/etag")" > "$headers"
+    printf '%s' "$status" ;;
+  *) [ -f "$dir/download" ] || exit 22; cat "$dir/download" > "$out" ;;
+esac
+"#,
+                dir.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&curl, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(dir.join("status"), "200").unwrap();
+        fs::write(dir.join("etag"), "\"v1\"").unwrap();
+        curl
+    }
+
+    #[cfg(target_os = "linux")]
+    fn release(tag: &str, name: &str, sha256: Option<&str>) -> String {
+        serde_json::json!([{"tag_name": tag, "draft": false, "prerelease": false, "assets": [{
+            "name": name,
+            "browser_download_url": format!("https://example.invalid/{name}"),
+            "size": 1000,
+            "digest": sha256.map(|sha| format!("sha256:{sha}")),
+        }]}])
+        .to_string()
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn github_releases_update_appimages_without_their_own_address() {
+        let base = test_base("github");
+        let (mut backend, id, _) = managed_demo(&base);
+        let server = base.join("server");
+        fs::create_dir_all(&server).unwrap();
+        backend.curl = Some(fake_curl(&server));
+        let cancel = Cancellation::default();
+        let calls = || {
+            fs::read_to_string(server.join("calls"))
+                .unwrap_or_default()
+                .lines()
+                .count()
+        };
+        // Nothing set: it has no way to update.
+        assert_eq!(
+            backend.update_source(&id).unwrap(),
+            UpdateSource {
+                github: None,
+                builtin: false,
+                editable: true
+            }
+        );
+        assert_eq!(
+            backend.installed(&cancel).unwrap()[0].update,
+            UpdateAvailability::Current
+        );
+        assert!(backend
+            .set_update_source(&id, "not a project")
+            .unwrap_err()
+            .to_string()
+            .contains("owner/name"));
+        backend
+            .set_update_source(&id, "https://github.com/example/demo/releases")
+            .unwrap();
+        assert_eq!(
+            backend.update_source(&id).unwrap().github.as_deref(),
+            Some("example/demo")
+        );
+        // A newer version on GitHub is offered; the same one isn't.
+        fs::write(
+            server.join("releases.json"),
+            release("v2.1.0", "Demo-2.1.0.AppImage", None),
+        )
+        .unwrap();
+        let offered = backend.installed(&cancel).unwrap().remove(0);
+        assert_eq!(offered.update, UpdateAvailability::Available);
+        assert_eq!(offered.installed_version.as_deref(), Some("2.0"));
+        assert_eq!(offered.candidate_version.as_deref(), Some("2.1.0"));
+        assert_eq!(calls(), 1);
+        // The answer is reused for a while, then asked again with its ETag.
+        assert_eq!(
+            backend.installed(&cancel).unwrap()[0].update,
+            UpdateAvailability::Available
+        );
+        assert_eq!(calls(), 1);
+        let kept = base.join("pkgdeck/appimage-github/example__demo.json");
+        let mut record: serde_json::Value =
+            serde_json::from_slice(&fs::read(&kept).unwrap()).unwrap();
+        assert_eq!(record["etag"], "\"v1\"");
+        record["fetched"] = 0.into();
+        fs::write(&kept, record.to_string()).unwrap();
+        fs::write(
+            server.join("releases.json"),
+            "not JSON, never read on a 304",
+        )
+        .unwrap();
+        assert_eq!(
+            backend.installed(&cancel).unwrap()[0].update,
+            UpdateAvailability::Available
+        );
+        assert!(fs::read_to_string(server.join("calls"))
+            .unwrap()
+            .lines()
+            .last()
+            .unwrap()
+            .ends_with("\"v1\""));
+        // Older or equal versions aren't updates; unreadable ones that differ are.
+        for (tag, expected) in [
+            ("v2.0", UpdateAvailability::Current),
+            ("2.0.0", UpdateAvailability::Current),
+            ("v1.9.0", UpdateAvailability::Current),
+            ("v2.0.1", UpdateAvailability::Available),
+            ("build-7", UpdateAvailability::Available),
+        ] {
+            fs::remove_file(&kept).unwrap();
+            fs::write(server.join("etag"), format!("\"{tag}\"")).unwrap();
+            fs::write(
+                server.join("releases.json"),
+                release(tag, "Demo.AppImage", None),
+            )
+            .unwrap();
+            assert_eq!(
+                backend.installed(&cancel).unwrap()[0].update,
+                expected,
+                "{tag}"
+            );
+        }
+        // GitHub saying no leaves the update unknown and the list intact.
+        for status in ["403", "404", "500"] {
+            let _ = fs::remove_file(&kept);
+            fs::write(server.join("status"), status).unwrap();
+            assert_eq!(
+                backend.installed(&cancel).unwrap()[0].update,
+                UpdateAvailability::Unknown,
+                "{status}"
+            );
+        }
+        let _ = fs::remove_file(&kept);
+        fs::write(server.join("status"), "200").unwrap();
+        fs::write(server.join("releases.json"), "[{]").unwrap();
+        assert!(backend
+            .github_releases("example/demo", &cancel)
+            .unwrap_err()
+            .to_string()
+            .contains("couldn't be read"));
+        // No AppImage for this computer: unknown, and nothing to update to.
+        fs::write(
+            server.join("releases.json"),
+            release("v3.0.0", "Demo-3.0.0-arm64.AppImage", None),
+        )
+        .unwrap();
+        assert_eq!(
+            backend.installed(&cancel).unwrap()[0].update,
+            UpdateAvailability::Unknown
+        );
+        assert!(backend
+            .update(&id, &cancel)
+            .unwrap_err()
+            .to_string()
+            .contains("no AppImage for this computer"));
+        // Updating checks GitHub's checksum and the file, then replaces it.
+        let file = base.join("pkgdeck/appimages").join(&id.name);
+        let newer = server.join("download");
+        let entry = DEMO_ENTRY.to_vec();
+        let entry = String::from_utf8(entry)
+            .unwrap()
+            .replace("X-AppImage-Version=2.0", "X-AppImage-Version=2.1.0");
+        appimage_with(
+            &newer,
+            backhand::compression::Compressor::Gzip,
+            &[("demo.desktop", entry.as_bytes()), ("demo.png", DEMO_PNG)],
+        );
+        let sha = AppImage::digest(&newer, &cancel).unwrap();
+        let before = fs::read(&file).unwrap();
+        let _ = fs::remove_file(&kept);
+        fs::write(
+            server.join("releases.json"),
+            release("v2.1.0", "Demo-2.1.0.AppImage", Some(&"0".repeat(64))),
+        )
+        .unwrap();
+        assert!(backend.update(&id, &cancel).is_err());
+        assert_eq!(fs::read(&file).unwrap(), before);
+        let _ = fs::remove_file(&kept);
+        fs::write(
+            server.join("releases.json"),
+            release("v2.1.0", "Demo-2.1.0.AppImage", Some(&sha)),
+        )
+        .unwrap();
+        backend
+            .execute(
+                &Operation::UpgradeAll {
+                    backend: "appimage".into(),
+                },
+                &cancel,
+                &mut ignore,
+            )
+            .unwrap();
+        assert_eq!(fs::read(&file).unwrap(), fs::read(&newer).unwrap());
+        assert_eq!(
+            fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        let installed = backend.installed(&cancel).unwrap().remove(0);
+        assert_eq!(installed.installed_version.as_deref(), Some("2.1.0"));
+        assert_eq!(installed.update, UpdateAvailability::Current);
+        // A download that fails, or isn't for this computer, changes nothing.
+        let current = fs::read(&file).unwrap();
+        fs::remove_file(&newer).unwrap();
+        assert!(backend
+            .update(&id, &cancel)
+            .unwrap_err()
+            .to_string()
+            .contains("downloading"));
+        // Without a checksum from GitHub, the file itself is still checked.
+        let _ = fs::remove_file(&kept);
+        fs::write(
+            server.join("releases.json"),
+            release("v2.2.0", "Demo-2.2.0.AppImage", None),
+        )
+        .unwrap();
+        let mut arm = fs::read(&file).unwrap();
+        arm[18..20].copy_from_slice(&183_u16.to_le_bytes());
+        fs::write(&newer, &arm).unwrap();
+        assert!(backend
+            .update(&id, &cancel)
+            .unwrap_err()
+            .to_string()
+            .contains("another kind of computer"));
+        assert_eq!(fs::read(&file).unwrap(), current);
+        assert!(fs::read_dir(base.join("pkgdeck/appimages"))
+            .unwrap()
+            .all(|e| !e.unwrap().file_name().to_string_lossy().starts_with('.')));
+        // Releases kept from a moment ago are used without asking; a file
+        // too large, or curl missing for the download, is refused.
+        let _ = fs::remove_file(&kept);
+        let mut huge: serde_json::Value =
+            serde_json::from_str(&release("v9.0.0", "Demo-9.0.0.AppImage", None)).unwrap();
+        huge[0]["assets"][0]["size"] = (MAX_IMPORT_BYTES + 1).into();
+        fs::write(server.join("releases.json"), huge.to_string()).unwrap();
+        assert!(backend
+            .update(&id, &cancel)
+            .unwrap_err()
+            .to_string()
+            .contains("larger than 2 GiB"));
+        fs::write(&kept, serde_json::json!({"fetched": u64::MAX / 2, "releases": serde_json::from_str::<serde_json::Value>(&release("v9.0.0", "Demo-9.0.0.AppImage", None)).unwrap()}).to_string()).unwrap();
+        backend.curl = Some(base.join("missing-curl"));
+        assert!(backend.update(&id, &cancel).is_err());
+        assert_eq!(fs::read(&file).unwrap(), current);
+        backend.curl = Some(fake_curl(&server));
+        // Clearing it stops GitHub updates; removing the app forgets it.
+        backend.set_update_source(&id, " ").unwrap();
+        assert_eq!(backend.update_source(&id).unwrap().github, None);
+        backend.set_update_source(&id, "example/demo").unwrap();
+        backend
+            .execute(&Operation::Remove(id.clone()), &cancel, &mut ignore)
+            .unwrap();
+        assert!(
+            !fs::read_to_string(base.join("pkgdeck/appimage-sources.json"))
+                .unwrap()
+                .contains("example")
+        );
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn curl_comes_from_the_host() {
+        let backend = AppImage::new("/nonexistent/a".into(), "/nonexistent/b".into(), 1000);
+        // Every build PkgDeck tests on has curl; it's found on the PATH.
+        assert!(backend.curl().unwrap().ends_with("curl"));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn without_a_version_github_checksums_decide() {
+        let base = test_base("github-digest");
+        let uid = rustix::process::getuid().as_raw();
+        let applications = base.join("applications");
+        fs::create_dir_all(&applications).unwrap();
+        let source = base.join("bare.AppImage");
+        appimage_with(
+            &source,
+            backhand::compression::Compressor::Gzip,
+            &[("demo.png", DEMO_PNG)],
+        );
+        let mut backend = AppImage::new(base.join("pkgdeck/appimages"), applications.clone(), uid);
+        let server = base.join("server");
+        fs::create_dir_all(&server).unwrap();
+        backend.curl = Some(fake_curl(&server));
+        let cancel = Cancellation::default();
+        let id = backend
+            .search(source.to_str().unwrap(), &cancel)
+            .unwrap()
+            .remove(0)
+            .id;
+        backend
+            .execute(&Operation::Install(id), &cancel, &mut ignore)
+            .unwrap();
+        let id = backend.installed(&cancel).unwrap().remove(0).id;
+        backend.set_update_source(&id, "example/bare").unwrap();
+        let kept = base.join("pkgdeck/appimage-github/example__bare.json");
+        let sha = AppImage::digest(&source, &cancel).unwrap();
+        for (digest, expected) in [
+            (Some(sha.as_str()), UpdateAvailability::Current),
+            (Some(&*"f".repeat(64)), UpdateAvailability::Available),
+            (None, UpdateAvailability::Unknown),
+        ] {
+            let _ = fs::remove_file(&kept);
+            fs::write(
+                server.join("releases.json"),
+                release("v1", "Bare.AppImage", digest),
+            )
+            .unwrap();
+            assert_eq!(
+                backend.installed(&cancel).unwrap()[0].update,
+                expected,
+                "{digest:?}"
+            );
+        }
+        // AppImages PkgDeck doesn't manage can't be pointed at GitHub.
+        let other = base.join("other.appimage");
+        appimage_with(
+            &other,
+            backhand::compression::Compressor::Gzip,
+            &[("demo.png", DEMO_PNG)],
+        );
+        fs::write(
+            applications.join("other.desktop"),
+            format!(
+                "[Desktop Entry]\nName=Other\nExec=\"{}\"\n",
+                other.display()
+            ),
+        )
+        .unwrap();
+        let external = backend.external_packages().unwrap().remove(0).id;
+        assert_eq!(
+            backend.update_source(&external).unwrap(),
+            UpdateSource {
+                github: None,
+                builtin: false,
+                editable: false
+            }
+        );
+        assert!(backend
+            .set_update_source(&external, "example/other")
+            .unwrap_err()
+            .to_string()
+            .contains("Manage it first"));
+        // A sources file that can't be written is reported.
+        fs::remove_file(base.join("pkgdeck/appimage-sources.json")).unwrap();
+        fs::create_dir(base.join("pkgdeck/appimage-sources.json")).unwrap();
+        assert!(backend
+            .set_update_source(&id, "example/bare")
+            .unwrap_err()
+            .to_string()
+            .contains("couldn't save"));
         fs::remove_dir_all(base).unwrap();
     }
 

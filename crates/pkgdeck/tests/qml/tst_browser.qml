@@ -43,6 +43,15 @@ TestCase {
             return launchResult;
         }
         function launchApp(index) { launches++; return launchResult; }
+        property string updateSource: "{}"
+        property string savedGithub: ""
+        function appUpdateSource(index) { return updateSource; }
+        function saveAppUpdateSource(index, github) {
+            savedGithub = github;
+            if (!launchResult)
+                updateSource = JSON.stringify(Object.assign(JSON.parse(updateSource), {github: github || null}));
+            return launchResult;
+        }
         property int openedInstalls: 0
         function installOpened() { openedInstalls++; }
         function closeOpened() { opened = ""; }
@@ -111,12 +120,19 @@ TestCase {
                 data.changes = nextReview ? ["Install synthetic-library (1)", "Install other-library (2)"] : [];
             }
             confirmation_data = JSON.stringify(data);
+            preparing = true;
             confirmation = action + " synthetic-tool from apt, all, system";
+            preparing = false;
         }
         function proposeChecked(identities) {
             lastChecked = identities;
         }
+        // Like the controller, a preview is announced before its change is
+        // stored; confirming in between finds nothing to run.
+        property bool preparing: false
         function confirm(approved) {
+            if (preparing)
+                return;
             if (approved)
                 writes++;
             confirmation = "";
@@ -568,7 +584,7 @@ TestCase {
         compare(fake.openedInstalls, 1);
         fake.confirmation_data = JSON.stringify({action: "Install Demo", review: false});
         fake.confirmation = "Install Demo";
-        compare(fake.writes, 1);
+        tryCompare(fake, "writes", 1);
         verify(!findChild(browser, "confirmationDialog").opened);
         // Once installed, the page has nothing left to press.
         fake.opened = JSON.stringify(Object.assign(JSON.parse(fake.opened), {action: "", package: Object.assign({}, row, {installed: "2.1.7"})}));
@@ -627,7 +643,8 @@ TestCase {
         const dialog = findChild(browser, "confirmationDialog");
         fake.nextReview = false;
         mouseClick(findChild(list.itemAtIndex(0), "rowPackageAction"));
-        compare(fake.writes, 1);
+        // Confirmed once the change it announced is stored.
+        tryCompare(fake, "writes", 1);
         verify(!dialog.opened);
         // More than that app changes: the dialog asks first.
         fake.nextReview = true;
@@ -706,6 +723,28 @@ TestCase {
         mouseClick(launch);
         tryCompare(findChild(page, "launchError"), "text", "couldn't start it");
         fake.launchResult = "";
+        // Where it updates from: a GitHub project, saved with Enter or Save.
+        fake.updateSource = JSON.stringify({github: null, builtin: true, editable: true});
+        browser.launchRevision++;
+        const updates = findChild(page, "updateSource");
+        verify(updates.visible);
+        verify(findChild(page, "builtinUpdates").visible);
+        const github = findChild(page, "githubRepository");
+        github.forceActiveFocus();
+        for (const c of "example/demo")
+            keyClick(c);
+        verify(findChild(page, "saveUpdateSource").enabled);
+        keyClick(Qt.Key_Return);
+        compare(fake.savedGithub, "example/demo");
+        compare(github.text, "example/demo");
+        verify(!findChild(page, "builtinUpdates").visible);
+        verify(!findChild(page, "saveUpdateSource").enabled);
+        fake.launchResult = "that isn't a GitHub project (owner/name)";
+        keyClick(Qt.Key_Backspace);
+        mouseClick(findChild(page, "saveUpdateSource"));
+        tryCompare(findChild(page, "updateError"), "text", "that isn't a GitHub project (owner/name)");
+        fake.launchResult = "";
+        fake.updateSource = "{}";
         // AppImages PkgDeck doesn't manage launch, but don't change.
         fake.launchSettings = JSON.stringify({arguments: "%U", environment: [], editable: false});
         browser.launchRevision++;
