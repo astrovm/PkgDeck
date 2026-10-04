@@ -114,6 +114,10 @@ pub mod ffi {
         #[qproperty(QString, self_update)]
         #[qproperty(QString, confirmation)]
         #[qproperty(QString, confirmation_data)]
+        /// The opened file or link's app page, shaped like `details` plus
+        /// `action` (Install, Manage, or empty once installed); empty when
+        /// nothing is open.
+        #[qproperty(QString, opened)]
         #[qproperty(QString, version)]
         #[qproperty(bool, busy)]
         #[qproperty(bool, writing)]
@@ -160,6 +164,12 @@ pub mod ffi {
         #[qinvokable]
         #[cxx_name = "openInput"]
         fn open_input(self: Pin<&mut PackageController>, input: QString);
+        #[qinvokable]
+        #[cxx_name = "installOpened"]
+        fn install_opened(self: Pin<&mut PackageController>);
+        #[qinvokable]
+        #[cxx_name = "closeOpened"]
+        fn close_opened(self: Pin<&mut PackageController>);
         #[qinvokable]
         #[cxx_name = "setOpenFlatpakScope"]
         fn set_open_flatpak_scope(self: Pin<&mut PackageController>, system: bool);
@@ -307,7 +317,8 @@ struct Confirmed {
     cleanup_preview: Vec<CleanupItem>,
 }
 enum Payload {
-    OpenPackage(Box<Package>),
+    /// An opened file or link, with what it says about itself.
+    OpenPackage(Box<PackageDetails>),
     OpenRepository(RepositoryImport),
     Repositories(repositories::Report),
     Packages(PackageReport),
@@ -588,10 +599,18 @@ fn is_appimage(path: &std::path::Path) -> bool {
         .and_then(|mut file| file.read_exact(&mut header))
         .is_ok_and(|()| header.starts_with(b"\x7fELF") && &header[8..11] == b"AI\x02")
 }
+/// An opened package that has nothing more to say than its own fields.
+fn opened_payload(package: Package) -> Payload {
+    Payload::OpenPackage(Box::new(PackageDetails {
+        description: String::new(),
+        homepage: package.homepages.first().cloned(),
+        dependencies: vec![],
+        package,
+    }))
+}
 fn inspect_open_input(input: &str, cancel: &Cancellation) -> Result<Payload, EngineError> {
     if let Some(url) = input.strip_prefix("flatpak+") {
-        return pkgdeck_core::flatpak_ref::inspect(url, cancel)
-            .map(|package| Payload::OpenPackage(Box::new(package)));
+        return pkgdeck_core::flatpak_ref::inspect(url, cancel).map(opened_payload);
     }
     if input.starts_with("https://") {
         if repository_input::supported(input) {
@@ -602,11 +621,9 @@ fn inspect_open_input(input: &str, cancel: &Cancellation) -> Result<Payload, Eng
             .next()
             .is_some_and(|url| url.ends_with(".flatpakref"))
         {
-            return pkgdeck_core::flatpak_ref::inspect(input, cancel)
-                .map(|package| Payload::OpenPackage(Box::new(package)));
+            return pkgdeck_core::flatpak_ref::inspect(input, cancel).map(opened_payload);
         }
-        return pkgdeck_core::artifact::inspect(input, cancel)
-            .map(|package| Payload::OpenPackage(Box::new(package)));
+        return pkgdeck_core::artifact::inspect(input, cancel).map(opened_payload);
     }
     let path = local_input_path(input).map_err(|reason| EngineError::InvalidResponse {
         backend: "open".into(),
@@ -627,11 +644,14 @@ fn inspect_open_input(input: &str, cancel: &Cancellation) -> Result<Payload, Eng
                 .search(&path.to_string_lossy(), cancel)
                 .and_then(|mut packages| packages.pop().ok_or(EngineError::NotFound))
         }
-        "deb" => pkgdeck_core::local_deb::inspect(&path, cancel),
+        "deb" => {
+            return pkgdeck_core::local_deb::inspect_details(&path, cancel)
+                .map(|details| Payload::OpenPackage(Box::new(details)));
+        }
         "flatpakref" => pkgdeck_core::flatpak_ref::inspect(&path.to_string_lossy(), cancel),
         _ => pkgdeck_core::artifact::inspect(&path.to_string_lossy(), cancel),
     };
-    package.map(|package| Payload::OpenPackage(Box::new(package)))
+    package.map(opened_payload)
 }
 /// Resolve the cask a macOS app row names through the real Homebrew Casks
 /// source, as `pkd install --from homebrew-cask` does, and preview installing
@@ -1247,6 +1267,9 @@ pub struct Controller {
     progress: QString,
     confirmation: QString,
     confirmation_data: QString,
+    opened: QString,
+    /// The package `opened` shows.
+    opened_package: Option<Package>,
     repositories: QString,
     source_catalog: QString,
     report_state: QString,
@@ -1347,6 +1370,8 @@ impl Default for Controller {
             progress: "{}".into(),
             confirmation: QString::default(),
             confirmation_data: "{}".into(),
+            opened: QString::default(),
+            opened_package: None,
             repositories: "{}".into(),
             source_catalog: "[]".into(),
             report_state: r#"{"phase":"idle"}"#.into(),
@@ -2828,6 +2853,9 @@ fn confirmation_preview(
     let mut summary = vec![operation_label(operation)];
     let mut title = action_name(operation).to_owned();
     let mut icon = None;
+    // Installing or updating one app needs no second look. Anything that
+    // removes, changes more than that app, or moves files is reviewed.
+    let mut review = !matches!(operation, Operation::Install(_) | Operation::Upgrade(_));
     if let Some(package) = packages.iter().find(|package| match operation {
         Operation::Install(id) | Operation::Remove(id) | Operation::Upgrade(id) => {
             package.id == *id
@@ -2914,6 +2942,10 @@ fn confirmation_preview(
     ) {
         summary[0] = title.clone();
     }
+    // What follows the name, source and version is worth saying on an app
+    // page too, which already shows those.
+    let notes_from = summary.len();
+    let mut other_changes = Vec::new();
     if let Some(plan) = plan {
         let requested_name = match operation {
             Operation::Install(id) | Operation::Remove(id) | Operation::Upgrade(id) => {
@@ -2965,6 +2997,8 @@ fn confirmation_preview(
             })
             .map(describe)
             .collect::<Vec<_>>();
+        review |= !changes.is_empty() || plan.adopts.is_some();
+        other_changes.clone_from(&changes);
         if !changes.is_empty() {
             let removals = plan
                 .changes
@@ -3035,7 +3069,41 @@ fn confirmation_preview(
         }
         _ => "",
     };
-    json!({"action": title, "body": lines.join("\n\n"), "summary": summary.join("\n"), "details": lines.iter().skip(1).filter(|line| !summary.contains(line)).cloned().collect::<Vec<_>>().join("\n\n"), "flatpak_ref_scope": flatpak_ref_scope, "icon": icon})
+    json!({"action": title, "body": lines.join("\n\n"), "summary": summary.join("\n"), "details": lines.iter().skip(1).filter(|line| !summary.contains(line)).cloned().collect::<Vec<_>>().join("\n\n"), "flatpak_ref_scope": flatpak_ref_scope, "icon": icon, "review": review || !flatpak_ref_scope.is_empty(), "notes": summary.get(notes_from..).unwrap_or_default(), "changes": other_changes})
+}
+/// The app page of an opened file or link: the `details` shape, plus where
+/// it came from and what its button does.
+fn opened_page(details: &PackageDetails, action: &str) -> Value {
+    let package = &details.package;
+    let info = crate::metadata::cached_info(package);
+    let summary = package.summary.lines().next().unwrap_or_default();
+    let description = info
+        .as_ref()
+        .map(|info| info.description.clone())
+        .filter(|description| !description.is_empty())
+        .unwrap_or_else(|| details.description.clone());
+    let location = match package.id.reference.as_deref() {
+        Some(reference) if reference.starts_with("local-deb:") => reference
+            .splitn(3, ':')
+            .nth(2)
+            .unwrap_or_default()
+            .to_owned(),
+        Some(reference) if reference.starts_with("flatpakref:") => package.id.name.clone(),
+        _ => package.id.name.clone(),
+    };
+    let mut row = package_row(package, &[], None);
+    row["summary"] = json!(summary);
+    json!({
+        "package": row,
+        "description": description,
+        "homepage": details.homepage.clone().or_else(|| info.as_ref().and_then(|i| i.homepage.clone())),
+        "publisher": info.as_ref().and_then(|i| i.publisher.clone()),
+        "license": info.as_ref().and_then(|i| i.license.clone()),
+        "dependencies": details.dependencies,
+        "screenshots": info.as_ref().map(|i| i.screenshots.clone()).unwrap_or_default(),
+        "location": location,
+        "action": action,
+    })
 }
 fn package_row(p: &Package, same_from: &[String], same_group: Option<&str>) -> Value {
     json!({"name": p.id.name, "display_name": p.display_name, "source": p.id.backend, "architecture": p.id.architecture,
@@ -3078,6 +3146,52 @@ impl ffi::PackageController {
             return;
         }
         self.start(Job::OpenInput(input.to_string()));
+    }
+    /// Install (or Manage) what the open app page shows: preview the change
+    /// as opening a file did before it had a page.
+    pub fn install_opened(mut self: Pin<&mut Self>) {
+        let Some(package) = self.rust().opened_package.clone() else {
+            return;
+        };
+        if package.adopt_with.as_deref() == Some("appimage") {
+            self.as_mut().start(Job::PlanAdoption(Box::new(package)));
+            return;
+        }
+        let operation = Operation::Install(package.id.clone());
+        if package.id.backend == "apt" {
+            self.as_mut().start(Job::PlanOperation(operation));
+        } else {
+            self.as_mut()
+                .apply(Ok(Payload::OperationPreview(operation, None)));
+        }
+    }
+    /// Once the open page's own install finished, it shows the app as
+    /// installed, with nothing left to press.
+    fn mark_opened_installed(
+        mut self: Pin<&mut Self>,
+        job: &Job,
+        result: &Result<Payload, EngineError>,
+    ) {
+        let Some(package) = self.rust().opened_package.clone() else {
+            return;
+        };
+        let installed = result.is_ok()
+            && job
+                .operations()
+                .iter()
+                .any(|operation| matches!(operation, Operation::Install(id) if *id == package.id));
+        if !installed {
+            return;
+        }
+        // The page was written from this same package just before.
+        let mut data: Value = serde_json::from_str(&self.opened().to_string()).unwrap_or_default();
+        data["action"] = json!("");
+        data["package"]["installed"] = data["package"]["candidate"].clone();
+        self.as_mut().set_opened(encoded(data));
+    }
+    pub fn close_opened(mut self: Pin<&mut Self>) {
+        self.as_mut().rust_mut().opened_package = None;
+        self.as_mut().set_opened(QString::default());
     }
     pub fn set_open_flatpak_scope(mut self: Pin<&mut Self>, system: bool) {
         let Some(Job::Write(Operation::Install(previous), None)) = &self.rust().pending else {
@@ -4582,27 +4696,23 @@ impl ffi::PackageController {
                     self.set_status(plain_error(&e, None, sudo).as_str().into());
                 }
             }
-            // An AppImage already installed some other way: installing it
-            // means moving it in, so preview that instead.
-            Ok(Payload::OpenPackage(package))
-                if package.adopt_with.as_deref() == Some("appimage") =>
-            {
-                self.as_mut().start(Job::PlanAdoption(package));
-            }
-            Ok(Payload::OpenPackage(package)) => {
-                let operation = Operation::Install(package.id.clone());
-                let apt = package.id.backend == "apt";
-                self.as_mut()
-                    .rust_mut()
-                    .packages
-                    .retain(|row| row.id != package.id);
-                self.as_mut().rust_mut().packages.push(*package);
-                if apt {
-                    self.as_mut().start(Job::PlanOperation(operation));
-                } else {
-                    self.as_mut()
-                        .apply(Ok(Payload::OperationPreview(operation, None)));
+            // An opened file or link gets its own app page; Install there
+            // previews the change.
+            Ok(Payload::OpenPackage(details)) => {
+                let package = details.package.clone();
+                {
+                    let mut rust = self.as_mut().rust_mut();
+                    rust.packages.retain(|row| row.id != package.id);
+                    rust.packages.push(package.clone());
+                    rust.opened_package = Some(package.clone());
                 }
+                let action = if package.adopt_with.as_deref() == Some("appimage") {
+                    "Manage"
+                } else {
+                    "Install"
+                };
+                let data = opened_page(&details, action);
+                self.as_mut().set_opened(encoded(data));
             }
             Ok(Payload::OpenRepository(import)) => {
                 let action = if import.suffix == "ymp" {
@@ -4751,6 +4861,7 @@ impl ffi::PackageController {
                     "Homebrew"
                 };
                 data["action"] = json!(format!("Manage with {manager}"));
+                data["notes"] = json!([plan.native_preview]);
                 data["body"] = json!(format!(
                     "{}\n\n{}",
                     plan.native_preview,
@@ -5665,6 +5776,7 @@ impl ffi::PackageController {
                             }
                         }
                         if job.writes() {
+                            self.as_mut().mark_opened_installed(&job, &result);
                             // A changed plan is not a failure: the new plan
                             // opens for review right after this.
                             let mut notice = if repreview_changed_plan(
@@ -6035,8 +6147,8 @@ mod tests {
             "flatpak+https://example.invalid/synthetic.flatpakref",
         ] {
             let preview = inspect_open_input(link, &cancel).unwrap();
-            let package = expect!(preview, Payload::OpenPackage(package) => package);
-            assert_eq!(package.id.name, "org.example.Synthetic");
+            let opened = expect!(preview, Payload::OpenPackage(opened) => opened);
+            assert_eq!(opened.package.id.name, "org.example.Synthetic");
         }
         let preview =
             inspect_open_input("https://example.invalid/synthetic.flatpakrepo", &cancel).unwrap();
@@ -6044,8 +6156,8 @@ mod tests {
         assert_eq!(import.name, "synthetic");
         let preview =
             inspect_open_input("https://example.invalid/synthetic.flatpak", &cancel).unwrap();
-        let package = expect!(preview, Payload::OpenPackage(package) => package);
-        assert_eq!(package.id.backend, "flatpak");
+        let opened = expect!(preview, Payload::OpenPackage(opened) => opened);
+        assert_eq!(opened.package.id.backend, "flatpak");
         assert!(inspect_open_input("https://example.invalid/unsupported.bin", &cancel).is_err());
     }
     #[test]
@@ -6211,7 +6323,8 @@ mod tests {
             .unwrap();
         assert!(status.success());
         let preview = inspect_open_input(archive.to_str().unwrap(), &Cancellation::default());
-        let package = expect!(preview.unwrap(), Payload::OpenPackage(package) => package);
+        let opened = expect!(preview.unwrap(), Payload::OpenPackage(opened) => opened);
+        let package = &opened.package;
         assert_eq!(package.id.backend, "apt");
         assert_eq!(package.id.name, "pkgdeck-open-synthetic");
         assert_eq!(package.candidate_version.as_deref(), Some("1.2.3"));
@@ -6246,13 +6359,16 @@ mod tests {
             .as_mut()
             .open_input(source.to_str().unwrap().into());
         let deadline = Instant::now() + Duration::from_secs(15);
-        while Instant::now() < deadline {
+        while Instant::now() < deadline && controller.opened().is_empty() {
             controller.as_mut().poll();
-            if !controller.confirmation().is_empty() {
-                break;
-            }
             std::thread::sleep(Duration::from_millis(10));
         }
+        // It opens as a page first; nothing is asked until Install.
+        let page: Value = serde_json::from_str(&controller.opened().to_string()).unwrap();
+        assert_eq!(page["action"], "Install", "{page}");
+        assert_eq!(page["location"], source.to_str().unwrap());
+        assert!(controller.confirmation().is_empty());
+        controller.as_mut().install_opened();
         let preview = controller.confirmation().to_string();
         let status = controller.status();
         assert!(
@@ -6300,13 +6416,11 @@ mod tests {
             .to_string()
             .contains("The file will open when the current operation finishes"));
         let deadline = Instant::now() + Duration::from_secs(15);
-        while Instant::now() < deadline {
+        while Instant::now() < deadline && controller.opened().is_empty() {
             controller.as_mut().poll();
-            if !controller.confirmation().is_empty() {
-                break;
-            }
             std::thread::sleep(Duration::from_millis(10));
         }
+        controller.as_mut().install_opened();
         let preview = controller.confirmation().to_string();
         assert!(preview.contains("org.example.Synthetic"), "{preview}");
         assert!(
@@ -6370,6 +6484,156 @@ mod tests {
             "Choose an installation file."
         );
         std::fs::remove_dir_all(base).unwrap();
+    }
+    #[test]
+    fn previews_say_when_a_change_needs_a_second_look() {
+        let package = synthetic_package("synthetic", "Synthetic");
+        let install = Operation::Install(package.id.clone());
+        let preview = |operation: &Operation, plan: Option<&TransactionPlan>| {
+            confirmation_preview(operation, std::slice::from_ref(&package), &[], plan)
+        };
+        // Installing or updating just that app runs without asking.
+        assert_eq!(preview(&install, None)["review"], false);
+        assert_eq!(
+            preview(&Operation::Upgrade(package.id.clone()), None)["review"],
+            false
+        );
+        // Removing always asks, and says what may stay behind.
+        let removal = preview(&Operation::Remove(package.id.clone()), None);
+        assert_eq!(removal["review"], true);
+        assert_eq!(
+            removal["notes"],
+            json!([
+                "Other changes may be required.",
+                "App data may remain after removal."
+            ])
+        );
+        // A plan that changes other packages lists them.
+        let change = |name: &str| PlannedChange {
+            action: PlannedAction::Install,
+            name: name.into(),
+            installed_version: None,
+            candidate_version: Some("1".into()),
+        };
+        let mut plan = TransactionPlan {
+            operation: install.clone(),
+            native_preview: String::new(),
+            changes: vec![change("synthetic")],
+            download_bytes: None,
+            disk_bytes: None,
+            restart_required: None,
+            adopts: None,
+        };
+        let alone = preview(&install, Some(&plan));
+        assert_eq!(alone["review"], false);
+        assert_eq!(alone["changes"], json!([]));
+        plan.changes.push(change("synthetic-library"));
+        let more = preview(&install, Some(&plan));
+        assert_eq!(more["review"], true);
+        assert_eq!(more["notes"], json!(["1 other package will change"]));
+        assert_eq!(more["changes"], json!(["Install synthetic-library (1)"]));
+        // Moving an app already in place is reviewed too.
+        plan.changes.truncate(1);
+        plan.adopts = Some("/Applications/Synthetic.app".into());
+        assert_eq!(preview(&install, Some(&plan))["review"], true);
+        // So is anything that isn't one app.
+        assert_eq!(
+            confirmation_preview(
+                &Operation::UpgradeAll {
+                    backend: "apt".into()
+                },
+                &[],
+                &[],
+                None
+            )["review"],
+            true
+        );
+    }
+    #[test]
+    fn opened_files_show_a_page_until_back_and_installed_after_their_install() {
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        // Nothing open: Install does nothing.
+        controller.as_mut().install_opened();
+        assert!(controller.confirmation().is_empty());
+        let mut package = synthetic_package("demo", "Demo");
+        package.id.backend = "fixture".into();
+        package.installed_version = None;
+        package.candidate_version = Some("2.1.7".into());
+        package.summary =
+            "Flash images safely\nLocal archive: /home/user/Downloads/demo.deb".into();
+        package.id.reference = Some(format!(
+            "local-deb:{}:/home/user/Downloads/demo.deb",
+            "ab".repeat(32)
+        ));
+        let details = PackageDetails {
+            description: "A longer description.".into(),
+            homepage: Some("https://example.invalid/demo".into()),
+            dependencies: vec!["libc6".into()],
+            package: package.clone(),
+        };
+        controller
+            .as_mut()
+            .apply(Ok(Payload::OpenPackage(Box::new(details))));
+        let page: Value = serde_json::from_str(&controller.opened().to_string()).unwrap();
+        assert_eq!(page["action"], "Install");
+        assert_eq!(page["location"], "/home/user/Downloads/demo.deb");
+        assert_eq!(page["package"]["summary"], "Flash images safely");
+        assert_eq!(page["description"], "A longer description.");
+        assert_eq!(page["homepage"], "https://example.invalid/demo");
+        assert_eq!(page["dependencies"], json!(["libc6"]));
+        // Nothing is asked until Install.
+        assert!(controller.confirmation().is_empty());
+        controller.as_mut().install_opened();
+        let data: Value =
+            serde_json::from_str(&controller.confirmation_data().to_string()).unwrap();
+        assert_eq!(data["review"], false);
+        controller.as_mut().confirm(false);
+        // Another app's install leaves the page as it is; its own marks it installed.
+        let job = |id: &PackageId| Job::Write(Operation::Install(id.clone()), None);
+        let other = synthetic_package("other", "Other").id;
+        controller.as_mut().mark_opened_installed(
+            &job(&other),
+            &Ok(Payload::Written(OperationOutcome::default())),
+        );
+        controller
+            .as_mut()
+            .mark_opened_installed(&job(&package.id), &Err(EngineError::NotFound));
+        let page: Value = serde_json::from_str(&controller.opened().to_string()).unwrap();
+        assert_eq!(page["action"], "Install");
+        controller.as_mut().mark_opened_installed(
+            &job(&package.id),
+            &Ok(Payload::Written(OperationOutcome::default())),
+        );
+        let page: Value = serde_json::from_str(&controller.opened().to_string()).unwrap();
+        assert_eq!(page["action"], "");
+        assert_eq!(page["package"]["installed"], "2.1.7");
+        // Back closes it.
+        controller.as_mut().close_opened();
+        assert!(controller.opened().is_empty());
+        controller.as_mut().install_opened();
+        assert!(controller.confirmation().is_empty());
+        controller.as_mut().mark_opened_installed(
+            &job(&package.id),
+            &Ok(Payload::Written(OperationOutcome::default())),
+        );
+        assert!(controller.opened().is_empty());
+        // Links and references show where they came from.
+        let mut link = package.clone();
+        link.id.name = "https://example.invalid/demo.flatpakref".into();
+        link.id.reference = Some("flatpakref:app/org.example.Demo/x86_64/stable".into());
+        assert_eq!(
+            opened_page(
+                &PackageDetails {
+                    description: String::new(),
+                    homepage: None,
+                    dependencies: vec![],
+                    package: link
+                },
+                "Install"
+            )["location"],
+            "https://example.invalid/demo.flatpakref"
+        );
     }
     #[test]
     fn appimage_install_previews_show_icon_and_description() {
@@ -12643,7 +12907,11 @@ mod tests {
         };
         controller
             .as_mut()
-            .apply(Ok(Payload::OpenPackage(Box::new(opened.clone()))));
+            .apply(Ok(opened_payload(opened.clone())));
+        // Its page offers Manage, which previews the move.
+        let page: Value = serde_json::from_str(&controller.opened().to_string()).unwrap();
+        assert_eq!(page["action"], "Manage");
+        controller.as_mut().install_opened();
         assert!(matches!(
             &controller.rust().worker,
             Some(worker) if matches!(&worker.job, Job::PlanAdoption(found) if found.id == opened.id)
@@ -14177,9 +14445,8 @@ mod tests {
         let mut apt = fixture_row();
         apt.id.backend = "apt".into();
         apt.installed_version = None;
-        controller
-            .as_mut()
-            .apply(Ok(Payload::OpenPackage(Box::new(apt.clone()))));
+        controller.as_mut().apply(Ok(opened_payload(apt.clone())));
+        controller.as_mut().install_opened();
         assert!(matches!(
             &controller.rust().worker,
             Some(worker) if matches!(&worker.job, Job::PlanOperation(Operation::Install(id)) if *id == apt.id)

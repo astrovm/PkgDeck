@@ -22,9 +22,11 @@ package. For Flatpak, pick the User or System row to choose where it installs.
   Some sources only keep what's already installed up to date, such as
   firmware and the standalone tools. Their rows show **Remove** only when
   the source can uninstall, and only when no update is waiting.
-- Click a row to see its description, screenshots, publisher, license,
-  homepage, and dependencies, when the source provides them. Close details
-  with **×**.
+- Click a row (or press Space on it) to open its app page: icon, version,
+  screenshots, description, publisher, license, homepage, and dependencies,
+  when the source provides them, with its **Install**, **Remove** or
+  **Update** button. **Back** (or Esc) returns to the list as it was. Arrow
+  keys only move the selection.
 - App names, icons, and screenshots come from the source. Packages without
   app metadata show their package name.
 
@@ -34,8 +36,8 @@ package. For Flatpak, pick the User or System row to choose where it installs.
 
 On Search, click **Add…**, drop a file onto the window, or pass a path or link
 to `pkgdeck`. If PkgDeck is already open, the file goes to the open window.
-PkgDeck always shows a preview first. It never installs anything without your
-confirmation.
+It opens on its own app page, with what the file or link says about itself
+and where it came from. Nothing installs until you press **Install** there.
 
 | Kind | Formats |
 | --- | --- |
@@ -43,15 +45,16 @@ confirmation.
 | Repositories | `.flatpakrepo`, `.repo`, `.sources`, `.list`, openSUSE `.ymp` |
 | Links | HTTPS links to any of the files above, and `flatpak+https://` links |
 
-What the preview shows:
+What the page shows:
 
 - AppImage: the app's name, icon, description and version, read from inside
   the file. PkgDeck never runs the file to inspect it. Your original file is
   kept, unless that AppImage is already installed some other way (for
-  example by Gear Lever): then the preview offers **Manage** instead, which
+  example by Gear Lever): then the page offers **Manage** instead, which
   moves it into PkgDeck's folder.
-- Debian package (`.deb`): the changes APT would make, before it asks for
-  your password.
+- Debian package (`.deb`): its full description, homepage and dependencies.
+  **Install** checks the changes APT would make before it asks for your
+  password.
 - Flatpak reference: the app, its repository, whether a signing key is
   included, and any extra repository it needs. Choose User or System here.
   Flatpak may still download extra runtimes during install.
@@ -114,9 +117,14 @@ source reports and never makes up a version.
 
 ### Before anything changes
 
-Every change opens a confirmation. It shows the package, source, scope, and
-any extra changes the package manager plans to make. **Cancel** is selected by
-default.
+Installing or updating one app from its page or its row's button runs right
+away when nothing else changes. Anything more asks first: removing,
+cleaning, **Update all**, other packages the manager would install or
+remove, moving an app PkgDeck takes over, or a choice to make (a Flatpak
+reference's User or System). On an app page, those changes show on the page
+itself, with the action and **Cancel**; elsewhere they open a confirmation
+that shows the package, source, scope, and the extra changes, with
+**Cancel** selected by default.
 
 - APT does a dry run first and checks it again right before making changes.
   For **Update all**, packages that will be installed or removed are listed at
@@ -438,7 +446,8 @@ out of date, and each page refreshes when you open it.
 | Ctrl+R | Reload the page |
 | Ctrl+Shift+U | Update checked packages |
 | Ctrl+Enter | Apply the open confirmation (Alt plus the underlined letter also works) |
-| Esc | Clear the search, or close the details |
+| Space | Open the selected row's app page |
+| Esc | Clear the search, close the details, or go back from an app page |
 | Ctrl+M | Refresh the source's package lists |
 | Ctrl+Q | Quit (waits for any running package change to finish); on Linux, with background checks on, it closes to the tray |
 

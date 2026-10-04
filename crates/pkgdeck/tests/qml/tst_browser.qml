@@ -29,6 +29,10 @@ TestCase {
         property string progress: "{}"
         property string confirmation: ""
         property string confirmation_data: "{}"
+        property string opened: ""
+        property int openedInstalls: 0
+        function installOpened() { openedInstalls++; }
+        function closeOpened() { opened = ""; }
         property string source_catalog: "[]"
         property int sourceChecks: 0
         function checkSources() { sourceChecks++; }
@@ -82,9 +86,18 @@ TestCase {
                 dependencies: ["synthetic-library"]
             });
         }
+        // What the next preview says about reviewing it; undefined leaves
+        // it out, as previews from older paths do.
+        property var nextReview: undefined
         function propose(action, index) {
             selection = index;
-            confirmation_data = JSON.stringify({action: ({install:"Install", remove:"Remove", upgrade:"Update", "upgrade-all":"Update", clean:"Clean", "clean-all":"Clean", refresh:"Refresh"})[action] || "Apply"});
+            const data = {action: ({install:"Install", remove:"Remove", upgrade:"Update", "upgrade-all":"Update", clean:"Clean", "clean-all":"Clean", refresh:"Refresh"})[action] || "Apply"};
+            if (nextReview !== undefined) {
+                data.review = nextReview;
+                data.notes = nextReview ? ["2 other packages will change"] : [];
+                data.changes = nextReview ? ["Install synthetic-library (1)", "Install other-library (2)"] : [];
+            }
+            confirmation_data = JSON.stringify(data);
             confirmation = action + " synthetic-tool from apt, all, system";
         }
         function proposeChecked(identities) {
@@ -307,8 +320,9 @@ TestCase {
         const panelHeight = panel.height;
         browser.choose(1);
         compare(panel.height, panelHeight);
-        mouseClick(findChild(browser, "closeDetailsButton"));
-        verify(!panel.visible);
+        waitForRendering(panel);
+        mouseClick(findChild(panel, "pageBackButton"));
+        tryCompare(panel, "visible", false);
         browser.choose(1);
         verify(panel.visible);
         browser.openView("Settings");
@@ -326,7 +340,7 @@ TestCase {
         compare(findChild(browser, "settingsScroll").contentItem.boundsBehavior, Flickable.StopAtBounds);
         compare(findChild(browser, "detailsContent").opacity, 1);
         browser.openView("Search");
-        browser.choose(0);
+        browser.choose(0, false);
         browser.propose("install");
         const dialog = findChild(browser, "confirmationDialog");
         tryCompare(dialog, "opened", true);
@@ -437,7 +451,7 @@ TestCase {
         tryCompare(panel, "visible", true);
         compare(panel.actionText, "Remove");
         compare(panel.actionTone, "danger");
-        clickDelegate(action);
+        mouseClick(findChild(panel, "detailsActionButton"));
         verify(fake.confirmation.indexOf("remove") === 0, fake.confirmation);
         fake.confirm(false);
         tryCompare(findChild(browser, "confirmationDialog"), "visible", false);
@@ -474,7 +488,7 @@ TestCase {
         verify(button.visible);
         compare(button.Accessible.name, "Manage Obsidian with Homebrew");
         // The action goes through the normal confirmation.
-        mouseClick(action);
+        mouseClick(button);
         compare(fake.selection, 0);
         verify(fake.confirmation.indexOf("adopt") === 0, fake.confirmation);
         fake.confirm(false);
@@ -521,6 +535,116 @@ TestCase {
         tryCompare(panel, "secondaryActionText", "");
         verify(!manage.visible);
     }
+    function test_opened_files_get_an_app_page_that_installs_without_asking() {
+        fake.confirm(false);
+        const row = {kind: "package", name: "demo", display_name: "Demo", source: "apt", architecture: "amd64",
+            scope: "system", installed: null, candidate: "2.1.7", summary: "Flash images safely"};
+        fake.opened = JSON.stringify({package: row, description: "A longer description.", location: "/home/user/Downloads/demo.deb",
+            homepage: "https://example.invalid/demo", dependencies: ["libc6"], screenshots: [], action: "Install"});
+        const page = findChild(browser, "detailsPanel");
+        tryCompare(page, "visible", true);
+        verify(page.page);
+        compare(page.actionText, "Install");
+        compare(findChild(page, "pageVersion").text, "2.1.7");
+        compare(findChild(page, "pageSummary").text, "Flash images safely");
+        compare(findChild(page, "packageDetails").text, "A longer description.");
+        verify(findChild(page, "packageMetadata").text.indexOf("File: /home/user/Downloads/demo.deb") >= 0);
+        // Install asks the controller; just that app comes back unreviewed and runs.
+        waitForRendering(page);
+        mouseClick(findChild(page, "detailsActionButton"));
+        compare(fake.openedInstalls, 1);
+        fake.confirmation_data = JSON.stringify({action: "Install Demo", review: false});
+        fake.confirmation = "Install Demo";
+        compare(fake.writes, 1);
+        verify(!findChild(browser, "confirmationDialog").opened);
+        // Once installed, the page has nothing left to press.
+        fake.opened = JSON.stringify(Object.assign(JSON.parse(fake.opened), {action: "", package: Object.assign({}, row, {installed: "2.1.7"})}));
+        compare(page.actionText, "");
+        verify(page.installed);
+        // Escape, like Back, closes it.
+        page.forceActiveFocus();
+        keyClick(Qt.Key_Escape);
+        compare(fake.opened, "");
+        tryCompare(page, "visible", false);
+    }
+    function test_changes_to_review_show_on_the_page_and_choices_in_the_dialog() {
+        fake.confirm(false);
+        populate();
+        browser.choose(0);
+        const page = findChild(browser, "detailsPanel");
+        tryCompare(page, "visible", true);
+        const dialog = findChild(browser, "confirmationDialog");
+        fake.nextReview = true;
+        waitForRendering(page);
+        mouseClick(findChild(page, "detailsActionButton"));
+        const review = findChild(page, "pageReview");
+        tryCompare(review, "visible", true);
+        verify(!dialog.opened);
+        compare(findChild(page, "pageReviewTitle").text, "Install?");
+        compare(findChild(page, "pageReviewMeta").text, "2 other packages will change");
+        compare(findChild(page, "pageReviewDetails").text, "Install synthetic-library (1)\nInstall other-library (2)");
+        // The page's own button waits while the review is open.
+        verify(!page.actionEnabled);
+        // Escape cancels the review, not the page.
+        keyClick(Qt.Key_Escape);
+        compare(fake.confirmation, "");
+        verify(page.visible);
+        compare(fake.writes, 0);
+        mouseClick(findChild(page, "detailsActionButton"));
+        tryCompare(review, "visible", true);
+        waitForRendering(review);
+        mouseClick(findChild(page, "pageReviewApply"));
+        compare(fake.writes, 1);
+        tryCompare(review, "visible", false);
+        // A choice to make (the Flatpak scope) still opens the dialog.
+        fake.confirmation_data = JSON.stringify({action: "Install", review: false, flatpak_ref_scope: "user"});
+        fake.confirmation = "Install from a Flatpak reference";
+        tryCompare(dialog, "opened", true);
+        verify(!review.visible);
+        fake.confirm(false);
+        tryCompare(dialog, "visible", false);
+        fake.nextReview = undefined;
+    }
+    function test_row_buttons_install_one_app_without_asking() {
+        fake.confirm(false);
+        populate();
+        const list = findChild(browser, "packageResults");
+        tryVerify(() => list.itemAtIndex(0) !== null);
+        waitForRendering(browser.contentItem);
+        const dialog = findChild(browser, "confirmationDialog");
+        fake.nextReview = false;
+        mouseClick(findChild(list.itemAtIndex(0), "rowPackageAction"));
+        compare(fake.writes, 1);
+        verify(!dialog.opened);
+        // More than that app changes: the dialog asks first.
+        fake.nextReview = true;
+        mouseClick(findChild(list.itemAtIndex(0), "rowPackageAction"));
+        tryCompare(dialog, "opened", true);
+        compare(fake.writes, 1);
+        fake.confirm(false);
+        tryCompare(dialog, "visible", false);
+        // A preview nobody asked for quickly (an Update all) is never skipped.
+        fake.nextReview = false;
+        browser.propose("install");
+        tryCompare(dialog, "opened", true);
+        fake.confirm(false);
+        tryCompare(dialog, "visible", false);
+        fake.nextReview = undefined;
+    }
+    function test_arrow_keys_select_and_space_opens_the_page() {
+        populate();
+        const list = findChild(browser, "packageResults");
+        tryVerify(() => list.count > 1);
+        list.forceActiveFocus();
+        keyClick(Qt.Key_Down);
+        verify(browser.selected !== null);
+        verify(!browser.appPageOpen);
+        keyClick(Qt.Key_Space);
+        verify(browser.appPageOpen);
+        keyClick(Qt.Key_Escape);
+        verify(!browser.appPageOpen);
+        verify(browser.selected !== null);
+    }
     function test_reads_never_lock_navigation_and_results_fit_small_windows() {
         for (const view of ["Search", "Installed", "Updates", "Clean", "Sources", "Settings"]) {
             browser.openView(view);
@@ -528,7 +652,7 @@ TestCase {
         }
         browser.openView("Installed");
         populate();
-        browser.choose(0);
+        browser.choose(0, false);
         fake.busy = true;
         const rowAction = findChild(findChild(browser, "packageResults").itemAtIndex(0), "rowPackageAction");
         verify(!rowAction.enabled);
@@ -905,7 +1029,7 @@ TestCase {
         fake.rows = JSON.stringify([runtime]);
         const list = findChild(browser, "packageResults");
         tryVerify(() => list.itemAtIndex(0) !== null);
-        browser.choose(0);
+        browser.choose(0, false);
         const action = findChild(list.itemAtIndex(0), "rowPackageAction");
         verify(action.enabled);
         compare(action.symbol, "updates");
@@ -1016,12 +1140,12 @@ TestCase {
         compare(browser.viewItems[0].name, "alpha");
         verify(header0.text.indexOf("▲") >= 0);
         // The visible index maps back to backend order for actions.
-        browser.choose(0);
+        browser.choose(0, false);
         compare(fake.selection, 1);
         mouseClick(header0);
         compare(browser.viewItems[0].name, "bravo");
         verify(header0.text.indexOf("▼") >= 0);
-        browser.choose(0);
+        browser.choose(0, false);
         compare(fake.selection, 0);
         const grip = findChild(browser, "columnResize0");
         verify(grip !== null);
@@ -1797,7 +1921,7 @@ TestCase {
     function test_installed_filter_keeps_focus_during_streaming() {
         browser.openView("Installed");
         populate();
-        browser.choose(0);
+        browser.choose(0, false);
         const filter = findChild(browser, "installedFilterField");
         filter.forceActiveFocus();
         filter.text = "synthetic";
@@ -1883,7 +2007,7 @@ TestCase {
         compare(browser.viewItems[3].name, "zzz");
         // Failed sources are separate; guessed offers are excluded entirely.
         verify(findChild(browser, "sourceFailureNotice").visible);
-        browser.choose(0);
+        browser.choose(0, false);
         compare(fake.selection, 2);
         browser.cycleSort("name");
         compare(browser.viewItems[0].name, "fire");
@@ -2211,7 +2335,7 @@ TestCase {
         const good = Qt.resolvedUrl("../../assets/logo.svg").toString();
         const bad = Qt.resolvedUrl("missing-synthetic-screenshot.png").toString();
         fake.details = JSON.stringify({package: row, screenshots: [{url: bad}, {url: good}]});
-        const gallery = findChild(browser, "screenshotGallery");
+        const gallery = findChild(findChild(browser, "detailsPanel"), "screenshotGallery");
         tryCompare(gallery, "count", 1);
         compare(browser.visibleScreenshots[0].url, good);
         verify(gallery.visible);
@@ -2241,7 +2365,7 @@ TestCase {
     function test_app_screenshots_follow_selected_identity_and_open_viewer() {
         populate();
         browser.choose(0);
-        const gallery = findChild(browser, "screenshotGallery");
+        const gallery = findChild(findChild(browser, "detailsPanel"), "screenshotGallery");
         verify(!gallery.visible);
         const row = JSON.parse(fake.rows)[0];
         fake.details = JSON.stringify({package: row, description: "Example app", screenshots: [
@@ -2282,14 +2406,14 @@ TestCase {
         verify(findChild(browser, "detailsPanel").visible);
         verify(findChild(browser, "detailsPanel").loading);
         fake.details = JSON.stringify({package: JSON.parse(fake.rows)[1], description: "Additional details"});
-        const close = findChild(browser, "closeDetailsButton");
-        compare(close.text, "");
-        // The icon keeps its size instead of stretching to the button.
-        const closeIcon = findChild(close, "closeDetailsIcon");
-        compare(closeIcon.width, 16);
-        verify(close.width > closeIcon.width);
-        mouseClick(close);
-        verify(browser.selected === null);
+        const back = findChild(findChild(browser, "detailsPanel"), "pageBackButton");
+        compare(back.text, "");
+        compare(back.Accessible.name, "Back");
+        waitForRendering(back);
+        mouseClick(back);
+        // Back returns to the list, the row still selected.
+        compare(browser.pageIdentity, null);
+        verify(browser.selected !== null);
         verify(!findChild(browser, "detailsPanel").visible);
         compare(fake.writes, 0);
     }
@@ -2298,16 +2422,15 @@ TestCase {
         browser.choose(0);
         const row = JSON.parse(fake.rows)[0];
         const panel = findChild(browser, "detailsPanel");
-        const description = findChild(browser, "packageDetails");
-        const metadata = findChild(browser, "packageMetadata");
+        const description = findChild(panel, "packageDetails");
+        const metadata = findChild(panel, "packageMetadata");
         fake.details = JSON.stringify({package: row, description: row.summary,
             available_sources: [row], installed_copies: [row]});
         compare(browser.detailText(), "");
         verify(!description.visible);
         verify(!metadata.visible);
-        // The panel stays open with the row's header and action.
+        // The page stays open with the row's header and action.
         verify(panel.visible);
-        verify(panel.idealHeight < 160);
         fake.details = JSON.stringify({package: row, description: "A longer description from the package source.",
             publisher: "Example publisher", license: "MIT", homepage: "https://example.invalid/app",
             dependencies: ["synthetic-library"]});
@@ -2813,14 +2936,16 @@ TestCase {
         const panel = findChild(browser, "detailsPanel");
         tryVerify(() => panel.visible);
         waitForRendering(browser.contentItem);
-        // The details and the actions below them stay inside the window.
+        // The page stays inside the window, its long description scrolling,
+        // with Back and the action on screen.
         const window = browser.contentItem.height;
         const panelBottom = panel.mapToItem(browser.contentItem, 0, panel.height).y;
-        verify(panelBottom <= window, "details end at " + panelBottom + " of " + window);
-        const actions = findChild(browser, "updatesActions");
-        const actionsBottom = actions.mapToItem(browser.contentItem, 0, actions.height).y;
-        verify(actionsBottom <= window, "actions end at " + actionsBottom + " of " + window);
-        verify(findChild(browser, "resultsBox").height + panel.height <= browser.detailsBudget() + 1);
+        verify(panelBottom <= window, "page ends at " + panelBottom + " of " + window);
+        for (const name of ["pageBackButton", "detailsActionButton"]) {
+            const control = findChild(panel, name);
+            verify(control.visible, name);
+            verify(control.mapToItem(browser.contentItem, 0, control.height).y <= window, name);
+        }
     }
     function test_large_sections_reuse_parsed_rows() {
         const rows = Array.from({length: 800}, (_, i) => ({kind: "package", name: "synthetic-" + i, source: "apt",

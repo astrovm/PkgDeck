@@ -5,6 +5,8 @@ import QtQuick.Layouts
 // Details for the selected row. The header (icon, name, source, installed
 // state, the row's action and Close) follows the selection at once; the
 // body shows a skeleton until the details for that same row arrive.
+// As a page (`page`), it is a package's store page: Back, a large icon,
+// the version, big screenshots, and changes to review before they run.
 Rectangle {
     id: panel
     objectName: "detailsPanel"
@@ -19,9 +21,17 @@ Rectangle {
         detailsData.publisher ? "Publisher: " + detailsData.publisher : "",
         detailsData.license ? "License: " + detailsData.license : "",
         detailsData.homepage ? "Homepage: " + detailsData.homepage : "",
-        (detailsData.dependencies || []).length ? "Dependencies: " + detailsData.dependencies.join(", ") : ""
+        (detailsData.dependencies || []).length ? "Dependencies: " + detailsData.dependencies.join(", ") : "",
+        location ? "File: " + location : ""
     ].filter(Boolean).join("\n") : ""
     property string iconSource: ""
+    property bool page: false
+    // Changes to look at before they run, shown on the page: the summary's
+    // first line names them, the rest and `reviewDetails` explain them.
+    property string reviewSummary: ""
+    property string reviewDetails: ""
+    property string reviewActionText: ""
+    property bool reviewDanger: false
     property bool compact: false
     property bool motionEnabled: Theme.motionEnabled
     property bool detailMatchesSelection: false
@@ -62,9 +72,20 @@ Rectangle {
     readonly property real idealHeight: loading ? Math.max(settledHeight, contentIdealHeight) : contentIdealHeight
     property real settledHeight: 0
     property bool dependenciesExpanded: false
-    readonly property int thumbnailWidth: 230
-    readonly property int thumbnailHeight: 130
+    readonly property int thumbnailWidth: page ? 360 : 230
+    readonly property int thumbnailHeight: page ? 225 : 130
+    readonly property int iconSize: page ? 72 : 44
+    // The version a page shows: the one installed, else the one on offer.
+    readonly property string version: selected && selected.kind === "package"
+        ? String(selected.installed || selected.candidate || "") : ""
+    // Where an opened file or link came from.
+    readonly property string location: detailMatchesSelection && detailsData.location ? String(detailsData.location) : ""
+    // The one-line summary, above the long description on a page.
+    readonly property string summary: page && selected && selected.kind === "package" && selected.summary
+        && String(selected.summary).trim() !== description.trim() ? String(selected.summary) : ""
     signal closeRequested()
+    signal reviewAccepted()
+    signal reviewRejected()
     signal screenshotRequested(string url, string caption)
     signal screenshotFailed(string url, string identity)
     signal actionRequested()
@@ -129,7 +150,8 @@ Rectangle {
     readonly property var dependencies: detailMatchesSelection ? (detailsData.dependencies || []) : []
     readonly property var facts: detailMatchesSelection ? [
         {label: "Publisher", value: detailsData.publisher || ""},
-        {label: "License", value: detailsData.license || ""}
+        {label: "License", value: detailsData.license || ""},
+        {label: "File", value: location}
     ].filter(fact => fact.value) : []
     // The source's display name, under the package name.
     readonly property string subtitle: selected && selected.kind === "package" && selected.source
@@ -155,17 +177,40 @@ Rectangle {
         id: detailsContent
         objectName: "detailsContent"
         anchors.fill: parent
-        anchors.margins: Theme.gutter
-        spacing: Theme.spacingSmall
+        anchors.margins: panel.page ? Theme.gutter * 1.5 : Theme.gutter
+        spacing: panel.page ? Theme.spacingLarge : Theme.spacingSmall
         RowLayout {
             id: header
             objectName: "detailsHeader"
             Layout.fillWidth: true
             spacing: Theme.spacing
+            Controls.Button {
+                id: backButton
+                objectName: "pageBackButton"
+                visible: panel.page
+                Accessible.name: "Back"
+                Controls.ToolTip.visible: hovered
+                Controls.ToolTip.delay: 500
+                Controls.ToolTip.text: Accessible.name
+                Layout.preferredWidth: 38
+                Layout.alignment: Qt.AlignTop
+                implicitHeight: 38
+                onClicked: panel.closeRequested()
+                background: Rectangle {
+                    color: backButton.down ? Theme.tint(panel.ink, 0.12) : backButton.hovered ? Theme.tint(panel.ink, 0.08) : "transparent"
+                    radius: Theme.controlRadius
+                    border.color: backButton.visualFocus ? panel.accent : "transparent"
+                    border.width: 2
+                    Behavior on color { ColorAnimation { duration: Theme.feedbackDuration } }
+                }
+                contentItem: Item {
+                    DeckIcon { anchors.centerIn: parent; name: "back"; ink: panel.ink; width: 18; height: 18 }
+                }
+            }
             Item {
                 objectName: "detailsIcon"
-                Layout.preferredWidth: 44
-                Layout.preferredHeight: 44
+                Layout.preferredWidth: panel.iconSize
+                Layout.preferredHeight: panel.iconSize
                 Layout.alignment: Qt.AlignVCenter
                 Rectangle {
                     anchors.fill: parent
@@ -176,8 +221,8 @@ Rectangle {
                         name: panel.selected ? (panel.selected.kind === "source" ? panel.selected.source : (panel.selected.kind === "failure" ? "warning" : "package")) : "package"
                         ink: panel.accent
                         anchors.centerIn: parent
-                        width: 24
-                        height: 24
+                        width: panel.iconSize * 0.55
+                        height: panel.iconSize * 0.55
                     }
                 }
                 Image {
@@ -186,8 +231,8 @@ Rectangle {
                     visible: status === Image.Ready
                     asynchronous: true
                     source: panel.iconSource
-                    sourceSize.width: Math.round(44 * Screen.devicePixelRatio)
-                    sourceSize.height: Math.round(44 * Screen.devicePixelRatio)
+                    sourceSize.width: Math.round(panel.iconSize * Screen.devicePixelRatio)
+                    sourceSize.height: Math.round(panel.iconSize * Screen.devicePixelRatio)
                     fillMode: Image.PreserveAspectFit
                     Accessible.ignored: true
                 }
@@ -220,7 +265,7 @@ Rectangle {
                     text: panel.selected ? (panel.selected.display_name || panel.selected.name || "") : ""
                     textFormat: Text.PlainText
                     color: panel.ink
-                    font.pointSize: Theme.pointSize(Theme.titleScale)
+                    font.pointSize: Theme.pointSize(panel.page ? Theme.titleScale * 1.35 : Theme.titleScale)
                     font.weight: Font.DemiBold
                     elide: Text.ElideRight
                     Layout.fillWidth: true
@@ -228,7 +273,7 @@ Rectangle {
                 RowLayout {
                     spacing: Theme.spacingSmall
                     Layout.fillWidth: true
-                    visible: panel.subtitle.length > 0 || panel.installed
+                    visible: panel.subtitle.length > 0 || panel.installed || (panel.page && panel.version.length > 0)
                     Controls.Label {
                         objectName: "detailsSubtitle"
                         visible: text.length > 0
@@ -241,6 +286,15 @@ Rectangle {
                         // just under the text's fractional one elides it.
                         Layout.maximumWidth: Math.ceil(implicitWidth)
                         Layout.fillWidth: true
+                    }
+                    Controls.Label {
+                        objectName: "pageVersion"
+                        visible: panel.page && panel.version.length > 0
+                        text: panel.version
+                        textFormat: Text.PlainText
+                        color: panel.muted
+                        font.family: "monospace"
+                        font.pointSize: Theme.pointSize(Theme.smallScale)
                     }
                     Controls.Label {
                         objectName: "installedChip"
@@ -280,6 +334,7 @@ Rectangle {
             Controls.Button {
                 id: closeButton
                 objectName: "closeDetailsButton"
+                visible: !panel.page
                 Accessible.name: "Close details"
                 Controls.ToolTip.visible: hovered
                 Controls.ToolTip.delay: 500
@@ -338,6 +393,72 @@ Rectangle {
                         NumberAnimation { from: 1; to: 0.45; duration: Math.max(1, Theme.pulseDuration); easing.type: Easing.InOutSine }
                         NumberAnimation { from: 0.45; to: 1; duration: Math.max(1, Theme.pulseDuration); easing.type: Easing.InOutSine }
                         onRunningChanged: if (!running) skeleton.opacity = 1
+                    }
+                }
+                // Changes to look at before they run, on the page itself.
+                Rectangle {
+                    id: reviewCard
+                    objectName: "pageReview"
+                    visible: panel.page && panel.reviewSummary.length > 0
+                    Layout.fillWidth: true
+                    implicitHeight: reviewColumn.implicitHeight + 2 * Theme.gutter
+                    radius: Theme.cardRadius
+                    color: Theme.tint(panel.reviewDanger ? Theme.danger : panel.accent, 0.1)
+                    border.color: Theme.tint(panel.reviewDanger ? Theme.danger : panel.accent, 0.35)
+                    ColumnLayout {
+                        id: reviewColumn
+                        anchors.fill: parent
+                        anchors.margins: Theme.gutter
+                        spacing: Theme.spacingSmall
+                        Controls.Label {
+                            objectName: "pageReviewTitle"
+                            Layout.fillWidth: true
+                            text: panel.reviewSummary.split("\n")[0]
+                            textFormat: Text.PlainText
+                            wrapMode: Text.Wrap
+                            color: panel.ink
+                            font.weight: Font.DemiBold
+                        }
+                        Controls.Label {
+                            objectName: "pageReviewMeta"
+                            Layout.fillWidth: true
+                            visible: text.length > 0
+                            text: panel.reviewSummary.split("\n").slice(1).join("\n").trim()
+                            textFormat: Text.PlainText
+                            wrapMode: Text.Wrap
+                            color: panel.muted
+                        }
+                        TextEdit {
+                            objectName: "pageReviewDetails"
+                            Layout.fillWidth: true
+                            visible: text.length > 0
+                            text: panel.reviewDetails
+                            readOnly: true
+                            selectByMouse: true
+                            wrapMode: TextEdit.Wrap
+                            textFormat: TextEdit.PlainText
+                            color: panel.muted
+                            font.pointSize: Theme.pointSize(Theme.smallScale)
+                        }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: Theme.spacingSmall
+                            Item { Layout.fillWidth: true }
+                            DetailsAction {
+                                objectName: "pageReviewApply"
+                                label: panel.reviewActionText || "Apply"
+                                symbol: panel.reviewDanger ? "remove" : "install"
+                                tone: panel.reviewDanger ? Theme.danger : panel.accent
+                                onClicked: panel.reviewAccepted()
+                            }
+                            DetailsAction {
+                                objectName: "pageReviewCancel"
+                                label: "Cancel"
+                                symbol: "cancel"
+                                tone: panel.muted
+                                onClicked: panel.reviewRejected()
+                            }
+                        }
                     }
                 }
                 ColumnLayout {
@@ -423,6 +544,17 @@ Rectangle {
                                 }
                             }
                         }
+                    }
+                    Controls.Label {
+                        objectName: "pageSummary"
+                        visible: panel.summary.length > 0
+                        Layout.fillWidth: true
+                        text: panel.summary
+                        textFormat: Text.PlainText
+                        wrapMode: Text.Wrap
+                        color: panel.ink
+                        font.pointSize: Theme.pointSize(Theme.titleScale)
+                        font.weight: Font.DemiBold
                     }
                     TextEdit {
                         objectName: "packageDetails"
