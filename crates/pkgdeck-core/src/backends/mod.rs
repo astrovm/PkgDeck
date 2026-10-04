@@ -678,7 +678,7 @@ impl NativeTransport {
         };
         // A search reads every synced database and takes about a second.
         let search = !write
-            && self.host.runtime == crate::host::Runtime::Native
+            && self.host.runtime.sees_host_files()
             && executable == "pacman"
             && args.first().is_some_and(|arg| arg == "-Ss");
         let Some(watches) = search.then(|| pacman_search_watches(root)).flatten() else {
@@ -716,7 +716,7 @@ impl NativeTransport {
         // Remote search reads the local AppStream copy and takes about a
         // second per installation. Other reads are fast or remote.
         let search = !write
-            && self.host.runtime == crate::host::Runtime::Native
+            && self.host.runtime.sees_host_files()
             && args.get(1).is_some_and(|arg| arg == "search");
         let Some(installation) = search
             .then(|| flatpak_installation(system, |name| self.host.var(name)))
@@ -975,6 +975,9 @@ pub struct Flatpak<T = NativeTransport> {
     /// Remotes the last installed query could not ask about updates. The
     /// rest were asked, so their rows are complete.
     skipped: Vec<EngineError>,
+    /// Set during an update check, which asks the remotes again. Other
+    /// listings, such as Installed, use the summaries Flatpak already has.
+    update_check: Option<u64>,
 }
 fn flatpak_offer_reference(reference: &str) -> Option<(&str, &str, &str)> {
     let mut parts = reference.split('/');
@@ -987,6 +990,7 @@ impl<T: Transport> Flatpak<T> {
         Self {
             transport,
             skipped: vec![],
+            update_check: None,
         }
     }
 }
@@ -1154,15 +1158,26 @@ impl<T: Transport + Sync> Flatpak<T> {
         // Flatpak compares commits, not version labels: rebuilds and runtimes
         // can have an update even when the version is unchanged or empty.
         let remote_updates = |remote: Option<&str>| -> Result<String, EngineError> {
-            let mut args = vec![
-                prefix,
-                "remote-ls",
-                "--updates",
-                "--columns=ref,version,origin",
-            ];
-            args.extend(remote);
-            let output = bytes("flatpak", self.call(&args, cancel, false, system)?)?;
-            String::from_utf8(output).map_err(|e| invalid("flatpak", e))
+            let ask = |cached: bool| -> Result<String, EngineError> {
+                let mut args = vec![
+                    prefix,
+                    "remote-ls",
+                    "--updates",
+                    "--columns=ref,version,origin",
+                ];
+                if cached {
+                    args.push("--cached");
+                }
+                args.extend(remote);
+                let output = bytes("flatpak", self.call(&args, cancel, false, system)?)?;
+                String::from_utf8(output).map_err(|e| invalid("flatpak", e))
+            };
+            // Outside an update check, use the summaries Flatpak already has.
+            // A remote it never fetched has none, so that one is asked.
+            match self.update_check {
+                None => ask(true).or_else(|_| ask(false)),
+                Some(_) => ask(false),
+            }
         };
         let remotes: std::collections::BTreeSet<_> =
             origins.iter().filter(|origin| !origin.is_empty()).collect();
@@ -1351,6 +1366,9 @@ impl<T: Transport + Sync> Backend for Flatpak<T> {
     }
     fn query_errors(&self) -> Vec<EngineError> {
         self.skipped.clone()
+    }
+    fn arm_update_check(&mut self, token: Option<u64>) {
+        self.update_check = token;
     }
     fn search(&mut self, query: &str, cancel: &Cancellation) -> Result<Vec<Package>, EngineError> {
         if query.trim().is_empty() || query.starts_with('-') {
@@ -2422,7 +2440,7 @@ impl BrewFound {
             .filter(|name| !self.packages.contains_key(*name))
             .collect();
         for chunk in missing.chunks(BREW_INFO_BATCH) {
-            let mut read = read(chunk)?
+            let mut read = read_around_broken(chunk, &mut read)?
                 .into_iter()
                 .map(|package| (package.id.name.clone(), package))
                 .collect::<std::collections::HashMap<_, _>>();
@@ -2448,6 +2466,59 @@ impl BrewFound {
     fn clear(&mut self) {
         self.packages.clear();
         self.key = None;
+    }
+}
+/// Extra `brew info` calls one batch may make to find the names it fails on.
+const BREW_INFO_RETRIES: usize = 64;
+/// `read` all of `names`. `brew info` stops at the first name it can't load,
+/// such as a macOS-only cask on Linux, and returns nothing. Then each half
+/// is read again, down to the names that fail alone, which are left out.
+/// When no read works at all, or the retries run out, the first failure
+/// stands: Homebrew itself is broken, not one of its packages.
+fn read_around_broken(
+    names: &[&str],
+    read: &mut impl FnMut(&[&str]) -> Result<Vec<Package>, EngineError>,
+) -> Result<Vec<Package>, EngineError> {
+    fn halves(
+        names: &[&str],
+        read: &mut impl FnMut(&[&str]) -> Result<Vec<Package>, EngineError>,
+        budget: &mut usize,
+        worked: &mut bool,
+    ) -> Result<Vec<Package>, Option<EngineError>> {
+        match read(names) {
+            Ok(packages) => {
+                *worked = true;
+                Ok(packages)
+            }
+            Err(EngineError::Execution(ExecutionError::Failed(_))) if names.len() == 1 => {
+                Ok(vec![])
+            }
+            Err(EngineError::Execution(ExecutionError::Failed(_))) if *budget >= 2 => {
+                *budget -= 2;
+                let (first, second) = names.split_at(names.len() / 2);
+                let mut packages = halves(first, read, budget, worked)?;
+                packages.extend(halves(second, read, budget, worked)?);
+                Ok(packages)
+            }
+            // Out of retries: report the batch's own failure.
+            Err(EngineError::Execution(ExecutionError::Failed(_))) => Err(None),
+            Err(error) => Err(Some(error)),
+        }
+    }
+    let first = match read(names) {
+        Err(error @ EngineError::Execution(ExecutionError::Failed(_))) if names.len() > 1 => error,
+        result => return result,
+    };
+    let (mut budget, mut worked) = (BREW_INFO_RETRIES, false);
+    let (first_half, second_half) = names.split_at(names.len() / 2);
+    let packages = halves(first_half, read, &mut budget, &mut worked).and_then(|mut packages| {
+        packages.extend(halves(second_half, read, &mut budget, &mut worked)?);
+        Ok(packages)
+    });
+    match packages {
+        Ok(packages) if worked => Ok(packages),
+        Ok(_) | Err(None) => Err(first),
+        Err(Some(error)) => Err(error),
     }
 }
 /// Where Homebrew search details are kept between runs, and everything
@@ -7317,6 +7388,96 @@ mod tests {
             );
         }
         assert!(casks.search("codex x", &cancel).unwrap().is_empty());
+    }
+
+    #[test]
+    fn one_cask_brew_cannot_load_does_not_hide_the_others() {
+        let failed = || {
+            EngineError::Execution(ExecutionError::Failed(Completion {
+                code: Some(1),
+                signal: None,
+                stdout: vec![],
+                stderr: b"Error: key not found: :screen_saverdir".to_vec(),
+                truncated: false,
+                cancellation_deferred: false,
+            }))
+        };
+        let package = |name: &str| Package {
+            id: PackageId {
+                backend: "homebrew-cask".into(),
+                name: name.into(),
+                architecture: "all".into(),
+                scope: Scope::System,
+                remote: None,
+                reference: None,
+            },
+            display_name: name.into(),
+            summary: String::new(),
+            installed_version: None,
+            candidate_version: Some("1".into()),
+            update: UpdateAvailability::Unknown,
+            icon: None,
+            component_ids: vec![],
+            homepages: vec![],
+            adopt_with: None,
+        };
+        let names = ["a", "b", "clocksaver", "d", "e", "grid-clock", "g"];
+        // Like brew: any broken name fails the whole call.
+        let mut calls = 0;
+        let mut read = |chunk: &[&str]| {
+            calls += 1;
+            if chunk.iter().any(|name| name.contains("clock")) {
+                Err(failed())
+            } else {
+                Ok(chunk.iter().map(|name| package(name)).collect())
+            }
+        };
+        let found: Vec<_> = read_around_broken(&names, &mut read)
+            .unwrap()
+            .into_iter()
+            .map(|package| package.id.name)
+            .collect();
+        assert_eq!(found, ["a", "b", "d", "e", "g"]);
+        assert!(calls < 2 * names.len());
+        // A Homebrew that can't read anything still reports its failure,
+        // and so does one that stopped for another reason.
+        let mut broken = |_: &[&str]| -> Result<Vec<Package>, EngineError> { Err(failed()) };
+        assert!(matches!(
+            read_around_broken(&names, &mut broken),
+            Err(EngineError::Execution(ExecutionError::Failed(_)))
+        ));
+        let mut cancelled = |chunk: &[&str]| {
+            if chunk.len() == names.len() {
+                Err(failed())
+            } else {
+                Err(EngineError::Cancelled)
+            }
+        };
+        assert!(matches!(
+            read_around_broken(&names, &mut cancelled),
+            Err(EngineError::Cancelled)
+        ));
+        // One name that fails alone is that name's failure.
+        let mut one = |_: &[&str]| -> Result<Vec<Package>, EngineError> { Err(failed()) };
+        assert!(read_around_broken(&["clocksaver"], &mut one).is_err());
+        // Too many broken names to single out: the batch's failure stands,
+        // after a bounded number of tries.
+        let many: Vec<String> = (0..300).map(|i| format!("cask-{i}")).collect();
+        let many: Vec<&str> = many.iter().map(String::as_str).collect();
+        let mut calls = 0;
+        let mut mostly_broken = |chunk: &[&str]| {
+            calls += 1;
+            if chunk.iter().any(|name| name.ends_with('0')) {
+                Err(failed())
+            } else {
+                Ok(chunk.iter().map(|name| package(name)).collect())
+            }
+        };
+        assert!(matches!(
+            read_around_broken(&many, &mut mostly_broken),
+            Err(EngineError::Execution(ExecutionError::Failed(_)))
+        ));
+        assert!(calls <= BREW_INFO_RETRIES + 3, "{calls} calls");
     }
 
     #[test]

@@ -710,6 +710,8 @@ struct FlatpakFixture {
     /// A remote whose summary cannot be loaded. Flatpak then refuses to list
     /// updates from any remote unless one is named.
     unreachable: Vec<&'static str>,
+    /// Flatpak has never fetched a summary, so cached reads fail.
+    uncached: bool,
 }
 impl Transport for FlatpakFixture {
     fn apt_query(
@@ -748,8 +750,20 @@ impl Transport for FlatpakFixture {
             .unwrap()
             .push((args.clone(), write, system));
         if args.contains(&"remote-ls".into()) {
+            if self.uncached && args.contains(&"--cached".into()) {
+                return Err(ExecutionError::Failed(Completion {
+                    code: Some(1),
+                    signal: None,
+                    stdout: vec![],
+                    stderr: b"error: Unable to load summary from remote flathub: No cached summary for remote 'flathub'\n".to_vec(),
+                    truncated: false,
+                    cancellation_deferred: false,
+                }));
+            }
             if !self.unreachable.is_empty() {
-                let asked = args.get(4);
+                // The remote is the only argument after `remote-ls` that
+                // isn't an option.
+                let asked = args.iter().skip(2).find(|arg| !arg.starts_with("--"));
                 if let Some(remote) = self
                     .unreachable
                     .iter()
@@ -1596,9 +1610,11 @@ impl Transport for FlatpakGate {
         _: bool,
         system: bool,
     ) -> Result<Completion, ExecutionError> {
+        // Whether Flatpak may use its cached summaries doesn't matter here.
         let args: Vec<_> = args
             .iter()
             .map(|arg| arg.to_string_lossy().into_owned())
+            .filter(|arg| arg != "--cached")
             .collect();
         // Searches and listings are local reads; update checks name a
         // remote once asking every remote failed.
@@ -4776,6 +4792,38 @@ fn flatpak_update_query_failures_are_not_reported_as_current() {
         .unwrap()
         .iter()
         .any(|(args, _, _)| args.contains(&"remote-ls".into())));
+}
+
+#[test]
+fn flatpak_asks_remotes_again_only_during_an_update_check() {
+    let cancel = Cancellation::default();
+    let fixture = FlatpakFixture::default();
+    let mut backend = Flatpak::new(fixture.clone());
+    let update_asks = |fixture: &FlatpakFixture| {
+        std::mem::take(&mut *fixture.calls.lock().unwrap())
+            .into_iter()
+            .filter(|(args, _, _)| args.iter().any(|arg| arg == "remote-ls"))
+            .map(|(args, _, _)| args.iter().any(|arg| arg == "--cached"))
+            .collect::<Vec<_>>()
+    };
+    backend.installed(&cancel).unwrap();
+    assert_eq!(update_asks(&fixture), [true, true]);
+    backend.arm_update_check(Some(1));
+    backend.installed(&cancel).unwrap();
+    assert_eq!(update_asks(&fixture), [false, false]);
+    backend.arm_update_check(None);
+    backend.installed(&cancel).unwrap();
+    assert_eq!(update_asks(&fixture), [true, true]);
+    // A remote with no cached summary yet is asked instead.
+    let uncached = FlatpakFixture {
+        uncached: true,
+        ..FlatpakFixture::default()
+    };
+    let rows = Flatpak::new(uncached.clone()).installed(&cancel).unwrap();
+    assert!(!rows.is_empty());
+    let mut asks = update_asks(&uncached);
+    asks.sort();
+    assert_eq!(asks, [false, false, true, true]);
 }
 
 #[test]

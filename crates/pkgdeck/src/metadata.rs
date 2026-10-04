@@ -11,7 +11,7 @@ use std::{
     io::Read,
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
     },
 };
@@ -99,6 +99,8 @@ impl CatalogCache {
 struct Store {
     catalog: CatalogCache,
     remote: Mutex<BTreeMap<PackageId, (u64, AppInfo)>>,
+    /// A background load of the catalog is running (see [`warm`]).
+    warming: AtomicBool,
 }
 static STORE: Store = Store::new();
 impl Store {
@@ -109,7 +111,17 @@ impl Store {
                 snapshot: Mutex::new(None),
             },
             remote: Mutex::new(BTreeMap::new()),
+            warming: AtomicBool::new(false),
         }
+    }
+    fn warm(&'static self, load: fn() -> Catalog) {
+        if self.catalog.cached().is_some() || self.warming.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        std::thread::spawn(move || {
+            self.catalog.get(load);
+            self.warming.store(false, Ordering::Release);
+        });
     }
     fn generation(&self) -> u64 {
         self.catalog.generation.load(Ordering::Acquire)
@@ -126,6 +138,19 @@ impl Store {
             .filter(|(generation, _)| *generation == self.generation())
             .map(|(_, info)| info.clone())
             .or_else(|| self.catalog.cached()?.find(package).cloned())
+    }
+    fn will_fetch(&self, package: &Package) -> bool {
+        let fetched = self
+            .remote
+            .lock()
+            .unwrap()
+            .get(&package.id)
+            .is_some_and(|(generation, _)| *generation == self.generation());
+        !fetched
+            && provider_url(package).is_some()
+            && self
+                .cached_info(package)
+                .is_none_or(|info| info.screenshots.is_empty())
     }
     fn enrich_cached(&self, package: &mut Package) {
         if let Some(catalog) = self.catalog.cached() {
@@ -185,6 +210,11 @@ pub fn invalidate() {
 pub fn cached_info(package: &Package) -> Option<AppInfo> {
     STORE.cached_info(package)
 }
+/// Whether opening `package` still asks its provider online (see
+/// [`details`]), so more about it is on the way.
+pub fn will_fetch(package: &Package) -> bool {
+    STORE.will_fetch(package)
+}
 /// Where the catalog and provider details come from: the running system, or
 /// fixtures in tests.
 #[derive(Clone, Copy)]
@@ -196,6 +226,12 @@ pub const SYSTEM: Sources = Sources {
     catalog: host_catalog,
     fetch: crate::network::fetch,
 };
+/// Load the local catalog on a background thread unless it is loaded or
+/// loading, so the first app page and row names and icons don't wait for
+/// it. A metadata change drops it; the next call loads it again.
+pub fn warm(sources: Sources) {
+    STORE.warm(sources.catalog);
+}
 pub fn enrich(package: &mut Package, sources: Sources) {
     STORE.catalog.get(sources.catalog);
     enrich_cached(package);
@@ -1316,6 +1352,42 @@ Description: '&invalid;'
         })
         .is_none());
         assert!(detail_info(&snap, local, &cancel, offline).is_none());
+    }
+    #[test]
+    fn warming_loads_the_catalog_once_in_the_background() {
+        static LOADS: AtomicU64 = AtomicU64::new(0);
+        static RELEASE: Mutex<()> = Mutex::new(());
+        fn load() -> Catalog {
+            LOADS.fetch_add(1, Ordering::SeqCst);
+            let _released = RELEASE.lock().unwrap();
+            let mut catalog = Catalog::default();
+            catalog.xml(APP);
+            catalog
+        }
+        let store: &'static Store = Box::leak(Box::new(Store::new()));
+        let held = RELEASE.lock().unwrap();
+        store.warm(load);
+        // A second call while the first load runs starts no other.
+        store.warm(load);
+        while LOADS.load(Ordering::SeqCst) == 0 {
+            std::thread::yield_now();
+        }
+        drop(held);
+        while store.catalog.cached().is_none() || store.warming.load(Ordering::SeqCst) {
+            std::thread::yield_now();
+        }
+        let mut row = package("apt", "player-bin");
+        store.enrich_cached(&mut row);
+        assert_eq!(row.display_name, "Example Player");
+        // Loaded: nothing to do. After a change it loads again.
+        store.warm(load);
+        assert_eq!(LOADS.load(Ordering::SeqCst), 1);
+        store.invalidate();
+        store.warm(load);
+        while store.catalog.cached().is_none() {
+            std::thread::yield_now();
+        }
+        assert_eq!(LOADS.load(Ordering::SeqCst), 2);
     }
     #[test]
     fn opened_details_cache_provider_data_until_metadata_changes() {

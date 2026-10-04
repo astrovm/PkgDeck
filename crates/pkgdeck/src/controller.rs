@@ -24,6 +24,20 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+/// Most search results the list shows. A short query can match tens of
+/// thousands of packages, and laying them all out froze the window.
+const SEARCH_ROW_LIMIT: usize = 500;
+/// Keep only the best [`SEARCH_ROW_LIMIT`] matches, ranked like the list
+/// ranks them, and return how many there were.
+fn keep_best_matches(report: &mut PackageReport, query: &str) -> usize {
+    let total = report.packages.len();
+    if total > SEARCH_ROW_LIMIT {
+        rank_search_matches(&mut report.packages, query);
+        report.packages.truncate(SEARCH_ROW_LIMIT);
+    }
+    total
+}
+
 fn local_input_path(input: &str) -> Result<PathBuf, String> {
     let input = input.trim();
     let path = if let Some(encoded) = input.strip_prefix("file://") {
@@ -387,6 +401,9 @@ enum Reply {
     /// its rows for the end, but the section waiting on it names the rest.
     Answered(Vec<String>),
     Partial(PackageReport),
+    /// How many packages the search matched, sent before each search
+    /// report that may carry only the best of them.
+    Matches(usize),
     /// Every installed package, and whether update indexes were refreshed
     /// first. Only a refreshed inventory may stand in for Updates.
     Inventory(PackageReport, bool),
@@ -850,10 +867,12 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
                 send(Reply::Asked(engine.source_ids()));
                 let mut send_partial = |mut partial: PackageReport| {
                     partial.packages.retain(|p| !unverified_search_offer(p));
+                    send(Reply::Matches(keep_best_matches(&mut partial, &query)));
                     send(Reply::Partial(partial));
                 };
                 let mut report = engine.search_stream(&query, cancel, &mut send_partial);
                 report.packages.retain(|p| !unverified_search_offer(p));
+                send(Reply::Matches(keep_best_matches(&mut report, &query)));
                 Ok(Payload::Packages(report))
             } else {
                 // Installed and Updates stream like Search so rows appear
@@ -906,6 +925,7 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
                     filter_installed(&mut report, &query);
                 } else {
                     report.packages.retain(|p| !unverified_search_offer(p));
+                    keep_best_matches(&mut report, &query);
                 }
                 Ok(Payload::RetryPackages(source, report))
             }
@@ -1140,6 +1160,8 @@ struct Natives {
     approve: fn(&pkgdeck_core::host::Host, bool, &Cancellation) -> Result<String, ExecutionError>,
     root: &'static str,
     metadata: crate::metadata::Sources,
+    /// Load the local app catalog in the background when sections load.
+    warm_catalog: bool,
 }
 const NATIVES: Natives = Natives {
     engine: pkgdeck_core::backends::native_engine,
@@ -1147,6 +1169,7 @@ const NATIVES: Natives = Natives {
     approve: pkgdeck_core::unattended::set_approval,
     root: "/",
     metadata: crate::metadata::SYSTEM,
+    warm_catalog: true,
 };
 /// Unit tests never detect the machine's own package managers.
 #[cfg(not(test))]
@@ -1380,6 +1403,12 @@ pub struct Controller {
     engine_scope: Option<(Vec<String>, bool, Instant)>,
     reused_engine_born: Option<Instant>,
     active_view: String,
+    /// How many packages the running or last search matched; its rows
+    /// carry only the best of them.
+    search_matches: usize,
+    /// Set while a details preview is applied: the quick first look sent
+    /// before slower lookups finish.
+    details_preview: bool,
     catalog_checked: bool,
     catalog_worker: Option<CatalogWorker>,
     approval_worker: Option<ApprovalWorker>,
@@ -1486,6 +1515,8 @@ impl Default for Controller {
             engine_scope: None,
             reused_engine_born: None,
             active_view: "Search".into(),
+            search_matches: 0,
+            details_preview: false,
             catalog_checked: false,
             catalog_worker: None,
             approval_worker: None,
@@ -3876,6 +3907,10 @@ impl ffi::PackageController {
             "successful_sources": report.successful_sources,
             "last_success": last_success
         });
+        if self.rust().active_view == "Search" && self.rust().search_matches > report.packages.len()
+        {
+            state["matches"] = json!(self.rust().search_matches);
+        }
         // Only a finished read says when the section was checked.
         if !loading {
             state["checked_at"] = json!(now);
@@ -3887,6 +3922,9 @@ impl ffi::PackageController {
         self.sync_needs_poll();
     }
     fn start_job(mut self: Pin<&mut Self>, job: Job) {
+        if matches!(&job, Job::Load(view, _) if view == "Search") {
+            self.as_mut().rust_mut().search_matches = 0;
+        }
         // The quiet reload of the section on screen, behind its cached rows.
         let quiet = self.rust().refreshing
             && matches!(&job, Job::Load(view, _) if *view == self.rust().active_view);
@@ -4150,6 +4188,9 @@ impl ffi::PackageController {
     ) {
         self.as_mut().load_view(view, query, sources, sudo, force);
         self.as_mut().rewarm_if_due();
+        if self.rust().natives.warm_catalog {
+            crate::metadata::warm(self.rust().natives.metadata);
+        }
         self.sync_needs_poll();
     }
     fn load_view(
@@ -4444,17 +4485,19 @@ impl ffi::PackageController {
                     // Rows are still streaming or refreshing: load details
                     // alongside instead of stopping that read.
                     let same = same_app_sources(&self.rust().packages, &package.id);
-                    self.as_mut().set_details(encoded(json!({"package": package_row(&package, &same, None), "description": package.summary})));
+                    self.as_mut().set_details(encoded(json!({"package": package_row(&package, &same, None), "description": package.summary, "more": true})));
                     self.start_details(package.id);
                     return;
                 }
+                // A write owns the worker: nothing more loads until it ends.
                 let same = same_app_sources(&self.rust().packages, &package.id);
                 self.as_mut().set_details(encoded(json!({"package": package_row(&package, &same, None), "description": package.summary})));
                 return;
             }
             let same = same_app_sources(&self.rust().packages, &package.id);
+            // What the row already says, until its details arrive.
             self.as_mut().set_details(encoded(
-                json!({"package": package_row(&package, &same, None), "description": package.summary}),
+                json!({"package": package_row(&package, &same, None), "description": package.summary, "more": true}),
             ));
             // Details load on their own worker, so opening a package never
             // makes the page busy or disables its actions.
@@ -5264,17 +5307,23 @@ impl ffi::PackageController {
                     }
                 }
                 let info = crate::metadata::cached_info(&details.package);
+                // A first look whose provider is still being asked online.
+                let more =
+                    self.rust().details_preview && crate::metadata::will_fetch(&details.package);
                 let data = encoded(
-                    json!({"package": package_row(&details.package, &same_app_sources(&self.rust().packages, &details.package.id), None), "description": info.as_ref().filter(|i| !i.description.is_empty()).map(|i| &i.description).unwrap_or(&details.description), "homepage": details.homepage.as_ref().or_else(|| info.as_ref().and_then(|i| i.homepage.as_ref())), "publisher": info.as_ref().and_then(|i| i.publisher.as_ref()), "license": info.as_ref().and_then(|i| i.license.as_ref()), "dependencies": details.dependencies, "screenshots": info.as_ref().map(|i| &i.screenshots)}),
+                    json!({"package": package_row(&details.package, &same_app_sources(&self.rust().packages, &details.package.id), None), "description": info.as_ref().filter(|i| !i.description.is_empty()).map(|i| &i.description).unwrap_or(&details.description), "homepage": details.homepage.as_ref().or_else(|| info.as_ref().and_then(|i| i.homepage.as_ref())), "publisher": info.as_ref().and_then(|i| i.publisher.as_ref()), "license": info.as_ref().and_then(|i| i.license.as_ref()), "dependencies": details.dependencies, "screenshots": info.as_ref().map(|i| &i.screenshots), "more": more}),
                 );
                 // Bound memory use for large searches; reload and writes invalidate this snapshot.
                 if self.rust().detail_cache.len() >= 128 {
                     self.as_mut().rust_mut().detail_cache.clear();
                 }
-                self.as_mut()
-                    .rust_mut()
-                    .detail_cache
-                    .insert(details.package.id.clone(), data.clone());
+                // Only complete details are reused when the row opens again.
+                if !more {
+                    self.as_mut()
+                        .rust_mut()
+                        .detail_cache
+                        .insert(details.package.id.clone(), data.clone());
+                }
                 // A superseded reply still warms the cache, but only the
                 // current selection may take over the details panel.
                 if !superseded && details_fresh(self.rust().selected.as_ref(), &details) {
@@ -5420,7 +5469,12 @@ impl ffi::PackageController {
             // apply). A failure replaces the row preview with the reason,
             // unless the user already cancelled or a newer load is waiting.
             match reply {
-                Reply::DetailsPreview(details) | Reply::Done(Ok(Payload::Details(details))) => {
+                Reply::DetailsPreview(details) => {
+                    self.as_mut().rust_mut().details_preview = true;
+                    self.as_mut().apply(Ok(Payload::Details(details)));
+                    self.as_mut().rust_mut().details_preview = false;
+                }
+                Reply::Done(Ok(Payload::Details(details))) => {
                     self.as_mut().apply(Ok(Payload::Details(details)));
                 }
                 Reply::Done(Err(error)) => self.as_mut().show_details_error(&id, &error),
@@ -5745,6 +5799,10 @@ impl ffi::PackageController {
                     self.as_mut().rust_mut().password_casks.push(id);
                     None
                 }
+                Reply::Matches(count) => {
+                    self.as_mut().rust_mut().search_matches = count;
+                    None
+                }
                 reply => Some(reply),
             })
             .collect();
@@ -5890,7 +5948,9 @@ impl ffi::PackageController {
                         }
                     }
                     Reply::DetailsPreview(details) => {
-                        self.as_mut().apply(Ok(Payload::Details(details)))
+                        self.as_mut().rust_mut().details_preview = true;
+                        self.as_mut().apply(Ok(Payload::Details(details)));
+                        self.as_mut().rust_mut().details_preview = false;
                     }
                     Reply::Done(result) => {
                         if self.rust().discard_revalidation && job.reviews() {
@@ -6055,6 +6115,7 @@ impl ffi::PackageController {
                     | Reply::NeedsPassword(_)
                     | Reply::Asked(_)
                     | Reply::Answered(_)
+                    | Reply::Matches(_)
                     | Reply::Inventory(..) => {}
                 }
             }
@@ -6107,7 +6168,9 @@ impl ffi::PackageController {
                         }
                     }
                     Reply::DetailsPreview(details) => {
-                        self.as_mut().apply(Ok(Payload::Details(details)))
+                        self.as_mut().rust_mut().details_preview = true;
+                        self.as_mut().apply(Ok(Payload::Details(details)));
+                        self.as_mut().rust_mut().details_preview = false;
                     }
                     Reply::Progress(message) => {
                         self.as_mut().set_status(message.as_str().into());
@@ -11402,6 +11465,76 @@ mod tests {
         );
     }
     #[test]
+    fn huge_searches_keep_only_the_best_matches() {
+        let package = |name: String| Package {
+            id: PackageId {
+                backend: "fixture".into(),
+                name,
+                architecture: "all".into(),
+                scope: Scope::System,
+                remote: None,
+                reference: None,
+            },
+            display_name: String::new(),
+            summary: "Fixture".into(),
+            installed_version: None,
+            candidate_version: Some("1".into()),
+            update: UpdateAvailability::Unknown,
+            icon: None,
+            component_ids: vec![],
+            homepages: vec![],
+            adopt_with: None,
+        };
+        let mut report = PackageReport {
+            packages: (0..2000)
+                .map(|i| package(format!("lib-{i:04}-v")))
+                .chain([package("v".into()), package("vlc".into())])
+                .collect(),
+            ..PackageReport::default()
+        };
+        assert_eq!(keep_best_matches(&mut report, "V "), 2002);
+        assert_eq!(report.packages.len(), SEARCH_ROW_LIMIT);
+        // The exact name and a prefix match come first, as the list ranks.
+        let names: Vec<_> = report.packages.iter().map(|p| p.id.name.as_str()).collect();
+        assert_eq!(names[..3], ["v", "vlc", "lib-0000-v"]);
+        // Smaller searches are left as they are.
+        let mut small = PackageReport {
+            packages: vec![package("vlc".into()), package("v".into())],
+            ..PackageReport::default()
+        };
+        assert_eq!(keep_best_matches(&mut small, "v"), 2);
+        let names: Vec<_> = small.packages.iter().map(|p| p.id.name.as_str()).collect();
+        assert_eq!(names, ["vlc", "v"]);
+
+        // The page says how many matched in all.
+        let mut controller = synthetic_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().rust_mut().natives = Natives {
+            warm_catalog: true,
+            ..SYNTHETIC
+        };
+        controller
+            .as_mut()
+            .load("Search".into(), "v".into(), "".into(), false, false);
+        settle(&mut controller);
+        controller.as_mut().rust_mut().worker = Some(fake_worker(
+            Job::Load("Search".into(), "v".into()),
+            vec![
+                Reply::Matches(2002),
+                Reply::Done(Ok(Payload::Packages(report))),
+            ],
+        ));
+        controller.as_mut().poll();
+        let state: Value = serde_json::from_str(&controller.report_state().to_string()).unwrap();
+        assert_eq!(state["matches"], 2002);
+        // A new search starts counting again.
+        controller
+            .as_mut()
+            .start(Job::Load("Search".into(), "vl".into()));
+        assert_eq!(controller.rust().search_matches, 0);
+        settle(&mut controller);
+    }
+    #[test]
     fn checked_proposals_plan_selected_upgrades() {
         fn package(name: &str) -> Package {
             Package {
@@ -11574,10 +11707,19 @@ mod tests {
             &Cancellation::default(),
             &mut |r| replies.push(r),
         );
-        assert_eq!(replies.len(), 3);
+        assert_eq!(replies.len(), 5);
         let asked = expect!(replies.remove(0), Reply::Asked(sources) => sources);
         assert_eq!(asked, ["fixture"]);
+        // Each report says how many packages matched before it arrives.
+        assert_eq!(
+            expect!(replies.remove(0), Reply::Matches(count) => count),
+            1
+        );
         let partial = expect!(replies.remove(0), Reply::Partial(report) => report);
+        assert_eq!(
+            expect!(replies.remove(0), Reply::Matches(count) => count),
+            1
+        );
         let terminal =
             expect!(replies.remove(0), Reply::Done(Ok(Payload::Packages(report))) => report);
         assert_eq!(terminal, partial);
@@ -13590,6 +13732,7 @@ mod tests {
         approve: no_approval,
         root: "/nonexistent/pkgdeck-tests",
         metadata: NO_METADATA,
+        warm_catalog: false,
     };
     #[test]
     fn production_workers_use_the_running_system() {
@@ -13614,6 +13757,7 @@ mod tests {
         approve: no_approval,
         root: "/nonexistent/pkgdeck-tests",
         metadata: NO_METADATA,
+        warm_catalog: false,
     };
     fn synthetic_controller() -> cxx::UniquePtr<ffi::PackageController> {
         let mut controller = idle_controller();
@@ -13870,6 +14014,37 @@ mod tests {
         controller.as_mut().poll();
         assert!(controller.rust().worker.is_none());
         assert!(controller.details().to_string().contains("Finished"));
+
+        // Flathub's description and screenshots are fetched after the first
+        // look, which says more is coming and isn't kept for reopening.
+        let mut flathub = fixture_details("");
+        flathub.package.id.backend = "flatpak".into();
+        flathub.package.id.name = "io.example.PreviewOnly".into();
+        flathub.package.id.remote = Some("flathub".into());
+        let more = |controller: &Pin<&mut ffi::PackageController>| {
+            serde_json::from_str::<Value>(&controller.details().to_string()).unwrap()["more"]
+                == true
+        };
+        controller.as_mut().rust_mut().packages = vec![flathub.package.clone()];
+        controller.as_mut().rust_mut().selected = Some(flathub.package.id.clone());
+        controller.as_mut().rust_mut().detail_cache.clear();
+        let (worker, gate) = held_worker(
+            Job::Details(flathub.package.id.clone()),
+            vec![Reply::DetailsPreview(flathub.clone())],
+        );
+        controller.as_mut().rust_mut().worker = Some(worker);
+        controller.as_mut().poll();
+        assert!(more(&controller));
+        assert!(controller.rust().detail_cache.is_empty());
+        drop(gate);
+        settle(&mut controller);
+        controller.as_mut().rust_mut().worker = Some(fake_worker(
+            Job::Details(flathub.package.id.clone()),
+            vec![Reply::Done(Ok(Payload::Details(flathub)))],
+        ));
+        controller.as_mut().poll();
+        assert!(!more(&controller));
+        assert_eq!(controller.rust().detail_cache.len(), 1);
     }
     #[test]
     fn finished_reviews_notices_and_activity_follow_the_job() {

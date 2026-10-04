@@ -1690,6 +1690,13 @@ TestCase {
         compare(pending.text, "Waiting for RubyGems");
         waitForRendering(browser.contentItem);
         compare(row.height, height);
+        // A source this computer doesn't have never answers: not named.
+        fake.source_catalog = JSON.stringify([
+            {source: "npm", availability_kind: "available", capabilities: ["installed"]},
+            {source: "apk", availability_kind: "unavailable", capabilities: []}]);
+        fake.pending_sources = JSON.stringify(["apk", "npm", "macports"]);
+        compare(pending.text, "Waiting for npm");
+        fake.source_catalog = "[]";
         fake.pending_sources = "[]";
         verify(!pending.visible);
         // Nothing is named once the read ends, or while a change runs.
@@ -1892,6 +1899,19 @@ TestCase {
         compare(findChild(browser, "resultsHeading").text, "Searching…");
         verify(!findChild(browser, "emptyState").visible);
         compare(findChild(browser, "emptyState").text, "");
+    }
+    function test_huge_search_says_it_shows_the_best_matches() {
+        browser.openView("Search");
+        const search = findChild(browser, "searchField");
+        search.text = "v";
+        browser.reload();
+        fake.rows = JSON.stringify([{kind: "package", name: "v", source: "apt", installed: null, candidate: "1", scope: "system", summary: "Synthetic"},
+            {kind: "package", name: "vlc", source: "apt", installed: null, candidate: "1", scope: "system", summary: "Synthetic"}]);
+        fake.report_state = JSON.stringify({phase: "complete", failures: [], matches: 46005});
+        waitForRendering(browser.contentItem);
+        compare(findChild(browser, "resultsHeading").text, "Best 2 of " + Number(46005).toLocaleString(Qt.locale(), "f", 0) + " packages. Type more to narrow.");
+        fake.report_state = JSON.stringify({phase: "complete", failures: []});
+        compare(findChild(browser, "resultsHeading").text, "2 packages");
     }
     function test_compact_installed_filter_has_its_own_row() {
         browser.width = 360;
@@ -2190,8 +2210,9 @@ TestCase {
         compare(shown.length, 2000);
         compare(order(shown), order(expected));
         // Derived values stay off the rows the list shows.
+        // The list model follows on the next turn of the event loop.
         const model = findChild(browser, "packageResults").model;
-        compare(model.count, 2000);
+        tryCompare(model, "count", 2000);
         for (let i = 0; i < model.count; i++)
             verify(model.get(i).rowJson.indexOf("_memo") < 0);
         compare(model.get(0).rowJson, JSON.stringify(shown[0]));
