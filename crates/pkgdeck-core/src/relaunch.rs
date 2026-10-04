@@ -77,7 +77,7 @@ impl Install {
         executable: &Path,
     ) -> Option<Self> {
         let var = |name: &str| env.get(&OsString::from(name)).cloned();
-        let kind = match Runtime::detect(env, flatpak_info.is_some()) {
+        let kind = match Runtime::detect_for(env, flatpak_info.is_some(), Some(executable)) {
             Runtime::Flatpak => {
                 // app-path=/var/lib/flatpak/app/ID/ARCH/BRANCH/COMMIT/files
                 let path = flatpak_info?
@@ -424,18 +424,21 @@ mod tests {
         assert_eq!(strings(&args)[3..], ["/snap/bin/pkgdeck"]);
         assert!(Install::detect(&env(&[("SNAP", "/snap/x/1")]), None, Path::new("/x")).is_none());
 
-        let appimage = Install::detect(
-            &env(&[("APPIMAGE", "/home/me/PkgDeck.AppImage")]),
-            None,
-            Path::new("/tmp/.mount/usr/bin/pkgdeck"),
-        )
-        .unwrap();
+        let mounted = env(&[
+            ("APPIMAGE", "/home/me/PkgDeck.AppImage"),
+            ("APPDIR", "/tmp/.mount"),
+        ]);
+        let appimage =
+            Install::detect(&mounted, None, Path::new("/tmp/.mount/usr/bin/pkgdeck")).unwrap();
         assert_eq!(
             appimage.kind,
             Kind::Program {
                 path: "/home/me/PkgDeck.AppImage".into()
             }
         );
+        // Started from another AppImage, such as a terminal: not that one.
+        let inherited = Install::detect(&mounted, None, Path::new("/usr/bin/pkgdeck")).unwrap();
+        assert_eq!(inherited.kind, native(Path::new("/usr/bin/pkgdeck")));
     }
 
     #[test]

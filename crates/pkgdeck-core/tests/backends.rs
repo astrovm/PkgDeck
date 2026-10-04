@@ -749,7 +749,9 @@ impl Transport for FlatpakFixture {
             .push((args.clone(), write, system));
         if args.contains(&"remote-ls".into()) {
             if !self.unreachable.is_empty() {
-                let asked = args.get(4);
+                // The remote is the only argument after `remote-ls` that
+                // isn't an option.
+                let asked = args.iter().skip(2).find(|arg| !arg.starts_with("--"));
                 if let Some(remote) = self
                     .unreachable
                     .iter()
@@ -1596,9 +1598,11 @@ impl Transport for FlatpakGate {
         _: bool,
         system: bool,
     ) -> Result<Completion, ExecutionError> {
+        // Whether Flatpak may use its cached summaries doesn't matter here.
         let args: Vec<_> = args
             .iter()
             .map(|arg| arg.to_string_lossy().into_owned())
+            .filter(|arg| arg != "--cached")
             .collect();
         // Searches and listings are local reads; update checks name a
         // remote once asking every remote failed.
@@ -4776,6 +4780,28 @@ fn flatpak_update_query_failures_are_not_reported_as_current() {
         .unwrap()
         .iter()
         .any(|(args, _, _)| args.contains(&"remote-ls".into())));
+}
+
+#[test]
+fn flatpak_asks_remotes_again_only_during_an_update_check() {
+    let cancel = Cancellation::default();
+    let fixture = FlatpakFixture::default();
+    let mut backend = Flatpak::new(fixture.clone());
+    let update_asks = |fixture: &FlatpakFixture| {
+        std::mem::take(&mut *fixture.calls.lock().unwrap())
+            .into_iter()
+            .filter(|(args, _, _)| args.iter().any(|arg| arg == "remote-ls"))
+            .map(|(args, _, _)| args.iter().any(|arg| arg == "--cached"))
+            .collect::<Vec<_>>()
+    };
+    backend.installed(&cancel).unwrap();
+    assert_eq!(update_asks(&fixture), [true, true]);
+    backend.arm_update_check(Some(1));
+    backend.installed(&cancel).unwrap();
+    assert_eq!(update_asks(&fixture), [false, false]);
+    backend.arm_update_check(None);
+    backend.installed(&cancel).unwrap();
+    assert_eq!(update_asks(&fixture), [true, true]);
 }
 
 #[test]

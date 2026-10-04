@@ -16,18 +16,41 @@ pub enum Runtime {
 }
 
 impl Runtime {
+    /// The runtime this program runs in.
     pub fn detect(env: &BTreeMap<OsString, OsString>, flatpak_info: bool) -> Self {
+        Self::detect_for(env, flatpak_info, std::env::current_exe().ok().as_deref())
+    }
+    /// [`detect`](Self::detect) for the program at `executable`. Everything
+    /// an AppImage starts inherits its variables, such as a terminal and
+    /// what runs in it, so they only count when this program is inside the
+    /// AppImage's folder.
+    pub fn detect_for(
+        env: &BTreeMap<OsString, OsString>,
+        flatpak_info: bool,
+        executable: Option<&Path>,
+    ) -> Self {
+        let appdir = env
+            .get(&OsString::from("APPDIR"))
+            .map(PathBuf::from)
+            .map(|dir| fs::canonicalize(&dir).unwrap_or(dir));
         if env.contains_key(&OsString::from("SNAP")) {
             Self::Snap
         } else if flatpak_info || env.contains_key(&OsString::from("FLATPAK_ID")) {
             Self::Flatpak
-        } else if env.contains_key(&OsString::from("APPIMAGE"))
-            || env.contains_key(&OsString::from("APPDIR"))
+        } else if appdir
+            .zip(executable)
+            .is_some_and(|(dir, executable)| executable.starts_with(dir))
         {
             Self::AppImage
         } else {
             Self::Native
         }
+    }
+
+    /// Whether host tools and their files are seen as they are, so their
+    /// answers can be kept: true outside a sandbox.
+    pub fn sees_host_files(self) -> bool {
+        matches!(self, Self::Native | Self::AppImage)
     }
 
     pub fn disabled_reason(self) -> Option<&'static str> {
@@ -695,7 +718,7 @@ impl Host {
             ["info", "--json=v2", "--installed"] => Some("homebrew"),
             _ => None,
         };
-        let result = match source.filter(|_| !write && self.runtime == Runtime::Native) {
+        let result = match source.filter(|_| !write && self.runtime.sees_host_files()) {
             Some(source) => crate::cache::completion(
                 crate::cache::Store::user().as_ref(),
                 source,
@@ -718,7 +741,7 @@ impl Host {
     /// depend on. `None` in a sandbox, without a cache, or without Homebrew.
     /// Homebrew says where its data is, since `brew.env` files can move it.
     pub fn brew_cache(&self) -> Option<(crate::cache::Store, Vec<crate::cache::Watch>)> {
-        if self.runtime != Runtime::Native {
+        if !self.runtime.sees_host_files() {
             return None;
         }
         let brew = self.resolve("brew").ok().flatten()?;

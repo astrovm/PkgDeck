@@ -334,12 +334,15 @@ pub fn rank_search_matches(packages: &mut [Package], query: &str) {
     if query.is_empty() {
         return;
     }
-    packages.sort_by(|a, b| {
-        unverified_search_offer(a)
-            .cmp(&unverified_search_offer(b))
-            .then(score(a, &query).cmp(&score(b, &query)))
-            .then(a.id.name.cmp(&b.id.name))
-            .then(a.id.backend.cmp(&b.id.backend))
+    // Keys are built once per package: a short query can match tens of
+    // thousands, and lower-casing inside every comparison dominated.
+    packages.sort_by_cached_key(|package| {
+        (
+            unverified_search_offer(package),
+            score(package, &query),
+            package.id.name.clone(),
+            package.id.backend.clone(),
+        )
     });
 }
 /// Explicit-install placeholders are not catalog matches and must not be

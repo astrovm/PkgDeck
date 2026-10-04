@@ -29,12 +29,14 @@ package. For Flatpak, pick the User or System row to choose where it installs.
   keys only move the selection.
 - App names, icons, and screenshots come from the source. Packages without
   app metadata show their package name.
+- A very short search can match tens of thousands of packages. The list
+  shows the best 500 and says how many matched. Type more to narrow it.
 
 ![Firefox from APT and Flatpak, with the Flatpak details open](screenshots/details.png)
 
 ## Open a package file or link
 
-On Search, click **Add…**, drop a file onto the window, or pass a path or link
+On Search, click **Install from file…**, drop a file onto the window, or pass a path or link
 to `pkgdeck`. If PkgDeck is already open, the file goes to the open window.
 It opens on its own app page, with what the file or link says about itself
 and where it came from. Nothing installs until you press **Install** there.
@@ -88,8 +90,9 @@ only Docker or Podman and search for the full image name with its tag.
 Updates lists package updates and, if `fwupdmgr` is installed, firmware updates.
 Opening this page, **Reload**, and the background check run `brew update` once
 before they read Homebrew. Formulae and casks share that fetch, so a newly
-published cask (including PkgDeck itself) can show up. The Installed page does
-not fetch. The first Updates load can take longer while Homebrew fetches;
+published cask (including PkgDeck itself) can show up. They also ask each
+Flatpak remote for new versions again. The Installed page does not fetch: it
+uses what Homebrew and Flatpak already know. The first Updates load can take longer while Homebrew fetches;
 other sources still appear as they answer.
 
 ![Updates for an APT package and three npm tools, all checked](screenshots/updates.png)

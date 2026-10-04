@@ -75,6 +75,9 @@ Rectangle {
     // Anything to show beyond the header, once details are in.
     readonly property bool hasDetails: detailMatchesSelection
         && (description.length > 0 || screenshots.length > 0 || metadataText.length > 0)
+    // A first look, such as what the row already says, while the rest is
+    // still on its way (such as Flathub's description and screenshots).
+    readonly property bool loadingMore: detailMatchesSelection && detailsData.more === true
     readonly property real contentIdealHeight: Math.max(88, 2 * Theme.gutter + header.implicitHeight
         + detailsContent.spacing + detailBody.implicitHeight)
     // Never collapses while the next row loads: it keeps the last settled
@@ -390,34 +393,6 @@ Rectangle {
                 id: detailBody
                 width: detailScroll.availableWidth
                 spacing: Theme.spacing
-                // Placeholder bars while the selected row's details load.
-                Column {
-                    id: skeleton
-                    objectName: "detailsSkeleton"
-                    visible: panel.loading
-                    Layout.fillWidth: true
-                    Layout.topMargin: 4
-                    spacing: 10
-                    readonly property bool pulsing: pulse.running
-                    Repeater {
-                        model: [0.92, 1, 0.78, 0.46]
-                        Rectangle {
-                            required property real modelData
-                            width: skeleton.width * modelData
-                            height: 10
-                            radius: 5
-                            color: Theme.tint(panel.ink, 0.09)
-                        }
-                    }
-                    SequentialAnimation on opacity {
-                        id: pulse
-                        running: skeleton.visible && panel.motionEnabled && Theme.pulseDuration > 0
-                        loops: Animation.Infinite
-                        NumberAnimation { from: 1; to: 0.45; duration: Math.max(1, Theme.pulseDuration); easing.type: Easing.InOutSine }
-                        NumberAnimation { from: 0.45; to: 1; duration: Math.max(1, Theme.pulseDuration); easing.type: Easing.InOutSine }
-                        onRunningChanged: if (!running) skeleton.opacity = 1
-                    }
-                }
                 // Changes to look at before they run, on the page itself.
                 Rectangle {
                     id: reviewCard
@@ -930,6 +905,35 @@ Rectangle {
                                 }
                             }
                         }
+                    }
+                }
+                // Placeholder bars while the selected row's details load, below
+                // whatever part of them is already in.
+                Column {
+                    id: skeleton
+                    objectName: "detailsSkeleton"
+                    visible: panel.loading || panel.loadingMore
+                    Layout.fillWidth: true
+                    Layout.topMargin: 4
+                    spacing: 10
+                    readonly property bool pulsing: pulse.running
+                    Repeater {
+                        model: [0.92, 1, 0.78, 0.46]
+                        Rectangle {
+                            required property real modelData
+                            width: skeleton.width * modelData
+                            height: 10
+                            radius: 5
+                            color: Theme.tint(panel.ink, 0.09)
+                        }
+                    }
+                    SequentialAnimation on opacity {
+                        id: pulse
+                        running: skeleton.visible && panel.motionEnabled && Theme.pulseDuration > 0
+                        loops: Animation.Infinite
+                        NumberAnimation { from: 1; to: 0.45; duration: Math.max(1, Theme.pulseDuration); easing.type: Easing.InOutSine }
+                        NumberAnimation { from: 0.45; to: 1; duration: Math.max(1, Theme.pulseDuration); easing.type: Easing.InOutSine }
+                        onRunningChanged: if (!running) skeleton.opacity = 1
                     }
                 }
             }

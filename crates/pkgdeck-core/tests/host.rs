@@ -71,13 +71,26 @@ fn link_executable(dir: &Path, name: &str, target: &str) -> PathBuf {
 #[test]
 fn formats_detect_native_and_bridged_runtimes() {
     assert_eq!(Runtime::detect(&env(&[]), false), Runtime::Native);
+    let mounted = env(&[
+        ("APPIMAGE", "/tmp/example.AppImage"),
+        ("APPDIR", "/tmp/example"),
+    ]);
+    let inside = Path::new("/tmp/example/usr/bin/pkgdeck");
     assert_eq!(
-        Runtime::detect(&env(&[("APPIMAGE", "/tmp/example")]), false),
+        Runtime::detect_for(&mounted, false, Some(inside)),
         Runtime::AppImage
     );
+    // Variables inherited from another AppImage, such as the terminal this
+    // runs in, don't make this program an AppImage.
+    for executable in [Some(Path::new("/usr/bin/pkgdeck")), None] {
+        assert_eq!(
+            Runtime::detect_for(&mounted, false, executable),
+            Runtime::Native
+        );
+    }
     assert_eq!(
-        Runtime::detect(&env(&[("APPDIR", "/tmp/example")]), false),
-        Runtime::AppImage
+        Runtime::detect_for(&env(&[("APPIMAGE", "/tmp/example")]), false, Some(inside)),
+        Runtime::Native
     );
     assert_eq!(Runtime::detect(&env(&[]), true), Runtime::Flatpak);
     assert_eq!(

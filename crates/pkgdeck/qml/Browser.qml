@@ -338,9 +338,12 @@ Controls.ApplicationWindow {
     }
     readonly property var reportState: JSON.parse(backend.report_state || "{}")
     // Sources a slow read still waits for. A fast read ends before the
-    // delay, so its list never flashes by.
+    // delay, so its list never flashes by. Sources this computer doesn't
+    // have never answer, so they aren't waited for.
     readonly property var pendingSourceNames: pendingDelay.elapsed
-        ? JSON.parse(backend.pending_sources || "[]").map((id) => sourceDisplayName(id)) : []
+        ? JSON.parse(backend.pending_sources || "[]")
+            .filter((id) => ["unavailable", "platform"].indexOf(sourceInfo(id).availability_kind) < 0)
+            .map((id) => sourceDisplayName(id)) : []
     Timer {
         id: pendingDelay
         readonly property bool reading: backend.busy && !backend.writing
@@ -503,6 +506,9 @@ Controls.ApplicationWindow {
             return currentView === "Search" ? "Searching…" :
                 (retainingResults || viewItems.length > 0 ? "Refreshing…" : "Loading…");
         const count = viewItems.length;
+        // A short search can match far more than the list shows.
+        if (currentView === "Search" && (reportState.matches || 0) > count)
+            return "Best " + count + " of " + reportState.matches.toLocaleString(Qt.locale(), "f", 0) + " packages. Type more to narrow.";
         const noun = currentView === "Sources" ? "source" : currentView === "Clean" ? "cleanup task" :
             currentView === "Updates" ? "update" : "package";
         return count + " " + noun + (count === 1 ? "" : "s");
@@ -1464,11 +1470,15 @@ Controls.ApplicationWindow {
     }
     onHeightChanged: Qt.callLater(updateOverflow)
     onCompactChanged: Qt.callLater(updateOverflow)
-    onViewItemsChanged: {
+    // One page switch or load changes viewItems several times in a row;
+    // only the last list is laid out, so the old page's rows are never
+    // rebuilt on the way out.
+    function flushResults() {
         syncResults();
         updateOverflow();
-        Qt.callLater(() => root.restoreSelection());
+        restoreSelection();
     }
+    onViewItemsChanged: Qt.callLater(flushResults)
     function propose(action) {
         if (!retainingResults) {
             if (action === "upgrade-all")

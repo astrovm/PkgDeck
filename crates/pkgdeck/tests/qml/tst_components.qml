@@ -262,8 +262,18 @@ TestCase {
         verify(!findChild(details, "detailsSkeleton").pulsing);
         compare(findChild(details, "detailsSkeleton").opacity, 1);
 
-        // A short row settles to its own height once its details are in.
+        // A first look shows what it has, with the skeleton below it while
+        // the rest is on its way.
         details.detailMatchesSelection = true;
+        details.detailsData = {package: details.selected, more: true};
+        details.description = "What the row says.";
+        verify(!details.loading);
+        verify(findChild(details, "detailsBody").visible);
+        verify(findChild(details, "detailsSkeleton").visible);
+        tryVerify(() => findChild(details, "detailsSkeleton").y > findChild(details, "detailsBody").y);
+        details.description = "";
+
+        // A short row settles to its own height once its details are in.
         details.detailsData = {package: details.selected};
         verify(!details.loading);
         verify(!findChild(details, "detailsSkeleton").visible);
