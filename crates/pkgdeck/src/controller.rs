@@ -580,6 +580,14 @@ impl ProgressState {
         }))
     }
 }
+/// A Type 2 AppImage, whatever its file is called.
+fn is_appimage(path: &std::path::Path) -> bool {
+    use std::io::Read;
+    let mut header = [0_u8; 11];
+    std::fs::File::open(path)
+        .and_then(|mut file| file.read_exact(&mut header))
+        .is_ok_and(|()| header.starts_with(b"\x7fELF") && &header[8..11] == b"AI\x02")
+}
 fn inspect_open_input(input: &str, cancel: &Cancellation) -> Result<Payload, EngineError> {
     if let Some(url) = input.strip_prefix("flatpak+") {
         return pkgdeck_core::flatpak_ref::inspect(url, cancel)
@@ -613,7 +621,7 @@ fn inspect_open_input(input: &str, cancel: &Cancellation) -> Result<Payload, Eng
         .and_then(|value| value.to_str())
         .unwrap_or_default();
     let package = match extension {
-        "AppImage" => {
+        _ if extension.eq_ignore_ascii_case("appimage") || is_appimage(&path) => {
             use pkgdeck_core::engine::Backend;
             AppImage::native()
                 .search(&path.to_string_lossy(), cancel)
@@ -634,6 +642,9 @@ fn plan_adoption(
     app: &Package,
     cancel: &Cancellation,
 ) -> Result<Payload, EngineError> {
+    if app.id.backend == "appimage" {
+        return plan_appimage_adoption(engine, app, cancel);
+    }
     const CASK: &str = "homebrew-cask";
     let refuse = |reason: String| EngineError::InvalidResponse {
         backend: CASK.into(),
@@ -692,6 +703,42 @@ fn plan_adoption(
             "The {token} cask would install another copy instead of managing {}.",
             app.id.name
         ))),
+    }
+}
+/// Preview PkgDeck taking over an AppImage installed some other way: the
+/// file moves into PkgDeck's folder and gets PkgDeck's own menu entry. The
+/// AppImage source plans the move, and checks it again before it happens.
+fn plan_appimage_adoption(
+    engine: &mut Engine,
+    app: &Package,
+    cancel: &Cancellation,
+) -> Result<Payload, EngineError> {
+    if app.adopt_with.as_deref() != Some("appimage") {
+        return Err(EngineError::NotFound);
+    }
+    let mut report = engine.lookup_for_mutation(&app.id.name, cancel);
+    if let Some(failure) = report.failures.pop() {
+        return Err(failure.error);
+    }
+    let package = report
+        .packages
+        .into_iter()
+        .find(|package| package.id.backend == "appimage" && package.id.name == app.id.name)
+        .ok_or(EngineError::NotFound)?;
+    let operation = Operation::Install(package.id.clone());
+    match engine.plan_operation(&operation, cancel)? {
+        Some(plan) if plan.adopts.is_some() => Ok(Payload::AdoptionPreview(
+            Box::new(package),
+            operation,
+            Box::new(plan),
+        )),
+        _ => Err(EngineError::InvalidResponse {
+            backend: "appimage".into(),
+            reason: format!(
+                "{} isn't installed some other way anymore. Nothing was changed.",
+                app.id.name
+            ),
+        }),
     }
 }
 fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn FnMut(Reply)) {
@@ -1606,6 +1653,8 @@ fn engine_source(job: &Job, filter: &[String]) -> Vec<String> {
         Job::RetrySource(_, _, source) => vec![source.clone()],
         Job::RetryFailedUpdates(sources) => sources.clone(),
         Job::PlanOperation(operation) => vec![operation.backend().into()],
+        // AppImages are taken over by the AppImage source itself.
+        Job::PlanAdoption(app) if app.id.backend == "appimage" => vec!["appimage".into()],
         Job::PlanAdoption(_) => vec!["homebrew-cask".into()],
         Job::Write(operation, _) => vec![operation.backend().into()],
         Job::BackgroundUpdates(sources) => sources.clone(),
@@ -2211,7 +2260,15 @@ fn preflight_notice(job: &Job, error: &EngineError, sudo: bool, names: &Names) -
         ),
         Job::PlanUpgrade(operations, _) => ("The update".to_owned(), operations.clone()),
         Job::PlanAdoption(app) => (
-            format!("Managing {} with Homebrew", app.display_name),
+            format!(
+                "Managing {} with {}",
+                app.display_name,
+                if app.id.backend == "appimage" {
+                    "PkgDeck"
+                } else {
+                    "Homebrew"
+                }
+            ),
             vec![],
         ),
         Job::PlanCleanAll(operations) => ("The cleanup".to_owned(), operations.clone()),
@@ -2716,7 +2773,7 @@ fn package_name(id: &PackageId) -> &str {
     match id.reference.as_deref() {
         // The App Store ID only selects the app; people know it by name.
         Some(_) if id.backend == "mas" => &id.name,
-        Some(reference) if !reference.starts_with("artifact:") => reference,
+        // A local AppImage's reference is its checksum; show the file.
         Some(_) if id.backend == "appimage" => id
             .name
             .split(['?', '#'])
@@ -2725,6 +2782,7 @@ fn package_name(id: &PackageId) -> &str {
             .rsplit('/')
             .next()
             .unwrap_or(&id.name),
+        Some(reference) if !reference.starts_with("artifact:") => reference,
         _ => &id.name,
     }
 }
@@ -2769,6 +2827,7 @@ fn confirmation_preview(
     let mut lines = vec![operation_label(operation)];
     let mut summary = vec![operation_label(operation)];
     let mut title = action_name(operation).to_owned();
+    let mut icon = None;
     if let Some(package) = packages.iter().find(|package| match operation {
         Operation::Install(id) | Operation::Remove(id) | Operation::Upgrade(id) => {
             package.id == *id
@@ -2820,6 +2879,13 @@ fn confirmation_preview(
         if package.id.backend == "fwupd" {
             lines.push(package.summary.clone());
             summary.push(package.summary.clone());
+        }
+        // An AppImage being installed shows what it is, like a store page.
+        if package.id.backend == "appimage" && matches!(operation, Operation::Install(_)) {
+            if !package.summary.is_empty() {
+                summary.push(package.summary.clone());
+            }
+            icon.clone_from(&package.icon);
         }
         if (package.id.backend == "appimage"
             || package.id.reference.as_deref().is_some_and(|value| {
@@ -2942,7 +3008,9 @@ fn confirmation_preview(
     } else if matches!(
         operation,
         Operation::Install(_) | Operation::Remove(_) | Operation::Upgrade(_)
-    ) {
+    ) && operation.backend() != "appimage"
+    {
+        // AppImages carry everything they need.
         summary.push("Other changes may be required.".into());
     }
     if matches!(operation, Operation::Remove(_)) {
@@ -2967,7 +3035,7 @@ fn confirmation_preview(
         }
         _ => "",
     };
-    json!({"action": title, "body": lines.join("\n\n"), "summary": summary.join("\n"), "details": lines.iter().skip(1).filter(|line| !summary.contains(line)).cloned().collect::<Vec<_>>().join("\n\n"), "flatpak_ref_scope": flatpak_ref_scope})
+    json!({"action": title, "body": lines.join("\n\n"), "summary": summary.join("\n"), "details": lines.iter().skip(1).filter(|line| !summary.contains(line)).cloned().collect::<Vec<_>>().join("\n\n"), "flatpak_ref_scope": flatpak_ref_scope, "icon": icon})
 }
 fn package_row(p: &Package, same_from: &[String], same_group: Option<&str>) -> Value {
     json!({"name": p.id.name, "display_name": p.display_name, "source": p.id.backend, "architecture": p.id.architecture,
@@ -4331,8 +4399,12 @@ impl ffi::PackageController {
             let app = usize::try_from(index)
                 .ok()
                 .and_then(|i| self.rust().packages.get(i))
-                // Only the macOS Applications inventory produces such rows.
-                .filter(|p| p.id.backend == "macos-apps" && p.adopt_with.is_some())
+                // Only the macOS Applications inventory and AppImages
+                // installed some other way produce such rows.
+                .filter(|p| {
+                    matches!(p.id.backend.as_str(), "macos-apps" | "appimage")
+                        && p.adopt_with.is_some()
+                })
                 .cloned();
             match app {
                 Some(app) => self.start(Job::PlanAdoption(Box::new(app))),
@@ -4510,6 +4582,13 @@ impl ffi::PackageController {
                     self.set_status(plain_error(&e, None, sudo).as_str().into());
                 }
             }
+            // An AppImage already installed some other way: installing it
+            // means moving it in, so preview that instead.
+            Ok(Payload::OpenPackage(package))
+                if package.adopt_with.as_deref() == Some("appimage") =>
+            {
+                self.as_mut().start(Job::PlanAdoption(package));
+            }
             Ok(Payload::OpenPackage(package)) => {
                 let operation = Operation::Install(package.id.clone());
                 let apt = package.id.backend == "apt";
@@ -4653,27 +4732,32 @@ impl ffi::PackageController {
                     &[],
                     Some(&plan),
                 );
-                // Say what happens in people's words: the checked copy stays
-                // where it is and Homebrew takes it over.
+                // Say what happens in people's words: Homebrew takes over the
+                // checked copy where it is; PkgDeck moves an AppImage in.
                 let app = self
                     .rust()
                     .packages
                     .iter()
                     .find(|row| {
-                        row.id.backend == "macos-apps"
+                        matches!(row.id.backend.as_str(), "macos-apps" | "appimage")
                             && plan.adopts.as_deref() == Some(std::path::Path::new(&row.id.name))
                     })
                     .map(|row| row.display_name.clone())
                     .filter(|name| !name.is_empty())
                     .unwrap_or_else(|| cask.display_name.clone());
-                data["action"] = json!("Manage with Homebrew");
+                let manager = if cask.id.backend == "appimage" {
+                    "PkgDeck"
+                } else {
+                    "Homebrew"
+                };
+                data["action"] = json!(format!("Manage with {manager}"));
                 data["body"] = json!(format!(
                     "{}\n\n{}",
                     plan.native_preview,
                     data["body"].as_str().unwrap_or_default()
                 ));
                 data["summary"] = json!(format!(
-                    "Manage {app} with Homebrew\n{}\n{}",
+                    "Manage {app} with {manager}\n{}\n{}",
                     source_display_name(&cask.id.backend),
                     plan.native_preview
                 ));
@@ -6175,8 +6259,13 @@ mod tests {
             preview.contains("Sample ñ"),
             "preview: {preview}; status: {status}"
         );
-        assert!(preview.contains("Managed file:"), "{preview}");
-        assert!(preview.contains("Desktop entry:"), "{preview}");
+        assert!(preview.contains("Location:"), "{preview}");
+        let data: Value =
+            serde_json::from_str(&controller.confirmation_data().to_string()).unwrap();
+        assert!(
+            !data["summary"].as_str().unwrap().contains("Other changes"),
+            "{data}"
+        );
         assert!(matches!(
             controller.rust().pending,
             Some(Job::Write(Operation::Install(_), _))
@@ -6282,6 +6371,31 @@ mod tests {
         );
         std::fs::remove_dir_all(base).unwrap();
     }
+    #[test]
+    fn appimage_install_previews_show_icon_and_description() {
+        let mut package = synthetic_package("/home/user/Downloads/demo.appimage", "Demo App");
+        package.id.backend = "appimage".into();
+        package.id.scope = Scope::Environment {
+            path: "/home/user/.local/share/pkgdeck/appimages".into(),
+        };
+        package.summary = "Does demo things".into();
+        package.installed_version = None;
+        package.candidate_version = Some("2.0".into());
+        package.icon = Some("/icons/demo.png".into());
+        let data = confirmation_preview(
+            &Operation::Install(package.id.clone()),
+            std::slice::from_ref(&package),
+            &[],
+            None,
+        );
+        assert_eq!(data["icon"], "/icons/demo.png");
+        let summary = data["summary"].as_str().unwrap();
+        assert!(summary.starts_with("Install Demo App\nAppImage"));
+        assert!(summary.contains("\n2.0\nDoes demo things"));
+        // AppImages carry everything they need.
+        assert!(!summary.contains("Other changes may be required"));
+    }
+
     #[test]
     fn confirmation_preview_names_target_and_extra_native_changes() {
         let package: Package = serde_json::from_value(json!({
@@ -11251,6 +11365,11 @@ mod tests {
         id.name = "https://example.invalid/dl/Tool.AppImage?x=1".into();
         id.reference = Some("artifact:sha".into());
         assert_eq!(package_name(&id), "Tool.AppImage");
+        // A local AppImage's reference is its checksum, never shown.
+        id.name = "/home/user/Downloads/tool.appimage".into();
+        id.reference = Some("ab".repeat(32));
+        assert_eq!(package_name(&id), "tool.appimage");
+        id.backend = "flatpak".into();
         id.reference = Some("app/org.example.Tool/x86_64/stable".into());
         assert_eq!(package_name(&id), "app/org.example.Tool/x86_64/stable");
         // An App Store app shows its name, not its App Store ID.
@@ -12389,6 +12508,163 @@ mod tests {
             }))
         }
     }
+    /// An AppImage source stand-in: the file it finds, and the copy its
+    /// install would move in (`None` once it's no longer installed elsewhere).
+    struct AppImageFixture {
+        package: Package,
+        adopts: Option<PathBuf>,
+    }
+    impl Backend for AppImageFixture {
+        fn id(&self) -> &str {
+            "appimage"
+        }
+        fn capabilities(&self) -> &[Capability] {
+            &[Capability::Search, Capability::Install]
+        }
+        fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
+            Ok(Availability::Available)
+        }
+        fn search(&mut self, query: &str, _: &Cancellation) -> Result<Vec<Package>, EngineError> {
+            if query == "/fail" {
+                return Err(EngineError::NotFound);
+            }
+            Ok(vec![self.package.clone()])
+        }
+        fn operation_plan(
+            &mut self,
+            operation: &Operation,
+            _: &Cancellation,
+        ) -> Result<Option<TransactionPlan>, EngineError> {
+            Ok(self.adopts.clone().map(|original| TransactionPlan {
+                operation: operation.clone(),
+                native_preview: "Moves ~/AppImages/demo.appimage into PkgDeck's folder and replaces its menu entries.".into(),
+                changes: vec![],
+                download_bytes: None,
+                disk_bytes: None,
+                restart_required: None,
+                adopts: Some(original),
+            }))
+        }
+    }
+    fn external_appimage() -> Package {
+        let mut app = synthetic_package("/home/user/AppImages/demo.appimage", "Demo");
+        app.id.backend = "appimage".into();
+        app.id.scope = Scope::User { uid: 1000 };
+        app.summary = "~/AppImages/demo.appimage".into();
+        app.adopt_with = Some("appimage".into());
+        app
+    }
+    fn plan_appimage_adoption_with(adopts: Option<&str>, app: Package) -> Reply {
+        let mut file = app.clone();
+        file.id.scope = Scope::Environment {
+            path: "/home/user/.local/share/pkgdeck/appimages".into(),
+        };
+        file.id.reference = Some("ab".repeat(32));
+        file.summary = "Does demo things".into();
+        let mut engine = Engine::default();
+        engine
+            .register(AppImageFixture {
+                package: file,
+                adopts: adopts.map(PathBuf::from),
+            })
+            .unwrap();
+        let mut replies = Vec::new();
+        execute(
+            &mut engine,
+            Job::PlanAdoption(Box::new(app)),
+            &Cancellation::default(),
+            &mut |reply| replies.push(reply),
+        );
+        replies.pop().unwrap()
+    }
+    #[test]
+    fn appimage_adoption_previews_the_move_the_appimage_source_plans() {
+        let app = external_appimage();
+        assert!(matches!(
+            plan_appimage_adoption_with(Some(&app.id.name), app.clone()),
+            Reply::Done(Ok(Payload::AdoptionPreview(file, Operation::Install(id), plan)))
+                if file.id == id
+                    && id.name == app.id.name
+                    && plan.adopts.as_deref() == Some(std::path::Path::new(&app.id.name))
+        ));
+        // No longer installed elsewhere: nothing to take over.
+        assert!(matches!(
+            plan_appimage_adoption_with(None, app.clone()),
+            Reply::Done(Err(EngineError::InvalidResponse { reason, .. })) if reason.contains("isn't installed some other way anymore")
+        ));
+        // A failed read of the file is reported as is.
+        let mut failing = app.clone();
+        failing.id.name = "/fail".into();
+        assert!(matches!(
+            plan_appimage_adoption_with(Some("/fail"), failing),
+            Reply::Done(Err(EngineError::NotFound))
+        ));
+        // Only rows PkgDeck can take over are planned.
+        let mut managed = app;
+        managed.adopt_with = None;
+        assert!(matches!(
+            plan_appimage_adoption_with(Some("/x"), managed),
+            Reply::Done(Err(EngineError::NotFound))
+        ));
+    }
+    #[test]
+    fn appimage_adoption_confirms_as_manage_with_pkgdeck() {
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        let app = external_appimage();
+        controller.as_mut().rust_mut().packages = vec![app.clone()];
+        let reply = plan_appimage_adoption_with(Some(&app.id.name), app.clone());
+        assert!(matches!(
+            &reply,
+            Reply::Done(Ok(Payload::AdoptionPreview(..)))
+        ));
+        if let Reply::Done(result) = reply {
+            controller.as_mut().apply(result);
+        }
+        let data: Value =
+            serde_json::from_str(&controller.confirmation_data().to_string()).unwrap();
+        assert_eq!(data["action"], "Manage with PkgDeck");
+        assert!(
+            data["summary"]
+                .as_str()
+                .unwrap()
+                .starts_with("Manage Demo with PkgDeck\nAppImage\nMoves ~/AppImages/demo.appimage"),
+            "{data}"
+        );
+        assert!(matches!(
+            &controller.rust().pending,
+            Some(Job::Write(Operation::Install(_), Some(plan))) if plan.adopts.is_some()
+        ));
+        controller.as_mut().confirm(false);
+        // Opening a file that's installed some other way previews the move.
+        let mut opened = app.clone();
+        opened.id.scope = Scope::Environment {
+            path: "/home/user/.local/share/pkgdeck/appimages".into(),
+        };
+        controller
+            .as_mut()
+            .apply(Ok(Payload::OpenPackage(Box::new(opened.clone()))));
+        assert!(matches!(
+            &controller.rust().worker,
+            Some(worker) if matches!(&worker.job, Job::PlanAdoption(found) if found.id == opened.id)
+        ));
+        settle(&mut controller);
+        // A failed plan names PkgDeck, not Homebrew.
+        let notice = preflight_notice(
+            &Job::PlanAdoption(Box::new(app)),
+            &EngineError::NotFound,
+            false,
+            &Names::default(),
+        )
+        .unwrap();
+        assert!(
+            notice["title"]
+                .as_str()
+                .unwrap()
+                .starts_with("Managing Demo with PkgDeck"),
+            "{notice}"
+        );
+    }
     fn adoptable_app() -> Package {
         let mut app = synthetic_package("/Applications/Obsidian.app", "Obsidian");
         app.id.backend = "macos-apps".into();
@@ -12517,6 +12793,32 @@ mod tests {
             engine_source(&Job::PlanAdoption(Box::new(adoptable_app())), &[]),
             ["homebrew-cask"]
         );
+        // The AppImage source takes over AppImages itself.
+        let mut appimage = adoptable_app();
+        appimage.id.backend = "appimage".into();
+        appimage.adopt_with = Some("appimage".into());
+        assert_eq!(
+            engine_source(&Job::PlanAdoption(Box::new(appimage)), &[]),
+            ["appimage"]
+        );
+    }
+
+    #[test]
+    fn appimages_open_whatever_their_file_is_called() {
+        let dir =
+            std::env::temp_dir().join(format!("pkgdeck-appimage-magic-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut header = vec![0_u8; 64];
+        header[..4].copy_from_slice(b"\x7fELF");
+        header[8..11].copy_from_slice(b"AI\x02");
+        let named = dir.join("tool");
+        std::fs::write(&named, &header).unwrap();
+        assert!(is_appimage(&named));
+        header[8] = 0;
+        std::fs::write(&named, &header).unwrap();
+        assert!(!is_appimage(&named));
+        assert!(!is_appimage(&dir.join("missing")));
+        std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]
     fn adoption_is_proposed_only_for_rows_a_cask_can_manage() {

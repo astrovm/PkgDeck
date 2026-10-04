@@ -1,3 +1,4 @@
+use super::appimage_contents::{self, Contents, Icon};
 use crate::{
     engine::*,
     host::Host,
@@ -13,6 +14,8 @@ use std::{
 };
 
 const MAX_IMPORT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+/// Shown when an AppImage names no version.
+const UNKNOWN_VERSION: &str = "local";
 
 const CAPABILITIES: &[Capability] = &[
     Capability::Search,
@@ -271,15 +274,123 @@ impl AppImage {
         }
         Ok(false)
     }
-    fn desktop_entry(destination: &Path, display_name: &str) -> String {
+    /// The `Exec=` value's program part: the managed file, quoted.
+    fn exec_program(destination: &Path) -> String {
         let escaped = destination
             .display()
             .to_string()
             .replace('\\', "\\\\")
             .replace('"', "\\\"")
             .replace('%', "%%");
-        let name = display_name.replace(['\n', '\r'], " ");
-        format!("[Desktop Entry]\nType=Application\nName={name}\nExec=\"{escaped}\" %U\nTryExec={escaped}\nTerminal=false\nCategories=Utility;\n")
+        format!("\"{escaped}\"")
+    }
+    /// A desktop entry for a managed AppImage, from what the AppImage says
+    /// about itself: its name, description, icon, categories and the
+    /// arguments its own entry starts it with.
+    fn desktop_entry(
+        destination: &Path,
+        fallback_name: &str,
+        contents: &Contents,
+        icon: Option<&Path>,
+    ) -> String {
+        let line = |value: &str| value.replace(['\n', '\r'], " ");
+        let mut entry = format!(
+            "[Desktop Entry]\nType=Application\nName={}\n",
+            line(contents.name.as_deref().unwrap_or(fallback_name))
+        );
+        if let Some(comment) = &contents.comment {
+            entry += &format!("Comment={}\n", line(comment));
+        }
+        if let Some(icon) = icon {
+            entry += &format!("Icon={}\n", line(&icon.display().to_string()));
+        }
+        let arguments = contents.arguments.as_deref().map_or_else(
+            || "%U".to_string(),
+            |arguments| line(arguments).replace('\\', "\\\\"),
+        );
+        entry += &format!(
+            "Exec={} {arguments}\nTryExec={}\nTerminal=false\nCategories={}\n",
+            Self::exec_program(destination),
+            line(&destination.display().to_string()),
+            line(contents.categories.as_deref().unwrap_or("Utility;"))
+        );
+        if let Some(class) = &contents.startup_wm_class {
+            entry += &format!("StartupWMClass={}\n", line(class));
+        }
+        if let Some(version) = &contents.version {
+            entry += &format!("X-AppImage-Version={}\n", line(version));
+        }
+        entry
+    }
+    /// What the AppImage at `path` says about itself, remembered while the
+    /// file is unchanged. Unreadable contents count as empty.
+    fn contents(path: &Path) -> std::sync::Arc<Contents> {
+        use std::{
+            collections::HashMap,
+            sync::{Arc, Mutex, OnceLock},
+        };
+        /// Size and modification time: the file is unchanged while they are.
+        type Key = (u64, i64, i64);
+        type Seen = HashMap<PathBuf, (Key, Arc<Contents>)>;
+        static SEEN: OnceLock<Mutex<Seen>> = OnceLock::new();
+        let key = fs::metadata(path)
+            .ok()
+            .map(|m| (m.len(), m.mtime(), m.mtime_nsec()));
+        let seen = SEEN.get_or_init(Default::default);
+        if let Some((_, contents)) = seen
+            .lock()
+            .unwrap()
+            .get(path)
+            .filter(|(known, _)| Some(*known) == key)
+        {
+            return contents.clone();
+        }
+        let contents = Arc::new(appimage_contents::read(path).unwrap_or_default());
+        if let Some(key) = key {
+            seen.lock()
+                .unwrap()
+                .insert(path.to_path_buf(), (key, contents.clone()));
+        }
+        contents
+    }
+    /// Icons PkgDeck read out of AppImages live next to its AppImage folder,
+    /// which holds nothing but managed AppImages.
+    fn icons(&self) -> PathBuf {
+        self.root.with_file_name("appimage-icons")
+    }
+    /// Save `icon` as `<key>.<png|svg>` among the icons, replacing an older
+    /// one with the same key.
+    fn save_icon(&self, key: &str, icon: &Icon) -> Option<PathBuf> {
+        let dir = self.icons();
+        let path = dir.join(format!("{key}.{}", icon.extension));
+        if fs::read(&path).is_ok_and(|bytes| bytes == icon.bytes) {
+            return Some(path);
+        }
+        fs::create_dir_all(&dir).ok()?;
+        let temporary = dir.join(format!(".{key}.{}", std::process::id()));
+        let written =
+            fs::write(&temporary, &icon.bytes).and_then(|()| fs::rename(&temporary, &path));
+        if written.is_err() {
+            let _ = fs::remove_file(&temporary);
+            return None;
+        }
+        Some(path)
+    }
+    fn remove_icons(&self, key: &str) {
+        for extension in ["png", "svg"] {
+            let _ = fs::remove_file(self.icons().join(format!("{key}.{extension}")));
+        }
+    }
+    /// `~/…` for paths in the home folder, as people know them.
+    fn shown_path(path: &Path) -> String {
+        Host::current()
+            .var("HOME")
+            .and_then(|home| {
+                path.strip_prefix(home)
+                    .ok()
+                    .map(|rest| format!("~/{}", rest.display()))
+            })
+            .unwrap_or_else(|| path.display().to_string())
     }
     fn existing_import(
         destination: &Path,
@@ -300,10 +411,11 @@ impl AppImage {
                 .as_deref()
                 == Some(digest)
             && fs::read_to_string(entry).ok().is_some_and(|desktop| {
-                Self::desktop_entry(destination, "Imported AppImage")
-                    .lines()
-                    .find(|line| line.starts_with("Exec="))
-                    .is_some_and(|line| desktop.lines().any(|existing| existing == line))
+                let program = format!("Exec={}", Self::exec_program(destination));
+                desktop.lines().any(|line| {
+                    line.strip_prefix(&program)
+                        .is_some_and(|rest| rest.is_empty() || rest.starts_with(' '))
+                })
             });
         if identical {
             Ok(true)
@@ -329,6 +441,21 @@ impl AppImage {
         }
         let architecture = Self::type2(&path)?;
         let digest = &name[8..72];
+        let contents = Self::contents(&path);
+        let version = contents
+            .version
+            .clone()
+            .unwrap_or_else(|| UNKNOWN_VERSION.into());
+        let icon = ["png", "svg"]
+            .into_iter()
+            .map(|extension| self.icons().join(format!("pkgdeck-{digest}.{extension}")))
+            .find(|icon| icon.is_file())
+            .or_else(|| {
+                contents
+                    .icon
+                    .as_ref()
+                    .and_then(|icon| self.save_icon(&format!("pkgdeck-{digest}"), icon))
+            });
         Ok(Package {
             id: PackageId {
                 backend: "appimage".into(),
@@ -338,16 +465,19 @@ impl AppImage {
                 remote: None,
                 reference: None,
             },
-            display_name: "Imported AppImage".into(),
-            summary: format!("AppImage managed by PkgDeck ({digest})"),
-            installed_version: Some(digest.into()),
-            candidate_version: Some(digest.into()),
+            display_name: contents
+                .name
+                .clone()
+                .unwrap_or_else(|| "Imported AppImage".into()),
+            summary: contents.comment.clone().unwrap_or_default(),
+            installed_version: Some(version.clone()),
+            candidate_version: Some(version),
             update: if Self::has_update_metadata(&path)? {
                 UpdateAvailability::Unknown
             } else {
                 UpdateAvailability::Current
             },
-            icon: None,
+            icon,
             component_ids: vec![],
             homepages: vec![],
             adopt_with: None,
@@ -463,12 +593,22 @@ impl AppImage {
                 let architecture = Self::type2(&canonical).ok()?;
                 let display_name = Self::desktop_value(&contents, "Name=")
                     .unwrap_or_else(|| "External AppImage".into());
-                let version = Self::desktop_value(&contents, "X-AppImage-Version=")
-                    .unwrap_or_else(|| "local".into());
+                // The AppImage's own version wins: an entry written at
+                // install time goes stale once the app updates itself.
+                let inside = Self::contents(&canonical);
+                let version = inside
+                    .version
+                    .clone()
+                    .or_else(|| Self::desktop_value(&contents, "X-AppImage-Version="))
+                    .unwrap_or_else(|| UNKNOWN_VERSION.into());
                 // External entries keep their own desktop file, so its Icon=
-                // resolves like any local entry. Managed imports stay
-                // icon-less until .DirIcon extraction exists.
-                let icon = super::desktop_icon(None, &desktop);
+                // resolves like any local entry; otherwise the AppImage's own.
+                let icon = super::desktop_icon(None, &desktop).or_else(|| {
+                    inside
+                        .icon
+                        .as_ref()
+                        .and_then(|icon| self.save_icon(&Self::external_icon_key(&canonical), icon))
+                });
                 Some((
                     Package {
                         id: PackageId {
@@ -480,7 +620,8 @@ impl AppImage {
                             reference: None,
                         },
                         display_name,
-                        summary: "AppImage not managed by PkgDeck".into(),
+                        // Where the file is: it lives outside PkgDeck's folder.
+                        summary: Self::shown_path(&canonical),
                         installed_version: Some(version.clone()),
                         candidate_version: Some(version),
                         update: if Self::has_update_metadata(&canonical).ok()? {
@@ -498,12 +639,44 @@ impl AppImage {
                             .into_iter()
                             .collect(),
                         homepages: vec![],
-                        adopt_with: None,
+                        // PkgDeck can take it over: Manage moves it in.
+                        adopt_with: Some("appimage".into()),
                     },
                     desktop,
                 ))
             })
             .collect::<Vec<_>>())
+    }
+    fn external_icon_key(path: &Path) -> String {
+        let hash = Sha256::digest(path.as_os_str().as_encoded_bytes());
+        format!("external-{}", &hex::encode(hash)[..16])
+    }
+    /// Every desktop entry that starts the AppImage at `canonical`. Gear
+    /// Lever and others often leave several.
+    fn entries_for(&self, canonical: &Path) -> Vec<PathBuf> {
+        fs::read_dir(&self.applications)
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "desktop"))
+            .filter(|path| {
+                fs::read_to_string(path)
+                    .ok()
+                    .and_then(|contents| Self::desktop_appimage_path(&contents))
+                    .and_then(|target| fs::canonicalize(target).ok())
+                    .is_some_and(|target| target == canonical)
+            })
+            .collect()
+    }
+    /// The external AppImage at `path`, when PkgDeck lists it.
+    fn external_at(&self, path: &Path) -> Option<PathBuf> {
+        let canonical = fs::canonicalize(path).ok()?;
+        self.external_entries()
+            .ok()?
+            .into_iter()
+            .any(|(package, _)| Path::new(&package.id.name) == canonical)
+            .then_some(canonical)
     }
     fn external_packages(&self) -> Result<Vec<Package>, EngineError> {
         Ok(self
@@ -546,6 +719,7 @@ impl AppImage {
         }
         let digest = id.reference.as_deref().unwrap_or_default();
         Self::verify_digest(&source, digest, cancel)?;
+        let taken_over = self.external_at(&source);
         let name = format!("pkgdeck-{digest}.AppImage");
         fs::create_dir_all(&self.root).map_err(|e| Self::invalid(e.to_string()))?;
         let destination = self.root.join(&name);
@@ -581,11 +755,17 @@ impl AppImage {
             fs::set_permissions(&temporary, fs::Permissions::from_mode(0o755))
                 .map_err(|e| Self::invalid(e.to_string()))?;
             fs::hard_link(&temporary, &destination).map_err(|e| Self::invalid(e.to_string()))?;
-            let display_name = source
+            let fallback_name = source
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or("Imported AppImage");
-            let desktop = Self::desktop_entry(&destination, display_name);
+            let contents = Self::contents(&destination);
+            let icon = contents
+                .icon
+                .as_ref()
+                .and_then(|icon| self.save_icon(&format!("pkgdeck-{digest}"), icon));
+            let desktop =
+                Self::desktop_entry(&destination, fallback_name, &contents, icon.as_deref());
             let file = match fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
@@ -606,12 +786,28 @@ impl AppImage {
                 Err(error) => {
                     let _ = fs::remove_file(&entry);
                     let _ = fs::remove_file(&destination);
+                    self.remove_icons(&format!("pkgdeck-{digest}"));
                     Err(Self::invalid(format!("desktop entry failed: {error}")))
                 }
             }
         })();
         let _ = fs::remove_file(&temporary);
-        result
+        result?;
+        // An AppImage that was already installed elsewhere moves in: its old
+        // file and desktop entries go, so it isn't listed twice.
+        if let Some(original) = taken_over {
+            for entry in self.entries_for(&original) {
+                let _ = fs::remove_file(entry);
+            }
+            fs::remove_file(&original).map_err(|e| {
+                Self::invalid(format!(
+                    "PkgDeck now manages this AppImage, but couldn't remove the old copy at {}: {e}",
+                    original.display()
+                ))
+            })?;
+            self.remove_icons(&Self::external_icon_key(&original));
+        }
+        Ok(())
     }
     fn updater(&self) -> Result<PathBuf, EngineError> {
         #[cfg(test)]
@@ -712,15 +908,16 @@ impl Backend for AppImage {
         let source = PathBuf::from(query);
         if source.is_absolute() && source.symlink_metadata().is_ok() {
             let architecture = Self::type2(&source)?;
-            let has_updates = Self::has_update_metadata(&source)?;
             let digest = Self::digest(&source, cancel)?;
             let destination = self.root.join(format!("pkgdeck-{digest}.AppImage"));
             let desktop = self.applications.join(format!("pkgdeck-{digest}.desktop"));
             let already_imported = Self::existing_import(&destination, &desktop, &digest)?;
-            let display_name = source
-                .file_stem()
-                .and_then(|value| value.to_str())
-                .unwrap_or("Imported AppImage");
+            let contents = Self::contents(&source);
+            let icon = contents
+                .icon
+                .as_ref()
+                .and_then(|icon| self.save_icon(&format!("pkgdeck-{digest}"), icon));
+            let version = contents.version.clone();
             return Ok(vec![Package {
                 id: PackageId {
                     backend: "appimage".into(),
@@ -732,19 +929,23 @@ impl Backend for AppImage {
                     remote: None,
                     reference: Some(digest),
                 },
-                display_name: source
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("AppImage")
-                    .into(),
-                summary: format!("Original: {} (kept)\nManaged file: {} (executable, mode 0755)\nDesktop entry: {}\nDesktop name: {}\nDesktop command: {} %U\nUpdate metadata: {}\n{}", source.display(), destination.display(), desktop.display(), display_name, destination.display(), if has_updates { "available" } else { "unavailable" }, if already_imported { "Already imported; no files will be overwritten." } else { "A managed copy and desktop entry will be created." }),
-                installed_version: None,
-                candidate_version: None,
+                display_name: contents.name.clone().unwrap_or_else(|| {
+                    source
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("AppImage")
+                        .into()
+                }),
+                summary: contents.comment.clone().unwrap_or_default(),
+                installed_version: already_imported
+                    .then(|| version.clone().unwrap_or_else(|| UNKNOWN_VERSION.into())),
+                candidate_version: version,
                 update: UpdateAvailability::Unknown,
-                icon: None,
+                icon,
                 component_ids: vec![],
                 homepages: vec![],
-adopt_with: None,
+                // Already installed some other way: PkgDeck would move it in.
+                adopt_with: self.external_at(&source).map(|_| "appimage".into()),
             }]);
         }
         let query = query.to_ascii_lowercase();
@@ -780,7 +981,59 @@ adopt_with: None,
             .into_iter()
             .find(|p| p.id == *id)
             .ok_or(EngineError::NotFound)?;
-        Ok(PackageDetails { description: "A PkgDeck-managed local Type 2 AppImage. PkgDeck never executes imported files to inspect metadata.".into(), homepage: None, dependencies: vec![], package })
+        let path = if Self::managed_name(&package.id.name) {
+            self.root.join(&package.id.name)
+        } else {
+            PathBuf::from(&package.id.name)
+        };
+        Ok(PackageDetails {
+            description: Self::contents(&path).comment.clone().unwrap_or_default(),
+            homepage: None,
+            dependencies: vec![],
+            package,
+        })
+    }
+    /// Installing an AppImage that's already installed some other way moves
+    /// it in; say so, so the move is reviewed before it happens.
+    fn operation_plan(
+        &mut self,
+        operation: &Operation,
+        _: &Cancellation,
+    ) -> Result<Option<TransactionPlan>, EngineError> {
+        let Operation::Install(id) = operation else {
+            return Ok(None);
+        };
+        let source = Path::new(&id.name);
+        if id.scope != self.import_scope() || !source.is_absolute() {
+            return Ok(None);
+        }
+        let Some(original) = self.external_at(source) else {
+            return Ok(None);
+        };
+        let contents = Self::contents(&original);
+        let name = contents.name.clone().unwrap_or_else(|| {
+            source
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| id.name.clone())
+        });
+        Ok(Some(TransactionPlan {
+            operation: operation.clone(),
+            native_preview: format!(
+                "Moves {} into PkgDeck's folder and replaces its menu entries.",
+                Self::shown_path(&original)
+            ),
+            changes: vec![PlannedChange {
+                action: PlannedAction::Install,
+                name,
+                installed_version: None,
+                candidate_version: contents.version.clone(),
+            }],
+            download_bytes: None,
+            disk_bytes: None,
+            restart_required: None,
+            adopts: Some(original),
+        }))
     }
     fn execute(
         &mut self,
@@ -809,6 +1062,7 @@ adopt_with: None,
                     self.applications
                         .join(format!("pkgdeck-{}.desktop", &id.name[8..72])),
                 );
+                self.remove_icons(&id.name[..72]);
             }
             Operation::Remove(id)
                 if id.backend == "appimage" && id.scope == self.scope() && id.remote.is_none() =>
@@ -822,8 +1076,15 @@ adopt_with: None,
                     "Removing external AppImage {} and its desktop entry.",
                     package.display_name
                 )));
+                // Other entries for the same file (Gear Lever leaves several),
+                // found while the file still exists.
+                let others = self.entries_for(Path::new(&id.name));
                 fs::remove_file(&id.name).map_err(|e| Self::invalid(e.to_string()))?;
-                fs::remove_file(desktop).map_err(|e| Self::invalid(e.to_string()))?;
+                fs::remove_file(&desktop).map_err(|e| Self::invalid(e.to_string()))?;
+                for other in others.into_iter().filter(|other| *other != desktop) {
+                    let _ = fs::remove_file(other);
+                }
+                self.remove_icons(&Self::external_icon_key(Path::new(&id.name)));
             }
             Operation::Upgrade(id) if id.backend == "appimage" => {
                 progress(Progress::Message(
@@ -862,6 +1123,347 @@ mod tests {
     }
 
     fn ignore(_: Progress) {}
+
+    #[cfg(target_os = "linux")]
+    fn appimage_with(
+        path: &Path,
+        compressor: backhand::compression::Compressor,
+        files: &[(&str, &[u8])],
+    ) {
+        appimage_contents::fixture::squash(
+            path,
+            compressor,
+            files,
+            &[(".DirIcon", "demo.png")],
+            &[],
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    const DEMO_ENTRY: &[u8] = b"[Desktop Entry]\nType=Application\nName=Demo App\nComment=Does demo things\nIcon=demo\nExec=AppRun --no-sandbox %U\nCategories=Game;\nStartupWMClass=demo-app\nX-AppImage-Version=2.0\n\n[Desktop Action New]\nName=Wrong\n";
+    #[cfg(target_os = "linux")]
+    const DEMO_PNG: &[u8] = b"\x89PNG\r\n\x1a\ndemo icon";
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn reads_name_version_icon_and_arguments_from_inside_the_appimage() {
+        use backhand::compression::Compressor;
+        let base = test_base("contents");
+        for (index, compressor) in [Compressor::Gzip, Compressor::Xz, Compressor::Zstd]
+            .into_iter()
+            .enumerate()
+        {
+            let path = base.join(format!("demo-{index}.AppImage"));
+            appimage_with(
+                &path,
+                compressor,
+                &[("demo.desktop", DEMO_ENTRY), ("demo.png", DEMO_PNG)],
+            );
+            let contents = appimage_contents::read(&path).unwrap();
+            assert_eq!(contents.name.as_deref(), Some("Demo App"));
+            assert_eq!(contents.comment.as_deref(), Some("Does demo things"));
+            assert_eq!(contents.version.as_deref(), Some("2.0"));
+            assert_eq!(contents.categories.as_deref(), Some("Game;"));
+            assert_eq!(contents.startup_wm_class.as_deref(), Some("demo-app"));
+            assert_eq!(contents.arguments.as_deref(), Some("--no-sandbox %U"));
+            assert_eq!(
+                contents
+                    .icon
+                    .as_ref()
+                    .map(|icon| (icon.bytes.as_slice(), icon.extension)),
+                Some((DEMO_PNG, "png"))
+            );
+        }
+        // Without a named icon, .DirIcon is used; without an entry, nothing.
+        let bare = base.join("bare.AppImage");
+        appimage_with(&bare, Compressor::Gzip, &[("demo.png", DEMO_PNG)]);
+        let contents = appimage_contents::read(&bare).unwrap();
+        assert_eq!(contents.name, None);
+        assert_eq!(
+            contents.icon.map(|icon| icon.bytes),
+            Some(DEMO_PNG.to_vec())
+        );
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn manage_moves_an_external_appimage_in_with_a_full_desktop_entry() {
+        let base = test_base("manage");
+        let uid = rustix::process::getuid().as_raw();
+        let root = base.join("data/pkgdeck/appimages");
+        let applications = base.join("data/applications");
+        fs::create_dir_all(&applications).unwrap();
+        let folder = base.join("AppImages");
+        fs::create_dir_all(&folder).unwrap();
+        let original = folder.join("demo.appimage");
+        appimage_with(
+            &original,
+            backhand::compression::Compressor::Gzip,
+            &[("demo.desktop", DEMO_ENTRY), ("demo.png", DEMO_PNG)],
+        );
+        // Gear Lever style: two entries for one file, with a stale version.
+        for name in ["demo.desktop", "gearlever_demo.desktop"] {
+            fs::write(
+                applications.join(name),
+                format!(
+                    "[Desktop Entry]\nName=Demo App\nExec=\"{}\" %U\nX-AppImage-Version=1.0\n",
+                    original.display()
+                ),
+            )
+            .unwrap();
+        }
+        let mut backend = AppImage::new(root.clone(), applications.clone(), uid);
+        let cancel = Cancellation::default();
+        let external = backend.installed(&cancel).unwrap();
+        assert_eq!(external.len(), 1);
+        assert_eq!(external[0].installed_version.as_deref(), Some("2.0"));
+        assert_eq!(external[0].summary, original.display().to_string());
+        assert_eq!(external[0].adopt_with.as_deref(), Some("appimage"));
+
+        let preview = backend
+            .search(original.to_str().unwrap(), &cancel)
+            .unwrap()
+            .remove(0);
+        assert_eq!(preview.display_name, "Demo App");
+        assert_eq!(preview.summary, "Does demo things");
+        assert_eq!(preview.candidate_version.as_deref(), Some("2.0"));
+        assert_eq!(preview.installed_version, None);
+        let digest = preview.id.reference.clone().unwrap();
+        let icon = base.join(format!("data/pkgdeck/appimage-icons/pkgdeck-{digest}.png"));
+        assert_eq!(preview.icon.as_deref(), Some(icon.as_path()));
+
+        assert_eq!(preview.adopt_with.as_deref(), Some("appimage"));
+        let install = Operation::Install(preview.id);
+        let plan = backend.operation_plan(&install, &cancel).unwrap().unwrap();
+        assert_eq!(
+            plan.adopts.as_deref(),
+            Some(original.canonicalize().unwrap().as_path())
+        );
+        assert_eq!(plan.changes[0].name, "Demo App");
+        assert_eq!(plan.changes[0].candidate_version.as_deref(), Some("2.0"));
+        backend.execute(&install, &cancel, &mut ignore).unwrap();
+        assert!(!original.exists());
+        assert!(!applications.join("demo.desktop").exists());
+        assert!(!applications.join("gearlever_demo.desktop").exists());
+        let managed = root.join(format!("pkgdeck-{digest}.AppImage"));
+        let entry =
+            fs::read_to_string(applications.join(format!("pkgdeck-{digest}.desktop"))).unwrap();
+        assert_eq!(
+            entry,
+            format!(
+                "[Desktop Entry]\nType=Application\nName=Demo App\nComment=Does demo things\nIcon={}\nExec=\"{}\" --no-sandbox %U\nTryExec={}\nTerminal=false\nCategories=Game;\nStartupWMClass=demo-app\nX-AppImage-Version=2.0\n",
+                icon.display(),
+                managed.display(),
+                managed.display()
+            )
+        );
+        assert_eq!(fs::read(&icon).unwrap(), DEMO_PNG);
+
+        let installed = backend.installed(&cancel).unwrap();
+        assert_eq!(installed.len(), 1);
+        assert_eq!(installed[0].display_name, "Demo App");
+        assert_eq!(installed[0].summary, "Does demo things");
+        assert_eq!(installed[0].installed_version.as_deref(), Some("2.0"));
+        assert_eq!(installed[0].icon.as_deref(), Some(icon.as_path()));
+        assert_eq!(installed[0].adopt_with, None);
+        assert_eq!(
+            backend
+                .details(&installed[0].id, &cancel)
+                .unwrap()
+                .description,
+            "Does demo things"
+        );
+
+        backend
+            .execute(
+                &Operation::Remove(installed[0].id.clone()),
+                &cancel,
+                &mut ignore,
+            )
+            .unwrap();
+        assert!(!managed.exists());
+        assert!(!icon.exists());
+        assert!(backend.installed(&cancel).unwrap().is_empty());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn manage_plans_only_installs_of_appimages_installed_elsewhere() {
+        let base = test_base("plans");
+        let uid = rustix::process::getuid().as_raw();
+        let applications = base.join("applications");
+        fs::create_dir_all(&applications).unwrap();
+        let mut backend = AppImage::new(base.join("pkgdeck/appimages"), applications.clone(), uid);
+        let cancel = Cancellation::default();
+        // No desktop entry inside: the plan names the file.
+        let original = base.join("bare.appimage");
+        appimage_with(
+            &original,
+            backhand::compression::Compressor::Gzip,
+            &[("demo.png", DEMO_PNG)],
+        );
+        let mut id = backend
+            .search(original.to_str().unwrap(), &cancel)
+            .unwrap()
+            .remove(0)
+            .id;
+        // Not installed elsewhere yet: an ordinary install, nothing to plan.
+        assert_eq!(
+            backend
+                .operation_plan(&Operation::Install(id.clone()), &cancel)
+                .unwrap(),
+            None
+        );
+        fs::write(
+            applications.join("bare.desktop"),
+            format!(
+                "[Desktop Entry]\nName=Bare\nExec={} %U\n",
+                original.display()
+            ),
+        )
+        .unwrap();
+        let plan = backend
+            .operation_plan(&Operation::Install(id.clone()), &cancel)
+            .unwrap()
+            .unwrap();
+        assert_eq!(plan.changes[0].name, "bare.appimage");
+        assert_eq!(plan.changes[0].candidate_version, None);
+        assert_eq!(
+            plan.native_preview,
+            format!(
+                "Moves {} into PkgDeck's folder and replaces its menu entries.",
+                original.display()
+            )
+        );
+        // Other operations and identities are never planned.
+        assert_eq!(
+            backend
+                .operation_plan(&Operation::Remove(id.clone()), &cancel)
+                .unwrap(),
+            None
+        );
+        id.scope = Scope::System;
+        assert_eq!(
+            backend
+                .operation_plan(&Operation::Install(id.clone()), &cancel)
+                .unwrap(),
+            None
+        );
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn manage_reports_an_old_copy_it_cannot_remove() {
+        let base = test_base("stuck-original");
+        let uid = rustix::process::getuid().as_raw();
+        let applications = base.join("applications");
+        fs::create_dir_all(&applications).unwrap();
+        let folder = base.join("readonly");
+        fs::create_dir_all(&folder).unwrap();
+        let original = folder.join("demo.appimage");
+        appimage_with(
+            &original,
+            backhand::compression::Compressor::Gzip,
+            &[("demo.desktop", DEMO_ENTRY), ("demo.png", DEMO_PNG)],
+        );
+        fs::write(
+            applications.join("demo.desktop"),
+            format!(
+                "[Desktop Entry]\nName=Demo\nExec={} %U\n",
+                original.display()
+            ),
+        )
+        .unwrap();
+        let mut backend = AppImage::new(base.join("pkgdeck/appimages"), applications.clone(), uid);
+        let cancel = Cancellation::default();
+        let id = backend
+            .search(original.to_str().unwrap(), &cancel)
+            .unwrap()
+            .remove(0)
+            .id;
+        fs::set_permissions(&folder, fs::Permissions::from_mode(0o555)).unwrap();
+        // Needs a non-root user: root ignores directory permissions.
+        let result = backend.execute(&Operation::Install(id), &cancel, &mut ignore);
+        fs::set_permissions(&folder, fs::Permissions::from_mode(0o755)).unwrap();
+        let error = result.unwrap_err().to_string();
+        assert!(
+            error.contains("PkgDeck now manages this AppImage, but couldn't remove the old copy"),
+            "{error}"
+        );
+        assert!(original.exists());
+        // The managed copy works and the old entry is gone, so it's listed once.
+        let installed = backend.installed(&cancel).unwrap();
+        assert_eq!(installed.len(), 1);
+        assert!(AppImage::managed_name(&installed[0].id.name));
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn icons_that_cannot_be_saved_are_skipped() {
+        let base = test_base("icons");
+        let backend = AppImage::new(
+            base.join("pkgdeck/appimages"),
+            base.join("applications"),
+            1000,
+        );
+        let icon = Icon {
+            bytes: DEMO_PNG.to_vec(),
+            extension: "png",
+        };
+        let saved = backend.save_icon("demo", &icon).unwrap();
+        assert_eq!(fs::read(&saved).unwrap(), DEMO_PNG);
+        // The same icon again is left as is.
+        assert_eq!(backend.save_icon("demo", &icon), Some(saved));
+        fs::set_permissions(backend.icons(), fs::Permissions::from_mode(0o555)).unwrap();
+        // Needs a non-root user: root ignores directory permissions.
+        let unwritable = backend.save_icon("other", &icon);
+        fs::set_permissions(backend.icons(), fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(unwritable, None);
+        assert_eq!(fs::read_dir(backend.icons()).unwrap().count(), 1);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn removing_an_external_appimage_removes_every_entry_for_it() {
+        let base = test_base("external-entries");
+        let uid = rustix::process::getuid().as_raw();
+        let applications = base.join("applications");
+        fs::create_dir_all(&applications).unwrap();
+        let original = base.join("demo.appimage");
+        appimage_with(
+            &original,
+            backhand::compression::Compressor::Gzip,
+            &[("demo.png", DEMO_PNG)],
+        );
+        for name in ["a.desktop", "b.desktop"] {
+            fs::write(
+                applications.join(name),
+                format!(
+                    "[Desktop Entry]\nName=Demo\nExec={} %U\n",
+                    original.display()
+                ),
+            )
+            .unwrap();
+        }
+        let mut backend = AppImage::new(base.join("pkgdeck/appimages"), applications.clone(), uid);
+        let cancel = Cancellation::default();
+        let external = backend.installed(&cancel).unwrap().remove(0);
+        // No usable Icon= in its entry, so the AppImage's own icon is shown.
+        let icon = external.icon.clone().unwrap();
+        assert_eq!(fs::read(&icon).unwrap(), DEMO_PNG);
+        backend
+            .execute(&Operation::Remove(external.id), &cancel, &mut ignore)
+            .unwrap();
+        assert!(!original.exists());
+        assert!(fs::read_dir(&applications).unwrap().next().is_none());
+        assert!(!icon.exists());
+        fs::remove_dir_all(base).unwrap();
+    }
 
     /// Adds a `.upd_info` section carrying `zsyn` to the Type 2 file at `path`.
     fn with_update_info(path: &Path) -> Vec<u8> {
@@ -1093,9 +1695,7 @@ mod tests {
         let mut backend = AppImage::new(base.join("owned"), base.join("apps"), 1000);
         assert!(backend
             .search(source.to_str().unwrap(), &Cancellation::default())
-            .unwrap()[0]
-            .summary
-            .contains("Update metadata: available"));
+            .is_ok());
         let mut invalid_table = bytes.clone();
         invalid_table[58..60].copy_from_slice(&32_u16.to_le_bytes());
         fs::write(&source, invalid_table).unwrap();
@@ -1376,7 +1976,8 @@ mod tests {
             .execute(&Operation::Install(candidate.id), &cancel, &mut |_| {})
             .unwrap();
         let duplicate = backend.search(source.to_str().unwrap(), &cancel).unwrap();
-        assert!(duplicate[0].summary.contains("Already imported"));
+        // Opening a file that's already imported shows it as installed.
+        assert_eq!(duplicate[0].installed_version.as_deref(), Some("local"));
         let installed = backend.installed(&cancel).unwrap();
         assert_eq!(installed.len(), 1);
         assert_eq!(

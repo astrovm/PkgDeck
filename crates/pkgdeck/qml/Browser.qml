@@ -1329,10 +1329,23 @@ Controls.ApplicationWindow {
     // only on macOS. Tests override this to check both platforms.
     property bool homebrewAdoptionSupported: Qt.platform.os === "osx"
     // A macOS app a curated Homebrew cask can manage in place, while the
-    // Homebrew Casks source is available.
+    // Homebrew Casks source is available, or an AppImage installed some
+    // other way that PkgDeck can move in.
     function canAdopt(row) {
-        return !!row && row.kind === "package" && row.source === "macos-apps" && !!row.adopt_with
+        if (!row || row.kind !== "package" || !row.adopt_with)
+            return false;
+        if (row.source === "appimage")
+            return row.adopt_with === "appimage";
+        return row.source === "macos-apps"
             && homebrewAdoptionSupported && sourceInfo("homebrew-cask").availability_kind === "available";
+    }
+    // Manage sits next to Remove for AppImages; macOS apps swap Remove for it.
+    function runAdopt(index) {
+        const row = viewItems[index];
+        if (!canAdopt(row) || retainingResults || !canAct)
+            return;
+        markActiveRows([rowIdentity(row)]);
+        backend.propose("adopt", originalIndex(index));
     }
     // An installed package row can be removed. macOS apps and sources
     // PkgDeck never installs from need their source to say it can remove.
@@ -3238,6 +3251,10 @@ Controls.ApplicationWindow {
                 installed: root.selected !== null && root.selected.kind === "package" && root.isInstalled(root.selected)
                 readonly property string rowAction: root.rowActionName(root.selected)
                 actionText: ({install: "Install", remove: "Remove", upgrade: "Update", clean: "Clean", adopt: "Manage with Homebrew"})[rowAction] || ""
+                secondaryActionText: rowAction !== "adopt" && root.selected && root.selected.source === "appimage" && root.canAdopt(root.selected) ? "Manage" : ""
+                secondaryActionSymbol: "install"
+                secondaryActionTone: "accent"
+                onSecondaryActionRequested: root.runAdopt(results.currentIndex)
                 actionAccessibleName: rowAction === "adopt" && root.selected ? "Manage " + (root.selected.display_name || root.selected.name) + " with Homebrew" : ""
                 actionSymbol: rowAction === "upgrade" ? "updates" : ["install", "adopt"].indexOf(rowAction) >= 0 ? "install" : "remove"
                 actionTone: ["upgrade", "adopt"].indexOf(rowAction) >= 0 ? "accent" : rowAction === "install" ? "success" : "danger"
@@ -3773,13 +3790,30 @@ Controls.ApplicationWindow {
                 }
                 Rectangle {
                     Layout.fillWidth: true
-                    implicitHeight: summaryContent.implicitHeight + 28
+                    implicitHeight: summaryRow.implicitHeight + 28
                     color: root.selection
                     radius: root.controlRadius + 1
-                    ColumnLayout {
-                        id: summaryContent
+                    RowLayout {
+                        id: summaryRow
                         anchors.fill: parent
                         anchors.margins: 14
+                        spacing: 14
+                    // The app's own icon, when the file being installed has one.
+                    Image {
+                        objectName: "confirmationIcon"
+                        visible: !!confirmation.preview.icon && status === Image.Ready
+                        source: confirmation.preview.icon ? root.iconUrl(confirmation.preview.icon) : ""
+                        sourceSize.width: 96
+                        sourceSize.height: 96
+                        fillMode: Image.PreserveAspectFit
+                        asynchronous: true
+                        Layout.preferredWidth: 48
+                        Layout.preferredHeight: 48
+                        Layout.alignment: Qt.AlignTop
+                    }
+                    ColumnLayout {
+                        id: summaryContent
+                        Layout.fillWidth: true
                         spacing: 6
                         Controls.Label {
                             objectName: "confirmationSummary"
@@ -3799,6 +3833,7 @@ Controls.ApplicationWindow {
                             wrapMode: Text.WrapAnywhere
                             textFormat: Text.PlainText
                         }
+                    }
                     }
                 }
                 ActionButton {
