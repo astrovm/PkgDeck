@@ -18,12 +18,17 @@ class Pkd < Formula
   def install
     bin.install "bin/pkd"
     libexec.install "libexec/pkgdeck-host-runner"
+    # pkd finds it at ../lib/pkgdeck from its own (resolved) path.
+    (lib/"pkgdeck").install "lib/pkgdeck/appimageupdatetool.AppImage"
   end
 
   test do
     assert_match "pkd", shell_output("#{bin}/pkd --version")
     assert_match "Usage:", shell_output("#{bin}/pkd --help")
     assert_path_exists libexec/"pkgdeck-host-runner"
+    updater = lib/"pkgdeck/appimageupdatetool.AppImage"
+    assert_predicate updater, :executable?
+    assert_match "appimageupdatetool version", shell_output("#{updater} --appimage-extract-and-run --version 2>&1")
     # Host package managers can fail detection inside the test sandbox,
     # which exits 1; any other status means the command itself failed.
     sources = shell_output("#{bin}/pkd --json sources; echo \"exit=$?\"")

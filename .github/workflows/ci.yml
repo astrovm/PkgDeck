@@ -525,6 +525,7 @@ jobs:
             bin/pkd --version | grep -F pkd
             bin/pkd --help | grep -F Usage:
             test -x libexec/pkgdeck-host-runner
+            test -x lib/pkgdeck/appimageupdatetool.AppImage
           '
       - name: Upload CLI
         if: needs.reviewed.outputs.tested != 'true'
@@ -802,6 +803,7 @@ jobs:
           scripts/xtask.sh gui flatpak run --env=QT_QPA_PLATFORM=offscreen --env=QT_QUICK_BACKEND=software io.github.astrovm.PkgDeck
           flatpak run --command=pkd io.github.astrovm.PkgDeck </dev/null | grep -F 'Usage: pkd'
           flatpak run --command=sh io.github.astrovm.PkgDeck -c 'test -x /app/libexec/pkgdeck-host-runner'
+          flatpak run --command=sh io.github.astrovm.PkgDeck -c '/app/lib/pkgdeck/appimageupdatetool.AppImage --appimage-extract-and-run --version 2>&1' | grep -F 'appimageupdatetool version'
           scripts/tests/flatpak-package.sh
       - name: Upload Flatpak
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
