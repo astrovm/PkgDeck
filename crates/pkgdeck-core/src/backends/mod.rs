@@ -7,6 +7,7 @@ mod aur;
 mod cleanup;
 mod conda;
 mod container;
+mod desktop_exec;
 mod dev_containers;
 mod dotnet;
 mod firmware;

@@ -275,6 +275,14 @@ Controls.ApplicationWindow {
     // The confirmation shown on the page instead of a dialog.
     readonly property var pageReview: appPageOpen && backend.confirmation.length && reviewOnPage ? JSON.parse(backend.confirmation_data || "{}") : null
     property bool reviewOnPage: false
+    // An installed AppImage's launch settings, read when its page opens and
+    // again after a save (`launchRevision`).
+    property int launchRevision: 0
+    readonly property bool pageLaunchable: rowPageOpen && pageRow.source === "appimage" && isInstalled(pageRow)
+    readonly property var pageLaunch: pageLaunchable && launchRevision >= 0
+        ? JSON.parse(backend.appLaunchSettings(originalIndex(results.currentIndex)) || "{}") : null
+    property string pageLaunchError: ""
+    onPageRowChanged: pageLaunchError = ""
     // Values derived from a parsed row, computed once and kept on the row,
     // hidden from JSON.stringify and Object.assign. Rows never change once
     // parsed. Lookups over rows use plain objects: this engine's Map, Set
@@ -3457,6 +3465,15 @@ Controls.ApplicationWindow {
         reviewDetails: root.pageReview ? (root.pageReview.changes || []).join("\n") : ""
         reviewActionText: root.pageReview ? ((root.pageReview.action || "Apply").trim().split(/\s+/)[0]) : ""
         reviewDanger: reviewActionText === "Remove"
+        launchText: root.pageLaunchable && root.pageLaunch && !root.pageLaunch.error ? "Launch" : ""
+        launchSettings: root.pageLaunch && !root.pageLaunch.error ? root.pageLaunch : null
+        launchError: root.pageLaunchError || (root.pageLaunch && root.pageLaunch.error ? root.pageLaunch.error : "")
+        onLaunchRequested: root.pageLaunchError = backend.launchApp(root.originalIndex(results.currentIndex))
+        onLaunchSettingsSaved: (arguments, environment) => {
+            root.pageLaunchError = backend.saveAppLaunchSettings(root.originalIndex(results.currentIndex), arguments, JSON.stringify(environment));
+            if (!root.pageLaunchError)
+                root.launchRevision++;
+        }
         onReviewAccepted: backend.confirm(true)
         onReviewRejected: { root.activeRows = []; backend.confirm(false); }
         compact: root.compact

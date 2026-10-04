@@ -476,6 +476,12 @@ next to **Remove**: PkgDeck moves the file into its own folder, replaces
 every menu entry for it with one of its own, and from then on lists it like
 any AppImage it installed.
 
+Installed AppImages have **Launch** on their page. For AppImages PkgDeck
+manages, the page also edits how the app starts: **Command line arguments**
+and **Environment variables**, then **Save**. They go into the app's menu
+entry, so starting it from the app menu uses them too. **Manage** keeps the
+arguments and variables the old entry had (set in Gear Lever, say).
+
 PkgDeck's menu entries use the app's own name, description, icon,
 categories and launch arguments (such as `--no-sandbox`), read from inside
 the AppImage without running it. Versions also come from inside the file,

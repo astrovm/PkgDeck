@@ -1,4 +1,5 @@
 use super::appimage_contents::{self, Contents, Icon};
+use super::desktop_exec;
 use crate::{
     engine::*,
     host::Host,
@@ -25,6 +26,16 @@ const CAPABILITIES: &[Capability] = &[
     Capability::Remove,
     Capability::Upgrade,
 ];
+
+/// How an AppImage starts from its menu entry. PkgDeck can change it only
+/// for AppImages it manages (`editable`), whose entry it wrote.
+#[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize)]
+pub struct LaunchSettings {
+    /// The arguments after the program, as written (`--no-sandbox %U`).
+    pub arguments: String,
+    pub environment: Vec<(String, String)>,
+    pub editable: bool,
+}
 
 /// Imports only Type 2 AppImages into PkgDeck-owned storage. Metadata inspection
 /// reads the ELF header; imported files are never executed by this backend.
@@ -62,10 +73,18 @@ impl AppImage {
             .map(|prefix| prefix.join("Caskroom"))
             .collect();
         Self {
+            caskrooms,
+            ..Self::with_data(&data)
+        }
+    }
+    /// The AppImages of a data folder (`XDG_DATA_HOME`): PkgDeck's own and
+    /// those its desktop entries start. Homebrew's are not told apart.
+    pub fn with_data(data: &Path) -> Self {
+        Self {
             root: data.join("pkgdeck/appimages"),
             applications: data.join("applications"),
             uid: rustix::process::getuid().as_raw(),
-            caskrooms,
+            caskrooms: vec![],
             #[cfg(test)]
             updater: None,
         }
@@ -410,13 +429,9 @@ impl AppImage {
                 .ok()
                 .as_deref()
                 == Some(digest)
-            && fs::read_to_string(entry).ok().is_some_and(|desktop| {
-                let program = format!("Exec={}", Self::exec_program(destination));
-                desktop.lines().any(|line| {
-                    line.strip_prefix(&program)
-                        .is_some_and(|rest| rest.is_empty() || rest.starts_with(' '))
-                })
-            });
+            && Self::exec_line(entry)
+                .and_then(|exec| desktop_exec::Command::parse(&exec))
+                .is_some_and(|command| Path::new(&command.program) == destination);
         if identical {
             Ok(true)
         } else {
@@ -506,30 +521,12 @@ impl AppImage {
             .find_map(|line| line.strip_prefix(key).map(str::to_owned))
             .filter(|value| !value.is_empty())
     }
-    /// Return the executable from an `Exec=` value when it is an absolute path.
-    /// Desktop entry field codes are deliberately ignored after the executable.
+    /// Return the executable from an `Exec=` value when it is an absolute path,
+    /// past a leading `env VAR=value …`. Field codes after it are ignored.
     fn exec_path(value: &str) -> Option<PathBuf> {
-        let value = value.trim_start();
-        let executable = if let Some(value) = value.strip_prefix('"') {
-            let mut escaped = false;
-            let mut end = None;
-            for (index, character) in value.char_indices() {
-                if escaped {
-                    escaped = false;
-                } else if character == '\\' {
-                    escaped = true;
-                } else if character == '"' {
-                    end = Some(index);
-                    break;
-                }
-            }
-            let end = end?;
-            value[..end].replace("\\\\", "\\").replace("\\\"", "\"")
-        } else {
-            value.split_whitespace().next()?.into()
-        };
-        let path = PathBuf::from(executable);
-        path.is_absolute().then_some(path)
+        desktop_exec::Command::parse(value)
+            .map(|command| PathBuf::from(command.program))
+            .filter(|path| path.is_absolute())
     }
     fn desktop_appimage_path(contents: &str) -> Option<PathBuf> {
         Self::desktop_value(contents, "TryExec=")
@@ -720,6 +717,13 @@ impl AppImage {
         let digest = id.reference.as_deref().unwrap_or_default();
         Self::verify_digest(&source, digest, cancel)?;
         let taken_over = self.external_at(&source);
+        // How its old entry started it (arguments, environment variables set
+        // in Gear Lever, say) carries over to PkgDeck's entry.
+        let carried = taken_over.as_ref().and_then(|original| {
+            self.entries_for(original).iter().find_map(|entry| {
+                Self::exec_line(entry).and_then(|exec| desktop_exec::Command::parse(&exec))
+            })
+        });
         let name = format!("pkgdeck-{digest}.AppImage");
         fs::create_dir_all(&self.root).map_err(|e| Self::invalid(e.to_string()))?;
         let destination = self.root.join(&name);
@@ -764,8 +768,21 @@ impl AppImage {
                 .icon
                 .as_ref()
                 .and_then(|icon| self.save_icon(&format!("pkgdeck-{digest}"), icon));
-            let desktop =
+            let mut desktop =
                 Self::desktop_entry(&destination, fallback_name, &contents, icon.as_deref());
+            if let Some(carried) = &carried {
+                let exec = carried.render(&Self::exec_program(&destination));
+                desktop = desktop
+                    .lines()
+                    .map(|line| {
+                        if line.starts_with("Exec=") {
+                            format!("Exec={exec}\n")
+                        } else {
+                            format!("{line}\n")
+                        }
+                    })
+                    .collect();
+            }
             let file = match fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
@@ -808,6 +825,157 @@ impl AppImage {
             self.remove_icons(&Self::external_icon_key(&original));
         }
         Ok(())
+    }
+    /// The raw `Exec=` value of a desktop entry's main group.
+    fn exec_line(desktop: &Path) -> Option<String> {
+        let contents = fs::read_to_string(desktop).ok()?;
+        let mut in_group = false;
+        contents.lines().find_map(|line| {
+            if line.starts_with('[') {
+                in_group = line.trim() == "[Desktop Entry]";
+                return None;
+            }
+            in_group
+                .then(|| line.strip_prefix("Exec="))
+                .flatten()
+                .map(str::to_owned)
+        })
+    }
+    /// The menu entry and file of an installed AppImage, and whether PkgDeck
+    /// manages it.
+    fn entry_of(&self, id: &PackageId) -> Result<(PathBuf, PathBuf, bool), EngineError> {
+        if Self::managed_name(&id.name) && id.scope == self.scope() {
+            let entry = self
+                .applications
+                .join(format!("pkgdeck-{}.desktop", &id.name[8..72]));
+            return Ok((entry, self.root.join(&id.name), true));
+        }
+        self.external_entries()?
+            .into_iter()
+            .find(|(package, _)| package.id == *id)
+            .map(|(_, entry)| (entry, PathBuf::from(&id.name), false))
+            .ok_or(EngineError::NotFound)
+    }
+    /// What the AppImage's menu entry starts, checked to be the AppImage.
+    fn launch_command(&self, id: &PackageId) -> Result<(desktop_exec::Command, bool), EngineError> {
+        let (entry, file, managed) = self.entry_of(id)?;
+        let command = Self::exec_line(&entry)
+            .and_then(|exec| desktop_exec::Command::parse(&exec))
+            .ok_or_else(|| Self::invalid("its menu entry has no command PkgDeck can read"))?;
+        let same = fs::canonicalize(&command.program)
+            .ok()
+            .zip(fs::canonicalize(&file).ok())
+            .is_some_and(|(program, file)| program == file);
+        if !same {
+            return Err(Self::invalid(
+                "its menu entry starts something other than this AppImage",
+            ));
+        }
+        Ok((command, managed))
+    }
+    pub fn launch_settings(&self, id: &PackageId) -> Result<LaunchSettings, EngineError> {
+        let (command, editable) = self.launch_command(id)?;
+        Ok(LaunchSettings {
+            arguments: command
+                .arguments
+                .iter()
+                .map(|argument| desktop_exec::quote(argument))
+                .collect::<Vec<_>>()
+                .join(" "),
+            environment: command.environment,
+            editable,
+        })
+    }
+    /// Change how an AppImage PkgDeck manages starts, from PkgDeck and from
+    /// the app menu alike: its entry's `Exec=` line is rewritten.
+    pub fn set_launch_settings(
+        &self,
+        id: &PackageId,
+        arguments: &str,
+        environment: &[(String, String)],
+    ) -> Result<(), EngineError> {
+        let (mut command, managed) = self.launch_command(id)?;
+        if !managed {
+            return Err(Self::invalid(
+                "PkgDeck can change only AppImages it manages. Manage it first.",
+            ));
+        }
+        if let Some((name, _)) = environment
+            .iter()
+            .find(|(name, value)| !desktop_exec::valid_name(name) || value.contains(['\n', '\r']))
+        {
+            return Err(Self::invalid(format!(
+                "{name:?} can't be an environment variable"
+            )));
+        }
+        command.arguments = desktop_exec::split(&arguments.replace(['\n', '\r'], " "))
+            .ok_or_else(|| Self::invalid("the arguments have a quote that's never closed"))?;
+        command.environment = environment.to_vec();
+        let (entry, file, _) = self.entry_of(id)?;
+        let exec = command.render(&Self::exec_program(&file));
+        let contents = fs::read_to_string(&entry).map_err(|e| Self::invalid(e.to_string()))?;
+        let mut in_group = false;
+        let mut written = false;
+        let updated: String = contents
+            .lines()
+            .map(|line| {
+                if line.starts_with('[') {
+                    in_group = line.trim() == "[Desktop Entry]";
+                }
+                if in_group && !written && line.starts_with("Exec=") {
+                    written = true;
+                    format!("Exec={exec}\n")
+                } else {
+                    format!("{line}\n")
+                }
+            })
+            .collect();
+        let temporary = entry.with_extension(format!("desktop.{}", std::process::id()));
+        fs::write(&temporary, updated)
+            .and_then(|()| fs::rename(&temporary, &entry))
+            .map_err(|e| {
+                let _ = fs::remove_file(&temporary);
+                Self::invalid(format!("couldn't save its menu entry: {e}"))
+            })
+    }
+    /// Start the AppImage as its menu entry does, without files. It runs on
+    /// its own, outside PkgDeck's sandbox when PkgDeck is a Flatpak.
+    pub fn launch(&self, id: &PackageId) -> Result<(), EngineError> {
+        let (command, _) = self.launch_command(id)?;
+        let bridge = (Host::current().runtime == crate::host::Runtime::Flatpak)
+            .then(|| Path::new("flatpak-spawn"));
+        Self::spawn(&command, bridge).map_err(|e| Self::invalid(format!("couldn't start it: {e}")))
+    }
+    /// Start `command` detached; through `bridge` (`flatpak-spawn`) when it
+    /// has to leave a Flatpak sandbox.
+    fn spawn(command: &desktop_exec::Command, bridge: Option<&Path>) -> std::io::Result<()> {
+        use std::os::unix::process::CommandExt;
+        let mut process = if let Some(bridge) = bridge {
+            let mut process = std::process::Command::new(bridge);
+            process.arg("--host");
+            for (name, value) in &command.environment {
+                process.arg(format!("--env={name}={value}"));
+            }
+            process.arg(&command.program);
+            process
+        } else {
+            let mut process = std::process::Command::new(&command.program);
+            process.envs(
+                command
+                    .environment
+                    .iter()
+                    .map(|(name, value)| (name, value)),
+            );
+            process
+        };
+        process
+            .args(command.launch_arguments())
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .process_group(0)
+            .spawn()
+            .map(drop)
     }
     fn updater(&self) -> Result<PathBuf, EngineError> {
         #[cfg(test)]
@@ -1202,12 +1370,13 @@ mod tests {
             backhand::compression::Compressor::Gzip,
             &[("demo.desktop", DEMO_ENTRY), ("demo.png", DEMO_PNG)],
         );
-        // Gear Lever style: two entries for one file, with a stale version.
+        // Gear Lever style: two entries for one file, with a stale version,
+        // and a variable someone set there, which carries over.
         for name in ["demo.desktop", "gearlever_demo.desktop"] {
             fs::write(
                 applications.join(name),
                 format!(
-                    "[Desktop Entry]\nName=Demo App\nExec=\"{}\" %U\nX-AppImage-Version=1.0\n",
+                    "[Desktop Entry]\nName=Demo App\nExec=env DESKTOPINTEGRATION=1 \"{}\" --no-sandbox %U\nX-AppImage-Version=1.0\n",
                     original.display()
                 ),
             )
@@ -1252,7 +1421,7 @@ mod tests {
         assert_eq!(
             entry,
             format!(
-                "[Desktop Entry]\nType=Application\nName=Demo App\nComment=Does demo things\nIcon={}\nExec=\"{}\" --no-sandbox %U\nTryExec={}\nTerminal=false\nCategories=Game;\nStartupWMClass=demo-app\nX-AppImage-Version=2.0\n",
+                "[Desktop Entry]\nType=Application\nName=Demo App\nComment=Does demo things\nIcon={}\nExec=env DESKTOPINTEGRATION=1 \"{}\" --no-sandbox %U\nTryExec={}\nTerminal=false\nCategories=Game;\nStartupWMClass=demo-app\nX-AppImage-Version=2.0\n",
                 icon.display(),
                 managed.display(),
                 managed.display()
@@ -1424,6 +1593,234 @@ mod tests {
         fs::set_permissions(backend.icons(), fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(unwritable, None);
         assert_eq!(fs::read_dir(backend.icons()).unwrap().count(), 1);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    /// A managed AppImage, imported from a fixture with `--no-sandbox %U`.
+    #[cfg(target_os = "linux")]
+    fn managed_demo(base: &Path) -> (AppImage, PackageId, PathBuf) {
+        let uid = rustix::process::getuid().as_raw();
+        let applications = base.join("applications");
+        fs::create_dir_all(&applications).unwrap();
+        let source = base.join("demo.AppImage");
+        appimage_with(
+            &source,
+            backhand::compression::Compressor::Gzip,
+            &[("demo.desktop", DEMO_ENTRY), ("demo.png", DEMO_PNG)],
+        );
+        let mut backend = AppImage::new(base.join("pkgdeck/appimages"), applications, uid);
+        let cancel = Cancellation::default();
+        let id = backend
+            .search(source.to_str().unwrap(), &cancel)
+            .unwrap()
+            .remove(0)
+            .id;
+        backend
+            .execute(&Operation::Install(id), &cancel, &mut ignore)
+            .unwrap();
+        let installed = backend.installed(&cancel).unwrap().remove(0);
+        let entry = base.join(format!(
+            "applications/pkgdeck-{}.desktop",
+            &installed.id.name[8..72]
+        ));
+        (backend, installed.id, entry)
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn launch_settings_live_in_the_menu_entry() {
+        let base = test_base("launch-settings");
+        let (mut backend, id, entry) = managed_demo(&base);
+        let file = base.join("pkgdeck/appimages").join(&id.name);
+        assert_eq!(
+            backend.launch_settings(&id).unwrap(),
+            LaunchSettings {
+                arguments: "--no-sandbox %U".into(),
+                environment: vec![],
+                editable: true
+            }
+        );
+        backend
+            .set_launch_settings(
+                &id,
+                "--no-sandbox --name \"My App\" %U",
+                &[
+                    ("DESKTOPINTEGRATION".into(), "1".into()),
+                    ("GREETING".into(), "hi there".into()),
+                ],
+            )
+            .unwrap();
+        let written = fs::read_to_string(&entry).unwrap();
+        assert!(
+            written.contains(&format!("\nExec=env DESKTOPINTEGRATION=1 \"GREETING=hi there\" \"{}\" --no-sandbox --name \"My App\" %U\n", file.display())),
+            "{written}"
+        );
+        // Everything else in the entry stays as it was.
+        assert!(written.starts_with("[Desktop Entry]\nType=Application\nName=Demo App\n"));
+        assert!(written.contains("\nStartupWMClass=demo-app\n"));
+        let settings = backend.launch_settings(&id).unwrap();
+        assert_eq!(settings.arguments, "--no-sandbox --name \"My App\" %U");
+        assert_eq!(
+            settings.environment[1],
+            ("GREETING".into(), "hi there".into())
+        );
+        // Opening the same file again still finds it installed.
+        let cancel = Cancellation::default();
+        let again = backend
+            .search(base.join("demo.AppImage").to_str().unwrap(), &cancel)
+            .unwrap()
+            .remove(0);
+        assert!(again.installed_version.is_some());
+        // Bad input changes nothing.
+        for (arguments, environment) in [
+            ("\"unclosed", vec![]),
+            ("", vec![("1BAD".to_owned(), "x".to_owned())]),
+            ("", vec![("OK".to_owned(), "line\nbreak".to_owned())]),
+        ] {
+            assert!(backend
+                .set_launch_settings(&id, arguments, &environment)
+                .is_err());
+        }
+        assert_eq!(fs::read_to_string(&entry).unwrap(), written);
+        // An entry PkgDeck can't read, or that starts something else, is reported.
+        fs::write(&entry, "[Desktop Entry]\nName=Demo\n").unwrap();
+        assert!(backend
+            .launch_settings(&id)
+            .unwrap_err()
+            .to_string()
+            .contains("no command"));
+        fs::write(&entry, "[Desktop Entry]\nExec=/bin/true\n").unwrap();
+        assert!(backend
+            .launch(&id)
+            .unwrap_err()
+            .to_string()
+            .contains("something other"));
+        // The fixture is no real program: starting it fails, and says so.
+        fs::write(&entry, &written).unwrap();
+        assert!(backend
+            .launch(&id)
+            .unwrap_err()
+            .to_string()
+            .contains("couldn't start it"));
+        // An entry that can't be saved leaves no partial file behind.
+        let applications = base.join("applications");
+        fs::set_permissions(&applications, fs::Permissions::from_mode(0o555)).unwrap();
+        let unwritable = backend.set_launch_settings(&id, "%U", &[]);
+        fs::set_permissions(&applications, fs::Permissions::from_mode(0o755)).unwrap();
+        // Needs a non-root user: root ignores directory permissions.
+        assert!(unwritable
+            .unwrap_err()
+            .to_string()
+            .contains("couldn't save"));
+        assert_eq!(fs::read_dir(&applications).unwrap().count(), 1);
+        assert_eq!(
+            backend
+                .launch_settings(&PackageId {
+                    name: "missing".into(),
+                    ..id
+                })
+                .unwrap_err(),
+            EngineError::NotFound
+        );
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn external_appimages_launch_but_only_managed_ones_change() {
+        let base = test_base("launch-external");
+        let uid = rustix::process::getuid().as_raw();
+        let applications = base.join("applications");
+        fs::create_dir_all(&applications).unwrap();
+        let original = base.join("demo.appimage");
+        appimage_with(
+            &original,
+            backhand::compression::Compressor::Gzip,
+            &[("demo.png", DEMO_PNG)],
+        );
+        fs::write(
+            applications.join("demo.desktop"),
+            "[Desktop Entry]\nName=Demo\n[Desktop Action New]\nExec=/bin/false\n",
+        )
+        .unwrap();
+        let backend = AppImage::new(base.join("pkgdeck/appimages"), applications.clone(), uid);
+        // Without a command in its main group it isn't listed at all.
+        assert!(backend.external_packages().unwrap().is_empty());
+        fs::write(
+            applications.join("demo.desktop"),
+            format!(
+                "[Desktop Entry]\nName=Demo\nExec=env A=1 \"{}\" %f\n",
+                original.display()
+            ),
+        )
+        .unwrap();
+        let id = backend.external_packages().unwrap().remove(0).id;
+        let settings = backend.launch_settings(&id).unwrap();
+        assert_eq!(
+            settings,
+            LaunchSettings {
+                arguments: "%f".into(),
+                environment: vec![("A".into(), "1".into())],
+                editable: false
+            }
+        );
+        assert!(backend
+            .set_launch_settings(&id, "", &[])
+            .unwrap_err()
+            .to_string()
+            .contains("Manage it first"));
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn launching_runs_the_command_detached_with_its_environment() {
+        let base = test_base("spawn");
+        let record = base.join("record");
+        let program = base.join("program");
+        fs::write(
+            &program,
+            format!(
+                "#!/bin/sh\nprintf '%s|%s\\n' \"$GREETING\" \"$*\" > '{}'\n",
+                record.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+        let command = desktop_exec::Command {
+            environment: vec![("GREETING".into(), "hi".into())],
+            program: program.display().to_string(),
+            arguments: vec!["--flag".into(), "%U".into()],
+        };
+        AppImage::spawn(&command, None).unwrap();
+        let wait = || {
+            (0..200)
+                .find_map(|_| {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    fs::read_to_string(&record)
+                        .ok()
+                        .filter(|text| text.ends_with('\n'))
+                })
+                .expect("the program never ran")
+        };
+        assert_eq!(wait(), "hi|--flag\n");
+        // From a Flatpak, flatpak-spawn starts it on the host.
+        fs::remove_file(&record).unwrap();
+        let bridge = base.join("flatpak-spawn");
+        fs::write(
+            &bridge,
+            format!(
+                "#!/bin/sh\nprintf '%s|%s\\n' \"${{GREETING:-}}\" \"$*\" > '{}'\n",
+                record.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&bridge, fs::Permissions::from_mode(0o755)).unwrap();
+        AppImage::spawn(&command, Some(&bridge)).unwrap();
+        assert_eq!(
+            wait(),
+            format!("|--host --env=GREETING=hi {} --flag\n", program.display())
+        );
+        assert!(AppImage::spawn(&command, Some(&base.join("missing"))).is_err());
         fs::remove_dir_all(base).unwrap();
     }
 
@@ -1730,6 +2127,11 @@ mod tests {
             Some(PathBuf::from("/home/user/Apps/Audacity\"Edition.AppImage"))
         );
         assert_eq!(AppImage::exec_path("Audacity.AppImage"), None);
+        // Gear Lever writes environment variables through `env`.
+        assert_eq!(
+            AppImage::exec_path("env DESKTOPINTEGRATION=1 \"/home/user/Apps/Trezor.AppImage\" %U"),
+            Some(PathBuf::from("/home/user/Apps/Trezor.AppImage"))
+        );
         assert_eq!(
             AppImage::exec_path("\"/home/user/Apps/Audacity.AppImage"),
             None

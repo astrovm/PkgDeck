@@ -30,6 +30,19 @@ TestCase {
         property string confirmation: ""
         property string confirmation_data: "{}"
         property string opened: ""
+        // How the AppImage at an index starts, and what PkgDeck was told.
+        property string launchSettings: "{}"
+        property var savedLaunch: null
+        property string launchResult: ""
+        property int launches: 0
+        function appLaunchSettings(index) { return launchSettings; }
+        function saveAppLaunchSettings(index, arguments, environment) {
+            savedLaunch = {index: index, arguments: arguments, environment: JSON.parse(environment)};
+            if (!launchResult)
+                launchSettings = JSON.stringify(Object.assign(JSON.parse(launchSettings), {arguments: arguments, environment: savedLaunch.environment}));
+            return launchResult;
+        }
+        function launchApp(index) { launches++; return launchResult; }
         property int openedInstalls: 0
         function installOpened() { openedInstalls++; }
         function closeOpened() { opened = ""; }
@@ -644,6 +657,65 @@ TestCase {
         keyClick(Qt.Key_Escape);
         verify(!browser.appPageOpen);
         verify(browser.selected !== null);
+    }
+    function test_installed_appimages_launch_and_change_how_they_start() {
+        browser.openView("Installed");
+        const row = {kind: "package", name: "pkgdeck-demo.AppImage", display_name: "Demo", source: "appimage", architecture: "x86_64",
+            scope: {user: {uid: 1000}}, installed: "2.0", candidate: "2.0", update: "current", summary: "Does demo things"};
+        fake.launchSettings = JSON.stringify({arguments: "--no-sandbox %U", environment: [{name: "DESKTOPINTEGRATION", value: "1"}], editable: true});
+        fake.rows = JSON.stringify([row]);
+        const list = findChild(browser, "packageResults");
+        tryCompare(list, "count", 1);
+        browser.choose(0);
+        const page = findChild(browser, "detailsPanel");
+        tryCompare(page, "visible", true);
+        const launch = findChild(page, "pageLaunchButton");
+        verify(launch.visible);
+        waitForRendering(page);
+        mouseClick(launch);
+        compare(fake.launches, 1);
+        const editor = findChild(page, "launchSettings");
+        verify(editor.visible);
+        const argumentsField = findChild(page, "launchArguments");
+        compare(argumentsField.text, "--no-sandbox %U");
+        const save = findChild(page, "saveLaunchSettings");
+        verify(!save.enabled);
+        // Change the arguments, add a variable, save.
+        argumentsField.forceActiveFocus();
+        argumentsField.selectAll();
+        keyClick(Qt.Key_Backspace);
+        keyClick("%");
+        keyClick("U");
+        verify(save.enabled);
+        mouseClick(findChild(page, "addVariable"));
+        compare(editor.environment.length, 2);
+        editor.environment[1] = {name: "FOO", value: "bar"};
+        mouseClick(save);
+        compare(fake.savedLaunch.index, 0);
+        compare(fake.savedLaunch.arguments, "%U");
+        compare(fake.savedLaunch.environment, [{name: "DESKTOPINTEGRATION", value: "1"}, {name: "FOO", value: "bar"}]);
+        // The page shows what was saved; a variable can go again.
+        compare(argumentsField.text, "%U");
+        compare(editor.environment.length, 2);
+        verify(!save.enabled);
+        mouseClick(findChild(page, "removeVariable"));
+        compare(editor.environment.length, 1);
+        verify(save.enabled);
+        // Errors show on the page.
+        fake.launchResult = "couldn't start it";
+        mouseClick(launch);
+        tryCompare(findChild(page, "launchError"), "text", "couldn't start it");
+        fake.launchResult = "";
+        // AppImages PkgDeck doesn't manage launch, but don't change.
+        fake.launchSettings = JSON.stringify({arguments: "%U", environment: [], editable: false});
+        browser.launchRevision++;
+        verify(launch.visible);
+        verify(!editor.visible);
+        // Unreadable settings show why, and nothing to launch.
+        fake.launchSettings = JSON.stringify({error: "its menu entry has no command"});
+        browser.launchRevision++;
+        verify(!launch.visible);
+        fake.launchSettings = "{}";
     }
     function test_reads_never_lock_navigation_and_results_fit_small_windows() {
         for (const view of ["Search", "Installed", "Updates", "Clean", "Sources", "Settings"]) {

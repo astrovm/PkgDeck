@@ -164,6 +164,25 @@ pub mod ffi {
         #[qinvokable]
         #[cxx_name = "openInput"]
         fn open_input(self: Pin<&mut PackageController>, input: QString);
+        /// How the AppImage at `index` starts: {arguments, environment:
+        /// [{name, value}], editable}, {error} when unreadable, or {} for
+        /// anything that isn't an installed AppImage.
+        #[qinvokable]
+        #[cxx_name = "appLaunchSettings"]
+        fn app_launch_settings(self: Pin<&mut PackageController>, index: i32) -> QString;
+        /// Save them (`environment` as that JSON list); returns the error.
+        #[qinvokable]
+        #[cxx_name = "saveAppLaunchSettings"]
+        fn save_app_launch_settings(
+            self: Pin<&mut PackageController>,
+            index: i32,
+            arguments: QString,
+            environment: QString,
+        ) -> QString;
+        /// Start the installed AppImage at `index`; returns the error.
+        #[qinvokable]
+        #[cxx_name = "launchApp"]
+        fn launch_app(self: Pin<&mut PackageController>, index: i32) -> QString;
         #[qinvokable]
         #[cxx_name = "installOpened"]
         fn install_opened(self: Pin<&mut PackageController>);
@@ -1268,6 +1287,8 @@ pub struct Controller {
     confirmation: QString,
     confirmation_data: QString,
     opened: QString,
+    /// Where tests keep the AppImages launch settings read and change.
+    appimage_data: Option<PathBuf>,
     /// The package `opened` shows.
     opened_package: Option<Package>,
     repositories: QString,
@@ -1371,6 +1392,7 @@ impl Default for Controller {
             confirmation: QString::default(),
             confirmation_data: "{}".into(),
             opened: QString::default(),
+            appimage_data: None,
             opened_package: None,
             repositories: "{}".into(),
             source_catalog: "[]".into(),
@@ -3146,6 +3168,73 @@ impl ffi::PackageController {
             return;
         }
         self.start(Job::OpenInput(input.to_string()));
+    }
+    /// The AppImage source: the person's own, or a test's data folder.
+    fn appimages(&self) -> AppImage {
+        match &self.rust().appimage_data {
+            Some(data) => AppImage::with_data(data),
+            None => AppImage::native(),
+        }
+    }
+    /// The installed AppImage row at `index`.
+    fn installed_appimage(&self, index: i32) -> Option<Package> {
+        usize::try_from(index)
+            .ok()
+            .and_then(|i| self.rust().packages.get(i))
+            .filter(|p| p.id.backend == "appimage" && p.installed_version.is_some())
+            .cloned()
+    }
+    pub fn app_launch_settings(self: Pin<&mut Self>, index: i32) -> QString {
+        let Some(package) = self.installed_appimage(index) else {
+            return "{}".into();
+        };
+        encoded(match self.appimages().launch_settings(&package.id) {
+            Ok(settings) => json!({
+                "arguments": settings.arguments,
+                "environment": settings.environment.iter().map(|(name, value)| json!({"name": name, "value": value})).collect::<Vec<_>>(),
+                "editable": settings.editable,
+            }),
+            Err(error) => json!({"error": plain_error(&error, None, false)}),
+        })
+    }
+    pub fn save_app_launch_settings(
+        self: Pin<&mut Self>,
+        index: i32,
+        arguments: QString,
+        environment: QString,
+    ) -> QString {
+        let Some(package) = self.installed_appimage(index) else {
+            return "Nothing to change.".into();
+        };
+        let environment: Vec<(String, String)> =
+            serde_json::from_str::<Vec<Value>>(&environment.to_string())
+                .unwrap_or_default()
+                .iter()
+                .map(|pair| {
+                    (
+                        pair["name"].as_str().unwrap_or_default().trim().to_owned(),
+                        pair["value"].as_str().unwrap_or_default().to_owned(),
+                    )
+                })
+                .filter(|(name, _)| !name.is_empty())
+                .collect();
+        match self.appimages().set_launch_settings(
+            &package.id,
+            &arguments.to_string(),
+            &environment,
+        ) {
+            Ok(()) => QString::default(),
+            Err(error) => plain_error(&error, None, false).as_str().into(),
+        }
+    }
+    pub fn launch_app(self: Pin<&mut Self>, index: i32) -> QString {
+        let Some(package) = self.installed_appimage(index) else {
+            return "Nothing to start.".into();
+        };
+        match self.appimages().launch(&package.id) {
+            Ok(()) => QString::default(),
+            Err(error) => plain_error(&error, None, false).as_str().into(),
+        }
     }
     /// Install (or Manage) what the open app page shows: preview the change
     /// as opening a file did before it had a page.
@@ -6484,6 +6573,128 @@ mod tests {
             "Choose an installation file."
         );
         std::fs::remove_dir_all(base).unwrap();
+    }
+    #[test]
+    fn appimage_launch_settings_need_an_installed_appimage() {
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        let mut apt = synthetic_package("tool", "Tool");
+        apt.installed_version = Some("1".into());
+        let mut gone = synthetic_package("/nonexistent/pkgdeck-test/demo.appimage", "Demo");
+        gone.id.backend = "appimage".into();
+        gone.id.scope = Scope::User { uid: 1000 };
+        gone.installed_version = Some("1".into());
+        controller.as_mut().rust_mut().packages = vec![apt, gone];
+        // Anything else, or no row at all, has nothing to show or do.
+        for index in [-1, 0, 5] {
+            assert_eq!(
+                controller.as_mut().app_launch_settings(index).to_string(),
+                "{}"
+            );
+            assert_eq!(
+                controller.as_mut().launch_app(index).to_string(),
+                "Nothing to start."
+            );
+            assert_eq!(
+                controller
+                    .as_mut()
+                    .save_app_launch_settings(index, "%U".into(), "[]".into())
+                    .to_string(),
+                "Nothing to change."
+            );
+        }
+        // An AppImage that's gone says so instead.
+        let settings: Value =
+            serde_json::from_str(&controller.as_mut().app_launch_settings(1).to_string()).unwrap();
+        assert!(settings["error"].is_string(), "{settings}");
+        assert!(!controller.as_mut().launch_app(1).is_empty());
+        assert!(!controller
+            .as_mut()
+            .save_app_launch_settings(
+                1,
+                "%U".into(),
+                r#"[{"name":" A ","value":"1"},{"name":"","value":"x"}]"#.into()
+            )
+            .is_empty());
+    }
+    #[test]
+    fn appimage_pages_read_change_and_launch_through_the_menu_entry() {
+        let data = std::env::temp_dir().join(format!("pkgdeck-launch-data-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data);
+        let root = data.join("pkgdeck/appimages");
+        let applications = data.join("applications");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&applications).unwrap();
+        // A managed AppImage that's a script, so launching it really runs.
+        let digest = "ab".repeat(32);
+        let name = format!("pkgdeck-{digest}.AppImage");
+        let file = root.join(&name);
+        let record = data.join("record");
+        std::fs::write(
+            &file,
+            format!(
+                "#!/bin/sh\nprintf '%s|%s\\n' \"$GREETING\" \"$*\" > '{}'\n",
+                record.display()
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let entry = applications.join(format!("pkgdeck-{digest}.desktop"));
+        std::fs::write(
+            &entry,
+            format!(
+                "[Desktop Entry]\nName=Demo\nExec=\"{}\" --flag %U\n",
+                file.display()
+            ),
+        )
+        .unwrap();
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().rust_mut().appimage_data = Some(data.clone());
+        let mut row = synthetic_package(&name, "Demo");
+        row.id.backend = "appimage".into();
+        row.id.scope = Scope::User {
+            uid: rustix::process::getuid().as_raw(),
+        };
+        row.installed_version = Some("2.0".into());
+        controller.as_mut().rust_mut().packages = vec![row];
+        let settings: Value =
+            serde_json::from_str(&controller.as_mut().app_launch_settings(0).to_string()).unwrap();
+        assert_eq!(
+            settings,
+            json!({"arguments": "--flag %U", "environment": [], "editable": true})
+        );
+        // Blank variable names are dropped; the rest are saved trimmed.
+        assert_eq!(
+            controller
+                .as_mut()
+                .save_app_launch_settings(
+                    0,
+                    "--other %U".into(),
+                    r#"[{"name":" GREETING ","value":"hi"},{"name":"","value":"x"}]"#.into()
+                )
+                .to_string(),
+            ""
+        );
+        let settings: Value =
+            serde_json::from_str(&controller.as_mut().app_launch_settings(0).to_string()).unwrap();
+        assert_eq!(settings["arguments"], "--other %U");
+        assert_eq!(
+            settings["environment"],
+            json!([{"name": "GREETING", "value": "hi"}])
+        );
+        assert_eq!(controller.as_mut().launch_app(0).to_string(), "");
+        let text = (0..200)
+            .find_map(|_| {
+                std::thread::sleep(Duration::from_millis(10));
+                std::fs::read_to_string(&record)
+                    .ok()
+                    .filter(|text| text.ends_with('\n'))
+            })
+            .expect("the AppImage never started");
+        assert_eq!(text, "hi|--other\n");
+        std::fs::remove_dir_all(data).unwrap();
     }
     #[test]
     fn previews_say_when_a_change_needs_a_second_look() {
