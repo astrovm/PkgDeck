@@ -5818,6 +5818,37 @@ fn pacman_leaves_aur_packages_to_the_aur_source() {
 }
 
 #[test]
+fn searches_with_several_words_ask_for_the_longest_and_keep_full_matches() {
+    let cancel = Cancellation::default();
+    let script = Script::new(&[(
+        "pacman -Ss editor",
+        "extra/kate 26.08-1\n    Advanced text editor\n\
+         extra/text-editor 1.0-1\n    Plain\n\
+         extra/vim 9.2-1\n    Vi editor improved\n",
+    )]);
+    let mut pacman = Pacman::pacman(script.clone());
+    let names: Vec<_> = pacman
+        .search("text editor", &cancel)
+        .unwrap()
+        .into_iter()
+        .map(|p| p.id.name)
+        .collect();
+    // The name or the description has every word, separators ignored.
+    assert_eq!(names, ["kate", "text-editor"]);
+    assert_eq!(*script.calls.lock().unwrap(), ["pacman -Ss editor"]);
+    // Words that can't be package names, or none at all, are refused.
+    for query in ["text e/ditor", "a;b c", " - ", "-text editor"] {
+        assert!(
+            matches!(
+                pacman.search(query, &cancel),
+                Err(EngineError::InvalidResponse { .. })
+            ),
+            "{query}"
+        );
+    }
+}
+
+#[test]
 fn pacman_detects_and_searches_with_one_command_each() {
     let cancel = Cancellation::default();
     let script = Script::new(&[
