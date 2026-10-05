@@ -141,6 +141,9 @@ Controls.ApplicationWindow {
     property alias backgroundMode: preferences.backgroundMode
     property alias autostartEnabled: preferences.autostart
     property alias preferredSidebarWidth: preferences.sidebarWidth
+    // 0 keeps the automatic split. A dragged or keyed height is remembered.
+    property alias detailsHeight: preferences.detailsHeight
+    property alias flatpakScopeChoices: preferences.flatpakScopeChoices
     // Quit from the keyboard. On a Mac that quits even with background
     // checks on, like every Mac app; elsewhere it closes to the tray.
     function quitFromKeyboard() {
@@ -862,7 +865,14 @@ Controls.ApplicationWindow {
             return a.source < b.source ? -1 : 1;
         return 0;
     }
-    property var flatpakInstallations: ({})
+    function flatpakChoices() {
+        try {
+            const saved = JSON.parse(preferences.flatpakScopeChoices || "{}");
+            return saved && typeof saved === "object" ? saved : {};
+        } catch (error) {
+            return {};
+        }
+    }
     function flatpakGroupKey(row) {
         return JSON.stringify([row.name, row.architecture, row.remote || "", row.reference || ""]);
     }
@@ -889,9 +899,10 @@ Controls.ApplicationWindow {
                 result.push(...variants);
                 return result;
             }
-            const ordered = variants.slice().sort((a, b) => (a.scope === "system") - (b.scope === "system"));
-            const chosen = ordered.find((entry) => rowIdentity(entry) === flatpakInstallations[key])
-                || ordered.find(isInstalled) || ordered[0];
+            // System is the first copy and the one opened until a choice is remembered.
+            const ordered = variants.slice().sort((a, b) => (b.scope === "system") - (a.scope === "system"));
+            const chosen = ordered.find((entry) => rowIdentity(entry) === flatpakChoices()[key])
+                || ordered[0];
             const memo = rowMemo(chosen), shape = ordered.map(rowJson).join("\n");
             if (memo.flatpakShape !== shape) {
                 memo.flatpakShape = shape;
@@ -906,7 +917,9 @@ Controls.ApplicationWindow {
         if (!variants || index < 0 || index >= variants.length || !canAct || retainingResults)
             return;
         const visible = results.currentIndex;
-        flatpakInstallations = Object.assign({}, flatpakInstallations, {[row.flatpakGroup]: rowIdentity(variants[index])});
+        const saved = Object.assign({}, flatpakChoices(), {[row.flatpakGroup]: rowIdentity(variants[index])});
+        preferences.flatpakScopeChoices = JSON.stringify(saved);
+        preferences.sync();
         choose(visible);
     }
     function groupInstalledRows(rows) {
@@ -1274,17 +1287,32 @@ Controls.ApplicationWindow {
         const filler = pageContent.children.some((child) => child.objectName === "pageFiller" && child.visible);
         return Math.max(0, page - used - pageContent.spacing * (shown + 1 + (filler ? 1 : 0)));
     }
+    function detailsRowHeight() {
+        return compact ? Math.max(94, font.pointSize * 8.5) : Math.max(56, font.pointSize * 5);
+    }
     function detailsMinimumHeight() {
-        return Math.min(120, (rowPageOpen ? appPage : detailsPanel).idealHeight, detailsBudget() * 0.4);
+        // Compact windows spend the height on two list cards. Every window
+        // keeps one complete row; the panel scrolls whatever is left.
+        const cap = compact ? 72 : 120;
+        const besideOneRow = Math.max(48, detailsBudget() - listChromeHeight() - detailsRowHeight());
+        return Math.min(cap, (rowPageOpen ? appPage : detailsPanel).idealHeight, detailsBudget() * (compact ? 0.34 : 0.4), besideOneRow);
     }
     function detailsListHeight() {
-        const rows = compact ? 2 : 3;
-        const rowHeight = compact ? Math.max(94, font.pointSize * 8.5) : Math.max(56, font.pointSize * 5);
+        const oneRow = detailsRowHeight();
+        const chrome = listChromeHeight();
         const budget = detailsBudget();
-        // Keep a complete compact card available above the scrolling details.
-        return Math.min(shortResultsHeight(), listChromeHeight() + rows * rowHeight,
-            Math.max(budget * (compact ? 0.5 : 0.55), compact ? listChromeHeight() + rowHeight : 0),
+        // Keep a complete row available above the scrolling details.
+        return Math.min(shortResultsHeight(), chrome + (compact ? 2 : 3) * oneRow,
+            Math.max(budget * (compact ? 0.5 : 0.55), chrome + oneRow),
             budget - detailsMinimumHeight());
+    }
+    // A saved height wins. 0 follows the space left after the list's minimum.
+    function detailsPreferredHeight(ideal) {
+        const minimum = detailsMinimumHeight();
+        const maximum = Math.max(minimum, detailsBudget() - detailsListHeight());
+        if (preferences.detailsHeight > 0)
+            return Math.max(minimum, Math.min(preferences.detailsHeight, maximum));
+        return Math.max(minimum, Math.min(height * (compact ? 0.45 : 0.5), ideal, maximum));
     }
     // Tokens live in the Theme singleton; these aliases keep bindings short.
     Binding { target: Theme; property: "appearance"; value: preferences.appearance }
@@ -1346,7 +1374,10 @@ Controls.ApplicationWindow {
         const scoped = row.source === "flatpak" || containerSource(row.source);
         // An AppImage installed some other way, which Manage moves in.
         const unmanaged = row.source === "appimage" && row.adopt_with === "appimage" && isInstalled(row);
-        return [packageNameNote(row), sourceDisplayName(row.source), row.remote || "", scoped && !row.flatpakVariants ? (row.scope === "system" ? "System" : "User") : "", flatpakBranch(row), unmanaged ? "not managed" : ""]
+        const bothFlatpakCopies = row.source === "flatpak" && row.flatpakVariants && row.flatpakVariants.length > 1;
+        const scopeLabel = bothFlatpakCopies ? "System and user"
+            : scoped && !row.flatpakVariants ? (row.scope === "system" ? "System" : "User") : "";
+        return [packageNameNote(row), sourceDisplayName(row.source), row.remote || "", scopeLabel, flatpakBranch(row), unmanaged ? "not managed" : ""]
             .filter(Boolean).join(", ");
     }
     function sameAppNames(row) {
@@ -1658,6 +1689,10 @@ Controls.ApplicationWindow {
         property string notificationHistory: "{}"
         property string lastBackgroundState: "{}"
         property int sidebarWidth: root.defaultSidebarWidth
+        // Pixel height of the open app panel. 0 uses the automatic split.
+        property int detailsHeight: 0
+        // Last Flatpak copy chosen for each merged row, keyed by group.
+        property string flatpakScopeChoices: "{}"
         // Shown on the empty Search page until sources are checked again.
         property string searchHint: ""
     }
@@ -3321,7 +3356,10 @@ Controls.ApplicationWindow {
                                 }
                                 ActionButton {
                                     objectName: "rowPackageAction"
-                                    visible: packageRow.rowAction.length > 0
+                                    // The open app repeats this action in its header.
+                                    // Match the row by index: its identity changes a frame
+                                    // later when another Flatpak copy is chosen.
+                                    visible: packageRow.rowAction.length > 0 && !(root.rowPageOpen && packageRow.index === results.currentIndex)
                                     enabled: packageRow.active || (root.canAct && !root.retainingResults)
                                     readonly property string verb: ({install: "Install ", remove: "Remove ", upgrade: "Update ", clean: "Run cleanup ", adopt: "Manage "})[packageRow.rowAction] || ""
                                     text: ""
@@ -3557,10 +3595,12 @@ Controls.ApplicationWindow {
                 embedded: !fromFile
                 parent: fromFile ? root.contentItem : pageContent
                 Layout.fillWidth: true
-                Layout.preferredHeight: Math.max(root.detailsMinimumHeight(),
-                    Math.min(root.height * (root.compact ? 0.45 : 0.5), appPage.idealHeight,
-                        root.detailsBudget() - root.detailsListHeight()))
+                Layout.preferredHeight: root.detailsPreferredHeight(appPage.idealHeight)
                 Layout.minimumHeight: root.detailsMinimumHeight()
+                Behavior on Layout.preferredHeight {
+                    enabled: appPage.visible && !detailsResize.pressed && root.motionEnabled
+                    NumberAnimation { duration: Theme.layoutDuration; easing.type: Easing.OutCubic }
+                }
                 visible: root.appPageOpen
                 transform: Translate { id: pageShift }
                 Binding { target: appPage; property: "x"; value: pageContent.x; when: appPage.fromFile }
@@ -3638,6 +3678,69 @@ Controls.ApplicationWindow {
                 }
                 onScreenshotFailed: (url, identity) => root.hideFailedScreenshot(url, identity)
                 onVisibleChanged: if (visible) Qt.callLater(() => appPage.forceActiveFocus())
+                // Drag the top edge. Up grows the panel; Home restores the automatic split.
+                MouseArea {
+                    id: detailsResize
+                    objectName: "detailsResize"
+                    visible: appPage.visible && !appPage.fromFile
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.topMargin: -8
+                    height: 14
+                    z: 3
+                    hoverEnabled: true
+                    cursorShape: Qt.SplitVCursor
+                    activeFocusOnTab: true
+                    Accessible.role: Accessible.Separator
+                    Accessible.name: "Resize details"
+                    preventStealing: true
+                    property real pressY: 0
+                    property int startHeight: 0
+                    function clamp(next) {
+                        const minimum = root.detailsMinimumHeight();
+                        const maximum = Math.max(minimum, root.detailsBudget() - root.detailsListHeight());
+                        return Math.round(Math.max(minimum, Math.min(next, maximum)));
+                    }
+                    Keys.onPressed: (event) => {
+                        const current = preferences.detailsHeight > 0 ? preferences.detailsHeight : appPage.height;
+                        if (event.key === Qt.Key_Home)
+                            preferences.detailsHeight = 0;
+                        else if (event.key === Qt.Key_Up)
+                            preferences.detailsHeight = clamp(current + 24);
+                        else if (event.key === Qt.Key_Down)
+                            preferences.detailsHeight = clamp(current - 24);
+                        else
+                            return;
+                        preferences.sync();
+                        event.accepted = true;
+                    }
+                    onPressed: (mouse) => {
+                        pressY = mapToItem(root.contentItem, 0, mouse.y).y;
+                        startHeight = appPage.height;
+                    }
+                    onPositionChanged: (mouse) => {
+                        if (!pressed)
+                            return;
+                        const y = mapToItem(root.contentItem, 0, mouse.y).y;
+                        preferences.detailsHeight = clamp(startHeight - (y - pressY));
+                    }
+                    onReleased: preferences.sync()
+                    onDoubleClicked: {
+                        preferences.detailsHeight = 0;
+                        preferences.sync();
+                    }
+                    Rectangle {
+                        width: 36
+                        height: 4
+                        radius: 2
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        anchors.bottom: parent.bottom
+                        anchors.bottomMargin: 2
+                        color: detailsResize.containsMouse || detailsResize.pressed || detailsResize.activeFocus ? root.accent : root.muted
+                        opacity: detailsResize.containsMouse || detailsResize.pressed || detailsResize.activeFocus ? 0.9 : 0.45
+                    }
+                }
             }
             Flow {
                 id: pageActions

@@ -248,6 +248,8 @@ TestCase {
         browser.nameWidth = 202;
         browser.versionWidth = 150;
         browser.preferredSidebarWidth = 212;
+        browser.detailsHeight = 0;
+        browser.flatpakScopeChoices = "{}";
         wait(30);
     }
     function cleanup() {
@@ -644,6 +646,9 @@ TestCase {
         mouseClick(findChild(page, "detailsActionButton"));
         tryCompare(review, "visible", true);
         waitForRendering(review);
+        // The panel animates to the height the review needs.
+        const apply = findChild(page, "pageReviewApply");
+        tryVerify(() => apply.mapToItem(page, 0, 0).y + apply.height <= page.height);
         mouseClick(findChild(page, "pageReviewApply"));
         compare(fake.writes, 1);
         tryCompare(review, "visible", false);
@@ -2618,17 +2623,31 @@ TestCase {
         browser.choose(0);
         const panel = findChild(browser, "detailsPanel");
         tryVerify(() => panel.visible && panel.height > 0 && list.height > 0);
+        // The split animates. A click during that move can land on the reload
+        // button or the resize handle instead of the row.
+        let settledPanel = -1;
+        let settledList = -1;
+        tryVerify(() => {
+            const done = Math.abs(panel.height - settledPanel) < 0.5 && Math.abs(list.height - settledList) < 0.5;
+            settledPanel = panel.height;
+            settledList = list.height;
+            return done;
+        });
         waitForRendering(browser.contentItem);
         verify(list.enabled);
         verify(panel.embedded);
-        verify(box.mapToItem(browser.contentItem, 0, box.height).y <= panel.mapToItem(browser.contentItem, 0, 0).y);
+        verify(box.mapToItem(browser.contentItem, 0, box.height).y <= panel.mapToItem(browser.contentItem, 0, 0).y + 1);
         verify(panel.mapToItem(browser.contentItem, 0, panel.height).y <= browser.contentItem.height + 1);
         // Another real row click replaces the details without closing first.
         list.positionViewAtIndex(1, ListView.Beginning);
-        waitForRendering(list);
         const next = list.itemAtIndex(1);
         verify(next !== null);
-        mouseClick(next, next.width / 2, Math.min(next.height / 2, list.height / 2));
+        const clickY = Math.min(next.height / 2, Math.max(1, list.height / 2));
+        tryVerify(() => {
+            const top = next.mapToItem(list, 0, clickY).y;
+            return top >= 0 && top < list.height;
+        });
+        mouseClick(next, next.width / 2, clickY);
         tryCompare(browser, "selectedIdentity", browser.rowIdentity(browser.viewItems[1]));
         verify(panel.visible);
         compare(panel.selected.name, browser.viewItems[1].name);
@@ -2647,31 +2666,59 @@ TestCase {
         const list = findChild(browser, "packageResults");
         tryCompare(list, "count", 1);
         browser.choose(0);
+        // System is listed first and selected until a choice is remembered.
+        compare(browser.selected.installed, "2");
+        compare(browser.selected.scope, "system");
+        compare(browser.originalIndex(0), 0);
+        compare(findChild(list.itemAtIndex(0), "packageSourceLine").text, "Flatpak, flathub, System and user");
+        browser.selectFlatpakInstallation(1);
         compare(browser.selected.installed, "1");
         compare(browser.originalIndex(0), 1);
-        browser.selectFlatpakInstallation(1);
-        compare(browser.selected.installed, "2");
-        compare(browser.originalIndex(0), 0);
         const panel = findChild(browser, "detailsPanel");
-        compare(panel.version, "2");
+        compare(panel.version, "1");
         mouseClick(findChild(panel, "detailsActionButton"));
         compare(fake.lastProposal, "remove");
-        compare(fake.selection, 0);
+        compare(fake.selection, 1);
         fake.confirm(false);
         fake.busy = true;
         browser.selectFlatpakInstallation(0);
-        compare(browser.selected.installed, "2");
+        compare(browser.selected.installed, "1");
         verify(!findChild(panel, "packageInstallationSelector").enabled);
         fake.busy = false;
         // Dropping the selected installation keeps its remaining copy open.
-        fake.rows = JSON.stringify([user]);
+        fake.rows = JSON.stringify([system]);
         tryCompare(list, "count", 1);
         tryCompare(panel, "visible", true);
-        tryCompare(panel, "version", "1");
+        tryCompare(panel, "version", "2");
         compare(browser.originalIndex(0), 0);
         verify(!findChild(panel, "packageInstallationSelector").visible);
         browser.selectFlatpakInstallation(-1);
         browser.selectFlatpakInstallation(5);
+        compare(browser.selected.installed, "2");
+    }
+    function test_flatpak_remembers_the_last_installation() {
+        browser.openView("Installed");
+        const app = {kind: "package", name: "org.example.Player", source: "flatpak", remote: "flathub",
+            architecture: "x86_64", reference: "app/org.example.Player/x86_64/stable", candidate: "3", update: "current"};
+        const user = Object.assign({}, app, {scope: "user", installed: "1"});
+        const system = Object.assign({}, app, {scope: "system", installed: "2"});
+        fake.rows = JSON.stringify([user, system]);
+        tryCompare(findChild(browser, "packageResults"), "count", 1);
+        browser.choose(0);
+        compare(browser.selected.scope, "system");
+        browser.selectFlatpakInstallation(1);
+        compare(browser.selected.scope, "user");
+        verify(browser.flatpakScopeChoices.indexOf("user") >= 0);
+        browser.destroy();
+        wait(30);
+        browser = createTemporaryObject(window, test);
+        verify(browser !== null);
+        fake.source_catalog = JSON.stringify(browser.sourceIds.map((id) => ({source: id, summary: "Available", availability_kind: "available", capabilities: ["search", "installed", "upgrade", "clean"]})));
+        browser.openView("Installed");
+        fake.rows = JSON.stringify([user, system]);
+        tryCompare(findChild(browser, "packageResults"), "count", 1);
+        browser.choose(0);
+        compare(browser.selected.scope, "user");
         compare(browser.selected.installed, "1");
     }
     function test_flatpak_selector_fits_below_a_narrow_header() {
@@ -2686,19 +2733,89 @@ TestCase {
         const panel = findChild(browser, "detailsPanel"), selector = findChild(panel, "compactInstallationSelector");
         waitForRendering(panel);
         verify(selector.visible);
+        compare(selector.currentText, "System");
         const scroll = findChild(panel, "detailsScroll");
-        verify(scroll.height >= 20, "readable details viewport: " + scroll.height);
+        tryVerify(() => scroll.height >= 20, 2000, "readable details viewport: " + scroll.height + " panel " + panel.height);
         verify(scroll.mapToItem(panel, 0, scroll.height).y <= panel.height);
         const list = findChild(browser, "packageResults");
         verify(list.height >= list.itemAtIndex(0).height, "list=" + list.height + " row=" + list.itemAtIndex(0).height + " budget=" + browser.detailsBudget() + " minimum=" + browser.detailsListHeight() + " box=" + findChild(browser, "resultsBox").height + " panel=" + panel.height);
         verify(!findChild(panel, "packageInstallationSelector").visible);
-        verify(selector.mapToItem(panel, 0, 0).y >= findChild(panel, "detailsHeader").height);
+        // The switch sits on the subtitle line, inside the header.
+        verify(selector.mapToItem(panel, 0, 0).y < findChild(panel, "detailsHeader").height);
         verify(selector.mapToItem(panel, selector.width, selector.height).x <= panel.width);
-        mouseClick(selector);
+        const title = findChild(panel, "detailsTitle");
+        verify(!title.truncated, title.text);
+        mouseClick(findChild(selector, "installationChoiceUser"));
+        tryCompare(selector, "currentText", "User");
+        compare(browser.originalIndex(0), 0);
+        const openRow = list.itemAtIndex(0);
+        const openAction = findChild(openRow, "rowPackageAction");
+        verify(!openAction.visible);
+    }
+    function test_narrow_details_keep_a_complete_list_row() {
+        browser.width = 400;
+        browser.height = 520;
+        browser.openView("Installed");
+        fake.rows = JSON.stringify(Array.from({length: 8}, (_, i) => ({kind: "package", name: "synthetic-" + i,
+            display_name: i === 0 ? "Synthetic Player" : "synthetic-" + i,
+            source: "apt", architecture: "all", installed: "1", candidate: "1", scope: "system", summary: "Synthetic package"})));
+        const list = findChild(browser, "packageResults");
+        tryCompare(list, "count", 8);
+        browser.choose(0);
+        const panel = findChild(browser, "detailsPanel");
+        tryVerify(() => panel.visible);
+        waitForRendering(browser.contentItem);
+        const row = list.itemAtIndex(0);
+        verify(row !== null);
+        verify(list.height >= row.height - 1, "list=" + list.height + " row=" + row.height + " budget=" + browser.detailsBudget());
+        // The panel keeps the rest, so its content stays readable.
+        tryVerify(() => panel.height >= 120, 2000, "panel=" + panel.height);
+        verify(!findChild(panel, "detailsTitle").truncated);
+        verify(panel.mapToItem(browser.contentItem, 0, panel.height).y <= browser.contentItem.height + 1);
+    }
+    function test_details_panel_resizes_and_remembers_its_height() {
+        browser.width = 1100;
+        browser.height = 760;
+        browser.openView("Installed");
+        fake.rows = JSON.stringify(Array.from({length: 12}, (_, i) => ({kind: "package", name: "synthetic-" + i,
+            source: "apt", architecture: "all", installed: "1", candidate: "1", scope: "system", summary: "Synthetic package"})));
+        const list = findChild(browser, "packageResults");
+        tryCompare(list, "count", 12);
+        browser.choose(0);
+        const panel = findChild(browser, "detailsPanel");
+        const handle = findChild(panel, "detailsResize");
+        tryVerify(() => panel.visible && handle.visible && panel.height > 80);
+        const before = panel.height;
+        handle.forceActiveFocus();
+        keyClick(Qt.Key_Up);
+        tryVerify(() => panel.height >= before + 16, 2000, "height " + panel.height + " from " + before);
+        const row = list.itemAtIndex(0);
+        verify(row !== null && list.height >= row.height);
+        verify(browser.detailsHeight > 0);
+        const grown = panel.height;
         keyClick(Qt.Key_Down);
-        keyClick(Qt.Key_Return);
-        tryCompare(selector, "currentText", "System");
-        compare(browser.originalIndex(0), 1);
+        tryVerify(() => panel.height <= grown - 8, 2000, "height " + panel.height + " from " + grown);
+        keyClick(Qt.Key_Home);
+        compare(browser.detailsHeight, 0);
+        keyClick(Qt.Key_Up);
+        tryVerify(() => browser.detailsHeight > 0);
+        const saved = browser.detailsHeight;
+        browser.destroy();
+        wait(30);
+        browser = createTemporaryObject(window, test);
+        verify(browser !== null);
+        fake.source_catalog = JSON.stringify(browser.sourceIds.map((id) => ({source: id, summary: "Available", availability_kind: "available", capabilities: ["search", "installed", "upgrade", "clean"]})));
+        browser.openView("Installed");
+        fake.rows = JSON.stringify(Array.from({length: 12}, (_, i) => ({kind: "package", name: "synthetic-" + i,
+            source: "apt", architecture: "all", installed: "1", candidate: "1", scope: "system", summary: "Synthetic package"})));
+        tryCompare(findChild(browser, "packageResults"), "count", 12);
+        browser.choose(0);
+        const again = findChild(browser, "detailsPanel");
+        tryVerify(() => again.visible && Math.abs(again.height - saved) <= 2, 2000, "height " + again.height + " saved " + saved);
+        const againHandle = findChild(again, "detailsResize");
+        againHandle.forceActiveFocus();
+        keyClick(Qt.Key_Home);
+        compare(browser.detailsHeight, 0);
     }
     function test_flatpak_prefers_the_installed_copy_and_ignores_stale_details() {
         browser.openView("Search");
@@ -2713,7 +2830,7 @@ TestCase {
         compare(browser.selected.scope, "system");
         compare(panel.actionText, "Remove");
         compare(fake.selection, 1);
-        browser.selectFlatpakInstallation(0);
+        browser.selectFlatpakInstallation(1);
         compare(panel.actionText, "Install");
         compare(fake.selection, 0);
         fake.details = JSON.stringify({package: system, description: "Stale system description"});
@@ -2759,19 +2876,18 @@ TestCase {
         const selector = findChild(panel, "packageInstallationSelector");
         tryCompare(selector, "visible", true);
         compare(selector.count, 2);
-        compare(selector.currentText, "User");
-        compare(fake.selection, 0);
-        waitForRendering(selector);
-        mouseClick(selector);
-        keyClick(Qt.Key_Down);
-        keyClick(Qt.Key_Return);
-        tryCompare(selector, "currentText", "System");
+        compare(selector.currentText, "System");
+        compare(findChild(selector, "installationChoiceSystem").checked, true);
         compare(fake.selection, 1);
-        compare(browser.originalIndex(0), 1);
-        compare(browser.selected.scope, "system");
+        waitForRendering(selector);
+        mouseClick(findChild(selector, "installationChoiceUser"));
+        tryCompare(selector, "currentText", "User");
+        compare(fake.selection, 0);
+        compare(browser.originalIndex(0), 0);
+        verify(browser.selected.scope !== "system");
         browser.runPageAction();
         compare(fake.lastProposal, "install");
-        compare(fake.selection, 1);
+        compare(fake.selection, 0);
         fake.confirm(false);
         compare(browser.sourceLine({source: "flatpak", remote: "flathub", scope: "user", reference: "runtime/org.freedesktop.Sdk.Extension.typescript/x86_64/24.08"}), "Flatpak, flathub, User, 24.08");
         compare(browser.sourceLine({source: "flatpak", remote: "flathub", scope: "system", reference: "app/org.mozilla.firefox/x86_64/stable"}), "Flatpak, flathub, System");
@@ -2781,6 +2897,7 @@ TestCase {
         compare(browser.sourceLine({source: "apt", name: "neovim", display_name: "Neovim"}), "APT");
         compare(browser.sourceLine({source: "snap", name: "nvim", display_name: "Neovim"}), "nvim, Snap");
         compare(browser.sourceLine({source: "flatpak", name: "io.neovim.nvim", display_name: "Neovim", remote: "flathub", scope: "user"}), "Flatpak, flathub, User");
+        compare(browser.sourceLine({source: "flatpak", remote: "flathub", scope: "system", flatpakVariants: [{scope: "system"}, {scope: "user"}]}), "Flatpak, flathub, System and user");
         compare(fake.writes, 0);
     }
     function test_failed_screenshots_collapse_and_keep_working_images() {

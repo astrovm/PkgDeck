@@ -90,8 +90,7 @@ Rectangle {
     // still on its way (such as Flathub's description and screenshots).
     readonly property bool loadingMore: detailMatchesSelection && detailsData.more === true
     readonly property real contentIdealHeight: Math.max(88, 2 * Theme.gutter + header.implicitHeight
-        + detailsContent.spacing + detailBody.implicitHeight
-        + (compact && installationChoices.length > 1 ? Theme.controlHeight + detailsContent.spacing : 0))
+        + detailsContent.spacing + detailBody.implicitHeight)
     // Never collapses while the next row loads: it keeps the last settled
     // height (or the skeleton's, if taller) so the panel does not jump.
     readonly property real idealHeight: loading ? Math.max(settledHeight, contentIdealHeight) : contentIdealHeight
@@ -192,13 +191,51 @@ Rectangle {
             }
         }
     }
-    component InstallationSelector: ThemedComboBox {
+    component InstallationSelector: RowLayout {
+        id: selector
         enabled: panel.actionEnabled
-        model: panel.installationChoices.map((choice) => choice.label)
-        currentIndex: panel.installationIndex
-        Accessible.name: "Flatpak installation"
+        spacing: 4
         Layout.alignment: Qt.AlignVCenter
-        onActivated: (index) => panel.installationRequested(index)
+        property int currentIndex: panel.installationIndex
+        readonly property string currentText: currentIndex >= 0 && currentIndex < panel.installationChoices.length
+            ? panel.installationChoices[currentIndex].label : ""
+        readonly property int count: panel.installationChoices.length
+        Repeater {
+            model: panel.installationChoices
+            delegate: Controls.Button {
+                id: choice
+                required property var modelData
+                required property int index
+                objectName: "installationChoice" + modelData.label
+                text: modelData.label
+                checkable: true
+                checked: index === selector.currentIndex
+                enabled: selector.enabled
+                Accessible.name: modelData.label + " Flatpak"
+                implicitHeight: Math.max(32, Theme.controlHeight - 4)
+                leftPadding: 10
+                rightPadding: 10
+                font.pointSize: Theme.pointSize(Theme.smallScale)
+                font.weight: checked ? Font.DemiBold : Font.Normal
+                onClicked: panel.installationRequested(index)
+                background: Rectangle {
+                    radius: Theme.controlRadius
+                    color: !choice.enabled ? "transparent"
+                        : choice.checked ? Theme.tint(panel.accent, choice.down ? 0.24 : 0.16)
+                        : (choice.hovered ? Theme.hoverTint : "transparent")
+                    border.color: choice.visualFocus ? panel.accent
+                        : choice.checked ? Theme.tint(panel.accent, 0.45) : panel.line
+                    border.width: choice.visualFocus ? 2 : 1
+                }
+                contentItem: Text {
+                    text: choice.text
+                    color: choice.enabled ? panel.ink : panel.muted
+                    font: choice.font
+                    horizontalAlignment: Text.AlignHCenter
+                    verticalAlignment: Text.AlignVCenter
+                }
+            }
+        }
     }
     readonly property string homepage: detailMatchesSelection && detailsData.homepage ? String(detailsData.homepage) : ""
     readonly property bool homepageOpens: /^https?:\/\//i.test(homepage)
@@ -323,8 +360,10 @@ Rectangle {
                     text: panel.selected ? (panel.selected.display_name || panel.selected.name || "") : ""
                     textFormat: Text.PlainText
                     color: panel.ink
-                    font.pointSize: Theme.pointSize(panel.page ? Theme.titleScale * 1.35 : Theme.titleScale)
+                    font.pointSize: Theme.pointSize(panel.compact ? Theme.titleScale : (panel.page ? Theme.titleScale * 1.35 : Theme.titleScale))
                     font.weight: Font.DemiBold
+                    wrapMode: panel.compact ? Text.WordWrap : Text.NoWrap
+                    maximumLineCount: panel.compact ? 2 : 1
                     elide: Text.ElideRight
                     Layout.fillWidth: true
                 }
@@ -332,6 +371,7 @@ Rectangle {
                     spacing: Theme.spacingSmall
                     Layout.fillWidth: true
                     visible: panel.subtitle.length > 0 || (panel.page && panel.version.length > 0)
+                        || (panel.compact && panel.installationChoices.length > 1)
                     Controls.Label {
                         objectName: "detailsSubtitle"
                         visible: text.length > 0
@@ -354,7 +394,11 @@ Rectangle {
                         font.family: "monospace"
                         font.pointSize: Theme.pointSize(Theme.smallScale)
                     }
-                    Item { Layout.fillWidth: true }
+                    InstallationSelector {
+                        objectName: "compactInstallationSelector"
+                        visible: panel.compact && panel.installationChoices.length > 1
+                    }
+                    Item { Layout.fillWidth: true; visible: !panel.compact }
                 }
             }
             InstallationSelector {
@@ -415,11 +459,6 @@ Rectangle {
                     DeckIcon { objectName: "closeDetailsIcon"; anchors.centerIn: parent; name: "cancel"; ink: panel.muted; width: 16; height: 16 }
                 }
             }
-        }
-        InstallationSelector {
-            objectName: "compactInstallationSelector"
-            visible: panel.compact && panel.installationChoices.length > 1
-            Layout.alignment: Qt.AlignLeft
         }
         // What the page's own action does, and how the app starts here.
         Controls.Label {

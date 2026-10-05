@@ -16,7 +16,9 @@ sidebar shows only icons.
 Type an app or package name. Exact matches come first, and the same app from
 different package managers is shown together. Each row keeps its own source,
 architecture, and scope (User or System), so you always act on one exact
-package. For Flatpak, pick the User or System row to choose where it installs.
+package. A Flatpak found in both places shows one row, with **System** first
+and opened by default. Switch to **User** in the details; PkgDeck remembers
+your last choice for that app.
 
 - The button on the right of a row installs, removes, or updates that package.
   Some sources only keep what's already installed up to date, such as
@@ -28,6 +30,9 @@ package. For Flatpak, pick the User or System row to choose where it installs.
   **Update** button. **Back** (or Esc, Alt+←, or the mouse's back button)
   returns to the list as it was. Arrow
   keys only move the selection.
+- The open app stays beside the list. Drag its top edge to change the
+  height (Up and Down keys when it has focus, double-click or Home to
+  reset). PkgDeck remembers the height.
 - App names, icons, and screenshots come from the source. Packages without
   app metadata show their package name.
 - A very short search can match tens of thousands of packages. The list
