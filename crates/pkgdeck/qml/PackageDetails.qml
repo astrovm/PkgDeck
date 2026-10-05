@@ -236,7 +236,7 @@ Rectangle {
         objectName: "detailsContent"
         anchors.fill: parent
         anchors.margins: panel.page && !panel.embedded ? Theme.gutter * 1.5 : Theme.gutter
-        spacing: panel.page ? Theme.spacingLarge : Theme.spacingSmall
+        spacing: panel.page && !panel.embedded ? Theme.spacingLarge : Theme.spacingSmall
         RowLayout {
             id: header
             objectName: "detailsHeader"

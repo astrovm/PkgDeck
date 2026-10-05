@@ -2686,6 +2686,9 @@ TestCase {
         const panel = findChild(browser, "detailsPanel"), selector = findChild(panel, "compactInstallationSelector");
         waitForRendering(panel);
         verify(selector.visible);
+        const scroll = findChild(panel, "detailsScroll");
+        verify(scroll.height >= 20, "readable details viewport: " + scroll.height);
+        verify(scroll.mapToItem(panel, 0, scroll.height).y <= panel.height);
         const list = findChild(browser, "packageResults");
         verify(list.height >= list.itemAtIndex(0).height, "list=" + list.height + " row=" + list.itemAtIndex(0).height + " budget=" + browser.detailsBudget() + " minimum=" + browser.detailsListHeight() + " box=" + findChild(browser, "resultsBox").height + " panel=" + panel.height);
         verify(!findChild(panel, "packageInstallationSelector").visible);
