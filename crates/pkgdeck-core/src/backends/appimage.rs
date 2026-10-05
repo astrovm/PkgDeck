@@ -26,6 +26,7 @@ const CAPABILITIES: &[Capability] = &[
     Capability::Install,
     Capability::Remove,
     Capability::Upgrade,
+    Capability::Clean,
 ];
 
 /// How an AppImage starts from its menu entry. PkgDeck can change it only
@@ -47,6 +48,28 @@ pub struct UpdateSource {
     pub editable: bool,
 }
 
+/// The file an installed AppImage starts from, as its page shows it.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+pub struct AppFile {
+    pub path: PathBuf,
+    pub bytes: u64,
+    /// When the file last changed (installed or updated), in seconds since 1970.
+    pub modified: i64,
+    pub managed: bool,
+    /// Its runtime needs FUSE 2 (`libfuse.so.2`) and this computer lacks
+    /// it, so PkgDeck starts it unpacked instead.
+    pub without_fuse: bool,
+}
+/// Where `libfuse.so.2` is found on common Linux systems.
+const FUSE2_LIBRARIES: [&str; 6] = [
+    "/usr/lib/x86_64-linux-gnu/libfuse.so.2",
+    "/usr/lib/aarch64-linux-gnu/libfuse.so.2",
+    "/lib/x86_64-linux-gnu/libfuse.so.2",
+    "/usr/lib64/libfuse.so.2",
+    "/usr/lib/libfuse.so.2",
+    "/lib64/libfuse.so.2",
+];
+
 /// How long a GitHub answer is used before asking again. GitHub allows 60
 /// questions an hour without signing in, shared by everything on the network.
 const GITHUB_REUSE_SECONDS: u64 = 15 * 60;
@@ -63,6 +86,9 @@ pub struct AppImage {
     updater: Option<PathBuf>,
     #[cfg(test)]
     curl: Option<PathBuf>,
+    /// Whether FUSE 2 is installed, decided by a test.
+    #[cfg(test)]
+    fuse2: Option<bool>,
 }
 
 impl AppImage {
@@ -105,6 +131,8 @@ impl AppImage {
             updater: None,
             #[cfg(test)]
             curl: None,
+            #[cfg(test)]
+            fuse2: None,
         }
     }
     #[cfg(test)]
@@ -116,6 +144,7 @@ impl AppImage {
             caskrooms: vec![],
             updater: None,
             curl: None,
+            fuse2: None,
         }
     }
     #[cfg(test)]
@@ -130,6 +159,18 @@ impl AppImage {
     }
     fn scope(&self) -> Scope {
         Scope::User { uid: self.uid }
+    }
+    /// The installed AppImage a file with this `digest` becomes once
+    /// PkgDeck installs it.
+    pub fn installed_id(&self, digest: &str, architecture: &str) -> PackageId {
+        PackageId {
+            backend: "appimage".into(),
+            name: format!("pkgdeck-{digest}.AppImage"),
+            architecture: architecture.into(),
+            scope: self.scope(),
+            remote: None,
+            reference: None,
+        }
     }
     pub fn import_scope(&self) -> Scope {
         Scope::Environment {
@@ -636,8 +677,13 @@ impl AppImage {
                             reference: None,
                         },
                         display_name,
-                        // Where the file is: it lives outside PkgDeck's folder.
-                        summary: Self::shown_path(&canonical),
+                        // What the app says it is; else where the file is,
+                        // outside PkgDeck's folder. Its page shows the file.
+                        summary: inside
+                            .comment
+                            .clone()
+                            .filter(|comment| !comment.trim().is_empty())
+                            .unwrap_or_else(|| Self::shown_path(&canonical)),
                         installed_version: Some(version.clone()),
                         candidate_version: Some(version),
                         update: if Self::has_update_metadata(&canonical).ok()? {
@@ -751,7 +797,8 @@ impl AppImage {
             .applications
             .join(format!("pkgdeck-{}.desktop", &name[8..72]));
         if Self::existing_import(&destination, &entry, digest)? {
-            return Ok(());
+            // PkgDeck already has this very file: the other copy still goes.
+            return taken_over.map_or(Ok(()), |original| self.retire(&original));
         }
         let temporary = self.root.join(format!(
             ".pkgdeck-import-{}-{}-{digest}",
@@ -829,20 +876,21 @@ impl AppImage {
         })();
         let _ = fs::remove_file(&temporary);
         result?;
-        // An AppImage that was already installed elsewhere moves in: its old
-        // file and desktop entries go, so it isn't listed twice.
-        if let Some(original) = taken_over {
-            for entry in self.entries_for(&original) {
-                let _ = fs::remove_file(entry);
-            }
-            fs::remove_file(&original).map_err(|e| {
-                Self::invalid(format!(
-                    "PkgDeck now manages this AppImage, but couldn't remove the old copy at {}: {e}",
-                    original.display()
-                ))
-            })?;
-            self.remove_icons(&Self::external_icon_key(&original));
+        taken_over.map_or(Ok(()), |original| self.retire(&original))
+    }
+    /// An AppImage that was installed elsewhere moved in: its old file and
+    /// desktop entries go, so it isn't listed twice.
+    fn retire(&self, original: &Path) -> Result<(), EngineError> {
+        for entry in self.entries_for(original) {
+            let _ = fs::remove_file(entry);
         }
+        fs::remove_file(original).map_err(|e| {
+            Self::invalid(format!(
+                "PkgDeck now manages this AppImage, but couldn't remove the old copy at {}: {e}",
+                original.display()
+            ))
+        })?;
+        self.remove_icons(&Self::external_icon_key(original));
         Ok(())
     }
     /// The raw `Exec=` value of a desktop entry's main group.
@@ -957,10 +1005,47 @@ impl AppImage {
                 Self::invalid(format!("couldn't save its menu entry: {e}"))
             })
     }
+    /// The file `id` starts from: where it is, its size, when it last
+    /// changed, and whether it can start the usual way here.
+    pub fn file(&self, id: &PackageId) -> Result<AppFile, EngineError> {
+        let (_, path, managed) = self.entry_of(id)?;
+        let metadata = fs::metadata(&path).map_err(|e| Self::invalid(e.to_string()))?;
+        Ok(AppFile {
+            without_fuse: Self::needs_fuse2(&path) && !self.has_fuse2(),
+            bytes: metadata.len(),
+            modified: metadata.mtime(),
+            path,
+            managed,
+        })
+    }
+    /// Older AppImage runtimes load `libfuse.so.2` to mount themselves;
+    /// newer ones carry what they need. The runtime is the part before the
+    /// app's files, well within the first megabyte.
+    fn needs_fuse2(path: &Path) -> bool {
+        let mut start = Vec::new();
+        fs::File::open(path)
+            .and_then(|file| file.take(1 << 20).read_to_end(&mut start))
+            .is_ok_and(|_| start.windows(12).any(|window| window == b"libfuse.so.2"))
+    }
+    fn has_fuse2(&self) -> bool {
+        #[cfg(test)]
+        if let Some(present) = self.fuse2 {
+            return present;
+        }
+        FUSE2_LIBRARIES
+            .iter()
+            .any(|library| Path::new(library).exists())
+    }
     /// Start the AppImage as its menu entry does, without files. It runs on
-    /// its own, outside PkgDeck's sandbox when PkgDeck is a Flatpak.
+    /// its own, outside PkgDeck's sandbox when PkgDeck is a Flatpak. Without
+    /// FUSE 2 an older AppImage can't mount itself, so it starts unpacked.
     pub fn launch(&self, id: &PackageId) -> Result<(), EngineError> {
-        let (command, _) = self.launch_command(id)?;
+        let (mut command, _) = self.launch_command(id)?;
+        if self.file(id)?.without_fuse {
+            command
+                .environment
+                .push(("APPIMAGE_EXTRACT_AND_RUN".into(), "1".into()));
+        }
         let bridge = (Host::current().runtime == crate::host::Runtime::Flatpak)
             .then(|| Path::new("flatpak-spawn"));
         Self::spawn(&command, bridge).map_err(|e| Self::invalid(format!("couldn't start it: {e}")))
@@ -1527,12 +1612,60 @@ impl Backend for AppImage {
             adopts: Some(original),
         }))
     }
+    /// Copies of an app PkgDeck already manages, installed some other way
+    /// (left in Downloads with a menu entry, or by Gear Lever): each can go.
+    fn cleanup(&mut self, cancel: &Cancellation) -> Result<Vec<CleanupItem>, EngineError> {
+        if cancel.requested() {
+            return Err(EngineError::Cancelled);
+        }
+        let packages = self.installed_packages()?;
+        let plain = |name: &str| name.to_lowercase().replace([' ', '-', '_', '.'], "");
+        let managed: std::collections::BTreeSet<String> = packages
+            .iter()
+            .filter(|package| Self::managed_name(&package.id.name))
+            .map(|package| plain(&package.display_name))
+            .collect();
+        Ok(packages
+            .iter()
+            .filter(|package| {
+                !Self::managed_name(&package.id.name)
+                    && !package.display_name.is_empty()
+                    && managed.contains(&plain(&package.display_name))
+            })
+            .map(|package| {
+                let path = Self::shown_path(Path::new(&package.id.name));
+                CleanupItem {
+                    id: CleanupId {
+                        backend: "appimage".into(),
+                        key: package.id.name.clone(),
+                    },
+                    kind: CleanupKind::DuplicateCopy,
+                    title: format!("Extra copy of {}", package.display_name),
+                    summary: format!(
+                        "PkgDeck already manages {}. This copy and its menu entries can go.",
+                        package.display_name
+                    ),
+                    preview: format!("Removes {path} and its menu entries."),
+                }
+            })
+            .collect())
+    }
     fn execute(
         &mut self,
         operation: &Operation,
         cancel: &Cancellation,
         progress: &mut dyn FnMut(Progress),
     ) -> Result<OperationOutcome, EngineError> {
+        // Only a copy that's still an extra one goes, checked again now.
+        if let Operation::Clean(id) = operation {
+            let extra = self.cleanup(cancel)?.into_iter().any(|item| item.id == *id);
+            let package = self
+                .installed_packages()?
+                .into_iter()
+                .find(|package| extra && package.id.name == id.key)
+                .ok_or(EngineError::NotFound)?;
+            return self.execute(&Operation::Remove(package.id), cancel, progress);
+        }
         match operation {
             Operation::Install(id) => {
                 progress(Progress::Message(
@@ -1681,6 +1814,156 @@ mod tests {
 
     #[test]
     #[cfg(target_os = "linux")]
+    fn an_extra_copy_of_a_managed_appimage_is_cleaned_up_or_moved_in() {
+        let base = test_base("extra");
+        let uid = rustix::process::getuid().as_raw();
+        let root = base.join("data/pkgdeck/appimages");
+        let applications = base.join("data/applications");
+        fs::create_dir_all(&applications).unwrap();
+        let folder = base.join("AppImages");
+        fs::create_dir_all(&folder).unwrap();
+        let original = folder.join("demo.appimage");
+        appimage_with(
+            &original,
+            backhand::compression::Compressor::Gzip,
+            &[("demo.desktop", DEMO_ENTRY), ("demo.png", DEMO_PNG)],
+        );
+        let mut backend = AppImage::new(root.clone(), applications.clone(), uid);
+        let cancel = Cancellation::default();
+        let cancelled = Cancellation::default();
+        cancelled.cancel();
+        assert_eq!(backend.cleanup(&cancelled), Err(EngineError::Cancelled));
+        // PkgDeck manages one copy; the file it came from has no menu entry.
+        let preview = backend
+            .search(original.to_str().unwrap(), &cancel)
+            .unwrap()
+            .remove(0);
+        let digest = preview.id.reference.clone().unwrap();
+        let architecture = preview.id.architecture.clone();
+        backend
+            .execute(&Operation::Install(preview.id), &cancel, &mut ignore)
+            .unwrap();
+        assert!(backend.cleanup(&cancel).unwrap().is_empty());
+        // Another copy with its own menu entry is an extra one.
+        let copy = folder.join("demo-copy.appimage");
+        let entry = applications.join("demo-copy.desktop");
+        let place_copy = || {
+            fs::copy(&original, &copy).unwrap();
+            fs::write(
+                &entry,
+                format!(
+                    "[Desktop Entry]\nName=Demo App\nExec=\"{}\" %U\n",
+                    copy.display()
+                ),
+            )
+            .unwrap();
+        };
+        place_copy();
+        let items = backend.cleanup(&cancel).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].kind, CleanupKind::DuplicateCopy);
+        assert_eq!(items[0].title, "Extra copy of Demo App");
+        // Only a copy that's still an extra one goes.
+        let elsewhere = CleanupId {
+            backend: "appimage".into(),
+            key: base.join("elsewhere.appimage").display().to_string(),
+        };
+        assert_eq!(
+            backend.execute(&Operation::Clean(elsewhere), &cancel, &mut ignore),
+            Err(EngineError::NotFound)
+        );
+        backend
+            .execute(&Operation::Clean(items[0].id.clone()), &cancel, &mut ignore)
+            .unwrap();
+        assert!(!copy.exists());
+        assert!(!entry.exists());
+        assert!(backend.cleanup(&cancel).unwrap().is_empty());
+        // Managing a copy identical to the managed one retires that copy too.
+        place_copy();
+        let again = backend
+            .search(copy.to_str().unwrap(), &cancel)
+            .unwrap()
+            .remove(0);
+        backend
+            .execute(&Operation::Install(again.id), &cancel, &mut ignore)
+            .unwrap();
+        assert!(!copy.exists());
+        assert!(!entry.exists());
+        // Its page shows the file it starts from.
+        let managed = backend.installed_id(&digest, &architecture);
+        let file = backend.file(&managed).unwrap();
+        assert!(file.managed);
+        assert_eq!(file.path, root.join(&managed.name));
+        assert_eq!(file.bytes, fs::metadata(&original).unwrap().len());
+        assert!(file.modified > 0);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn appimages_that_need_fuse2_start_unpacked_without_it() {
+        let base = test_base("fuse");
+        let uid = rustix::process::getuid().as_raw();
+        let root = base.join("data/pkgdeck/appimages");
+        let applications = base.join("data/applications");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&applications).unwrap();
+        let mut backend = AppImage::new(root.clone(), applications.clone(), uid);
+        let id = backend.installed_id(&"ef".repeat(32), "x86_64");
+        let file = root.join(&id.name);
+        let record = base.join("record");
+        // An older runtime names libfuse.so.2, which it loads to mount itself.
+        fs::write(
+            &file,
+            format!(
+                "#!/bin/sh\n# libfuse.so.2\nprintf '%s\\n' \"$APPIMAGE_EXTRACT_AND_RUN\" > '{}'\n",
+                record.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(
+            applications.join(format!("pkgdeck-{}.desktop", &id.name[8..72])),
+            format!(
+                "[Desktop Entry]\nName=Old\nExec=\"{}\" %U\n",
+                file.display()
+            ),
+        )
+        .unwrap();
+        // A script written a moment ago may still be busy; try again.
+        let launch = |backend: &AppImage| {
+            let _ = fs::remove_file(&record);
+            (0..200)
+                .map(|_| backend.launch(&id))
+                .inspect(|_| std::thread::sleep(std::time::Duration::from_millis(1)))
+                .find(Result::is_ok)
+                .unwrap()
+                .unwrap();
+            (0..200)
+                .find_map(|_| {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    fs::read_to_string(&record)
+                        .ok()
+                        .filter(|text| text.ends_with('\n'))
+                })
+                .unwrap()
+        };
+        backend.fuse2 = Some(true);
+        assert!(!backend.file(&id).unwrap().without_fuse);
+        assert_eq!(launch(&backend), "\n");
+        backend.fuse2 = Some(false);
+        assert!(backend.file(&id).unwrap().without_fuse);
+        assert_eq!(launch(&backend), "1\n");
+        // This computer's own answer.
+        backend.fuse2 = None;
+        let here = FUSE2_LIBRARIES
+            .iter()
+            .any(|library| Path::new(library).exists());
+        assert_eq!(backend.file(&id).unwrap().without_fuse, !here);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
     fn manage_moves_an_external_appimage_in_with_a_full_desktop_entry() {
         let base = test_base("manage");
         let uid = rustix::process::getuid().as_raw();
@@ -1712,7 +1995,8 @@ mod tests {
         let external = backend.installed(&cancel).unwrap();
         assert_eq!(external.len(), 1);
         assert_eq!(external[0].installed_version.as_deref(), Some("2.0"));
-        assert_eq!(external[0].summary, original.display().to_string());
+        // What the app says it is; its page shows where the file is.
+        assert_eq!(external[0].summary, "Does demo things");
         assert_eq!(external[0].adopt_with.as_deref(), Some("appimage"));
 
         let preview = backend

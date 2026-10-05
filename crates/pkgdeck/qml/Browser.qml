@@ -298,6 +298,24 @@ Controls.ApplicationWindow {
         ? JSON.parse(backend.appUpdateSource(originalIndex(results.currentIndex)) || "{}") : null
     property string pageUpdateError: ""
     onPageRowChanged: { pageLaunchError = ""; pageUpdateError = ""; }
+    // Where the installed AppImage's file is, how big, and how it starts.
+    readonly property var pageFile: pageLaunchable && launchRevision >= 0
+        ? JSON.parse(backend.appFile(originalIndex(results.currentIndex)) || "{}") : null
+    // An AppImage the open page just installed from a file can start too.
+    readonly property bool openedLaunchable: opened !== null && !!opened.package
+        && opened.package.source === "appimage" && isInstalled(opened.package)
+    // How the page's AppImage gets updates, in a few words.
+    function updateState(row, source) {
+        if (!row || row.source !== "appimage" || !isInstalled(row))
+            return "";
+        if (row.update === "available")
+            return row.candidate && row.candidate !== row.installed ? "Update " + row.candidate + " available" : "Update available";
+        if (source && source.github)
+            return "From GitHub, " + source.github;
+        if (source && source.builtin)
+            return "Updates itself";
+        return source && source.editable ? "No update source yet. Add its GitHub project below." : "";
+    }
     // Values derived from a parsed row, computed once and kept on the row,
     // hidden from JSON.stringify and Object.assign. Rows never change once
     // parsed. Lookups over rows use plain objects: this engine's Map, Set
@@ -1275,7 +1293,9 @@ Controls.ApplicationWindow {
     }
     function sourceLine(row) {
         const scoped = row.source === "flatpak" || containerSource(row.source);
-        return [packageNameNote(row), sourceDisplayName(row.source), row.remote || "", scoped ? (row.scope === "system" ? "System" : "User") : "", flatpakBranch(row)]
+        // An AppImage installed some other way, which Manage moves in.
+        const unmanaged = row.source === "appimage" && row.adopt_with === "appimage" && isInstalled(row);
+        return [packageNameNote(row), sourceDisplayName(row.source), row.remote || "", scoped ? (row.scope === "system" ? "System" : "User") : "", flatpakBranch(row), unmanaged ? "not managed" : ""]
             .filter(Boolean).join(", ");
     }
     function sameAppNames(row) {
@@ -1287,7 +1307,7 @@ Controls.ApplicationWindow {
     }
     function versionText(row) {
         if (row.kind === "cleanup")
-            return row.cleanup_kind === "orphan_dependencies" ? "Dependencies" : "Cache";
+            return row.cleanup_kind === "orphan_dependencies" ? "Dependencies" : row.cleanup_kind === "duplicate_copy" ? "Extra copy" : "Cache";
         if (row.kind === "failure")
             return "Failed";
         if (row.kind === "source")
@@ -1486,6 +1506,21 @@ Controls.ApplicationWindow {
         if (!same)
             backend.select(originalIndex(index));
     }
+    // Resting the pointer on a row looks up its details in the background,
+    // so opening it a moment later shows them at once.
+    function hoverRow(index) {
+        warmTimer.row = index;
+        if (index >= 0)
+            warmTimer.restart();
+        else
+            warmTimer.stop();
+    }
+    Timer {
+        id: warmTimer
+        property int row: -1
+        interval: 150
+        onTriggered: if (row >= 0 && !root.retainingResults) backend.warmDetails(root.originalIndex(row))
+    }
     function restoreSelection() {
         if (!selectedIdentity || retainingResults)
             return;
@@ -1526,6 +1561,8 @@ Controls.ApplicationWindow {
         if (!retainingResults) {
             if (action === "upgrade-all")
                 markActiveRows(packageIdentities());
+            else if (action === "adopt-all")
+                markActiveRows(items.filter((row) => row.source === "appimage" && canAdopt(row)).map(rowIdentity));
             else if (selected)
                 markActiveRows([rowIdentity(selected)]);
             backend.propose(action, originalIndex(results.currentIndex));
@@ -1972,6 +2009,8 @@ Controls.ApplicationWindow {
             id: pageContent
             // Behind the app page, out of reach until Back.
             enabled: !root.appPageOpen
+            // Back brings the list in from the left, the way it went.
+            transform: Translate { id: listShift }
             onImplicitHeightChanged: Qt.callLater(root.updateOverflow)
             Layout.fillWidth: true
             Layout.fillHeight: true
@@ -2423,6 +2462,20 @@ Controls.ApplicationWindow {
                         verticalAlignment: Text.AlignVCenter
                         leftPadding: 28
                     }
+                }
+                // AppImages installed some other way (Gear Lever, a folder),
+                // moved in together with one review.
+                ActionButton {
+                    objectName: "manageAllAppImages"
+                    readonly property int count: root.currentView === "Installed"
+                        ? root.items.filter((row) => row.kind === "package" && row.source === "appimage" && root.canAdopt(row)).length : 0
+                    visible: count >= 2
+                    text: root.headerIconsOnly ? "" : "Manage " + count + " AppImages"
+                    symbol: "install"
+                    tooltipText: "Manage " + count + " AppImages with PkgDeck"
+                    enabled: root.canAct && !root.retainingResults
+                    Layout.alignment: Qt.AlignVCenter
+                    onClicked: root.propose("adopt-all")
                 }
             }
             SettingsPage {
@@ -2938,6 +2991,7 @@ Controls.ApplicationWindow {
                                 + (modelData.kind === "source" ? root.sourceDisplayName(modelData.source) : (modelData.display_name || modelData.name) + ", " + root.sourceLine(modelData))
                                 + (modelData.summary ? ", " + modelData.summary : "")
                             onClicked: { root.keyboardNavigation = false; results.forceActiveFocus(); root.choose(index); }
+                            onHoveredChanged: root.hoverRow(hovered && packageKind ? index : -1)
                             Rectangle {
                                 visible: !!packageRow.modelData.groupStart
                                 anchors.top: parent.top
@@ -3521,11 +3575,30 @@ Controls.ApplicationWindow {
     }
     // A package's store page, over the list: an opened file or link, or a
     // row someone opened. Back returns to the list as it was.
+    // Opening a page slides it in from the right; Back slides the list
+    // back from the left.
+    ParallelAnimation {
+        id: pageOpening
+        NumberAnimation { target: pageShift; property: "x"; from: 32; to: 0; duration: Theme.revealDuration; easing.type: Easing.OutCubic }
+        NumberAnimation { target: appPage; property: "opacity"; from: 0; to: 1; duration: Theme.revealDuration; easing.type: Easing.OutCubic }
+    }
+    ParallelAnimation {
+        id: pageClosing
+        NumberAnimation { target: listShift; property: "x"; from: -24; to: 0; duration: Theme.revealDuration; easing.type: Easing.OutCubic }
+        NumberAnimation { target: pageContent; property: "opacity"; from: 0.4; to: 1; duration: Theme.revealDuration; easing.type: Easing.OutCubic }
+    }
+    onAppPageOpenChanged: {
+        if (!root.motionEnabled)
+            return;
+        (appPageOpen ? pageClosing : pageOpening).complete();
+        (appPageOpen ? pageOpening : pageClosing).restart();
+    }
     PackageDetails {
         id: appPage
         objectName: "detailsPanel"
         page: true
         visible: root.appPageOpen
+        transform: Translate { id: pageShift }
         x: pageContent.x
         y: pageContent.y
         width: pageContent.width
@@ -3536,7 +3609,7 @@ Controls.ApplicationWindow {
         sourceName: root.sourceDisplayName
         installed: root.pageRow !== null && root.isInstalled(root.pageRow)
         readonly property string rowAction: fromFile ? "" : root.rowActionName(root.pageRow)
-        actionText: fromFile ? (root.opened.action || "") : (({install: "Install", remove: "Remove", upgrade: "Update", clean: "Clean", adopt: "Manage with Homebrew"})[rowAction] || "")
+        actionText: fromFile ? (root.openedLaunchable ? "" : root.opened.action || "") : (({install: "Install", remove: "Remove", upgrade: "Update", clean: "Clean", adopt: "Manage with Homebrew"})[rowAction] || "")
         secondaryActionText: !fromFile && rowAction !== "adopt" && root.pageRow && root.pageRow.source === "appimage" && root.canAdopt(root.pageRow) ? "Manage" : ""
         secondaryActionSymbol: "install"
         secondaryActionTone: "accent"
@@ -3557,7 +3630,11 @@ Controls.ApplicationWindow {
         reviewDetails: root.pageReview ? (root.pageReview.changes || []).join("\n") : ""
         reviewActionText: root.pageReview ? ((root.pageReview.action || "Apply").trim().split(/\s+/)[0]) : ""
         reviewDanger: reviewActionText === "Remove"
-        launchText: root.pageLaunchable && root.pageLaunch && !root.pageLaunch.error ? "Launch" : ""
+        launchText: root.openedLaunchable || root.pageLaunchable && root.pageLaunch && !root.pageLaunch.error ? "Launch" : ""
+        appFile: !fromFile && root.pageFile && root.pageFile.path ? root.pageFile : null
+        updateState: fromFile ? "" : root.updateState(root.pageRow, root.pageUpdateSource && !root.pageUpdateSource.error ? root.pageUpdateSource : null)
+        note: secondaryActionText === "Manage" ? "Manage moves it into PkgDeck, which then keeps it updated with its menu entry and icon." : ""
+        onShowInFolderRequested: (folder) => Qt.openUrlExternally("file://" + encodeURI(folder))
         launchSettings: root.pageLaunch && !root.pageLaunch.error ? root.pageLaunch : null
         launchError: root.pageLaunchError || (root.pageLaunch && root.pageLaunch.error ? root.pageLaunch.error : "")
         updateSource: root.pageUpdateSource && !root.pageUpdateSource.error ? root.pageUpdateSource : null
@@ -3567,7 +3644,7 @@ Controls.ApplicationWindow {
             if (!root.pageUpdateError)
                 root.launchRevision++;
         }
-        onLaunchRequested: root.pageLaunchError = backend.launchApp(root.originalIndex(results.currentIndex))
+        onLaunchRequested: root.pageLaunchError = fromFile ? backend.launchOpened() : backend.launchApp(root.originalIndex(results.currentIndex))
         onLaunchSettingsSaved: (arguments, environment) => {
             root.pageLaunchError = backend.saveAppLaunchSettings(root.originalIndex(results.currentIndex), arguments, JSON.stringify(environment));
             if (!root.pageLaunchError)
@@ -4252,6 +4329,22 @@ Controls.ApplicationWindow {
     Shortcut {
         sequence: "Ctrl+Q"
         onActivated: root.quitFromKeyboard()
+    }
+    // Back from an app page, like a browser: Alt+Left, the Back key, or the
+    // mouse's back button.
+    Shortcut {
+        objectName: "pageBackShortcut"
+        // Alt+Left on Linux and Windows, Cmd+[ on macOS.
+        sequences: [StandardKey.Back]
+        enabled: root.appPageOpen && root.pageReview === null
+        onActivated: root.closePage()
+        onActivatedAmbiguously: root.closePage()
+    }
+    TapHandler {
+        objectName: "pageBackButtonHandler"
+        acceptedButtons: Qt.BackButton
+        enabled: root.appPageOpen && root.pageReview === null
+        onTapped: root.closePage()
     }
     Shortcut {
         sequence: "Ctrl+W"

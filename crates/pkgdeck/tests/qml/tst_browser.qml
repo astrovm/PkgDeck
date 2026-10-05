@@ -43,6 +43,14 @@ TestCase {
             return launchResult;
         }
         function launchApp(index) { launches++; return launchResult; }
+        // The file an installed AppImage starts from, and an opened one.
+        property string appFileInfo: "{}"
+        function appFile(index) { return appFileInfo; }
+        property int openedLaunches: 0
+        function launchOpened() { openedLaunches++; return launchResult; }
+        // Rows whose details loaded while the pointer rested on them.
+        property var warmed: []
+        function warmDetails(index) { warmed = warmed.concat([index]); }
         property string updateSource: "{}"
         property string savedGithub: ""
         function appUpdateSource(index) { return updateSource; }
@@ -111,8 +119,10 @@ TestCase {
         // What the next preview says about reviewing it; undefined leaves
         // it out, as previews from older paths do.
         property var nextReview: undefined
+        property string lastProposal: ""
         function propose(action, index) {
             selection = index;
+            lastProposal = action;
             const data = {action: ({install:"Install", remove:"Remove", upgrade:"Update", "upgrade-all":"Update", clean:"Clean", "clean-all":"Clean", refresh:"Refresh"})[action] || "Apply"};
             if (nextReview !== undefined) {
                 data.review = nextReview;
@@ -188,6 +198,10 @@ TestCase {
         fake.rows = "[]";
         fake.details = "{}";
         fake.status = "Ready";
+        fake.appFileInfo = "{}";
+        fake.openedLaunches = 0;
+        fake.warmed = [];
+        fake.lastProposal = "";
         fake.notice = "{}";
         fake.noticeDismissals = 0;
         fake.progress = "{}";
@@ -759,7 +773,7 @@ TestCase {
         browser.launchRevision++;
         const updates = findChild(page, "updateSource");
         verify(updates.visible);
-        verify(findChild(page, "builtinUpdates").visible);
+        compare(page.updateState, "Updates itself");
         const github = findChild(page, "githubRepository");
         github.forceActiveFocus();
         for (const c of "example/demo")
@@ -768,7 +782,7 @@ TestCase {
         keyClick(Qt.Key_Return);
         compare(fake.savedGithub, "example/demo");
         compare(github.text, "example/demo");
-        verify(!findChild(page, "builtinUpdates").visible);
+        compare(page.updateState, "From GitHub, example/demo");
         verify(!findChild(page, "saveUpdateSource").enabled);
         fake.launchResult = "that isn't a GitHub project (owner/name)";
         keyClick(Qt.Key_Backspace);
@@ -786,6 +800,117 @@ TestCase {
         browser.launchRevision++;
         verify(!launch.visible);
         fake.launchSettings = "{}";
+    }
+    function test_an_installed_appimage_page_leads_with_launch_and_its_file() {
+        browser.openView("Installed");
+        const row = {kind: "package", name: "pkgdeck-demo.AppImage", display_name: "Demo", source: "appimage", architecture: "x86_64",
+            scope: {user: {uid: 1000}}, installed: "2.0", candidate: "2.0", update: "current", summary: "Does demo things"};
+        fake.launchSettings = JSON.stringify({arguments: "%U", environment: [], editable: true});
+        fake.updateSource = JSON.stringify({github: null, builtin: false, editable: true});
+        fake.appFileInfo = JSON.stringify({path: "/home/user/.local/share/pkgdeck/appimages/pkgdeck-demo.AppImage",
+            folder: "/home/user/.local/share/pkgdeck/appimages", bytes: 68400000, modified: 1790000000, managed: true, without_fuse: false});
+        fake.rows = JSON.stringify([row]);
+        tryCompare(findChild(browser, "packageResults"), "count", 1);
+        browser.choose(0);
+        const page = findChild(browser, "detailsPanel");
+        tryCompare(page, "visible", true);
+        waitForRendering(page);
+        // Launch is the main button; Remove waits under More.
+        verify(findChild(page, "pageLaunchButton").primary);
+        verify(!findChild(page, "detailsActionButton").visible);
+        const more = findChild(page, "pageMoreButton");
+        verify(more.visible);
+        mouseClick(more);
+        const remove = findChild(page, "pageMenuRemove");
+        tryCompare(remove, "visible", true);
+        compare(remove.text, "Remove");
+        mouseClick(remove);
+        compare(fake.lastProposal, "remove");
+        fake.confirm(false);
+        // Its file, size, last change and where updates come from.
+        compare(page.updateState, "No update source yet. Add its GitHub project below.");
+        const facts = page.facts.map((fact) => fact.label);
+        for (const label of ["Updates", "File", "Size", "Updated"])
+            verify(facts.indexOf(label) >= 0, label);
+        compare(page.facts.find((fact) => fact.label === "Size").value, "68 MB");
+        verify(findChild(page, "showInFolder").visible);
+        verify(!findChild(page, "pageFuseNote").visible);
+        // Without FUSE 2 it says it starts unpacked.
+        fake.appFileInfo = JSON.stringify(Object.assign(JSON.parse(fake.appFileInfo), {without_fuse: true}));
+        browser.launchRevision++;
+        tryCompare(findChild(page, "pageFuseNote"), "visible", true);
+        // Back with Alt+Left, like a browser.
+        keySequence("Alt+Left");
+        tryCompare(page, "visible", false);
+        fake.appFileInfo = "{}";
+        fake.launchSettings = "{}";
+        fake.updateSource = "{}";
+    }
+    function test_appimages_installed_elsewhere_explain_manage_and_move_together() {
+        browser.openView("Installed");
+        const row = (name, title) => ({kind: "package", name: name, display_name: title, source: "appimage", architecture: "x86_64",
+            scope: {user: {uid: 1000}}, installed: "1.0", candidate: "1.0", update: "current", summary: "An app", adopt_with: "appimage"});
+        fake.launchSettings = JSON.stringify({arguments: "%U", environment: [], editable: false});
+        fake.rows = JSON.stringify([row("/home/user/Apps/one.AppImage", "One"), row("/home/user/Apps/two.AppImage", "Two")]);
+        const list = findChild(browser, "packageResults");
+        tryCompare(list, "count", 2);
+        compare(browser.sourceLine(browser.viewItems[0]), "AppImage, not managed");
+        const manageAll = findChild(browser, "manageAllAppImages");
+        tryCompare(manageAll, "visible", true);
+        compare(manageAll.text, "Manage 2 AppImages");
+        mouseClick(manageAll);
+        compare(fake.lastProposal, "adopt-all");
+        fake.confirm(false);
+        // Its page says what Manage does.
+        browser.choose(0);
+        const page = findChild(browser, "detailsPanel");
+        tryCompare(page, "visible", true);
+        compare(page.secondaryActionText, "Manage");
+        compare(findChild(page, "pageNote").text, "Manage moves it into PkgDeck, which then keeps it updated with its menu entry and icon.");
+        browser.closePage();
+        fake.launchSettings = "{}";
+    }
+    function test_a_dropped_appimage_offers_launch_once_installed() {
+        const pkg = {kind: "package", name: "/home/user/Downloads/Demo.AppImage", display_name: "Demo", source: "appimage",
+            architecture: "x86_64", installed: null, candidate: "2.0", summary: "Does demo things"};
+        fake.opened = JSON.stringify({package: pkg, action: "Install", description: ""});
+        const page = findChild(browser, "detailsPanel");
+        tryCompare(page, "visible", true);
+        compare(page.actionText, "Install");
+        compare(page.launchText, "");
+        fake.opened = JSON.stringify({package: Object.assign({}, pkg, {installed: "2.0"}), action: "", description: ""});
+        compare(page.actionText, "");
+        compare(page.launchText, "Launch");
+        mouseClick(findChild(page, "pageLaunchButton"));
+        compare(fake.openedLaunches, 1);
+        // A failed start says why on the page.
+        fake.launchResult = "couldn't start it";
+        mouseClick(findChild(page, "pageLaunchButton"));
+        tryCompare(findChild(page, "pageLaunchError"), "visible", true);
+        fake.launchResult = "";
+        fake.closeOpened();
+    }
+    function test_resting_on_a_row_loads_its_details() {
+        browser.openView("Installed");
+        populate();
+        fake.warmed = [];
+        browser.hoverRow(1);
+        tryVerify(() => fake.warmed.length === 1);
+        compare(fake.warmed[0], browser.originalIndex(1));
+        // Moving off before it fires loads nothing.
+        browser.hoverRow(0);
+        browser.hoverRow(-1);
+        wait(250);
+        compare(fake.warmed.length, 1);
+    }
+    function test_update_state_says_how_an_appimage_updates() {
+        const row = {source: "appimage", installed: "1.0", candidate: "1.0", update: "current"};
+        compare(browser.updateState(Object.assign({}, row, {update: "available", candidate: "1.1"}), null), "Update 1.1 available");
+        compare(browser.updateState(Object.assign({}, row, {update: "available"}), null), "Update available");
+        compare(browser.updateState(row, {github: "owner/app"}), "From GitHub, owner/app");
+        compare(browser.updateState(row, {builtin: true}), "Updates itself");
+        compare(browser.updateState(row, {editable: false}), "");
+        compare(browser.updateState(Object.assign({}, row, {source: "apt"}), null), "");
     }
     function test_reads_never_lock_navigation_and_results_fit_small_windows() {
         for (const view of ["Search", "Installed", "Updates", "Clean", "Sources", "Settings"]) {

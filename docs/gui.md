@@ -25,7 +25,8 @@ package. For Flatpak, pick the User or System row to choose where it installs.
 - Click a row (or press Space on it) to open its app page: icon, version,
   screenshots, description, publisher, license, homepage, and dependencies,
   when the source provides them, with its **Install**, **Remove** or
-  **Update** button. **Back** (or Esc) returns to the list as it was. Arrow
+  **Update** button. **Back** (or Esc, Alt+←, or the mouse's back button)
+  returns to the list as it was. Arrow
   keys only move the selection.
 - App names, icons, and screenshots come from the source. Packages without
   app metadata show their package name.
@@ -473,13 +474,20 @@ support is hidden.
 ### AppImages
 
 **Installed** lists the AppImages PkgDeck manages, and the ones it finds
-through their menu entries (for example installed by Gear Lever). Those show
-where the file is instead of a description. Their details offer **Manage**
-next to **Remove**: PkgDeck moves the file into its own folder, replaces
-every menu entry for it with one of its own, and from then on lists it like
-any AppImage it installed.
+through their menu entries (for example installed by Gear Lever), marked
+**not managed**. Their page offers **Manage**: PkgDeck moves the file into
+its own folder, replaces every menu entry for it with one of its own, and
+from then on lists it like any AppImage it installed. With two or more,
+**Manage N AppImages** on **Installed** moves them all after one review.
+When PkgDeck already manages the same app, **Clean** offers to remove the
+other copy and its menu entries.
 
-Installed AppImages have **Launch** on their page. For AppImages PkgDeck
+Installed AppImages have **Launch** on their page, and so does the page of an
+AppImage file you just installed. **Remove** is under **⋯**. The page also
+shows how it gets updates, its file (with **Show in folder**), its size, and
+when it last changed. An AppImage that needs FUSE 2 (`libfuse2`) still
+starts on a computer without it: PkgDeck starts it unpacked, and its page
+says so. For AppImages PkgDeck
 manages, the page also edits how the app starts: **Command line arguments**
 and **Environment variables**, then **Save**. They go into the app's menu
 entry, so starting it from the app menu uses them too. **Manage** keeps the

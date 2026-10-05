@@ -166,6 +166,9 @@ pub mod ffi {
         #[qinvokable]
         fn select(self: Pin<&mut PackageController>, index: i32);
         #[qinvokable]
+        #[cxx_name = "warmDetails"]
+        fn warm_details(self: Pin<&mut PackageController>, index: i32);
+        #[qinvokable]
         #[cxx_name = "retrySource"]
         fn retry_source(
             self: Pin<&mut PackageController>,
@@ -210,6 +213,15 @@ pub mod ffi {
         #[qinvokable]
         #[cxx_name = "launchApp"]
         fn launch_app(self: Pin<&mut PackageController>, index: i32) -> QString;
+        /// The file the installed AppImage at `index` starts from: {path,
+        /// folder, bytes, modified, managed, without_fuse}, or {}.
+        #[qinvokable]
+        #[cxx_name = "appFile"]
+        fn app_file(self: Pin<&mut PackageController>, index: i32) -> QString;
+        /// Start the AppImage the open page just installed; returns the error.
+        #[qinvokable]
+        #[cxx_name = "launchOpened"]
+        fn launch_opened(self: Pin<&mut PackageController>) -> QString;
         #[qinvokable]
         #[cxx_name = "installOpened"]
         fn install_opened(self: Pin<&mut PackageController>);
@@ -316,6 +328,9 @@ enum Job {
     /// Resolve the Homebrew cask that can take over a macOS app row and
     /// preview that adoption.
     PlanAdoption(Box<Package>),
+    /// Check every AppImage installed some other way before PkgDeck moves
+    /// them all in, with one review.
+    PlanAdoptAll(Vec<Package>),
     PlanCleanAll(Vec<Operation>),
     Write(Operation, Option<Box<TransactionPlan>>),
     PlanUpgrade(Vec<Operation>, usize),
@@ -382,6 +397,9 @@ enum Payload {
     OperationPreview(Operation, Option<Box<TransactionPlan>>),
     /// The cask package that adopts an app, its install and the adoption plan.
     AdoptionPreview(Box<Package>, Operation, Box<TransactionPlan>),
+    /// The AppImages that can be moved in, each with its plan, and the
+    /// names of those that can't any more.
+    AdoptAllPreview(Vec<(Package, Operation, Box<TransactionPlan>)>, Vec<String>),
     ManifestExport(usize),
     ManifestPreview(manifest::Preview),
     CleanPreview(Vec<Operation>, Vec<CleanupItem>),
@@ -955,6 +973,22 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
         Job::PlanOperation(operation) => engine.plan_operation(&operation, cancel)
             .map(|plan| Payload::OperationPreview(operation, plan.map(Box::new))),
         Job::PlanAdoption(app) => plan_adoption(engine, &app, cancel),
+        Job::PlanAdoptAll(apps) => {
+            let mut plans = Vec::new();
+            let mut skipped = Vec::new();
+            for app in apps {
+                if cancel.requested() {
+                    return send(Reply::Done(Err(EngineError::Cancelled)));
+                }
+                match plan_appimage_adoption(engine, &app, cancel) {
+                    Ok(Payload::AdoptionPreview(package, operation, plan)) => {
+                        plans.push((*package, operation, plan))
+                    }
+                    _ => skipped.push(app.display_name.clone()),
+                }
+            }
+            Ok(Payload::AdoptAllPreview(plans, skipped))
+        }
         Job::PlanCleanAll(operations) => {
             let report = engine.cleanup(cancel);
             Ok(Payload::CleanPreview(operations, report.items))
@@ -1416,6 +1450,11 @@ pub struct Controller {
     /// Set while a details preview is applied: the quick first look sent
     /// before slower lookups finish.
     details_preview: bool,
+    /// More changes the review on screen covers, run after `pending`, with
+    /// the operations of the `pending` they belong to.
+    pending_more: (Vec<Operation>, Vec<Job>),
+    /// The package whose details load because the pointer rests on its row.
+    warming: Option<PackageId>,
     catalog_checked: bool,
     catalog_worker: Option<CatalogWorker>,
     approval_worker: Option<ApprovalWorker>,
@@ -1525,6 +1564,8 @@ impl Default for Controller {
             search_matches: 0,
             prepared_rows: RowsCache::default(),
             details_preview: false,
+            pending_more: (Vec::new(), Vec::new()),
+            warming: None,
             catalog_checked: false,
             catalog_worker: None,
             approval_worker: None,
@@ -1572,7 +1613,12 @@ impl Controller {
             && self.validated_confirmed.is_none()
             && !matches!(
                 self.queued,
-                Some(Job::PlanOperation(..) | Job::PlanAdoption(..) | Job::PlanUpgrade(..))
+                Some(
+                    Job::PlanOperation(..)
+                        | Job::PlanAdoption(..)
+                        | Job::PlanAdoptAll(..)
+                        | Job::PlanUpgrade(..)
+                )
             )
     }
     fn outstanding(&self) -> bool {
@@ -1754,6 +1800,7 @@ fn engine_source(job: &Job, filter: &[String]) -> Vec<String> {
         Job::PlanOperation(operation) => vec![operation.backend().into()],
         // AppImages are taken over by the AppImage source itself.
         Job::PlanAdoption(app) if app.id.backend == "appimage" => vec!["appimage".into()],
+        Job::PlanAdoptAll(_) => vec!["appimage".into()],
         Job::PlanAdoption(_) => vec!["homebrew-cask".into()],
         Job::Write(operation, _) => vec![operation.backend().into()],
         Job::BackgroundUpdates(sources) => sources.clone(),
@@ -2371,6 +2418,7 @@ fn preflight_notice(job: &Job, error: &EngineError, sudo: bool, names: &Names) -
             vec![],
         ),
         Job::PlanCleanAll(operations) => ("The cleanup".to_owned(), operations.clone()),
+        Job::PlanAdoptAll(_) => ("Managing your AppImages with PkgDeck".to_owned(), vec![]),
         _ => return None,
     };
     if matches!(
@@ -3033,6 +3081,8 @@ fn confirmation_preview(
             Operation::Upgrade(_) => Some(PlannedAction::Upgrade),
             _ => None,
         };
+        // Managing an AppImage moves the very file in; nothing is downloaded.
+        let moving = plan.adopts.is_some() && operation.backend() == "appimage";
         let describe = |change: &PlannedChange| {
             let action = match change.action {
                 PlannedAction::Install => "Install",
@@ -3048,6 +3098,14 @@ fn confirmation_preview(
                 (None, Some(new)) => format!(" ({new})"),
                 (None, None) => String::new(),
             };
+            if moving && change.action == PlannedAction::Install {
+                let version = change
+                    .candidate_version
+                    .as_deref()
+                    .map(|version| format!(" {version}"))
+                    .unwrap_or_default();
+                return format!("Move {}{version} into PkgDeck", change.name);
+            }
             format!("{action} {}{version}", change.name)
         };
         let requested = plan
@@ -3366,6 +3424,42 @@ impl ffi::PackageController {
                 self.as_mut().rust_mut().view_cache.expire();
                 QString::default()
             }
+            Err(error) => plain_error(&error, None, false).as_str().into(),
+        }
+    }
+    pub fn app_file(self: Pin<&mut Self>, index: i32) -> QString {
+        let Some(package) = self.installed_appimage(index) else {
+            return "{}".into();
+        };
+        encoded(match self.appimages().file(&package.id) {
+            Ok(file) => {
+                let folder = file
+                    .path
+                    .parent()
+                    .map(|folder| folder.display().to_string());
+                let mut value = json!(file);
+                value["folder"] = json!(folder);
+                value
+            }
+            Err(_) => json!({}),
+        })
+    }
+    /// The installed AppImage an opened file became: PkgDeck keeps it under
+    /// its digest, which the page's preview already has.
+    fn opened_appimage(&self) -> Option<PackageId> {
+        let package = self.rust().opened_package.as_ref()?;
+        let digest = package.id.reference.as_deref()?;
+        (package.id.backend == "appimage").then(|| {
+            self.appimages()
+                .installed_id(digest, &package.id.architecture)
+        })
+    }
+    pub fn launch_opened(self: Pin<&mut Self>) -> QString {
+        let Some(id) = self.opened_appimage() else {
+            return "Nothing to start.".into();
+        };
+        match self.appimages().launch(&id) {
+            Ok(()) => QString::default(),
             Err(error) => plain_error(&error, None, false).as_str().into(),
         }
     }
@@ -4519,6 +4613,30 @@ impl ffi::PackageController {
         };
         self.rust_mut().view_cache.insert(key, view);
     }
+    /// Look up the details of the row at `index` in the background, as the
+    /// pointer rests on it, so opening it a moment later is instant. Never
+    /// replaces the lookup for the open package or delays other work.
+    pub fn warm_details(mut self: Pin<&mut Self>, index: i32) {
+        let Some(package) = usize::try_from(index)
+            .ok()
+            .and_then(|i| self.rust().packages.get(i))
+            .cloned()
+        else {
+            return;
+        };
+        let busy = self.rust().details_worker.as_ref().is_some_and(|worker| {
+            worker.id == package.id || self.rust().warming.as_ref() != Some(&worker.id)
+        });
+        if busy
+            || self.rust().detail_cache.contains_key(&package.id)
+            || self.rust().selected.as_ref() == Some(&package.id)
+            || self.rust().worker.as_ref().is_some_and(|w| w.job.writes())
+        {
+            return;
+        }
+        self.as_mut().rust_mut().warming = Some(package.id.clone());
+        self.start_details(package.id);
+    }
     pub fn select(mut self: Pin<&mut Self>, index: i32) {
         if let Some(package) = usize::try_from(index)
             .ok()
@@ -4531,16 +4649,23 @@ impl ffi::PackageController {
                 self.set_status("Package details loaded.".into());
                 return;
             }
-            // The open package is already loading. Arrowing onto it again
-            // must not start a second native query.
+            // The open package is already loading, perhaps since the pointer
+            // rested on its row. Arrowing onto it again must not start a
+            // second native query.
             if self
                 .rust()
                 .details_worker
                 .as_ref()
                 .is_some_and(|worker| worker.id == package.id)
             {
+                if self.rust().warming.as_ref() == Some(&package.id) {
+                    self.as_mut().rust_mut().warming = None;
+                    let same = same_app_sources(&self.rust().packages, &package.id);
+                    self.as_mut().set_details(encoded(json!({"package": package_row(&package, &same, None), "description": package.summary, "more": true})));
+                }
                 return;
             }
+            self.as_mut().rust_mut().warming = None;
             // A running Details job is stale the moment the selection moves:
             // cancel it and queue the new identity. A selection that lands
             // while rows stream in queues behind the load instead. Writes
@@ -4755,6 +4880,25 @@ impl ffi::PackageController {
             self.rust_mut().pending = Some(Job::CleanAll(operations));
             return;
         }
+        if action == "adopt-all" {
+            // Every AppImage installed some other way that PkgDeck can move in.
+            let apps: Vec<_> = self
+                .rust()
+                .packages
+                .iter()
+                .filter(|p| {
+                    p.id.backend == "appimage"
+                        && p.adopt_with.as_deref() == Some("appimage")
+                        && p.installed_version.is_some()
+                })
+                .cloned()
+                .collect();
+            if apps.is_empty() {
+                return;
+            }
+            self.start(Job::PlanAdoptAll(apps));
+            return;
+        }
         if action == "adopt" {
             // A macOS app a curated cask can take over. The cask's exact
             // identity and the adoption check come from Homebrew itself.
@@ -4881,11 +5025,25 @@ impl ffi::PackageController {
     }
     pub fn confirm(mut self: Pin<&mut Self>, approved: bool) {
         let pending = self.as_mut().rust_mut().pending.take();
+        let (owner, more) = std::mem::take(&mut self.as_mut().rust_mut().pending_more);
+        // Only the review that listed them may run them.
+        let more = if pending
+            .as_ref()
+            .is_some_and(|job| job.operations() == owner)
+        {
+            more
+        } else {
+            vec![]
+        };
         self.as_mut().set_confirmation(QString::default());
         self.as_mut().set_confirmation_data("{}".into());
         if approved {
             if let Some(op) = pending {
                 self.as_mut().accept_confirmed(op);
+            }
+            // The rest of one review that covers several changes.
+            for job in more {
+                self.as_mut().accept_confirmed(job);
             }
         }
         // Declining lets held-back preloads run.
@@ -5125,6 +5283,64 @@ impl ffi::PackageController {
                 self.as_mut().set_confirmation_data(encoded(data));
                 self.as_mut().set_confirmation(body.as_str().into());
                 self.rust_mut().pending = Some(Job::Write(operation, Some(plan)));
+            }
+            Ok(Payload::AdoptAllPreview(mut plans, skipped)) => {
+                if plans.len() == 1 && skipped.is_empty() {
+                    let (package, operation, plan) = plans.remove(0);
+                    return self.apply(Ok(Payload::AdoptionPreview(
+                        Box::new(package),
+                        operation,
+                        plan,
+                    )));
+                }
+                if plans.is_empty() {
+                    self.set_status(
+                        "No AppImage installed some other way can be moved in now.".into(),
+                    );
+                    return;
+                }
+                let count = plans.len();
+                let moves: Vec<String> = plans
+                    .iter()
+                    .map(|(package, _, plan)| {
+                        let version = plan
+                            .changes
+                            .first()
+                            .and_then(|change| change.candidate_version.as_deref())
+                            .map(|version| format!(" {version}"))
+                            .unwrap_or_default();
+                        format!("Move {}{version} into PkgDeck", package.display_name)
+                    })
+                    .collect();
+                let mut notes = vec![
+                    "Moves them into PkgDeck's folder and replaces their menu entries.".to_owned(),
+                ];
+                if !skipped.is_empty() {
+                    notes.push(format!("Left as they are: {}", skipped.join(", ")));
+                }
+                let noun = if count == 1 { "AppImage" } else { "AppImages" };
+                let summary = format!("Manage {count} {noun} with PkgDeck\n{}", notes.join("\n"));
+                let body = format!("{}\n\n{}", notes.join("\n"), moves.join("\n"));
+                for (package, operation, _) in &plans {
+                    let name = package.display_name.clone();
+                    let names = &mut self.as_mut().rust_mut().names;
+                    if let Operation::Install(id) = operation {
+                        names.insert(id.clone(), name.clone());
+                    }
+                    names.insert(package.id.clone(), name);
+                }
+                let mut writes = plans
+                    .into_iter()
+                    .map(|(_, operation, plan)| Job::Write(operation, Some(plan)));
+                let first = writes.next();
+                let owner = first.as_ref().map(Job::operations).unwrap_or_default();
+                self.as_mut().rust_mut().pending_more = (owner, writes.collect());
+                self.as_mut().set_confirmation_data(encoded(json!({
+                    "action": "Manage all", "review": true, "summary": summary,
+                    "body": body, "notes": notes, "changes": moves, "details": moves.join("\n")
+                })));
+                self.as_mut().set_confirmation(body.as_str().into());
+                self.rust_mut().pending = first;
             }
             Ok(Payload::ManifestExport(count)) => {
                 self.set_status(format!("Exported {count} packages.").as_str().into());
@@ -6243,7 +6459,12 @@ impl ffi::PackageController {
                 self.validate_confirmed(entry);
             } else if matches!(
                 &queued,
-                Some(Job::PlanOperation(..) | Job::PlanAdoption(..) | Job::PlanUpgrade(..))
+                Some(
+                    Job::PlanOperation(..)
+                        | Job::PlanAdoption(..)
+                        | Job::PlanAdoptAll(..)
+                        | Job::PlanUpgrade(..)
+                )
             ) {
                 self.start(queued.expect("review job"));
             } else if let Some(job) = self.as_mut().rust_mut().deferred_load.take() {
@@ -6891,6 +7112,36 @@ mod tests {
             })
             .expect("the AppImage never started");
         assert_eq!(text, "hi|--other\n");
+        // Its page shows the file it starts from.
+        let shown: Value =
+            serde_json::from_str(&controller.as_mut().app_file(0).to_string()).unwrap();
+        assert_eq!(shown["path"], file.display().to_string());
+        assert_eq!(shown["folder"], root.display().to_string());
+        assert_eq!(shown["bytes"], std::fs::metadata(&file).unwrap().len());
+        assert_eq!(shown["managed"], true);
+        assert_eq!(shown["without_fuse"], false);
+        assert_eq!(controller.as_mut().app_file(5).to_string(), "{}");
+        // The page of a file PkgDeck just installed starts that install.
+        assert_eq!(
+            controller.as_mut().launch_opened().to_string(),
+            "Nothing to start."
+        );
+        let mut opened = controller.rust().packages[0].clone();
+        opened.id.name = data.join("Demo.AppImage").display().to_string();
+        opened.id.reference = Some(digest.clone());
+        controller.as_mut().rust_mut().opened_package = Some(opened);
+        std::fs::remove_file(&record).unwrap();
+        assert_eq!(controller.as_mut().launch_opened().to_string(), "");
+        let text = (0..200)
+            .find_map(|_| {
+                std::thread::sleep(Duration::from_millis(10));
+                std::fs::read_to_string(&record)
+                    .ok()
+                    .filter(|text| text.ends_with('\n'))
+            })
+            .expect("the AppImage never started");
+        assert_eq!(text, "hi|--other\n");
+        controller.as_mut().rust_mut().opened_package = None;
         // Where it updates from, saved for the next check.
         let source: Value =
             serde_json::from_str(&controller.as_mut().app_update_source(0).to_string()).unwrap();
@@ -6927,6 +7178,21 @@ mod tests {
         let gone: Value =
             serde_json::from_str(&controller.as_mut().app_update_source(1).to_string()).unwrap();
         assert!(gone["error"].is_string(), "{gone}");
+        assert_eq!(controller.as_mut().app_file(1).to_string(), "{}");
+        // Opened from a file that isn't an AppImage: nothing to start.
+        let mut opened = controller.rust().packages[0].clone();
+        opened.id.backend = "apt".into();
+        opened.id.reference = Some(digest);
+        controller.as_mut().rust_mut().opened_package = Some(opened);
+        assert_eq!(
+            controller.as_mut().launch_opened().to_string(),
+            "Nothing to start."
+        );
+        // One the install didn't keep can't start.
+        let mut opened = controller.rust().packages[0].clone();
+        opened.id.reference = Some("cd".repeat(32));
+        controller.as_mut().rust_mut().opened_package = Some(opened);
+        assert!(!controller.as_mut().launch_opened().is_empty());
         std::fs::remove_dir_all(data).unwrap();
     }
     #[test]
@@ -9301,6 +9567,67 @@ mod tests {
                 }
             )))))
             .is_err());
+    }
+    #[test]
+    fn resting_on_a_row_loads_its_details_before_it_opens() {
+        let mut controller = synthetic_controller();
+        let mut controller = controller.pin_mut();
+        let first = fixture_row();
+        let mut second = fixture_row();
+        second.id.name = "other".into();
+        controller.as_mut().rust_mut().packages = vec![first.clone(), second.clone()];
+        let loading = |controller: &ffi::PackageController| {
+            controller
+                .rust()
+                .details_worker
+                .as_ref()
+                .map(|worker| worker.id.clone())
+        };
+        controller.as_mut().warm_details(-1);
+        assert_eq!(loading(&controller), None);
+        controller.as_mut().warm_details(0);
+        assert_eq!(loading(&controller), Some(first.id.clone()));
+        controller.as_mut().warm_details(0);
+        assert_eq!(loading(&controller), Some(first.id.clone()));
+        // Moving on to another row looks that one up instead.
+        controller.as_mut().warm_details(1);
+        assert_eq!(loading(&controller), Some(second.id.clone()));
+        // Opening it shows what the row says while the same lookup finishes.
+        controller.as_mut().select(1);
+        assert_eq!(loading(&controller), Some(second.id.clone()));
+        let details: Value = serde_json::from_str(&controller.details().to_string()).unwrap();
+        assert_eq!(details["more"], true);
+        // The open package's lookup is never replaced.
+        controller.as_mut().warm_details(0);
+        assert_eq!(loading(&controller), Some(second.id.clone()));
+        let started = Instant::now();
+        while controller.rust().details_worker.is_some() {
+            assert!(started.elapsed() < Duration::from_secs(10));
+            controller.as_mut().poll();
+            thread::sleep(Duration::from_millis(5));
+        }
+        let details: Value = serde_json::from_str(&controller.details().to_string()).unwrap();
+        assert_ne!(details["more"], true);
+        // Known, open, or behind a change: nothing to look up.
+        controller
+            .as_mut()
+            .rust_mut()
+            .detail_cache
+            .insert(second.id.clone(), "{}".into());
+        controller.as_mut().rust_mut().selected = None;
+        controller.as_mut().warm_details(1);
+        assert_eq!(loading(&controller), None);
+        controller.as_mut().rust_mut().detail_cache.clear();
+        controller.as_mut().rust_mut().selected = Some(second.id.clone());
+        controller.as_mut().warm_details(1);
+        assert_eq!(loading(&controller), None);
+        controller.as_mut().rust_mut().worker = Some(fake_worker(
+            Job::Write(Operation::Install(first.id.clone()), None),
+            vec![],
+        ));
+        controller.as_mut().warm_details(0);
+        assert_eq!(loading(&controller), None);
+        controller.as_mut().rust_mut().worker = None;
     }
     #[test]
     fn parallel_details_failure_replaces_the_row_preview() {
@@ -13498,6 +13825,165 @@ mod tests {
             plan_appimage_adoption_with(Some("/x"), managed),
             Reply::Done(Err(EngineError::NotFound))
         ));
+    }
+    #[test]
+    fn managing_every_appimage_reviews_them_once() {
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        let demo = external_appimage();
+        let mut other = external_appimage();
+        other.id.name = "/home/user/AppImages/other.appimage".into();
+        other.display_name = "Other".into();
+        // Planned on a worker: what can move, and what can't any more.
+        let mut file = demo.clone();
+        file.id.reference = Some("ab".repeat(32));
+        let mut engine = Engine::default();
+        engine
+            .register(AppImageFixture {
+                package: file,
+                adopts: Some(PathBuf::from(&demo.id.name)),
+            })
+            .unwrap();
+        let plan_all = |engine: &mut Engine, cancel: &Cancellation| {
+            let mut replies = Vec::new();
+            execute(
+                engine,
+                Job::PlanAdoptAll(vec![demo.clone(), other.clone()]),
+                cancel,
+                &mut |reply| replies.push(reply),
+            );
+            replies.pop().unwrap()
+        };
+        assert!(matches!(
+            plan_all(&mut engine, &Cancellation::default()),
+            Reply::Done(Ok(Payload::AdoptAllPreview(plans, skipped)))
+                if plans.len() == 1 && skipped == ["Other"]
+        ));
+        let cancelled = Cancellation::default();
+        cancelled.cancel();
+        assert!(matches!(
+            plan_all(&mut engine, &cancelled),
+            Reply::Done(Err(EngineError::Cancelled))
+        ));
+        // One review lists every move, then runs them all.
+        let plan = |app: &Package, version: Option<&str>| {
+            let operation = Operation::Install(app.id.clone());
+            let plan = TransactionPlan {
+                operation: operation.clone(),
+                native_preview: "Moves it into PkgDeck's folder.".into(),
+                changes: vec![PlannedChange {
+                    action: PlannedAction::Install,
+                    name: app.display_name.clone(),
+                    installed_version: None,
+                    candidate_version: version.map(str::to_owned),
+                }],
+                download_bytes: None,
+                disk_bytes: None,
+                restart_required: None,
+                adopts: Some(PathBuf::from(&app.id.name)),
+            };
+            (app.clone(), operation, Box::new(plan))
+        };
+        controller.as_mut().rust_mut().packages = vec![demo.clone(), other.clone()];
+        controller.as_mut().apply(Ok(Payload::AdoptAllPreview(
+            vec![plan(&demo, Some("2.0")), plan(&other, None)],
+            vec![],
+        )));
+        let data: Value =
+            serde_json::from_str(&controller.confirmation_data().to_string()).unwrap();
+        assert_eq!(data["action"], "Manage all");
+        assert_eq!(
+            data["changes"],
+            json!(["Move Demo 2.0 into PkgDeck", "Move Other into PkgDeck"])
+        );
+        assert!(data["summary"]
+            .as_str()
+            .unwrap()
+            .starts_with("Manage 2 AppImages with PkgDeck"));
+        controller.as_mut().confirm(true);
+        let queued: Vec<Vec<Operation>> = controller
+            .rust()
+            .worker
+            .iter()
+            .map(|worker| worker.job.operations())
+            .chain(
+                controller
+                    .rust()
+                    .confirmed_queue
+                    .iter()
+                    .map(|entry| entry.job.operations()),
+            )
+            .collect();
+        assert_eq!(queued.len(), 2, "{}", queued.len());
+        settle(&mut controller);
+        // One that couldn't move is named, and the count reads right.
+        controller.as_mut().apply(Ok(Payload::AdoptAllPreview(
+            vec![plan(&demo, Some("2.0"))],
+            vec!["Other".into()],
+        )));
+        let data: Value =
+            serde_json::from_str(&controller.confirmation_data().to_string()).unwrap();
+        assert!(data["summary"]
+            .as_str()
+            .unwrap()
+            .starts_with("Manage 1 AppImage with PkgDeck"));
+        assert!(data["notes"][1].as_str().unwrap().contains("Other"));
+        controller.as_mut().confirm(false);
+        // A later review never runs the moves an earlier one listed.
+        controller.as_mut().apply(Ok(Payload::AdoptAllPreview(
+            vec![plan(&demo, Some("2.0")), plan(&other, None)],
+            vec![],
+        )));
+        controller.as_mut().rust_mut().pending = Some(Job::PlanCleanAll(vec![]));
+        controller.as_mut().confirm(true);
+        assert!(controller.rust().confirmed_queue.is_empty());
+        assert!(!controller
+            .rust()
+            .worker
+            .as_ref()
+            .is_some_and(|worker| matches!(worker.job, Job::Write(..))));
+        settle(&mut controller);
+        // Just one: the usual review, which says it moves.
+        controller.as_mut().apply(Ok(Payload::AdoptAllPreview(
+            vec![plan(&demo, Some("2.0"))],
+            vec![],
+        )));
+        let data: Value =
+            serde_json::from_str(&controller.confirmation_data().to_string()).unwrap();
+        assert_eq!(data["action"], "Manage with PkgDeck");
+        assert!(
+            data.to_string().contains("Move Demo 2.0 into PkgDeck"),
+            "{data}"
+        );
+        controller.as_mut().confirm(false);
+        // None left to move.
+        controller
+            .as_mut()
+            .apply(Ok(Payload::AdoptAllPreview(vec![], vec!["Demo".into()])));
+        assert_eq!(controller.confirmation().to_string(), "");
+        assert!(controller.status().to_string().contains("No AppImage"));
+        // The button plans every AppImage installed some other way.
+        controller.as_mut().propose("adopt-all".into(), -1);
+        assert!(matches!(
+            &controller.rust().worker,
+            Some(worker) if matches!(&worker.job, Job::PlanAdoptAll(apps) if apps.len() == 2)
+        ));
+        settle(&mut controller);
+        controller.as_mut().rust_mut().packages = vec![];
+        controller.as_mut().propose("adopt-all".into(), -1);
+        assert!(controller.rust().worker.is_none());
+        // A failed plan says what it was for.
+        let notice = preflight_notice(
+            &Job::PlanAdoptAll(vec![demo]),
+            &EngineError::NotFound,
+            false,
+            &Names::default(),
+        )
+        .unwrap();
+        assert!(notice["title"]
+            .as_str()
+            .unwrap()
+            .starts_with("Managing your AppImages with PkgDeck"));
     }
     #[test]
     fn appimage_adoption_confirms_as_manage_with_pkgdeck() {
