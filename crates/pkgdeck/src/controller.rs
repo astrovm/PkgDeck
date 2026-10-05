@@ -13660,13 +13660,11 @@ mod tests {
             );
             replies.pop().unwrap()
         };
-        let Reply::Done(Ok(Payload::AdoptAllPreview(plans, skipped))) =
-            plan_all(&mut engine, &Cancellation::default())
-        else {
-            panic!("expected a preview");
-        };
-        assert_eq!(plans.len(), 1);
-        assert_eq!(skipped, ["Other"]);
+        assert!(matches!(
+            plan_all(&mut engine, &Cancellation::default()),
+            Reply::Done(Ok(Payload::AdoptAllPreview(plans, skipped)))
+                if plans.len() == 1 && skipped == ["Other"]
+        ));
         let cancelled = Cancellation::default();
         cancelled.cancel();
         assert!(matches!(
