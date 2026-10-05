@@ -318,6 +318,14 @@ TestCase {
         fake.busy = false; // Empty completion must discard the old snapshot.
         compare(browser.items.length, 0);
     }
+    function revealDetailControl(panel, name) {
+        const control = findChild(panel, name), scroll = findChild(panel, "detailsScroll").contentItem;
+        waitForRendering(panel);
+        const position = control.mapToItem(scroll.contentItem, 0, 0).y;
+        scroll.contentY = Math.max(0, Math.min(scroll.contentHeight - scroll.height, position - scroll.height / 2));
+        waitForRendering(scroll);
+        return control;
+    }
     function test_details_load_again_after_a_refresh_keeps_the_selection() {
         populate();
         browser.choose(1);
@@ -364,7 +372,7 @@ TestCase {
         browser.choose(1);
         compare(panel.height, panelHeight);
         waitForRendering(panel);
-        mouseClick(findChild(panel, "pageBackButton"));
+        mouseClick(findChild(panel, "closeDetailsButton"));
         tryCompare(panel, "visible", false);
         browser.choose(1);
         verify(panel.visible);
@@ -603,7 +611,7 @@ TestCase {
         // Once installed, the page has nothing left to press.
         fake.opened = JSON.stringify(Object.assign(JSON.parse(fake.opened), {action: "", package: Object.assign({}, row, {installed: "2.1.7"})}));
         compare(page.actionText, "");
-        verify(page.installed);
+        verify(browser.isInstalled(page.selected));
         // Escape, like Back, closes it.
         page.forceActiveFocus();
         keyClick(Qt.Key_Escape);
@@ -743,16 +751,17 @@ TestCase {
         const save = findChild(page, "saveLaunchSettings");
         verify(!save.enabled);
         // Change the arguments, add a variable, save.
+        revealDetailControl(page, "launchArguments");
         argumentsField.forceActiveFocus();
         argumentsField.selectAll();
         keyClick(Qt.Key_Backspace);
         keyClick("%");
         keyClick("U");
         verify(save.enabled);
-        mouseClick(findChild(page, "addVariable"));
+        mouseClick(revealDetailControl(page, "addVariable"));
         compare(editor.environment.length, 2);
         editor.environment[1] = {name: "FOO", value: "bar"};
-        mouseClick(save);
+        mouseClick(revealDetailControl(page, "saveLaunchSettings"));
         compare(fake.savedLaunch.index, 0);
         compare(fake.savedLaunch.arguments, "%U");
         compare(fake.savedLaunch.environment, [{name: "DESKTOPINTEGRATION", value: "1"}, {name: "FOO", value: "bar"}]);
@@ -760,7 +769,7 @@ TestCase {
         compare(argumentsField.text, "%U");
         compare(editor.environment.length, 2);
         verify(!save.enabled);
-        mouseClick(findChild(page, "removeVariable"));
+        mouseClick(revealDetailControl(page, "removeVariable"));
         compare(editor.environment.length, 1);
         verify(save.enabled);
         // Errors show on the page.
@@ -786,7 +795,7 @@ TestCase {
         verify(!findChild(page, "saveUpdateSource").enabled);
         fake.launchResult = "that isn't a GitHub project (owner/name)";
         keyClick(Qt.Key_Backspace);
-        mouseClick(findChild(page, "saveUpdateSource"));
+        mouseClick(revealDetailControl(page, "saveUpdateSource"));
         tryCompare(findChild(page, "updateError"), "text", "that isn't a GitHub project (owner/name)");
         fake.launchResult = "";
         fake.updateSource = "{}";
@@ -815,15 +824,14 @@ TestCase {
         const page = findChild(browser, "detailsPanel");
         tryCompare(page, "visible", true);
         waitForRendering(page);
-        // Launch is the main button; Remove waits under More.
+        // Launch stays primary and removal is one direct trash button.
         verify(findChild(page, "pageLaunchButton").primary);
-        verify(!findChild(page, "detailsActionButton").visible);
-        const more = findChild(page, "pageMoreButton");
-        verify(more.visible);
-        mouseClick(more);
-        const remove = findChild(page, "pageMenuRemove");
-        tryCompare(remove, "visible", true);
-        compare(remove.text, "Remove");
+        const remove = findChild(page, "detailsActionButton");
+        verify(remove.visible);
+        compare(remove.text, "");
+        compare(remove.Accessible.name, "Remove Demo");
+        compare(findChild(page, "pageMoreButton"), null);
+        compare(findChild(page, "installedChip"), null);
         mouseClick(remove);
         compare(fake.lastProposal, "remove");
         fake.confirm(false);
@@ -858,6 +866,7 @@ TestCase {
         const manageAll = findChild(browser, "manageAllAppImages");
         tryCompare(manageAll, "visible", true);
         compare(manageAll.text, "Manage 2 AppImages");
+        waitForRendering(browser.contentItem);
         mouseClick(manageAll);
         compare(fake.lastProposal, "adopt-all");
         fake.confirm(false);
@@ -2589,6 +2598,125 @@ TestCase {
         tryCompare(findChild(row, "packageIconFallback"), "visible", true);
         verify(!findChild(row, "packageIcon").visible);
     }
+    function test_package_details_leave_the_list_available_data() {
+        return [
+            {tag: "installed wide", view: "Installed", width: 1100, height: 760},
+            {tag: "search wide", view: "Search", width: 1100, height: 760},
+            {tag: "installed narrow", view: "Installed", width: 400, height: 520},
+            {tag: "search short", view: "Search", width: 1100, height: 400}
+        ];
+    }
+    function test_package_details_leave_the_list_available(data) {
+        browser.width = data.width;
+        browser.height = data.height;
+        browser.openView(data.view);
+        if (data.view === "Search") findChild(browser, "searchField").text = "synthetic";
+        fake.rows = JSON.stringify(Array.from({length: 20}, (_, i) => ({kind: "package", name: "synthetic-" + i,
+            source: "apt", architecture: "all", installed: "1", candidate: "1", scope: "system", summary: "Synthetic package"})));
+        const list = findChild(browser, "packageResults"), box = findChild(browser, "resultsBox");
+        tryCompare(list, "count", 20);
+        browser.choose(0);
+        const panel = findChild(browser, "detailsPanel");
+        tryVerify(() => panel.visible && panel.height > 0 && list.height > 0);
+        waitForRendering(browser.contentItem);
+        verify(list.enabled);
+        verify(panel.embedded);
+        verify(box.mapToItem(browser.contentItem, 0, box.height).y <= panel.mapToItem(browser.contentItem, 0, 0).y);
+        verify(panel.mapToItem(browser.contentItem, 0, panel.height).y <= browser.contentItem.height + 1);
+        // Another real row click replaces the details without closing first.
+        list.positionViewAtIndex(1, ListView.Beginning);
+        waitForRendering(list);
+        const next = list.itemAtIndex(1);
+        verify(next !== null);
+        mouseClick(next, next.width / 2, Math.min(next.height / 2, list.height / 2));
+        tryCompare(browser, "selectedIdentity", browser.rowIdentity(browser.viewItems[1]));
+        verify(panel.visible);
+        compare(panel.selected.name, browser.viewItems[1].name);
+        mouseClick(findChild(panel, "closeDetailsButton"));
+        tryCompare(panel, "visible", false);
+        compare(list.count, 20);
+        verify(list.enabled);
+    }
+    function test_flatpak_scope_actions_keep_the_selected_copy_and_survive_refresh() {
+        browser.openView("Installed");
+        const app = {kind: "package", name: "org.example.Player", source: "flatpak", remote: "flathub",
+            architecture: "x86_64", reference: "app/org.example.Player/x86_64/stable", candidate: "3", update: "current"};
+        const user = Object.assign({}, app, {scope: {user: {uid: 1000}}, installed: "1"});
+        const system = Object.assign({}, app, {scope: "system", installed: "2"});
+        fake.rows = JSON.stringify([system, user]);
+        const list = findChild(browser, "packageResults");
+        tryCompare(list, "count", 1);
+        browser.choose(0);
+        compare(browser.selected.installed, "1");
+        compare(browser.originalIndex(0), 1);
+        browser.selectFlatpakInstallation(1);
+        compare(browser.selected.installed, "2");
+        compare(browser.originalIndex(0), 0);
+        const panel = findChild(browser, "detailsPanel");
+        compare(panel.version, "2");
+        mouseClick(findChild(panel, "detailsActionButton"));
+        compare(fake.lastProposal, "remove");
+        compare(fake.selection, 0);
+        fake.confirm(false);
+        fake.busy = true;
+        browser.selectFlatpakInstallation(0);
+        compare(browser.selected.installed, "2");
+        verify(!findChild(panel, "packageInstallationSelector").enabled);
+        fake.busy = false;
+        // Dropping the selected installation keeps its remaining copy open.
+        fake.rows = JSON.stringify([user]);
+        tryCompare(list, "count", 1);
+        tryCompare(panel, "visible", true);
+        tryCompare(panel, "version", "1");
+        compare(browser.originalIndex(0), 0);
+        verify(!findChild(panel, "packageInstallationSelector").visible);
+        browser.selectFlatpakInstallation(-1);
+        browser.selectFlatpakInstallation(5);
+        compare(browser.selected.installed, "1");
+    }
+    function test_flatpak_prefers_the_installed_copy_and_ignores_stale_details() {
+        browser.openView("Search");
+        const app = {kind: "package", name: "org.example.Player", source: "flatpak", remote: "flathub",
+            architecture: "x86_64", reference: "app/org.example.Player/x86_64/stable", candidate: "3", update: "current"};
+        const user = Object.assign({}, app, {scope: "user", installed: null});
+        const system = Object.assign({}, app, {scope: "system", installed: "2"});
+        fake.rows = JSON.stringify([user, system]);
+        tryCompare(findChild(browser, "packageResults"), "count", 1);
+        browser.choose(0);
+        const panel = findChild(browser, "detailsPanel");
+        compare(browser.selected.scope, "system");
+        compare(panel.actionText, "Remove");
+        compare(fake.selection, 1);
+        browser.selectFlatpakInstallation(0);
+        compare(panel.actionText, "Install");
+        compare(fake.selection, 0);
+        fake.details = JSON.stringify({package: system, description: "Stale system description"});
+        verify(!panel.detailMatchesSelection);
+        verify(panel.loading);
+        verify(panel.description.indexOf("Stale") < 0);
+        browser.runPageAction();
+        compare(fake.lastProposal, "install");
+        compare(fake.selection, 0);
+        fake.confirm(false);
+    }
+    function test_flatpak_merging_preserves_distinct_offers_data() {
+        return [
+            {tag: "remote", extra: {remote: "other"}},
+            {tag: "architecture", extra: {architecture: "aarch64"}},
+            {tag: "branch", extra: {reference: "app/org.example.Player/x86_64/beta"}},
+            {tag: "name", extra: {name: "org.example.Other"}},
+            {tag: "updates", extra: {}, view: "Updates"}
+        ];
+    }
+    function test_flatpak_merging_preserves_distinct_offers(data) {
+        browser.openView(data.view || "Search");
+        const app = {kind: "package", name: "org.example.Player", source: "flatpak", remote: "flathub",
+            architecture: "x86_64", reference: "app/org.example.Player/x86_64/stable", installed: "1", candidate: "2", update: "available"};
+        fake.rows = JSON.stringify([Object.assign({}, app, {scope: "user"}), Object.assign({}, app, {scope: "system"}, data.extra)]);
+        tryCompare(findChild(browser, "packageResults"), "count", 2);
+        compare(browser.originalIndex(0), 0);
+        compare(browser.originalIndex(1), 1);
+    }
     function test_flatpak_installation_scopes_are_visible_and_selectable() {
         populate();
         const app = {kind: "package", name: "org.example.Player", display_name: "Player",
@@ -2599,11 +2727,26 @@ TestCase {
             Object.assign({}, app, {scope: "system"})
         ]);
         const results = findChild(browser, "packageResults");
-        tryCompare(results, "count", 2);
-        waitForRendering(browser.contentItem);
-        const userRow = results.itemAtIndex(0);
-        const systemRow = results.itemAtIndex(1);
-        compare(findChild(userRow, "packageSourceLine").text, "Flatpak, flathub, User");
+        tryCompare(results, "count", 1);
+        browser.choose(0);
+        const panel = findChild(browser, "detailsPanel");
+        const selector = findChild(panel, "packageInstallationSelector");
+        tryCompare(selector, "visible", true);
+        compare(selector.count, 2);
+        compare(selector.currentText, "User");
+        compare(fake.selection, 0);
+        waitForRendering(selector);
+        mouseClick(selector);
+        keyClick(Qt.Key_Down);
+        keyClick(Qt.Key_Return);
+        tryCompare(selector, "currentText", "System");
+        compare(fake.selection, 1);
+        compare(browser.originalIndex(0), 1);
+        compare(browser.selected.scope, "system");
+        browser.runPageAction();
+        compare(fake.lastProposal, "install");
+        compare(fake.selection, 1);
+        fake.confirm(false);
         compare(browser.sourceLine({source: "flatpak", remote: "flathub", scope: "user", reference: "runtime/org.freedesktop.Sdk.Extension.typescript/x86_64/24.08"}), "Flatpak, flathub, User, 24.08");
         compare(browser.sourceLine({source: "flatpak", remote: "flathub", scope: "system", reference: "app/org.mozilla.firefox/x86_64/stable"}), "Flatpak, flathub, System");
         compare(browser.sourceLine({source: "apt"}), "APT");
@@ -2612,13 +2755,6 @@ TestCase {
         compare(browser.sourceLine({source: "apt", name: "neovim", display_name: "Neovim"}), "APT");
         compare(browser.sourceLine({source: "snap", name: "nvim", display_name: "Neovim"}), "nvim, Snap");
         compare(browser.sourceLine({source: "flatpak", name: "io.neovim.nvim", display_name: "Neovim", remote: "flathub", scope: "user"}), "Flatpak, flathub, User");
-        compare(findChild(systemRow, "packageSourceLine").text, "Flatpak, flathub, System");
-        mouseClick(findChild(systemRow, "rowPackageAction"));
-        compare(fake.selection, 1);
-        const dialog = findChild(browser, "confirmationDialog");
-        tryCompare(dialog, "opened", true);
-        keyClick(Qt.Key_C, Qt.AltModifier);
-        tryCompare(dialog, "visible", false);
         compare(fake.writes, 0);
     }
     function test_failed_screenshots_collapse_and_keep_working_images() {
@@ -2699,9 +2835,9 @@ TestCase {
         verify(findChild(browser, "detailsPanel").visible);
         verify(findChild(browser, "detailsPanel").loading);
         fake.details = JSON.stringify({package: JSON.parse(fake.rows)[1], description: "Additional details"});
-        const back = findChild(findChild(browser, "detailsPanel"), "pageBackButton");
+        const back = findChild(findChild(browser, "detailsPanel"), "closeDetailsButton");
         compare(back.text, "");
-        compare(back.Accessible.name, "Back");
+        compare(back.Accessible.name, "Close details");
         waitForRendering(back);
         mouseClick(back);
         // Back returns to the list, the row still selected.
@@ -3234,7 +3370,7 @@ TestCase {
         const window = browser.contentItem.height;
         const panelBottom = panel.mapToItem(browser.contentItem, 0, panel.height).y;
         verify(panelBottom <= window, "page ends at " + panelBottom + " of " + window);
-        for (const name of ["pageBackButton", "detailsActionButton"]) {
+        for (const name of ["closeDetailsButton", "detailsActionButton"]) {
             const control = findChild(panel, name);
             verify(control.visible, name);
             verify(control.mapToItem(browser.contentItem, 0, control.height).y <= window, name);

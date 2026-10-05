@@ -26,6 +26,9 @@ Rectangle {
     ].filter(Boolean).join("\n") : ""
     property string iconSource: ""
     property bool page: false
+    property bool embedded: false
+    property var installationChoices: []
+    property int installationIndex: 0
     // Changes to look at before they run, shown on the page: the summary's
     // first line names them, the rest and `reviewDetails` explain them.
     property string reviewSummary: ""
@@ -52,8 +55,6 @@ Rectangle {
     property bool compact: false
     property bool motionEnabled: Theme.motionEnabled
     property bool detailMatchesSelection: false
-    // True when the selected package is installed; shows an "Installed" chip.
-    property bool installed: false
     // The row's own action, repeated in the header. Empty text hides it.
     property string actionText: ""
     property string actionSymbol: "install"       // DeckIcon: install | remove | updates
@@ -67,9 +68,8 @@ Rectangle {
     property string secondaryActionSymbol: "install"
     property string secondaryActionTone: "accent"
     // An app you can start opens with Launch as its main button, unless an
-    // update waits; removing it then sits under More.
+    // update waits; removal stays beside it as a trash icon.
     readonly property bool launchIsMain: page && launchText.length > 0 && actionSymbol !== "updates"
-    readonly property bool removeInMenu: page && launchText.length > 0 && actionText.length > 0 && actionTone === "danger"
     // Maps a raw source id to its display name for the header.
     property var sourceName: (id) => id
     property color canvas: Theme.canvas
@@ -96,9 +96,9 @@ Rectangle {
     readonly property real idealHeight: loading ? Math.max(settledHeight, contentIdealHeight) : contentIdealHeight
     property real settledHeight: 0
     property bool dependenciesExpanded: false
-    readonly property int thumbnailWidth: page ? 360 : 230
-    readonly property int thumbnailHeight: page ? 225 : 130
-    readonly property int iconSize: page ? 72 : 44
+    readonly property int thumbnailWidth: page && !embedded ? 360 : 230
+    readonly property int thumbnailHeight: page && !embedded ? 225 : 130
+    readonly property int iconSize: page && !embedded ? 72 : 44
     // The version a page shows: the one installed, else the one on offer.
     readonly property string version: selected && selected.kind === "package"
         ? String(selected.installed || selected.candidate || "") : ""
@@ -130,6 +130,7 @@ Rectangle {
     signal actionRequested()
     signal secondaryActionRequested()
     signal showInFolderRequested(string folder)
+    signal installationRequested(int index)
 
     onContentIdealHeightChanged: if (!loading && selected) settledHeight = contentIdealHeight
     onLoadingChanged: if (!loading && selected) settledHeight = contentIdealHeight
@@ -225,7 +226,7 @@ Rectangle {
         id: detailsContent
         objectName: "detailsContent"
         anchors.fill: parent
-        anchors.margins: panel.page ? Theme.gutter * 1.5 : Theme.gutter
+        anchors.margins: panel.page && !panel.embedded ? Theme.gutter * 1.5 : Theme.gutter
         spacing: panel.page ? Theme.spacingLarge : Theme.spacingSmall
         RowLayout {
             id: header
@@ -235,7 +236,7 @@ Rectangle {
             Controls.Button {
                 id: backButton
                 objectName: "pageBackButton"
-                visible: panel.page
+                visible: panel.page && !panel.embedded
                 Accessible.name: "Back"
                 Controls.ToolTip.visible: hovered
                 Controls.ToolTip.delay: 500
@@ -321,7 +322,7 @@ Rectangle {
                 RowLayout {
                     spacing: Theme.spacingSmall
                     Layout.fillWidth: true
-                    visible: panel.subtitle.length > 0 || panel.installed || (panel.page && panel.version.length > 0)
+                    visible: panel.subtitle.length > 0 || (panel.page && panel.version.length > 0)
                     Controls.Label {
                         objectName: "detailsSubtitle"
                         visible: text.length > 0
@@ -344,21 +345,18 @@ Rectangle {
                         font.family: "monospace"
                         font.pointSize: Theme.pointSize(Theme.smallScale)
                     }
-                    Controls.Label {
-                        objectName: "installedChip"
-                        visible: panel.installed
-                        text: "Installed"
-                        color: Theme.success
-                        font.pointSize: Theme.pointSize(Theme.captionScale)
-                        font.weight: Font.DemiBold
-                        leftPadding: 7
-                        rightPadding: 7
-                        topPadding: 1
-                        bottomPadding: 1
-                        background: Rectangle { radius: height / 2; color: Theme.tint(Theme.success, 0.14) }
-                    }
                     Item { Layout.fillWidth: true }
                 }
+            }
+            ThemedComboBox {
+                objectName: "packageInstallationSelector"
+                visible: panel.installationChoices.length > 1
+                enabled: panel.actionEnabled
+                model: panel.installationChoices.map((choice) => choice.label)
+                currentIndex: panel.installationIndex
+                Accessible.name: "Flatpak installation"
+                Layout.alignment: Qt.AlignVCenter
+                onActivated: (index) => panel.installationRequested(index)
             }
             DetailsAction {
                 objectName: "pageLaunchButton"
@@ -381,8 +379,8 @@ Rectangle {
             DetailsAction {
                 id: actionButton
                 objectName: "detailsActionButton"
-                // An app you can start keeps Remove under More.
-                label: panel.removeInMenu ? "" : panel.actionText
+                label: panel.actionText
+                iconOnly: panel.actionSymbol === "remove"
                 symbol: panel.actionSymbol
                 tone: panel.actionColor
                 primary: panel.page && !panel.launchIsMain && panel.actionTone !== "danger"
@@ -391,75 +389,9 @@ Rectangle {
                 onClicked: panel.actionRequested()
             }
             Controls.Button {
-                id: moreButton
-                objectName: "pageMoreButton"
-                visible: panel.removeInMenu
-                enabled: panel.actionEnabled
-                Accessible.name: "More"
-                Controls.ToolTip.visible: hovered && !moreMenu.visible
-                Controls.ToolTip.delay: 500
-                Controls.ToolTip.text: Accessible.name
-                Layout.preferredWidth: 38
-                Layout.alignment: Qt.AlignVCenter
-                implicitHeight: Theme.controlHeight
-                onClicked: moreMenu.visible ? moreMenu.close() : moreMenu.open()
-                background: Rectangle {
-                    color: moreButton.down || moreMenu.visible ? Theme.tint(panel.ink, 0.12) : moreButton.hovered ? Theme.tint(panel.ink, 0.08) : "transparent"
-                    radius: Theme.controlRadius
-                    border.color: moreButton.visualFocus ? panel.accent : panel.line
-                    border.width: moreButton.visualFocus ? 2 : 1
-                    Behavior on color { ColorAnimation { duration: Theme.feedbackDuration } }
-                }
-                contentItem: Text {
-                    text: "\u22ef"
-                    color: moreButton.enabled ? panel.ink : panel.muted
-                    horizontalAlignment: Text.AlignHCenter
-                    verticalAlignment: Text.AlignVCenter
-                    font.pointSize: panel.textFont.pointSize * 1.3
-                    font.bold: true
-                }
-                Controls.Popup {
-                    id: moreMenu
-                    objectName: "pageMoreMenu"
-                    y: moreButton.height + 4
-                    x: moreButton.width - width
-                    padding: 4
-                    background: Rectangle {
-                        color: panel.surface
-                        radius: Theme.controlRadius
-                        border.color: Theme.strongLine
-                    }
-                    enter: Transition {
-                        NumberAnimation { property: "opacity"; from: 0; to: 1; duration: panel.motionEnabled ? Theme.feedbackDuration : 0 }
-                    }
-                    contentItem: Controls.ItemDelegate {
-                        id: removeItem
-                        objectName: "pageMenuRemove"
-                        text: panel.actionText
-                        Accessible.name: panel.actionAccessibleName || (panel.actionText + (panel.selected ? " " + (panel.selected.display_name || panel.selected.name || "") : ""))
-                        onClicked: { moreMenu.close(); panel.actionRequested(); }
-                        background: Rectangle {
-                            radius: Theme.smallRadius
-                            color: removeItem.hovered || removeItem.visualFocus ? Theme.tint(Theme.danger, 0.14) : "transparent"
-                        }
-                        contentItem: RowLayout {
-                            spacing: 8
-                            DeckIcon { name: panel.actionSymbol; ink: Theme.danger; Layout.preferredWidth: 16; Layout.preferredHeight: 16 }
-                            Text {
-                                text: removeItem.text
-                                color: Theme.danger
-                                font.family: panel.textFont.family
-                                font.pointSize: panel.textFont.pointSize
-                                Layout.rightMargin: 6
-                            }
-                        }
-                    }
-                }
-            }
-            Controls.Button {
                 id: closeButton
                 objectName: "closeDetailsButton"
-                visible: !panel.page
+                visible: !panel.page || panel.embedded
                 Accessible.name: "Close details"
                 Controls.ToolTip.visible: hovered
                 Controls.ToolTip.delay: 500
@@ -513,6 +445,7 @@ Rectangle {
         DeckScrollView {
             ink: panel.muted
             id: detailScroll
+            objectName: "detailsScroll"
             Layout.fillWidth: true
             Layout.fillHeight: true
             contentWidth: availableWidth

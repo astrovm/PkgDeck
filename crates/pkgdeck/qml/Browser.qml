@@ -261,6 +261,7 @@ Controls.ApplicationWindow {
     property bool closePending: false
     property bool queryDirty: false
     property var selectedIdentity: null
+    property string selectedFlatpakGroup: ""
     // The app page: one package as a store page. An opened file or link
     // has one; so does a row someone opened (clicked), until Back.
     readonly property var opened: backend.opened.length ? JSON.parse(backend.opened) : null
@@ -861,6 +862,53 @@ Controls.ApplicationWindow {
             return a.source < b.source ? -1 : 1;
         return 0;
     }
+    property var flatpakInstallations: ({})
+    function flatpakGroupKey(row) {
+        return JSON.stringify([row.name, row.architecture, row.remote || "", row.reference || ""]);
+    }
+    function mergeFlatpakInstallations(rows) {
+        const groups = Object.create(null);
+        for (const row of rows) {
+            if (row.kind === "package" && row.source === "flatpak") {
+                const key = flatpakGroupKey(row);
+                if (!groups[key]) groups[key] = [];
+                groups[key].push(row);
+            }
+        }
+        const emitted = Object.create(null);
+        return rows.reduce((result, row) => {
+            if (row.kind !== "package" || row.source !== "flatpak") {
+                result.push(row);
+                return result;
+            }
+            const key = flatpakGroupKey(row), variants = groups[key];
+            if (emitted[key]) return result;
+            emitted[key] = true;
+            if (variants.length < 2 || !variants.some((entry) => entry.scope === "system")
+                    || !variants.some((entry) => entry.scope !== "system")) {
+                result.push(...variants);
+                return result;
+            }
+            const ordered = variants.slice().sort((a, b) => (a.scope === "system") - (b.scope === "system"));
+            const chosen = ordered.find((entry) => rowIdentity(entry) === flatpakInstallations[key])
+                || ordered.find(isInstalled) || ordered[0];
+            const memo = rowMemo(chosen), shape = ordered.map(rowJson).join("\n");
+            if (memo.flatpakShape !== shape) {
+                memo.flatpakShape = shape;
+                memo.flatpakCopy = Object.assign({}, chosen, {flatpakVariants: ordered, flatpakGroup: key});
+            }
+            result.push(memo.flatpakCopy);
+            return result;
+        }, []);
+    }
+    function selectFlatpakInstallation(index) {
+        const row = pageRow, variants = row && row.flatpakVariants;
+        if (!variants || index < 0 || index >= variants.length || !canAct || retainingResults)
+            return;
+        const visible = results.currentIndex;
+        flatpakInstallations = Object.assign({}, flatpakInstallations, {[row.flatpakGroup]: rowIdentity(variants[index])});
+        choose(visible);
+    }
     function groupInstalledRows(rows) {
         const members = Object.create(null);
         for (const row of rows) {
@@ -982,6 +1030,8 @@ Controls.ApplicationWindow {
         }
         // One app offered by several sources reads as one group, app first.
         const appFirst = root.currentView === "Search" && sortColumn === "" && searchPane.text.trim() !== "";
+        if (["Search", "Installed"].indexOf(root.currentView) >= 0)
+            rows = mergeFlatpakInstallations(rows);
         return root.currentView === "Installed" || appFirst ? groupInstalledRows(rows) : rows;
     }
     // The list shows viewItems through resultsModel, updated in place by
@@ -1212,7 +1262,7 @@ Controls.ApplicationWindow {
         for (const child of pageContent.children) {
             // The filler takes no height of its own, only a gap (below).
             // Children that fill the page take what is left, so they are not "used".
-            if (!child.visible || child === resultsBox || child === detailsPanel || child.objectName === "pageFiller"
+            if (!child.visible || child === resultsBox || child === detailsPanel || child === appPage || child.objectName === "pageFiller"
                     || child === searchEmptyState || child === settingsScroll)
                 continue;
             used += child.height;
@@ -1225,7 +1275,7 @@ Controls.ApplicationWindow {
         return Math.max(0, page - used - pageContent.spacing * (shown + 1 + (filler ? 1 : 0)));
     }
     function detailsMinimumHeight() {
-        return Math.min(120, detailsPanel.idealHeight, detailsBudget() * 0.4);
+        return Math.min(120, (rowPageOpen ? appPage : detailsPanel).idealHeight, detailsBudget() * 0.4);
     }
     function detailsListHeight() {
         const rows = compact ? 2 : 3;
@@ -1295,7 +1345,7 @@ Controls.ApplicationWindow {
         const scoped = row.source === "flatpak" || containerSource(row.source);
         // An AppImage installed some other way, which Manage moves in.
         const unmanaged = row.source === "appimage" && row.adopt_with === "appimage" && isInstalled(row);
-        return [packageNameNote(row), sourceDisplayName(row.source), row.remote || "", scoped ? (row.scope === "system" ? "System" : "User") : "", flatpakBranch(row), unmanaged ? "not managed" : ""]
+        return [packageNameNote(row), sourceDisplayName(row.source), row.remote || "", scoped && !row.flatpakVariants ? (row.scope === "system" ? "System" : "User") : "", flatpakBranch(row), unmanaged ? "not managed" : ""]
             .filter(Boolean).join(", ");
     }
     function sameAppNames(row) {
@@ -1503,6 +1553,7 @@ Controls.ApplicationWindow {
         const same = results.currentIndex === index && selectedIdentity === identity;
         results.currentIndex = index;
         selectedIdentity = identity;
+        selectedFlatpakGroup = viewItems[index].source === "flatpak" ? flatpakGroupKey(viewItems[index]) : "";
         if (!same)
             backend.select(originalIndex(index));
     }
@@ -1531,6 +1582,15 @@ Controls.ApplicationWindow {
                 // the rows are final, so the panel never waits forever.
                 if (backend.details === "{}" && !backend.busy)
                     backend.select(originalIndex(i));
+                return;
+            }
+        }
+        // If one installation disappears, keep the same app open on its
+        // remaining copy, with that copy's exact backend identity.
+        if (selectedFlatpakGroup) {
+            const index = viewItems.findIndex((row) => row.source === "flatpak" && flatpakGroupKey(row) === selectedFlatpakGroup);
+            if (index >= 0) {
+                choose(index, pageIdentity === selectedIdentity);
                 return;
             }
         }
@@ -2007,8 +2067,8 @@ Controls.ApplicationWindow {
         }
         ColumnLayout {
             id: pageContent
-            // Behind the app page, out of reach until Back.
-            enabled: !root.appPageOpen
+            // Opened files use the full page; row details keep this list active.
+            enabled: root.opened === null
             // Back brings the list in from the left, the way it went.
             transform: Translate { id: listShift }
             onImplicitHeightChanged: Qt.callLater(root.updateOverflow)
@@ -2657,6 +2717,7 @@ Controls.ApplicationWindow {
             Rectangle {
                 id: resultsBox
                 objectName: "resultsBox"
+                clip: true
                 Layout.fillWidth: true
                 // Lists take their content's height up to the space the page
                 // has, then scroll. The first load fills the page for its
@@ -2665,10 +2726,10 @@ Controls.ApplicationWindow {
                 readonly property bool overflowing: root.listOverflowing
                 Layout.fillHeight: loadingEmpty || overflowing
                 Layout.preferredHeight: root.viewItems.length === 0 && !backend.busy ? 150
-                    : detailsPanel.visible ? Math.min(root.shortResultsHeight(), root.height * (root.compact ? 0.24 : 0.42),
-                        root.detailsBudget() - detailsPanel.Layout.preferredHeight)
+                    : (detailsPanel.visible || root.rowPageOpen) ? Math.min(root.shortResultsHeight(), root.height * (root.compact ? 0.24 : 0.42),
+                        root.detailsBudget() - (root.rowPageOpen ? appPage : detailsPanel).Layout.preferredHeight)
                     : Math.min(root.shortResultsHeight(), root.detailsBudget())
-                Layout.minimumHeight: detailsPanel.visible ? root.detailsListHeight() : 130
+                Layout.minimumHeight: (detailsPanel.visible || root.rowPageOpen) ? root.detailsListHeight() : 130
                 visible: root.currentView === root.resultView && root.currentView !== "Settings" &&
                     (root.currentView !== "Search" || root.viewItems.length > 0 || root.readFailures.length > 0 ||
                         (backend.busy && !root.openingInput) || searchPane.text.trim().length > 0)
@@ -3145,23 +3206,9 @@ Controls.ApplicationWindow {
                                             font.bold: true
                                             textFormat: Text.PlainText
                                             elide: Text.ElideRight
-                                            // The chip, when shown, keeps to the column's end so it
-                                            // lines up from row to row.
                                             Layout.fillWidth: true
                                         }
-                                        Controls.Label {
-                                            objectName: "installedChip"
-                                            visible: packageRow.packageKind && root.currentView === "Search" && root.isInstalled(packageRow.modelData)
-                                            text: "Installed"
-                                            color: root.success
-                                            font.pointSize: Theme.pointSize(Theme.captionScale)
-                                            font.weight: Font.DemiBold
-                                            leftPadding: 7
-                                            rightPadding: 7
-                                            topPadding: 1
-                                            bottomPadding: 1
-                                            background: Rectangle { radius: height / 2; color: root.tint(root.success, 0.12) }
-                                        }
+
                                     }
                                     Controls.Label {
                                         objectName: "packageSourceLine"
@@ -3460,7 +3507,6 @@ Controls.ApplicationWindow {
                 selected: root.selected
                 selectionIdentity: root.rowIdentity(root.selected)
                 sourceName: root.sourceDisplayName
-                installed: root.selected !== null && root.selected.kind === "package" && root.isInstalled(root.selected)
                 readonly property string rowAction: root.rowActionName(root.selected)
                 actionText: ({install: "Install", remove: "Remove", upgrade: "Update", clean: "Clean", adopt: "Manage with Homebrew"})[rowAction] || ""
                 secondaryActionText: rowAction !== "adopt" && root.selected && root.selected.source === "appimage" && root.canAdopt(root.selected) ? "Manage" : ""
@@ -3502,6 +3548,95 @@ Controls.ApplicationWindow {
                     screenshotDialog.open();
                 }
                 onScreenshotFailed: (url, identity) => root.hideFailedScreenshot(url, identity)
+            }
+            PackageDetails {
+                id: appPage
+                objectName: "detailsPanel"
+                page: true
+                embedded: !fromFile
+                parent: fromFile ? root.contentItem : pageContent
+                Layout.fillWidth: true
+                Layout.preferredHeight: Math.max(root.detailsMinimumHeight(),
+                    Math.min(root.height * (root.compact ? 0.45 : 0.5), appPage.idealHeight,
+                        root.detailsBudget() - root.detailsListHeight()))
+                Layout.minimumHeight: root.detailsMinimumHeight()
+                visible: root.appPageOpen
+                transform: Translate { id: pageShift }
+                Binding { target: appPage; property: "x"; value: pageContent.x; when: appPage.fromFile }
+                Binding { target: appPage; property: "y"; value: pageContent.y; when: appPage.fromFile }
+                Binding { target: appPage; property: "width"; value: pageContent.width; when: appPage.fromFile }
+                Binding { target: appPage; property: "height"; value: pageContent.height; when: appPage.fromFile }
+                readonly property bool fromFile: root.opened !== null
+                selected: root.pageRow
+                selectionIdentity: root.rowIdentity(root.pageRow)
+                sourceName: root.sourceDisplayName
+                installationChoices: root.pageRow && root.pageRow.flatpakVariants
+                    ? root.pageRow.flatpakVariants.map((row) => ({label: row.scope === "system" ? "System" : "User"})) : []
+                installationIndex: root.pageRow && root.pageRow.flatpakVariants
+                    ? root.pageRow.flatpakVariants.findIndex((row) => root.rowIdentity(row) === root.rowIdentity(root.pageRow)) : 0
+                onInstallationRequested: (index) => root.selectFlatpakInstallation(index)
+                readonly property string rowAction: fromFile ? "" : root.rowActionName(root.pageRow)
+                actionText: fromFile ? (root.openedLaunchable ? "" : root.opened.action || "") : (({install: "Install", remove: "Remove", upgrade: "Update", clean: "Clean", adopt: "Manage with Homebrew"})[rowAction] || "")
+                secondaryActionText: !fromFile && rowAction !== "adopt" && root.pageRow && root.pageRow.source === "appimage" && root.canAdopt(root.pageRow) ? "Manage" : ""
+                secondaryActionSymbol: "install"
+                secondaryActionTone: "accent"
+                onSecondaryActionRequested: root.runAdopt(results.currentIndex)
+                actionAccessibleName: rowAction === "adopt" && root.pageRow ? "Manage " + (root.pageRow.display_name || root.pageRow.name) + " with Homebrew" : ""
+                actionSymbol: rowAction === "upgrade" ? "updates" : rowAction === "remove" ? "remove" : "install"
+                actionTone: fromFile ? "success" : ["upgrade", "adopt"].indexOf(rowAction) >= 0 ? "accent" : rowAction === "install" ? "success" : "danger"
+                actionEnabled: root.canAct && !root.retainingResults && root.pageReview === null
+                onActionRequested: root.runPageAction()
+                screenshots: fromFile ? (root.opened.screenshots || []) : root.visibleScreenshots
+                description: fromFile ? (root.opened.description || "") : root.detailText()
+                detailsData: fromFile ? root.opened : (root.detailMatchesSelection ? root.detail : ({}))
+                detailMatchesSelection: fromFile || root.detailMatchesSelection
+                iconSource: root.iconUrl(fromFile ? (root.opened.package.icon || "") : root.selectedIcon)
+                // The header already names the app, its source and version: say
+                // what happens, and what else changes.
+                reviewSummary: root.pageReview ? [((root.pageReview.action || "Apply") + "?")].concat(root.pageReview.notes || []).join("\n") : ""
+                reviewDetails: root.pageReview ? (root.pageReview.changes || []).join("\n") : ""
+                reviewActionText: root.pageReview ? ((root.pageReview.action || "Apply").trim().split(/\s+/)[0]) : ""
+                reviewDanger: reviewActionText === "Remove"
+                launchText: root.openedLaunchable || root.pageLaunchable && root.pageLaunch && !root.pageLaunch.error ? "Launch" : ""
+                appFile: !fromFile && root.pageFile && root.pageFile.path ? root.pageFile : null
+                updateState: fromFile ? "" : root.updateState(root.pageRow, root.pageUpdateSource && !root.pageUpdateSource.error ? root.pageUpdateSource : null)
+                note: secondaryActionText === "Manage" ? "Manage moves it into PkgDeck, which then keeps it updated with its menu entry and icon." : ""
+                onShowInFolderRequested: (folder) => Qt.openUrlExternally("file://" + encodeURI(folder))
+                launchSettings: root.pageLaunch && !root.pageLaunch.error ? root.pageLaunch : null
+                launchError: root.pageLaunchError || (root.pageLaunch && root.pageLaunch.error ? root.pageLaunch.error : "")
+                updateSource: root.pageUpdateSource && !root.pageUpdateSource.error ? root.pageUpdateSource : null
+                updateError: root.pageUpdateError
+                onUpdateSourceSaved: (github) => {
+                    root.pageUpdateError = backend.saveAppUpdateSource(root.originalIndex(results.currentIndex), github);
+                    if (!root.pageUpdateError)
+                        root.launchRevision++;
+                }
+                onLaunchRequested: root.pageLaunchError = fromFile ? backend.launchOpened() : backend.launchApp(root.originalIndex(results.currentIndex))
+                onLaunchSettingsSaved: (arguments, environment) => {
+                    root.pageLaunchError = backend.saveAppLaunchSettings(root.originalIndex(results.currentIndex), arguments, JSON.stringify(environment));
+                    if (!root.pageLaunchError)
+                        root.launchRevision++;
+                }
+                onReviewAccepted: backend.confirm(true)
+                onReviewRejected: { root.activeRows = []; backend.confirm(false); }
+                compact: root.compact
+                motionEnabled: root.motionEnabled
+                textFont: root.font
+                canvas: root.canvas
+                surface: root.surface
+                ink: root.ink
+                muted: root.muted
+                line: root.line
+                accent: root.accent
+                onCloseRequested: root.closePage()
+                onScreenshotRequested: (url, caption) => {
+                    root.rememberDialogFocus();
+                    root.screenshotUrl = url;
+                    root.screenshotCaption = caption;
+                    screenshotDialog.open();
+                }
+                onScreenshotFailed: (url, identity) => root.hideFailedScreenshot(url, identity)
+                onVisibleChanged: if (visible) Qt.callLater(() => appPage.forceActiveFocus())
             }
             Flow {
                 id: pageActions
@@ -3566,7 +3701,7 @@ Controls.ApplicationWindow {
     }
     // Hides the list behind the app page, rounded corners included.
     Rectangle {
-        visible: root.appPageOpen
+        visible: root.opened !== null
         x: pageContent.x - root.pageMargin
         y: pageContent.y - root.pageMargin
         width: pageContent.width + 2 * root.pageMargin
@@ -3588,88 +3723,10 @@ Controls.ApplicationWindow {
         NumberAnimation { target: pageContent; property: "opacity"; from: 0.4; to: 1; duration: Theme.revealDuration; easing.type: Easing.OutCubic }
     }
     onAppPageOpenChanged: {
-        if (!root.motionEnabled)
+        if (!root.motionEnabled || root.opened === null)
             return;
         (appPageOpen ? pageClosing : pageOpening).complete();
         (appPageOpen ? pageOpening : pageClosing).restart();
-    }
-    PackageDetails {
-        id: appPage
-        objectName: "detailsPanel"
-        page: true
-        visible: root.appPageOpen
-        transform: Translate { id: pageShift }
-        x: pageContent.x
-        y: pageContent.y
-        width: pageContent.width
-        height: pageContent.height
-        readonly property bool fromFile: root.opened !== null
-        selected: root.pageRow
-        selectionIdentity: root.rowIdentity(root.pageRow)
-        sourceName: root.sourceDisplayName
-        installed: root.pageRow !== null && root.isInstalled(root.pageRow)
-        readonly property string rowAction: fromFile ? "" : root.rowActionName(root.pageRow)
-        actionText: fromFile ? (root.openedLaunchable ? "" : root.opened.action || "") : (({install: "Install", remove: "Remove", upgrade: "Update", clean: "Clean", adopt: "Manage with Homebrew"})[rowAction] || "")
-        secondaryActionText: !fromFile && rowAction !== "adopt" && root.pageRow && root.pageRow.source === "appimage" && root.canAdopt(root.pageRow) ? "Manage" : ""
-        secondaryActionSymbol: "install"
-        secondaryActionTone: "accent"
-        onSecondaryActionRequested: root.runAdopt(results.currentIndex)
-        actionAccessibleName: rowAction === "adopt" && root.pageRow ? "Manage " + (root.pageRow.display_name || root.pageRow.name) + " with Homebrew" : ""
-        actionSymbol: rowAction === "upgrade" ? "updates" : rowAction === "remove" ? "remove" : "install"
-        actionTone: fromFile ? "success" : ["upgrade", "adopt"].indexOf(rowAction) >= 0 ? "accent" : rowAction === "install" ? "success" : "danger"
-        actionEnabled: root.canAct && !root.retainingResults && root.pageReview === null
-        onActionRequested: root.runPageAction()
-        screenshots: fromFile ? (root.opened.screenshots || []) : root.visibleScreenshots
-        description: fromFile ? (root.opened.description || "") : root.detailText()
-        detailsData: fromFile ? root.opened : (root.detailMatchesSelection ? root.detail : ({}))
-        detailMatchesSelection: fromFile || root.detailMatchesSelection
-        iconSource: root.iconUrl(fromFile ? (root.opened.package.icon || "") : root.selectedIcon)
-        // The header already names the app, its source and version: say
-        // what happens, and what else changes.
-        reviewSummary: root.pageReview ? [((root.pageReview.action || "Apply") + "?")].concat(root.pageReview.notes || []).join("\n") : ""
-        reviewDetails: root.pageReview ? (root.pageReview.changes || []).join("\n") : ""
-        reviewActionText: root.pageReview ? ((root.pageReview.action || "Apply").trim().split(/\s+/)[0]) : ""
-        reviewDanger: reviewActionText === "Remove"
-        launchText: root.openedLaunchable || root.pageLaunchable && root.pageLaunch && !root.pageLaunch.error ? "Launch" : ""
-        appFile: !fromFile && root.pageFile && root.pageFile.path ? root.pageFile : null
-        updateState: fromFile ? "" : root.updateState(root.pageRow, root.pageUpdateSource && !root.pageUpdateSource.error ? root.pageUpdateSource : null)
-        note: secondaryActionText === "Manage" ? "Manage moves it into PkgDeck, which then keeps it updated with its menu entry and icon." : ""
-        onShowInFolderRequested: (folder) => Qt.openUrlExternally("file://" + encodeURI(folder))
-        launchSettings: root.pageLaunch && !root.pageLaunch.error ? root.pageLaunch : null
-        launchError: root.pageLaunchError || (root.pageLaunch && root.pageLaunch.error ? root.pageLaunch.error : "")
-        updateSource: root.pageUpdateSource && !root.pageUpdateSource.error ? root.pageUpdateSource : null
-        updateError: root.pageUpdateError
-        onUpdateSourceSaved: (github) => {
-            root.pageUpdateError = backend.saveAppUpdateSource(root.originalIndex(results.currentIndex), github);
-            if (!root.pageUpdateError)
-                root.launchRevision++;
-        }
-        onLaunchRequested: root.pageLaunchError = fromFile ? backend.launchOpened() : backend.launchApp(root.originalIndex(results.currentIndex))
-        onLaunchSettingsSaved: (arguments, environment) => {
-            root.pageLaunchError = backend.saveAppLaunchSettings(root.originalIndex(results.currentIndex), arguments, JSON.stringify(environment));
-            if (!root.pageLaunchError)
-                root.launchRevision++;
-        }
-        onReviewAccepted: backend.confirm(true)
-        onReviewRejected: { root.activeRows = []; backend.confirm(false); }
-        compact: root.compact
-        motionEnabled: root.motionEnabled
-        textFont: root.font
-        canvas: root.canvas
-        surface: root.surface
-        ink: root.ink
-        muted: root.muted
-        line: root.line
-        accent: root.accent
-        onCloseRequested: root.closePage()
-        onScreenshotRequested: (url, caption) => {
-            root.rememberDialogFocus();
-            root.screenshotUrl = url;
-            root.screenshotCaption = caption;
-            screenshotDialog.open();
-        }
-        onScreenshotFailed: (url, identity) => root.hideFailedScreenshot(url, identity)
-        onVisibleChanged: if (visible) Qt.callLater(() => appPage.forceActiveFocus())
     }
     // A change running while an app page is open shows its progress there,
     // since the list's own progress bar is behind the page.
