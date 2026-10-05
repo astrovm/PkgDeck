@@ -2674,6 +2674,27 @@ TestCase {
         browser.selectFlatpakInstallation(5);
         compare(browser.selected.installed, "1");
     }
+    function test_flatpak_selector_fits_below_a_narrow_header() {
+        browser.width = 400;
+        browser.height = 520;
+        browser.openView("Installed");
+        const app = {kind: "package", name: "org.example.Player", display_name: "Synthetic Player", source: "flatpak",
+            remote: "flathub", architecture: "x86_64", candidate: "2", installed: "1"};
+        fake.rows = JSON.stringify([Object.assign({}, app, {scope: "user"}), Object.assign({}, app, {scope: "system"})]);
+        tryCompare(findChild(browser, "packageResults"), "count", 1);
+        browser.choose(0);
+        const panel = findChild(browser, "detailsPanel"), selector = findChild(panel, "compactInstallationSelector");
+        waitForRendering(panel);
+        verify(selector.visible);
+        verify(!findChild(panel, "packageInstallationSelector").visible);
+        verify(selector.mapToItem(panel, 0, 0).y >= findChild(panel, "detailsHeader").height);
+        verify(selector.mapToItem(panel, selector.width, selector.height).x <= panel.width);
+        mouseClick(selector);
+        keyClick(Qt.Key_Down);
+        keyClick(Qt.Key_Return);
+        tryCompare(selector, "currentText", "System");
+        compare(browser.originalIndex(0), 1);
+    }
     function test_flatpak_prefers_the_installed_copy_and_ignores_stale_details() {
         browser.openView("Search");
         const app = {kind: "package", name: "org.example.Player", source: "flatpak", remote: "flathub",

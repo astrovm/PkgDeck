@@ -90,7 +90,8 @@ Rectangle {
     // still on its way (such as Flathub's description and screenshots).
     readonly property bool loadingMore: detailMatchesSelection && detailsData.more === true
     readonly property real contentIdealHeight: Math.max(88, 2 * Theme.gutter + header.implicitHeight
-        + detailsContent.spacing + detailBody.implicitHeight)
+        + detailsContent.spacing + detailBody.implicitHeight
+        + (compact && installationChoices.length > 1 ? Theme.controlHeight + detailsContent.spacing : 0))
     // Never collapses while the next row loads: it keeps the last settled
     // height (or the skeleton's, if taller) so the panel does not jump.
     readonly property real idealHeight: loading ? Math.max(settledHeight, contentIdealHeight) : contentIdealHeight
@@ -190,6 +191,14 @@ Rectangle {
                 font.weight: Font.DemiBold
             }
         }
+    }
+    component InstallationSelector: ThemedComboBox {
+        enabled: panel.actionEnabled
+        model: panel.installationChoices.map((choice) => choice.label)
+        currentIndex: panel.installationIndex
+        Accessible.name: "Flatpak installation"
+        Layout.alignment: Qt.AlignVCenter
+        onActivated: (index) => panel.installationRequested(index)
     }
     readonly property string homepage: detailMatchesSelection && detailsData.homepage ? String(detailsData.homepage) : ""
     readonly property bool homepageOpens: /^https?:\/\//i.test(homepage)
@@ -348,15 +357,9 @@ Rectangle {
                     Item { Layout.fillWidth: true }
                 }
             }
-            ThemedComboBox {
+            InstallationSelector {
                 objectName: "packageInstallationSelector"
-                visible: panel.installationChoices.length > 1
-                enabled: panel.actionEnabled
-                model: panel.installationChoices.map((choice) => choice.label)
-                currentIndex: panel.installationIndex
-                Accessible.name: "Flatpak installation"
-                Layout.alignment: Qt.AlignVCenter
-                onActivated: (index) => panel.installationRequested(index)
+                visible: !panel.compact && panel.installationChoices.length > 1
             }
             DetailsAction {
                 objectName: "pageLaunchButton"
@@ -412,6 +415,11 @@ Rectangle {
                     DeckIcon { objectName: "closeDetailsIcon"; anchors.centerIn: parent; name: "cancel"; ink: panel.muted; width: 16; height: 16 }
                 }
             }
+        }
+        InstallationSelector {
+            objectName: "compactInstallationSelector"
+            visible: panel.compact && panel.installationChoices.length > 1
+            Layout.alignment: Qt.AlignLeft
         }
         // What the page's own action does, and how the app starts here.
         Controls.Label {
