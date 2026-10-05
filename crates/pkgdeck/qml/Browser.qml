@@ -1281,9 +1281,9 @@ Controls.ApplicationWindow {
         const rows = compact ? 2 : 3;
         const rowHeight = compact ? Math.max(94, font.pointSize * 8.5) : Math.max(56, font.pointSize * 5);
         const budget = detailsBudget();
-        // Compact pages leave most of the space to the details' gallery.
+        // Keep a complete compact card available above the scrolling details.
         return Math.min(shortResultsHeight(), listChromeHeight() + rows * rowHeight,
-            budget * (compact ? 0.3 : 0.55), budget - detailsMinimumHeight());
+            budget * (compact ? 0.5 : 0.55), budget - detailsMinimumHeight());
     }
     // Tokens live in the Theme singleton; these aliases keep bindings short.
     Binding { target: Theme; property: "appearance"; value: preferences.appearance }
