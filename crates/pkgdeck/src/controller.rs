@@ -404,6 +404,9 @@ enum Reply {
     /// How many packages the search matched, sent before each search
     /// report that may carry only the best of them.
     Matches(usize),
+    /// The rows for a report's packages, made on the worker before the
+    /// report is sent, so the window never encodes thousands of them.
+    Rows(Box<PreparedRows>),
     /// Every installed package, and whether update indexes were refreshed
     /// first. Only a refreshed inventory may stand in for Updates.
     Inventory(PackageReport, bool),
@@ -1409,6 +1412,7 @@ pub struct Controller {
     /// How many packages the running or last search matched; its rows
     /// carry only the best of them.
     search_matches: usize,
+    prepared_rows: RowsCache,
     /// Set while a details preview is applied: the quick first look sent
     /// before slower lookups finish.
     details_preview: bool,
@@ -1519,6 +1523,7 @@ impl Default for Controller {
             reused_engine_born: None,
             active_view: "Search".into(),
             search_matches: 0,
+            prepared_rows: RowsCache::default(),
             details_preview: false,
             catalog_checked: false,
             catalog_worker: None,
@@ -3174,6 +3179,67 @@ fn opened_page(details: &PackageDetails, action: &str) -> Value {
         "action": action,
     })
 }
+/// The list rows for `packages`, in order, with the apps each one shares.
+fn package_rows(packages: &[Package]) -> Vec<Value> {
+    let same = same_app_sources_all(packages);
+    let groups = same_app_group_keys_all(packages);
+    packages
+        .iter()
+        .zip(same.into_iter().zip(groups))
+        .map(|(p, (from, group))| package_row(p, &from, group.as_deref()))
+        .collect()
+}
+/// Encoded rows for exactly these packages.
+struct PreparedRows {
+    packages: Vec<Package>,
+    json: String,
+}
+impl PreparedRows {
+    fn new(packages: &[Package]) -> Box<Self> {
+        Box::new(Self {
+            packages: packages.to_vec(),
+            json: serde_json::to_string(&package_rows(packages)).expect("serializable rows"),
+        })
+    }
+}
+/// Rows made on a worker, newest last. A few are kept: a preload's rows are
+/// used when its section opens, which may be after other loads.
+#[derive(Default)]
+struct RowsCache(Vec<PreparedRows>);
+impl RowsCache {
+    const CAPACITY: usize = 4;
+    fn insert(&mut self, rows: PreparedRows) {
+        self.0.retain(|kept| kept.packages != rows.packages);
+        if self.0.len() >= Self::CAPACITY {
+            self.0.remove(0);
+        }
+        self.0.push(rows);
+    }
+    /// The encoded rows for `packages`, made on a worker or here.
+    fn json(&self, packages: &[Package]) -> String {
+        self.0
+            .iter()
+            .rev()
+            .find(|kept| kept.packages == packages)
+            .map(|kept| kept.json.clone())
+            .unwrap_or_else(|| {
+                serde_json::to_string(&package_rows(packages)).expect("serializable rows")
+            })
+    }
+}
+/// `rows`, an encoded array, with `more` rows appended.
+fn append_rows(mut rows: String, more: &[Value]) -> String {
+    if more.is_empty() {
+        return rows;
+    }
+    let more = serde_json::to_string(more).expect("serializable rows");
+    rows.pop();
+    if rows.len() > 1 {
+        rows.push(',');
+    }
+    rows.push_str(&more[1..]);
+    rows
+}
 fn package_row(p: &Package, same_from: &[String], same_group: Option<&str>) -> Value {
     json!({"name": p.id.name, "display_name": p.display_name, "source": p.id.backend, "architecture": p.id.architecture,
         "remote": p.id.remote, "reference": p.id.reference, "scope": p.id.scope, "scope_label": scope_label(&p.id.scope), "summary": p.summary, "installed": p.installed_version,
@@ -4017,10 +4083,15 @@ impl ffi::PackageController {
             let sources_view = matches!(&job, Job::Load(view, _) | Job::RetrySource(view, ..) if view == "Sources");
             let mut send = |mut reply| {
                 match &mut reply {
+                    // Rows are made here, off the window's thread.
+                    Reply::Partial(report) | Reply::Done(Ok(Payload::Packages(report))) => {
+                        for package in &mut report.packages {
+                            crate::metadata::enrich_cached(package);
+                        }
+                        let _ = sender.send(Reply::Rows(PreparedRows::new(&report.packages)));
+                    }
                     Reply::Done(Ok(
-                        Payload::Packages(report)
-                        | Payload::RetryPackages(_, report)
-                        | Payload::RetryFailedUpdates(_, report),
+                        Payload::RetryPackages(_, report) | Payload::RetryFailedUpdates(_, report),
                     )) => {
                         for package in &mut report.packages {
                             crate::metadata::enrich_cached(package);
@@ -5168,19 +5239,15 @@ impl ffi::PackageController {
                 }
                 let loading = self.rust().worker.is_some();
                 self.as_mut().set_package_report_state(&report, loading);
-                let same = same_app_sources_all(&report.packages);
-                let groups = same_app_group_keys_all(&report.packages);
-                let mut rows: Vec<_> = report
-                    .packages
-                    .iter()
-                    .zip(same.into_iter().zip(groups))
-                    .map(|(p, (from, group))| package_row(p, &from, group.as_deref()))
-                    .collect();
-                rows.extend(report.failures.iter().map(|failure| {
+                let failure_rows: Vec<_> = report.failures.iter().map(|failure| {
                     json!({"kind": "failure", "name": failure.backend, "source": failure.backend,
                         "display_name": source_display_name(&failure.backend),
                         "summary": plain_error(&failure.error, Some(&failure.backend), sudo), "failure_kind": failure_kind(&failure.error), "available": false})
-                }));
+                }).collect();
+                let rows = append_rows(
+                    self.rust().prepared_rows.json(&report.packages),
+                    &failure_rows,
+                );
                 let failed: Vec<_> = report
                     .failures
                     .iter()
@@ -5205,7 +5272,7 @@ impl ffi::PackageController {
                 };
                 self.as_mut().rust_mut().packages = report.packages;
                 self.as_mut().rust_mut().failures = report.failures;
-                self.as_mut().set_rows(encoded(rows));
+                self.as_mut().set_rows(rows.as_str().into());
                 self.set_status(status.as_str().into());
             }
             Ok(Payload::Cleanup(report)) => {
@@ -5552,6 +5619,7 @@ impl ffi::PackageController {
                     for package in &mut report.packages {
                         crate::metadata::enrich_cached(package);
                     }
+                    let _ = sender.send(Reply::Rows(PreparedRows::new(&report.packages)));
                 }
                 // Rows stream only for a visible load; a section waiting
                 // on this preload only needs who answered.
@@ -5638,6 +5706,7 @@ impl ffi::PackageController {
                                 worker.answered = sources;
                             }
                         }
+                        Reply::Rows(rows) => self.as_mut().rust_mut().prepared_rows.insert(*rows),
                         _ => {}
                     }
                 }
@@ -5806,8 +5875,27 @@ impl ffi::PackageController {
                     self.as_mut().rust_mut().search_matches = count;
                     None
                 }
+                Reply::Rows(rows) => {
+                    if !cancelled {
+                        self.as_mut().rust_mut().prepared_rows.insert(*rows);
+                    }
+                    None
+                }
                 reply => Some(reply),
             })
+            .collect();
+        // Partials are cumulative: only the newest of a batch is shown.
+        let newest = replies.iter().rposition(|reply| {
+            matches!(
+                reply,
+                Reply::Partial(_) | Reply::Done(Ok(Payload::Packages(_)))
+            )
+        });
+        let replies: Vec<_> = replies
+            .into_iter()
+            .enumerate()
+            .filter(|(at, reply)| !matches!(reply, Reply::Partial(_)) || Some(*at) == newest)
+            .map(|(_, reply)| reply)
             .collect();
         if let Some((job, cancel, joined)) = finished {
             // A source that never answered is not waited for any more.
@@ -6119,6 +6207,7 @@ impl ffi::PackageController {
                     | Reply::Asked(_)
                     | Reply::Answered(_)
                     | Reply::Matches(_)
+                    | Reply::Rows(_)
                     | Reply::Inventory(..) => {}
                 }
             }
@@ -11466,6 +11555,94 @@ mod tests {
             checked_upgrades(&[runtime], &serde_json::to_string(&vec![identity]).unwrap())
                 .is_empty()
         );
+    }
+    #[test]
+    fn rows_made_on_the_worker_match_rows_made_here() {
+        let package = |name: &str| Package {
+            id: PackageId {
+                backend: "fixture".into(),
+                name: name.into(),
+                architecture: "all".into(),
+                scope: Scope::System,
+                remote: None,
+                reference: None,
+            },
+            display_name: name.into(),
+            summary: "Fixture".into(),
+            installed_version: Some("1".into()),
+            candidate_version: Some("1".into()),
+            update: UpdateAvailability::Current,
+            icon: None,
+            component_ids: vec![],
+            homepages: vec![],
+            adopt_with: None,
+        };
+        let packages = vec![package("one"), package("two")];
+        let made_here = serde_json::to_string(&package_rows(&packages)).unwrap();
+        let mut cache = RowsCache::default();
+        assert_eq!(cache.json(&packages), made_here);
+        // Rows from a worker are used only for exactly the same packages.
+        let mut prepared = PreparedRows::new(&packages);
+        prepared.json = "[\"from the worker\"]".into();
+        cache.insert(*prepared);
+        assert_eq!(cache.json(&packages), "[\"from the worker\"]");
+        let mut changed = packages.clone();
+        changed[1].installed_version = Some("2".into());
+        assert_ne!(cache.json(&changed), "[\"from the worker\"]");
+        // Only the newest few are kept.
+        for name in ["a", "b", "c", "d"] {
+            cache.insert(*PreparedRows::new(&[package(name)]));
+        }
+        assert_eq!(cache.json(&packages), made_here);
+        // Failure rows go after the package rows.
+        let failure = [json!({"kind": "failure"})];
+        assert_eq!(
+            append_rows("[]".into(), &failure),
+            r#"[{"kind":"failure"}]"#
+        );
+        assert_eq!(
+            append_rows("[1]".into(), &failure),
+            r#"[1,{"kind":"failure"}]"#
+        );
+        assert_eq!(append_rows("[1]".into(), &[]), "[1]");
+    }
+    #[test]
+    fn a_batch_of_partials_shows_only_the_newest() {
+        let mut controller = synthetic_controller();
+        let mut controller = controller.pin_mut();
+        let row = |name: &str| {
+            let mut row = fixture_row();
+            row.id.name = name.into();
+            row
+        };
+        let report = |names: &[&str]| PackageReport {
+            packages: names.iter().map(|name| row(name)).collect(),
+            failures: vec![],
+            successful_sources: vec![],
+        };
+        let (worker, gate) = held_worker(
+            Job::Load("Installed".into(), String::new()),
+            vec![
+                Reply::Rows(PreparedRows::new(&report(&["first"]).packages)),
+                Reply::Partial(report(&["first"])),
+                Reply::Rows(PreparedRows::new(&report(&["first", "second"]).packages)),
+                Reply::Partial(report(&["first", "second"])),
+            ],
+        );
+        controller.as_mut().rust_mut().worker = Some(worker);
+        let shown = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = shown.clone();
+        let _connection = controller
+            .as_mut()
+            .on_rows_changed(move |_| {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            })
+            .release();
+        controller.as_mut().poll();
+        assert_eq!(shown.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(controller.rows().to_string().contains("second"));
+        drop(gate);
+        settle(&mut controller);
     }
     #[test]
     fn huge_searches_keep_only_the_best_matches() {
