@@ -2507,7 +2507,8 @@ esac
                 .map(|_| AppImage::spawn(command, bridge))
                 .inspect(|_| std::thread::sleep(std::time::Duration::from_millis(1)))
                 .find(|result| {
-                    !matches!(result, Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy)
+                    result.as_ref().err().map(std::io::Error::kind)
+                        != Some(std::io::ErrorKind::ExecutableFileBusy)
                 })
                 .unwrap()
         };
