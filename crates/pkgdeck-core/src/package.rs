@@ -117,6 +117,8 @@ pub enum Capability {
 pub enum CleanupKind {
     OrphanDependencies,
     PackageCache,
+    /// A second copy of an app that's already installed.
+    DuplicateCopy,
 }
 
 /// One manager-native cleanup plan. `key` is a backend-defined fixed token,

@@ -42,6 +42,13 @@ Rectangle {
     // editable}), set on its page.
     property var updateSource: null
     property string updateError: ""
+    // The file an installed AppImage starts from ({path, folder, bytes,
+    // modified, managed, without_fuse}), on its page.
+    property var appFile: null
+    // How it gets updates, in a few words (see Browser's updateState).
+    property string updateState: ""
+    // One line under the header that explains the page's own action.
+    property string note: ""
     property bool compact: false
     property bool motionEnabled: Theme.motionEnabled
     property bool detailMatchesSelection: false
@@ -59,6 +66,10 @@ Rectangle {
     property string secondaryActionText: ""
     property string secondaryActionSymbol: "install"
     property string secondaryActionTone: "accent"
+    // An app you can start opens with Launch as its main button, unless an
+    // update waits; removing it then sits under More.
+    readonly property bool launchIsMain: page && launchText.length > 0 && actionSymbol !== "updates"
+    readonly property bool removeInMenu: page && launchText.length > 0 && actionText.length > 0 && actionTone === "danger"
     // Maps a raw source id to its display name for the header.
     property var sourceName: (id) => id
     property color canvas: Theme.canvas
@@ -92,7 +103,19 @@ Rectangle {
     readonly property string version: selected && selected.kind === "package"
         ? String(selected.installed || selected.candidate || "") : ""
     // Where an opened file or link came from.
-    readonly property string location: detailMatchesSelection && detailsData.location ? String(detailsData.location) : ""
+    readonly property string location: appFile && appFile.path ? String(appFile.path)
+        : detailMatchesSelection && detailsData.location ? String(detailsData.location) : ""
+    function sizeText(bytes) {
+        if (!(bytes > 0))
+            return "";
+        const units = ["bytes", "KB", "MB", "GB"];
+        let value = bytes, unit = 0;
+        while (value >= 1000 && unit < units.length - 1) {
+            value /= 1000;
+            unit++;
+        }
+        return (unit === 0 ? value : value.toFixed(value < 10 ? 1 : 0)) + " " + units[unit];
+    }
     // The one-line summary, above the long description on a page.
     readonly property string summary: page && selected && selected.kind === "package" && selected.summary
         && String(selected.summary).trim() !== description.trim() ? String(selected.summary) : ""
@@ -106,6 +129,7 @@ Rectangle {
     signal screenshotFailed(string url, string identity)
     signal actionRequested()
     signal secondaryActionRequested()
+    signal showInFolderRequested(string folder)
 
     onContentIdealHeightChanged: if (!loading && selected) settledHeight = contentIdealHeight
     onLoadingChanged: if (!loading && selected) settledHeight = contentIdealHeight
@@ -125,6 +149,8 @@ Rectangle {
         property string accessibleName: ""
         // Just the icon; the label is still its spoken name and tooltip.
         property bool iconOnly: false
+        // The page's main action: filled, so it reads first.
+        property bool primary: false
         visible: label.length > 0
         text: panel.compact || iconOnly ? "" : label
         Accessible.name: accessibleName || (label + (panel.selected ? " " + (panel.selected.display_name || panel.selected.name || "") : ""))
@@ -139,8 +165,9 @@ Rectangle {
         background: Rectangle {
             radius: Theme.controlRadius
             color: !chip.enabled ? "transparent"
+                : chip.primary ? Qt.darker(chip.tone, chip.down ? 1.2 : chip.hovered ? 1.08 : 1)
                 : Theme.tint(chip.tone, chip.down ? 0.26 : chip.hovered ? 0.2 : 0.13)
-            border.color: chip.enabled ? Theme.tint(chip.tone, 0.4) : panel.line
+            border.color: chip.enabled ? (chip.primary ? chip.tone : Theme.tint(chip.tone, 0.4)) : panel.line
             Behavior on color { ColorAnimation { duration: Theme.feedbackDuration } }
             FocusFrame { shown: chip.visualFocus }
         }
@@ -148,7 +175,7 @@ Rectangle {
             spacing: 8
             DeckIcon {
                 name: chip.symbol
-                ink: chip.enabled ? chip.tone : panel.muted
+                ink: !chip.enabled ? panel.muted : chip.primary ? panel.surface : chip.tone
                 Layout.preferredWidth: 18
                 Layout.preferredHeight: 18
                 Layout.alignment: Qt.AlignCenter
@@ -156,7 +183,7 @@ Rectangle {
             Text {
                 visible: text.length > 0
                 text: chip.text
-                color: chip.enabled ? chip.tone : panel.muted
+                color: !chip.enabled ? panel.muted : chip.primary ? panel.surface : chip.tone
                 font.family: panel.textFont.family
                 font.pointSize: panel.textFont.pointSize
                 font.weight: Font.DemiBold
@@ -167,9 +194,12 @@ Rectangle {
     readonly property bool homepageOpens: /^https?:\/\//i.test(homepage)
     readonly property var dependencies: detailMatchesSelection ? (detailsData.dependencies || []) : []
     readonly property var facts: detailMatchesSelection ? [
+        {label: "Updates", value: updateState},
         {label: "Publisher", value: detailsData.publisher || ""},
         {label: "License", value: detailsData.license || ""},
-        {label: "File", value: location}
+        {label: "File", value: location},
+        {label: "Size", value: appFile ? sizeText(appFile.bytes) : ""},
+        {label: "Updated", value: appFile && appFile.modified > 0 ? new Date(appFile.modified * 1000).toLocaleDateString(Qt.locale(), Locale.ShortFormat) : ""}
     ].filter(fact => fact.value) : []
     // The source's display name, under the package name.
     readonly property string subtitle: selected && selected.kind === "package" && selected.source
@@ -335,6 +365,7 @@ Rectangle {
                 label: panel.launchText
                 symbol: "launch"
                 tone: panel.accent
+                primary: panel.launchIsMain
                 enabled: panel.actionEnabled
                 onClicked: panel.launchRequested()
             }
@@ -350,12 +381,80 @@ Rectangle {
             DetailsAction {
                 id: actionButton
                 objectName: "detailsActionButton"
-                label: panel.actionText
+                // An app you can start keeps Remove under More.
+                label: panel.removeInMenu ? "" : panel.actionText
                 symbol: panel.actionSymbol
                 tone: panel.actionColor
+                primary: panel.page && !panel.launchIsMain && panel.actionTone !== "danger"
                 accessibleName: panel.actionAccessibleName
                 enabled: panel.actionEnabled
                 onClicked: panel.actionRequested()
+            }
+            Controls.Button {
+                id: moreButton
+                objectName: "pageMoreButton"
+                visible: panel.removeInMenu
+                enabled: panel.actionEnabled
+                Accessible.name: "More"
+                Controls.ToolTip.visible: hovered && !moreMenu.visible
+                Controls.ToolTip.delay: 500
+                Controls.ToolTip.text: Accessible.name
+                Layout.preferredWidth: 38
+                Layout.alignment: Qt.AlignVCenter
+                implicitHeight: Theme.controlHeight
+                onClicked: moreMenu.visible ? moreMenu.close() : moreMenu.open()
+                background: Rectangle {
+                    color: moreButton.down || moreMenu.visible ? Theme.tint(panel.ink, 0.12) : moreButton.hovered ? Theme.tint(panel.ink, 0.08) : "transparent"
+                    radius: Theme.controlRadius
+                    border.color: moreButton.visualFocus ? panel.accent : panel.line
+                    border.width: moreButton.visualFocus ? 2 : 1
+                    Behavior on color { ColorAnimation { duration: Theme.feedbackDuration } }
+                }
+                contentItem: Text {
+                    text: "\u22ef"
+                    color: moreButton.enabled ? panel.ink : panel.muted
+                    horizontalAlignment: Text.AlignHCenter
+                    verticalAlignment: Text.AlignVCenter
+                    font.pointSize: panel.textFont.pointSize * 1.3
+                    font.bold: true
+                }
+                Controls.Popup {
+                    id: moreMenu
+                    objectName: "pageMoreMenu"
+                    y: moreButton.height + 4
+                    x: moreButton.width - width
+                    padding: 4
+                    background: Rectangle {
+                        color: panel.surface
+                        radius: Theme.controlRadius
+                        border.color: Theme.strongLine
+                    }
+                    enter: Transition {
+                        NumberAnimation { property: "opacity"; from: 0; to: 1; duration: panel.motionEnabled ? Theme.feedbackDuration : 0 }
+                    }
+                    contentItem: Controls.ItemDelegate {
+                        id: removeItem
+                        objectName: "pageMenuRemove"
+                        text: panel.actionText
+                        Accessible.name: panel.actionAccessibleName || (panel.actionText + (panel.selected ? " " + (panel.selected.display_name || panel.selected.name || "") : ""))
+                        onClicked: { moreMenu.close(); panel.actionRequested(); }
+                        background: Rectangle {
+                            radius: Theme.smallRadius
+                            color: removeItem.hovered || removeItem.visualFocus ? Theme.tint(Theme.danger, 0.14) : "transparent"
+                        }
+                        contentItem: RowLayout {
+                            spacing: 8
+                            DeckIcon { name: panel.actionSymbol; ink: Theme.danger; Layout.preferredWidth: 16; Layout.preferredHeight: 16 }
+                            Text {
+                                text: removeItem.text
+                                color: Theme.danger
+                                font.family: panel.textFont.family
+                                font.pointSize: panel.textFont.pointSize
+                                Layout.rightMargin: 6
+                            }
+                        }
+                    }
+                }
             }
             Controls.Button {
                 id: closeButton
@@ -381,6 +480,35 @@ Rectangle {
                     DeckIcon { objectName: "closeDetailsIcon"; anchors.centerIn: parent; name: "cancel"; ink: panel.muted; width: 16; height: 16 }
                 }
             }
+        }
+        // What the page's own action does, and how the app starts here.
+        Controls.Label {
+            objectName: "pageNote"
+            visible: panel.page && text.length > 0
+            Layout.fillWidth: true
+            text: panel.note
+            textFormat: Text.PlainText
+            wrapMode: Text.Wrap
+            color: panel.muted
+        }
+        // Why Launch failed, when its settings aren't on this page to show it.
+        Controls.Label {
+            objectName: "pageLaunchError"
+            visible: panel.page && text.length > 0 && !(panel.launchSettings && panel.launchSettings.editable === true)
+            Layout.fillWidth: true
+            text: panel.launchError
+            textFormat: Text.PlainText
+            wrapMode: Text.Wrap
+            color: Theme.danger
+        }
+        Controls.Label {
+            objectName: "pageFuseNote"
+            visible: panel.page && !!panel.appFile && panel.appFile.without_fuse === true
+            Layout.fillWidth: true
+            text: "Starts unpacked: this computer doesn't have FUSE 2 (libfuse2), which this AppImage needs to start the usual way."
+            textFormat: Text.PlainText
+            wrapMode: Text.Wrap
+            color: Theme.warning
         }
         DeckScrollView {
             ink: panel.muted
@@ -569,6 +697,178 @@ Rectangle {
                         text: panel.description
                         Accessible.name: "Package details"
                     }
+                    // Facts as a two-column grid, then the dependency list.
+                    ColumnLayout {
+                        objectName: "packageMetadata"
+                        // The same facts as plain text, for tests and copying.
+                        readonly property string text: panel.metadataText
+                        visible: panel.metadataText.length > 0 || panel.facts.length > 0
+                        Layout.fillWidth: true
+                        Layout.topMargin: panel.description.length > 0 || panel.screenshots.length > 0 ? 2 : 0
+                        spacing: Theme.spacing
+                        Accessible.name: "Additional package metadata"
+                        GridLayout {
+                            objectName: "detailsFacts"
+                            visible: panel.facts.length > 0 || panel.homepage.length > 0
+                            columns: 2
+                            columnSpacing: Theme.spacingLarge
+                            rowSpacing: Theme.spacingSmall
+                            Layout.fillWidth: true
+                            Repeater {
+                                model: panel.facts
+                                delegate: Controls.Label {
+                                    required property var modelData
+                                    required property int index
+                                    Layout.row: index
+                                    Layout.column: 0
+                                    Layout.alignment: Qt.AlignTop
+                                    text: modelData.label
+                                    color: panel.muted
+                                    font.pointSize: Theme.pointSize(Theme.smallScale)
+                                }
+                            }
+                            Repeater {
+                                model: panel.facts
+                                delegate: TextEdit {
+                                    required property var modelData
+                                    required property int index
+                                    Layout.row: index
+                                    Layout.column: 1
+                                    Layout.fillWidth: true
+                                    text: modelData.value
+                                    textFormat: TextEdit.PlainText
+                                    readOnly: true
+                                    selectByMouse: true
+                                    wrapMode: TextEdit.Wrap
+                                    color: panel.ink
+                                    font.pointSize: Theme.pointSize(Theme.smallScale)
+                                    Accessible.name: modelData.label + ": " + modelData.value
+                                }
+                            }
+                            Controls.Label {
+                                visible: panel.homepage.length > 0
+                                Layout.row: panel.facts.length
+                                Layout.column: 0
+                                Layout.alignment: Qt.AlignVCenter
+                                text: "Homepage"
+                                color: panel.muted
+                                font.pointSize: Theme.pointSize(Theme.smallScale)
+                            }
+                            Controls.AbstractButton {
+                                id: homepageLink
+                                objectName: "homepageLink"
+                                visible: panel.homepage.length > 0
+                                enabled: panel.homepageOpens
+                                Layout.row: panel.facts.length
+                                Layout.column: 1
+                                Layout.fillWidth: true
+                                Layout.maximumWidth: Math.ceil(implicitWidth)
+                                hoverEnabled: true
+                                Accessible.role: Accessible.Link
+                                Accessible.name: "Homepage " + panel.homepage
+                                Controls.ToolTip.visible: hovered
+                                Controls.ToolTip.delay: 500
+                                Controls.ToolTip.text: panel.homepage
+                                onClicked: Qt.openUrlExternally(panel.homepage)
+                                HoverHandler { cursorShape: homepageLink.enabled ? Qt.PointingHandCursor : Qt.ArrowCursor }
+                                background: FocusFrame { shown: homepageLink.visualFocus; radius: Theme.smallRadius }
+                                contentItem: RowLayout {
+                                    spacing: 5
+                                    Text {
+                                        text: panel.homepage.replace(/^https?:\/\//i, "").replace(/\/$/, "")
+                                        textFormat: Text.PlainText
+                                        elide: Text.ElideMiddle
+                                        color: homepageLink.enabled ? panel.accent : panel.ink
+                                        font.pointSize: Theme.pointSize(Theme.smallScale)
+                                        font.underline: homepageLink.hovered && homepageLink.enabled
+                                        Layout.fillWidth: true
+                                    }
+                                    DeckIcon {
+                                        visible: homepageLink.enabled
+                                        name: "external"
+                                        ink: panel.accent
+                                        Layout.preferredWidth: 13
+                                        Layout.preferredHeight: 13
+                                    }
+                                }
+                            }
+                        }
+                        DetailsAction {
+                            objectName: "showInFolder"
+                            label: panel.appFile && panel.appFile.folder ? "Show in folder" : ""
+                            symbol: "external"
+                            tone: panel.accent
+                            accessibleName: "Show " + (panel.selected ? (panel.selected.display_name || panel.selected.name || "") : "") + " in its folder"
+                            onClicked: panel.showInFolderRequested(panel.appFile.folder)
+                        }
+                        // Collapsed by default: long APT lists stay out of the way.
+                        Controls.AbstractButton {
+                            id: dependenciesToggle
+                            objectName: "dependenciesToggle"
+                            visible: panel.dependencies.length > 0
+                            Layout.fillWidth: true
+                            hoverEnabled: true
+                            Accessible.role: Accessible.Button
+                            Accessible.name: (panel.dependenciesExpanded ? "Hide " : "Show ") + "dependencies (" + panel.dependencies.length + ")"
+                            onClicked: panel.dependenciesExpanded = !panel.dependenciesExpanded
+                            background: FocusFrame { shown: dependenciesToggle.visualFocus; radius: Theme.smallRadius }
+                            contentItem: RowLayout {
+                                spacing: 6
+                                DeckIcon {
+                                    name: "right"
+                                    ink: panel.muted
+                                    rotation: panel.dependenciesExpanded ? 90 : 0
+                                    Layout.preferredWidth: 13
+                                    Layout.preferredHeight: 13
+                                    Behavior on rotation {
+                                        enabled: panel.motionEnabled
+                                        NumberAnimation { duration: Theme.feedbackDuration; easing.type: Easing.OutCubic }
+                                    }
+                                }
+                                Text {
+                                    objectName: "dependenciesHeading"
+                                    text: "Dependencies (" + panel.dependencies.length + ")"
+                                    color: dependenciesToggle.hovered ? panel.ink : panel.muted
+                                    font.pointSize: Theme.pointSize(Theme.smallScale)
+                                    font.weight: Font.DemiBold
+                                    Layout.fillWidth: true
+                                }
+                            }
+                        }
+                        Flow {
+                            id: dependencyChips
+                            objectName: "dependencyChips"
+                            visible: panel.dependenciesExpanded && panel.dependencies.length > 0
+                            Layout.fillWidth: true
+                            spacing: 6
+                            opacity: visible ? 1 : 0
+                            Behavior on opacity {
+                                enabled: panel.motionEnabled
+                                NumberAnimation { duration: Theme.revealDuration; easing.type: Easing.OutCubic }
+                            }
+                            Repeater {
+                                model: dependencyChips.visible ? panel.dependencies : []
+                                delegate: Controls.Label {
+                                    required property var modelData
+                                    text: String(modelData)
+                                    textFormat: Text.PlainText
+                                    color: panel.ink
+                                    font.pointSize: Theme.pointSize(Theme.captionScale)
+                                    elide: Text.ElideRight
+                                    width: Math.min(implicitWidth, dependencyChips.width)
+                                    leftPadding: 8
+                                    rightPadding: 8
+                                    topPadding: 3
+                                    bottomPadding: 3
+                                    background: Rectangle {
+                                        radius: Theme.smallRadius
+                                        color: Theme.tint(panel.ink, 0.06)
+                                        border.color: panel.line
+                                    }
+                                }
+                            }
+                        }
+                    }
                     // How an AppImage PkgDeck manages starts, from here and
                     // from the app menu: arguments and environment variables.
                     ColumnLayout {
@@ -727,183 +1027,12 @@ Rectangle {
                             }
                         }
                         Controls.Label {
-                            objectName: "builtinUpdates"
-                            visible: !!panel.updateSource && panel.updateSource.builtin === true && !panel.updateSource.github
-                            text: "Updates itself"
-                            color: panel.muted
-                            font.pointSize: Theme.pointSize(Theme.smallScale)
-                        }
-                        Controls.Label {
                             objectName: "updateError"
                             visible: text.length > 0
                             Layout.fillWidth: true
                             text: panel.updateError
                             wrapMode: Text.Wrap
                             color: Theme.danger
-                        }
-                    }
-                    // Facts as a two-column grid, then the dependency list.
-                    ColumnLayout {
-                        objectName: "packageMetadata"
-                        // The same facts as plain text, for tests and copying.
-                        readonly property string text: panel.metadataText
-                        visible: panel.metadataText.length > 0
-                        Layout.fillWidth: true
-                        Layout.topMargin: panel.description.length > 0 || panel.screenshots.length > 0 ? 2 : 0
-                        spacing: Theme.spacing
-                        Accessible.name: "Additional package metadata"
-                        GridLayout {
-                            objectName: "detailsFacts"
-                            visible: panel.facts.length > 0 || panel.homepage.length > 0
-                            columns: 2
-                            columnSpacing: Theme.spacingLarge
-                            rowSpacing: Theme.spacingSmall
-                            Layout.fillWidth: true
-                            Repeater {
-                                model: panel.facts
-                                delegate: Controls.Label {
-                                    required property var modelData
-                                    required property int index
-                                    Layout.row: index
-                                    Layout.column: 0
-                                    Layout.alignment: Qt.AlignTop
-                                    text: modelData.label
-                                    color: panel.muted
-                                    font.pointSize: Theme.pointSize(Theme.smallScale)
-                                }
-                            }
-                            Repeater {
-                                model: panel.facts
-                                delegate: TextEdit {
-                                    required property var modelData
-                                    required property int index
-                                    Layout.row: index
-                                    Layout.column: 1
-                                    Layout.fillWidth: true
-                                    text: modelData.value
-                                    textFormat: TextEdit.PlainText
-                                    readOnly: true
-                                    selectByMouse: true
-                                    wrapMode: TextEdit.Wrap
-                                    color: panel.ink
-                                    font.pointSize: Theme.pointSize(Theme.smallScale)
-                                    Accessible.name: modelData.label + ": " + modelData.value
-                                }
-                            }
-                            Controls.Label {
-                                visible: panel.homepage.length > 0
-                                Layout.row: panel.facts.length
-                                Layout.column: 0
-                                Layout.alignment: Qt.AlignVCenter
-                                text: "Homepage"
-                                color: panel.muted
-                                font.pointSize: Theme.pointSize(Theme.smallScale)
-                            }
-                            Controls.AbstractButton {
-                                id: homepageLink
-                                objectName: "homepageLink"
-                                visible: panel.homepage.length > 0
-                                enabled: panel.homepageOpens
-                                Layout.row: panel.facts.length
-                                Layout.column: 1
-                                Layout.fillWidth: true
-                                Layout.maximumWidth: Math.ceil(implicitWidth)
-                                hoverEnabled: true
-                                Accessible.role: Accessible.Link
-                                Accessible.name: "Homepage " + panel.homepage
-                                Controls.ToolTip.visible: hovered
-                                Controls.ToolTip.delay: 500
-                                Controls.ToolTip.text: panel.homepage
-                                onClicked: Qt.openUrlExternally(panel.homepage)
-                                HoverHandler { cursorShape: homepageLink.enabled ? Qt.PointingHandCursor : Qt.ArrowCursor }
-                                background: FocusFrame { shown: homepageLink.visualFocus; radius: Theme.smallRadius }
-                                contentItem: RowLayout {
-                                    spacing: 5
-                                    Text {
-                                        text: panel.homepage.replace(/^https?:\/\//i, "").replace(/\/$/, "")
-                                        textFormat: Text.PlainText
-                                        elide: Text.ElideMiddle
-                                        color: homepageLink.enabled ? panel.accent : panel.ink
-                                        font.pointSize: Theme.pointSize(Theme.smallScale)
-                                        font.underline: homepageLink.hovered && homepageLink.enabled
-                                        Layout.fillWidth: true
-                                    }
-                                    DeckIcon {
-                                        visible: homepageLink.enabled
-                                        name: "external"
-                                        ink: panel.accent
-                                        Layout.preferredWidth: 13
-                                        Layout.preferredHeight: 13
-                                    }
-                                }
-                            }
-                        }
-                        // Collapsed by default: long APT lists stay out of the way.
-                        Controls.AbstractButton {
-                            id: dependenciesToggle
-                            objectName: "dependenciesToggle"
-                            visible: panel.dependencies.length > 0
-                            Layout.fillWidth: true
-                            hoverEnabled: true
-                            Accessible.role: Accessible.Button
-                            Accessible.name: (panel.dependenciesExpanded ? "Hide " : "Show ") + "dependencies (" + panel.dependencies.length + ")"
-                            onClicked: panel.dependenciesExpanded = !panel.dependenciesExpanded
-                            background: FocusFrame { shown: dependenciesToggle.visualFocus; radius: Theme.smallRadius }
-                            contentItem: RowLayout {
-                                spacing: 6
-                                DeckIcon {
-                                    name: "right"
-                                    ink: panel.muted
-                                    rotation: panel.dependenciesExpanded ? 90 : 0
-                                    Layout.preferredWidth: 13
-                                    Layout.preferredHeight: 13
-                                    Behavior on rotation {
-                                        enabled: panel.motionEnabled
-                                        NumberAnimation { duration: Theme.feedbackDuration; easing.type: Easing.OutCubic }
-                                    }
-                                }
-                                Text {
-                                    objectName: "dependenciesHeading"
-                                    text: "Dependencies (" + panel.dependencies.length + ")"
-                                    color: dependenciesToggle.hovered ? panel.ink : panel.muted
-                                    font.pointSize: Theme.pointSize(Theme.smallScale)
-                                    font.weight: Font.DemiBold
-                                    Layout.fillWidth: true
-                                }
-                            }
-                        }
-                        Flow {
-                            id: dependencyChips
-                            objectName: "dependencyChips"
-                            visible: panel.dependenciesExpanded && panel.dependencies.length > 0
-                            Layout.fillWidth: true
-                            spacing: 6
-                            opacity: visible ? 1 : 0
-                            Behavior on opacity {
-                                enabled: panel.motionEnabled
-                                NumberAnimation { duration: Theme.revealDuration; easing.type: Easing.OutCubic }
-                            }
-                            Repeater {
-                                model: dependencyChips.visible ? panel.dependencies : []
-                                delegate: Controls.Label {
-                                    required property var modelData
-                                    text: String(modelData)
-                                    textFormat: Text.PlainText
-                                    color: panel.ink
-                                    font.pointSize: Theme.pointSize(Theme.captionScale)
-                                    elide: Text.ElideRight
-                                    width: Math.min(implicitWidth, dependencyChips.width)
-                                    leftPadding: 8
-                                    rightPadding: 8
-                                    topPadding: 3
-                                    bottomPadding: 3
-                                    background: Rectangle {
-                                        radius: Theme.smallRadius
-                                        color: Theme.tint(panel.ink, 0.06)
-                                        border.color: panel.line
-                                    }
-                                }
-                            }
                         }
                     }
                 }
