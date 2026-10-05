@@ -2500,7 +2500,19 @@ esac
             program: program.display().to_string(),
             arguments: vec!["--flag".into(), "%U".into()],
         };
-        AppImage::spawn(&command, None).unwrap();
+        // A script written a moment ago can still be open in a process
+        // another test is starting ("Text file busy"); try again.
+        let spawn = |command: &desktop_exec::Command, bridge: Option<&Path>| {
+            (0..200)
+                .map(|_| AppImage::spawn(command, bridge))
+                .inspect(|_| std::thread::sleep(std::time::Duration::from_millis(1)))
+                .find(|result| {
+                    result.as_ref().err().map(std::io::Error::kind)
+                        != Some(std::io::ErrorKind::ExecutableFileBusy)
+                })
+                .unwrap()
+        };
+        spawn(&command, None).unwrap();
         let wait = || {
             (0..200)
                 .find_map(|_| {
@@ -2524,7 +2536,7 @@ esac
         )
         .unwrap();
         fs::set_permissions(&bridge, fs::Permissions::from_mode(0o755)).unwrap();
-        AppImage::spawn(&command, Some(&bridge)).unwrap();
+        spawn(&command, Some(&bridge)).unwrap();
         assert_eq!(
             wait(),
             format!("|--host --env=GREETING=hi {} --flag\n", program.display())
