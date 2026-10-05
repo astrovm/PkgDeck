@@ -326,8 +326,9 @@ fn polkit_approval(
     let command = host.command(Path::new(program), &args)?;
     polkit_result(process::run(command, Limits::default(), cancel, true))
 }
-/// pkexec exits with 126 when the password dialog is dismissed. A system
-/// without polkit can't ask for the password at all.
+/// pkexec exits with 126 when the password dialog is dismissed, and with
+/// 127 when polkit refuses (a wrong password, or an account that may not
+/// make system changes). A system without polkit can't ask at all.
 #[cfg(any(not(target_os = "macos"), test))]
 fn polkit_result(
     result: Result<process::Completion, ExecutionError>,
@@ -344,6 +345,7 @@ fn polkit_result(
     match result.code {
         Some(0) => Ok(String::from_utf8_lossy(&result.stdout).trim().to_owned()),
         Some(126) => Err(ExecutionError::AuthorizationCancelled),
+        Some(127) => Err(ExecutionError::AuthorizationDenied),
         _ => Err(ExecutionError::Failed(result)),
     }
 }
@@ -797,6 +799,14 @@ mod tests {
         assert_eq!(
             polkit_result(Ok(ended(126, "", ""))),
             Err(ExecutionError::AuthorizationCancelled)
+        );
+        assert_eq!(
+            polkit_result(Ok(ended(
+                127,
+                "",
+                "Error executing command as another user: Not authorized\n\nThis incident has been reported.\n"
+            ))),
+            Err(ExecutionError::AuthorizationDenied)
         );
         assert_eq!(
             polkit_result(Ok(ended(1, "", "no"))),

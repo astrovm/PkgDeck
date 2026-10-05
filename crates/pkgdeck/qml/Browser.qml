@@ -962,6 +962,15 @@ Controls.ApplicationWindow {
     property var modelJson: []
     // Few changes animate; bulk loads replace the rows at once.
     property bool animateListChanges: false
+    // Pooling is suspended only until the last add/remove/move has settled.
+    // Keeping it off after a small streaming reply makes later long scrolls
+    // construct every delegate again. Start the grace period after layout,
+    // since that is when ListView starts its transitions.
+    Timer {
+        id: listChangesSettled
+        interval: Math.max(Theme.revealDuration, Theme.feedbackDuration) + 50
+        onTriggered: root.animateListChanges = false
+    }
     function rowKeys(rows) {
         const seen = Object.create(null);
         return rows.map((row) => {
@@ -976,6 +985,8 @@ Controls.ApplicationWindow {
         const keys = rowKeys(rows);
         // Unchanged rows reuse the JSON made when they were first shown.
         const json = rows.map((row) => rowJson(row));
+        if (keys.length === modelKeys.length && keys.every((key, i) => key === modelKeys[i] && json[i] === modelJson[i]))
+            return;
         const wanted = Object.create(null);
         for (const key of keys)
             wanted[key] = true;
@@ -983,6 +994,7 @@ Controls.ApplicationWindow {
         // Mostly new rows (another page, a new search): replace them all.
         if (modelKeys.length === 0 || kept < Math.min(modelKeys.length, keys.length) / 2) {
             animateListChanges = false;
+            listChangesSettled.stop();
             resultsModel.clear();
             resultsModel.append(json.map((text) => ({rowJson: text})));
             modelKeys = keys;
@@ -1012,6 +1024,7 @@ Controls.ApplicationWindow {
                     // A re-sort moves many rows: replace them all instead.
                     if (++moves > 48) {
                         animateListChanges = false;
+                        listChangesSettled.stop();
                         resultsModel.clear();
                         resultsModel.append(json.map((text) => ({rowJson: text})));
                         modelKeys = keys;
@@ -1037,6 +1050,10 @@ Controls.ApplicationWindow {
         modelKeys = keys;
         modelJson = json;
         results.forceLayout();
+        if (animateListChanges)
+            listChangesSettled.restart();
+        else
+            listChangesSettled.stop();
     }
     // Rows the change being confirmed or run applies to, by identity.
     property var activeRows: []
@@ -1234,9 +1251,19 @@ Controls.ApplicationWindow {
         const branch = parts.length >= 3 ? parts[parts.length - 1] : "";
         return branch && branch !== "stable" ? branch : "";
     }
+    // The package name, when the row shows an app's name instead: a package
+    // such as neovim-runtime ships the Neovim launcher and is named after
+    // it, next to the neovim package itself. Sources whose ids are app ids
+    // or files keep just the app's name.
+    function packageNameNote(row) {
+        if (!row || !row.display_name || !row.name || ["flatpak", "macos-apps", "mas", "appimage"].indexOf(row.source) >= 0)
+            return "";
+        const plain = (text) => text.toLowerCase().replace(/[^a-z0-9]/g, "");
+        return plain(row.display_name) === plain(row.name) ? "" : row.name;
+    }
     function sourceLine(row) {
         const scoped = row.source === "flatpak" || containerSource(row.source);
-        return [sourceDisplayName(row.source), row.remote || "", scoped ? (row.scope === "system" ? "System" : "User") : "", flatpakBranch(row)]
+        return [packageNameNote(row), sourceDisplayName(row.source), row.remote || "", scoped ? (row.scope === "system" ? "System" : "User") : "", flatpakBranch(row)]
             .filter(Boolean).join(", ");
     }
     function sameAppNames(row) {
@@ -2788,10 +2815,12 @@ Controls.ApplicationWindow {
                         Layout.fillHeight: true
                         model: resultsModel
                         clip: true
-                        // Pooled delegates and the add/remove transitions do not mix:
-                        // a delegate reused mid-transition can stay on screen over
-                        // its successor, and keeps text measured for its old row.
-                        reuseItems: false
+                        // Rows are pooled so a fast scroll through thousands of
+                        // them never builds each row again. Pooled delegates and
+                        // the add/remove transitions do not mix: a delegate reused
+                        // mid-transition can stay on screen over its successor.
+                        // So pooling stops while a few changes animate.
+                        reuseItems: !(root.motionEnabled && root.animateListChanges)
                         add: Transition {
                             enabled: root.motionEnabled && root.animateListChanges
                             NumberAnimation { property: "opacity"; from: 0; to: 1; duration: Theme.revealDuration; easing.type: Easing.OutCubic }
