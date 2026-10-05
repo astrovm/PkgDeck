@@ -273,8 +273,20 @@ Controls.ApplicationWindow {
     // (just that app), it runs without asking.
     property bool quickChange: false
     // The confirmation shown on the page instead of a dialog.
-    readonly property var pageReview: appPageOpen && backend.confirmation.length && reviewOnPage ? JSON.parse(backend.confirmation_data || "{}") : null
+    readonly property var pageReview: appPageOpen && backend.confirmation.length && reviewOnPage && reviewFor === pageKey ? JSON.parse(backend.confirmation_data || "{}") : null
     property bool reviewOnPage: false
+    // The page open now, and the page a change was asked for. Its review
+    // only shows on that page: it may arrive after you moved on.
+    readonly property string pageKey: !appPageOpen ? "" : opened !== null ? "opened" : rowIdentity(pageRow)
+    property string reviewFor: ""
+    // Leaving a page drops the review shown on it.
+    onPageKeyChanged: {
+        if (reviewOnPage && backend.confirmation.length && reviewFor !== pageKey) {
+            reviewOnPage = false;
+            root.activeRows = [];
+            backend.confirm(false);
+        }
+    }
     // An installed AppImage's launch settings, read when its page opens and
     // again after a save (`launchRevision`).
     property int launchRevision: 0
@@ -1399,6 +1411,7 @@ Controls.ApplicationWindow {
     }
     // Manage sits next to Remove for AppImages; macOS apps swap Remove for it.
     function runAdopt(index) {
+        reviewFor = pageKey;
         const row = viewItems[index];
         if (!canAdopt(row) || retainingResults || !canAct)
             return;
@@ -1430,6 +1443,7 @@ Controls.ApplicationWindow {
         return isInstalled(row) ? "remove" : "install";
     }
     function runRowAction(index) {
+        reviewFor = pageKey;
         const row = viewItems[index];
         const action = rowActionName(row);
         if (!action || retainingResults || !canAct)
@@ -1441,6 +1455,7 @@ Controls.ApplicationWindow {
     // The app page's main button: the opened file's Install or Manage, or
     // the row's own action.
     function runPageAction() {
+        reviewFor = pageKey;
         if (opened !== null) {
             if (!canAct)
                 return;
@@ -1507,6 +1522,7 @@ Controls.ApplicationWindow {
     }
     onViewItemsChanged: Qt.callLater(flushResults)
     function propose(action) {
+        reviewFor = pageKey;
         if (!retainingResults) {
             if (action === "upgrade-all")
                 markActiveRows(packageIdentities());
@@ -1629,7 +1645,7 @@ Controls.ApplicationWindow {
                 }
                 // On the app page, the changes show there; a choice (the
                 // Flatpak scope) still needs the dialog.
-                if (root.appPageOpen && !preview.flatpak_ref_scope) {
+                if (root.appPageOpen && root.reviewFor === root.pageKey && !preview.flatpak_ref_scope) {
                     root.reviewOnPage = true;
                     return;
                 }
