@@ -329,13 +329,14 @@ TestCase {
             {selected: row("synthetic-tool"), detailMatchesSelection: true});
         const action = findChild(details, "detailsActionButton");
         verify(!action.visible);
-        verify(!findChild(details, "installedChip").visible);
-        details.installed = true;
+        compare(findChild(details, "installedChip"), null);
         details.actionText = "Remove";
         details.actionSymbol = "remove";
         details.actionTone = "danger";
-        verify(findChild(details, "installedChip").visible);
+        compare(findChild(details, "installedChip"), null);
         verify(action.visible);
+        compare(action.text, "");
+        compare(findChild(details, "pageMoreButton"), null);
         compare(details.actionColor, App.Theme.danger);
         compare(action.Accessible.name, "Remove synthetic-tool");
         spyA.target = details;
