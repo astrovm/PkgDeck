@@ -2687,7 +2687,7 @@ TestCase {
         waitForRendering(panel);
         verify(selector.visible);
         const list = findChild(browser, "packageResults");
-        verify(list.height >= list.itemAtIndex(0).height, "a complete compact row remains available");
+        verify(list.height >= list.itemAtIndex(0).height, "list=" + list.height + " row=" + list.itemAtIndex(0).height + " budget=" + browser.detailsBudget() + " minimum=" + browser.detailsListHeight() + " box=" + findChild(browser, "resultsBox").height + " panel=" + panel.height);
         verify(!findChild(panel, "packageInstallationSelector").visible);
         verify(selector.mapToItem(panel, 0, 0).y >= findChild(panel, "detailsHeader").height);
         verify(selector.mapToItem(panel, selector.width, selector.height).x <= panel.width);

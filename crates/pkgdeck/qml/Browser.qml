@@ -1283,7 +1283,8 @@ Controls.ApplicationWindow {
         const budget = detailsBudget();
         // Keep a complete compact card available above the scrolling details.
         return Math.min(shortResultsHeight(), listChromeHeight() + rows * rowHeight,
-            budget * (compact ? 0.5 : 0.55), budget - detailsMinimumHeight());
+            Math.max(budget * (compact ? 0.5 : 0.55), compact ? listChromeHeight() + rowHeight : 0),
+            budget - detailsMinimumHeight());
     }
     // Tokens live in the Theme singleton; these aliases keep bindings short.
     Binding { target: Theme; property: "appearance"; value: preferences.appearance }
