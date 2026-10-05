@@ -3176,6 +3176,34 @@ TestCase {
         tryVerify(() => list.contentY < before);
         verify(list.reuseItems);
     }
+    function test_dragging_the_scroll_bar_moves_the_list_once_per_frame() {
+        browser.openView("Installed");
+        fake.rows = JSON.stringify(Array.from({length: 3000}, (_, i) => ({kind: "package", name: "paced-" + String(i).padStart(4, "0"), source: "apt",
+            installed: "1", candidate: "1", scope: "system", summary: "Synthetic"})));
+        const list = findChild(browser, "packageResults");
+        tryCompare(list, "count", 3000);
+        const bar = findChild(browser, "resultsScrollBar");
+        verify(bar.plainHandle);
+        waitForRendering(browser.contentItem);
+        let moves = 0;
+        const count = () => moves++;
+        list.contentYChanged.connect(count);
+        // Many pointer moves before one frame, as Wayland delivers them.
+        const x = bar.width / 2;
+        mousePress(bar, x, 4);
+        for (let y = 10; y < bar.height - 10; y += 4)
+            mouseMove(bar, x, y);
+        compare(moves, 0);
+        // The next frame takes the list to where the bar is by then.
+        tryVerify(() => moves > 0);
+        verify(moves <= 2, moves + " moves");
+        tryVerify(() => Math.abs(list.visibleArea.yPosition - bar.position) < 0.01);
+        mouseRelease(bar, x, bar.height - 10);
+        list.contentYChanged.disconnect(count);
+        // Scrolling the list itself still moves the bar.
+        list.positionViewAtBeginning();
+        tryVerify(() => bar.position < 0.01);
+    }
     function test_sidebar_title_lines_up_with_the_page_title() {
         for (const width of [1100, 900, 700]) {
             browser.width = width;

@@ -2847,7 +2847,36 @@ Controls.ApplicationWindow {
                         onHeightChanged: if (currentIndex >= 0) Qt.callLater(() => { if (results.currentIndex >= 0) results.positionViewAtIndex(results.currentIndex, ListView.Contain); })
                         keyNavigationEnabled: false
                         activeFocusOnTab: true
-                        Controls.ScrollBar.vertical: DeckScrollBar { ink: root.muted }
+                        // Dragging the bar moves the list once per frame, to where
+                        // the bar is by then. On Wayland every pointer move arrives,
+                        // hundreds per frame from a fast mouse, and each one filled
+                        // the rows again before anything was drawn.
+                        readonly property DeckScrollBar pacedBar: DeckScrollBar {
+                            objectName: "resultsScrollBar"
+                            parent: results
+                            ink: root.muted
+                            orientation: Qt.Vertical
+                            anchors.top: parent.top
+                            anchors.right: parent.right
+                            anchors.bottom: parent.bottom
+                            size: results.visibleArea.heightRatio
+                            active: results.moving || pressed
+                            // Where the list should go on the next frame; -1 when
+                            // it is already there.
+                            property real pending: -1
+                            onPositionChanged: if (pressed) pending = position
+                            Binding on position {
+                                when: !results.pacedBar.pressed && results.pacedBar.pending < 0
+                                value: results.visibleArea.yPosition
+                            }
+                        }
+                        FrameAnimation {
+                            running: results.pacedBar.pending >= 0
+                            onTriggered: {
+                                results.contentY = results.originY + results.pacedBar.pending * results.contentHeight;
+                                results.pacedBar.pending = -1;
+                            }
+                        }
                         Keys.onDownPressed: { root.keyboardNavigation = true; root.choose(Math.min(count - 1, currentIndex + 1), false); }
                         Keys.onUpPressed: { root.keyboardNavigation = true; root.choose(Math.max(0, currentIndex - 1), false); }
                         Keys.onPressed: (event) => {
