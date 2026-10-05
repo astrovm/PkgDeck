@@ -11643,6 +11643,23 @@ mod tests {
         assert!(controller.rows().to_string().contains("second"));
         drop(gate);
         settle(&mut controller);
+
+        // A read that ended without its final report still shows its
+        // newest rows.
+        let worker = fake_worker(
+            Job::Load("Installed".into(), String::new()),
+            vec![
+                Reply::Partial(report(&["third"])),
+                Reply::Partial(report(&["third", "fourth"])),
+            ],
+        );
+        while !worker.handle.is_finished() {
+            thread::yield_now();
+        }
+        controller.as_mut().rust_mut().worker = Some(worker);
+        controller.as_mut().poll();
+        assert!(controller.rust().worker.is_none());
+        assert!(controller.rows().to_string().contains("fourth"));
     }
     #[test]
     fn huge_searches_keep_only_the_best_matches() {
