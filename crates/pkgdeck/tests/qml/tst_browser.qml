@@ -634,6 +634,37 @@ TestCase {
         tryCompare(dialog, "visible", false);
         fake.nextReview = undefined;
     }
+    function test_a_review_stays_with_the_page_that_asked_for_it() {
+        fake.confirm(false);
+        populate();
+        browser.choose(0);
+        const page = findChild(browser, "detailsPanel");
+        tryCompare(page, "visible", true);
+        const dialog = findChild(browser, "confirmationDialog");
+        const review = findChild(page, "pageReview");
+        fake.nextReview = true;
+        waitForRendering(page);
+        mouseClick(findChild(page, "detailsActionButton"));
+        tryCompare(review, "visible", true);
+        // Opening another app drops the review shown on the first one.
+        browser.choose(1);
+        compare(fake.confirmation, "");
+        verify(!review.visible);
+        compare(fake.writes, 0);
+        // A review that arrives after you moved on opens in the dialog,
+        // which names its app, instead of on the page open now.
+        browser.choose(0);
+        browser.reviewFor = browser.pageKey;
+        browser.choose(1);
+        fake.confirmation_data = JSON.stringify({action: "Install", review: true});
+        fake.confirmation = "Install synthetic-tool";
+        tryCompare(dialog, "opened", true);
+        verify(!review.visible);
+        verify(browser.pageReview === null);
+        fake.confirm(false);
+        tryCompare(dialog, "visible", false);
+        fake.nextReview = undefined;
+    }
     function test_row_buttons_install_one_app_without_asking() {
         fake.confirm(false);
         populate();
