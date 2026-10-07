@@ -2973,6 +2973,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "pkgdeck-app"
+version = "0.7.0"
+dependencies = [
+ "flate2",
+ "pkgdeck-core",
+ "pkgdeck-tools",
+ "roxmltree 0.21.1",
+ "rustix 1.1.5",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+]
+
+[[package]]
 name = "pkgdeck-core"
 version = "0.7.0"
 dependencies = [
