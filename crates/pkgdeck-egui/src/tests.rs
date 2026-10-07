@@ -722,6 +722,7 @@ fn enter_after_filtering_opens_a_visible_row() {
     assert_eq!(harness.state().page.selected(), Some(&installed()[1].id));
     harness.key_press(egui::Key::Escape);
     harness.run_steps(1);
+    harness.get_by_label("Filter installed packages").focus();
     harness
         .get_by_label("Filter installed packages")
         .type_text("nothing");
