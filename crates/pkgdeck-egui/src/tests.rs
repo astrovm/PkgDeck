@@ -709,6 +709,14 @@ fn refresh_keeps_pending_sources_and_their_open_details() {
 #[test]
 fn enter_after_filtering_opens_a_visible_row() {
     let mut harness = loaded(fixture_engine);
+    // A filter changed before the highlight has scrolled into view
+    // cancels that reveal and cannot retain a hidden keyboard target.
+    harness.state_mut().page.move_cursor(100);
+    harness.state_mut().page.set_filter("PAINT");
+    harness.run_steps(2);
+    assert_eq!(harness.state().page.cursor(), None);
+    harness.state_mut().page.set_filter("");
+    harness.run_steps(2);
     harness.key_press(egui::Key::End);
     harness.run_steps(1);
     assert_eq!(harness.state().page.cursor().unwrap().name, "zsh");
@@ -730,6 +738,22 @@ fn enter_after_filtering_opens_a_visible_row() {
     harness.key_press(egui::Key::Enter);
     harness.run_steps(1);
     assert_eq!(harness.state().page.selected(), None);
+}
+
+#[test]
+fn many_pending_sources_do_not_push_the_header_outside_the_window() {
+    let mut harness = window(nothing, [480.0, 360.0]);
+    until(&mut harness, |page| !page.loading());
+    let page = &mut harness.state_mut().page;
+    page.list = Some(spawn(None, |_, _: &mut dyn FnMut(ListReply)| {}));
+    page.waiting = (0..60)
+        .map(|n| format!("very long source name {n}"))
+        .collect();
+    harness.run_steps(2);
+    let status = harness.get_by_label_contains("Waiting for very long source name");
+    assert!(status.rect().right() <= 480.0);
+    let message = harness.get_by_label("Reading installed packages…");
+    assert!(message.rect().right() <= 480.0);
 }
 
 #[test]

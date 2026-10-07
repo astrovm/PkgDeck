@@ -95,8 +95,16 @@ to judge a Qt-free GUI on real code. It isn't packaged or shipped.
 cargo run -p pkgdeck-egui
 ```
 
-It reads the same engine as the Qt app. Click a row for its details, drag
-the line above them to resize, and Esc or **Close** closes them. Tests use
+It reads the same engine as the Qt app and uses PkgDeck's light and dark
+colours, icons and system fonts. Click a row for its details, drag the
+handle above them to resize, or double-click it to reset the split.
+**Close details** or Esc closes them; Esc again clears the filter.
+Arrow keys, Home/End and Page Up/Down move through rows. Enter or Space
+opens the highlighted row. Ctrl+F focuses the filter and Ctrl+R reloads
+(Command on macOS). Short windows scroll to keep both cards reachable.
+Only **Installed** is implemented in this trial.
+
+Tests use
 `egui_kittest`, which checks the page through its accessibility tree with no
 window. One more test opens the real window on a private Xvfb display.
 

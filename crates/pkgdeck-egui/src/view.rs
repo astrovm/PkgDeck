@@ -416,18 +416,6 @@ fn list_card(ui: &mut Ui, page: &mut Installed, palette: &Palette, height: f32, 
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.set_min_height(34.0);
-                        ui.label(
-                            RichText::new(count_text(shown, page.packages().len()))
-                                .color(palette.muted),
-                        );
-                        let waiting = page.waiting();
-                        if !waiting.is_empty() {
-                            ui.label(
-                                RichText::new(format!("Waiting for {}", waiting.join(", ")))
-                                    .color(palette.muted)
-                                    .small(),
-                            );
-                        }
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             if page.loading() {
                                 ui.add_space(9.0);
@@ -437,6 +425,23 @@ fn list_card(ui: &mut Ui, page: &mut Installed, palette: &Palette, height: f32, 
                             {
                                 page.reload();
                             }
+                            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                                ui.label(
+                                    RichText::new(count_text(shown, page.packages().len()))
+                                        .color(palette.muted),
+                                );
+                                let waiting = page.waiting();
+                                if !waiting.is_empty() {
+                                    let status = format!("Waiting for {}", waiting.join(", "));
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(&status).color(palette.muted).small(),
+                                        )
+                                        .truncate(),
+                                    )
+                                    .on_hover_text(status);
+                                }
+                            });
                         });
                     });
                 });
