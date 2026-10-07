@@ -37,6 +37,10 @@ fn filter_id() -> Id {
 fn details_height_id() -> Id {
     Id::new("installed_details_height")
 }
+fn row_id(id: &pkgdeck_core::package::PackageId) -> Id {
+    // Include the whole identity, including Flatpak scope and native ref.
+    Id::new(("installed_row", format!("{id:?}")))
+}
 
 pub fn window(ui: &mut Ui, page: &mut Installed) {
     page.poll();
@@ -71,7 +75,7 @@ fn keyboard(ui: &Ui, page: &mut Installed) {
         || page
             .packages()
             .iter()
-            .any(|package| focused == Some(Id::new(("installed_row", &package.id))));
+            .any(|package| focused == Some(row_id(&package.id)));
     let press =
         |modifiers: Modifiers, key: Key| ui.input_mut(|input| input.consume_key(modifiers, key));
     let none = Modifiers::NONE;
@@ -619,7 +623,7 @@ fn row(
     id: &pkgdeck_core::package::PackageId,
 ) -> bool {
     let (_, rect) = ui.allocate_space(Vec2::new(ui.available_width(), ROW_HEIGHT));
-    let response = ui.interact(rect, Id::new(("installed_row", id)), Sense::click());
+    let response = ui.interact(rect, row_id(id), Sense::click());
     let package = page
         .packages()
         .iter()

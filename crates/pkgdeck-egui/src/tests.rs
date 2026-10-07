@@ -754,6 +754,7 @@ fn small_windows_can_scroll_to_the_details_controls() {
     harness.input_mut().events.push(egui::Event::MouseWheel {
         unit: egui::MouseWheelUnit::Point,
         delta: egui::vec2(0.0, -500.0),
+        phase: egui::TouchPhase::Move,
         modifiers: egui::Modifiers::NONE,
     });
     harness.run_steps(8);
