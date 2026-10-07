@@ -10,7 +10,7 @@ publish = false
 
 [dependencies]
 pkgdeck-core.workspace = true
-eframe = { version = "=0.36.2", default-features = false, features = ["accesskit", "default_fonts", "glow", "wayland", "x11"] }
+eframe = { version = "=0.36.2", default-features = false, features = ["accesskit", "default_fonts", "glow", "persistence", "wayland", "x11"] }
 egui_extras = { version = "=0.36.2", default-features = false, features = ["file", "image", "svg"] }
 image = { version = "=0.25.10", default-features = false, features = ["png"] }
 

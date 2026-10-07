@@ -1,9 +1,13 @@
 //! PkgDeck's Installed page drawn with egui: a trial of a GUI without Qt.
 //! It reads the same engine the Qt app does, on worker threads, and keeps
 //! everything it shows in plain Rust state so tests can check it directly.
+//! `view` draws that state; `theme` gives it PkgDeck's look.
+
+mod icons;
+pub mod theme;
+mod view;
 
 use eframe::egui;
-use egui_extras::{Column, TableBuilder};
 use pkgdeck_core::{
     backends,
     engine::{BackendFailure, Engine, EngineError, PackageReport},
@@ -12,18 +16,23 @@ use pkgdeck_core::{
     process::Cancellation,
 };
 use std::{
+    path::{Path, PathBuf},
     sync::mpsc,
     thread,
-    time::{Duration, Instant},
+    time::Instant,
 };
+
+pub use icons::NAMES as ICON_NAMES;
 
 /// Builds an engine for some sources (all of them when empty), as
 /// `pkgdeck_core::backends::native_engine` does. Tests pass their own.
 pub type MakeEngine =
     fn(&[String], bool, Authorization, &Cancellation) -> Result<Engine, EngineError>;
 
-/// What the list worker sends: rows so far, every row, or why none came.
+/// What the list worker sends: the sources it asks, rows so far, every
+/// row, or why none came.
 enum ListReply {
+    Asked(Vec<String>),
     Partial(PackageReport),
     Done(PackageReport),
     Failed(String),
@@ -40,8 +49,10 @@ impl<T> Drop for Worker<T> {
         self.cancel.cancel();
     }
 }
-/// Run `job` on a thread; each reply it sends is read by the next poll.
+/// Run `job` on a thread; each reply it sends is read by the next poll,
+/// and wakes the window if there is one.
 fn spawn<T: Send + 'static>(
+    wake: Option<egui::Context>,
     job: impl FnOnce(&Cancellation, &mut dyn FnMut(T)) + Send + 'static,
 ) -> Worker<T> {
     let (sender, receiver) = mpsc::channel();
@@ -50,6 +61,9 @@ fn spawn<T: Send + 'static>(
     thread::spawn(move || {
         job(&token, &mut |reply| {
             let _ = sender.send(reply);
+            if let Some(ctx) = &wake {
+                ctx.request_repaint();
+            }
         })
     });
     Worker { receiver, cancel }
@@ -88,43 +102,86 @@ pub fn source_line(id: &PackageId) -> String {
     .collect::<Vec<_>>()
     .join(", ")
 }
+/// The version an update brings, or "" when it isn't known.
+pub fn update_version(package: &Package) -> Option<&str> {
+    (package.update == UpdateAvailability::Available).then(|| match &package.candidate_version {
+        Some(version) if package.installed_version.as_ref() != Some(version) => version,
+        _ => "",
+    })
+}
 /// "Update 2.0 available" when there is one.
 pub fn update_line(package: &Package) -> Option<String> {
-    (package.update == UpdateAvailability::Available).then(|| match &package.candidate_version {
-        Some(version) if package.installed_version.as_ref() != Some(version) => {
-            format!("Update {version} available")
-        }
-        _ => "Update available".to_owned(),
+    update_version(package).map(|version| match version {
+        "" => "Update available".to_owned(),
+        version => format!("Update {version} available"),
     })
+}
+/// "Snap couldn't be read: snapd isn't running": a source that failed,
+/// and why, without repeating its name.
+pub fn failure_line(failure: &BackendFailure) -> String {
+    let reason = match &failure.error {
+        EngineError::Unavailable { reason, .. } => reason.clone(),
+        error => error.to_string(),
+    };
+    format!(
+        "{} couldn't be read: {reason}",
+        backends::display_name(&failure.backend)
+    )
+}
+/// What a screen reader says for a row: everything the row shows.
+pub fn row_label(package: &Package) -> String {
+    [
+        shown_name(package).to_owned(),
+        source_line(&package.id),
+        package.installed_version.clone().unwrap_or_default(),
+        update_line(package).unwrap_or_default(),
+        package.summary.clone(),
+    ]
+    .into_iter()
+    .filter(|part| !part.is_empty())
+    .collect::<Vec<_>>()
+    .join(", ")
 }
 
 /// The Installed page: every installed package, a filter, sortable
 /// columns, and the open package's details below the list.
 pub struct Installed {
     make_engine: MakeEngine,
+    /// Wakes the window when a worker sends something.
+    wake: Option<egui::Context>,
     packages: Vec<Package>,
     failures: Vec<BackendFailure>,
+    /// Sources asked that haven't answered yet.
+    waiting: Vec<String>,
     /// Why nothing could be read at all.
     error: Option<String>,
     list: Option<Worker<ListReply>>,
-    pub filter: String,
+    filter: String,
     sort: SortBy,
     descending: bool,
     /// Indexes into `packages`, filtered and sorted; rebuilt when stale.
     order: Vec<usize>,
     stale: bool,
+    /// The highlighted row, which the keyboard moves.
+    cursor: Option<PackageId>,
+    /// The package whose details are open.
     selected: Option<PackageId>,
     details: Option<Result<PackageDetails, String>>,
     details_worker: Option<Worker<(PackageId, Result<PackageDetails, String>)>>,
+    dependencies_open: bool,
+    /// Bring the cursor's row into view on the next frame.
+    reveal: bool,
 }
 
 impl Installed {
     /// A page that starts reading what's installed right away.
-    pub fn new(make_engine: MakeEngine) -> Self {
+    pub fn new(make_engine: MakeEngine, wake: Option<egui::Context>) -> Self {
         let mut page = Self {
             make_engine,
+            wake,
             packages: vec![],
             failures: vec![],
+            waiting: vec![],
             error: None,
             list: None,
             filter: String::new(),
@@ -132,9 +189,12 @@ impl Installed {
             descending: false,
             order: vec![],
             stale: true,
+            cursor: None,
             selected: None,
             details: None,
             details_worker: None,
+            dependencies_open: false,
+            reveal: false,
         };
         page.reload();
         page
@@ -144,13 +204,17 @@ impl Installed {
     pub fn reload(&mut self) {
         let make = self.make_engine;
         self.error = None;
-        self.list = Some(spawn(move |cancel, send| {
-            let last = match make(&[], false, Authorization::Polkit, cancel) {
-                Ok(mut engine) => ListReply::Done(
-                    engine.installed_stream(cancel, &mut |report| send(ListReply::Partial(report))),
-                ),
-                Err(error) => ListReply::Failed(error.to_string()),
-            };
+        self.list = Some(spawn(self.wake.clone(), move |cancel, send| {
+            let last =
+                match make(&[], false, Authorization::Polkit, cancel) {
+                    Ok(mut engine) => {
+                        send(ListReply::Asked(engine.source_ids()));
+                        ListReply::Done(engine.installed_stream(cancel, &mut |report| {
+                            send(ListReply::Partial(report))
+                        }))
+                    }
+                    Err(error) => ListReply::Failed(error.to_string()),
+                };
             send(last);
         }));
     }
@@ -163,8 +227,21 @@ impl Installed {
     pub fn failures(&self) -> &[BackendFailure] {
         &self.failures
     }
+    /// The sources still being read, by the names people know them by.
+    pub fn waiting(&self) -> Vec<&str> {
+        self.waiting
+            .iter()
+            .map(|id| backends::display_name(id))
+            .collect()
+    }
     pub fn error(&self) -> Option<&str> {
         self.error.as_deref()
+    }
+    pub fn filter(&self) -> &str {
+        &self.filter
+    }
+    pub fn cursor(&self) -> Option<&PackageId> {
+        self.cursor.as_ref()
     }
     pub fn selected(&self) -> Option<&PackageId> {
         self.selected.as_ref()
@@ -182,13 +259,16 @@ impl Installed {
             for reply in replies {
                 changed = true;
                 match reply {
-                    ListReply::Partial(report) => self.show_report(report),
+                    ListReply::Asked(sources) => self.waiting = sources,
+                    ListReply::Partial(report) => self.show_report(report, false),
                     ListReply::Done(report) => {
-                        self.show_report(report);
+                        self.show_report(report, true);
+                        self.waiting.clear();
                         self.list = None;
                     }
                     ListReply::Failed(error) => {
                         self.error = Some(error);
+                        self.waiting.clear();
                         self.list = None;
                     }
                 }
@@ -205,20 +285,48 @@ impl Installed {
         }
         changed
     }
-    fn show_report(&mut self, report: PackageReport) {
+    fn show_report(&mut self, mut report: PackageReport, complete: bool) {
+        // A source has answered once it succeeded or failed.
+        self.waiting.retain(|id| {
+            !report.successful_sources.contains(id)
+                && !report.failures.iter().any(|failure| failure.backend == *id)
+        });
+        // During a refresh, keep the last rows from sources that haven't
+        // answered yet. Their open details stay usable while others stream in.
+        if !complete {
+            report.packages.extend(
+                self.packages
+                    .iter()
+                    .filter(|package| {
+                        !report.successful_sources.contains(&package.id.backend)
+                            && !report
+                                .failures
+                                .iter()
+                                .any(|failure| failure.backend == package.id.backend)
+                    })
+                    .cloned(),
+            );
+        }
         self.packages = report.packages;
         self.failures = report.failures;
         self.stale = true;
-        // The open package keeps its page only while it's still installed.
-        if let Some(id) = &self.selected {
-            if !self.packages.iter().any(|package| package.id == *id) {
-                self.close_details();
-            }
+        // Rows that are gone take their highlight and details with them.
+        let present = |id: &Option<PackageId>| {
+            id.as_ref()
+                .is_some_and(|id| self.packages.iter().any(|package| package.id == *id))
+        };
+        if !present(&self.cursor) {
+            self.cursor = None;
+        }
+        if !present(&self.selected) && self.selected.is_some() {
+            self.close_details();
         }
     }
     pub fn set_filter(&mut self, filter: &str) {
-        self.filter = filter.to_owned();
-        self.stale = true;
+        if self.filter != filter {
+            self.filter = filter.to_owned();
+            self.stale = true;
+        }
     }
     /// Sort by `column`; the same column again flips the direction.
     pub fn sort_by(&mut self, column: SortBy) {
@@ -273,19 +381,60 @@ impl Installed {
             order.reverse();
         }
         self.order = order;
+        if self
+            .cursor
+            .as_ref()
+            .is_some_and(|id| !self.order.iter().any(|&i| self.packages[i].id == *id))
+        {
+            self.cursor = None;
+        }
         self.stale = false;
+    }
+    /// Move the highlight `by` rows (negative is up), staying in the list.
+    /// With details open, they follow the highlight.
+    pub fn move_cursor(&mut self, by: isize) {
+        self.refresh_order();
+        if self.order.is_empty() {
+            return;
+        }
+        let at = self
+            .cursor
+            .as_ref()
+            .and_then(|id| self.order.iter().position(|&i| self.packages[i].id == *id));
+        let last = self.order.len() as isize - 1;
+        // From nowhere, down starts at the top and up at the bottom.
+        let next = match at {
+            Some(at) => at as isize + by,
+            None if by < 0 => last + 1 + by,
+            None => by - 1,
+        }
+        .clamp(0, last) as usize;
+        let id = self.packages[self.order[next]].id.clone();
+        self.cursor = Some(id.clone());
+        self.reveal = true;
+        if self.selected.is_some() {
+            self.open(&id);
+        }
+    }
+    /// Open the highlighted row's details.
+    pub fn open_cursor(&mut self) {
+        if let Some(id) = self.cursor.clone() {
+            self.open(&id);
+        }
     }
     /// Open a package's details. They load on their own thread; the same
     /// package again changes nothing.
     pub fn open(&mut self, id: &PackageId) {
+        self.cursor = Some(id.clone());
         if self.selected.as_ref() == Some(id) {
             return;
         }
         self.selected = Some(id.clone());
         self.details = None;
+        self.dependencies_open = false;
         let make = self.make_engine;
         let id = id.clone();
-        self.details_worker = Some(spawn(move |cancel, send| {
+        self.details_worker = Some(spawn(self.wake.clone(), move |cancel, send| {
             let details = make(
                 std::slice::from_ref(&id.backend),
                 false,
@@ -302,319 +451,60 @@ impl Installed {
         self.details = None;
         self.details_worker = None;
     }
-
-    /// Draw the page. Workers are polled first, and while they run the
-    /// window asks to be drawn again soon.
-    pub fn ui(&mut self, ui: &mut egui::Ui) {
-        self.poll();
-        if self.list.is_some() || self.details_worker.is_some() {
-            ui.ctx().request_repaint_after(Duration::from_millis(50));
-        }
-        if ui.input(|input| input.key_pressed(egui::Key::Escape)) {
-            self.close_details();
-        }
-        egui::Panel::top("installed_header").show(ui, |ui| self.header(ui));
+    /// Esc: close the details, else clear the filter.
+    pub fn escape(&mut self) {
         if self.selected.is_some() {
-            egui::Panel::bottom("installed_details")
-                .resizable(true)
-                .default_size(ui.available_height() * 0.45)
-                .size_range(120.0..=ui.available_height().max(120.0) - 80.0)
-                .show(ui, |ui| self.details_ui(ui));
+            self.close_details();
+        } else {
+            self.set_filter("");
         }
-        egui::CentralPanel::default_margins().show(ui, |ui| self.list_ui(ui));
-    }
-    fn header(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            ui.heading(egui::RichText::new("Installed").strong().size(24.0));
-            if self.list.is_some() {
-                ui.add(egui::Spinner::new())
-                    .on_hover_text("Reading installed packages");
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui
-                    .add_enabled(self.list.is_none(), egui::Button::new("Reload"))
-                    .clicked()
-                {
-                    self.reload();
-                }
-            });
-        });
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            let mut filter = self.filter.clone();
-            let edit = ui.add(
-                egui::TextEdit::singleline(&mut filter)
-                    .hint_text("Filter installed packages")
-                    .desired_width(320.0),
-            );
-            if edit.changed() {
-                self.set_filter(&filter);
-            }
-            let shown = self.visible().len();
-            let count = if shown == self.packages.len() {
-                format!("{shown} packages")
-            } else {
-                format!("{shown} of {} packages", self.packages.len())
-            };
-            ui.label(egui::RichText::new(count).weak());
-        });
-        ui.add_space(8.0);
-    }
-    fn list_ui(&mut self, ui: &mut egui::Ui) {
-        if let Some(error) = &self.error {
-            ui.colored_label(
-                ui.visuals().error_fg_color,
-                format!("Couldn't read installed packages. {error}"),
-            );
-            return;
-        }
-        for failure in &self.failures {
-            ui.colored_label(
-                ui.visuals().error_fg_color,
-                format!(
-                    "{} couldn't be read. {}",
-                    backends::display_name(&failure.backend),
-                    failure.error
-                ),
-            );
-        }
-        if self.packages.is_empty() {
-            ui.label(if self.list.is_some() {
-                "Reading installed packages…"
-            } else {
-                "Nothing installed was found."
-            });
-            return;
-        }
-        self.refresh_order();
-        if self.order.is_empty() {
-            ui.label(format!(
-                "Nothing installed matches “{}”.",
-                self.filter.trim()
-            ));
-            return;
-        }
-        let mut clicked = None;
-        let mut sort = None;
-        let row_height = ui.text_style_height(&egui::TextStyle::Body) * 2.0 + 14.0;
-        // Rows open on a click, so their labels must not take it for
-        // selecting text.
-        ui.style_mut().interaction.selectable_labels = false;
-        TableBuilder::new(ui)
-            .striped(true)
-            .resizable(true)
-            .sense(egui::Sense::click())
-            // Every cell starts at the top, so a row's first lines line up.
-            .cell_layout(egui::Layout::left_to_right(egui::Align::Min))
-            .column(Column::initial(280.0).at_least(140.0).clip(true))
-            .column(Column::initial(150.0).at_least(80.0).clip(true))
-            .column(Column::remainder().at_least(120.0).clip(true))
-            .header(28.0, |mut header| {
-                for (column, title) in [
-                    (SortBy::Name, "Name"),
-                    (SortBy::Version, "Version"),
-                    (SortBy::Summary, "Summary"),
-                ] {
-                    header.col(|ui| {
-                        let arrow = match self.sorting() {
-                            (current, false) if current == column => " ⏶",
-                            (current, true) if current == column => " ⏷",
-                            _ => "",
-                        };
-                        if ui.button(format!("{title}{arrow}")).clicked() {
-                            sort = Some(column);
-                        }
-                    });
-                }
-            })
-            .body(|body| {
-                body.rows(row_height, self.order.len(), |mut row| {
-                    let package = &self.packages[self.order[row.index()]];
-                    row.set_selected(self.selected.as_ref() == Some(&package.id));
-                    row.col(|ui| {
-                        if let Some(icon) = &package.icon {
-                            ui.add(
-                                egui::Image::new(format!("file://{}", icon.display()))
-                                    .fit_to_exact_size(egui::vec2(28.0, 28.0)),
-                            );
-                        }
-                        ui.vertical(|ui| {
-                            ui.label(egui::RichText::new(shown_name(package)).strong());
-                            ui.label(egui::RichText::new(source_line(&package.id)).small().weak());
-                        });
-                    });
-                    row.col(|ui| {
-                        ui.vertical(|ui| {
-                            ui.label(package.installed_version.as_deref().unwrap_or(""));
-                            if let Some(update) = update_line(package) {
-                                ui.label(
-                                    egui::RichText::new(update)
-                                        .small()
-                                        .color(ui.visuals().hyperlink_color),
-                                );
-                            }
-                        });
-                    });
-                    row.col(|ui| {
-                        ui.label(&package.summary);
-                    });
-                    if row.response().clicked() {
-                        clicked = Some(package.id.clone());
-                    }
-                });
-            });
-        if let Some(column) = sort {
-            self.sort_by(column);
-        }
-        if let Some(id) = clicked {
-            self.open(&id);
-        }
-    }
-    fn details_ui(&mut self, ui: &mut egui::Ui) {
-        let Some(package) = self
-            .selected
-            .as_ref()
-            .and_then(|id| self.packages.iter().find(|package| package.id == *id))
-            .cloned()
-        else {
-            return;
-        };
-        ui.add_space(10.0);
-        ui.horizontal(|ui| {
-            if let Some(icon) = &package.icon {
-                ui.add(
-                    egui::Image::new(format!("file://{}", icon.display()))
-                        .fit_to_exact_size(egui::vec2(48.0, 48.0)),
-                );
-            }
-            ui.vertical(|ui| {
-                ui.heading(egui::RichText::new(shown_name(&package)).strong());
-                ui.label(egui::RichText::new(source_line(&package.id)).weak());
-            });
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("Close").clicked() {
-                    self.close_details();
-                }
-            });
-        });
-        if self.selected.is_none() {
-            return;
-        }
-        ui.separator();
-        egui::ScrollArea::vertical()
-            .auto_shrink(false)
-            .show(ui, |ui| {
-                if let Some(version) = &package.installed_version {
-                    ui.label(format!("Version {version}"));
-                }
-                if let Some(update) = update_line(&package) {
-                    ui.colored_label(ui.visuals().hyperlink_color, update);
-                }
-                ui.add_space(6.0);
-                match &self.details {
-                    None => {
-                        ui.horizontal(|ui| {
-                            ui.add(egui::Spinner::new());
-                            ui.label(&package.summary);
-                        });
-                    }
-                    Some(Err(error)) => {
-                        ui.label(&package.summary);
-                        ui.colored_label(
-                            ui.visuals().error_fg_color,
-                            format!("Details couldn't be loaded. {error}"),
-                        );
-                    }
-                    Some(Ok(details)) => {
-                        ui.label(if details.description.trim().is_empty() {
-                            &package.summary
-                        } else {
-                            &details.description
-                        });
-                        if let Some(homepage) = &details.homepage {
-                            ui.add_space(6.0);
-                            ui.horizontal(|ui| {
-                                ui.label(egui::RichText::new("Homepage").weak());
-                                ui.hyperlink(homepage);
-                            });
-                        }
-                        if !details.dependencies.is_empty() {
-                            ui.add_space(6.0);
-                            egui::CollapsingHeader::new(format!(
-                                "Dependencies ({})",
-                                details.dependencies.len()
-                            ))
-                            .default_open(false)
-                            .show(ui, |ui| {
-                                for dependency in &details.dependencies {
-                                    ui.label(dependency);
-                                }
-                            });
-                        }
-                    }
-                }
-            });
     }
 }
 
-/// PkgDeck's colours (see the Qt app's Theme.qml) on egui's visuals.
-pub fn apply_theme(ctx: &egui::Context) {
-    for (theme, accent, canvas, surface) in [
-        (
-            egui::Theme::Light,
-            egui::Color32::from_rgb(0x2f, 0x68, 0xd8),
-            egui::Color32::from_rgb(0xf4, 0xf6, 0xf9),
-            egui::Color32::WHITE,
-        ),
-        (
-            egui::Theme::Dark,
-            egui::Color32::from_rgb(0x7a, 0xa7, 0xff),
-            egui::Color32::from_rgb(0x0e, 0x10, 0x15),
-            egui::Color32::from_rgb(0x16, 0x1a, 0x21),
-        ),
-    ] {
-        ctx.style_mut_of(theme, |style| {
-            let visuals = &mut style.visuals;
-            visuals.hyperlink_color = accent;
-            visuals.selection.bg_fill = accent.gamma_multiply(0.25);
-            visuals.selection.stroke.color = accent;
-            visuals.panel_fill = canvas;
-            visuals.window_fill = surface;
-            visuals.extreme_bg_color = surface;
-            for widget in [
-                &mut visuals.widgets.inactive,
-                &mut visuals.widgets.hovered,
-                &mut visuals.widgets.active,
-                &mut visuals.widgets.open,
-            ] {
-                widget.corner_radius = egui::CornerRadius::same(9);
-            }
-            style.spacing.button_padding = egui::vec2(12.0, 6.0);
-        });
-    }
+/// Image loaders, the system fonts under `root`, and PkgDeck's look.
+pub fn setup(ctx: &egui::Context, root: &Path) {
+    egui_extras::install_image_loaders(ctx);
+    ctx.set_fonts(theme::fonts(root));
+    theme::apply(ctx);
 }
 
-/// The window: the Installed page, and with `smoke_test` a single frame
-/// that reports it drew, then closes.
+/// The window: the sidebar and the Installed page. With `smoke_test` it
+/// reports its first drawn frame, then closes.
 pub struct Window {
     pub page: Installed,
     smoke_test: bool,
     started: Instant,
+    /// Fonts and looks to set up on the first frame, from this root.
+    setup: Option<PathBuf>,
 }
 impl Window {
     pub fn new(ctx: &egui::Context, make_engine: MakeEngine, smoke_test: bool) -> Self {
-        egui_extras::install_image_loaders(ctx);
-        apply_theme(ctx);
+        Self::with_fonts(ctx, make_engine, smoke_test, Path::new("/"))
+    }
+    /// The window with the system fonts found under `root`.
+    pub fn with_fonts(
+        ctx: &egui::Context,
+        make_engine: MakeEngine,
+        smoke_test: bool,
+        root: &Path,
+    ) -> Self {
         Self {
-            page: Installed::new(make_engine),
+            page: Installed::new(make_engine, Some(ctx.clone())),
             smoke_test,
             started: Instant::now(),
+            setup: Some(root.to_owned()),
         }
     }
     /// Draw one frame. Returns whether the window should close.
     pub fn frame(&mut self, ui: &mut egui::Ui) -> bool {
-        self.page.ui(ui);
+        // New fonts take effect on the next frame, so this one only sets
+        // them up and asks for that frame.
+        if let Some(root) = self.setup.take() {
+            setup(ui.ctx(), &root);
+            ui.ctx().request_repaint();
+            return false;
+        }
+        view::window(ui, &mut self.page);
         if self.smoke_test {
             eprintln!(
                 "PKGDECK_EGUI_READY after {} ms",
