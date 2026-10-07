@@ -3,7 +3,7 @@ FROM docker.io/library/ubuntu:26.04@sha256:da6fc2be547864451aa253836dd926da33623
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential ninja-build lld pkg-config curl ca-certificates git libapt-pkg-dev jq libarchive-tools cmake \
-    qt6-base-dev qt6-declarative-dev qt6-declarative-dev-tools qt6-tools-dev qt6-shadertools-dev qt6-wayland libkirigami-dev extra-cmake-modules \
+    qt6-base-dev qt6-declarative-dev qt6-declarative-dev-tools qt6-tools-dev qt6-shadertools-dev qt6-wayland \
     libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-dev libvulkan-dev \
     libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-shape0 libxcb-xkb1 \
     libxkbcommon-x11-0 libxcb-image0 libxcb-render-util0 libxcb-randr0 libxcb-sync1 \

@@ -1,7 +1,6 @@
 import QtQuick
 import QtQuick.Controls as Controls
 import QtQuick.Layouts
-import org.kde.kirigami as Kirigami
 
 // The history of installs, removals and updates. Works as a page (with its
 // own title) or inside a drawer whose shared header replaces the title
@@ -143,13 +142,13 @@ ColumnLayout {
         visible: pane.showHeader || pane.hasQueued
         Layout.fillWidth: true
         spacing: Theme.spacing
-        Kirigami.Heading {
+        Controls.Label {
+            Accessible.role: Accessible.Heading
             objectName: "activityTitle"
             visible: pane.showHeader
             text: pane.title
             elide: Text.ElideRight
             color: pane.ink
-            level: 1
             font.pointSize: Theme.pointSize(Theme.headingScale)
             font.bold: true
             Layout.fillWidth: true

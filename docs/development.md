@@ -31,7 +31,7 @@ scripts/container.sh development --exec cargo test --locked -p pkgdeck --test en
 scripts/container.sh development --shell
 ```
 
-Both set up Qt and Kirigami for you. QML tests render off-screen, and
+Both set up Qt for you. QML tests render off-screen, and
 real-window tests use a private Xvfb display with xdotool. Neither touches
 your display.
 
@@ -45,7 +45,7 @@ For the macOS app bundle and the Linux CLI-only Homebrew package, see
 
 ## SDK and prerequisites
 
-Ubuntu 26.04 provides Qt 6.10.2, Kirigami/ECM 6.24.0, CMake 4.2.3, and Ninja
+Ubuntu 26.04 provides Qt 6.10.2, CMake 4.2.3, and Ninja
 1.13.2 from its normal package archive. There's no separate SDK to download.
 `setup-dev.sh` only installs `cargo-llvm-cov`. Rust comes from
 `rust-toolchain.toml`.
@@ -70,7 +70,7 @@ cargo run --locked -p pkgdeck
 `dev-env.sh` sets up `PATH`, CMake, library, and QML paths. It also finds LLD
 in standard LLVM folders when it isn't on `PATH`. To use your own compatible
 SDK, set `QT_ROOT_DIR` and `PKGDECK_SDK_PREFIX` before sourcing it.
-`verify.sh full` checks your Qt and Kirigami setup and tells you what's missing.
+`verify.sh full` checks your Qt setup and tells you what's missing.
 `fast` doesn't need Qt.
 
 ### Notes
@@ -160,7 +160,7 @@ scripts/verify.sh containers --engine podman
 Homebrew install/remove tests in a separate throwaway container. Without
 `--engine podman`, it builds the CLI with your local Cargo first.
 
-The development image has the pinned Rust toolchain and Ubuntu's Qt/Kirigami
+The development image has the pinned Rust toolchain and Ubuntu's Qt
 packages. It runs the same `setup-dev.sh` and `verify.sh` as native builds and
 CI. Base images are pinned by digest and support x86_64 and aarch64. Tests use
 your machine's architecture.

@@ -83,8 +83,8 @@ if [[ "$mode" == fast ]]; then
     stage check-qt-free scripts/check-qt-free.sh
 else
     source scripts/dev-env.sh
-    [[ $(qtpaths6 --qt-version) == 6.10.2 ]] && dpkg-query -W libkirigami-dev >/dev/null 2>&1 || {
-        echo 'Ubuntu Qt 6.10.2/Kirigami toolchain missing. Install the development prerequisites.' >&2; exit 1;
+    [[ $(qtpaths6 --qt-version) == 6.10.2 ]] || {
+        echo 'Ubuntu Qt 6.10.2 toolchain missing. Install the development prerequisites.' >&2; exit 1;
     }
     if want coverage; then
         command -v cargo-llvm-cov >/dev/null && [[ $(cargo llvm-cov --version) == 'cargo-llvm-cov 0.9.1' ]] || {
