@@ -86,6 +86,20 @@ SDK, set `QT_ROOT_DIR` and `PKGDECK_SDK_PREFIX` before sourcing it.
   works.
 - Run `pinact run --verify` after changing GitHub workflows.
 
+## egui trial
+
+`crates/pkgdeck-egui` draws the **Installed** page with egui instead of Qt,
+to judge a Qt-free GUI on real code. It isn't packaged or shipped.
+
+```sh
+cargo run -p pkgdeck-egui
+```
+
+It reads the same engine as the Qt app. Click a row for its details, drag
+the line above them to resize, and Esc or **Close** closes them. Tests use
+`egui_kittest`, which checks the page through its accessibility tree with no
+window. One more test opens the real window on a private Xvfb display.
+
 ## CI
 
 The workflow is called `CI`. Check names follow `Category / Scope (architecture)`:
