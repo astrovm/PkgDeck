@@ -405,7 +405,8 @@ impl Installed {
             .striped(true)
             .resizable(true)
             .sense(egui::Sense::click())
-            .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+            // Every cell starts at the top, so a row's first lines line up.
+            .cell_layout(egui::Layout::left_to_right(egui::Align::Min))
             .column(Column::initial(280.0).at_least(140.0).clip(true))
             .column(Column::initial(150.0).at_least(80.0).clip(true))
             .column(Column::remainder().at_least(120.0).clip(true))
