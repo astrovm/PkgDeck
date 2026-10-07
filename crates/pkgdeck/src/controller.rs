@@ -3261,14 +3261,27 @@ impl PreparedRows {
     }
 }
 /// Rows made on a worker, newest last. A few are kept: a preload's rows are
-/// used when its section opens, which may be after other loads.
+/// used when its section opens, which may be after other loads. The cache
+/// saves the window the work of encoding rows, so it holds only a few of them
+/// and never more than its budget: a list of tens of thousands of packages
+/// must not be kept four times over.
 #[derive(Default)]
 struct RowsCache(Vec<PreparedRows>);
 impl RowsCache {
     const CAPACITY: usize = 4;
+    /// What every snapshot kept here may add up to. The packages count by
+    /// their own size, which leaves out the strings behind them, so this
+    /// bounds the order of a few large lists rather than an exact figure.
+    const BUDGET: usize = 64 * 1024 * 1024;
+    fn size(rows: &PreparedRows) -> usize {
+        rows.json.len() + rows.packages.len() * std::mem::size_of::<Package>()
+    }
     fn insert(&mut self, rows: PreparedRows) {
         self.0.retain(|kept| kept.packages != rows.packages);
-        if self.0.len() >= Self::CAPACITY {
+        while !self.0.is_empty()
+            && (self.0.len() >= Self::CAPACITY
+                || Self::size(&rows) + self.0.iter().map(Self::size).sum::<usize>() > Self::BUDGET)
+        {
             self.0.remove(0);
         }
         self.0.push(rows);
@@ -11921,6 +11934,16 @@ mod tests {
             cache.insert(*PreparedRows::new(&[package(name)]));
         }
         assert_eq!(cache.json(&packages), made_here);
+        // A snapshot over the budget pushes every older one out, so one huge
+        // list is held once and never four times.
+        let mut huge = PreparedRows::new(&[package("huge")]);
+        huge.json = "x".repeat(RowsCache::BUDGET);
+        cache.insert(*huge);
+        let mut small = PreparedRows::new(&[package("small")]);
+        small.json = "[\"small\"]".into();
+        cache.insert(*small);
+        assert_eq!(cache.json(&[package("small")]), "[\"small\"]");
+        assert_eq!(cache.0.len(), 1);
         // Failure rows go after the package rows.
         let failure = [json!({"kind": "failure"})];
         assert_eq!(

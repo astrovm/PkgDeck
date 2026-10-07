@@ -17,8 +17,9 @@ Type an app or package name. Exact matches come first, and the same app from
 different package managers is shown together. Each row keeps its own source,
 architecture, and scope (User or System), so you always act on one exact
 package. A Flatpak found in both places shows one row, with **System** first
-and opened by default. Switch to **User** in the details; PkgDeck remembers
-your last choice for that app.
+and opened by default. If only one copy is installed, that copy is shown
+instead. Switch to **User** in the details; PkgDeck remembers your last
+choice for that app.
 
 - The button on the right of a row installs, removes, or updates that package.
   Some sources only keep what's already installed up to date, such as

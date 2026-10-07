@@ -1032,9 +1032,19 @@ impl AppImage {
         if let Some(present) = self.fuse2 {
             return present;
         }
+        // A Flatpak PkgDeck sees its runtime at /usr; the AppImage starts on
+        // the host, whose system is under /run/host.
+        let flatpak = crate::host::Runtime::detect(
+            &std::env::vars_os().collect(),
+            Path::new("/.flatpak-info").exists(),
+        ) == crate::host::Runtime::Flatpak;
+        Self::fuse2_under(Path::new(if flatpak { "/run/host" } else { "/" }))
+    }
+    /// Whether `libfuse.so.2` is in the system whose root is `root`.
+    fn fuse2_under(root: &Path) -> bool {
         FUSE2_LIBRARIES
             .iter()
-            .any(|library| Path::new(library).exists())
+            .any(|library| root.join(library.trim_start_matches('/')).exists())
     }
     /// Start the AppImage as its menu entry does, without files. It runs on
     /// its own, outside PkgDeck's sandbox when PkgDeck is a Flatpak. Without
@@ -1955,10 +1965,15 @@ mod tests {
         assert_eq!(launch(&backend), "1\n");
         // This computer's own answer.
         backend.fuse2 = None;
-        let here = FUSE2_LIBRARIES
-            .iter()
-            .any(|library| Path::new(library).exists());
+        let here = AppImage::fuse2_under(Path::new("/"));
         assert_eq!(backend.file(&id).unwrap().without_fuse, !here);
+        // A Flatpak looks in the host's system, not in its own runtime.
+        let host = base.join("host");
+        assert!(!AppImage::fuse2_under(&host));
+        let library = host.join("usr/lib64/libfuse.so.2");
+        fs::create_dir_all(library.parent().unwrap()).unwrap();
+        fs::write(&library, "").unwrap();
+        assert!(AppImage::fuse2_under(&host));
         fs::remove_dir_all(base).unwrap();
     }
 

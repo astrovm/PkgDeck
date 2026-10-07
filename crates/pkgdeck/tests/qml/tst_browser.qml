@@ -690,6 +690,27 @@ TestCase {
         verify(browser.pageReview === null);
         fake.confirm(false);
         tryCompare(dialog, "visible", false);
+        // The list beside the open app can change another row, and the
+        // header can change every row: those review in the dialog.
+        browser.choose(0);
+        tryCompare(page, "visible", true);
+        fake.nextReview = true;
+        browser.runRowAction(1);
+        tryCompare(dialog, "opened", true);
+        verify(!review.visible);
+        verify(browser.pageReview === null);
+        fake.confirm(false);
+        tryCompare(dialog, "visible", false);
+        browser.propose("upgrade-all");
+        tryCompare(dialog, "opened", true);
+        verify(!review.visible);
+        fake.confirm(false);
+        tryCompare(dialog, "visible", false);
+        // The open row's own change still reviews on its page.
+        browser.runRowAction(0);
+        tryCompare(review, "visible", true);
+        verify(!dialog.opened);
+        fake.confirm(false);
         fake.nextReview = undefined;
     }
     function test_row_buttons_install_one_app_without_asking() {
@@ -847,6 +868,9 @@ TestCase {
             verify(facts.indexOf(label) >= 0, label);
         compare(page.facts.find((fact) => fact.label === "Size").value, "68 MB");
         verify(findChild(page, "showInFolder").visible);
+        // A folder name with "#", "?" or spaces still opens that folder.
+        compare(browser.folderUrl("/home/me/Apps #2/What?"), "file:///home/me/Apps%20%232/What%3F");
+        compare(browser.folderUrl("/home/me/Ñandú 🦤"), "file:///home/me/%C3%91and%C3%BA%20%F0%9F%A6%A4");
         verify(!findChild(page, "pageFuseNote").visible);
         // Without FUSE 2 it says it starts unpacked.
         fake.appFileInfo = JSON.stringify(Object.assign(JSON.parse(fake.appFileInfo), {without_fuse: true}));
@@ -2841,6 +2865,31 @@ TestCase {
         compare(fake.lastProposal, "install");
         compare(fake.selection, 0);
         fake.confirm(false);
+    }
+    function test_flatpak_shows_the_copy_that_is_installed() {
+        browser.openView("Search");
+        const app = {kind: "package", name: "org.example.Player", source: "flatpak", remote: "flathub",
+            architecture: "x86_64", reference: "app/org.example.Player/x86_64/stable", candidate: "3", update: "current"};
+        // The user copy is installed; the system copy is only on offer. The
+        // row must keep reading as installed, and offer Remove.
+        const user = Object.assign({}, app, {scope: "user", installed: "1"});
+        const system = Object.assign({}, app, {scope: "system", installed: null});
+        fake.rows = JSON.stringify([user, system]);
+        tryCompare(findChild(browser, "packageResults"), "count", 1);
+        browser.choose(0);
+        const panel = findChild(browser, "detailsPanel");
+        compare(browser.selected.scope, "user");
+        compare(browser.selected.installed, "1");
+        compare(panel.version, "1");
+        compare(panel.actionText, "Remove");
+        compare(fake.selection, 0);
+        // System still leads when both copies are installed.
+        fake.rows = JSON.stringify([user, Object.assign({}, system, {installed: "2"})]);
+        tryCompare(findChild(browser, "packageResults"), "count", 1);
+        browser.choose(0);
+        compare(browser.selected.scope, "system");
+        compare(browser.selected.installed, "2");
+        compare(fake.selection, 1);
     }
     function test_flatpak_merging_preserves_distinct_offers_data() {
         return [

@@ -283,6 +283,11 @@ Controls.ApplicationWindow {
     // only shows on that page: it may arrive after you moved on.
     readonly property string pageKey: !appPageOpen ? "" : opened !== null ? "opened" : rowIdentity(pageRow)
     property string reviewFor: ""
+    // A change for `identity` reviews on the page only when that row is the
+    // one open: the list beside it can start changes for other rows.
+    function reviewOn(identity) {
+        reviewFor = rowPageOpen && opened === null && identity === pageKey ? pageKey : "";
+    }
     // Leaving a page drops the review shown on it.
     onPageKeyChanged: {
         if (reviewOnPage && backend.confirmation.length && reviewFor !== pageKey) {
@@ -319,6 +324,11 @@ Controls.ApplicationWindow {
         if (source && source.builtin)
             return "Updates itself";
         return source && source.editable ? "No update source yet. Add its GitHub project below." : "";
+    }
+    // A folder as a file URL. Each part is escaped on its own: encodeURI
+    // leaves "#" and "?", which would cut the path short.
+    function folderUrl(folder) {
+        return "file://" + folder.split("/").map(encodeURIComponent).join("/");
     }
     // Values derived from a parsed row, computed once and kept on the row,
     // hidden from JSON.stringify and Object.assign. Rows never change once
@@ -790,6 +800,7 @@ Controls.ApplicationWindow {
         if (uncheckedPackages.length === 0)
             root.propose("upgrade-all");
         else {
+            reviewOn("");
             markActiveRows(checkedIdentities());
             backend.proposeChecked(JSON.stringify(checkedIdentities().map((id) => JSON.parse(id))));
         }
@@ -886,6 +897,8 @@ Controls.ApplicationWindow {
             }
         }
         const emitted = Object.create(null);
+        // Read once for the whole list: a row must not pay for a parse.
+        const choices = flatpakChoices();
         return rows.reduce((result, row) => {
             if (row.kind !== "package" || row.source !== "flatpak") {
                 result.push(row);
@@ -899,10 +912,12 @@ Controls.ApplicationWindow {
                 result.push(...variants);
                 return result;
             }
-            // System is the first copy and the one opened until a choice is remembered.
+            // System is the first copy and the one opened until a choice is
+            // remembered, but a copy already installed wins over one that is
+            // merely offered: the row must keep reading as installed.
             const ordered = variants.slice().sort((a, b) => (b.scope === "system") - (a.scope === "system"));
-            const chosen = ordered.find((entry) => rowIdentity(entry) === flatpakChoices()[key])
-                || ordered[0];
+            const chosen = ordered.find((entry) => rowIdentity(entry) === choices[key])
+                || ordered.find(isInstalled) || ordered[0];
             const memo = rowMemo(chosen), shape = ordered.map(rowJson).join("\n");
             if (memo.flatpakShape !== shape) {
                 memo.flatpakShape = shape;
@@ -1513,8 +1528,8 @@ Controls.ApplicationWindow {
     }
     // Manage sits next to Remove for AppImages; macOS apps swap Remove for it.
     function runAdopt(index) {
-        reviewFor = pageKey;
         const row = viewItems[index];
+        reviewOn(rowIdentity(row));
         if (!canAdopt(row) || retainingResults || !canAct)
             return;
         markActiveRows([rowIdentity(row)]);
@@ -1545,8 +1560,8 @@ Controls.ApplicationWindow {
         return isInstalled(row) ? "remove" : "install";
     }
     function runRowAction(index) {
-        reviewFor = pageKey;
         const row = viewItems[index];
+        reviewOn(rowIdentity(row));
         const action = rowActionName(row);
         if (!action || retainingResults || !canAct)
             return;
@@ -1557,10 +1572,10 @@ Controls.ApplicationWindow {
     // The app page's main button: the opened file's Install or Manage, or
     // the row's own action.
     function runPageAction() {
-        reviewFor = pageKey;
         if (opened !== null) {
             if (!canAct)
                 return;
+            reviewFor = pageKey;
             quickChange = true;
             backend.installOpened();
         } else
@@ -1649,7 +1664,8 @@ Controls.ApplicationWindow {
     }
     onViewItemsChanged: Qt.callLater(flushResults)
     function propose(action) {
-        reviewFor = pageKey;
+        // Changes for the whole list review in the dialog.
+        reviewOn(["upgrade-all", "adopt-all", "refresh"].indexOf(action) >= 0 ? "" : rowIdentity(selected));
         if (!retainingResults) {
             if (action === "upgrade-all")
                 markActiveRows(packageIdentities());
@@ -3352,7 +3368,7 @@ Controls.ApplicationWindow {
                                     Layout.preferredWidth: 38
                                     horizontalPadding: 8
                                     opacity: 1
-                                    onClicked: { root.markActiveRows([packageRow.identity]); backend.propose("upgrade", root.originalIndex(packageRow.index)); }
+                                    onClicked: { root.reviewOn(packageRow.identity); root.markActiveRows([packageRow.identity]); backend.propose("upgrade", root.originalIndex(packageRow.index)); }
                                 }
                                 ActionButton {
                                     objectName: "rowPackageAction"
@@ -3642,7 +3658,7 @@ Controls.ApplicationWindow {
                 appFile: !fromFile && root.pageFile && root.pageFile.path ? root.pageFile : null
                 updateState: fromFile ? "" : root.updateState(root.pageRow, root.pageUpdateSource && !root.pageUpdateSource.error ? root.pageUpdateSource : null)
                 note: secondaryActionText === "Manage" ? "Manage moves it into PkgDeck, which then keeps it updated with its menu entry and icon." : ""
-                onShowInFolderRequested: (folder) => Qt.openUrlExternally("file://" + encodeURI(folder))
+                onShowInFolderRequested: (folder) => Qt.openUrlExternally(root.folderUrl(folder))
                 launchSettings: root.pageLaunch && !root.pageLaunch.error ? root.pageLaunch : null
                 launchError: root.pageLaunchError || (root.pageLaunch && root.pageLaunch.error ? root.pageLaunch.error : "")
                 updateSource: root.pageUpdateSource && !root.pageUpdateSource.error ? root.pageUpdateSource : null
@@ -3755,7 +3771,7 @@ Controls.ApplicationWindow {
                     symbol: "remove"
                     primary: true
                     enabled: !backend.busy || backend.writing
-                    onClicked: backend.propose("clean-all", -1)
+                    onClicked: { root.reviewOn(""); backend.propose("clean-all", -1); }
                 }
                 UpdatesActions {
                     active: root.currentView === "Updates"
