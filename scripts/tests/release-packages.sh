@@ -88,11 +88,13 @@ fi
 # Every Linux build ships the same AppImage updater: the Flatpak manifest
 # must pin exactly what scripts/appimage-updater.sh downloads.
 manifest=packaging/flatpak/io.github.astrovm.PkgDeck.yml
+pins=$(scripts/appimage-updater.sh --pins)
 while read -r arch url sha256; do
     grep -Fq "url: $url" "$manifest" || { echo "Flatpak manifest lacks $url" >&2; exit 1; }
     grep -Fq "sha256: $sha256" "$manifest" || { echo "Flatpak manifest lacks $arch updater checksum" >&2; exit 1; }
-done < <(scripts/appimage-updater.sh --pins)
-[[ $(grep -c 'appimageupdatetool-.*\.AppImage$' "$manifest") == "$(scripts/appimage-updater.sh --pins | wc -l)" ]] \
+done <<<"$pins"
+# BSD wc pads its count with spaces and GNU does not: compare the digits.
+[[ $(grep -c 'appimageupdatetool-.*\.AppImage$' "$manifest") == "$(printf '%s\n' "$pins" | wc -l | tr -d '[:space:]')" ]] \
     || { echo 'Flatpak manifest pins a different AppImage updater set' >&2; exit 1; }
 grep -Fq 'scripts/appimage-updater.sh "$out/usr"' scripts/bundle.sh
 grep -Fq 'scripts/appimage-updater.sh "$stage"' scripts/package-cli.sh

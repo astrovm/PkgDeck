@@ -208,7 +208,9 @@ Rectangle {
                 required property int index
                 objectName: "installationChoice" + modelData.label
                 text: modelData.label
-                checkable: true
+                // Not checkable: clicking only reports the choice, so `checked`
+                // stays bound to the selection instead of a click breaking it.
+                checkable: false
                 checked: index === selector.currentIndex
                 enabled: selector.enabled
                 Accessible.name: modelData.label + " Flatpak"

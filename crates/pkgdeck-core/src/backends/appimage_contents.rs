@@ -2,10 +2,11 @@
 //! embedded filesystem (SquashFS, or DwarFS for newer runtimes). Read
 //! straight from the file, so the AppImage is never run.
 
-use std::{
-    io::Read,
-    path::{Path, PathBuf},
-};
+// Every reader of the image's contents is behind the Linux cfg below; the
+// other platforms open the file only to report what it is.
+#[cfg(target_os = "linux")]
+use std::io::Read;
+use std::path::{Path, PathBuf};
 
 /// A desktop entry or icon larger than this is not read.
 const MAX_ENTRY_BYTES: usize = 64 * 1024;

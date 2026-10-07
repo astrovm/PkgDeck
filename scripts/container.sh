@@ -59,7 +59,9 @@ if [[ "$kind" == development ]]; then
     fi
     if [[ "${1:-}" == --build-cli ]]; then command=(cargo build --locked -p pkd -p pkgdeck-tools); fi
     # No host HOME, credentials, daemon sockets, or package database is mounted.
-    run_container "${interactive[@]}" --userns=keep-id -e LANG=C.UTF-8 \
+    # The `[@]+` form keeps an empty array from being an unbound variable: the
+    # default macOS bash is 3.2, where set -u rejects "${interactive[@]}".
+    run_container ${interactive[@]+"${interactive[@]}"} --userns=keep-id -e LANG=C.UTF-8 \
         -v "$PWD:/workspace:rw" -v "$cache/cargo:/cache/cargo:rw" \
         -v "$cache/target:/workspace/target:rw" \
         "$image" bash -ec 'mkdir -p "$HOME"; source scripts/dev-env.sh; exec "$@"' -- "${command[@]}"
@@ -76,6 +78,6 @@ else
     fi
     tools_binary=$(realpath "${PKGDECK_TOOLS_BINARY:-${CARGO_TARGET_DIR:-target}/debug/pkgdeck-tools}")
     gui_mount+=(-v "$tools_binary:/mnt/pkgdeck-tools:ro")
-    run_container "${gui_mount[@]}" -e "PKGDECK_FRONTEND=${PKGDECK_FRONTEND:-cli}" -v "$PWD:/mnt/pkgdeck:ro" -v "$binaries:/mnt/pkgdeck-bin:ro" "$image" \
+    run_container ${gui_mount[@]+"${gui_mount[@]}"} -e "PKGDECK_FRONTEND=${PKGDECK_FRONTEND:-cli}" -v "$PWD:/mnt/pkgdeck:ro" -v "$binaries:/mnt/pkgdeck-bin:ro" "$image" \
         bash /mnt/pkgdeck/scripts/vm/guest.sh --container "$@"
 fi
