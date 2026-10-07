@@ -400,34 +400,15 @@ jobs:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install build dependencies
-        id: deps
         run: |
-          brew install cmake ninja librsvg qtbase qtdeclarative qtimageformats qtshadertools qtsvg qttools \
+          brew install librsvg qtbase qtdeclarative qtimageformats qtshadertools qtsvg qttools \
             coreutils jq pkgconf openssl@3
           rustup show
-          # Kirigami uses Qt private API, so its build is only reusable with the same Qt.
-          echo "qt=$(brew list --versions qtbase qtdeclarative | tr ' \n' '--')" >> "$GITHUB_OUTPUT"
-          # Only the Kirigami recipe (version, checksums, build flags) decides
-          # whether its 6-minute build can be reused, not the rest of the script.
-          recipe=$(grep -E 'kf_version=|fetch |kde_build |-D[A-Z]' scripts/bundle-macos.sh | shasum -a 256 | cut -c1-16)
-          echo "kirigami=$recipe" >> "$GITHUB_OUTPUT"
       - name: Cache Rust build outputs
         uses: ./.github/actions/rust-cache
         with:
           arch: ${{ matrix.arch }}
           scope: macos-app
-      - name: Cache Kirigami build
-        if: github.ref == 'refs/heads/main'
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: build/macos/kde
-          key: kirigami-v2-${{ matrix.arch }}-${{ steps.deps.outputs.qt }}-${{ steps.deps.outputs.kirigami }}
-      - name: Restore Kirigami build
-        if: github.ref != 'refs/heads/main'
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: build/macos/kde
-          key: kirigami-v2-${{ matrix.arch }}-${{ steps.deps.outputs.qt }}-${{ steps.deps.outputs.kirigami }}
       - name: Build app bundle
         run: scripts/bundle-macos.sh
       - name: Check bundle requirements
@@ -447,7 +428,6 @@ jobs:
           PATH="$(brew --prefix coreutils)/libexec/gnubin:$(brew --prefix qtbase)/bin:$(brew --prefix qtdeclarative)/bin:$(brew --prefix qttools)/bin:$(brew --prefix openssl@3)/bin:$PATH"
           QMAKE="$(brew --prefix qtbase)/bin/qmake"
           export PATH QMAKE
-          export QML_IMPORT_PATH="$PWD/build/macos/kde/lib/qml"
           export QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=software
           # The bundle step already built the release profile; testing it
           # reuses those outputs instead of compiling everything again.

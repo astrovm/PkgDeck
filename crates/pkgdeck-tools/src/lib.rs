@@ -540,11 +540,12 @@ pub fn gui(args: &[String], failure: bool) {
         .env("XDG_DATA_DIRS", &dir.0)
         .env("XDG_RUNTIME_DIR", &runtime);
     if failure {
-        let module = dir.0.join("org/kde/kirigami");
+        // A Controls style whose Label can't load, so the window can't either.
+        let module = dir.0.join("PkgDeckBroken");
         fs::create_dir_all(&module).unwrap();
         fs::write(
             module.join("qmldir"),
-            "module org.kde.kirigami\nHeading 1.0 Broken.qml\n",
+            "module PkgDeckBroken\nLabel 1.0 Broken.qml\n",
         )
         .unwrap();
         fs::write(
@@ -552,7 +553,7 @@ pub fn gui(args: &[String], failure: bool) {
             "import QtQuick\nItem { pkgdeckMissingProperty: true }\n",
         )
         .unwrap();
-        c.env(
+        c.env("QT_QUICK_CONTROLS_STYLE", "PkgDeckBroken").env(
             "QML_IMPORT_PATH",
             format!(
                 "{}:{}",

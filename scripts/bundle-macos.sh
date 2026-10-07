@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Build a self-contained PkgDeck.app (GUI and pkd) from Homebrew's Qt and a
-# pinned Kirigami, then zip it for the Homebrew cask.
+# Build a self-contained PkgDeck.app (GUI and pkd) from Homebrew's Qt, then
+# zip it for the Homebrew cask.
 set -euo pipefail
 [[ $(uname -s) == Darwin ]] || { echo 'bundle-macos.sh requires macOS' >&2; exit 1; }
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
@@ -13,42 +13,10 @@ case "$(uname -m)" in
 esac
 brew=$(brew --prefix)
 work=$PWD/build/macos
-kde=$work/kde
 app=$work/PkgDeck.app
 contents=$app/Contents
 target=${CARGO_TARGET_DIR:-target}/release
-kf_version=6.24
-fetch() {
-    local name=$1 sha256=$2 archive
-    archive=$work/src/$name-$kf_version.0.tar.xz
-    if [[ ! -f $archive ]]; then
-        curl -fL --retry 5 --retry-delay 5 --retry-all-errors "https://download.kde.org/stable/frameworks/$kf_version/$name-$kf_version.0.tar.xz" -o "$archive.part"
-        mv "$archive.part" "$archive"
-    fi
-    printf '%s  %s\n' "$sha256" "$archive" | shasum -a 256 --check --status
-    rm -rf "$work/src/$name-$kf_version.0"
-    tar -xf "$archive" -C "$work/src"
-}
-kde_build() {
-    local name=$1
-    shift
-    cmake -S "$work/src/$name-$kf_version.0" -B "$work/src/$name-build" -G Ninja \
-        -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$kde" -DCMAKE_PREFIX_PATH="$kde;$brew" \
-        -DBUILD_TESTING=OFF "$@"
-    cmake --build "$work/src/$name-build"
-    cmake --install "$work/src/$name-build"
-}
-mkdir -p "$work/src" build/artifacts
-if [[ ! -d $kde/lib/qml/org/kde/kirigami ]]; then
-    fetch extra-cmake-modules 8ef3f7e176588e099c02559d20ddf4fed0590f92c168f0bcc60a7e638ba1e6a3
-    kde_build extra-cmake-modules
-    fetch kirigami 7b3247dfe349867d44244335beb8d549ad4a8f6b3179d1736d231512dea5b0ce
-    kde_build kirigami -DKDE_INSTALL_QMLDIR=lib/qml -DKDE_INSTALL_LIBDIR=lib \
-        -DBUILD_EXAMPLES=OFF -DBUILD_QCH=OFF
-    # Keep the licenses with the cached build; the source tree is not cached.
-    mkdir -p "$kde/share/licenses"
-    cp -R "$work/src/kirigami-$kf_version.0/LICENSES" "$kde/share/licenses/kirigami"
-fi
+mkdir -p "$work" build/artifacts
 
 QMAKE=$brew/opt/qtbase/bin/qmake cargo build --locked --release -p pkgdeck -p pkd
 
@@ -58,7 +26,6 @@ cp "$target/pkgdeck" "$target/pkd" "$contents/MacOS/"
 cp LICENSE "$contents/Resources/licenses/PkgDeck"
 # sudo's password prompt for Homebrew casks that need administrator access.
 install -m 755 packaging/macos/pkgdeck-askpass "$contents/Resources/pkgdeck-askpass"
-cp -R "$kde/share/licenses/kirigami" "$contents/Resources/licenses/kirigami"
 iconset=$work/PkgDeck.iconset
 rm -rf "$iconset"
 mkdir -p "$iconset"
@@ -72,8 +39,7 @@ iconutil -c icns "$iconset" -o "$contents/Resources/PkgDeck.icns"
 # The bundle starts empty, so -always-overwrite would only make macdeployqt
 # copy, strip and fix every framework again for each of the ~90 plugins it
 # deploys. Its ad-hoc signatures would not survive the rpath fixes below.
-"$brew/bin/macdeployqt" "$app" -no-codesign -libpath="$kde/lib" \
-    -qmldir="$PWD/crates/pkgdeck/qml" -qmlimport="$kde/lib/qml"
+"$brew/bin/macdeployqt" "$app" -no-codesign -qmldir="$PWD/crates/pkgdeck/qml"
 
 # Every Mach-O file must load only system libraries or bundled copies. One
 # file(1) call finds them among the ~2000 files; running it per file is slow.

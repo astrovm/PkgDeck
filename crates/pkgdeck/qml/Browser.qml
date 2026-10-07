@@ -4,7 +4,6 @@ import QtQuick.Layouts
 import QtQuick.Dialogs
 import QtCore
 import QtNetwork
-import org.kde.kirigami as Kirigami
 
 Controls.ApplicationWindow {
     id: root
@@ -2131,12 +2130,12 @@ Controls.ApplicationWindow {
             spacing: 14
             RowLayout {
                 Layout.fillWidth: true
-                Kirigami.Heading {
+                Controls.Label {
+                    Accessible.role: Accessible.Heading
                     objectName: "pageHeading"
                     text: root.currentView
                     elide: Text.ElideRight
                     color: root.ink
-                    level: 1
                     font.pointSize: root.font.pointSize * 1.6
                     font.bold: true
                     Layout.fillWidth: true
@@ -4461,11 +4460,11 @@ Controls.ApplicationWindow {
             spacing: 14
             RowLayout {
                 Layout.fillWidth: true
-                Kirigami.Heading {
+                Controls.Label {
+                    Accessible.role: Accessible.Heading
                     objectName: "activityHeading"
                     text: "Activity"
                     color: root.ink
-                    level: 1
                     font.pointSize: Theme.pointSize(Theme.titleScale)
                     font.bold: true
                     Layout.fillWidth: true

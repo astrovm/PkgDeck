@@ -23,7 +23,7 @@ a supported build target.
 
 Native dpkg and AppImage execution tests, and the X11 keyboard driver, run only
 on Linux. X11 testing does not establish native Cocoa interaction coverage. The macOS GUI
-tests use the Qt/Kirigami build that `scripts/bundle-macos.sh` bundles into the
+tests use the Qt build that `scripts/bundle-macos.sh` bundles into the
 shipped app. The Homebrew test installs that app through the cask and runs a
 Cocoa startup smoke test through the linked `pkgdeck` command, using Qt Quick's
 software renderer. That smoke test opens the menu bar menu and checks that Qt's

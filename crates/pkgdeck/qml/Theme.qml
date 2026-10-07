@@ -1,6 +1,5 @@
 pragma Singleton
 import QtQuick
-import org.kde.kirigami as Kirigami
 
 // Design tokens shared by every component: colours, radii, spacing, type
 // scale and motion. The window binds appearance, reduceMotion and baseFont.
@@ -59,9 +58,9 @@ QtObject {
     function pointSize(scale) { return Math.max(1, baseFont.pointSize * scale); }
 
     // Motion. Every duration drops to zero when animations are off.
-    readonly property bool motionEnabled: !reduceMotion && Kirigami.Units.shortDuration > 0
-    readonly property int feedbackDuration: motionEnabled ? Math.round(Kirigami.Units.shortDuration * 0.8) : 0
-    readonly property int revealDuration: motionEnabled ? Math.round(Kirigami.Units.shortDuration * 1.2) : 0
-    readonly property int layoutDuration: motionEnabled ? Kirigami.Units.longDuration : 0
-    readonly property int pulseDuration: motionEnabled ? Kirigami.Units.veryLongDuration * 2 : 0
+    readonly property bool motionEnabled: !reduceMotion
+    readonly property int feedbackDuration: motionEnabled ? 80 : 0
+    readonly property int revealDuration: motionEnabled ? 120 : 0
+    readonly property int layoutDuration: motionEnabled ? 200 : 0
+    readonly property int pulseDuration: motionEnabled ? 800 : 0
 }

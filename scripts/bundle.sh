@@ -8,7 +8,7 @@ scripts/appimage-updater.sh "$out/usr"
 scripts/build-apt.sh "${CARGO_TARGET_DIR:-target}/release"
 cp "${CARGO_TARGET_DIR:-target}/release/"{pkd,pkgdeck,pkgdeck-apt-query} "$out/usr/bin/"
 cp "${CARGO_TARGET_DIR:-target}/release/pkgdeck-host-runner" "$out/usr/libexec/"
-for module in QtQuick QtQml QtCore QtNetwork org; do cp -a "$QT_QML_DIR/$module" "$out/usr/qml/"; done
+for module in QtQuick QtQml QtCore QtNetwork; do cp -a "$QT_QML_DIR/$module" "$out/usr/qml/"; done
 mkdir -p "$out/usr/qml/Qt/labs"
 cp -a "$QT_QML_DIR/Qt/labs/platform" "$out/usr/qml/Qt/labs/"
 shopt -s nullglob
