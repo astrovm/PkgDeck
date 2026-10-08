@@ -252,5 +252,7 @@ fn a_list_that_loads_late_does_not_steal_typing_from_search() {
     harness.event(egui::Event::Text("re".into()));
     harness.run_steps(2);
     assert_eq!(harness.state().1.query, "fire");
-    assert!(harness.ctx.memory(|m| m.has_focus(pkgdeck::ui::search_id())));
+    assert!(harness
+        .ctx
+        .memory(|m| m.has_focus(pkgdeck::ui::search_id())));
 }
