@@ -1898,9 +1898,9 @@ fn scope_word(scope: &Scope) -> String {
         Scope::Environment { path } => path.display().to_string(),
     }
 }
-/// "APT · System": where a change happens, in people's words.
+/// "APT, System": where a change happens, in people's words.
 fn source_and_scope(backend: &str, scope: &Scope) -> String {
-    format!("{} · {}", source_display_name(backend), scope_word(scope))
+    format!("{}, {}", source_display_name(backend), scope_word(scope))
 }
 /// Capitalize and end with a period, so every message reads as a sentence.
 fn sentence(text: &str) -> String {
@@ -2187,7 +2187,7 @@ fn plain_error(error: &EngineError, backend: Option<&str>, sudo: bool) -> String
     }
 }
 /// A repository change in people's words, such as
-/// "Remove repository\nflathub · Flatpak · System".
+/// "Remove repository\nflathub, Flatpak, System".
 fn repository_label(action: &RepositoryAction) -> String {
     let change = match &action.change {
         repositories::Change::Add { url } => format!("Add repository from {url}"),
@@ -2200,7 +2200,7 @@ fn repository_label(action: &RepositoryAction) -> String {
         repositories::Change::OpenEditor => "Open Software Sources".into(),
     };
     format!(
-        "{change}\n{} · {}",
+        "{change}\n{}, {}",
         action.name,
         source_and_scope(&action.backend, &action.scope)
     )
@@ -2222,7 +2222,7 @@ fn repository_error(error: &str) -> String {
     }
 }
 /// The repositories report, with each repository's source and scope in
-/// people's words ("where": "Flatpak · System") and errors as sentences.
+/// people's words ("where": "Flatpak, System") and errors as sentences.
 /// Every original field stays for the frontend's own logic.
 fn repositories_json(report: &repositories::Report) -> QString {
     let mut value = serde_json::to_value(report).unwrap_or_else(|_| json!({}));
@@ -5225,7 +5225,7 @@ impl ffi::PackageController {
                     "System"
                 };
                 let summary = format!(
-                    "{action}\n{} · {scope}",
+                    "{action}\n{}, {scope}",
                     source_display_name(&import.backend)
                 );
                 let details = format!("{}\n{}", import.description, import.source);
@@ -7498,7 +7498,7 @@ mod tests {
         assert!(preview["summary"]
             .as_str()
             .unwrap()
-            .starts_with("Update Anonymous App\nAPT · System\n1 → 2"));
+            .starts_with("Update Anonymous App\nAPT, System\n1 → 2"));
         assert!(!preview["summary"]
             .as_str()
             .unwrap()
@@ -9243,7 +9243,7 @@ mod tests {
         assert_eq!(preview["action"], "Remove editor");
         assert_eq!(
             preview["summary"],
-            "Remove editor\nAPT · System\n1\n3 other packages will change\nRemoves: libgone\nApp data may remain after removal."
+            "Remove editor\nAPT, System\n1\n3 other packages will change\nRemoves: libgone\nApp data may remain after removal."
         );
         let body = preview["body"].as_str().unwrap();
         assert!(body.contains("Selected: Remove editor (1)"), "{body}");
@@ -10708,7 +10708,7 @@ mod tests {
         let report: Value = serde_json::from_str(&controller.repositories().to_string()).unwrap();
         assert_eq!(report["repositories"][0]["scope"], "system");
         assert_eq!(report["errors"][0], "Synthetic partial failure.");
-        assert_eq!(report["repositories"][0]["where"], "Flatpak · System");
+        assert_eq!(report["repositories"][0]["where"], "Flatpak, System");
         assert!(controller
             .rust()
             .view_cache
@@ -12789,9 +12789,9 @@ mod tests {
         }
         assert_eq!(
             source_and_scope("flatpak", &Scope::User { uid: 1000 }),
-            "Flatpak · User"
+            "Flatpak, User"
         );
-        assert_eq!(source_and_scope("apt", &Scope::System), "APT · System");
+        assert_eq!(source_and_scope("apt", &Scope::System), "APT, System");
         assert_eq!(
             scope_word(&Scope::Environment {
                 path: PathBuf::from("/tmp/env")
@@ -12840,7 +12840,7 @@ mod tests {
         };
         assert_eq!(
             repository_label(&action),
-            "Remove repository\nflathub · Flatpak · System"
+            "Remove repository\nflathub, Flatpak, System"
         );
         for (change, text) in [
             (
@@ -13913,7 +13913,7 @@ mod tests {
         assert!(controller
             .confirmation()
             .to_string()
-            .contains("flathub · Flatpak · System"));
+            .contains("flathub, Flatpak, System"));
     }
 
     /// A Homebrew Casks stand-in: `adopts` is the app its install would

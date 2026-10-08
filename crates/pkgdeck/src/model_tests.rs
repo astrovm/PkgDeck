@@ -286,10 +286,10 @@ fn source_lines_say_where_a_row_comes_from() {
     );
     assert_eq!(
         line(
-            json!({"name": "anchor", "display_name": "Anchor (AVM)", "source": "anchor", "scope_label": "User 501"}),
+            json!({"name": "anchor", "display_name": "Anchor (AVM)", "source": "anchor", "scope_label": "User 4242"}),
             false
         ),
-        "Anchor (AVM), User 501"
+        "User 4242"
     );
     assert_eq!(
         line(
@@ -872,4 +872,34 @@ fn times_sizes_and_intervals_read_naturally() {
     assert_eq!(INTERVALS[nearest_interval(100)].0, 60);
     assert_eq!(INTERVALS[nearest_interval(99_999)].0, 10080);
     assert_eq!(INTERVALS[nearest_interval(-4)].0, 15);
+}
+
+#[test]
+fn scopes_read_as_people_say_them() {
+    let home = Some("/home/fixture");
+    assert_eq!(
+        friendly_scope("/home/fixture/.cargo", home, 1000),
+        "~/.cargo"
+    );
+    assert_eq!(friendly_scope("/home/fixture", home, 1000), "~");
+    // A neighbour's folder or a lookalike prefix stays whole.
+    assert_eq!(
+        friendly_scope("/home/fixtured/.cargo", home, 1000),
+        "/home/fixtured/.cargo"
+    );
+    assert_eq!(
+        friendly_scope("/usr/lib/node_modules", home, 1000),
+        "/usr/lib/node_modules"
+    );
+    assert_eq!(
+        friendly_scope("/usr/lib/node_modules", Some("/"), 1000),
+        "/usr/lib/node_modules"
+    );
+    assert_eq!(
+        friendly_scope("/home/fixture/.bun", None, 1000),
+        "/home/fixture/.bun"
+    );
+    assert_eq!(friendly_scope("User 1000", home, 1000), "User");
+    assert_eq!(friendly_scope("User 1001", home, 1000), "User 1001");
+    assert_eq!(friendly_scope("System", home, 1000), "System");
 }

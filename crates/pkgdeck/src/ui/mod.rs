@@ -397,31 +397,6 @@ fn sidebar_ui(app: &mut App, ui: &mut Ui, rect: Rect, rail: bool) {
             focus_for_page(app);
         }
     }
-    // Who made it.
-    if name_shown > 0.02 {
-        let y = rect.bottom() - 26.0;
-        let x = inner.left() + 6.0;
-        let made = painter.text(
-            pos2(x, y),
-            Align2::LEFT_CENTER,
-            "Made with",
-            theme::font(12.5),
-            alpha(palette.muted, name_shown),
-        );
-        theme::paint_icon(
-            &painter,
-            Rect::from_center_size(pos2(made.right() + 10.0, y), Vec2::splat(13.0)),
-            "heart",
-            alpha(palette.heart, name_shown),
-        );
-        painter.text(
-            pos2(made.right() + 20.0, y),
-            Align2::LEFT_CENTER,
-            "by astro",
-            theme::font(12.5),
-            alpha(palette.muted, name_shown),
-        );
-    }
 }
 
 // ---------------------------------------------------------------------------

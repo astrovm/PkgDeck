@@ -3,7 +3,7 @@
 use super::widgets::*;
 use crate::{
     app::App,
-    model::{self, Activity},
+    model::{self, Activity, Tone},
     theme::{self, Palette},
 };
 use eframe::egui::{
@@ -145,20 +145,8 @@ fn entry_card(app: &mut App, ui: &mut Ui, entry: &Activity) {
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             let header = ui.horizontal(|ui| {
-                let title_width = ui.available_width() - 170.0;
-                let title = one_line(
-                    ui,
-                    &entry.title(),
-                    theme::bold(14.5),
-                    palette.ink,
-                    title_width.max(80.0),
-                );
-                let (rect, _) = ui.allocate_exact_size(vec2(title.size().x, 20.0), Sense::hover());
-                ui.painter().galley(
-                    pos2(rect.left(), rect.center().y - title.size().y / 2.0),
-                    title,
-                    palette.ink,
-                );
+                // Right side first, so the title gets what's left and never
+                // runs under it.
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if expandable {
                         let turn = ease(ui.ctx(), Id::new(("chevron", entry.id)), expanded, REVEAL);
@@ -175,17 +163,36 @@ fn entry_card(app: &mut App, ui: &mut Ui, entry: &Activity) {
                             .font(theme::font(12.0))
                             .color(palette.muted),
                     );
-                    egui::Frame::new()
-                        .fill(alpha(color, 0.14))
-                        .corner_radius(CornerRadius::same(8))
-                        .inner_margin(egui::Margin::symmetric(8, 2))
-                        .show(ui, |ui| {
-                            ui.label(
-                                egui::RichText::new(entry.result())
-                                    .font(theme::bold(11.5))
-                                    .color(color),
-                            );
-                        });
+                    // The bar on the left already says it went well.
+                    if entry.tone() != Tone::Success {
+                        egui::Frame::new()
+                            .fill(alpha(color, 0.14))
+                            .corner_radius(CornerRadius::same(8))
+                            .inner_margin(egui::Margin::symmetric(8, 2))
+                            .show(ui, |ui| {
+                                ui.label(
+                                    egui::RichText::new(entry.result())
+                                        .font(theme::bold(11.5))
+                                        .color(color),
+                                );
+                            });
+                    }
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        let title = one_line(
+                            ui,
+                            &entry.title(),
+                            theme::bold(14.5),
+                            palette.ink,
+                            (ui.available_width() - 8.0).max(40.0),
+                        );
+                        let (rect, _) =
+                            ui.allocate_exact_size(vec2(title.size().x, 20.0), Sense::hover());
+                        ui.painter().galley(
+                            pos2(rect.left(), rect.center().y - title.size().y / 2.0),
+                            title,
+                            palette.ink,
+                        );
+                    });
                 });
             });
             if !others.is_empty() && !expanded {

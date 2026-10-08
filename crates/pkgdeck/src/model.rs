@@ -684,6 +684,22 @@ fn simplified(text: &str) -> String {
         .collect()
 }
 
+/// A scope as people read it: "~/.cargo" for a folder in their home, and
+/// "User" for their own account rather than its number.
+pub fn friendly_scope(label: &str, home: Option<&str>, uid: u32) -> String {
+    if label == format!("User {uid}") {
+        return "User".into();
+    }
+    match home.filter(|home| home.len() > 1) {
+        Some(home) if label == home => "~".into(),
+        Some(home) => match label.strip_prefix(home) {
+            Some(rest) if rest.starts_with('/') => format!("~{rest}"),
+            _ => label.to_owned(),
+        },
+        None => label.to_owned(),
+    }
+}
+
 /// "Flatpak, flathub, System": where a row comes from.
 pub fn source_line(row: &Row, merged_scopes: bool) -> String {
     let mut parts: Vec<String> = vec![];
@@ -698,7 +714,10 @@ pub fn source_line(row: &Row, merged_scopes: bool) -> String {
     if names_differ && row.is_package() {
         parts.push(row.name.clone());
     }
-    parts.push(source_name(&row.source).to_owned());
+    // A standalone tool's row is named after its source already.
+    if source_name(&row.source) != row.title() {
+        parts.push(source_name(&row.source).to_owned());
+    }
     if let Some(remote) = row.remote.as_deref().filter(|r| !r.is_empty()) {
         parts.push(remote.to_owned());
     }
@@ -714,7 +733,11 @@ pub fn source_line(row: &Row, merged_scopes: bool) -> String {
             .into(),
         );
     } else if !row.scope_label.is_empty() && row.kind == "package" {
-        parts.push(row.scope_label.clone());
+        parts.push(friendly_scope(
+            &row.scope_label,
+            std::env::var("HOME").ok().as_deref(),
+            rustix::process::geteuid().as_raw(),
+        ));
     }
     if row.source == "flatpak" {
         if let Some(branch) = row

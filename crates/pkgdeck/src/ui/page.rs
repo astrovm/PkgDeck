@@ -87,7 +87,10 @@ fn panel(app: &mut App, ui: &mut Ui, rect: Rect, row: &Row, narrow: bool) {
                         .font(theme::bold(18.0))
                         .color(palette.ink),
                 );
-                ui.label(egui::RichText::new(model::source_name(&row.source)).color(palette.muted));
+                let source = model::source_name(&row.source);
+                if source != row.title() {
+                    ui.label(egui::RichText::new(source).color(palette.muted));
+                }
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                 if icon_button(ui, "cancel", "Close details", palette.muted, true).clicked() {

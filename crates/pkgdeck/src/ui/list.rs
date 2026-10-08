@@ -158,6 +158,15 @@ fn heading_text(app: &App) -> String {
     }
 }
 
+/// "Waiting for APT", "Waiting for APT and Snap", or a count past two.
+fn waiting_text(names: &[String]) -> String {
+    match names {
+        [one] => format!("Waiting for {one}"),
+        [one, two] => format!("Waiting for {one} and {two}"),
+        _ => format!("Waiting for {} sources", names.len()),
+    }
+}
+
 fn heading_row(app: &mut App, ui: &mut Ui, rect: Rect) {
     let ctx = ui.ctx().clone();
     let palette = Palette::current(&ctx);
@@ -186,16 +195,18 @@ fn heading_row(app: &mut App, ui: &mut Ui, rect: Rect) {
                     .map(|id| model::source_name(id).to_owned())
                     .collect();
                 if !names.is_empty() {
-                    let text = format!("Waiting for {}", names.join(", "));
                     let galley = one_line(
                         ui,
-                        &text,
+                        &waiting_text(&names),
                         theme::font(13.0),
                         palette.muted,
                         ui.available_width() * 0.5,
                     );
-                    let (r, _) = ui.allocate_exact_size(galley.size(), Sense::hover());
+                    let (r, response) = ui.allocate_exact_size(galley.size(), Sense::hover());
                     ui.painter().galley(r.min, galley, palette.muted);
+                    if names.len() > 2 {
+                        response.on_hover_text(names.join("\n"));
+                    }
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -527,6 +538,23 @@ fn rows(app: &mut App, ui: &mut Ui, body: Rect, width: Width) {
     app.hovered_row(hovered_raw);
 }
 
+/// What a source row adds to its status: why it can't be used, or that
+/// it's turned off.
+fn source_note(app: &App, row: &model::Row) -> String {
+    if !row.available.unwrap_or(false) {
+        return row
+            .summary
+            .strip_prefix("Unavailable: ")
+            .unwrap_or(&row.summary)
+            .to_owned();
+    }
+    if app.enabled_sources().contains(&row.source) {
+        String::new()
+    } else {
+        "Turned off".into()
+    }
+}
+
 /// Draws one row; returns its raw index when the pointer rests on it.
 fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Option<usize> {
     let ctx = ui.ctx().clone();
@@ -566,7 +594,7 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
         ui.painter().text(
             heading.right_center() - vec2(12.0, 0.0),
             Align2::RIGHT_CENTER,
-            group.sources.join(" · "),
+            group.sources.join(", "),
             theme::font(12.0),
             palette.accent,
         );
@@ -645,12 +673,16 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
     }
     // Name and source.
     let title = row.title().to_owned();
-    let line = if row.kind == "source" {
-        row.summary.clone()
+    let source = row.kind == "source";
+    let line = if source {
+        // The status column already says whether it's available.
+        source_note(app, &row)
     } else {
         model::source_line(&row, item.variants.len() > 1)
     };
-    let top_y = if compact {
+    let top_y = if line.is_empty() {
+        rect.center().y
+    } else if compact && !source {
         rect.top() + 14.0
     } else {
         rect.center().y - 10.0
@@ -687,24 +719,27 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
         _ if row.has_update() => palette.accent,
         _ => palette.muted,
     };
-    if compact {
-        let text = if row.summary.is_empty() {
-            version.clone()
-        } else {
-            format!("{version}  ·  {}", row.summary)
-        };
-        let galley = one_line(
-            ui,
-            &text,
-            theme::font(12.5),
-            palette.muted,
-            cols.name.width(),
-        );
-        painter.galley(
-            pos2(cols.name.left(), top_y + 30.0),
-            galley,
-            alpha(version_color, opacity),
-        );
+    if compact && !source {
+        // Version in its own colour, then the summary in what's left.
+        let width = cols.name.width();
+        let version = one_line(ui, &version, theme::font(12.5), version_color, width * 0.5);
+        let at = pos2(cols.name.left(), top_y + 30.0);
+        let used = version.size().x;
+        painter.galley(at, version, alpha(version_color, opacity));
+        if !row.summary.is_empty() && width - used > 40.0 {
+            let summary = one_line(
+                ui,
+                &row.summary,
+                theme::font(12.5),
+                palette.muted,
+                width - used - 12.0,
+            );
+            painter.galley(
+                at + vec2(used + 12.0, 0.0),
+                summary,
+                alpha(palette.muted, opacity),
+            );
+        }
     }
     if let Some(v) = cols.version {
         if app.page == Page::Updates && row.has_update() {
@@ -743,7 +778,7 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
             );
         }
     }
-    if let Some(s) = cols.summary {
+    if let Some(s) = cols.summary.filter(|_| !source) {
         let galley = one_line(
             ui,
             &row.summary,
@@ -763,10 +798,19 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
         let button = Rect::from_center_size(pos2(x - 17.0, rect.center().y), Vec2::splat(34.0));
         x -= 38.0;
         let enabled = running || (app.can_act() && !retaining);
+        // Coloured only on the row in hand, so a long list isn't a wall of
+        // red bins. The pointer may be on the button itself.
+        let near = ease(
+            &ctx,
+            id.with("near"),
+            ui.rect_contains_pointer(surface) && !retaining,
+            FEEDBACK,
+        )
+        .max(chosen);
         let color = if !enabled || running {
             palette.muted
         } else {
-            tone(&palette, action.tone())
+            mix(palette.muted, tone(&palette, action.tone()), near)
         };
         let icon = if running { "cancel" } else { action.icon() };
         let tip = if running {
@@ -1186,4 +1230,23 @@ fn empty_state(app: &mut App, ui: &mut Ui, body: Rect) {
             }
         },
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::waiting_text;
+
+    #[test]
+    fn waiting_names_one_or_two_sources_and_counts_more() {
+        let names = |list: &[&str]| list.iter().map(|n| (*n).to_owned()).collect::<Vec<_>>();
+        assert_eq!(waiting_text(&names(&["APT"])), "Waiting for APT");
+        assert_eq!(
+            waiting_text(&names(&["APT", "Snap"])),
+            "Waiting for APT and Snap"
+        );
+        assert_eq!(
+            waiting_text(&names(&["APT", "Snap", "npm"])),
+            "Waiting for 3 sources"
+        );
+    }
 }
