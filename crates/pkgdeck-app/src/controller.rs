@@ -113,6 +113,23 @@ pub mod ffi {
             listeners: Vec::new(),
         })
     }
+    /// A controller that never reaches the running system, for a front
+    /// end's tests: `engine` stands in for the package managers, and there
+    /// is no activity log, login item, relaunch, password prompt or web
+    /// lookup.
+    pub fn create_synthetic_controller(engine: super::EngineMaker) -> UniquePtr<PackageController> {
+        let mut rust = Controller::default();
+        rust.natives = super::synthetic_natives(engine);
+        rust.activity_store = None;
+        rust.autostart_path = None;
+        rust.install = None;
+        rust.needs_password = super::NeedsPassword::default();
+        UniquePtr::new(PackageController {
+            rust,
+            revision: 0,
+            listeners: Vec::new(),
+        })
+    }
     impl PackageController {
         pub fn rust(&self) -> &Controller {
             &self.rust
@@ -1085,6 +1102,44 @@ struct Natives {
     metadata: crate::metadata::Sources,
     /// Load the local app catalog in the background when sections load.
     warm_catalog: bool,
+}
+/// Builds an engine for some sources, as `native_engine` does.
+pub type EngineMaker =
+    fn(&[String], bool, Authorization, &Cancellation) -> Result<Engine, EngineError>;
+/// A machine whose only package managers are `engine`'s.
+fn synthetic_natives(engine: EngineMaker) -> Natives {
+    fn bare_host() -> pkgdeck_core::host::Host {
+        pkgdeck_core::host::Host::new(
+            pkgdeck_core::host::Runtime::Native,
+            BTreeMap::from([("PATH".into(), "/nonexistent/pkgdeck".into())]),
+        )
+    }
+    fn no_approval(
+        _: &pkgdeck_core::host::Host,
+        _: bool,
+        _: &Cancellation,
+    ) -> Result<String, ExecutionError> {
+        Err(ExecutionError::Disabled(
+            "PkgDeck's system helper is not installed".into(),
+        ))
+    }
+    fn no_catalog() -> crate::metadata::Catalog {
+        crate::metadata::Catalog::default()
+    }
+    fn offline(_: &str, _: &Cancellation) -> String {
+        String::new()
+    }
+    Natives {
+        engine,
+        host: bare_host,
+        approve: no_approval,
+        root: "/nonexistent/pkgdeck",
+        metadata: crate::metadata::Sources {
+            catalog: no_catalog,
+            fetch: offline,
+        },
+        warm_catalog: false,
+    }
 }
 const NATIVES: Natives = Natives {
     engine: pkgdeck_core::backends::native_engine,
@@ -14323,6 +14378,22 @@ mod tests {
         metadata: NO_METADATA,
         warm_catalog: false,
     };
+    #[test]
+    fn synthetic_controllers_stay_off_the_system() {
+        let mut controller = ffi::create_synthetic_controller(fixture_engine);
+        let natives = controller.rust().natives;
+        assert_eq!(natives.root, "/nonexistent/pkgdeck");
+        assert!(!natives.warm_catalog);
+        assert!((natives.metadata.fetch)("https://flathub.org/x", &Cancellation::default()).is_empty());
+        let _ = (natives.metadata.catalog)();
+        assert!((natives.approve)(&(natives.host)(), true, &Cancellation::default()).is_err());
+        assert!(controller.rust().activity_store.is_none());
+        let mut controller = controller.pin_mut();
+        controller.as_mut().check_sources();
+        settle(&mut controller);
+        let catalog: Value = serde_json::from_str(&controller.source_catalog().to_string()).unwrap();
+        assert_eq!(catalog[0]["source"], "fixture");
+    }
     #[test]
     fn production_workers_use_the_running_system() {
         assert_eq!(NATIVES.root, "/");

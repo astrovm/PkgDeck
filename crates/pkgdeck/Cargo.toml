@@ -5,25 +5,32 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "PkgDeck's window: browse, install, remove and update packages from every source"
+publish = false
 
 [dependencies]
+pkgdeck-core.workspace = true
+pkgdeck-app = { path = "../pkgdeck-app" }
 serde.workspace = true
 serde_json.workspace = true
 rustix.workspace = true
-pkgdeck-core.workspace = true
-cxx.workspace = true
-cxx-qt.workspace = true
-cxx-qt-lib.workspace = true
-roxmltree = { version = "0.21", default-features = false }
-serde_yaml = { version = "0.9", default-features = false }
-flate2 = { version = "1", default-features = false, features = ["miniz_oxide"] }
+eframe = { version = "=0.36.2", default-features = false, features = ["accesskit", "default_fonts", "glow", "wayland", "x11"] }
+egui_extras = { version = "=0.36.2", default-features = false, features = ["file", "image", "svg"] }
+image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
+sha2.workspace = true
+hex.workspace = true
+chrono = { version = "=0.4.45", default-features = false, features = ["clock", "std"] }
+rfd = "=0.17.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ksni = { version = "=0.3.6", default-features = false, features = ["async-io", "blocking"] }
+notify-rust = "=4.18.2"
 
 [build-dependencies]
-cxx-qt-build.workspace = true
-cxx-gen.workspace = true
+cc = "=1.6.0"
+
+[dev-dependencies]
+egui_kittest = { version = "=0.36.2", features = ["wgpu", "snapshot"] }
 
 [lints]
 workspace = true
-
-[dev-dependencies.pkgdeck-tools]
-path = "../pkgdeck-tools"

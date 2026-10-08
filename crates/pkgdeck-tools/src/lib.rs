@@ -211,9 +211,6 @@ impl Desktop {
         self.process = Some(Process(
             command(args)
                 .env("DISPLAY", &self.display)
-                .env("QT_QPA_PLATFORM", "xcb")
-                .env("QT_QUICK_BACKEND", "software")
-                .env("QT_ACCESSIBILITY", "0")
                 .env_remove("WAYLAND_DISPLAY")
                 .env("XDG_RUNTIME_DIR", &self.dir.0)
                 .env("XDG_CONFIG_HOME", &self.dir.0)
@@ -403,11 +400,7 @@ impl Desktop {
             "{}",
             self.logs()
         );
-        assert!(
-            !self.logs().contains("TypeError:") && !self.logs().contains("ReferenceError:"),
-            "{}",
-            self.logs()
-        );
+        assert!(!self.logs().contains("panicked"), "{}", self.logs());
         let _ = &mut self.server;
     }
 }
@@ -531,78 +524,35 @@ pub fn gui(args: &[String], failure: bool) {
     let _ = fs::remove_dir_all(&runtime);
     fs::create_dir_all(&runtime).unwrap();
     fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
+    // A private X display; the failure run gets none at all.
+    let desktop = (!failure).then(Desktop::new);
     let mut c = Command::new("timeout");
-    c.args(["--kill-after=5s", "30s"]).args(args);
-    c.env("QT_QPA_PLATFORM", "offscreen")
-        .env("QT_QUICK_BACKEND", "software")
-        .env("XDG_CONFIG_HOME", &dir.0)
+    c.args(["--kill-after=5s", "60s"]).args(args);
+    c.env("XDG_CONFIG_HOME", &dir.0)
         .env("XDG_DATA_HOME", &dir.0)
         .env("XDG_DATA_DIRS", &dir.0)
-        .env("XDG_RUNTIME_DIR", &runtime);
-    if failure {
-        // A Controls style whose Label can't load, so the window can't either.
-        let module = dir.0.join("PkgDeckBroken");
-        fs::create_dir_all(&module).unwrap();
-        fs::write(
-            module.join("qmldir"),
-            "module PkgDeckBroken\nLabel 1.0 Broken.qml\n",
-        )
-        .unwrap();
-        fs::write(
-            module.join("Broken.qml"),
-            "import QtQuick\nItem { pkgdeckMissingProperty: true }\n",
-        )
-        .unwrap();
-        c.env("QT_QUICK_CONTROLS_STYLE", "PkgDeckBroken").env(
-            "QML_IMPORT_PATH",
-            format!(
-                "{}:{}",
-                dir.0.display(),
-                std::env::var("QML_IMPORT_PATH").unwrap_or_default()
-            ),
-        );
-    } else {
-        c.arg("--smoke-test")
-            .env("SNAP", "/synthetic-disabled-runtime");
+        .env("XDG_RUNTIME_DIR", &runtime)
+        .env_remove("WAYLAND_DISPLAY")
+        .arg("--smoke-test");
+    match &desktop {
+        Some(desktop) => {
+            c.env("DISPLAY", &desktop.display)
+                .env("SNAP", "/synthetic-disabled-runtime");
+        }
+        None => {
+            c.env_remove("DISPLAY");
+        }
     }
     let out = c.output().unwrap();
     let _ = fs::remove_dir_all(&runtime);
+    let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(out.status.code(), Some(i32::from(failure)), "{stderr}");
-    assert!(
-        stderr.contains(if failure {
-            "failed to load component"
-        } else {
-            "PKGDECK_GUI_READY"
-        }),
-        "{stderr}"
-    );
-}
-pub fn qml() {
-    let dir = Temp::new();
-    // macOS keeps Qt settings in the test runner's own preferences domain and
-    // ignores XDG_CONFIG_HOME, so start each run from a cleared domain like
-    // the fresh directory on Linux. Otherwise saved state, such as the last
-    // background check, leaks from one run into the next.
-    if cfg!(target_os = "macos") {
-        let _ = Command::new("defaults")
-            .args(["delete", "com.example-invalid.qmltestrunner"])
-            .stderr(std::process::Stdio::null())
-            .status();
+    assert_eq!(out.status.code(), Some(i32::from(failure)), "{stdout}{stderr}");
+    if failure {
+        assert!(stderr.contains("pkgdeck: "), "{stderr}");
+    } else {
+        assert!(stdout.contains("PKGDECK_GUI_READY"), "{stdout}{stderr}");
     }
-    run(Command::new("timeout")
-        .args(["--kill-after=5s", "180s", "qmltestrunner"])
-        .args([
-            "-input",
-            concat!(env!("CARGO_MANIFEST_DIR"), "/../pkgdeck/tests/qml"),
-        ])
-        .env("XDG_CONFIG_HOME", &dir.0)
-        .env("XDG_DATA_HOME", &dir.0)
-        .env("XDG_DATA_DIRS", &dir.0)
-        // Match the shipped application's customizable control style on Mac.
-        .env("QT_QUICK_CONTROLS_STYLE", "Basic")
-        .env("QT_QPA_PLATFORM", "offscreen")
-        .env("QT_QUICK_BACKEND", "software"));
 }
 
 pub fn apt_lock_probe() {
