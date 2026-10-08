@@ -2,12 +2,12 @@
 
 Open PkgDeck from your app menu or run `pkgdeck`. The sidebar has six pages:
 **Search**, **Installed**, **Updates**, **Clean**, **Sources**, and **Settings**.
-The **Activity** button in the header opens a side panel with running and
-finished work; its badge counts changes waiting their turn.
+The **Updates** badge counts the updates found.
 
-Drag the sidebar's edge to resize it; drag it narrow to keep only its icons,
-or double-click the edge to restore the default width. In narrow windows the
-sidebar shows only icons.
+The **Activity** button in the header opens a drawer from the right, with
+running and finished work. Its badge counts changes waiting their turn.
+
+In narrow windows the sidebar shows only icons.
 
 <img src="screenshots/narrow.png" width="280" alt="PkgDeck in a narrow window, with the sidebar as an icon rail">
 
@@ -31,9 +31,11 @@ choice for that app.
   **Update** button. **Back** (or Esc, Alt+←, or the mouse's back button)
   returns to the list as it was. Arrow
   keys only move the selection.
-- The open app stays beside the list. Drag its top edge to change the
-  height (Up and Down keys when it has focus, double-click or Home to
-  reset). PkgDeck remembers the height.
+- In wide windows the app page opens beside the list. Drag the line between
+  them to change its width, or double-click it to reset. PkgDeck remembers
+  the width.
+- In narrow windows the app page slides over the list. **Back** returns to
+  it.
 - App names, icons, and screenshots come from the source. Packages without
   app metadata show their package name.
 - A very short search can match tens of thousands of packages. The list
@@ -82,9 +84,9 @@ separate package.
 
 These controls work on every package page:
 
-- Click a column heading to sort it. Drag the dividers to resize columns.
-- The source picker filters the current page. It also lists sources you can't
-  use, with the reason.
+- Click a column heading to sort it. Click it again to reverse the order.
+- **Filter sources** filters the current page. It also lists sources you
+  can't use, with the reason.
 - **Reload** gets fresh package data.
 
 Docker and Podman images are shown as separate sources. Each row shows
@@ -174,7 +176,7 @@ cleanup runs, and asks for your password then.
 
 Turn package managers on or off. PkgDeck remembers your choice.
 
-The source picker filters one page. The Sources page chooses which package
+**Filter sources** filters one page. The Sources page chooses which package
 managers PkgDeck checks at all. Neither one turns repositories on or off.
 **Refresh sources** downloads the latest package lists for the selected
 package managers.
@@ -357,14 +359,15 @@ is running. Turn them off in Settings.
 - **Start in background at login** keeps checks running after you log in.
   On Linux it adds an autostart entry; on macOS it adds a LaunchAgent,
   `~/Library/LaunchAgents/io.github.astrovm.PkgDeck.plist`.
-- On macOS, click the menu bar icon and choose **Open** to show the window.
-  Its menu also has **Check now** and **Quit**. Elsewhere, click the tray
-  icon to show or hide the window; that menu has **Check now** and **Quit**.
-  Clicking a notification opens Updates.
-- When your desktop has a system tray, closing the window keeps PkgDeck
-  running there. Use **Quit** in the tray menu to exit. On macOS, Cmd+Q and
-  **Quit PkgDeck** in the app menu quit too, Cmd+W closes the window to the
-  menu bar, and clicking the Dock icon brings it back.
+- While background checks are on, PkgDeck shows a tray icon (a menu bar
+  icon on macOS). Its menu has **Open**, **Check now** and **Quit**.
+- On Linux, clicking the tray icon also shows or hides the window.
+- Clicking a notification opens Updates.
+- Closing the window really closes it. PkgDeck keeps checking from the
+  tray or menu bar. **Open** brings a new window back.
+- On macOS, Cmd+W closes the window too, and clicking the Dock icon brings
+  it back.
+- **Quit** in the tray menu, or Ctrl+Q (Cmd+Q on macOS), exits PkgDeck.
 
 You get one notification for each new batch of updates, including on the first
 check. PkgDeck remembers what it already told you about, even after a restart.
@@ -443,6 +446,19 @@ loading. Installed, Updates, and Clean load in the background after you leave
 Search. Installing, removing, or changing repositories marks saved results as
 out of date, and each page refreshes when you open it.
 
+## Settings
+
+- **Theme**: **System**, **Light** or **Dark**.
+- **Animations**: turn motion on or off.
+- **Background checks**, **Check every**, **Install updates automatically**,
+  **Allow updates that remove packages**, **Allow automatic updates without
+  a password** and **Start in background at login**: see
+  [Update notifications](#update-notifications).
+- **Last check** shows when PkgDeck last checked and what it found.
+- **Test notification** sends a sample notification.
+- **About** shows the version and a link to GitHub.
+- **Keyboard shortcuts** lists the shortcuts below.
+
 ## Keyboard shortcuts
 
 | Shortcut | Action |
@@ -450,23 +466,27 @@ out of date, and each page refreshes when you open it.
 | Ctrl+1 to Ctrl+5 | Go to Search, Installed, Updates, Clean, or Sources |
 | Ctrl+, or Ctrl+6 | Open Settings |
 | Ctrl+J | Show or hide Activity |
-| Ctrl+F | Focus the search field, package filter, or source picker |
+| Ctrl+F | Focus the search field or package filter, or open **Filter sources** |
 | Ctrl+L | Move to the results list |
-| Enter | Install, remove, or update the selected row |
-| Ctrl+R | Reload the page |
-| Ctrl+Shift+U | Update checked packages |
-| Ctrl+Enter | Apply the open confirmation (Alt plus the underlined letter also works) |
+| Up, Down, Page Up, Page Down, Home, End | Move through the list |
 | Space | Open the selected row's app page |
-| Esc | Clear the search, close the details, or go back from an app page |
+| Enter | Install, remove, or update the selected row |
+| Ctrl+I, Ctrl+D, Ctrl+U | Install, remove, or update the selected row |
+| Ctrl+Shift+U | Update checked packages |
+| Ctrl+R | Reload the page |
 | Ctrl+M | Refresh the source's package lists |
-| Ctrl+Q | Quit (waits for any running package change to finish); on Linux, with background checks on, it closes to the tray |
+| Ctrl+Enter | Apply the open confirmation (Alt plus the action's letter also works) |
+| Alt+C | Cancel the open confirmation |
+| Esc | Close Activity, clear the search, close the details, or go back from an app page |
+| Alt+Left | Go back from an app page |
+| Ctrl+Q | Quit (waits for any running package change to finish) |
 
 On macOS, Cmd takes the place of Ctrl and Settings shows the shortcuts with
 Mac key symbols. Refreshing package lists is Shift+Cmd+R there, because
 Cmd+M minimizes the window, and Cmd+W closes it.
 
-Use Tab to move between controls. Column headings also sort with Space or
-Enter, and Shift+Left or Shift+Right resizes a focused column. Row actions and icon buttons have screen reader labels.
+Use Tab to move between controls. Row actions and icon buttons have screen
+reader labels.
 
 ## Platforms
 
@@ -489,7 +509,7 @@ When PkgDeck already manages the same app, **Clean** offers to remove the
 other copy and its menu entries.
 
 Installed AppImages have **Launch** on their page, and so does the page of an
-AppImage file you just installed. **Remove** is under **⋯**. The page also
+AppImage file you just installed. **Remove** is the icon button next to it. The page also
 shows how it gets updates, its file (with **Show in folder**), its size, and
 when it last changed. An AppImage that needs FUSE 2 (`libfuse2`) still
 starts on a computer without it: PkgDeck starts it unpacked, and its page

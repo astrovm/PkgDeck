@@ -49,8 +49,8 @@ shell), from `/`:
 
 - PkgDeck clears the environment and passes only selected user and session
   variables, your `PATH`, and the C locale.
-- It never passes Qt paths, library injection variables, `APT_CONFIG`, Python
-  paths, Node options, or shell startup files.
+- It never passes library injection variables, `APT_CONFIG`, Python paths,
+  Node options, or shell startup files.
 - Empty or relative `PATH` entries are ignored, as are programs inside the
   AppImage or `$SNAP`.
 - AppRun sets `APPDIR` for both the app and `pkd`, including extracted

@@ -28,8 +28,7 @@ still works, but `brew upgrade` skips PkgDeck. Both recipes are rendered from
 ### macOS
 
 [`scripts/bundle-macos.sh`](../scripts/bundle-macos.sh) builds a self-contained
-`PkgDeck.app` with Homebrew's Qt and `macdeployqt`, and
-checks that it loads nothing from Homebrew. CI builds it on macOS 26 runners
+`PkgDeck.app` and checks that it loads nothing from Homebrew. CI builds it on macOS 26 runners
 for Apple silicon and Intel, so the app needs macOS 26 or later.
 
 The app is ad-hoc signed, not notarized, because notarization needs a paid

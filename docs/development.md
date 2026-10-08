@@ -7,7 +7,7 @@ whole toolchain and runs GUI tests off-screen, away from your desktop. CI uses
 the same scripts.
 
 ```sh
-scripts/verify.sh fast --engine podman                # formatting, script tests, Qt-free lint/tests/build
+scripts/verify.sh fast --engine podman                # formatting, script tests, terminal lint/tests/build
 scripts/verify.sh full --only tests --engine podman   # workspace tests only
 scripts/verify.sh full --engine podman                # lint, tests, coverage report, release builds
 scripts/verify.sh containers --engine podman          # real APT and Homebrew install/remove tests
@@ -27,35 +27,47 @@ You can run these from any directory. Nothing is ever published.
 Use the same container image and caches:
 
 ```sh
-scripts/container.sh development --exec cargo test --locked -p pkgdeck --test entrypoint quick_controls
+scripts/container.sh development --exec cargo test --locked -p pkgdeck --test app search_debounces_ranks_and_installs
 scripts/container.sh development --shell
 ```
 
-Both set up Qt for you. QML tests render off-screen, and
-real-window tests use a private Xvfb display with xdotool. Neither touches
-your display.
+GUI tests that open a real window use a private Xvfb display with xdotool.
+They never touch your display.
+
+### GUI tests
+
+- `crates/pkgdeck/tests/app.rs` runs the window's logic against a fake
+  package manager, with no window.
+- Unit tests in `crates/pkgdeck/src` cover the list rules, settings, opening
+  files and links, and the media cache.
+- `crates/pkgdeck/tests/smoke.rs` opens the real window on Xvfb (Linux).
+- `scripts/tests/macos-gui.sh` runs `pkgdeck --smoke-test` on macOS and
+  checks the menu bar menu.
+- `cargo run -p pkgdeck --example gallery` draws every page to
+  `target/gallery/*.png` with no display, so you can check the look by eye.
+
+Coverage skips the drawing code (`crates/pkgdeck/src/ui/`, `platform.rs`,
+`main.rs`) and `pkgdeck-tools`. Everything the window decides is measured.
 
 To test without Podman, install the prerequisites below, run
-`scripts/setup-dev.sh`, and drop `--engine podman`. Before running GUI tests
-with Cargo directly, run `source scripts/dev-env.sh`. Qt-free tests don't
-need it.
+`scripts/setup-dev.sh`, and drop `--engine podman`.
 
 For the macOS app bundle and the Linux CLI-only Homebrew package, see
 [distribution](distribution.md). The native `full` check targets Linux.
 
 ## SDK and prerequisites
 
-Ubuntu 26.04 provides Qt 6.10.2, CMake 4.2.3, and Ninja
-1.13.2 from its normal package archive. There's no separate SDK to download.
+The GUI is drawn with egui, so there's no GUI toolkit or SDK to install.
 `setup-dev.sh` only installs `cargo-llvm-cov`. Rust comes from
 `rust-toolchain.toml`.
 
 You need:
 
 - rustup and Cargo
-- a C++ compiler
-- `libapt-pkg-dev`, jq, Ninja, pkg-config, and LLD
-- the Qt/KDE libraries listed in `.github/actions/setup-desktop/action.yml`
+- a C and C++ compiler
+- `libapt-pkg-dev`, jq, pkg-config, and LLD
+- on Linux, the OpenGL/EGL, X11, Wayland and xkbcommon libraries listed in
+  `.github/actions/setup-desktop/action.yml`
 
 `setup-dev.sh` tells you which commands are missing. It never installs system
 packages or changes permissions.
@@ -67,46 +79,21 @@ source scripts/dev-env.sh
 cargo run --locked -p pkgdeck
 ```
 
-`dev-env.sh` sets up `PATH`, CMake, library, and QML paths. It also finds LLD
-in standard LLVM folders when it isn't on `PATH`. To use your own compatible
-SDK, set `QT_ROOT_DIR` and `PKGDECK_SDK_PREFIX` before sourcing it.
-`verify.sh full` checks your Qt setup and tells you what's missing.
-`fast` doesn't need Qt.
+`dev-env.sh` only puts LLD on `PATH` when Ubuntu installs it in a versioned
+LLVM folder.
 
 ### Notes
 
 - Coverage is written to `coverage/lcov.info`. Set `CARGO_TARGET_DIR` to use a
   separate build cache.
-- The Qt-free check looks at both Cargo dependencies and the final `pkd`
-  binary.
+- `scripts/check-qt-free.sh` makes sure Qt never comes back: it checks the
+  Cargo dependencies and what the final `pkd` binary links.
 - Script tests use fake commands and temporary log folders. Real package
   changes only happen inside disposable containers.
 - When changing setup scripts, test a fresh setup and a second, cached setup.
 - CI runs on x86_64 and aarch64. Passing on x86_64 locally doesn't prove ARM
   works.
 - Run `pinact run --verify` after changing GitHub workflows.
-
-## egui trial
-
-`crates/pkgdeck-egui` draws the **Installed** page with egui instead of Qt,
-to judge a Qt-free GUI on real code. It isn't packaged or shipped.
-
-```sh
-cargo run -p pkgdeck-egui
-```
-
-It reads the same engine as the Qt app and uses PkgDeck's light and dark
-colours, icons and system fonts. Click a row for its details, drag the
-handle above them to resize, or double-click it to reset the split.
-**Close details** or Esc closes them; Esc again clears the filter.
-Arrow keys, Home/End and Page Up/Down move through rows. Enter or Space
-opens the highlighted row. Ctrl+F focuses the filter and Ctrl+R reloads
-(Command on macOS). Short windows scroll to keep both cards reachable.
-Only **Installed** is implemented in this trial.
-
-Tests use
-`egui_kittest`, which checks the page through its accessibility tree with no
-window. One more test opens the real window on a private Xvfb display.
 
 ## CI
 
@@ -122,7 +109,7 @@ The workflow is called `CI`. Check names follow `Category / Scope (architecture)
 | `Test / Backends / dev (linux-x86_64, linux-aarch64)` | Real lifecycle tests for every development manager on Linux; the job summary lists each backend's result |
 | `Package / AppImage + Snap (x86_64, aarch64)` | Release build, packages, and GUI tests on the packaged app |
 | `Package / Flatpak (x86_64, aarch64)` | Flatpak build, installed GUI, and host bridge tests |
-| `Package / macOS app (x86_64, aarch64)` | Self-contained `PkgDeck.app` build, bundle checks, GUI/controller, QML, startup and media tests, then installs that app through a Homebrew cask and checks it starts |
+| `Package / macOS app (x86_64, aarch64)` | Self-contained `PkgDeck.app` build, bundle checks, window, controller, startup and media tests, then installs that app through a Homebrew cask and checks it starts |
 | `Package / Linux CLI (x86_64, aarch64)` | Static `pkd` and host runner archive, tested on Alpine |
 | `Test / Homebrew (Linux)` | Renders the tap from the Linux packages and installs and tests the formula; published recipes are checked on macOS too |
 | `Prune superseded caches` | On main only: keeps the newest copy of each build cache so the 10 GB limit never evicts the ones pull requests restore |
@@ -147,8 +134,7 @@ Naming rules:
   `build-release`, `check-coverage`.
 - Step names start with a verb: `Install`, `Build`, `Run`, or `Upload`.
 - Artifacts use `<kind>-<scope>-<architecture>`, like `logs-podman-aarch64`.
-- Rust tests use descriptive snake_case names. Qt Quick tests use `tst_*.qml`
-  files and `test_*` functions.
+- Rust tests use descriptive snake_case names.
 - A test name is a short sentence about the behavior it checks, like
   `failed_update_check_keeps_known_updates`. Don't name tests after a list of
   topics, a development phase, or the toolkit that runs them.
@@ -182,8 +168,8 @@ scripts/verify.sh containers --engine podman
 Homebrew install/remove tests in a separate throwaway container. Without
 `--engine podman`, it builds the CLI with your local Cargo first.
 
-The development image has the pinned Rust toolchain and Ubuntu's Qt
-packages. It runs the same `setup-dev.sh` and `verify.sh` as native builds and
+The development image has the pinned Rust toolchain and the display
+libraries the GUI tests need. It runs the same `setup-dev.sh` and `verify.sh` as native builds and
 CI. Base images are pinned by digest and support x86_64 and aarch64. Tests use
 your machine's architecture.
 
@@ -213,7 +199,7 @@ afterward.
 
 ### Reproducibility
 
-Ubuntu and Rust base images, Qt/KDE versions, and
+Ubuntu and Rust base images and
 Homebrew 7.0.6 are pinned. The Homebrew tarball has a committed SHA-256. OS
 packages still come from the distro's current signed repositories, so a
 rebuild can differ from a saved image. The exact OS package list is saved to
@@ -240,9 +226,10 @@ Flatpak/Snap bridges, FUSE, or a real display.
 ## Tools
 
 - `cargo xtask` runs the Rust acceptance tests: `gui`, `gui-failure`,
-  `gui-lifecycle`, `gui-write`, `apt-lock-probe`, and `qml`. Build it once with
+  `gui-lifecycle`, `gui-write`, and `apt-lock-probe`. Build it once with
   `cargo build -p pkgdeck-tools`; `scripts/xtask.sh` runs it for package
-  checks. GUI tests use private Xvfb displays and temporary settings. These
+  checks. GUI tests drive the egui window on private Xvfb displays with
+  xdotool, using temporary settings. These
   test tools don't count toward the 100% coverage gate.
 - `scripts/build-apt.sh` builds the separate APT reader (GPL-2.0-or-later)
   from `libapt-pkg-dev`. It stays a separate program so APT isn't linked into
@@ -250,5 +237,5 @@ Flatpak/Snap bridges, FUSE, or a real display.
   users don't need development headers. Package changes still use the
   system's own package manager and password prompt.
 - `scripts/check-no-python.sh` rejects Python scripts and Python calls in
-  this project. It doesn't apply to the OS, cloud-init, Qt, or package
+  this project. It doesn't apply to the OS, cloud-init, or package
   managers.
