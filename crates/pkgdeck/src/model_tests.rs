@@ -612,6 +612,16 @@ fn visible_rows_sort_by_column_relevance_or_name() {
         names(&sources, &visible(&sources, &options)),
         ["a", "b", "z"]
     );
+    // Enabled managers come first, and nothing is hidden for being off.
+    let enabled = HashSet::from(["zypper".to_owned(), "bun".to_owned()]);
+    let enabled_first = ViewOptions {
+        sources: Some(&enabled),
+        ..options
+    };
+    assert_eq!(
+        names(&sources, &visible(&sources, &enabled_first)),
+        ["b", "z", "a"]
+    );
     let by_status = ViewOptions {
         sort: Some((Column::Summary, true)),
         ..options

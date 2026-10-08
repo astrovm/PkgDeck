@@ -1092,7 +1092,12 @@ pub fn visible(rows: &[Row], options: &ViewOptions) -> Vec<Item> {
             }
         });
     } else if page == Some(Page::Sources) {
-        kept.sort_by(|&a, &b| by_name(&rows[a], &rows[b]));
+        // Enabled managers first, so the ones in use are easy to find.
+        let disabled = |row: &Row| options.sources.is_some_and(|s| !s.contains(&row.source));
+        kept.sort_by(|&a, &b| {
+            let (a, b) = (&rows[a], &rows[b]);
+            disabled(a).cmp(&disabled(b)).then_with(|| by_name(a, b))
+        });
     } else if page == Some(Page::Search) && !options.query.trim().is_empty() {
         kept.sort_by(|&a, &b| {
             relevance(&rows[a], options.query)

@@ -1026,7 +1026,12 @@ impl App {
             return;
         }
         self.items_stale = false;
-        let sources = (self.page != Page::Sources).then(|| self.effective_sources(self.page));
+        // Sources lists every manager, with the enabled ones first.
+        let sources = Some(if self.page == Page::Sources {
+            self.enabled_sources()
+        } else {
+            self.effective_sources(self.page)
+        });
         let narrowing = self.retained.is_some() && self.page == Page::Search;
         let rows = self.shown_rows();
         let options = ViewOptions {
