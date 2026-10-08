@@ -5,4 +5,5 @@
 pub mod controller;
 pub mod metadata;
 mod network;
+pub mod wake;
 pub mod qt;

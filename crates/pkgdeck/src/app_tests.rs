@@ -848,3 +848,42 @@ fn big_row_lists_come_back_the_same_from_memory() {
     assert_eq!(show(&mut app, &list("d")), "d0");
     assert_eq!(app.rows.len(), 200);
 }
+
+#[test]
+fn the_window_sleeps_until_something_is_due() {
+    let mut app = app();
+    let now = Instant::now();
+    app.c().set_needs_poll(false);
+    app.last_poll = now;
+    app.next_check = now + Duration::from_secs(60);
+    assert_eq!(app.tick(now), SLEEP);
+    // Its own timers: a toast that expires, a restart, the next check.
+    app.toast = Some(Toast {
+        text: "x".into(),
+        tone: Tone::Success,
+        action: None,
+        shown: now,
+        lasts: Duration::from_secs(4),
+        from_notice: false,
+    });
+    assert_eq!(app.tick(now), Duration::from_secs(4));
+    app.restart_at = Some(now + Duration::from_secs(3));
+    assert_eq!(app.tick(now), Duration::from_secs(3));
+    app.next_check = now + Duration::from_secs(2);
+    assert_eq!(app.tick(now), Duration::from_secs(2));
+    // While reading, a poll too soon after the last waits for its turn;
+    // right after one, the next wake is a worker's reply.
+    app.toast = None;
+    app.restart_at = None;
+    app.next_check = now + Duration::from_secs(60);
+    app.c().set_needs_poll(true);
+    app.last_poll = now;
+    let soon = now + Duration::from_millis(50);
+    assert_eq!(app.tick(soon), POLL_IDLE - Duration::from_millis(50));
+    assert_eq!(app.last_poll, now);
+    let later = now + POLL_IDLE;
+    app.c().set_needs_poll(true);
+    let wait = app.tick(later);
+    assert_eq!(app.last_poll, later);
+    assert!(wait == Duration::from_secs(1) || wait == SLEEP, "{wait:?}");
+}

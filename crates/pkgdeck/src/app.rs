@@ -165,6 +165,9 @@ pub struct App {
 
 const POLL_BUSY: Duration = Duration::from_millis(40);
 const POLL_IDLE: Duration = Duration::from_millis(200);
+/// The longest the window sleeps with nothing due, so times like
+/// "2 minutes ago" stay current.
+const SLEEP: Duration = Duration::from_secs(15);
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(220);
 const WARM_AFTER: Duration = Duration::from_millis(150);
 pub const FLASH: Duration = Duration::from_secs(1);
@@ -353,7 +356,10 @@ impl App {
         }
         let interval = if self.busy { POLL_BUSY } else { POLL_IDLE };
         let polling = self.busy || *self.ctl.needs_poll();
-        if polling && now.duration_since(self.last_poll) >= interval {
+        let since_poll = now.duration_since(self.last_poll);
+        // A poll that comes too soon after the last waits its turn.
+        let deferred = polling && since_poll < interval;
+        if polling && !deferred {
             self.last_poll = now;
             self.c().poll();
         }
@@ -393,11 +399,23 @@ impl App {
         self.flashes.retain(|_, at| now.duration_since(*at) < FLASH);
         self.expire_toasts(now);
         self.save_settings();
-        let mut wait: Duration = if self.busy || *self.ctl.needs_poll() {
-            interval
-        } else {
+        // Workers wake the window when they reply, so it only has to come
+        // back for a poll it put off and for its own timers.
+        let mut wait = if deferred {
+            interval - since_poll
+        } else if self.busy || *self.ctl.needs_poll() {
+            // In case a worker stops without a reply.
             Duration::from_secs(1)
+        } else {
+            SLEEP
         };
+        let toasts = [&self.toast, &self.restart_toast];
+        for toast in toasts.into_iter().flatten() {
+            wait = wait.min((toast.shown + toast.lasts).saturating_duration_since(now));
+        }
+        if let Some(at) = self.restart_at {
+            wait = wait.min(at.saturating_duration_since(now));
+        }
         if let Some(due) = self.search_due {
             wait = wait.min(due.saturating_duration_since(now));
         }

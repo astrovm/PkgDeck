@@ -138,6 +138,7 @@ fn main() {
         .flatten()
         .map(|dir| dir.join("pkgdeck/media"));
     let platform = platform::Platform::start(pkgdeck::wake);
+    pkgdeck_app::wake::set_waker(pkgdeck::wake);
     let start_hidden = launch.background && settings.background_mode && platform.tray_available();
     let controller = pkgdeck_app::controller::ffi::create_controller();
     let mut app = App::with_controller(controller, settings, store, platform, launch);

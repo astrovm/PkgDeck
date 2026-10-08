@@ -1696,7 +1696,7 @@ fn cask_version(package: &Package) -> &str {
 /// updating; everything else a manager prints stays in the worker.
 fn output_follower(
     backends: Vec<String>,
-    sender: mpsc::Sender<Reply>,
+    sender: crate::wake::Sender<Reply>,
 ) -> pkgdeck_core::process::OutputObserver {
     std::sync::Arc::new(move |line: &str| {
         if backends
@@ -3756,7 +3756,7 @@ impl ffi::PackageController {
         self.as_mut().set_approval_error(QString::default());
         let natives = self.rust().natives;
         let host = (natives.host)();
-        let (sender, receiver) = mpsc::channel();
+        let (sender, receiver) = crate::wake::channel();
         let handle = thread::spawn(move || {
             let result = (natives.approve)(&host, allow, &Cancellation::default())
                 .map(|key| if allow { key } else { String::new() })
@@ -3945,7 +3945,7 @@ impl ffi::PackageController {
             self.as_mut().rust_mut().activity_again = true;
             return;
         }
-        let (sender, receiver) = mpsc::channel();
+        let (sender, receiver) = crate::wake::channel();
         let handle = thread::spawn(move || {
             let _ = sender.send(store.load());
         });
@@ -4228,7 +4228,7 @@ impl ffi::PackageController {
             controller.prefetch = prefetch_views();
         }
         let cancel = Cancellation::default();
-        let (sender, receiver) = mpsc::channel();
+        let (sender, receiver) = crate::wake::channel();
         // Update all runs one command per source; its output says which
         // package each one is on, so pass those lines to the progress.
         let followed: Vec<String> = job
@@ -5792,7 +5792,7 @@ impl ffi::PackageController {
         // startup discovery cannot slow the first search.
         let cancel = Cancellation::default();
         let token = cancel.clone();
-        let (sender, receiver) = mpsc::channel();
+        let (sender, receiver) = crate::wake::channel();
         let handle = thread::spawn(move || {
             let _ = sender.send(discover(&token));
         });
@@ -5818,7 +5818,7 @@ impl ffi::PackageController {
         let natives = self.rust().natives;
         let cancel = Cancellation::default();
         let token = cancel.clone();
-        let (sender, receiver) = mpsc::channel();
+        let (sender, receiver) = crate::wake::channel();
         let handle = thread::spawn(move || {
             let mut send = |mut reply| {
                 if let Reply::Done(Ok(Payload::Details(details))) = &mut reply {
@@ -5933,7 +5933,7 @@ impl ffi::PackageController {
         let born = born.unwrap_or_else(Instant::now);
         let cancel = Cancellation::default();
         let token = cancel.clone();
-        let (sender, receiver) = mpsc::channel();
+        let (sender, receiver) = crate::wake::channel();
         let handle = thread::spawn(move || {
             let mut send = |mut reply| {
                 if let Reply::Done(Ok(Payload::Packages(report))) = &mut reply {
@@ -13766,7 +13766,7 @@ mod tests {
         assert_eq!(state.fraction(), Some(1.0));
 
         // The worker passes on only lines that name a package.
-        let (sender, receiver) = mpsc::channel();
+        let (sender, receiver) = crate::wake::channel();
         let follow = output_follower(vec!["homebrew-cask".into()], sender);
         follow("==> Downloading https://example.invalid/beta.zip");
         follow("==> Upgrading beta");
