@@ -230,3 +230,27 @@ fn arrow_keys_on_an_empty_list_do_nothing() {
     }
     assert!(harness.state().1.items.is_empty());
 }
+
+#[test]
+fn a_list_that_loads_late_does_not_steal_typing_from_search() {
+    let mut harness = show(Page::Updates);
+    let rows = harness.state().1.rows.clone();
+    // Updates is still loading, so its list isn't drawn to take focus yet.
+    harness.state_mut().1.rows.clear();
+    harness.state_mut().1.invalidate();
+    harness.run_steps(2);
+    harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Num3);
+    harness.run_steps(2);
+    harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Num1);
+    harness.run_steps(2);
+    harness.event(egui::Event::Text("fi".into()));
+    harness.run_steps(2);
+    // Search results arrive and the list draws.
+    harness.state_mut().1.rows = rows;
+    harness.state_mut().1.invalidate();
+    harness.run_steps(3);
+    harness.event(egui::Event::Text("re".into()));
+    harness.run_steps(2);
+    assert_eq!(harness.state().1.query, "fire");
+    assert!(harness.ctx.memory(|m| m.has_focus(pkgdeck::ui::search_id())));
+}

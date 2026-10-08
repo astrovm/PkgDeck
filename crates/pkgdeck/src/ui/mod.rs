@@ -586,6 +586,7 @@ fn search_field(app: &mut App, ui: &mut Ui) {
         .show(ui);
     if app.ui.focus_search {
         app.ui.focus_search = false;
+        app.ui.focus_list = false;
         field.response.request_focus();
     }
     if field.response.changed() || field.cleared {
@@ -626,6 +627,7 @@ fn installed_filters(app: &mut App, ui: &mut Ui) {
             .show(ui);
         if app.ui.focus_filter {
             app.ui.focus_filter = false;
+            app.ui.focus_list = false;
             field.response.request_focus();
         }
         if field.response.changed() || field.cleared {

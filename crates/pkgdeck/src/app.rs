@@ -930,6 +930,11 @@ impl App {
         self.page_open = false;
         self.unchecked.clear();
         self.search_due = None;
+        // A focus asked for on the page being left must not land on this one,
+        // for example once a list that was still loading draws.
+        self.ui.focus_list = false;
+        self.ui.focus_search = false;
+        self.ui.focus_filter = false;
         match page {
             Page::Search if changed => self.reload(false, false),
             Page::Search | Page::Settings => {}
