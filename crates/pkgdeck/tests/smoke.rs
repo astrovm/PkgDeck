@@ -56,7 +56,8 @@ fn the_window_opens_on_a_real_display() {
     let _ = server.kill();
     let _ = server.wait();
     let _ = fs::remove_dir_all(&dir);
+    let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(output.status.success(), "{stderr}");
-    assert!(stderr.contains("PKGDECK_EGUI_READY"), "{stderr}");
+    assert!(output.status.success(), "{stdout}{stderr}");
+    assert!(stdout.contains("PKGDECK_GUI_READY"), "{stdout}{stderr}");
 }

@@ -250,9 +250,11 @@ impl Platform {
             .unwrap_or_default()
     }
 
-    /// What happened since the last call.
+    /// What happened since the last call. The window's own loop delivers
+    /// the menu bar icon's clicks, so this never runs the native loop:
+    /// AppKit can't be re-entered while it hands the window an event.
     pub fn events(&mut self) -> Vec<Event> {
-        self.wait(std::time::Duration::ZERO)
+        self.take(None)
     }
 
     /// Like [`Self::events`], but waits up to `timeout` for the first one.
@@ -264,6 +266,10 @@ impl Platform {
         let first = self.events.recv_timeout(timeout).ok();
         #[cfg(target_os = "macos")]
         let first = None;
+        self.take(first)
+    }
+
+    fn take(&mut self, first: Option<Event>) -> Vec<Event> {
         let events: Vec<Event> = first.into_iter().chain(self.events.try_iter()).collect();
         for event in &events {
             if let Event::Permission(allowed) = event {

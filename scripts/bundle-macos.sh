@@ -47,7 +47,9 @@ while IFS= read -r -d '' file && IFS= read -r kind; do
     awk '/cmd LC_RPATH/ {getline; getline; print $2}' <<<"$load" | while IFS= read -r rpath; do
         [[ $rpath == @* ]] || install_name_tool -delete_rpath "$rpath" "$file"
     done
-    minos+=$(awk '/minos/ {print $2}' <<<"$load")$'\n'
+    # Older targets (x86_64 defaults to 10.12) record it as
+    # LC_VERSION_MIN_MACOSX's version instead of LC_BUILD_VERSION's minos.
+    minos+=$(awk '/minos/ {print $2} /cmd LC_VERSION_MIN_MACOSX/ {getline; getline; print $2}' <<<"$load")$'\n'
     # A copied library keeps its original install name as its ID; only the
     # libraries it loads matter.
     id=$(otool -D "$file" | sed -n 2p)
@@ -59,7 +61,8 @@ done < <(find "$app" -type f -exec file -0 {} +)
 [[ -z $leaks ]] || { printf 'Unbundled library references in:\n%s' "$leaks" >&2; exit 1; }
 
 # The newest minimum OS among bundled binaries is the app's minimum.
-minimum=$(grep . <<<"$minos" | sort -t. -k1,1n -k2,2n | tail -n 1)
+minimum=$(grep . <<<"$minos" | sort -t. -k1,1n -k2,2n | tail -n 1) ||
+    { echo 'No bundled binary records a minimum macOS version' >&2; exit 1; }
 cat > "$contents/Info.plist" <<XML
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
