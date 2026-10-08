@@ -822,3 +822,29 @@ fn a_finished_updates_list_sets_the_badge() {
     app.react();
     assert_eq!(app.background.available, 2);
 }
+
+#[test]
+fn big_row_lists_come_back_the_same_from_memory() {
+    let mut app = app();
+    let list = |prefix: &str| {
+        Value::Array(
+            (0..200)
+                .map(|i| row(&format!("{prefix}{i}"), json!({})))
+                .collect(),
+        )
+        .to_string()
+    };
+    let show = |app: &mut App, text: &str| {
+        app.c().set_rows(text.into());
+        app.react();
+        app.rows[0].name.clone()
+    };
+    // More lists than are kept, so the first is dropped and parsed again.
+    for prefix in ["a", "b", "c", "d", "e"] {
+        assert_eq!(show(&mut app, &list(prefix)), format!("{prefix}0"));
+    }
+    assert_eq!(show(&mut app, &list("a")), "a0");
+    // Back to one still kept.
+    assert_eq!(show(&mut app, &list("d")), "d0");
+    assert_eq!(app.rows.len(), 200);
+}

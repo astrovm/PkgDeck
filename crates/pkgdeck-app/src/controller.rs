@@ -2916,23 +2916,35 @@ impl ViewStore {
                 views: self.views.clone(),
             },
         );
-        thread::spawn(move || {
-            let Ok(mut last) = written.lock() else { return };
-            if *last > generation {
-                return;
-            }
-            *last = generation;
-            let Ok(bytes) = serde_json::to_vec(&stored) else {
-                return;
-            };
-            let Some(dir) = path.parent() else { return };
-            let temporary = path.with_extension("json.tmp");
-            // Written whole, then renamed, so a crash never leaves half a file.
-            let _ = std::fs::create_dir_all(dir)
-                .and_then(|()| std::fs::write(&temporary, bytes))
-                .and_then(|()| std::fs::rename(&temporary, &path));
-        });
+        thread::spawn(move || write_views(&path, &stored, generation, &written));
     }
+}
+/// Writes the kept snapshots unless a newer generation already was: writes
+/// run on their own threads and may finish out of order. Whole, then
+/// renamed, so a crash never leaves half a file.
+fn write_views(
+    path: &std::path::Path,
+    stored: &StoredViews,
+    generation: u64,
+    written: &std::sync::Mutex<u64>,
+) -> bool {
+    let Ok(mut last) = written.lock() else {
+        return false;
+    };
+    if *last > generation {
+        return false;
+    }
+    *last = generation;
+    let temporary = path.with_extension("json.tmp");
+    let dir = path.parent().unwrap_or(std::path::Path::new("."));
+    serde_json::to_vec(stored)
+        .map_err(std::io::Error::other)
+        .and_then(|bytes| {
+            std::fs::create_dir_all(dir)?;
+            std::fs::write(&temporary, bytes)?;
+            std::fs::rename(&temporary, path)
+        })
+        .is_ok()
 }
 fn confirmation_label(operation: &Operation, packages: &[Package]) -> String {
     let mut label = operation_label(operation);
@@ -8128,11 +8140,7 @@ mod tests {
     fn wait_for_file(path: &std::path::Path, contains: &str) {
         let deadline = Instant::now() + Duration::from_secs(5);
         while !std::fs::read_to_string(path).is_ok_and(|text| text.contains(contains)) {
-            assert!(
-                Instant::now() < deadline,
-                "{} never held {contains}",
-                path.display()
-            );
+            assert!(Instant::now() < deadline, "never held {contains}");
             thread::sleep(Duration::from_millis(10));
         }
     }
@@ -8209,6 +8217,33 @@ mod tests {
         assert!(!text.contains("searched-tool"));
         assert!(!text.contains("Sources"));
         assert!(!text.contains("snap"));
+    }
+
+    #[test]
+    fn an_older_write_never_replaces_a_newer_one() {
+        let dir = Scratch::new("ordered-views");
+        let path = dir.path().join("views.json");
+        let written = std::sync::Mutex::new(0);
+        let stored = |name: &str| StoredViews {
+            version: pkgdeck_core::VERSION.into(),
+            views: vec![StoredView {
+                key: name.into(),
+                packages: vec![],
+                cleanup: vec![],
+                rows: "[]".into(),
+                status: String::new(),
+                report_state: String::new(),
+                upgradable: false,
+                updates_view: false,
+            }],
+        };
+        assert!(write_views(&path, &stored("newer"), 2, &written));
+        assert!(!write_views(&path, &stored("older"), 1, &written));
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("newer") && !text.contains("older"));
+        // A file in the way of the directory is a failed write, not a crash.
+        let blocked = dir.path().join("views.json").join("views.json");
+        assert!(!write_views(&blocked, &stored("blocked"), 3, &written));
     }
 
     #[test]
