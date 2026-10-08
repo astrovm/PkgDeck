@@ -256,3 +256,20 @@ fn a_list_that_loads_late_does_not_steal_typing_from_search() {
         .ctx
         .memory(|m| m.has_focus(pkgdeck::ui::search_id())));
 }
+
+#[test]
+fn rows_work_while_they_animate_in() {
+    let mut app = app();
+    app.settings.reduce_motion = false;
+    app.page = Page::Installed;
+    app.invalidate();
+    let mut harness = harness(app);
+    // Mid-entrance: rows are still rising into place.
+    harness.run_steps(2);
+    harness.get_by_label_contains("GIMP, APT").click();
+    harness.run_steps(2);
+    assert_eq!(harness.state().1.selected_row().unwrap().name, "gimp");
+    harness.key_press(egui::Key::ArrowDown);
+    harness.run_steps(30);
+    assert_eq!(harness.state().1.selected_row().unwrap().name, "htop");
+}

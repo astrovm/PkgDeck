@@ -523,12 +523,28 @@ fn rows(app: &mut App, ui: &mut Ui, body: Rect, width: Width) {
                 let last = offsets
                     .partition_point(|&o| o < viewport.bottom())
                     .min(app.items.len());
+                selection_highlight(app, ui, list_id, &offsets, origin);
+                let since = shown_since(app, &ctx, list_id);
                 for index in first..last {
                     let rect = Rect::from_min_max(
                         pos2(ui.min_rect().left(), origin + offsets[index]),
                         pos2(ui.max_rect().right(), origin + offsets[index + 1]),
                     );
-                    if let Some(raw) = row(app, ui, index, rect, width) {
+                    // Rows arrive one after another, rising into place.
+                    let delay = (index - first).min(12) as f32 * 0.025;
+                    let appear = progress_since(&ctx, since - delay, 0.26);
+                    let hovered = if appear < 1.0 {
+                        let mut child = ui.new_child(
+                            UiBuilder::new()
+                                .max_rect(rect.translate(vec2(0.0, (1.0 - appear) * 10.0))),
+                        );
+                        child.multiply_opacity(appear);
+                        let shifted = child.max_rect();
+                        row(app, &mut child, index, shifted, width)
+                    } else {
+                        row(app, ui, index, rect, width)
+                    };
+                    if let Some(raw) = hovered {
                         hovered_raw = Some(raw);
                     }
                 }
@@ -536,6 +552,84 @@ fn rows(app: &mut App, ui: &mut Ui, body: Rect, width: Width) {
         },
     );
     app.hovered_row(hovered_raw);
+}
+
+/// Seconds since this list last went from empty to showing rows. A reload
+/// that keeps rows on screen doesn't count, so only new lists animate.
+fn shown_since(app: &App, ctx: &egui::Context, list_id: Id) -> f32 {
+    let key = list_id.with("shown-at");
+    let now = ctx.input(|i| i.time);
+    if app.items.is_empty() {
+        ctx.data_mut(|d| d.remove::<f64>(key));
+        return 0.0;
+    }
+    let at = ctx.data_mut(|d| *d.get_temp_mut_or(key, now));
+    (now - at) as f32
+}
+
+/// The selected row's background, sliding from row to row as the selection
+/// moves. A new selection starts in place instead of sliding in from the
+/// last one.
+fn selection_highlight(app: &App, ui: &Ui, list_id: Id, offsets: &[f32], origin: f32) {
+    let ctx = ui.ctx();
+    let palette = Palette::current(ctx);
+    let session_key = list_id.with("selection-session");
+    let selected = app.selected_index().filter(|&i| i + 1 < offsets.len());
+    let mut session = ctx
+        .data(|d| d.get_temp::<(u64, bool)>(session_key))
+        .unwrap_or((0, false));
+    if selected.is_some() && !session.1 {
+        session.0 += 1;
+    }
+    session.1 = selected.is_some();
+    ctx.data_mut(|d| d.insert_temp(session_key, session));
+    let shown = ease(
+        ctx,
+        list_id.with("selection-shown"),
+        selected.is_some(),
+        REVEAL,
+    );
+    let Some(index) = selected.or_else(|| {
+        ctx.data(|d| d.get_temp::<usize>(list_id.with("selection-last")))
+            .filter(|&i| i + 1 < offsets.len())
+    }) else {
+        return;
+    };
+    ctx.data_mut(|d| d.insert_temp(list_id.with("selection-last"), index));
+    if shown <= 0.0 {
+        return;
+    }
+    let heading = if app
+        .items
+        .get(index)
+        .is_some_and(|item| item.group.is_some())
+    {
+        GROUP_HEADING
+    } else {
+        0.0
+    };
+    let id = list_id.with(("selection", session.0));
+    let top = glide(ctx, id.with("top"), offsets[index] + heading, LAYOUT);
+    let bottom = glide(ctx, id.with("bottom"), offsets[index + 1], LAYOUT);
+    let rect = Rect::from_min_max(
+        pos2(ui.min_rect().left(), origin + top),
+        pos2(ui.max_rect().right(), origin + bottom),
+    )
+    .shrink2(vec2(6.0, 2.0));
+    ui.painter().rect_filled(
+        rect,
+        CornerRadius::same(10),
+        alpha(palette.selection, shown),
+    );
+    // The keyboard's outline moves with it.
+    if selected.is_some() && app.ui.keyboard_nav && app.ui.list_focused {
+        ui.painter().rect_stroke(
+            rect,
+            CornerRadius::same(10),
+            Stroke::new(1.5, alpha(palette.accent, shown)),
+            StrokeKind::Inside,
+        );
+    }
 }
 
 /// What a source row adds to its status: why it can't be used, or that
@@ -614,24 +708,15 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
     let flash = app.flashes.get(&identity).map(|at| {
         1.0 - (at.elapsed().as_secs_f32() / crate::app::FLASH.as_secs_f32()).clamp(0.0, 1.0)
     });
-    let mut fill = alpha(palette.ink, hover * 0.045);
-    if chosen > 0.0 {
-        fill = mix(fill, palette.selection, chosen);
-    }
+    // The selected row's own background slides in `selection_highlight`.
+    let fill = alpha(palette.ink, hover * 0.045 * (1.0 - chosen));
+    let mut fill = fill;
     if let Some(flash) = flash {
         fill = mix(fill, alpha(palette.success, 0.2), flash);
         ctx.request_repaint();
     }
     ui.painter()
         .rect_filled(surface, CornerRadius::same(10), fill);
-    if selected && app.ui.keyboard_nav && app.ui.list_focused {
-        ui.painter().rect_stroke(
-            surface,
-            CornerRadius::same(10),
-            Stroke::new(1.5, palette.accent),
-            StrokeKind::Inside,
-        );
-    }
     let action = model::row_action(&row, app.page, &app.catalog).filter(|_| row.kind != "source");
     let running = app.writing
         && (app.active_rows.contains(&identity)
