@@ -279,6 +279,13 @@ fn source_lines_say_where_a_row_comes_from() {
     let line = |value: Value, merged| source_line(&row(value), merged);
     assert_eq!(
         line(
+            json!({"name": "org.gimp.GIMP", "source": "flatpak", "scope": "system"}),
+            false
+        ),
+        "Flatpak, System"
+    );
+    assert_eq!(
+        line(
             json!({"name": "anchor", "display_name": "Anchor (AVM)", "source": "anchor", "scope_label": "User 501"}),
             false
         ),

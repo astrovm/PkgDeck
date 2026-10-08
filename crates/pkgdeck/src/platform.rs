@@ -431,6 +431,11 @@ mod tests {
         );
         assert_eq!(woken.try_iter().count(), 2);
         assert!(platform.events().is_empty());
+        send(Event::Quit);
+        assert_eq!(
+            platform.wait(std::time::Duration::from_millis(10)),
+            vec![Event::Quit]
+        );
         assert!(platform.tray_available());
         platform.set_badge("");
         platform.refresh_permission();

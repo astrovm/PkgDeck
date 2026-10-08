@@ -868,13 +868,8 @@ pub fn row_action(row: &Row, page: Page, catalog: &[Source]) -> Option<Action> {
         return None;
     }
     if row.source == "macos-apps" {
-        return if can_adopt(row, catalog) {
-            Some(Action::Adopt)
-        } else if can_remove(row, catalog) {
-            Some(Action::Remove)
-        } else {
-            None
-        };
+        return (can_adopt(row, catalog).then_some(Action::Adopt))
+            .or_else(|| can_remove(row, catalog).then_some(Action::Remove));
     }
     if backends::never_installs(&row.source) {
         return if row.has_update() {

@@ -62,13 +62,12 @@ fn fetch_with(curl: &Path, url: &str, cancel: &Cancellation) -> String {
             return String::new();
         }
         match child.try_wait() {
-            Ok(Some(status)) => break status,
             Ok(None) => thread::sleep(Duration::from_millis(20)),
-            Err(_) => return String::new(),
+            finished => break finished.ok().flatten(),
         }
     };
     let bytes = reader.join().unwrap_or_default();
-    if !status.success() || bytes.len() > LIMIT {
+    if !status.is_some_and(|status| status.success()) || bytes.len() > LIMIT {
         return String::new();
     }
     String::from_utf8(bytes).unwrap_or_default()

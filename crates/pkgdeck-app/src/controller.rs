@@ -94,9 +94,6 @@ pub mod ffi {
 
     pub struct PackageController {
         rust: Controller,
-        /// Bumped whenever a property changes, so a window can tell that
-        /// what it shows is out of date without comparing every property.
-        revision: u64,
         listeners: Vec<(&'static str, Listener)>,
     }
     type Listener = Box<dyn FnMut(Pin<&mut PackageController>)>;
@@ -109,7 +106,6 @@ pub mod ffi {
     pub fn create_controller() -> UniquePtr<PackageController> {
         UniquePtr::new(PackageController {
             rust: Controller::default(),
-            revision: 0,
             listeners: Vec::new(),
         })
     }
@@ -126,7 +122,6 @@ pub mod ffi {
         rust.needs_password = super::NeedsPassword::default();
         UniquePtr::new(PackageController {
             rust,
-            revision: 0,
             listeners: Vec::new(),
         })
     }
@@ -137,11 +132,7 @@ pub mod ffi {
         pub fn rust_mut(self: Pin<&mut Self>) -> &mut Controller {
             &mut self.get_mut().rust
         }
-        pub fn revision(&self) -> u64 {
-            self.revision
-        }
         fn changed(mut self: Pin<&mut Self>, property: &'static str) {
-            self.revision += 1;
             let mut listeners = std::mem::take(&mut self.listeners);
             for (name, listener) in &mut listeners {
                 if *name == property {

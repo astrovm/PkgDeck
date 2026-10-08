@@ -63,6 +63,37 @@ fn launches_choose_sources_and_open_their_input() {
 }
 
 #[test]
+fn turning_every_source_on_follows_new_sources_too() {
+    let mut app = app_with(Launch {
+        from: vec!["flatpak".into()],
+        ..Launch::default()
+    });
+    for id in all_sources(&app.catalog) {
+        app.set_source_enabled(&id, true);
+    }
+    assert!(app.enabled.is_empty());
+    app.set_source_enabled("flatpak", false);
+    assert!(!app.enabled_sources().contains("flatpak"));
+}
+
+#[test]
+fn sources_list_the_enabled_ones_first() {
+    let mut app = app_with(Launch {
+        from: vec!["homebrew".into()],
+        ..Launch::default()
+    });
+    app.page = Page::Sources;
+    let source = |id: &str| json!({"kind": "source", "name": id, "source": id, "available": true});
+    rows(&mut app, json!([source("apt"), source("homebrew")]));
+    let order: Vec<&str> = app
+        .items
+        .iter()
+        .map(|item| app.rows[item.raw].source.as_str())
+        .collect();
+    assert_eq!(order, ["homebrew", "apt"]);
+}
+
+#[test]
 fn rows_stay_on_screen_while_the_same_list_reloads() {
     let mut app = app();
     app.page = Page::Installed;
