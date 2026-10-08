@@ -167,11 +167,9 @@ pub fn identity_of_row_value(value: &Value) -> String {
 fn identity_of(value: &Value) -> String {
     // Empty remotes and references count as none, as they do in the QML.
     let mut value = value.clone();
-    if let Some(parts) = value.as_array_mut() {
-        for index in [3, 5] {
-            if parts.get(index).and_then(Value::as_str) == Some("") {
-                parts[index] = Value::Null;
-            }
+    for index in [3, 5] {
+        if value.get(index).and_then(Value::as_str) == Some("") {
+            value[index] = Value::Null;
         }
     }
     value.to_string()
@@ -348,14 +346,17 @@ impl Progress {
         if self.total > 1 {
             return Some((self.done as f32 / self.total as f32).clamp(0.0, 1.0));
         }
-        self.fraction.map(|fraction| fraction.clamp(0.0, 1.0) as f32)
+        self.fraction
+            .map(|fraction| fraction.clamp(0.0, 1.0) as f32)
     }
     /// "45%" or "2 of 5".
     pub fn count(&self) -> String {
         match self.transfer_total {
             Some(total) if total > 0 => format!(
                 "{}%",
-                (self.transferred as f64 * 100.0 / total as f64).round().min(100.0)
+                (self.transferred as f64 * 100.0 / total as f64)
+                    .round()
+                    .min(100.0)
             ),
             _ if self.total > 1 => format!("{} of {}", self.done, self.total),
             _ => String::new(),
@@ -479,7 +480,10 @@ impl Activity {
             Value::String(text) => text.clone(),
             Value::Array(lines) => lines
                 .iter()
-                .map(|line| line.as_str().map_or_else(|| line.to_string(), str::to_owned))
+                .map(|line| {
+                    line.as_str()
+                        .map_or_else(|| line.to_string(), str::to_owned)
+                })
                 .collect::<Vec<_>>()
                 .join("\n"),
             _ => String::new(),
@@ -699,7 +703,14 @@ pub fn source_line(row: &Row, merged_scopes: bool) -> String {
     if merged_scopes {
         parts.push("System and user".into());
     } else if matches!(row.source.as_str(), "flatpak" | "docker" | "podman") {
-        parts.push(if row.is_flatpak_system() { "System" } else { "User" }.into());
+        parts.push(
+            if row.is_flatpak_system() {
+                "System"
+            } else {
+                "User"
+            }
+            .into(),
+        );
     } else if !row.scope_label.is_empty() && row.kind == "package" {
         parts.push(row.scope_label.clone());
     }
@@ -1098,7 +1109,9 @@ pub fn visible(rows: &[Row], options: &ViewOptions) -> Vec<Item> {
         items = merge_flatpak_scopes(rows, items, options.scope_choices);
     }
     let group = page == Some(Page::Installed)
-        || (page == Some(Page::Search) && !options.query.trim().is_empty() && options.sort.is_none());
+        || (page == Some(Page::Search)
+            && !options.query.trim().is_empty()
+            && options.sort.is_none());
     if group {
         items = group_same_apps(rows, items);
     }
@@ -1138,7 +1151,11 @@ fn merge_flatpak_scopes(
         variants.sort_by_key(|&raw| !rows[raw].is_flatpak_system());
         let chosen = choices
             .and_then(|choices| choices.get(&group))
-            .and_then(|identity| variants.iter().find(|&&raw| rows[raw].identity() == *identity))
+            .and_then(|identity| {
+                variants
+                    .iter()
+                    .find(|&&raw| rows[raw].identity() == *identity)
+            })
             .or_else(|| variants.iter().find(|&&raw| rows[raw].is_installed()))
             .copied()
             .unwrap_or(variants[0]);
@@ -1166,7 +1183,10 @@ fn group_same_apps(rows: &[Row], items: Vec<Item>) -> Vec<Item> {
             continue;
         }
         let group = rows[items[position].raw].same_app_group.as_deref();
-        match group.and_then(|group| members.get(group)).filter(|m| m.len() >= 2) {
+        match group
+            .and_then(|group| members.get(group))
+            .filter(|m| m.len() >= 2)
+        {
             Some(positions) => {
                 let first = &rows[items[positions[0]].raw];
                 let title = if first.display_name.is_empty() {
@@ -1210,7 +1230,10 @@ fn group_same_apps(rows: &[Row], items: Vec<Item>) -> Vec<Item> {
 
 /// Every source id, the known ones first in their usual order.
 pub fn all_sources(catalog: &[Source]) -> Vec<String> {
-    let mut ids: Vec<String> = backends::BACKEND_IDS.iter().map(|id| (*id).to_owned()).collect();
+    let mut ids: Vec<String> = backends::BACKEND_IDS
+        .iter()
+        .map(|id| (*id).to_owned())
+        .collect();
     for source in catalog {
         if !ids.contains(&source.source) {
             ids.push(source.source.clone());
@@ -1232,14 +1255,16 @@ pub fn category(id: &str) -> &'static str {
 }
 pub const CATEGORIES: [&str; 4] = ["System", "Applications", "Developer tools", "Containers"];
 
+#[cfg(target_os = "linux")]
+const AWAITING_CATALOG: &[&str] = &["AppImage", "appimage"];
+#[cfg(not(target_os = "linux"))]
+const AWAITING_CATALOG: &[&str] = &[];
+
 /// File name patterns the open dialog offers, by the sources available.
 pub fn file_patterns(catalog: &[Source]) -> Vec<&'static str> {
     if catalog.is_empty() {
-        return if cfg!(target_os = "linux") {
-            vec!["AppImage", "appimage"]
-        } else {
-            vec![]
-        };
+        // Before the catalog arrives, Linux still offers AppImages.
+        return AWAITING_CATALOG.to_vec();
     }
     let available = |id: &str| catalog.iter().any(|s| s.source == id && s.available);
     let mut patterns = vec![];
@@ -1339,8 +1364,12 @@ pub fn checked_ago(epoch: i64, now: i64) -> String {
     let seconds = (now - epoch).max(0);
     match seconds {
         0..60 => "Checked just now".into(),
-        60..3600 => plural(seconds / 60, "minute").map_or_else(String::new, |t| format!("Checked {t} ago")),
-        3600..86400 => plural(seconds / 3600, "hour").map_or_else(String::new, |t| format!("Checked {t} ago")),
+        60..3600 => {
+            plural(seconds / 60, "minute").map_or_else(String::new, |t| format!("Checked {t} ago"))
+        }
+        3600..86400 => {
+            plural(seconds / 3600, "hour").map_or_else(String::new, |t| format!("Checked {t} ago"))
+        }
         _ => format!("Checked {}", short_datetime(epoch)),
     }
 }

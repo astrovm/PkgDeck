@@ -11,30 +11,35 @@ use crate::{
 use eframe::egui::{self, vec2, CornerRadius, Id, Sense, Stroke, Ui, Vec2};
 
 pub fn show(app: &mut App, ui: &mut Ui) {
-    egui::ScrollArea::vertical().id_salt("settings").auto_shrink([false, false]).show(ui, |ui| {
-        let width = ui.available_width().min(760.0);
-        ui.set_max_width(width);
-        ui.spacing_mut().item_spacing.y = 6.0;
-        appearance(app, ui);
-        ui.add_space(8.0);
-        update_checks(app, ui);
-        ui.add_space(8.0);
-        about(app, ui);
-        ui.add_space(8.0);
-        shortcuts(ui);
-        ui.add_space(20.0);
-    });
+    egui::ScrollArea::vertical()
+        .id_salt("settings")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            let width = ui.available_width().min(760.0);
+            ui.set_max_width(width);
+            ui.spacing_mut().item_spacing.y = 6.0;
+            appearance(app, ui);
+            ui.add_space(8.0);
+            update_checks(app, ui);
+            ui.add_space(8.0);
+            about(app, ui);
+            ui.add_space(8.0);
+            shortcuts(ui);
+            ui.add_space(20.0);
+        });
 }
 
 fn section(ui: &mut Ui, title: &str, content: impl FnOnce(&mut Ui)) {
     let palette = Palette::current(ui.ctx());
-    card(&palette).inner_margin(egui::Margin::symmetric(18, 16)).show(ui, |ui| {
-        ui.spacing_mut().item_spacing.y = 4.0;
-        ui.set_width(ui.available_width());
-        caption(ui, title);
-        ui.add_space(4.0);
-        content(ui);
-    });
+    card(&palette)
+        .inner_margin(egui::Margin::symmetric(18, 16))
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 4.0;
+            ui.set_width(ui.available_width());
+            caption(ui, title);
+            ui.add_space(4.0);
+            content(ui);
+        });
 }
 
 /// A label with an optional line under it, and a control on the right.
@@ -42,9 +47,17 @@ fn setting_row(ui: &mut Ui, label: &str, hint: &str, control: impl FnOnce(&mut U
     let palette = Palette::current(ui.ctx());
     let text = |ui: &mut Ui| {
         ui.vertical(|ui| {
-            ui.label(egui::RichText::new(label).font(theme::font(14.5)).color(palette.ink));
+            ui.label(
+                egui::RichText::new(label)
+                    .font(theme::font(14.5))
+                    .color(palette.ink),
+            );
             if !hint.is_empty() {
-                ui.label(egui::RichText::new(hint).font(theme::font(12.5)).color(palette.muted));
+                ui.label(
+                    egui::RichText::new(hint)
+                        .font(theme::font(12.5))
+                        .color(palette.muted),
+                );
             }
         });
     };
@@ -68,16 +81,24 @@ fn appearance(app: &mut App, ui: &mut Ui) {
                 Appearance::Light => 1,
                 Appearance::Dark => 2,
             };
-            if let Some(choice) = segmented(ui, Id::new("theme"), &["System", "Light", "Dark"], current) {
-                app.settings.appearance = [Appearance::System, Appearance::Light, Appearance::Dark][choice];
+            if let Some(choice) =
+                segmented(ui, Id::new("theme"), &["System", "Light", "Dark"], current)
+            {
+                app.settings.appearance =
+                    [Appearance::System, Appearance::Light, Appearance::Dark][choice];
             }
         });
-        setting_row(ui, "Animations", "Movement when things open, close and change", |ui| {
-            let mut on = !app.settings.reduce_motion;
-            if switch(ui, &mut on, true, "Animations").changed() {
-                app.settings.reduce_motion = !on;
-            }
-        });
+        setting_row(
+            ui,
+            "Animations",
+            "Movement when things open, close and change",
+            |ui| {
+                let mut on = !app.settings.reduce_motion;
+                if switch(ui, &mut on, true, "Animations").changed() {
+                    app.settings.reduce_motion = !on;
+                }
+            },
+        );
     });
 }
 
@@ -86,8 +107,14 @@ fn segmented(ui: &mut Ui, id: Id, labels: &[&str], current: usize) -> Option<usi
     let palette = Palette::current(ui.ctx());
     let part = 84.0;
     let (rect, _) = ui.allocate_exact_size(vec2(part * labels.len() as f32, 34.0), Sense::hover());
-    ui.painter().rect_filled(rect, CornerRadius::same(10), palette.hover_solid());
-    let x = glide(ui.ctx(), id.with("knob"), rect.left() + current as f32 * part, LAYOUT);
+    ui.painter()
+        .rect_filled(rect, CornerRadius::same(10), palette.hover_solid());
+    let x = glide(
+        ui.ctx(),
+        id.with("knob"),
+        rect.left() + current as f32 * part,
+        LAYOUT,
+    );
     ui.painter().rect(
         egui::Rect::from_min_size(egui::pos2(x, rect.top()), vec2(part, rect.height())).shrink(3.0),
         CornerRadius::same(8),
@@ -97,11 +124,37 @@ fn segmented(ui: &mut Ui, id: Id, labels: &[&str], current: usize) -> Option<usi
     );
     let mut chosen = None;
     for (index, label) in labels.iter().enumerate() {
-        let cell = egui::Rect::from_min_size(egui::pos2(rect.left() + index as f32 * part, rect.top()), vec2(part, rect.height()));
-        let response = ui.interact(cell, id.with(index), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
-        response.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::RadioButton, true, index == current, *label));
-        let color = if index == current { palette.ink } else { palette.muted };
-        ui.painter().text(cell.center(), egui::Align2::CENTER_CENTER, *label, if index == current { theme::bold(13.5) } else { theme::font(13.5) }, color);
+        let cell = egui::Rect::from_min_size(
+            egui::pos2(rect.left() + index as f32 * part, rect.top()),
+            vec2(part, rect.height()),
+        );
+        let response = ui
+            .interact(cell, id.with(index), Sense::click())
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        response.widget_info(|| {
+            egui::WidgetInfo::selected(
+                egui::WidgetType::RadioButton,
+                true,
+                index == current,
+                *label,
+            )
+        });
+        let color = if index == current {
+            palette.ink
+        } else {
+            palette.muted
+        };
+        ui.painter().text(
+            cell.center(),
+            egui::Align2::CENTER_CENTER,
+            *label,
+            if index == current {
+                theme::bold(13.5)
+            } else {
+                theme::font(13.5)
+            },
+            color,
+        );
         if response.clicked() && index != current {
             chosen = Some(index);
         }
@@ -113,23 +166,39 @@ fn update_checks(app: &mut App, ui: &mut Ui) {
     let palette = Palette::current(ui.ctx());
     section(ui, "Update checks", |ui| {
         let background = app.settings.background_mode;
-        setting_row(ui, "Background checks", if cfg!(target_os = "macos") { "Keeps checking from the menu bar after the window closes" } else { "Keeps checking from the system tray after the window closes" }, |ui| {
-            let mut on = background;
-            if switch(ui, &mut on, true, "Background checks").changed() {
-                if !on && app.settings.autostart && !app.c().set_autostart(false) {
-                    return;
+        setting_row(
+            ui,
+            "Background checks",
+            if cfg!(target_os = "macos") {
+                "Keeps checking from the menu bar after the window closes"
+            } else {
+                "Keeps checking from the system tray after the window closes"
+            },
+            |ui| {
+                let mut on = background;
+                if switch(ui, &mut on, true, "Background checks").changed() {
+                    if !on && app.settings.autostart && !app.c().set_autostart(false) {
+                        return;
+                    }
+                    if !on {
+                        app.settings.autostart = false;
+                    }
+                    app.settings.background_mode = on;
+                    app.sync_tray();
                 }
-                if !on {
-                    app.settings.autostart = false;
-                }
-                app.settings.background_mode = on;
-                app.sync_tray();
-            }
-        });
+            },
+        );
         let interval = model::nearest_interval(app.settings.check_interval);
         setting_row(ui, "Check every", model::INTERVALS[interval].1, |ui| {
             let mut index = interval;
-            if steps(ui, Id::new("interval"), model::INTERVALS.len(), &mut index, background, 240.0) {
+            if steps(
+                ui,
+                Id::new("interval"),
+                model::INTERVALS.len(),
+                &mut index,
+                background,
+                240.0,
+            ) {
                 let minutes = model::INTERVALS[index].0;
                 app.settings.check_interval = minutes;
                 app.c().set_check_interval(minutes);
@@ -142,20 +211,37 @@ fn update_checks(app: &mut App, ui: &mut Ui) {
                 app.c().set_auto_update(on);
             }
         });
-        setting_row(ui, "Allow updates that remove packages", "Like an old kernel replaced by a new one", |ui| {
-            let mut on = app.settings.allow_removals;
-            if switch(ui, &mut on, true, "Allow updates that remove packages").changed() {
-                app.settings.allow_removals = on;
-                app.c().set_allow_removals(on);
-            }
-        });
-        setting_row(ui, "Allow automatic updates without a password", "Changes you start still ask", |ui| {
-            let mut on = !app.settings.system_approval.is_empty();
-            if switch(ui, &mut on, true, "Allow automatic updates without a password").changed() {
-                app.c().allow_system_updates(on);
-                app.react();
-            }
-        });
+        setting_row(
+            ui,
+            "Allow updates that remove packages",
+            "Like an old kernel replaced by a new one",
+            |ui| {
+                let mut on = app.settings.allow_removals;
+                if switch(ui, &mut on, true, "Allow updates that remove packages").changed() {
+                    app.settings.allow_removals = on;
+                    app.c().set_allow_removals(on);
+                }
+            },
+        );
+        setting_row(
+            ui,
+            "Allow automatic updates without a password",
+            "Changes you start still ask",
+            |ui| {
+                let mut on = !app.settings.system_approval.is_empty();
+                if switch(
+                    ui,
+                    &mut on,
+                    true,
+                    "Allow automatic updates without a password",
+                )
+                .changed()
+                {
+                    app.c().allow_system_updates(on);
+                    app.react();
+                }
+            },
+        );
         let error = app.ctl.approval_error().to_string();
         if !error.is_empty() {
             ui.label(egui::RichText::new(error).color(palette.danger));
@@ -164,7 +250,9 @@ fn update_checks(app: &mut App, ui: &mut Ui) {
             setting_row(ui, "Start in background at login", "", |ui| {
                 let mut on = app.settings.autostart;
                 let can = background && app.platform.tray_available();
-                if switch(ui, &mut on, can, "Start in background at login").changed() && app.c().set_autostart(on) {
+                if switch(ui, &mut on, can, "Start in background at login").changed()
+                    && app.c().set_autostart(on)
+                {
                     app.settings.autostart = on;
                 }
             });
@@ -174,15 +262,27 @@ fn update_checks(app: &mut App, ui: &mut Ui) {
             let text = match app.background.last_check {
                 Some(at) => {
                     let count = app.background.available;
-                    format!("Last check: {}, {count} update{} found", model::short_datetime(at), if count == 1 { "" } else { "s" })
+                    format!(
+                        "Last check: {}, {count} update{} found",
+                        model::short_datetime(at),
+                        if count == 1 { "" } else { "s" }
+                    )
                 }
                 None => "Last check: never".into(),
             };
             ui.label(egui::RichText::new(text).color(palette.muted));
             let warning = if !app.platform.tray_available() {
-                Some(if cfg!(target_os = "macos") { "No menu bar icon, so no notifications" } else { "No system tray, so no notifications" })
+                Some(if cfg!(target_os = "macos") {
+                    "No menu bar icon, so no notifications"
+                } else {
+                    "No system tray, so no notifications"
+                })
             } else if !app.platform.notifications_available() {
-                Some(if cfg!(target_os = "macos") { "Notifications are off in System Settings" } else { "This system tray can't show notifications" })
+                Some(if cfg!(target_os = "macos") {
+                    "Notifications are off in System Settings"
+                } else {
+                    "This system tray can't show notifications"
+                })
             } else if app.platform.permission_needed() {
                 Some("Notifications show Script Editor's icon until you allow PkgDeck")
             } else {
@@ -195,7 +295,12 @@ fn update_checks(app: &mut App, ui: &mut Ui) {
             }
         });
         ui.horizontal(|ui| {
-            if app.platform.permission_needed() && Button::new(Look::Secondary, "Notification settings").small().show(ui).clicked() {
+            if app.platform.permission_needed()
+                && Button::new(Look::Secondary, "Notification settings")
+                    .small()
+                    .show(ui)
+                    .clicked()
+            {
                 app.platform.open_notification_settings();
             }
             if Button::new(Look::Soft(Tone::Accent), "Test notification")
@@ -208,7 +313,8 @@ fn update_checks(app: &mut App, ui: &mut Ui) {
                 if app.platform.permission_needed() {
                     app.platform.request_permission();
                 }
-                app.platform.notify("PkgDeck test", "Desktop notifications are working.");
+                app.platform
+                    .notify("PkgDeck test", "Desktop notifications are working.");
             }
         });
     });
@@ -218,9 +324,16 @@ fn about(app: &mut App, ui: &mut Ui) {
     let palette = Palette::current(ui.ctx());
     section(ui, "About", |ui| {
         ui.horizontal(|ui| {
-            ui.add(egui::Image::new(egui::include_image!("../../assets/logo.svg")).fit_to_exact_size(Vec2::splat(40.0)));
+            ui.add(
+                egui::Image::new(egui::include_image!("../../assets/logo.svg"))
+                    .fit_to_exact_size(Vec2::splat(40.0)),
+            );
             ui.vertical(|ui| {
-                ui.label(egui::RichText::new(format!("PkgDeck {}", app.ctl.version())).font(theme::bold(16.0)).color(palette.ink));
+                ui.label(
+                    egui::RichText::new(format!("PkgDeck {}", app.ctl.version()))
+                        .font(theme::bold(16.0))
+                        .color(palette.ink),
+                );
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
                     ui.label(egui::RichText::new("Made with").color(palette.muted));
@@ -230,8 +343,13 @@ fn about(app: &mut App, ui: &mut Ui) {
                 });
             });
             right(ui, |ui| {
-                if Button::new(Look::Secondary, "GitHub").icon("external").show(ui).clicked() {
-                    ui.ctx().open_url(egui::OpenUrl::new_tab("https://github.com/astrovm/PkgDeck"));
+                if Button::new(Look::Secondary, "GitHub")
+                    .icon("external")
+                    .show(ui)
+                    .clicked()
+                {
+                    ui.ctx()
+                        .open_url(egui::OpenUrl::new_tab("https://github.com/astrovm/PkgDeck"));
                 }
             });
         });
@@ -281,7 +399,11 @@ const SHORTCUTS: &[(&str, &str)] = &[
 fn shortcuts(ui: &mut Ui) {
     let palette = Palette::current(ui.ctx());
     section(ui, "Keyboard shortcuts", |ui| {
-        let refresh = if cfg!(target_os = "macos") { "Ctrl+Shift+R" } else { "Ctrl+M" };
+        let refresh = if cfg!(target_os = "macos") {
+            "Ctrl+Shift+R"
+        } else {
+            "Ctrl+M"
+        };
         let mut all: Vec<(&str, &str)> = SHORTCUTS.to_vec();
         all.insert(17, ("Refresh the source's package lists", refresh));
         let columns = if ui.available_width() >= 620.0 { 2 } else { 1 };
@@ -298,7 +420,11 @@ fn shortcuts(ui: &mut Ui) {
                                 .corner_radius(CornerRadius::same(6))
                                 .inner_margin(egui::Margin::symmetric(7, 2))
                                 .show(ui, |ui| {
-                                    ui.label(egui::RichText::new(keys(key)).font(theme::mono(12.0)).color(palette.muted));
+                                    ui.label(
+                                        egui::RichText::new(keys(key))
+                                            .font(theme::mono(12.0))
+                                            .color(palette.muted),
+                                    );
                                 });
                         });
                     });

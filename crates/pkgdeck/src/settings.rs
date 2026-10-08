@@ -137,7 +137,10 @@ fn parse_ini(text: &str) -> Map<String, Value> {
     let mut section = String::new();
     for line in text.lines() {
         let line = line.trim();
-        if let Some(name) = line.strip_prefix('[').and_then(|line| line.strip_suffix(']')) {
+        if let Some(name) = line
+            .strip_prefix('[')
+            .and_then(|line| line.strip_suffix(']'))
+        {
             section = name.to_owned();
             continue;
         }
@@ -182,6 +185,7 @@ fn unquote(value: &str) -> String {
 }
 
 /// The macOS preferences, `Browser.key` entries, as `plutil` prints them.
+#[cfg(any(target_os = "macos", test))]
 fn parse_plist_json(text: &str) -> Map<String, Value> {
     let Ok(Value::Object(all)) = serde_json::from_str::<Value>(text) else {
         return Map::new();
@@ -197,10 +201,13 @@ fn legacy(directory: &Path, home: Option<&Path>) -> Option<Settings> {
     if let Some(values) = ini.map(|text| parse_ini(&text)).filter(|v| !v.is_empty()) {
         return Some(from_qt(&values));
     }
-    let plist = home?.join("Library/Preferences/io.github.astrovm.PkgDeck.plist");
-    if !plist.is_file() {
-        return None;
-    }
+    mac_preferences(home?)
+}
+
+/// The Qt app's preferences on macOS, through `plutil`.
+#[cfg(target_os = "macos")]
+fn mac_preferences(home: &Path) -> Option<Settings> {
+    let plist = home.join("Library/Preferences/io.github.astrovm.PkgDeck.plist");
     let output = std::process::Command::new("/usr/bin/plutil")
         .args(["-convert", "json", "-o", "-"])
         .arg(&plist)
@@ -208,6 +215,10 @@ fn legacy(directory: &Path, home: Option<&Path>) -> Option<Settings> {
         .ok()?;
     let values = parse_plist_json(&String::from_utf8_lossy(&output.stdout));
     (!values.is_empty()).then(|| from_qt(&values))
+}
+#[cfg(not(target_os = "macos"))]
+fn mac_preferences(_: &Path) -> Option<Settings> {
+    None
 }
 
 /// Reads and saves the settings in one directory.
@@ -253,9 +264,7 @@ impl Store {
         let Some(file) = &self.file else {
             return;
         };
-        let Ok(text) = serde_json::to_string_pretty(settings) else {
-            return;
-        };
+        let text = serde_json::to_string_pretty(settings).expect("settings are plain data");
         let partial = file.with_extension("json.partial");
         let written = file
             .parent()
@@ -371,6 +380,41 @@ mod tests {
         std::fs::write(dir.join("PkgDeck.conf"), "[Browser]\nautostart=true\n").unwrap();
         assert!(Store::open(Some(dir.clone()), None).1.autostart);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn odd_values_and_escapes_read_sensibly() {
+        let values = parse_ini(
+            "[Browser]\nappearance=0\nsidebarWidth=180\nsearchHint=\"a\\nb\\tc\\rd\\\"e\\\"\n",
+        );
+        let settings = from_qt(&values);
+        assert_eq!(settings.appearance, Appearance::System);
+        assert_eq!(settings.sidebar_width, 180.0);
+        assert_eq!(settings.search_hint, "a\nb\tc\rd\"e");
+        assert_eq!(unquote("\"trailing\\\""), "trailing");
+        let values =
+            parse_plist_json(r#"{"Browser.sourceList": ["apt"], "Browser.autostart": true}"#);
+        let settings = from_qt(&values);
+        assert_eq!(settings.source_list, "");
+        assert!(settings.autostart);
+    }
+
+    #[test]
+    fn mac_preferences_are_read_with_plutil() {
+        let home = std::env::temp_dir().join(format!("pkgdeck-home-{}", std::process::id()));
+        let prefs = home.join("Library/Preferences");
+        std::fs::create_dir_all(&prefs).unwrap();
+        std::fs::write(
+            prefs.join("io.github.astrovm.PkgDeck.plist"),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>Browser.autoUpdate</key><true/></dict></plist>"#,
+        )
+        .unwrap();
+        let config = home.join("config");
+        let read = Store::open(Some(config), Some(&home)).1;
+        assert_eq!(read.auto_update, cfg!(target_os = "macos"));
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]

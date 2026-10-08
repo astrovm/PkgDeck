@@ -174,7 +174,11 @@ impl<'a> Button<'a> {
             ui.painter()
                 .layout_no_wrap(self.label.to_owned(), text_font.clone(), palette.ink)
         });
-        let padding = if show_label { 14.0 } else { (height - icon_size) / 2.0 };
+        let padding = if show_label {
+            14.0
+        } else {
+            (height - icon_size) / 2.0
+        };
         let mut width = padding * 2.0;
         if self.icon.is_some() {
             width += icon_size;
@@ -202,8 +206,18 @@ impl<'a> Button<'a> {
         response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, self.enabled, &label));
         if ui.is_rect_visible(rect) {
             let ctx = ui.ctx();
-            let hover = ease(ctx, id.with("hover"), response.hovered() && self.enabled, FEEDBACK);
-            let press = ease(ctx, id.with("press"), response.is_pointer_button_down_on() && self.enabled, FEEDBACK);
+            let hover = ease(
+                ctx,
+                id.with("hover"),
+                response.hovered() && self.enabled,
+                FEEDBACK,
+            );
+            let press = ease(
+                ctx,
+                id.with("press"),
+                response.is_pointer_button_down_on() && self.enabled,
+                FEEDBACK,
+            );
             let rect = rect.shrink(press * 0.6);
             let (fill, stroke, ink) = match self.look {
                 Look::Primary => (
@@ -213,7 +227,11 @@ impl<'a> Button<'a> {
                 ),
                 Look::Solid(t) => {
                     let color = tone(&palette, t);
-                    (mix(color, Color32::WHITE, hover * 0.1), Stroke::NONE, palette.surface)
+                    (
+                        mix(color, Color32::WHITE, hover * 0.1),
+                        Stroke::NONE,
+                        palette.surface,
+                    )
                 }
                 Look::Secondary => (
                     mix(palette.surface, palette.hover_solid(), hover),
@@ -228,7 +246,11 @@ impl<'a> Button<'a> {
                         color,
                     )
                 }
-                Look::Flat => (alpha(palette.ink, hover * 0.07 + press * 0.05), Stroke::NONE, palette.ink),
+                Look::Flat => (
+                    alpha(palette.ink, hover * 0.07 + press * 0.05),
+                    Stroke::NONE,
+                    palette.ink,
+                ),
             };
             let opacity = if self.enabled { 1.0 } else { 0.42 };
             let painter = ui.painter();
@@ -241,7 +263,9 @@ impl<'a> Button<'a> {
             );
             let ink = alpha(ink, opacity);
             let content = icon_size
-                + galley.as_ref().map_or(0.0, |g| g.size().x + if self.icon.is_some() { 8.0 } else { 0.0 });
+                + galley.as_ref().map_or(0.0, |g| {
+                    g.size().x + if self.icon.is_some() { 8.0 } else { 0.0 }
+                });
             let mut x = rect.center().x - content / 2.0;
             if let Some(icon) = self.icon {
                 let icon_rect = Rect::from_min_size(
@@ -270,14 +294,29 @@ impl<'a> Button<'a> {
 }
 
 /// A round icon button without a frame until hovered.
-pub fn icon_button(ui: &mut Ui, icon: &str, tooltip: &str, color: Color32, enabled: bool) -> Response {
+pub fn icon_button(
+    ui: &mut Ui,
+    icon: &str,
+    tooltip: &str,
+    color: Color32,
+    enabled: bool,
+) -> Response {
     let size = 32.0;
-    let sense = if enabled { Sense::click() } else { Sense::hover() };
+    let sense = if enabled {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), sense);
     let tip = tooltip.to_owned();
     response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, enabled, &tip));
     if ui.is_rect_visible(rect) {
-        let hover = ease(ui.ctx(), response.id.with("hover"), response.hovered() && enabled, FEEDBACK);
+        let hover = ease(
+            ui.ctx(),
+            response.id.with("hover"),
+            response.hovered() && enabled,
+            FEEDBACK,
+        );
         let opacity = if enabled { 1.0 } else { 0.42 };
         ui.painter().rect_filled(
             rect,
@@ -306,7 +345,11 @@ pub fn icon_button(ui: &mut Ui, icon: &str, tooltip: &str, color: Color32, enabl
 /// An on/off switch. Returns the response; `on` flips on click.
 pub fn switch(ui: &mut Ui, on: &mut bool, enabled: bool, label: &str) -> Response {
     let size = vec2(40.0, 24.0);
-    let sense = if enabled { Sense::click() } else { Sense::hover() };
+    let sense = if enabled {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
     let (rect, mut response) = ui.allocate_exact_size(size, sense);
     if response.clicked() {
         *on = !*on;
@@ -318,7 +361,12 @@ pub fn switch(ui: &mut Ui, on: &mut bool, enabled: bool, label: &str) -> Respons
     if ui.is_rect_visible(rect) {
         let palette = Palette::current(ui.ctx());
         let t = ease(ui.ctx(), response.id, *on, REVEAL);
-        let hover = ease(ui.ctx(), response.id.with("hover"), response.hovered() && enabled, FEEDBACK);
+        let hover = ease(
+            ui.ctx(),
+            response.id.with("hover"),
+            response.hovered() && enabled,
+            FEEDBACK,
+        );
         let opacity = if enabled { 1.0 } else { 0.42 };
         let track = mix(palette.strong_line_solid(), palette.accent, t);
         ui.painter().rect_filled(
@@ -348,7 +396,14 @@ pub fn switch(ui: &mut Ui, on: &mut bool, enabled: bool, label: &str) -> Respons
 
 /// A check box that pops when ticked.
 pub fn tickbox(ui: &mut Ui, checked: bool, enabled: bool, label: &str) -> Response {
-    let (rect, response) = ui.allocate_exact_size(Vec2::splat(22.0), if enabled { Sense::click() } else { Sense::hover() });
+    let (rect, response) = ui.allocate_exact_size(
+        Vec2::splat(22.0),
+        if enabled {
+            Sense::click()
+        } else {
+            Sense::hover()
+        },
+    );
     let text = label.to_owned();
     response.widget_info(|| WidgetInfo::selected(WidgetType::Checkbox, enabled, checked, &text));
     paint_tick(ui, rect, response.id, checked, enabled, response.hovered());
@@ -372,18 +427,30 @@ pub fn paint_tick(ui: &Ui, rect: Rect, id: Id, checked: bool, enabled: bool, hov
     );
     let opacity = if enabled { 1.0 } else { 0.42 };
     let box_rect = Rect::from_center_size(rect.center(), Vec2::splat(18.0));
-    let border = if hovered && enabled { palette.accent } else { palette.strong_line };
+    let border = if hovered && enabled {
+        palette.accent
+    } else {
+        palette.strong_line
+    };
     ui.painter().rect(
         box_rect,
         CornerRadius::same(SMALL_RADIUS),
         alpha(palette.accent, t.clamp(0.0, 1.0) * opacity),
-        Stroke::new(1.5, alpha(mix(border, palette.accent, t.clamp(0.0, 1.0)), opacity)),
+        Stroke::new(
+            1.5,
+            alpha(mix(border, palette.accent, t.clamp(0.0, 1.0)), opacity),
+        ),
         StrokeKind::Inside,
     );
     if t > 0.01 {
         let scale = t.max(0.0);
         let check = Rect::from_center_size(box_rect.center(), Vec2::splat(14.0 * scale));
-        theme::paint_icon(ui.painter(), check, "installed", alpha(palette.accent_ink, opacity));
+        theme::paint_icon(
+            ui.painter(),
+            check,
+            "installed",
+            alpha(palette.accent_ink, opacity),
+        );
     }
 }
 
@@ -432,7 +499,11 @@ impl<'a> Field<'a> {
     }
     pub fn show(self, ui: &mut Ui) -> FieldResponse {
         let palette = Palette::current(ui.ctx());
-        let height = if self.large { 46.0 } else { CONTROL_HEIGHT + 2.0 };
+        let height = if self.large {
+            46.0
+        } else {
+            CONTROL_HEIGHT + 2.0
+        };
         let width = self.width.unwrap_or_else(|| ui.available_width());
         let (rect, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
         let focused = ui.ctx().memory(|m| m.has_focus(self.id));
@@ -455,14 +526,22 @@ impl<'a> Field<'a> {
         }
         let mut left = rect.left() + 12.0;
         if let Some(icon) = self.icon {
-            let icon_rect = Rect::from_center_size(
-                Pos2::new(left + 9.0, rect.center().y),
-                Vec2::splat(18.0),
+            let icon_rect =
+                Rect::from_center_size(Pos2::new(left + 9.0, rect.center().y), Vec2::splat(18.0));
+            theme::paint_icon(
+                &painter,
+                icon_rect,
+                icon,
+                mix(palette.muted, palette.accent, focus),
             );
-            theme::paint_icon(&painter, icon_rect, icon, mix(palette.muted, palette.accent, focus));
             left += 28.0;
         }
-        let clear_shown = ease(ui.ctx(), self.id.with("clear"), !self.text.is_empty(), REVEAL);
+        let clear_shown = ease(
+            ui.ctx(),
+            self.id.with("clear"),
+            !self.text.is_empty(),
+            REVEAL,
+        );
         let right = rect.right() - 8.0 - 28.0 * clear_shown.ceil();
         let font: FontId = if self.monospace {
             theme::mono(13.5)
@@ -471,7 +550,8 @@ impl<'a> Field<'a> {
         } else {
             theme::font(14.5)
         };
-        let text_rect = Rect::from_min_max(Pos2::new(left, rect.top()), Pos2::new(right, rect.bottom()));
+        let text_rect =
+            Rect::from_min_max(Pos2::new(left, rect.top()), Pos2::new(right, rect.bottom()));
         let edit = egui::TextEdit::singleline(self.text)
             .id(self.id)
             .hint_text(egui::RichText::new(self.hint).color(palette.muted))
@@ -493,7 +573,11 @@ impl<'a> Field<'a> {
                 .on_hover_cursor(CursorIcon::PointingHand)
                 .on_hover_text("Clear");
             let hover = ease(ui.ctx(), clear.id, clear.hovered(), FEEDBACK);
-            painter.circle_filled(clear_rect.center(), 11.0, alpha(palette.ink, (0.07 + hover * 0.08) * clear_shown));
+            painter.circle_filled(
+                clear_rect.center(),
+                11.0,
+                alpha(palette.ink, (0.07 + hover * 0.08) * clear_shown),
+            );
             theme::paint_icon(
                 &painter,
                 Rect::from_center_size(clear_rect.center(), Vec2::splat(13.0)),
@@ -533,8 +617,10 @@ pub fn paint_spinner(ui: &Ui, rect: Rect, color: Color32) {
             rect.center() + vec2(angle.cos(), angle.sin()) * radius
         })
         .collect();
-    ui.painter()
-        .add(egui::Shape::line(points, Stroke::new((rect.width() / 12.0).max(1.6), color)));
+    ui.painter().add(egui::Shape::line(
+        points,
+        Stroke::new((rect.width() / 12.0).max(1.6), color),
+    ));
 }
 
 /// A thin bar: filled to `fraction`, or a sweeping segment when unknown.
@@ -603,10 +689,13 @@ pub fn paint_badge(ui: &Ui, center: Pos2, text: &str, fill: Color32, ink: Color3
     if scale <= 0.0 {
         return;
     }
-    let galley = ui
-        .painter()
-        .layout_no_wrap(text.to_owned(), theme::bold(11.5 * scale.max(0.01)), ink);
-    let size = vec2((galley.size().x + 12.0 * scale).max(20.0 * scale), 20.0 * scale);
+    let galley =
+        ui.painter()
+            .layout_no_wrap(text.to_owned(), theme::bold(11.5 * scale.max(0.01)), ink);
+    let size = vec2(
+        (galley.size().x + 12.0 * scale).max(20.0 * scale),
+        20.0 * scale,
+    );
     let rect = Rect::from_center_size(center, size);
     ui.painter().rect_filled(rect, CornerRadius::same(10), fill);
     ui.painter()
@@ -614,14 +703,27 @@ pub fn paint_badge(ui: &Ui, center: Pos2, text: &str, fill: Color32, ink: Color3
 }
 
 /// A label that cuts long text short with an ellipsis.
-pub fn one_line(ui: &Ui, text: &str, font: FontId, color: Color32, width: f32) -> std::sync::Arc<egui::Galley> {
+pub fn one_line(
+    ui: &Ui,
+    text: &str,
+    font: FontId,
+    color: Color32,
+    width: f32,
+) -> std::sync::Arc<egui::Galley> {
     let mut job = egui::text::LayoutJob::simple_singleline(text.to_owned(), font, color);
     job.wrap = egui::text::TextWrapping::truncate_at_width(width.max(1.0));
     ui.painter().layout_job(job)
 }
 
 /// Text that wraps within `width`.
-pub fn wrapped(ui: &Ui, text: &str, font: FontId, color: Color32, width: f32, rows: usize) -> std::sync::Arc<egui::Galley> {
+pub fn wrapped(
+    ui: &Ui,
+    text: &str,
+    font: FontId,
+    color: Color32,
+    width: f32,
+    rows: usize,
+) -> std::sync::Arc<egui::Galley> {
     let mut job = egui::text::LayoutJob::simple(text.to_owned(), font, color, width.max(1.0));
     job.wrap.max_rows = rows;
     job.wrap.break_anywhere = false;
@@ -641,20 +743,44 @@ pub fn caption(ui: &mut Ui, text: &str) {
 }
 
 /// Paints a galley at `pos` anchored as `align` says.
-pub fn paint_text(ui: &Ui, pos: Pos2, align: Align2, text: &str, font: FontId, color: Color32) -> Rect {
+pub fn paint_text(
+    ui: &Ui,
+    pos: Pos2,
+    align: Align2,
+    text: &str,
+    font: FontId,
+    color: Color32,
+) -> Rect {
     ui.painter().text(pos, align, text, font, color)
 }
 
 /// A row whose contents line up from the right, as tall as they are.
 pub fn right<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
-    ui.horizontal(|ui| ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), add).inner)
-        .inner
+    ui.horizontal(|ui| {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), add)
+            .inner
+    })
+    .inner
 }
 
 /// A slider that snaps to `count` steps. Returns true when it moved.
-pub fn steps(ui: &mut Ui, id: Id, count: usize, index: &mut usize, enabled: bool, width: f32) -> bool {
+pub fn steps(
+    ui: &mut Ui,
+    id: Id,
+    count: usize,
+    index: &mut usize,
+    enabled: bool,
+    width: f32,
+) -> bool {
     let palette = Palette::current(ui.ctx());
-    let (rect, response) = ui.allocate_exact_size(vec2(width, 28.0), if enabled { Sense::click_and_drag() } else { Sense::hover() });
+    let (rect, response) = ui.allocate_exact_size(
+        vec2(width, 28.0),
+        if enabled {
+            Sense::click_and_drag()
+        } else {
+            Sense::hover()
+        },
+    );
     let track = Rect::from_center_size(rect.center(), vec2(rect.width() - 20.0, 4.0));
     let at = |i: usize| track.left() + track.width() * i as f32 / (count - 1).max(1) as f32;
     let before = *index;
@@ -665,15 +791,44 @@ pub fn steps(ui: &mut Ui, id: Id, count: usize, index: &mut usize, enabled: bool
     let opacity = if enabled { 1.0 } else { 0.42 };
     let x = glide(ui.ctx(), id, at(*index), REVEAL);
     let painter = ui.painter();
-    painter.rect_filled(track, CornerRadius::same(2), alpha(palette.strong_line_solid(), opacity));
-    painter.rect_filled(Rect::from_min_max(track.min, Pos2::new(x, track.max.y)), CornerRadius::same(2), alpha(palette.accent, opacity));
+    painter.rect_filled(
+        track,
+        CornerRadius::same(2),
+        alpha(palette.strong_line_solid(), opacity),
+    );
+    painter.rect_filled(
+        Rect::from_min_max(track.min, Pos2::new(x, track.max.y)),
+        CornerRadius::same(2),
+        alpha(palette.accent, opacity),
+    );
     for i in 0..count {
-        let color = if at(i) <= x { palette.accent } else { palette.strong_line_solid() };
-        painter.circle_filled(Pos2::new(at(i), track.center().y), 3.0, alpha(color, opacity));
+        let color = if at(i) <= x {
+            palette.accent
+        } else {
+            palette.strong_line_solid()
+        };
+        painter.circle_filled(
+            Pos2::new(at(i), track.center().y),
+            3.0,
+            alpha(color, opacity),
+        );
     }
-    let hover = ease(ui.ctx(), id.with("hover"), response.hovered() || response.dragged(), FEEDBACK);
-    painter.circle_filled(Pos2::new(x, track.center().y), 9.0 + hover * 1.5, alpha(palette.accent, opacity));
-    painter.circle_filled(Pos2::new(x, track.center().y), 4.0, alpha(palette.surface, opacity));
+    let hover = ease(
+        ui.ctx(),
+        id.with("hover"),
+        response.hovered() || response.dragged(),
+        FEEDBACK,
+    );
+    painter.circle_filled(
+        Pos2::new(x, track.center().y),
+        9.0 + hover * 1.5,
+        alpha(palette.accent, opacity),
+    );
+    painter.circle_filled(
+        Pos2::new(x, track.center().y),
+        4.0,
+        alpha(palette.surface, opacity),
+    );
     if enabled {
         response.on_hover_cursor(CursorIcon::Grab);
     }

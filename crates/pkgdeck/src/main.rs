@@ -8,7 +8,8 @@ use std::time::{Duration, Instant};
 /// Homebrew's and MacPorts' folders for the managers they install.
 #[cfg(target_os = "macos")]
 fn prepare_macos_environment() {
-    let current = std::env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin:/usr/sbin:/sbin".into());
+    let current =
+        std::env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin:/usr/sbin:/sbin".into());
     let mut dirs: Vec<std::path::PathBuf> = std::env::split_paths(&current).collect();
     for dir in [
         "/opt/local/sbin",
@@ -25,6 +26,31 @@ fn prepare_macos_environment() {
     if let Ok(path) = std::env::join_paths(dirs) {
         std::env::set_var("PATH", path);
     }
+}
+
+/// The Homebrew cask links the bundled binary into Homebrew's bin directory.
+/// Notifications need the bundle's identifier, which a symlink hides, so
+/// run the binary from inside the bundle instead.
+#[cfg(target_os = "macos")]
+fn exec_from_bundle() {
+    use std::os::unix::process::CommandExt;
+    let Ok(executable) = std::env::current_exe() else {
+        return;
+    };
+    let Ok(real) = executable.canonicalize() else {
+        return;
+    };
+    let in_bundle = real
+        .parent()
+        .is_some_and(|dir| dir.ends_with("Contents/MacOS"));
+    if !in_bundle || real == executable {
+        return;
+    }
+    let error = std::process::Command::new(&real)
+        .args(std::env::args_os().skip(1))
+        .exec();
+    eprintln!("pkgdeck: cannot run {}: {error}", real.display());
+    std::process::exit(1);
 }
 
 fn parse(args: &[String]) -> app::Launch {
@@ -46,7 +72,10 @@ fn parse(args: &[String]) -> app::Launch {
                 }
             }
             other => {
-                if let Some(id) = other.strip_prefix("--from=").filter(|id| known.contains(id)) {
+                if let Some(id) = other
+                    .strip_prefix("--from=")
+                    .filter(|id| known.contains(id))
+                {
                     launch.from.push(id.to_owned());
                 }
             }
@@ -79,7 +108,10 @@ fn main() {
         return;
     }
     #[cfg(target_os = "macos")]
-    prepare_macos_environment();
+    {
+        exec_from_bundle();
+        prepare_macos_environment();
+    }
     let launch = parse(&args);
     let var = |key: &str| std::env::var(key).ok();
     let socket = opening::socket_path(var("XDG_RUNTIME_DIR"), rustix::process::geteuid().as_raw());
@@ -92,7 +124,9 @@ fn main() {
             Err(_) => None,
         }
     };
-    let home = var("HOME").filter(|home| home.starts_with('/')).map(std::path::PathBuf::from);
+    let home = var("HOME")
+        .filter(|home| home.starts_with('/'))
+        .map(std::path::PathBuf::from);
     let (store, settings) = settings::Store::open(settings::directory(var), home.as_deref());
     let media = (!rustix::process::geteuid().is_root() && var("PKGDECK_NO_CACHE").is_none())
         .then(|| {
@@ -105,7 +139,8 @@ fn main() {
         .map(|dir| dir.join("pkgdeck/media"));
     let platform = platform::Platform::start(pkgdeck::wake);
     let start_hidden = launch.background && settings.background_mode && platform.tray_available();
-    let mut app = App::new(settings, store, platform, launch);
+    let controller = pkgdeck_app::controller::ffi::create_controller();
+    let mut app = App::with_controller(controller, settings, store, platform, launch);
     app.listener = listener;
     app.sync_tray();
     let mut show = !start_hidden;

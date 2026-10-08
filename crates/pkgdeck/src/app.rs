@@ -9,7 +9,7 @@ use crate::{
     settings::{Settings, Store},
 };
 use pkgdeck_app::{
-    controller::ffi::{create_controller, PackageController},
+    controller::ffi::PackageController,
     qt::{QString, QUrl, UniquePtr},
 };
 use serde_json::Value;
@@ -115,6 +115,9 @@ pub struct App {
     /// Rows still shown while a reload of the same list runs.
     pub retained: Option<Vec<Row>>,
     pub selected: Option<String>,
+    /// The Flatpak group of the selected row, to find its other copy if
+    /// this one goes away.
+    selected_group: Option<String>,
     /// The selected package's page is open beside the list.
     pub page_open: bool,
     pub cursor_moved: bool,
@@ -166,11 +169,8 @@ const FIRST_CHECK: Duration = Duration::from_secs(30);
 const CHECK_EVERY: Duration = Duration::from_secs(300);
 
 impl App {
-    pub fn new(settings: Settings, store: Store, platform: Platform, launch: Launch) -> Self {
-        Self::with_controller(create_controller(), settings, store, platform, launch)
-    }
-
-    /// An app around a given controller; tests pass a synthetic one.
+    /// An app around a controller: the real one, or a synthetic one in
+    /// tests.
     pub fn with_controller(
         mut ctl: UniquePtr<PackageController>,
         settings: Settings,
@@ -214,7 +214,8 @@ impl App {
             launch.from.iter().cloned().collect()
         };
         let sort = Column::from_key(&settings.sort_column).map(|c| (c, settings.sort_ascending));
-        let scope_choices = serde_json::from_str(&settings.flatpak_scope_choices).unwrap_or_default();
+        let scope_choices =
+            serde_json::from_str(&settings.flatpak_scope_choices).unwrap_or_default();
         let now = Instant::now();
         let mut app = Self {
             ctl,
@@ -254,6 +255,7 @@ impl App {
             items_stale: true,
             retained: None,
             selected: None,
+            selected_group: None,
             page_open: false,
             cursor_moved: false,
             unchecked: HashSet::new(),
@@ -325,7 +327,10 @@ impl App {
     }
 
     pub fn save_settings(&mut self) {
-        self.settings.sort_column = self.sort.map(|(c, _)| c.key().to_owned()).unwrap_or_default();
+        self.settings.sort_column = self
+            .sort
+            .map(|(c, _)| c.key().to_owned())
+            .unwrap_or_default();
         self.settings.sort_ascending = self.sort.is_none_or(|(_, ascending)| ascending);
         self.settings.flatpak_scope_choices =
             serde_json::to_string(&self.scope_choices).unwrap_or_else(|_| "{}".into());
@@ -456,7 +461,11 @@ impl App {
         self.refreshing = *self.ctl.refreshing();
         if has("source_catalog") {
             self.catalog = model::parse(self.ctl.source_catalog().as_str());
-            let hint = search_hint(&self.catalog, &self.enabled_sources(), &self.settings.search_hint);
+            let hint = search_hint(
+                &self.catalog,
+                &self.enabled_sources(),
+                &self.settings.search_hint,
+            );
             self.settings.search_hint = hint;
             self.items_stale = true;
         }
@@ -536,7 +545,11 @@ impl App {
                     .map(|row| {
                         (
                             row.identity(),
-                            (row.installed.clone(), row.candidate.clone(), row.update.clone()),
+                            (
+                                row.installed.clone(),
+                                row.candidate.clone(),
+                                row.update.clone(),
+                            ),
                         )
                     })
                     .collect();
@@ -616,8 +629,11 @@ impl App {
             .to_string();
         }
         let count = self.background.available;
-        self.platform
-            .set_badge(&if count > 0 { count.to_string() } else { String::new() });
+        self.platform.set_badge(&if count > 0 {
+            count.to_string()
+        } else {
+            String::new()
+        });
         if self.background.notify && self.can_notify() {
             let body = match count {
                 1 => "1 update available".to_owned(),
@@ -728,7 +744,8 @@ impl App {
                 let identity = model::identity_of_row_value(target);
                 if let Some(raw) = self.rows.iter().position(|row| row.identity() == identity) {
                     self.active_rows.insert(identity);
-                    self.c().propose(notice.undo_action.as_str().into(), raw as i32);
+                    self.c()
+                        .propose(notice.undo_action.as_str().into(), raw as i32);
                     self.react();
                 }
             }
@@ -741,7 +758,13 @@ impl App {
 
     pub fn restart(&mut self) {
         let hidden = !self.window_visible;
-        if self.c().restart_app(hidden) {
+        let restarted = self.c().restart_app(hidden);
+        self.restarted(restarted);
+    }
+
+    /// Once the new copy started, this one quits.
+    fn restarted(&mut self, restarted: bool) {
+        if restarted {
             self.force_quit = true;
             self.window_request = WindowRequest::Quit;
         }
@@ -752,13 +775,24 @@ impl App {
             return;
         }
         let now = Instant::now();
-        for row in self.rows.iter().filter(|row| row.is_package()) {
-            let identity = row.identity();
-            if let Some(before) = self.snapshot.get(&identity) {
-                if *before != (row.installed.clone(), row.candidate.clone(), row.update.clone()) {
-                    self.flashes.insert(identity, now);
-                }
-            }
+        let changed: Vec<String> = self
+            .rows
+            .iter()
+            .filter(|row| row.is_package())
+            .filter(|row| {
+                self.snapshot.get(&row.identity()).is_some_and(|before| {
+                    *before
+                        != (
+                            row.installed.clone(),
+                            row.candidate.clone(),
+                            row.update.clone(),
+                        )
+                })
+            })
+            .map(Row::identity)
+            .collect();
+        for identity in changed {
+            self.flashes.insert(identity, now);
         }
         if !self.busy {
             self.snapshot.clear();
@@ -823,7 +857,11 @@ impl App {
             enabled.remove(id);
         }
         let all: HashSet<String> = all_sources(&self.catalog).into_iter().collect();
-        self.enabled = if enabled == all { HashSet::new() } else { enabled };
+        self.enabled = if enabled == all {
+            HashSet::new()
+        } else {
+            enabled
+        };
         let mut list: Vec<String> = all_sources(&self.catalog)
             .into_iter()
             .filter(|id| self.enabled.contains(id))
@@ -831,8 +869,11 @@ impl App {
         list.dedup();
         self.settings.source_list = list.join(",");
         self.page_sources.clear();
-        self.settings.search_hint =
-            search_hint(&self.catalog, &self.enabled_sources(), &self.settings.search_hint);
+        self.settings.search_hint = search_hint(
+            &self.catalog,
+            &self.enabled_sources(),
+            &self.settings.search_hint,
+        );
         self.reload(false, false);
     }
 
@@ -897,22 +938,6 @@ impl App {
         self.items_stale = true;
     }
 
-    /// Switches page without loading, for pictures and tests with rows
-    /// set by hand.
-    pub fn open_page_offline(&mut self, page: Page) {
-        self.page = page;
-        self.items_stale = true;
-    }
-
-    /// Selects and opens a row without asking the controller.
-    pub fn select_offline(&mut self, index: usize) {
-        self.refresh_items();
-        if let Some(item) = self.items.get(index) {
-            self.selected = Some(self.rows[item.raw].identity());
-            self.page_open = true;
-        }
-    }
-
     pub fn typed_query(&mut self) {
         if self.query.trim().is_empty() {
             self.submit_search();
@@ -951,7 +976,8 @@ impl App {
             self.result_query.clear();
             self.rows.clear();
             self.items_stale = true;
-            self.c().load("Search".into(), "".into(), "".into(), false, false);
+            self.c()
+                .load("Search".into(), "".into(), "".into(), false, false);
             self.react();
             return;
         }
@@ -963,8 +989,13 @@ impl App {
         self.unchecked.clear();
         let sources = self.sources_csv(page);
         let sudo = self.launch.sudo;
-        self.c()
-            .load(page.name().into(), query.into(), sources.into(), sudo, force);
+        self.c().load(
+            page.name().into(),
+            query.into(),
+            sources.into(),
+            sudo,
+            force,
+        );
         self.react();
         if !self.busy {
             self.retained = None;
@@ -979,7 +1010,8 @@ impl App {
             String::new()
         };
         let page = self.page.name();
-        self.c().retry_source(page.into(), query.into(), source.into());
+        self.c()
+            .retry_source(page.into(), query.into(), source.into());
         self.react();
     }
 
@@ -1034,11 +1066,14 @@ impl App {
     pub fn selected_item(&self) -> Option<&Item> {
         let identity = self.selected.as_ref()?;
         let rows = self.shown_rows();
-        self.items.iter().find(|item| rows[item.raw].identity() == *identity)
+        self.items
+            .iter()
+            .find(|item| rows[item.raw].identity() == *identity)
     }
 
     pub fn selected_row(&self) -> Option<&Row> {
-        self.selected_item().map(|item| &self.shown_rows()[item.raw])
+        self.selected_item()
+            .map(|item| &self.shown_rows()[item.raw])
     }
 
     pub fn selected_index(&self) -> Option<usize> {
@@ -1071,11 +1106,11 @@ impl App {
         };
         let raw = item.raw;
         let identity = self.rows[raw].identity();
-        if let Some(group) = flatpak_group(&self.rows[raw]) {
-            if item.variants.len() > 1 {
-                self.scope_choices.insert(group, identity.clone());
-            }
+        let group = flatpak_group(&self.rows[raw]);
+        if let Some(group) = group.clone().filter(|_| item.variants.len() > 1) {
+            self.scope_choices.insert(group, identity.clone());
         }
+        self.selected_group = group;
         if open {
             self.page_open = true;
         }
@@ -1129,7 +1164,10 @@ impl App {
             return;
         };
         let rows = self.shown_rows();
-        let found = self.items.iter().find(|item| rows[item.raw].identity() == identity);
+        let found = self
+            .items
+            .iter()
+            .find(|item| rows[item.raw].identity() == identity);
         if let Some(item) = found {
             let raw = item.raw;
             if self.retained.is_none() && *self.ctl.details() == QString::from("{}") && !self.busy {
@@ -1138,15 +1176,7 @@ impl App {
             return;
         }
         // The other copy of a Flatpak whose chosen copy went away.
-        let group = self
-            .retained
-            .as_deref()
-            .unwrap_or(&self.rows)
-            .iter()
-            .chain(self.rows.iter())
-            .find(|row| row.identity() == identity)
-            .and_then(flatpak_group);
-        if let Some(group) = group {
+        if let Some(group) = self.selected_group.clone() {
             let rows = self.shown_rows();
             if let Some(index) = self
                 .items
@@ -1267,7 +1297,10 @@ impl App {
         if self.retained.is_some() {
             return;
         }
-        let whole_page = matches!(action, "upgrade-all" | "adopt-all" | "refresh" | "clean-all");
+        let whole_page = matches!(
+            action,
+            "upgrade-all" | "adopt-all" | "refresh" | "clean-all"
+        );
         let selected = self.selected_item().cloned();
         if whole_page {
             self.review_on = ReviewOn::Dialog;
@@ -1333,9 +1366,6 @@ impl App {
     }
 
     pub fn open_input(&mut self, input: &str) {
-        if input.trim().is_empty() {
-            return;
-        }
         self.opening = true;
         self.c().open_input(input.into());
         self.react();
@@ -1434,7 +1464,9 @@ impl App {
         } else {
             self.report.failures.clone()
         };
-        failures.retain(|f| f.kind != "cancelled" && (self.page == Page::Sources || sources.contains(&f.source)));
+        failures.retain(|f| {
+            f.kind != "cancelled" && (self.page == Page::Sources || sources.contains(&f.source))
+        });
         failures
     }
 
@@ -1470,3 +1502,7 @@ fn csv(text: &str) -> HashSet<String> {
         .map(str::to_owned)
         .collect()
 }
+
+#[cfg(test)]
+#[path = "app_tests.rs"]
+mod tests;

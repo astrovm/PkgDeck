@@ -3,12 +3,12 @@
 //! dialogs, toasts). Each part is its own module.
 
 mod activity;
-pub mod icons;
-pub mod theme;
 mod dialogs;
+pub mod icons;
 mod list;
 mod page;
 mod settings_page;
+pub mod theme;
 pub mod widgets;
 pub mod window;
 
@@ -19,8 +19,8 @@ use crate::{
     theme::Palette,
 };
 use eframe::egui::{
-    self, pos2, vec2, Align2, Color32, CornerRadius, CursorIcon, Id, Key, Modifiers, Rect,
-    Sense, Stroke, StrokeKind, Ui, UiBuilder, Vec2,
+    self, pos2, vec2, Align2, Color32, CornerRadius, CursorIcon, Id, Key, Modifiers, Rect, Sense,
+    Stroke, StrokeKind, Ui, UiBuilder, Vec2,
 };
 use std::collections::HashSet;
 use widgets::*;
@@ -91,9 +91,15 @@ pub fn show(app: &mut App, ui: &mut Ui) {
 
     let palette = Palette::current(&ctx);
     let full = ui.max_rect();
-    ui.painter().rect_filled(full, CornerRadius::ZERO, palette.canvas);
+    ui.painter()
+        .rect_filled(full, CornerRadius::ZERO, palette.canvas);
     let rail = full.width() < RAIL_BELOW;
-    let sidebar_width = glide(&ctx, Id::new("sidebar-width"), if rail { 68.0 } else { 224.0 }, LAYOUT);
+    let sidebar_width = glide(
+        &ctx,
+        Id::new("sidebar-width"),
+        if rail { 68.0 } else { 224.0 },
+        LAYOUT,
+    );
     let sidebar = Rect::from_min_size(full.min, vec2(sidebar_width, full.height()));
     let content = Rect::from_min_max(pos2(sidebar.right(), full.top()), full.max);
     sidebar_ui(app, ui, sidebar, rail);
@@ -112,9 +118,16 @@ fn keyboard(app: &mut App, ctx: &egui::Context) {
         || app.ui.add_repo.is_some()
         || app.ui.picker_open;
     let command = |key: Key| ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, key));
-    for (index, key) in [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6]
-        .into_iter()
-        .enumerate()
+    for (index, key) in [
+        Key::Num1,
+        Key::Num2,
+        Key::Num3,
+        Key::Num4,
+        Key::Num5,
+        Key::Num6,
+    ]
+    .into_iter()
+    .enumerate()
     {
         if !dialog_open && command(key) {
             app.open_page(Page::ALL[index]);
@@ -165,7 +178,12 @@ fn keyboard(app: &mut App, ctx: &egui::Context) {
     if command(Key::I) && can_change {
         app.propose("install");
     }
-    if command(Key::D) && can_change && app.selected_row().is_some_and(|row| model::can_remove(row, &app.catalog)) {
+    if command(Key::D)
+        && can_change
+        && app
+            .selected_row()
+            .is_some_and(|row| model::can_remove(row, &app.catalog))
+    {
         app.propose("remove");
     }
     if command(Key::U) && can_change {
@@ -241,7 +259,18 @@ fn sidebar_ui(app: &mut App, ui: &mut Ui, rect: Rect, rail: bool) {
     let margin = if rail { 12.0 } else { 16.0 };
     let inner = rect.shrink2(vec2(margin, 0.0));
     // The logo and name, level with the page's heading.
-    let logo = Rect::from_min_size(pos2(inner.left() + (if rail { (inner.width() - 30.0) / 2.0 } else { 4.0 }), rect.top() + 24.0), Vec2::splat(30.0));
+    let logo = Rect::from_min_size(
+        pos2(
+            inner.left()
+                + (if rail {
+                    (inner.width() - 30.0) / 2.0
+                } else {
+                    4.0
+                }),
+            rect.top() + 24.0,
+        ),
+        Vec2::splat(30.0),
+    );
     egui::Image::new(egui::include_image!("../../assets/logo.svg"))
         .fit_to_exact_size(logo.size())
         .paint_at(ui, logo);
@@ -259,12 +288,23 @@ fn sidebar_ui(app: &mut App, ui: &mut Ui, rect: Rect, rail: bool) {
     let entry_height = 40.0;
     let top = rect.top() + 84.0;
     let current = Page::ALL.iter().position(|p| *p == app.page).unwrap_or(0);
-    let pill_y = glide(&ctx, Id::new("nav-pill"), top + current as f32 * (entry_height + 4.0), LAYOUT);
-    let pill = Rect::from_min_size(pos2(inner.left(), pill_y), vec2(inner.width(), entry_height));
+    let pill_y = glide(
+        &ctx,
+        Id::new("nav-pill"),
+        top + current as f32 * (entry_height + 4.0),
+        LAYOUT,
+    );
+    let pill = Rect::from_min_size(
+        pos2(inner.left(), pill_y),
+        vec2(inner.width(), entry_height),
+    );
     painter.rect_filled(pill, CornerRadius::same(10), palette.selection);
     if !rail {
         painter.rect_filled(
-            Rect::from_min_size(pos2(pill.left(), pill.top() + 10.0), vec2(3.0, entry_height - 20.0)),
+            Rect::from_min_size(
+                pos2(pill.left(), pill.top() + 10.0),
+                vec2(3.0, entry_height - 20.0),
+            ),
             CornerRadius::same(2),
             palette.accent,
         );
@@ -277,26 +317,71 @@ fn sidebar_ui(app: &mut App, ui: &mut Ui, rect: Rect, rail: bool) {
         let response = ui
             .interact(entry, Id::new(("nav", page.name())), Sense::click())
             .on_hover_cursor(CursorIcon::PointingHand);
-        response.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, true, page == app.page, page.name()));
-        let hover = ease(&ctx, response.id.with("hover"), response.hovered() && page != app.page, FEEDBACK);
-        painter.rect_filled(entry, CornerRadius::same(10), alpha(palette.ink, hover * 0.05));
+        response.widget_info(|| {
+            egui::WidgetInfo::selected(
+                egui::WidgetType::Button,
+                true,
+                page == app.page,
+                page.name(),
+            )
+        });
+        let hover = ease(
+            &ctx,
+            response.id.with("hover"),
+            response.hovered() && page != app.page,
+            FEEDBACK,
+        );
+        painter.rect_filled(
+            entry,
+            CornerRadius::same(10),
+            alpha(palette.ink, hover * 0.05),
+        );
         let is_current = page == app.page;
-        let color = if is_current { palette.accent } else { mix(palette.muted, palette.ink, hover) };
-        let icon_x = if rail { entry.center().x - 10.0 } else { entry.left() + 14.0 };
-        theme::paint_icon(&painter, Rect::from_min_size(pos2(icon_x, entry.center().y - 10.0), Vec2::splat(20.0)), page.icon(), color);
+        let color = if is_current {
+            palette.accent
+        } else {
+            mix(palette.muted, palette.ink, hover)
+        };
+        let icon_x = if rail {
+            entry.center().x - 10.0
+        } else {
+            entry.left() + 14.0
+        };
+        theme::paint_icon(
+            &painter,
+            Rect::from_min_size(pos2(icon_x, entry.center().y - 10.0), Vec2::splat(20.0)),
+            page.icon(),
+            color,
+        );
         if name_shown > 0.02 {
             painter.text(
                 pos2(entry.left() + 46.0, entry.center().y),
                 Align2::LEFT_CENTER,
                 page.name(),
-                if is_current { theme::bold(14.5) } else { theme::font(14.5) },
-                alpha(if is_current { palette.ink } else { mix(palette.muted, palette.ink, 0.55 + hover * 0.45) }, name_shown),
+                if is_current {
+                    theme::bold(14.5)
+                } else {
+                    theme::font(14.5)
+                },
+                alpha(
+                    if is_current {
+                        palette.ink
+                    } else {
+                        mix(palette.muted, palette.ink, 0.55 + hover * 0.45)
+                    },
+                    name_shown,
+                ),
             );
         }
         // Updates waiting, from the last background check.
         if page == Page::Updates && app.background.available > 0 {
             let count = app.background.available.to_string();
-            let pop = ui.ctx().animate_bool_with_time_and_easing(response.id.with("badge"), true, secs(&ctx, REVEAL), egui::emath::easing::back_out);
+            let pop = ui.ctx().animate_bool_with_time_and_easing(
+                response.id.with("badge"),
+                true,
+                secs(&ctx, REVEAL),
+                egui::emath::easing::back_out,
+            );
             let center = if rail {
                 pos2(entry.center().x + 12.0, entry.top() + 9.0)
             } else {
@@ -316,9 +401,26 @@ fn sidebar_ui(app: &mut App, ui: &mut Ui, rect: Rect, rail: bool) {
     if name_shown > 0.02 {
         let y = rect.bottom() - 26.0;
         let x = inner.left() + 6.0;
-        let made = painter.text(pos2(x, y), Align2::LEFT_CENTER, "Made with", theme::font(12.5), alpha(palette.muted, name_shown));
-        theme::paint_icon(&painter, Rect::from_center_size(pos2(made.right() + 10.0, y), Vec2::splat(13.0)), "heart", alpha(palette.heart, name_shown));
-        painter.text(pos2(made.right() + 20.0, y), Align2::LEFT_CENTER, "by astro", theme::font(12.5), alpha(palette.muted, name_shown));
+        let made = painter.text(
+            pos2(x, y),
+            Align2::LEFT_CENTER,
+            "Made with",
+            theme::font(12.5),
+            alpha(palette.muted, name_shown),
+        );
+        theme::paint_icon(
+            &painter,
+            Rect::from_center_size(pos2(made.right() + 10.0, y), Vec2::splat(13.0)),
+            "heart",
+            alpha(palette.heart, name_shown),
+        );
+        painter.text(
+            pos2(made.right() + 20.0, y),
+            Align2::LEFT_CENTER,
+            "by astro",
+            theme::font(12.5),
+            alpha(palette.muted, name_shown),
+        );
     }
 }
 
@@ -327,9 +429,16 @@ fn sidebar_ui(app: &mut App, ui: &mut Ui, rect: Rect, rail: bool) {
 
 fn content_ui(app: &mut App, ui: &mut Ui, rect: Rect) {
     let ctx = ui.ctx().clone();
-    let margin = if rect.width() + 224.0 < RAIL_BELOW { 14.0 } else { 28.0 };
+    let margin = if rect.width() + 224.0 < RAIL_BELOW {
+        14.0
+    } else {
+        28.0
+    };
     let inner = rect.shrink2(vec2(margin, 0.0));
-    let inner = Rect::from_min_max(pos2(inner.left(), rect.top() + 20.0), pos2(inner.right(), rect.bottom() - margin.min(20.0)));
+    let inner = Rect::from_min_max(
+        pos2(inner.left(), rect.top() + 20.0),
+        pos2(inner.right(), rect.bottom() - margin.min(20.0)),
+    );
     // Each page fades and rises into place.
     let entered = progress_since(&ctx, app.page_changed.elapsed().as_secs_f32(), 0.22);
     let lift = (1.0 - entered) * 10.0;
@@ -365,9 +474,14 @@ fn content_ui(app: &mut App, ui: &mut Ui, rect: Rect) {
         main_area(app, ui, main);
         if actions > 0.0 {
             let row = Rect::from_min_max(pos2(rest.left(), main.bottom() + 12.0), rest.max);
-            ui.scope_builder(UiBuilder::new().max_rect(row).layout(egui::Layout::right_to_left(egui::Align::Center)), |ui| {
-                page_actions(app, ui);
-            });
+            ui.scope_builder(
+                UiBuilder::new()
+                    .max_rect(row)
+                    .layout(egui::Layout::right_to_left(egui::Align::Center)),
+                |ui| {
+                    page_actions(app, ui);
+                },
+            );
         }
     });
 }
@@ -378,15 +492,26 @@ fn header(app: &mut App, ui: &mut Ui) {
     let compact = width < 600.0;
     ui.horizontal(|ui| {
         ui.set_min_height(38.0);
-        ui.label(egui::RichText::new(app.page.name()).font(theme::bold(26.0)).color(palette.ink));
+        ui.label(
+            egui::RichText::new(app.page.name())
+                .font(theme::bold(26.0))
+                .color(palette.ink),
+        );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if app.page.filters_sources() && app.opened.is_none() {
                 let filtered = app.page_sources.contains_key(&app.page);
                 let label = app.source_summary(app.page);
-                let response = Button::new(if filtered { Look::Soft(Tone::Accent) } else { Look::Secondary }, &label)
-                    .icon("filter")
-                    .icon_only(compact)
-                    .show(ui);
+                let response = Button::new(
+                    if filtered {
+                        Look::Soft(Tone::Accent)
+                    } else {
+                        Look::Secondary
+                    },
+                    &label,
+                )
+                .icon("filter")
+                .icon_only(compact)
+                .show(ui);
                 if response.clicked() {
                     app.ui.picker_open = !app.ui.picker_open;
                     if app.ui.picker_open {
@@ -398,16 +523,32 @@ fn header(app: &mut App, ui: &mut Ui) {
             let working = app.writing;
             let count = app.queued_count() + usize::from(working);
             let response = Button::new(
-                if working { Look::Soft(Tone::Accent) } else { Look::Secondary },
+                if working {
+                    Look::Soft(Tone::Accent)
+                } else {
+                    Look::Secondary
+                },
                 if working { "Working" } else { "Activity" },
             )
             .icon("activity")
             .icon_only(compact)
             .tooltip("Activity (Ctrl+J)")
             .show(ui);
-            let pop = ui.ctx().animate_bool_with_time_and_easing(Id::new("activity-badge"), count > 0, secs(ui.ctx(), REVEAL), egui::emath::easing::back_out);
+            let pop = ui.ctx().animate_bool_with_time_and_easing(
+                Id::new("activity-badge"),
+                count > 0,
+                secs(ui.ctx(), REVEAL),
+                egui::emath::easing::back_out,
+            );
             if count > 0 || pop > 0.0 {
-                paint_badge(ui, response.rect.right_top() + vec2(-4.0, 4.0), &count.max(1).to_string(), palette.accent, palette.accent_ink, pop);
+                paint_badge(
+                    ui,
+                    response.rect.right_top() + vec2(-4.0, 4.0),
+                    &count.max(1).to_string(),
+                    palette.accent,
+                    palette.accent_ink,
+                    pop,
+                );
             }
             if response.clicked() {
                 app.drawer_open = !app.drawer_open;
@@ -417,7 +558,10 @@ fn header(app: &mut App, ui: &mut Ui) {
                 }
             }
             let can_open_files = !model::file_patterns(&app.catalog).is_empty();
-            if matches!(app.page, Page::Search | Page::Sources) && can_open_files && app.opened.is_none() {
+            if matches!(app.page, Page::Search | Page::Sources)
+                && can_open_files
+                && app.opened.is_none()
+            {
                 let response = Button::new(Look::Secondary, "Install from file…")
                     .icon("package")
                     .icon_only(compact)
@@ -451,7 +595,10 @@ fn search_field(app: &mut App, ui: &mut Ui) {
         app.submit_search();
         field.response.request_focus();
     }
-    if field.response.has_focus() && ui.input(|i| i.key_pressed(Key::ArrowDown)) && !app.items.is_empty() {
+    if field.response.has_focus()
+        && ui.input(|i| i.key_pressed(Key::ArrowDown))
+        && !app.items.is_empty()
+    {
         app.ui.focus_list = true;
         app.ui.keyboard_nav = true;
         app.choose(0, false);
@@ -466,7 +613,12 @@ fn installed_filters(app: &mut App, ui: &mut Ui) {
             .iter()
             .filter(|row| row.source == "appimage" && model::can_adopt(row, &app.catalog))
             .count();
-        let reserve = if compact { 40.0 } else { 200.0 } + if adoptable >= 2 && !compact { 200.0 } else { 0.0 };
+        let reserve = if compact { 40.0 } else { 200.0 }
+            + if adoptable >= 2 && !compact {
+                200.0
+            } else {
+                0.0
+            };
         let width = (ui.available_width() - reserve).max(160.0);
         let field = Field::new(&mut app.filter, "Filter installed packages", filter_id())
             .icon("filter")
@@ -479,7 +631,10 @@ fn installed_filters(app: &mut App, ui: &mut Ui) {
         if field.response.changed() || field.cleared {
             app.invalidate();
         }
-        if field.response.has_focus() && ui.input(|i| i.key_pressed(Key::ArrowDown) || i.key_pressed(Key::Enter)) && !app.items.is_empty() {
+        if field.response.has_focus()
+            && ui.input(|i| i.key_pressed(Key::ArrowDown) || i.key_pressed(Key::Enter))
+            && !app.items.is_empty()
+        {
             app.ui.focus_list = true;
             app.ui.keyboard_nav = true;
             app.choose(0, false);
@@ -487,8 +642,13 @@ fn installed_filters(app: &mut App, ui: &mut Ui) {
         let has_packages = app.rows.iter().any(model::Row::is_package);
         if has_packages || app.duplicates_only {
             let checked = app.duplicates_only;
-            let tick = tickbox(ui, checked, true, "Duplicate installs").on_hover_text("Only apps installed more than once");
-            let label = if compact { tick.clone() } else { ui.add(egui::Label::new("Duplicate installs").sense(Sense::click())) };
+            let tick = tickbox(ui, checked, true, "Duplicate installs")
+                .on_hover_text("Only apps installed more than once");
+            let label = if compact {
+                tick.clone()
+            } else {
+                ui.add(egui::Label::new("Duplicate installs").sense(Sense::click()))
+            };
             if tick.clicked() || label.clicked() {
                 app.duplicates_only = !checked;
                 app.invalidate();
@@ -541,19 +701,47 @@ pub fn progress_card(app: &mut App, ui: &mut Ui, salt: &str) {
             ui.horizontal(|ui| {
                 spinner(ui, 16.0, palette.accent);
                 let label_width = (ui.available_width() * 0.42).max(120.0);
-                let galley = one_line(ui, &progress.label, theme::bold(14.0), palette.ink, label_width);
+                let galley = one_line(
+                    ui,
+                    &progress.label,
+                    theme::bold(14.0),
+                    palette.ink,
+                    label_width,
+                );
                 let (rect, _) = ui.allocate_exact_size(vec2(galley.size().x, 20.0), Sense::hover());
-                ui.painter().galley(pos2(rect.left(), rect.center().y - galley.size().y / 2.0), galley, palette.ink);
+                ui.painter().galley(
+                    pos2(rect.left(), rect.center().y - galley.size().y / 2.0),
+                    galley,
+                    palette.ink,
+                );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if Button::new(Look::Flat, "Cancel").small().icon("cancel").show(ui).clicked() {
+                    if Button::new(Look::Flat, "Cancel")
+                        .small()
+                        .icon("cancel")
+                        .show(ui)
+                        .clicked()
+                    {
                         app.cancel();
                     }
                     let count = progress.count();
                     if !count.is_empty() {
-                        ui.label(egui::RichText::new(count).font(theme::mono(12.5)).color(palette.muted));
+                        ui.label(
+                            egui::RichText::new(count)
+                                .font(theme::mono(12.5))
+                                .color(palette.muted),
+                        );
                     }
-                    let (bar, _) = ui.allocate_exact_size(vec2(ui.available_width().max(40.0), 6.0), Sense::hover());
-                    paint_bar(ui, bar, progress.bar(), palette.accent, Id::new(("bar", salt)));
+                    let (bar, _) = ui.allocate_exact_size(
+                        vec2(ui.available_width().max(40.0), 6.0),
+                        Sense::hover(),
+                    );
+                    paint_bar(
+                        ui,
+                        bar,
+                        progress.bar(),
+                        palette.accent,
+                        Id::new(("bar", salt)),
+                    );
                 });
             });
         });
@@ -565,7 +753,11 @@ fn notice_banner(app: &mut App, ui: &mut Ui) {
         return;
     }
     let palette = Palette::current(ui.ctx());
-    let color = if notice.kind == "error" { palette.danger } else { palette.warning };
+    let color = if notice.kind == "error" {
+        palette.danger
+    } else {
+        palette.warning
+    };
     egui::Frame::new()
         .fill(alpha(color, if palette.dark { 0.12 } else { 0.08 }))
         .stroke(Stroke::new(1.0, alpha(color, 0.35)))
@@ -577,7 +769,11 @@ fn notice_banner(app: &mut App, ui: &mut Ui) {
                 let (icon, _) = ui.allocate_exact_size(Vec2::splat(20.0), Sense::hover());
                 theme::paint_icon(ui.painter(), icon, "warning", color);
                 ui.vertical(|ui| {
-                    ui.label(egui::RichText::new(&notice.title).font(theme::bold(14.5)).color(palette.ink));
+                    ui.label(
+                        egui::RichText::new(&notice.title)
+                            .font(theme::bold(14.5))
+                            .color(palette.ink),
+                    );
                     if !notice.detail.is_empty() {
                         ui.label(egui::RichText::new(&notice.detail).color(palette.muted));
                     }
@@ -589,13 +785,22 @@ fn notice_banner(app: &mut App, ui: &mut Ui) {
                         app.ui.notice_output = false;
                     }
                     if notice.retry
-                        && Button::new(Look::Soft(Tone::Accent), "Retry").small().icon("refresh").enabled(!app.busy).show(ui).clicked()
+                        && Button::new(Look::Soft(Tone::Accent), "Retry")
+                            .small()
+                            .icon("refresh")
+                            .enabled(!app.busy)
+                            .show(ui)
+                            .clicked()
                     {
                         app.c().retry_change();
                         app.react();
                     }
                     if !notice.output.is_empty() {
-                        let label = if app.ui.notice_output { "Hide details" } else { "Show details" };
+                        let label = if app.ui.notice_output {
+                            "Hide details"
+                        } else {
+                            "Show details"
+                        };
                         if Button::new(Look::Flat, label).small().show(ui).clicked() {
                             app.ui.notice_output = !app.ui.notice_output;
                         }
@@ -610,10 +815,20 @@ fn notice_banner(app: &mut App, ui: &mut Ui) {
                     .corner_radius(CornerRadius::same(8))
                     .inner_margin(egui::Margin::same(10))
                     .show(ui, |ui| {
-                        egui::ScrollArea::vertical().max_height(200.0).id_salt("notice-output").show(ui, |ui| {
-                            ui.set_width(ui.available_width());
-                            ui.add(egui::Label::new(egui::RichText::new(&notice.output).font(theme::mono(12.5)).color(palette.ink)).selectable(true));
-                        });
+                        egui::ScrollArea::vertical()
+                            .max_height(200.0)
+                            .id_salt("notice-output")
+                            .show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(&notice.output)
+                                            .font(theme::mono(12.5))
+                                            .color(palette.ink),
+                                    )
+                                    .selectable(true),
+                                );
+                            });
                     });
                 if Button::new(Look::Flat, "Copy").small().show(ui).clicked() {
                     ui.ctx().copy_text(notice.output.clone());
@@ -636,7 +851,10 @@ fn failure_banner(app: &mut App, ui: &mut Ui) {
         title.push_str(". Update all will retry the check.");
     }
     egui::Frame::new()
-        .fill(alpha(palette.warning, if palette.dark { 0.10 } else { 0.07 }))
+        .fill(alpha(
+            palette.warning,
+            if palette.dark { 0.10 } else { 0.07 },
+        ))
         .stroke(Stroke::new(1.0, alpha(palette.warning, 0.3)))
         .corner_radius(CornerRadius::same(12))
         .inner_margin(egui::Margin::symmetric(14, 8))
@@ -647,7 +865,11 @@ fn failure_banner(app: &mut App, ui: &mut Ui) {
                 theme::paint_icon(ui.painter(), icon, "warning", palette.warning);
                 ui.label(egui::RichText::new(&title).color(palette.ink));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if Button::new(Look::Flat, "Details").small().show(ui).clicked() {
+                    if Button::new(Look::Flat, "Details")
+                        .small()
+                        .show(ui)
+                        .clicked()
+                    {
                         app.ui.checks_open = true;
                     }
                     if let [one] = failures.as_slice() {
@@ -659,7 +881,13 @@ fn failure_banner(app: &mut App, ui: &mut Ui) {
                             }
                         }
                     }
-                    if Button::new(Look::Soft(Tone::Accent), "Retry").small().icon("refresh").enabled(!app.busy).show(ui).clicked() {
+                    if Button::new(Look::Soft(Tone::Accent), "Retry")
+                        .small()
+                        .icon("refresh")
+                        .enabled(!app.busy)
+                        .show(ui)
+                        .clicked()
+                    {
                         app.reload(true, true);
                     }
                 });
@@ -684,32 +912,55 @@ fn main_area(app: &mut App, ui: &mut Ui, rect: Rect) {
                 list::list_card(app, ui, rect);
             }
             let page_rect = rect.translate(vec2(offset, 0.0));
-            ui.scope_builder(UiBuilder::new().max_rect(page_rect).id_salt("narrow-page"), |ui| {
-                ui.multiply_opacity(open);
-                ui.painter().rect_filled(page_rect, CornerRadius::same(12), alpha(Palette::current(&ctx).canvas, open));
-                if wants_side {
-                    page::side(app, ui, page_rect, true);
-                }
-            });
+            ui.scope_builder(
+                UiBuilder::new().max_rect(page_rect).id_salt("narrow-page"),
+                |ui| {
+                    ui.multiply_opacity(open);
+                    ui.painter().rect_filled(
+                        page_rect,
+                        CornerRadius::same(12),
+                        alpha(Palette::current(&ctx).canvas, open),
+                    );
+                    if wants_side {
+                        page::side(app, ui, page_rect, true);
+                    }
+                },
+            );
         } else {
             list::list_card(app, ui, rect);
         }
         return;
     }
-    let share = if app.settings.details_width > 0.0 { app.settings.details_width.clamp(0.3, 0.65) } else { 0.44 };
+    let share = if app.settings.details_width > 0.0 {
+        app.settings.details_width.clamp(0.3, 0.65)
+    } else {
+        0.44
+    };
     let side_width = (rect.width() * share).clamp(340.0, rect.width() - 380.0) * open;
     let gap = 14.0 * open;
-    let list_rect = Rect::from_min_max(rect.min, pos2(rect.right() - side_width - gap, rect.bottom()));
+    let list_rect = Rect::from_min_max(
+        rect.min,
+        pos2(rect.right() - side_width - gap, rect.bottom()),
+    );
     list::list_card(app, ui, list_rect);
     if open > 0.0 {
         let side_rect = Rect::from_min_max(pos2(list_rect.right() + gap, rect.top()), rect.max);
         // The splitter between them.
-        let handle = Rect::from_center_size(pos2(list_rect.right() + gap / 2.0, rect.center().y), vec2(12.0, rect.height()));
-        let response = ui.interact(handle, Id::new("details-splitter"), Sense::click_and_drag()).on_hover_cursor(CursorIcon::ResizeHorizontal);
+        let handle = Rect::from_center_size(
+            pos2(list_rect.right() + gap / 2.0, rect.center().y),
+            vec2(12.0, rect.height()),
+        );
+        let response = ui
+            .interact(handle, Id::new("details-splitter"), Sense::click_and_drag())
+            .on_hover_cursor(CursorIcon::ResizeHorizontal);
         let active = response.hovered() || response.dragged();
         let shown = ease(&ctx, response.id.with("hover"), active, FEEDBACK);
         if shown > 0.0 {
-            ui.painter().rect_filled(Rect::from_center_size(handle.center(), vec2(3.0, 44.0)), CornerRadius::same(2), alpha(Palette::current(&ctx).accent, shown));
+            ui.painter().rect_filled(
+                Rect::from_center_size(handle.center(), vec2(3.0, 44.0)),
+                CornerRadius::same(2),
+                alpha(Palette::current(&ctx).accent, shown),
+            );
         }
         if response.dragged() {
             let width = rect.right() - ctx.pointer_interact_pos().map_or(side_rect.left(), |p| p.x);
@@ -719,18 +970,26 @@ fn main_area(app: &mut App, ui: &mut Ui, rect: Rect) {
             app.settings.details_width = 0.0;
         }
         let slide = (1.0 - open) * 24.0;
-        ui.scope_builder(UiBuilder::new().max_rect(side_rect.translate(vec2(slide, 0.0))).id_salt("side-page"), |ui| {
-            ui.multiply_opacity(open);
-            if wants_side {
-                page::side(app, ui, side_rect.translate(vec2(slide, 0.0)), false);
-            }
-        });
+        ui.scope_builder(
+            UiBuilder::new()
+                .max_rect(side_rect.translate(vec2(slide, 0.0)))
+                .id_salt("side-page"),
+            |ui| {
+                ui.multiply_opacity(open);
+                if wants_side {
+                    page::side(app, ui, side_rect.translate(vec2(slide, 0.0)), false);
+                }
+            },
+        );
     }
 }
 
 fn page_actions_height(app: &App) -> f32 {
     let any = match app.page {
-        Page::Updates => app.items.iter().any(|i| app.shown_rows()[i.raw].is_package()),
+        Page::Updates => app
+            .items
+            .iter()
+            .any(|i| app.shown_rows()[i.raw].is_package()),
         Page::Clean => app.items.len() > 1,
         Page::Sources => true,
         _ => false,
@@ -747,7 +1006,11 @@ fn page_actions(app: &mut App, ui: &mut Ui) {
     match app.page {
         Page::Updates => {
             let rows = app.shown_rows();
-            let total = app.items.iter().filter(|i| rows[i.raw].is_package()).count();
+            let total = app
+                .items
+                .iter()
+                .filter(|i| rows[i.raw].is_package())
+                .count();
             let unchecked = app
                 .items
                 .iter()
@@ -772,12 +1035,25 @@ fn page_actions(app: &mut App, ui: &mut Ui) {
                 app.upgrade_updates();
             }
             let narrow = width < 420.0;
-            if unchecked > 0 && Button::new(Look::Secondary, "Select all").icon("installed").icon_only(narrow).show(ui).clicked() {
+            if unchecked > 0
+                && Button::new(Look::Secondary, "Select all")
+                    .icon("installed")
+                    .icon_only(narrow)
+                    .show(ui)
+                    .clicked()
+            {
                 app.unchecked.clear();
             }
-            if checked > 0 && Button::new(Look::Secondary, "Select none").icon("cancel").icon_only(narrow).show(ui).clicked() {
+            if checked > 0
+                && Button::new(Look::Secondary, "Select none")
+                    .icon("cancel")
+                    .icon_only(narrow)
+                    .show(ui)
+                    .clicked()
+            {
                 let rows = app.shown_rows();
-                let all: HashSet<String> = app.items.iter().map(|i| rows[i.raw].identity()).collect();
+                let all: HashSet<String> =
+                    app.items.iter().map(|i| rows[i.raw].identity()).collect();
                 app.unchecked = all;
             }
         }
@@ -803,8 +1079,16 @@ fn page_actions(app: &mut App, ui: &mut Ui) {
                     app.propose("refresh");
                 }
             }
-            let repos = ["flatpak", "fwupd", "apt", "dnf", "zypper"].iter().any(|id| app.available(id));
-            if repos && Button::new(Look::Secondary, "Repositories").icon("sources").enabled(!app.busy).show(ui).clicked() {
+            let repos = ["flatpak", "fwupd", "apt", "dnf", "zypper"]
+                .iter()
+                .any(|id| app.available(id));
+            if repos
+                && Button::new(Look::Secondary, "Repositories")
+                    .icon("sources")
+                    .enabled(!app.busy)
+                    .show(ui)
+                    .clicked()
+            {
                 app.ui.repos_open = true;
                 app.c().load_repositories();
                 app.react();
@@ -822,15 +1106,29 @@ fn toasts(app: &mut App, ui: &mut Ui, content: Rect) {
     let palette = Palette::current(&ctx);
     let mut bottom = content.bottom() - 24.0 - page_actions_height(app);
     for restart in [true, false] {
-        let toast = if restart { app.restart_toast.clone() } else { app.toast.clone() };
+        let toast = if restart {
+            app.restart_toast.clone()
+        } else {
+            app.toast.clone()
+        };
         let id = Id::new(("toast", restart));
         let shown = ease(&ctx, id, toast.is_some(), REVEAL);
         let Some(toast) = toast else { continue };
         let width = 460.0f32.min(content.width() - 32.0);
-        let text = wrapped(ui, &toast.text, theme::font(14.0), palette.ink, width - 120.0, 3);
+        let text = wrapped(
+            ui,
+            &toast.text,
+            theme::font(14.0),
+            palette.ink,
+            width - 120.0,
+            3,
+        );
         let height = (text.size().y + 28.0).max(52.0);
         let rect = Rect::from_min_size(
-            pos2(content.center().x - width / 2.0, bottom - height + (1.0 - shown) * 14.0),
+            pos2(
+                content.center().x - width / 2.0,
+                bottom - height + (1.0 - shown) * 14.0,
+            ),
             vec2(width, height),
         );
         bottom = rect.top() - 10.0;
@@ -840,17 +1138,49 @@ fn toasts(app: &mut App, ui: &mut Ui, content: Rect) {
             .show(&ctx, |ui| {
                 ui.multiply_opacity(shown);
                 let (frame_rect, response) = ui.allocate_exact_size(rect.size(), Sense::hover());
-                ui.painter().add(egui::epaint::Shadow { offset: [0, 4], blur: 18, spread: 0, color: Color32::from_black_alpha(if palette.dark { 90 } else { 30 }) }.as_shape(frame_rect, CornerRadius::same(12)));
-                ui.painter().rect(frame_rect, CornerRadius::same(12), palette.surface, Stroke::new(1.0, palette.strong_line), StrokeKind::Inside);
+                ui.painter().add(
+                    egui::epaint::Shadow {
+                        offset: [0, 4],
+                        blur: 18,
+                        spread: 0,
+                        color: Color32::from_black_alpha(if palette.dark { 90 } else { 30 }),
+                    }
+                    .as_shape(frame_rect, CornerRadius::same(12)),
+                );
+                ui.painter().rect(
+                    frame_rect,
+                    CornerRadius::same(12),
+                    palette.surface,
+                    Stroke::new(1.0, palette.strong_line),
+                    StrokeKind::Inside,
+                );
                 let color = tone(&palette, toast.tone);
                 let icon = match toast.tone {
                     Tone::Success => "installed",
                     Tone::Danger | Tone::Warning => "warning",
                     _ => "info",
                 };
-                theme::paint_icon(ui.painter(), Rect::from_center_size(pos2(frame_rect.left() + 24.0, frame_rect.center().y), Vec2::splat(20.0)), icon, color);
-                ui.painter().galley(pos2(frame_rect.left() + 46.0, frame_rect.center().y - text.size().y / 2.0), text.clone(), palette.ink);
-                let close = Rect::from_center_size(pos2(frame_rect.right() - 24.0, frame_rect.center().y), Vec2::splat(30.0));
+                theme::paint_icon(
+                    ui.painter(),
+                    Rect::from_center_size(
+                        pos2(frame_rect.left() + 24.0, frame_rect.center().y),
+                        Vec2::splat(20.0),
+                    ),
+                    icon,
+                    color,
+                );
+                ui.painter().galley(
+                    pos2(
+                        frame_rect.left() + 46.0,
+                        frame_rect.center().y - text.size().y / 2.0,
+                    ),
+                    text.clone(),
+                    palette.ink,
+                );
+                let close = Rect::from_center_size(
+                    pos2(frame_rect.right() - 24.0, frame_rect.center().y),
+                    Vec2::splat(30.0),
+                );
                 let mut ui_close = ui.new_child(UiBuilder::new().max_rect(close));
                 if icon_button(&mut ui_close, "cancel", "Close", palette.muted, true).clicked() {
                     if restart {
@@ -864,9 +1194,20 @@ fn toasts(app: &mut App, ui: &mut Ui, content: Rect) {
                         crate::app::ToastAction::Undo => "Undo",
                         crate::app::ToastAction::Restart => "Restart",
                     };
-                    let action_rect = Rect::from_min_size(pos2(close.left() - 86.0, frame_rect.center().y - 15.0), vec2(80.0, 30.0));
-                    let mut ui_action = ui.new_child(UiBuilder::new().max_rect(action_rect).layout(egui::Layout::right_to_left(egui::Align::Center)));
-                    if Button::new(Look::Soft(Tone::Accent), label).small().show(&mut ui_action).clicked() {
+                    let action_rect = Rect::from_min_size(
+                        pos2(close.left() - 86.0, frame_rect.center().y - 15.0),
+                        vec2(80.0, 30.0),
+                    );
+                    let mut ui_action = ui.new_child(
+                        UiBuilder::new()
+                            .max_rect(action_rect)
+                            .layout(egui::Layout::right_to_left(egui::Align::Center)),
+                    );
+                    if Button::new(Look::Soft(Tone::Accent), label)
+                        .small()
+                        .show(&mut ui_action)
+                        .clicked()
+                    {
                         app.toast_action(action);
                     }
                 }

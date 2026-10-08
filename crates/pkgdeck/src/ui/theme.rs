@@ -37,7 +37,11 @@ fn tint(color: Color32, alpha: f32) -> Color32 {
 }
 fn over(base: Color32, top: Color32, amount: f32) -> Color32 {
     let lerp = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * amount).round() as u8;
-    Color32::from_rgb(lerp(base.r(), top.r()), lerp(base.g(), top.g()), lerp(base.b(), top.b()))
+    Color32::from_rgb(
+        lerp(base.r(), top.r()),
+        lerp(base.g(), top.g()),
+        lerp(base.b(), top.b()),
+    )
 }
 impl Palette {
     pub fn of(dark: bool) -> Self {
@@ -153,11 +157,15 @@ pub fn fonts(root: &Path) -> FontDefinitions {
     let defaults = fonts.families[&FontFamily::Proportional].clone();
     fonts.font_data.insert(
         "inter".into(),
-        Arc::new(FontData::from_static(include_bytes!("../../assets/fonts/Inter-Regular.ttf"))),
+        Arc::new(FontData::from_static(include_bytes!(
+            "../../assets/fonts/Inter-Regular.ttf"
+        ))),
     );
     fonts.font_data.insert(
         "inter-semibold".into(),
-        Arc::new(FontData::from_static(include_bytes!("../../assets/fonts/Inter-SemiBold.ttf"))),
+        Arc::new(FontData::from_static(include_bytes!(
+            "../../assets/fonts/Inter-SemiBold.ttf"
+        ))),
     );
     let mut regular = vec!["inter".to_owned()];
     let mut bold = vec!["inter-semibold".to_owned()];
@@ -166,13 +174,21 @@ pub fn fonts(root: &Path) -> FontDefinitions {
         .iter()
         .find_map(|(regular, bold)| Some((read(regular)?, read(bold)?)))
     {
-        fonts.font_data.insert("system".into(), Arc::new(FontData::from_owned(system)));
-        fonts.font_data.insert("system-bold".into(), Arc::new(FontData::from_owned(system_bold)));
+        fonts
+            .font_data
+            .insert("system".into(), Arc::new(FontData::from_owned(system)));
+        fonts.font_data.insert(
+            "system-bold".into(),
+            Arc::new(FontData::from_owned(system_bold)),
+        );
         regular.push("system".into());
         bold.push("system-bold".into());
     }
     if let Some(bytes) = OTHER_SCRIPTS.iter().find_map(|path| read(path)) {
-        fonts.font_data.insert("other-scripts".into(), Arc::new(FontData::from_owned(bytes)));
+        fonts.font_data.insert(
+            "other-scripts".into(),
+            Arc::new(FontData::from_owned(bytes)),
+        );
         regular.push("other-scripts".into());
         bold.push("other-scripts".into());
     }
@@ -181,7 +197,9 @@ pub fn fonts(root: &Path) -> FontDefinitions {
     fonts.families.insert(FontFamily::Proportional, regular);
     fonts.families.insert(bold_family(), bold);
     if let Some(bytes) = MONO.iter().find_map(|path| read(path)) {
-        fonts.font_data.insert("system-mono".into(), Arc::new(FontData::from_owned(bytes)));
+        fonts
+            .font_data
+            .insert("system-mono".into(), Arc::new(FontData::from_owned(bytes)));
         fonts
             .families
             .entry(FontFamily::Monospace)

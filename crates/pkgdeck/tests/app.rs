@@ -13,8 +13,8 @@ use pkgdeck_core::{
     engine::{Backend, Engine, EngineError},
     host::Authorization,
     package::{
-        Availability, Capability, Operation, OperationOutcome, Package, PackageDetails, PackageId, Progress, Scope,
-        UpdateAvailability,
+        Availability, Capability, Operation, OperationOutcome, Package, PackageDetails, PackageId,
+        Progress, Scope, UpdateAvailability,
     },
     process::Cancellation,
 };
@@ -77,15 +77,27 @@ impl Backend for Synthetic {
     }
     fn search(&mut self, query: &str, _: &Cancellation) -> Result<Vec<Package>, EngineError> {
         let world = WORLD.lock().unwrap();
-        Ok(world.iter().filter(|p| p.id.name.contains(query)).cloned().collect())
+        Ok(world
+            .iter()
+            .filter(|p| p.id.name.contains(query))
+            .cloned()
+            .collect())
     }
     fn installed(&mut self, _: &Cancellation) -> Result<Vec<Package>, EngineError> {
         let world = WORLD.lock().unwrap();
-        Ok(world.iter().filter(|p| p.installed_version.is_some()).cloned().collect())
+        Ok(world
+            .iter()
+            .filter(|p| p.installed_version.is_some())
+            .cloned()
+            .collect())
     }
     fn details(&mut self, id: &PackageId, _: &Cancellation) -> Result<PackageDetails, EngineError> {
         let world = WORLD.lock().unwrap();
-        let package = world.iter().find(|p| p.id == *id).cloned().ok_or(EngineError::NotFound)?;
+        let package = world
+            .iter()
+            .find(|p| p.id == *id)
+            .cloned()
+            .ok_or(EngineError::NotFound)?;
         Ok(serde_json::from_value(json!({
             "package": package,
             "description": format!("All about {}.", package.display_name),
@@ -108,7 +120,9 @@ impl Backend for Synthetic {
             }
         };
         match operation {
-            Operation::Install(id) => set(id, &|p| p.installed_version = p.candidate_version.clone()),
+            Operation::Install(id) => {
+                set(id, &|p| p.installed_version = p.candidate_version.clone())
+            }
             Operation::Remove(id) => set(id, &|p| p.installed_version = None),
             Operation::Upgrade(id) => set(id, &|p| {
                 p.installed_version = p.candidate_version.clone();
@@ -120,7 +134,12 @@ impl Backend for Synthetic {
     }
 }
 
-fn engine(_: &[String], _: bool, _: Authorization, _: &Cancellation) -> Result<Engine, EngineError> {
+fn engine(
+    _: &[String],
+    _: bool,
+    _: Authorization,
+    _: &Cancellation,
+) -> Result<Engine, EngineError> {
     let mut engine = Engine::default();
     engine.register(Synthetic)?;
     Ok(engine)
@@ -130,11 +149,16 @@ fn start(packages: Vec<Package>) -> (MutexGuard<'static, ()>, App) {
     let turn = TURN.lock().unwrap_or_else(|poison| poison.into_inner());
     *WORLD.lock().unwrap() = packages;
     let (store, settings) = Store::open(None, None);
+    let mut platform = Platform::start(|| {});
+    platform.record_notifications();
     let app = App::with_controller(
         create_synthetic_controller(engine),
-        Settings { source_list: "apt".into(), ..settings },
+        Settings {
+            source_list: "apt".into(),
+            ..settings
+        },
         store,
-        Platform::start(|| {}),
+        platform,
         Launch::default(),
     );
     (turn, app)
@@ -159,7 +183,10 @@ fn idle(app: &mut App) {
 }
 
 fn titles(app: &App) -> Vec<String> {
-    app.items.iter().map(|item| app.rows[item.raw].title().to_owned()).collect()
+    app.items
+        .iter()
+        .map(|item| app.rows[item.raw].title().to_owned())
+        .collect()
 }
 
 fn world() -> Vec<Package> {
@@ -200,18 +227,30 @@ fn installed_lists_selects_and_removes_with_review() {
     app.choose(0, true);
     assert!(app.page_open);
     assert_eq!(app.page_key(), app.selected.clone());
-    until(&mut app, "details", |app| app.details_for_selection().is_some_and(|d| !d.more && d.description.starts_with("All")));
-    assert_eq!(app.details_for_selection().unwrap().description, "All about GIMP.");
+    until(&mut app, "details", |app| {
+        app.details_for_selection()
+            .is_some_and(|d| !d.more && d.description.starts_with("All"))
+    });
+    assert_eq!(
+        app.details_for_selection().unwrap().description,
+        "All about GIMP."
+    );
     // Remove from the page: the review shows on the page.
     app.run_page_action();
-    until(&mut app, "review", |app| app.confirmation.is_some() && !app.busy);
+    until(&mut app, "review", |app| {
+        app.confirmation.is_some() && !app.busy
+    });
     assert!(app.review_on_page || app.confirm_open);
     if app.review_on_page {
         assert_eq!(app.review_on, ReviewOn::Page(app.selected.clone().unwrap()));
     }
     app.confirm(true);
-    until(&mut app, "removed", |_| world()[0].installed_version.is_none());
-    until(&mut app, "list refreshed", |app| !app.busy && !app.writing && titles(app) == ["htop"]);
+    until(&mut app, "removed", |_| {
+        world()[0].installed_version.is_none()
+    });
+    until(&mut app, "list refreshed", |app| {
+        !app.busy && !app.writing && titles(app) == ["htop"]
+    });
     // The success toast can undo.
     until(&mut app, "toast", |app| app.toast.is_some());
     if app.toast.as_ref().unwrap().action == Some(ToastAction::Undo) {
@@ -250,7 +289,9 @@ fn search_debounces_ranks_and_installs() {
     if app.confirmation.is_some() {
         app.confirm(true);
     }
-    until(&mut app, "installed", |_| world()[0].installed_version.is_some());
+    until(&mut app, "installed", |_| {
+        world()[0].installed_version.is_some()
+    });
     idle(&mut app);
     // Clearing the search empties the page without a query.
     app.query.clear();
@@ -278,7 +319,9 @@ fn updates_check_some_and_update_them() {
     assert!(app.confirm_open);
     assert_eq!(app.review_on, ReviewOn::Dialog);
     app.confirm(true);
-    until(&mut app, "alpha updated", |_| world()[0].installed_version.as_deref() == Some("2"));
+    until(&mut app, "alpha updated", |_| {
+        world()[0].installed_version.as_deref() == Some("2")
+    });
     assert_eq!(world()[1].installed_version.as_deref(), Some("1"));
     idle(&mut app);
     // A review that's turned down changes nothing. (Updating all of APT
@@ -286,7 +329,9 @@ fn updates_check_some_and_update_them() {
     // ends in a notice instead.)
     until(&mut app, "reloaded", |app| app.items.len() == 1);
     app.upgrade_updates();
-    until(&mut app, "answer", |app| app.confirmation.is_some() || !app.notice.is_empty());
+    until(&mut app, "answer", |app| {
+        app.confirmation.is_some() || !app.notice.is_empty()
+    });
     if app.confirmation.is_some() {
         app.confirm(false);
     }
@@ -306,18 +351,28 @@ fn sources_turn_off_and_pages_narrow() {
     app.open_page(Page::Installed);
     let only = ["apt".to_owned()].into_iter().collect();
     app.set_page_sources(Page::Installed, only);
-    assert!(!app.page_sources.contains_key(&Page::Installed), "all usable sources is no filter");
-    let narrowed = ["apt".to_owned(), "flatpak".to_owned()].into_iter().collect();
+    assert!(
+        !app.page_sources.contains_key(&Page::Installed),
+        "all usable sources is no filter"
+    );
+    let narrowed = ["apt".to_owned(), "flatpak".to_owned()]
+        .into_iter()
+        .collect();
     app.set_page_sources(Page::Installed, narrowed);
     assert_eq!(app.source_summary(Page::Installed), "2 sources");
     app.set_source_enabled("flatpak", true);
-    assert!(app.page_sources.is_empty(), "enabling sources resets page filters");
+    assert!(
+        app.page_sources.is_empty(),
+        "enabling sources resets page filters"
+    );
     assert_eq!(app.settings.source_list, "apt,flatpak");
     app.set_source_enabled("flatpak", false);
     assert_eq!(app.settings.source_list, "apt");
     idle(&mut app);
     app.open_page(Page::Sources);
-    until(&mut app, "sources", |app| app.rows.iter().any(|row| row.kind == "source"));
+    until(&mut app, "sources", |app| {
+        app.rows.iter().any(|row| row.kind == "source")
+    });
     app.show_unavailable = true;
     app.invalidate();
     app.refresh_items();
@@ -325,16 +380,24 @@ fn sources_turn_off_and_pages_narrow() {
     assert!(app.read_failures().iter().all(|f| f.kind != "cancelled"));
     app.retry_source("apt");
     idle(&mut app);
-    assert_eq!(app.failure_reason("nothing"), "This source could not be checked.");
+    assert_eq!(
+        app.failure_reason("nothing"),
+        "This source could not be checked."
+    );
 }
 
 #[test]
 fn background_checks_badge_and_tray_events() {
     let (_turn, mut app) = start(vec![package("a", "Alpha", Some("1"), Some("2"))]);
     app.check_updates(true);
-    until(&mut app, "background check", |app| app.background.last_check.is_some());
+    until(&mut app, "background check", |app| {
+        app.background.last_check.is_some()
+    });
     assert_eq!(app.background.available, 1);
-    assert!(app.settings.last_background_state.contains("\"available\":1"));
+    assert!(app
+        .settings
+        .last_background_state
+        .contains("\"available\":1"));
     for (event, request) in [
         (Event::Open, WindowRequest::Show),
         (Event::Toggle, WindowRequest::Hide),

@@ -80,9 +80,6 @@ pub fn claim(
         Ok(listener) => listener,
         Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
             // Nobody answered: a PkgDeck that crashed left its socket.
-            if forward(path, input) {
-                return Ok(None);
-            }
             std::fs::remove_file(path)?;
             UnixListener::bind(path)?
         }
@@ -103,12 +100,8 @@ pub fn claim(
             let Some(end) = bytes.iter().position(|byte| *byte == 0) else {
                 continue;
             };
-            if sender
-                .send(String::from_utf8_lossy(&bytes[..end]).into_owned())
-                .is_err()
-            {
-                break;
-            }
+            // The window may be gone already; then nobody needs it.
+            let _ = sender.send(String::from_utf8_lossy(&bytes[..end]).into_owned());
             wake();
         }
     });
@@ -133,13 +126,19 @@ mod tests {
     fn inputs_are_paths_and_links() {
         let args = |list: &[&str]| list.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
         assert_eq!(input_from(&args(&["pkgdeck", "--smoke-test"])), "");
-        assert_eq!(input_from(&args(&["pkgdeck", "/tmp/a.flatpakref", "/b"])), "/tmp/a.flatpakref");
+        assert_eq!(
+            input_from(&args(&["pkgdeck", "/tmp/a.flatpakref", "/b"])),
+            "/tmp/a.flatpakref"
+        );
         assert_eq!(input_from(&args(&["pkgdeck", "http://x"])), "");
         assert_eq!(
             input_from(&args(&["pkgdeck", "flatpak+https://dl.flathub.org/a"])),
             "flatpak+https://dl.flathub.org/a"
         );
-        assert_eq!(socket_path(Some("/run/user/1".into()), 1), PathBuf::from("/run/user/1/pkgdeck-open-1"));
+        assert_eq!(
+            socket_path(Some("/run/user/1".into()), 1),
+            PathBuf::from("/run/user/1/pkgdeck-open-1")
+        );
         assert!(socket_path(Some("relative".into()), 7).ends_with("pkgdeck-open-7"));
     }
 
@@ -152,15 +151,26 @@ mod tests {
         })
         .unwrap()
         .expect("first launch listens");
-        assert!(claim(&path, "/tmp/Ñandú app.AppImage", || {}).unwrap().is_none());
+        assert!(claim(&path, "/tmp/Ñandú app.AppImage", || {})
+            .unwrap()
+            .is_none());
         assert_eq!(
-            listener.inputs.recv_timeout(Duration::from_secs(5)).unwrap(),
+            listener
+                .inputs
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap(),
             "/tmp/Ñandú app.AppImage"
         );
         woken.recv_timeout(Duration::from_secs(5)).unwrap();
         // Showing the window alone sends nothing to open.
         assert!(forward(&path, ""));
-        assert_eq!(listener.inputs.recv_timeout(Duration::from_secs(5)).unwrap(), "");
+        assert_eq!(
+            listener
+                .inputs
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap(),
+            ""
+        );
         // Too long to send.
         assert!(!forward(&path, &"x".repeat(LIMIT + 1)));
         // Bytes without an end are dropped.
@@ -168,7 +178,13 @@ mod tests {
         raw.write_all(b"no end").unwrap();
         drop(raw);
         assert!(forward(&path, "after"));
-        assert_eq!(listener.inputs.recv_timeout(Duration::from_secs(5)).unwrap(), "after");
+        assert_eq!(
+            listener
+                .inputs
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap(),
+            "after"
+        );
         drop(listener);
         assert!(!path.exists());
     }

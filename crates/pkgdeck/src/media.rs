@@ -229,12 +229,18 @@ mod tests {
 
     fn wait_ready(loader: &WebLoader, ctx: &egui::Context, url: &str) -> BytesLoadResult {
         for _ in 0..500 {
-            match loader.load(ctx, url) {
-                Ok(BytesPoll::Pending { .. }) => std::thread::sleep(Duration::from_millis(10)),
-                other => return other,
+            if !matches!(loader.load(ctx, url), Ok(BytesPoll::Pending { .. })) {
+                break;
             }
+            std::thread::sleep(Duration::from_millis(10));
         }
-        panic!("never loaded");
+        loader.load(ctx, url)
+    }
+    fn bytes(result: BytesLoadResult) -> Vec<u8> {
+        match result {
+            Ok(BytesPoll::Ready { bytes, .. }) => bytes.to_vec(),
+            _ => vec![],
+        }
     }
 
     #[test]
@@ -256,14 +262,22 @@ mod tests {
         let loader = WebLoader::with_curl(Some(cache.clone()), curl.clone());
         let ctx = egui::Context::default();
         let url = "https://example.invalid/icon.png";
-        let Ok(BytesPoll::Ready { bytes, .. }) = wait_ready(&loader, &ctx, url) else {
-            panic!("not ready");
-        };
-        assert_eq!(&*bytes, url.as_bytes());
+        assert!(matches!(
+            loader.load(&ctx, url),
+            Ok(BytesPoll::Pending { .. })
+        ));
+        assert_eq!(loader.byte_size(), 0, "nothing counts while loading");
+        assert_eq!(bytes(wait_ready(&loader, &ctx, url)), url.as_bytes());
+        assert!(!loader.id().is_empty());
+        assert!(bytes(Err(LoadError::NotSupported)).is_empty());
+        assert!(WebLoader::new(None).directory.is_none());
         assert_eq!(loader.byte_size(), url.len());
         // A second loader reads the file without downloading.
         let again = WebLoader::with_curl(Some(cache.clone()), curl.clone());
-        assert!(matches!(wait_ready(&again, &ctx, url), Ok(BytesPoll::Ready { .. })));
+        assert!(matches!(
+            wait_ready(&again, &ctx, url),
+            Ok(BytesPoll::Ready { .. })
+        ));
         let count = cache_file(&cache, url).with_extension("partial.count");
         assert_eq!(std::fs::read_to_string(count).unwrap().lines().count(), 1);
         // Failures are remembered until forgotten.
@@ -275,11 +289,20 @@ mod tests {
         loader.forget_all();
         assert_eq!(loader.byte_size(), 0);
         // Other schemes belong to other loaders.
-        assert!(matches!(loader.load(&ctx, "file:///x.png"), Err(LoadError::NotSupported)));
-        assert!(matches!(loader.load(&ctx, "http://x/y.png"), Err(LoadError::NotSupported)));
+        assert!(matches!(
+            loader.load(&ctx, "file:///x.png"),
+            Err(LoadError::NotSupported)
+        ));
+        assert!(matches!(
+            loader.load(&ctx, "http://x/y.png"),
+            Err(LoadError::NotSupported)
+        ));
         // Without a cache folder images still load.
         let uncached = WebLoader::with_curl(None, curl);
-        assert!(matches!(wait_ready(&uncached, &ctx, url), Ok(BytesPoll::Ready { .. })));
+        assert!(matches!(
+            wait_ready(&uncached, &ctx, url),
+            Ok(BytesPoll::Ready { .. })
+        ));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
