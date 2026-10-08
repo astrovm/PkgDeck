@@ -104,8 +104,10 @@ pub mod ffi {
         pub fn release(self) {}
     }
     pub fn create_controller() -> UniquePtr<PackageController> {
+        let mut rust = Controller::default();
+        rust.open_view_store(super::ViewStore::default_path());
         UniquePtr::new(PackageController {
-            rust: Controller::default(),
+            rust,
             listeners: Vec::new(),
         })
     }
@@ -1345,6 +1347,7 @@ pub struct Controller {
     selected: Option<PackageId>,
     engine: Option<Engine>,
     view_cache: ViewCache,
+    view_store: Option<ViewStore>,
     prefetched: BTreeMap<String, (Instant, Payload)>,
     background: bool,
     prefetch: Vec<String>,
@@ -1397,6 +1400,18 @@ pub struct Controller {
     /// Display names of confirmed changes' packages (see `Names`).
     names: Names,
     natives: Natives,
+}
+impl Controller {
+    /// Keep the slow sections between runs at `path`, and show what the last
+    /// run kept until they load again.
+    pub(crate) fn open_view_store(&mut self, path: Option<PathBuf>) {
+        let Some(path) = path else { return };
+        let store = ViewStore::open(path);
+        for (key, view) in store.cached() {
+            self.view_cache.insert(key, view);
+        }
+        self.view_store = Some(store);
+    }
 }
 impl Default for Controller {
     fn default() -> Self {
@@ -1470,6 +1485,7 @@ impl Default for Controller {
             selected: None,
             engine: None,
             view_cache: ViewCache { entries: vec![] },
+            view_store: None,
             prefetched: BTreeMap::new(),
             background: false,
             prefetch: prefetch_views(),
@@ -2797,6 +2813,125 @@ impl ViewCache {
 impl CachedView {
     fn stale(&self) -> bool {
         self.expired || self.loaded.elapsed() >= VIEW_TTL
+    }
+}
+/// The slow sections' last snapshots, kept between runs so the next launch
+/// shows them at once, marked stale, while they load again.
+struct ViewStore {
+    path: PathBuf,
+    views: Vec<StoredView>,
+    /// Writes run on their own threads; the newest one wins.
+    written: std::sync::Arc<std::sync::Mutex<u64>>,
+    generation: u64,
+}
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+struct StoredView {
+    key: String,
+    packages: Vec<Package>,
+    cleanup: Vec<CleanupItem>,
+    rows: String,
+    status: String,
+    report_state: String,
+    upgradable: bool,
+    updates_view: bool,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+struct StoredViews {
+    /// Rows from another version may not read the same way.
+    version: String,
+    views: Vec<StoredView>,
+}
+impl ViewStore {
+    /// Searches are too many and Sources is quick; the rest is worth keeping.
+    fn keeps(key: &str) -> bool {
+        ["Installed\0", "Updates\0", "Clean\0"]
+            .iter()
+            .any(|view| key.starts_with(view))
+    }
+    fn default_path() -> Option<PathBuf> {
+        if cfg!(test)
+            || rustix::process::geteuid().is_root()
+            || std::env::var_os("PKGDECK_NO_CACHE").is_some()
+        {
+            return None;
+        }
+        let base = std::env::var_os("XDG_CACHE_HOME")
+            .filter(|p| std::path::Path::new(p).is_absolute())
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))?;
+        Some(base.join("pkgdeck/views.json"))
+    }
+    /// Reads what the last run kept. A missing, damaged or older file is
+    /// the same as none.
+    fn open(path: PathBuf) -> Self {
+        let views = std::fs::read(&path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<StoredViews>(&bytes).ok())
+            .filter(|stored| stored.version == pkgdeck_core::VERSION)
+            .map(|stored| stored.views)
+            .unwrap_or_default();
+        Self {
+            path,
+            views,
+            written: Default::default(),
+            generation: 0,
+        }
+    }
+    /// The kept snapshots, out of date until they load again.
+    fn cached(&self) -> Vec<(String, CachedView)> {
+        let loaded = Instant::now()
+            .checked_sub(VIEW_TTL)
+            .unwrap_or_else(Instant::now);
+        self.views
+            .iter()
+            .map(|view| {
+                (
+                    view.key.clone(),
+                    CachedView {
+                        loaded,
+                        expired: true,
+                        cleanup: view.cleanup.clone(),
+                        packages: view.packages.clone(),
+                        failures: vec![],
+                        sources: vec![],
+                        rows: view.rows.as_str().into(),
+                        status: view.status.as_str().into(),
+                        report_state: view.report_state.as_str().into(),
+                        upgradable: view.upgradable,
+                        updates_view: view.updates_view,
+                    },
+                )
+            })
+            .collect()
+    }
+    fn keep(&mut self, view: StoredView) {
+        self.views.retain(|old| old.key != view.key);
+        self.views.push(view);
+        self.generation += 1;
+        let (generation, written) = (self.generation, self.written.clone());
+        let (path, stored) = (
+            self.path.clone(),
+            StoredViews {
+                version: pkgdeck_core::VERSION.into(),
+                views: self.views.clone(),
+            },
+        );
+        thread::spawn(move || {
+            let Ok(mut last) = written.lock() else { return };
+            if *last > generation {
+                return;
+            }
+            *last = generation;
+            let Ok(bytes) = serde_json::to_vec(&stored) else {
+                return;
+            };
+            let Some(dir) = path.parent() else { return };
+            let temporary = path.with_extension("json.tmp");
+            // Written whole, then renamed, so a crash never leaves half a file.
+            let _ = std::fs::create_dir_all(dir)
+                .and_then(|()| std::fs::write(&temporary, bytes))
+                .and_then(|()| std::fs::rename(&temporary, &path));
+        });
     }
 }
 fn confirmation_label(operation: &Operation, packages: &[Package]) -> String {
@@ -4553,7 +4688,23 @@ impl ffi::PackageController {
             upgradable: self.rust().upgradable,
             updates_view: self.rust().updates_view,
         };
-        self.rust_mut().view_cache.insert(key, view);
+        let mut this = self;
+        // Failures aren't kept; the reload behind the snapshot reports them.
+        if ViewStore::keeps(&key) {
+            if let Some(store) = this.as_mut().rust_mut().view_store.as_mut() {
+                store.keep(StoredView {
+                    key: key.clone(),
+                    packages: view.packages.clone(),
+                    cleanup: view.cleanup.clone(),
+                    rows: view.rows.to_string(),
+                    status: view.status.to_string(),
+                    report_state: view.report_state.to_string(),
+                    upgradable: view.upgradable,
+                    updates_view: view.updates_view,
+                });
+            }
+        }
+        this.rust_mut().view_cache.insert(key, view);
     }
     /// Look up the details of the row at `index` in the background, as the
     /// pointer rests on it, so opening it a moment later is instant. Never
@@ -7953,6 +8104,132 @@ mod tests {
             .as_mut()
             .load("Search".into(), "query".into(), "".into(), false, false);
         assert!(!controller.rust().hold_partials);
+    }
+
+    /// A fresh directory for one test, removed when it ends.
+    struct Scratch(PathBuf);
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("pkgdeck-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn wait_for_file(path: &std::path::Path, contains: &str) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !std::fs::read_to_string(path).is_ok_and(|text| text.contains(contains)) {
+            assert!(
+                Instant::now() < deadline,
+                "{} never held {contains}",
+                path.display()
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn installed(controller: &mut Pin<&mut ffi::PackageController>, name: &str) -> String {
+        let package: Package = serde_json::from_value(json!({
+            "id": {"backend":"apt", "name":name, "architecture":"all", "scope":"system"},
+            "display_name":name, "summary":"Kept package", "installed_version":"1", "update":"current"
+        }))
+        .unwrap();
+        controller.as_mut().rust_mut().packages = vec![package];
+        controller
+            .as_mut()
+            .set_rows(json!([{"kind":"package","name":name}]).to_string().into());
+        cache_key("Installed", "", &[], false)
+    }
+
+    #[test]
+    fn kept_sections_show_at_once_on_the_next_launch() {
+        let dir = Scratch::new("kept-views");
+        let path = dir.path().join("pkgdeck/views.json");
+        let mut first = ffi::create_controller();
+        let mut first = first.pin_mut();
+        first
+            .as_mut()
+            .rust_mut()
+            .open_view_store(Some(path.clone()));
+        let key = installed(&mut first, "kept-tool");
+        first.as_mut().stash_current(key.clone());
+        wait_for_file(&path, "kept-tool");
+        assert!(!path.with_extension("json.tmp").exists());
+
+        let mut next = ffi::create_controller();
+        let mut next = next.pin_mut();
+        next.as_mut().rust_mut().open_view_store(Some(path));
+        let cached = next.rust().view_cache.get(&key).unwrap();
+        assert!(cached.stale());
+        assert_eq!(cached.packages[0].id.name, "kept-tool");
+        next.as_mut()
+            .load("Installed".into(), "".into(), "".into(), false, false);
+        assert!(next.rows().to_string().contains("kept-tool"));
+        assert!(next
+            .report_state()
+            .to_string()
+            .contains(r#""phase":"stale""#));
+    }
+
+    #[test]
+    fn searches_and_sources_are_not_kept() {
+        let dir = Scratch::new("unkept-views");
+        let path = dir.path().join("views.json");
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller
+            .as_mut()
+            .rust_mut()
+            .open_view_store(Some(path.clone()));
+        installed(&mut controller, "searched-tool");
+        controller
+            .as_mut()
+            .stash_current(cache_key("Search", "searched", &[], false));
+        controller
+            .as_mut()
+            .stash_current(cache_key("Sources", "", &[], false));
+        // A section with a failed source keeps its rows, not the failure.
+        let key = installed(&mut controller, "partly-checked-tool");
+        controller.as_mut().rust_mut().failures = vec![BackendFailure {
+            backend: "snap".into(),
+            error: EngineError::Execution(ExecutionError::Cancelled),
+        }];
+        controller.as_mut().stash_current(key);
+        wait_for_file(&path, "partly-checked-tool");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("searched-tool"));
+        assert!(!text.contains("Sources"));
+        assert!(!text.contains("snap"));
+    }
+
+    #[test]
+    fn a_damaged_or_older_store_is_ignored() {
+        let dir = Scratch::new("damaged-views");
+        let key = cache_key("Installed", "", &[], false);
+        for text in [
+            "not json".to_owned(),
+            json!({"version": "0.0.1", "views": [{"key": key, "packages": [], "cleanup": [], "rows": "[]", "status": "", "report_state": "", "upgradable": false, "updates_view": false}]}).to_string(),
+        ] {
+            let path = dir.path().join("views.json");
+            std::fs::write(&path, text).unwrap();
+            let mut controller = ffi::create_controller();
+            let mut controller = controller.pin_mut();
+            controller.as_mut().rust_mut().open_view_store(Some(path));
+            assert!(controller.rust().view_cache.get(&key).is_none());
+        }
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().rust_mut().open_view_store(None);
+        assert!(controller.rust().view_store.is_none());
     }
 
     #[test]
