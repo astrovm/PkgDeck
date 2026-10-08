@@ -141,6 +141,17 @@ mod tests {
         .unwrap();
         fs::set_permissions(&big, fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(fetch_with(&big, "https://example.invalid/", &cancel), "");
+        let largest = temp.0.join("largest");
+        fs::write(
+            &largest,
+            "#!/bin/sh\nhead -c 2097152 /dev/zero | tr '\\0' 'a'\n",
+        )
+        .unwrap();
+        fs::set_permissions(&largest, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            fetch_with(&largest, "https://example.invalid/", &cancel).len(),
+            LIMIT
+        );
         // Cancelled before, or while, it runs.
         let slow = fake(&temp.0, "slow", "late", 0, "5");
         let waiting = cancel.clone();

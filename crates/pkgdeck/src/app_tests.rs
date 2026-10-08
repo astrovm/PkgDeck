@@ -91,6 +91,15 @@ fn sources_list_the_enabled_ones_first() {
         .map(|item| app.rows[item.raw].source.as_str())
         .collect();
     assert_eq!(order, ["homebrew", "apt"]);
+    // Other pages keep their own narrower choice.
+    app.page_sources
+        .insert(Page::Installed, HashSet::from(["apt".to_owned()]));
+    app.page = Page::Installed;
+    rows(
+        &mut app,
+        json!([row("a", json!({})), row("b", json!({"source": "homebrew"}))]),
+    );
+    assert!(app.items.is_empty());
 }
 
 #[test]
