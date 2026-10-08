@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Build a self-contained PkgDeck.app (GUI and pkd) from Homebrew's Qt, then
-# zip it for the Homebrew cask.
+# Build a self-contained PkgDeck.app (GUI and pkd), then zip it for the
+# Homebrew cask.
 set -euo pipefail
 [[ $(uname -s) == Darwin ]] || { echo 'bundle-macos.sh requires macOS' >&2; exit 1; }
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
@@ -11,19 +11,19 @@ case "$(uname -m)" in
     x86_64) arch=x86_64 ;;
     *) echo "Unsupported macOS architecture: $(uname -m)" >&2; exit 1 ;;
 esac
-brew=$(brew --prefix)
 work=$PWD/build/macos
 app=$work/PkgDeck.app
 contents=$app/Contents
 target=${CARGO_TARGET_DIR:-target}/release
 mkdir -p "$work" build/artifacts
 
-QMAKE=$brew/opt/qtbase/bin/qmake cargo build --locked --release -p pkgdeck -p pkd
+cargo build --locked --release -p pkgdeck -p pkd
 
 rm -rf "$app"
 mkdir -p "$contents/MacOS" "$contents/Resources" "$contents/Resources/licenses"
 cp "$target/pkgdeck" "$target/pkd" "$contents/MacOS/"
 cp LICENSE "$contents/Resources/licenses/PkgDeck"
+cp crates/pkgdeck/assets/fonts/Inter-LICENSE.txt "$contents/Resources/licenses/Inter"
 # sudo's password prompt for Homebrew casks that need administrator access.
 install -m 755 packaging/macos/pkgdeck-askpass "$contents/Resources/pkgdeck-askpass"
 iconset=$work/PkgDeck.iconset
@@ -35,11 +35,6 @@ for pair in 16:16x16 32:16x16@2x 32:32x32 64:32x32@2x 128:128x128 256:128x128@2x
         -o "$iconset/icon_${pair#*:}.png"
 done
 iconutil -c icns "$iconset" -o "$contents/Resources/PkgDeck.icns"
-
-# The bundle starts empty, so -always-overwrite would only make macdeployqt
-# copy, strip and fix every framework again for each of the ~90 plugins it
-# deploys. Its ad-hoc signatures would not survive the rpath fixes below.
-"$brew/bin/macdeployqt" "$app" -no-codesign -qmldir="$PWD/crates/pkgdeck/qml"
 
 # Every Mach-O file must load only system libraries or bundled copies. One
 # file(1) call finds them among the ~2000 files; running it per file is slow.

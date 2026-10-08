@@ -69,6 +69,10 @@ impl<'a> Window<'a> {
         if let Some(frames) = &mut self.smoke_test {
             *frames += 1;
             if *frames == 3 {
+                let menu = self.app.platform.tray_titles();
+                if !menu.is_empty() {
+                    println!("PKGDECK_TRAY_MENU {}", menu.join("|"));
+                }
                 println!("PKGDECK_GUI_READY");
                 self.app.force_quit = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);

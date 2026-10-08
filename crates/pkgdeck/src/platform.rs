@@ -26,7 +26,7 @@ pub enum Event {
 type Wake = Box<dyn Fn() + Send>;
 static EVENTS: Mutex<Option<(mpsc::Sender<Event>, Wake)>> = Mutex::new(None);
 
-fn send(event: Event) {
+pub(crate) fn send(event: Event) {
     if let Ok(guard) = EVENTS.lock() {
         if let Some((sender, wake)) = guard.as_ref() {
             let _ = sender.send(event);
@@ -52,6 +52,8 @@ mod native {
         fn pkgdeck_mac_set_dock_visible(visible: c_int);
         fn pkgdeck_mac_pump(seconds: f64);
         fn pkgdeck_mac_watch_reopen(watching: c_int);
+        fn pkgdeck_mac_tray_titles() -> *mut c_char;
+        fn free(pointer: *mut std::ffi::c_void);
     }
     extern "C" fn event(code: c_int) {
         use super::Event::*;
@@ -106,6 +108,17 @@ mod native {
     }
     pub fn watch_reopen(watching: bool) {
         unsafe { pkgdeck_mac_watch_reopen(watching.into()) }
+    }
+    pub fn tray_titles() -> Vec<String> {
+        unsafe {
+            let raw = pkgdeck_mac_tray_titles();
+            if raw.is_null() {
+                return vec![];
+            }
+            let text = std::ffi::CStr::from_ptr(raw).to_string_lossy().into_owned();
+            free(raw.cast());
+            text.lines().map(str::to_owned).collect()
+        }
     }
 }
 
@@ -192,6 +205,8 @@ pub struct Platform {
     tray: Option<linux::Handle>,
     /// macOS lets PkgDeck post its own notifications.
     authorized: bool,
+    /// Notifications kept instead of shown, for tests.
+    recorded: Option<std::cell::RefCell<Vec<(String, String)>>>,
 }
 
 /// The logo as the menu bar wants it: black on clear, at twice 18 points.
@@ -216,7 +231,23 @@ impl Platform {
             #[cfg(target_os = "linux")]
             tray: None,
             authorized: false,
+            recorded: None,
         }
+    }
+
+    /// Keeps notifications instead of showing them, and says they work.
+    #[doc(hidden)]
+    pub fn record_notifications(&mut self) {
+        self.recorded = Some(Default::default());
+    }
+
+    /// What was kept by [`Self::record_notifications`].
+    #[doc(hidden)]
+    pub fn recorded(&self) -> Vec<(String, String)> {
+        self.recorded
+            .as_ref()
+            .map(|r| r.borrow().clone())
+            .unwrap_or_default()
     }
 
     /// What happened since the last call.
@@ -249,6 +280,9 @@ impl Platform {
 
     /// Whether notifications can be shown at all.
     pub fn notifications_available(&self) -> bool {
+        if self.recorded.is_some() {
+            return true;
+        }
         #[cfg(target_os = "macos")]
         return native::bundled();
         #[cfg(not(target_os = "macos"))]
@@ -297,6 +331,10 @@ impl Platform {
     }
 
     pub fn notify(&self, title: &str, body: &str) {
+        if let Some(recorded) = &self.recorded {
+            recorded.borrow_mut().push((title.into(), body.into()));
+            return;
+        }
         #[cfg(target_os = "macos")]
         native::notify(title, body);
         #[cfg(target_os = "linux")]
@@ -317,6 +355,17 @@ impl Platform {
     pub fn activate(&self) {
         #[cfg(target_os = "macos")]
         native::activate();
+    }
+
+    /// The tray menu's items, for the startup check.
+    pub fn tray_titles(&self) -> Vec<String> {
+        if !self.tray_visible {
+            return vec![];
+        }
+        #[cfg(target_os = "macos")]
+        return native::tray_titles();
+        #[cfg(not(target_os = "macos"))]
+        return vec!["Open".into(), "Check now".into(), "Quit".into()];
     }
 
     /// While no window is open, a click on the Dock icon sends [`Event::Open`].
@@ -370,7 +419,10 @@ mod tests {
         });
         send(Event::Check);
         send(Event::Permission(true));
-        assert_eq!(platform.events(), vec![Event::Check, Event::Permission(true)]);
+        assert_eq!(
+            platform.events(),
+            vec![Event::Check, Event::Permission(true)]
+        );
         assert_eq!(woken.try_iter().count(), 2);
         assert!(platform.events().is_empty());
         assert!(platform.tray_available());

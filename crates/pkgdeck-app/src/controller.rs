@@ -14384,14 +14384,17 @@ mod tests {
         let natives = controller.rust().natives;
         assert_eq!(natives.root, "/nonexistent/pkgdeck");
         assert!(!natives.warm_catalog);
-        assert!((natives.metadata.fetch)("https://flathub.org/x", &Cancellation::default()).is_empty());
+        assert!(
+            (natives.metadata.fetch)("https://flathub.org/x", &Cancellation::default()).is_empty()
+        );
         let _ = (natives.metadata.catalog)();
         assert!((natives.approve)(&(natives.host)(), true, &Cancellation::default()).is_err());
         assert!(controller.rust().activity_store.is_none());
         let mut controller = controller.pin_mut();
         controller.as_mut().check_sources();
         settle(&mut controller);
-        let catalog: Value = serde_json::from_str(&controller.source_catalog().to_string()).unwrap();
+        let catalog: Value =
+            serde_json::from_str(&controller.source_catalog().to_string()).unwrap();
         assert_eq!(catalog[0]["source"], "fixture");
     }
     #[test]

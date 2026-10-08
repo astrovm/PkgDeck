@@ -5,6 +5,8 @@
 
 #import <AppKit/AppKit.h>
 #import <UserNotifications/UserNotifications.h>
+#include <stdlib.h>
+#include <string.h>
 
 enum { PKGDECK_OPEN = 1, PKGDECK_CHECK = 2, PKGDECK_QUIT = 3, PKGDECK_CLICKED = 4, PKGDECK_ALLOWED = 5, PKGDECK_DENIED = 6 };
 
@@ -207,4 +209,12 @@ void pkgdeck_mac_watch_reopen(int watching) {
                     object:nil
                      queue:nil
                 usingBlock:^(__unused NSNotification *note) { if (pkgdeck_mac_event) pkgdeck_mac_event(PKGDECK_OPEN); }] retain];
+}
+
+// The menu bar menu's item titles, one per line, or "" without the icon.
+// The caller frees the string.
+char *pkgdeck_mac_tray_titles(void) {
+    NSMutableArray *titles = [NSMutableArray array];
+    for (NSMenuItem *entry in pkgdeck_item.menu.itemArray) [titles addObject:entry.title];
+    return strdup([[titles componentsJoinedByString:@"\n"] UTF8String]);
 }

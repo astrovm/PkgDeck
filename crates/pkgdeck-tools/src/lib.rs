@@ -547,7 +547,11 @@ pub fn gui(args: &[String], failure: bool) {
     let _ = fs::remove_dir_all(&runtime);
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(out.status.code(), Some(i32::from(failure)), "{stdout}{stderr}");
+    assert_eq!(
+        out.status.code(),
+        Some(i32::from(failure)),
+        "{stdout}{stderr}"
+    );
     if failure {
         assert!(stderr.contains("pkgdeck: "), "{stderr}");
     } else {

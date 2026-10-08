@@ -641,7 +641,11 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
     }
     // Name and source.
     let title = row.title().to_owned();
-    let line = model::source_line(&row, item.variants.len() > 1);
+    let line = if row.kind == "source" {
+        row.summary.clone()
+    } else {
+        model::source_line(&row, item.variants.len() > 1)
+    };
     let top_y = if compact {
         rect.top() + 14.0
     } else {
