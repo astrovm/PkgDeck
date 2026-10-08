@@ -708,14 +708,20 @@ fn body(
         let open = app.ui.dependencies_open;
         let label = format!("Dependencies ({})", details.dependencies.len());
         let response = ui
-            .add(
-                egui::Label::new(
-                    egui::RichText::new(format!("{} {label}", if open { "▾" } else { "▸" }))
-                        .font(theme::bold(13.5))
-                        .color(palette.ink),
+            .horizontal(|ui| {
+                let (chevron, _) = ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
+                let icon = if open { "down" } else { "right" };
+                theme::paint_icon(ui.painter(), chevron, icon, palette.muted);
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(&label)
+                            .font(theme::bold(13.5))
+                            .color(palette.ink),
+                    )
+                    .sense(Sense::click()),
                 )
-                .sense(Sense::click()),
-            )
+            })
+            .inner
             .on_hover_cursor(CursorIcon::PointingHand);
         if response.clicked() {
             app.ui.dependencies_open = !open;

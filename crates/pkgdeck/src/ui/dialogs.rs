@@ -374,7 +374,7 @@ fn repositories(app: &mut App, ctx: &egui::Context) {
             let columns = if ui.available_width() >= 620.0 { 2 } else { 1 };
             let width = (ui.available_width() - 10.0 * (columns - 1) as f32) / columns as f32;
             for chunk in repos.repositories.chunks(columns) {
-                ui.horizontal(|ui| {
+                ui.horizontal_top(|ui| {
                     for repo in chunk {
                         egui::Frame::new()
                             .fill(palette.canvas)
@@ -417,14 +417,10 @@ fn repositories(app: &mut App, ctx: &egui::Context) {
                                             }
                                         }
                                     }
-                                    if flatpak_editable {
-                                        right(ui, |ui| {
-                                            if icon_button(ui, "remove", "Remove repository", palette.danger, !app.busy).clicked() {
-                                                let mut change = target.clone();
-                                                change["action"] = json!("remove");
-                                                changes.push(change);
-                                            }
-                                        });
+                                    if flatpak_editable && icon_button(ui, "remove", "Remove repository", palette.danger, !app.busy).clicked() {
+                                        let mut change = target.clone();
+                                        change["action"] = json!("remove");
+                                        changes.push(change);
                                     }
                                 });
                             });
@@ -437,7 +433,7 @@ fn repositories(app: &mut App, ctx: &egui::Context) {
             ui.label(egui::RichText::new(error).color(palette.muted));
         }
         let status = app.ctl.status().to_string();
-        if !status.is_empty() && status != "Ready" && status != "Repositories loaded." {
+        if app.busy && !status.is_empty() {
             ui.label(egui::RichText::new(status).color(palette.muted));
         }
     });
