@@ -903,3 +903,21 @@ fn scopes_read_as_people_say_them() {
     assert_eq!(friendly_scope("User 1001", home, 1000), "User 1001");
     assert_eq!(friendly_scope("System", home, 1000), "System");
 }
+
+#[test]
+fn nulls_read_as_missing_on_either_parse_path() {
+    // Every field set: the direct path.
+    let plain = r#"[{"kind": "package", "name": "a", "summary": "s", "installed": null, "same_app_from": ["b"]}]"#;
+    // A null where a field can't take one: the slow path.
+    let nulls = r#"[{"kind": "package", "name": "a", "summary": null, "installed": null, "same_app_from": null}]"#;
+    let rows = parse::<Vec<Row>>(plain);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].summary, "s");
+    assert_eq!(rows[0].installed, None);
+    assert_eq!(rows[0].same_app_from, vec!["b".to_owned()]);
+    let rows = parse::<Vec<Row>>(nulls);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].name, "a");
+    assert_eq!(rows[0].summary, "");
+    assert!(rows[0].same_app_from.is_empty());
+}

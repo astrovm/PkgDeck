@@ -112,6 +112,9 @@ pub struct App {
     pub sort: Option<(Column, bool)>,
     pub items: Vec<Item>,
     items_stale: bool,
+    /// Rows parsed lately, by their text. Going back to a page sends the
+    /// same text again, and parsing thousands of rows took a frame or more.
+    parsed: Vec<(u64, Vec<Row>)>,
     /// Rows still shown while a reload of the same list runs.
     pub retained: Option<Vec<Row>>,
     pub selected: Option<String>,
@@ -253,6 +256,7 @@ impl App {
             sort,
             items: vec![],
             items_stale: true,
+            parsed: vec![],
             retained: None,
             selected: None,
             selected_group: None,
@@ -485,7 +489,7 @@ impl App {
             self.repositories = model::parse(self.ctl.repositories().as_str());
         }
         if has("rows") {
-            let rows: Vec<Row> = model::parse(self.ctl.rows().as_str());
+            let rows = self.parse_rows();
             let keep_old = rows.is_empty() && self.busy && self.retained.is_some();
             if !keep_old {
                 let covered = self
@@ -1023,6 +1027,30 @@ impl App {
     /// The rows on screen: the retained ones while a reload runs.
     pub fn shown_rows(&self) -> &[Row] {
         self.retained.as_deref().unwrap_or(&self.rows)
+    }
+
+    fn parse_rows(&mut self) -> Vec<Row> {
+        const KEPT: usize = 4;
+        let text = self.ctl.rows();
+        let text = text.as_str();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        std::hash::Hash::hash(text, &mut hasher);
+        let key = std::hash::Hasher::finish(&hasher);
+        if let Some(at) = self.parsed.iter().position(|(seen, _)| *seen == key) {
+            let entry = self.parsed.remove(at);
+            let rows = entry.1.clone();
+            self.parsed.push(entry);
+            return rows;
+        }
+        let rows: Vec<Row> = model::parse(text);
+        // Small lists are quick to parse; keep the big ones.
+        if rows.len() >= 200 {
+            if self.parsed.len() >= KEPT {
+                self.parsed.remove(0);
+            }
+            self.parsed.push((key, rows.clone()));
+        }
+        rows
     }
 
     /// Rebuilds the visible rows when something they depend on changed.

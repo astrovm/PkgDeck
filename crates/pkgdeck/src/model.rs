@@ -188,6 +188,12 @@ pub fn parse<T: for<'de> Deserialize<'de> + Default>(text: &str) -> T {
             _ => {}
         }
     }
+    // Straight to the type first: going through a `Value` tree took a frame
+    // or more for thousands of rows. Only text with a `null` where a field
+    // can't take one needs the slow way, and it reads the same either way.
+    if let Ok(parsed) = serde_json::from_str::<T>(text) {
+        return parsed;
+    }
     let Ok(mut value) = serde_json::from_str::<Value>(text) else {
         return T::default();
     };
