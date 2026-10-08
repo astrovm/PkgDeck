@@ -690,6 +690,23 @@ fn simplified(text: &str) -> String {
         .collect()
 }
 
+/// Whether an APT architecture is another machine's, such as i386 on a
+/// 64-bit PC, so two otherwise equal rows can be told apart.
+pub fn foreign_apt_architecture(architecture: &str, machine: &str) -> bool {
+    let native = match machine {
+        "x86_64" => "amd64",
+        "aarch64" => "arm64",
+        "x86" => "i386",
+        "arm" => "armhf",
+        "powerpc64" => "ppc64el",
+        other => other,
+    };
+    !architecture.is_empty()
+        && architecture != "all"
+        && architecture != native
+        && architecture != machine
+}
+
 /// A scope as people read it: "~/.cargo" for a folder in their home, and
 /// "User" for their own account rather than its number.
 pub fn friendly_scope(label: &str, home: Option<&str>, uid: u32) -> String {
@@ -754,6 +771,9 @@ pub fn source_line(row: &Row, merged_scopes: bool) -> String {
         {
             parts.push(branch.to_owned());
         }
+    }
+    if row.source == "apt" && foreign_apt_architecture(&row.architecture, std::env::consts::ARCH) {
+        parts.push(row.architecture.clone());
     }
     if row.adopt_with.as_deref() == Some("appimage") && row.source == "appimage" {
         parts.push("not managed".into());

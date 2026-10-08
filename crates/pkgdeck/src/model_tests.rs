@@ -921,3 +921,26 @@ fn nulls_read_as_missing_on_either_parse_path() {
     assert_eq!(rows[0].summary, "");
     assert!(rows[0].same_app_from.is_empty());
 }
+
+#[test]
+fn only_another_machines_apt_architecture_is_named() {
+    assert!(foreign_apt_architecture("i386", "x86_64"));
+    assert!(foreign_apt_architecture("amd64", "aarch64"));
+    assert!(!foreign_apt_architecture("amd64", "x86_64"));
+    assert!(!foreign_apt_architecture("arm64", "aarch64"));
+    assert!(!foreign_apt_architecture("i386", "x86"));
+    assert!(!foreign_apt_architecture("armhf", "arm"));
+    assert!(!foreign_apt_architecture("ppc64el", "powerpc64"));
+    assert!(!foreign_apt_architecture("riscv64", "riscv64"));
+    assert!(!foreign_apt_architecture("x86_64", "x86_64"));
+    assert!(!foreign_apt_architecture("all", "x86_64"));
+    assert!(!foreign_apt_architecture("", "x86_64"));
+    let line = source_line(
+        &row(json!({"name": "cargo", "architecture": "s390x"})),
+        false,
+    );
+    assert!(
+        line.ends_with(", s390x") || std::env::consts::ARCH == "s390x",
+        "{line}"
+    );
+}
