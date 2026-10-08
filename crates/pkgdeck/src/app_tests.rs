@@ -778,3 +778,47 @@ fn quiet_paths_do_nothing() {
     app.open_input("/nonexistent/pkgdeck/x.deb");
     assert!(app.opening);
 }
+
+#[test]
+fn a_finished_updates_list_sets_the_badge() {
+    let mut app = app();
+    app.c().set_background_state(
+        json!({"last_check": 100, "available": 1, "failures": [], "notify": false})
+            .to_string()
+            .into(),
+    );
+    app.react();
+    let updates = json!([
+        row("a", json!({"candidate": "2", "update": "available"})),
+        row("b", json!({"candidate": "3", "update": "available"})),
+        row("c", json!({})),
+    ]);
+    // Another page's rows leave it alone.
+    app.page = Page::Installed;
+    app.c().set_rows(updates.to_string().into());
+    app.react();
+    assert_eq!(app.background.available, 1);
+    // A snapshot still reloading doesn't count yet.
+    app.page = Page::Updates;
+    app.c().set_refreshing(true);
+    app.c().set_rows(json!([updates[0]]).to_string().into());
+    app.react();
+    assert_eq!(app.background.available, 1);
+    app.c().set_refreshing(false);
+    app.react();
+    assert_eq!(app.background.available, 1);
+    // The finished list does, quietly.
+    app.c().set_rows(updates.to_string().into());
+    app.react();
+    assert_eq!(app.background.available, 2);
+    assert!(!app.background.notify);
+    let saved: Value = serde_json::from_str(&app.settings.last_background_state).unwrap();
+    assert_eq!(saved["available"], 2);
+    assert!(app.platform.recorded().is_empty());
+    // A list narrowed to some sources is only part of the count.
+    app.page_sources
+        .insert(Page::Updates, ["apt".to_owned()].into_iter().collect());
+    app.c().set_rows(json!([updates[0]]).to_string().into());
+    app.react();
+    assert_eq!(app.background.available, 2);
+}

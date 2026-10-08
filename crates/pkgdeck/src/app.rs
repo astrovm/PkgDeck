@@ -574,6 +574,9 @@ impl App {
         if has("system_approval") {
             self.settings.system_approval = self.ctl.system_approval().to_string();
         }
+        if has("rows") || has("busy") || has("refreshing") {
+            self.count_shown_updates();
+        }
         if has("background_state") {
             self.background_changed();
         }
@@ -609,6 +612,48 @@ impl App {
         self.settings.background_mode
             && self.platform.tray_available()
             && self.platform.notifications_available()
+    }
+
+    /// A finished Updates list is the newest count there is, so the badge
+    /// follows it instead of waiting for the next background check. Not a
+    /// list narrowed to some sources, a snapshot still reloading, or rows
+    /// kept on screen while they load.
+    fn count_shown_updates(&mut self) {
+        if self.page != Page::Updates
+            || self.busy
+            || self.refreshing
+            || self.retained.is_some()
+            || self.page_sources.contains_key(&Page::Updates)
+        {
+            return;
+        }
+        let count = self
+            .rows
+            .iter()
+            .filter(|row| row.is_package() && row.has_update())
+            .count() as u64;
+        if count == self.background.available && self.background.last_check.is_some() {
+            return;
+        }
+        let failures: Vec<Value> = self
+            .background
+            .failures
+            .iter()
+            .map(|f| serde_json::json!({"source": f.source, "kind": f.kind}))
+            .collect();
+        let checked = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_secs());
+        self.c().set_background_state(
+            serde_json::json!({
+                "last_check": checked,
+                "available": count,
+                "failures": failures,
+                "notify": false,
+            })
+            .to_string()
+            .into(),
+        );
     }
 
     fn background_changed(&mut self) {
