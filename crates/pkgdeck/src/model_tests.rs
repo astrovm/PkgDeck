@@ -1,10 +1,11 @@
 use super::*;
 use serde_json::json;
 
+/// A row for this machine's own architecture unless a test says otherwise.
 fn row(value: Value) -> Row {
     let mut base = json!({
         "kind": "package", "name": "app", "display_name": "", "source": "apt",
-        "architecture": "x86_64", "scope": "system", "scope_label": "System",
+        "architecture": std::env::consts::ARCH, "scope": "system", "scope_label": "System",
         "installed": null, "candidate": null, "update": "unknown", "summary": "",
     });
     for (key, field) in value.as_object().unwrap() {
