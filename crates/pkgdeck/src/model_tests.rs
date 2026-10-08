@@ -279,6 +279,13 @@ fn source_lines_say_where_a_row_comes_from() {
     let line = |value: Value, merged| source_line(&row(value), merged);
     assert_eq!(
         line(
+            json!({"name": "anchor", "display_name": "Anchor (AVM)", "source": "anchor", "scope_label": "User 501"}),
+            false
+        ),
+        "Anchor (AVM), User 501"
+    );
+    assert_eq!(
+        line(
             json!({"name": "firefox-esr", "display_name": "Firefox ESR"}),
             false
         ),
