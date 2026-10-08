@@ -27,3 +27,9 @@ unsafe_code = "warn"
 
 [workspace.lints.clippy]
 all = "warn"
+
+# Debug builds keep our code easy to step through, but egui and image
+# decoding are too slow unoptimized: the window took ~600 ms to open and
+# burned CPU while idle.
+[profile.dev.package."*"]
+opt-level = 2
