@@ -437,7 +437,7 @@ fn rows(app: &mut App, ui: &mut Ui, body: Rect, width: Width) {
     }
     let focused = list_focus.has_focus();
     app.ui.list_focused = focused;
-    if focused {
+    if focused && !app.items.is_empty() {
         let current = app.selected_index();
         let mut target: Option<usize> = None;
         let count = app.items.len();
@@ -531,9 +531,13 @@ fn rows(app: &mut App, ui: &mut Ui, body: Rect, width: Width) {
 fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Option<usize> {
     let ctx = ui.ctx().clone();
     let palette = Palette::current(&ctx);
-    let item = app.items[index].clone();
-    let rows = app.shown_rows();
-    let row = rows[item.raw].clone();
+    // Rows can be replaced earlier in this frame (a key that reloads the
+    // page); the items catch up on the next one.
+    let item = app.items.get(index)?.clone();
+    let Some(row) = app.shown_rows().get(item.raw).cloned() else {
+        ui.ctx().request_repaint();
+        return None;
+    };
     let identity = row.identity();
     let retaining = app.retained.is_some();
     let mut rect = rect;

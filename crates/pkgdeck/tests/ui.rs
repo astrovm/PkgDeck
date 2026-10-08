@@ -203,3 +203,30 @@ fn narrow_windows_still_show_rows_and_their_page() {
     harness.run_steps(4);
     assert!(!harness.state().1.page_open);
 }
+
+#[test]
+fn rows_replaced_mid_frame_do_not_crash_the_list() {
+    let mut harness = show(Page::Installed);
+    assert!(!harness.state().1.items.is_empty());
+    // A key or callback can swap the rows after this frame built its items.
+    harness.state_mut().1.rows.clear();
+    harness.run_steps(2);
+    harness.state_mut().1.invalidate();
+    harness.run_steps(2);
+    assert!(harness.state().1.items.is_empty());
+}
+
+#[test]
+fn arrow_keys_on_an_empty_list_do_nothing() {
+    let mut harness = show(Page::Installed);
+    harness.state_mut().1.ui.focus_list = true;
+    harness.run_steps(2);
+    harness.state_mut().1.filter = "nothing matches this".into();
+    harness.state_mut().1.invalidate();
+    harness.run_steps(2);
+    for key in [egui::Key::ArrowDown, egui::Key::End, egui::Key::PageDown] {
+        harness.key_press(key);
+        harness.run_steps(2);
+    }
+    assert!(harness.state().1.items.is_empty());
+}

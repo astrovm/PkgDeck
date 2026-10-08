@@ -309,8 +309,9 @@ impl Desktop {
         self.key("ctrl+f");
         self.xdo(&["type", "--clearmodifiers", "--delay", "0", name]);
         self.key("Return");
+        // Focusing the list selects its first row.
         self.key("ctrl+l");
-        self.key("Down");
+        self.key("Home");
     }
     pub fn write(&mut self, op: &str, name: &str) {
         let history = self.dir.0.join("pkgdeck/activity.json");
@@ -334,7 +335,7 @@ impl Desktop {
         if op == "refresh" {
             self.key("ctrl+5");
             self.key("ctrl+l");
-            self.key("Down");
+            self.key("Home");
         } else {
             self.search(name);
         }
