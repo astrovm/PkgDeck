@@ -692,7 +692,9 @@ pub fn source_line(row: &Row, merged_scopes: bool) -> String {
         && !matches!(
             row.source.as_str(),
             "flatpak" | "macos-apps" | "mas" | "appimage"
-        );
+        )
+        // A standalone tool is named after its source already.
+        && source_name(&row.source) != row.display_name;
     if names_differ && row.is_package() {
         parts.push(row.name.clone());
     }
