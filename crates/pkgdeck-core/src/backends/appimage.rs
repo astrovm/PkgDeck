@@ -1556,7 +1556,11 @@ impl Backend for AppImage {
                         }
                         update
                     }
-                    None => self.check_update(&path, cancel)?,
+                    // A failed check leaves it unknown too; only cancelling stops the list.
+                    None => match self.check_update(&path, cancel) {
+                        Err(EngineError::Cancelled) => return Err(EngineError::Cancelled),
+                        result => result.unwrap_or(UpdateAvailability::Unknown),
+                    },
                 };
             }
         }
@@ -3826,21 +3830,24 @@ esac
         let probes = fs::read_to_string(&calls).unwrap();
         assert_eq!(probes.matches("--check-for-update").count(), 2);
         assert!(!probes.contains("--overwrite"));
-        // Failed network/probe operations must never become Current or Available.
+        // Failed network/probe operations must never become Current or Available,
+        // and never hide the installed AppImages.
         fs::write(
             &updater,
             "#!/bin/sh\necho 'error: unavailable source' >&2\nexit 2\n",
         )
         .unwrap();
-        assert!(matches!(
-            backend.installed(&cancel),
-            Err(EngineError::Execution(_))
-        ));
+        let offline = backend.installed(&cancel).unwrap();
+        assert_eq!(offline.len(), 2);
+        assert!(offline
+            .iter()
+            .all(|package| package.update == UpdateAvailability::Unknown));
         fs::remove_file(&updater).unwrap();
-        assert!(matches!(
-            backend.installed(&cancel),
-            Err(EngineError::Execution(_))
-        ));
+        let missing = backend.installed(&cancel).unwrap();
+        assert_eq!(missing.len(), 2);
+        assert!(missing
+            .iter()
+            .all(|package| package.update == UpdateAvailability::Unknown));
         // Cancellation applies to the read-only check, including while it runs.
         fs::write(&updater, "#!/bin/sh\nexec sleep 30\n").unwrap();
         fs::set_permissions(&updater, fs::Permissions::from_mode(0o755)).unwrap();

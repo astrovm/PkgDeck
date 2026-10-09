@@ -880,6 +880,17 @@ mod tests {
     use pkgdeck_core::package::{PackageId, Scope, UpdateAvailability};
     use std::io::Write;
 
+    /// Waits for a background thread. Yields before each look, so every line
+    /// runs however fast the thread was.
+    fn settle(done: impl Fn() -> bool) {
+        loop {
+            std::thread::yield_now();
+            if done() {
+                return;
+            }
+        }
+    }
+
     #[test]
     fn the_app_reads_the_running_systems_catalog() {
         let host = pkgdeck_core::host::Host::current();
@@ -1369,13 +1380,9 @@ Description: '&invalid;'
         store.warm(load);
         // A second call while the first load runs starts no other.
         store.warm(load);
-        while LOADS.load(Ordering::SeqCst) == 0 {
-            std::thread::yield_now();
-        }
+        settle(|| LOADS.load(Ordering::SeqCst) > 0);
         drop(held);
-        while store.catalog.cached().is_none() || store.warming.load(Ordering::SeqCst) {
-            std::thread::yield_now();
-        }
+        settle(|| store.catalog.cached().is_some() && !store.warming.load(Ordering::SeqCst));
         let mut row = package("apt", "player-bin");
         store.enrich_cached(&mut row);
         assert_eq!(row.display_name, "Example Player");
@@ -1384,9 +1391,7 @@ Description: '&invalid;'
         assert_eq!(LOADS.load(Ordering::SeqCst), 1);
         store.invalidate();
         store.warm(load);
-        while store.catalog.cached().is_none() {
-            std::thread::yield_now();
-        }
+        settle(|| store.catalog.cached().is_some());
         assert_eq!(LOADS.load(Ordering::SeqCst), 2);
     }
     #[test]
