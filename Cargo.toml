@@ -15,7 +15,7 @@ serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
 sha2 = "=0.11.0"
 hex = "=0.4.3"
-signal-hook = "=0.4.4"
+signal-hook = "=0.4.5"
 rustix = { version = "=1.1.5", features = ["fs", "process", "event", "system"] }
 pkgdeck-core = { path = "crates/pkgdeck-core" }
 clap = { version = "=4.6.7", features = ["derive"] }
