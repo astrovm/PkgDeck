@@ -11730,11 +11730,11 @@ mod tests {
         );
         // Update all leaves the failed one out, and asks for the cask.
         controller.as_mut().propose("upgrade-all".into(), -1);
-        let Some(Job::UpgradeAll(operations, _)) = &controller.rust().pending else {
-            panic!("Update all asks first");
-        };
-        assert!(!operations.contains(&upgrade(&tool)), "{operations:?}");
-        assert!(!operations.is_empty());
+        assert!(matches!(
+            &controller.rust().pending,
+            Some(Job::UpgradeAll(operations, _))
+                if !operations.is_empty() && !operations.contains(&upgrade(&tool))
+        ));
         // With nothing else left, it tries it again.
         controller.as_mut().confirm(false);
         controller.as_mut().rust_mut().packages = vec![tool.clone()];
@@ -11814,6 +11814,76 @@ mod tests {
             install["title"],
             "Install Anchor (AVM) (Anchor (AVM)) failed"
         );
+    }
+    #[test]
+    fn a_failure_notice_goes_once_its_updates_are_done() {
+        let mut tool = synthetic_package("anchor", "Anchor (AVM)");
+        tool.id.backend = "anchor".into();
+        tool.installed_version = Some("1".into());
+        tool.candidate_version = Some("2.0".into());
+        tool.update = UpdateAvailability::Available;
+        let mut controller = synthetic_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().rust_mut().updates_view = true;
+        let list = |controller: &mut Pin<&mut ffi::PackageController>, packages: Vec<Package>| {
+            controller
+                .as_mut()
+                .apply(Ok(Payload::Packages(PackageReport {
+                    packages,
+                    failures: vec![],
+                    successful_sources: vec!["anchor".into()],
+                })));
+        };
+        let fail = |controller: &mut Pin<&mut ffi::PackageController>, job: Job| {
+            controller.as_mut().rust_mut().retry_job = Some(job);
+            controller
+                .as_mut()
+                .set_notice(r#"{"kind":"error","title":"Anchor (AVM) didn't update"}"#.into());
+        };
+        // Still waiting: the notice stays.
+        fail(
+            &mut controller,
+            Job::Write(Operation::Upgrade(tool.id.clone()), None),
+        );
+        list(&mut controller, vec![tool.clone()]);
+        assert_ne!(controller.notice().to_string(), "{}");
+        // Updated somewhere else: it goes.
+        list(&mut controller, vec![]);
+        assert_eq!(controller.notice().to_string(), "{}");
+        assert!(controller.rust().retry_job.is_none());
+        // A whole source can't be told apart by package, so it stays.
+        fail(
+            &mut controller,
+            Job::UpgradeAll(
+                vec![Operation::UpgradeAll {
+                    backend: "anchor".into(),
+                }],
+                None,
+            ),
+        );
+        list(&mut controller, vec![]);
+        assert_ne!(controller.notice().to_string(), "{}");
+    }
+    #[test]
+    fn a_failed_cleanup_line_names_the_step() {
+        let clean = Operation::Clean(CleanupId {
+            backend: "apt".into(),
+            key: "cache".into(),
+        });
+        let notice = write_notice(
+            &Job::CleanAll(vec![clean.clone()]),
+            &Ok(Payload::Batch(
+                format!(
+                    "Completed 0 of 1 cleanup tasks.\n{}: disk full",
+                    operation_title(&clean)
+                ),
+                vec![Outcome::Failed],
+            )),
+            false,
+            &Names::new(),
+        );
+        assert_eq!(notice["title"], "Clean cache (APT) failed");
+        assert_eq!(notice["detail"], "Clean cache (APT): disk full");
     }
     #[test]
     fn automatic_runs_skip_updates_that_failed() {
