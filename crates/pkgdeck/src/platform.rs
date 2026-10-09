@@ -173,7 +173,14 @@ mod linux {
     }
     pub type Handle = ksni::blocking::Handle<Tray>;
     pub fn spawn(icon: Vec<ksni::Icon>) -> Option<Handle> {
-        Tray { icon }.spawn().ok()
+        // Flatpak won't let the app own a StatusNotifierItem name, so the
+        // icon registers under its connection's own name there instead.
+        let sandboxed = std::path::Path::new("/.flatpak-info").exists();
+        Tray { icon }
+            .disable_dbus_name(sandboxed)
+            .spawn()
+            .map_err(|e| eprintln!("pkgdeck: tray icon unavailable: {e}"))
+            .ok()
     }
     pub fn notify(title: &str, body: &str) {
         let (title, body) = (title.to_owned(), body.to_owned());
