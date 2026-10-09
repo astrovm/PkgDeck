@@ -78,7 +78,7 @@ computer can handle.
 
 ## Installed
 
-Filter the list by name, or turn on **Duplicate installs** to see apps
+Filter the list by name, or turn on **Duplicates** to see apps
 installed from more than one source. Grouping is only visual. Each copy stays a
 separate package.
 

@@ -541,6 +541,20 @@ fn header(app: &mut App, ui: &mut Ui) {
                     app.react();
                 }
             }
+            let adoptable = adoptable_appimages(app);
+            if adoptable > 0 {
+                let label = format!("Manage {adoptable} AppImages");
+                if Button::new(Look::Secondary, &label)
+                    .icon("install")
+                    .icon_only(compact)
+                    .tooltip(format!("Manage {adoptable} AppImages with PkgDeck"))
+                    .enabled(app.can_act() && app.retained.is_none())
+                    .show(ui)
+                    .clicked()
+                {
+                    app.propose("adopt-all");
+                }
+            }
             let can_open_files = !model::file_patterns(&app.catalog).is_empty();
             if matches!(app.page, Page::Search | Page::Sources)
                 && can_open_files
@@ -591,70 +605,72 @@ fn search_field(app: &mut App, ui: &mut Ui) {
 }
 
 fn installed_filters(app: &mut App, ui: &mut Ui) {
-    let compact = ui.available_width() < 600.0;
-    ui.horizontal(|ui| {
-        let adoptable = app
-            .rows
-            .iter()
-            .filter(|row| row.source == "appimage" && model::can_adopt(row, &app.catalog))
-            .count();
-        let reserve = if compact { 130.0 } else { 200.0 }
-            + if adoptable >= 2 && !compact {
-                200.0
-            } else {
-                0.0
-            };
-        let width = (ui.available_width() - reserve).max(160.0);
-        let field = Field::new(&mut app.filter, "Filter installed packages", filter_id())
-            .icon("filter")
-            .width(width)
-            .show(ui);
-        if app.ui.focus_filter {
-            app.ui.focus_filter = false;
-            app.ui.focus_list = false;
-            field.response.request_focus();
-        }
-        if field.response.changed() || field.cleared {
-            app.invalidate();
-        }
-        if field.response.has_focus()
-            && ui.input(|i| i.key_pressed(Key::ArrowDown) || i.key_pressed(Key::Enter))
-            && !app.items.is_empty()
-        {
-            app.ui.focus_list = true;
-            app.ui.keyboard_nav = true;
-            app.choose(0, false);
-        }
-        let has_packages = app.rows.iter().any(model::Row::is_package);
-        if has_packages || app.duplicates_only {
-            let checked = app.duplicates_only;
-            let tick = tickbox(ui, checked, true, "Duplicate installs")
-                .on_hover_text("Only apps installed more than once");
-            // A bare box says nothing, so narrow windows keep a short label.
-            let text = if compact {
-                "Duplicates"
-            } else {
-                "Duplicate installs"
-            };
-            let label = ui.add(egui::Label::new(text).sense(Sense::click()));
-            if tick.clicked() || label.clicked() {
-                app.duplicates_only = !checked;
+    let has_packages = app.rows.iter().any(model::Row::is_package);
+    let toggle = has_packages || app.duplicates_only;
+    // Right to left, so the toggle sits at the edge and the field takes
+    // the rest.
+    ui.allocate_ui_with_layout(
+        vec2(ui.available_width(), CONTROL_HEIGHT),
+        egui::Layout::right_to_left(egui::Align::Center),
+        |ui| {
+            if toggle {
+                // Looks like the source filter: tinted while on.
+                let on = app.duplicates_only;
+                let look = if on {
+                    Look::Soft(Tone::Accent)
+                } else {
+                    Look::Secondary
+                };
+                if Button::new(look, "Duplicates")
+                    .tooltip("Only apps installed more than once")
+                    .show(ui)
+                    .clicked()
+                {
+                    app.duplicates_only = !on;
+                    app.invalidate();
+                }
+            }
+            let width = ui.available_width().max(160.0);
+            let field = Field::new(&mut app.filter, "Filter installed packages", filter_id())
+                .icon("filter")
+                .width(width)
+                .show(ui);
+            if app.ui.focus_filter {
+                app.ui.focus_filter = false;
+                app.ui.focus_list = false;
+                field.response.request_focus();
+            }
+            if field.response.changed() || field.cleared {
                 app.invalidate();
             }
-        }
-        if adoptable >= 2 && !compact {
-            let label = format!("Manage {adoptable} AppImages");
-            if Button::new(Look::Soft(Tone::Accent), &label)
-                .icon("install")
-                .tooltip(format!("Manage {adoptable} AppImages with PkgDeck"))
-                .enabled(app.can_act() && app.retained.is_none())
-                .show(ui)
-                .clicked()
+            if field.response.has_focus()
+                && ui.input(|i| i.key_pressed(Key::ArrowDown) || i.key_pressed(Key::Enter))
+                && !app.items.is_empty()
             {
-                app.propose("adopt-all");
+                app.ui.focus_list = true;
+                app.ui.keyboard_nav = true;
+                app.choose(0, false);
             }
-        }
-    });
+        },
+    );
+}
+
+/// The AppImages on Installed that PkgDeck could manage, when there's
+/// more than one to manage at once.
+fn adoptable_appimages(app: &App) -> usize {
+    if app.page != Page::Installed || app.opened.is_some() {
+        return 0;
+    }
+    let count = app
+        .rows
+        .iter()
+        .filter(|row| row.source == "appimage" && model::can_adopt(row, &app.catalog))
+        .count();
+    if count >= 2 {
+        count
+    } else {
+        0
+    }
 }
 
 fn opening_row(app: &mut App, ui: &mut Ui) {
