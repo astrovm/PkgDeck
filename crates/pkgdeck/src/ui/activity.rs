@@ -205,33 +205,40 @@ fn entry_card(app: &mut App, ui: &mut Ui, entry: &Activity) {
             if entry.running() {
                 let live = app.progress.activity_id == Some(entry.id);
                 ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    if live && !app.progress.label.is_empty() {
-                        ui.label(
-                            egui::RichText::new(&app.progress.label)
-                                .font(theme::font(12.5))
-                                .color(palette.muted),
-                        );
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if live
-                            && app.writing
-                            && Button::new(Look::Flat, "Cancel").small().show(ui).clicked()
-                        {
-                            app.cancel();
+                // Only the change running now has words to show here.
+                let words = live
+                    && (app.writing
+                        || !app.progress.label.is_empty()
+                        || !app.progress.count().is_empty());
+                if words {
+                    ui.horizontal(|ui| {
+                        if !app.progress.label.is_empty() {
+                            ui.label(
+                                egui::RichText::new(&app.progress.label)
+                                    .font(theme::font(12.5))
+                                    .color(palette.muted),
+                            );
                         }
-                        if live {
-                            let count = app.progress.count();
-                            if !count.is_empty() {
-                                ui.label(
-                                    egui::RichText::new(count)
-                                        .font(theme::mono(12.0))
-                                        .color(palette.muted),
-                                );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if live
+                                && app.writing
+                                && Button::new(Look::Flat, "Cancel").small().show(ui).clicked()
+                            {
+                                app.cancel();
                             }
-                        }
+                            if live {
+                                let count = app.progress.count();
+                                if !count.is_empty() {
+                                    ui.label(
+                                        egui::RichText::new(count)
+                                            .font(theme::mono(12.0))
+                                            .color(palette.muted),
+                                    );
+                                }
+                            }
+                        });
                     });
-                });
+                }
                 let (bar, _) =
                     ui.allocate_exact_size(vec2(ui.available_width(), 5.0), Sense::hover());
                 let fraction = if live { app.progress.bar() } else { None };

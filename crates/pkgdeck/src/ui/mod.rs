@@ -589,7 +589,7 @@ fn installed_filters(app: &mut App, ui: &mut Ui) {
             .iter()
             .filter(|row| row.source == "appimage" && model::can_adopt(row, &app.catalog))
             .count();
-        let reserve = if compact { 40.0 } else { 200.0 }
+        let reserve = if compact { 130.0 } else { 200.0 }
             + if adoptable >= 2 && !compact {
                 200.0
             } else {
@@ -621,11 +621,13 @@ fn installed_filters(app: &mut App, ui: &mut Ui) {
             let checked = app.duplicates_only;
             let tick = tickbox(ui, checked, true, "Duplicate installs")
                 .on_hover_text("Only apps installed more than once");
-            let label = if compact {
-                tick.clone()
+            // A bare box says nothing, so narrow windows keep a short label.
+            let text = if compact {
+                "Duplicates"
             } else {
-                ui.add(egui::Label::new("Duplicate installs").sense(Sense::click()))
+                "Duplicate installs"
             };
+            let label = ui.add(egui::Label::new(text).sense(Sense::click()));
             if tick.clicked() || label.clicked() {
                 app.duplicates_only = !checked;
                 app.invalidate();
