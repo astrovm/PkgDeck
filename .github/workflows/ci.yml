@@ -96,9 +96,6 @@ jobs:
           - { runner: ubuntu-26.04, arch: x86_64, suite: 'checks,lint,coverage', coverage: 'true' }
           - { runner: ubuntu-26.04-arm, arch: aarch64, suite: 'checks,tests', coverage: 'false' }
     runs-on: ${{ matrix.runner }}
-    env:
-      QT_QPA_PLATFORM: offscreen
-      QT_QUICK_BACKEND: software
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -289,7 +286,7 @@ jobs:
       # Building the CLI in the development container checks its recipe.
       # The workspace tests already run natively on both architectures
       # (coverage on x86_64, test-workspace on aarch64) with the same
-      # Ubuntu 26.04 Qt packages, so they are not repeated here.
+      # Ubuntu 26.04 packages, so they are not repeated here.
       - name: Build CLI in the development container
         if: needs.reviewed.outputs.tested == 'true'
         run: scripts/container.sh development --build-cli
@@ -401,8 +398,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install build dependencies
         run: |
-          brew install librsvg qtbase qtdeclarative qtimageformats qtshadertools qtsvg qttools \
-            coreutils jq pkgconf openssl@3
+          brew install librsvg coreutils jq pkgconf openssl@3
           rustup show
       - name: Cache Rust build outputs
         uses: ./.github/actions/rust-cache
@@ -417,18 +413,18 @@ jobs:
           minimum=$(plutil -extract LSMinimumSystemVersion raw build/macos/PkgDeck.app/Contents/Info.plist)
           # The cask declares macOS 26 (Tahoe); the bundle must not need newer.
           [[ ${minimum%%.*} -le 26 ]] || { echo "Bundle needs macOS $minimum" >&2; exit 1; }
-          if otool -L build/macos/PkgDeck.app/Contents/MacOS/pkd | grep -qi Qt; then
-            echo 'CLI unexpectedly links Qt' >&2
-            exit 1
-          fi
-      - name: Test macOS GUI controllers, QML, startup and media
+          for binary in pkd pkgdeck; do
+            if otool -L "build/macos/PkgDeck.app/Contents/MacOS/$binary" | grep -qi Qt; then
+              echo "$binary unexpectedly links Qt" >&2
+              exit 1
+            fi
+          done
+      - name: Test the macOS window, startup and tray
         env:
           TESTED: ${{ needs.reviewed.outputs.tested }}
         run: |
-          PATH="$(brew --prefix coreutils)/libexec/gnubin:$(brew --prefix qtbase)/bin:$(brew --prefix qtdeclarative)/bin:$(brew --prefix qttools)/bin:$(brew --prefix openssl@3)/bin:$PATH"
-          QMAKE="$(brew --prefix qtbase)/bin/qmake"
-          export PATH QMAKE
-          export QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=software
+          PATH="$(brew --prefix coreutils)/libexec/gnubin:$(brew --prefix openssl@3)/bin:$PATH"
+          export PATH
           # The bundle step already built the release profile; testing it
           # reuses those outputs instead of compiling everything again.
           if [[ "$TESTED" == true ]]; then
@@ -642,9 +638,6 @@ jobs:
           - runner: ubuntu-26.04-arm
             arch: aarch64
     runs-on: ${{ matrix.runner }}
-    env:
-      QT_QPA_PLATFORM: offscreen
-      QT_QUICK_BACKEND: software
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -668,11 +661,10 @@ jobs:
         run: |
           source scripts/dev-env.sh
           scripts/bundle.sh
-          scripts/tests/media-cache.sh "$PWD/build/AppDir/usr"
           test -x build/AppDir/usr/lib/pkgdeck/appimageupdatetool.AppImage
           test -x build/AppDir/usr/libexec/pkgdeck-host-runner
           desktop-file-validate assets/io.github.astrovm.PkgDeck.desktop
-          unset LD_LIBRARY_PATH QML_IMPORT_PATH
+          unset LD_LIBRARY_PATH
           scripts/xtask.sh gui build/AppDir/AppRun
           build/AppDir/AppRun --cli </dev/null | grep -F 'Usage: pkd'
           build/AppDir/AppRun --cli --version
@@ -712,7 +704,7 @@ jobs:
           "$image" --appimage-extract 'usr/libexec/pkgdeck-host-runner' >/dev/null
           test -x 'squashfs-root/usr/libexec/pkgdeck-host-runner'
           rm -rf squashfs-root
-          unset LD_LIBRARY_PATH QML_IMPORT_PATH
+          unset LD_LIBRARY_PATH
           export APPIMAGE_EXTRACT_AND_RUN=1
           scripts/xtask.sh gui "$image"
           "$image" --cli </dev/null | grep -F 'Usage: pkd'
@@ -737,7 +729,7 @@ jobs:
           test -x build/snap-check/usr/bin/pkgdeck
           test -x build/snap-check/usr/bin/pkd
           test -x build/snap-check/usr/libexec/pkgdeck-host-runner
-          unset LD_LIBRARY_PATH QML_IMPORT_PATH
+          unset LD_LIBRARY_PATH
           scripts/xtask.sh gui build/snap-check/AppRun
           build/snap-check/usr/bin/pkd </dev/null | grep -F 'Usage: pkd'
           sudo systemctl enable --now snapd.socket
@@ -767,9 +759,6 @@ jobs:
           - runner: ubuntu-26.04-arm
             arch: aarch64
     runs-on: ${{ matrix.runner }}
-    env:
-      QT_QPA_PLATFORM: offscreen
-      QT_QUICK_BACKEND: software
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -787,10 +776,10 @@ jobs:
           version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)
           bundle="build/artifacts/PkgDeck-v${version}-${{ matrix.arch }}.flatpak"
           sudo flatpak remote-add --system --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
-          sudo flatpak install --system -y --noninteractive flathub org.kde.Platform//6.11 org.kde.Sdk//6.11 org.freedesktop.Sdk.Extension.rust-stable//25.08
+          sudo flatpak install --system -y --noninteractive flathub org.freedesktop.Platform//25.08 org.freedesktop.Sdk//25.08 org.freedesktop.Sdk.Extension.rust-stable//25.08
           scripts/package.sh flatpak
           sudo flatpak install --system -y --noninteractive "$bundle"
-          scripts/xtask.sh gui flatpak run --env=QT_QPA_PLATFORM=offscreen --env=QT_QUICK_BACKEND=software io.github.astrovm.PkgDeck
+          scripts/xtask.sh gui flatpak run io.github.astrovm.PkgDeck
           flatpak run --command=pkd io.github.astrovm.PkgDeck </dev/null | grep -F 'Usage: pkd'
           flatpak run --command=sh io.github.astrovm.PkgDeck -c 'test -x /app/libexec/pkgdeck-host-runner'
           flatpak run --command=sh io.github.astrovm.PkgDeck -c '/app/lib/pkgdeck/appimageupdatetool.AppImage --appimage-extract-and-run --version 2>&1' | grep -F 'appimageupdatetool version'

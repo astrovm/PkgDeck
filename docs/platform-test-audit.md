@@ -5,6 +5,9 @@ macOS on x86_64 and aarch64. This document describes the CI coverage contract;
 the checks on the exact PR commit determine whether it passed. Windows is not
 a supported build target.
 
+The GUI moved from Qt/QML to egui after this audit. The tables and notes below
+describe the egui app. The findings are kept as they were found.
+
 ## Shared and platform-specific suites
 
 | Suite | Linux x86_64 | Linux aarch64 | macOS x86_64 | macOS aarch64 |
@@ -12,8 +15,10 @@ a supported build target.
 | Core and CLI unit/integration tests | All | All | All | All |
 | Real CLI terminal confirmation | GNU `script` | GNU `script` | Apple `script` | Apple `script` |
 | Controller and GUI Rust tests | All | All | All applicable | All applicable |
-| QML component/browser tests | Offscreen | Offscreen | Offscreen | Offscreen |
-| GUI startup, broken-QML exit, single-instance forwarding, HTTPS/WebP cache | Yes | Yes | Yes | Yes |
+| Window logic against a fake package manager | All | All | All | All |
+| Single-instance forwarding and HTTPS media cache | Yes | Yes | Yes | Yes |
+| GUI startup | Xvfb | Xvfb | Cocoa smoke test | Cocoa smoke test |
+| Clean exit with no display | Yes | Yes | Not applicable | Not applicable |
 | Native window keyboard lifecycle | Xvfb/xdotool | Xvfb/xdotool | Not automated | Not automated |
 | Real sudo/polkit and APT lock handling | Yes | Yes | Not applicable | Not applicable |
 | AppImage/Snap/Flatpak packaged GUI and host bridge | Yes | Yes | Not applicable | Not applicable |
@@ -22,14 +27,14 @@ a supported build target.
 | Native XML/binary plist, application folders and cask ownership | Not applicable | Not applicable | Yes | Yes |
 
 Native dpkg and AppImage execution tests, and the X11 keyboard driver, run only
-on Linux. X11 testing does not establish native Cocoa interaction coverage. The macOS GUI
-tests use the Qt build that `scripts/bundle-macos.sh` bundles into the
-shipped app. The Homebrew test installs that app through the cask and runs a
-Cocoa startup smoke test through the linked `pkgdeck` command, using Qt Quick's
-software renderer. That smoke test opens the menu bar menu and checks that Qt's
-tray icon was not created, because opening that menu aborts on macOS 27. Cocoa
-startup has a 60-second limit and retains process samples on timeout; the source
-GUI suite still runs if that startup check fails. Qt asks
+on Linux. X11 testing does not establish native Cocoa interaction coverage. The macOS window tests
+build the same `pkgdeck` that `scripts/bundle-macos.sh` bundles into the
+shipped app. The Homebrew test installs that app through the cask and runs
+`scripts/tests/macos-gui.sh` through the linked `pkgdeck` command. It starts
+`pkgdeck --smoke-test` 15 times. Each run must print `PKGDECK_GUI_READY` and
+build the menu bar menu (`PKGDECK_TRAY_MENU Open|Check now|Quit`). Cocoa
+startup has a 60-second limit (180 seconds for the first run) and keeps process
+samples on timeout. AppKit asks
 IconServices for an icon on the main thread when the window takes focus, so the
 check first probes IconServices from a separate process and skips with a warning
 when the runner's daemon does not answer. The Linux formula test accepts a nonzero
@@ -71,9 +76,9 @@ through Linux fixtures.
   rather than treating a short CPU-idle interval as transaction completion.
   The driver runs as the application user and preserves native manager config,
   including Homebrew's trusted-tap settings.
-- Mac QML component tests use the Basic style the shipped Mac app selects, avoiding native controls that reject the app's customization.
-  Banner tests verify that the Linux authorization shortcut is hidden on Mac
-  and test ordinary Settings navigation on both platforms.
+- Mac QML component tests (from the Qt app) used the Basic style the shipped Mac app selected, avoiding native controls that rejected the app's customization.
+  Banner tests verified that the Linux authorization shortcut was hidden on Mac
+  and tested ordinary Settings navigation on both platforms.
 - Applications removed during directory metadata or path resolution are
   reported as skipped entries without discarding the remaining inventory.
 - Negated shell commands outside conditionals were not enforced by `set -e`.
@@ -87,7 +92,7 @@ through Linux fixtures.
 - Homebrew still quarantines cask downloads, and Gatekeeper blocks the ad-hoc
   signed app. The cask clears quarantine after the checksum is verified; CI
   checks the installed app is not quarantined.
-- Qt could not find the bundled plugins when the app ran through Homebrew's
+- The Qt app could not find its bundled plugins when it ran through Homebrew's
   `pkgdeck` symlink. The binary now re-runs itself from inside the bundle, and
   the Cocoa smoke test goes through that symlink.
 - Static-binary checks rejected valid output: `file` prints "statically linked"

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Build a self-contained PkgDeck.app (GUI and pkd) from Homebrew's Qt, then
-# zip it for the Homebrew cask.
+# Build a self-contained PkgDeck.app (GUI and pkd), then zip it for the
+# Homebrew cask.
 set -euo pipefail
 [[ $(uname -s) == Darwin ]] || { echo 'bundle-macos.sh requires macOS' >&2; exit 1; }
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
@@ -11,19 +11,19 @@ case "$(uname -m)" in
     x86_64) arch=x86_64 ;;
     *) echo "Unsupported macOS architecture: $(uname -m)" >&2; exit 1 ;;
 esac
-brew=$(brew --prefix)
 work=$PWD/build/macos
 app=$work/PkgDeck.app
 contents=$app/Contents
 target=${CARGO_TARGET_DIR:-target}/release
 mkdir -p "$work" build/artifacts
 
-QMAKE=$brew/opt/qtbase/bin/qmake cargo build --locked --release -p pkgdeck -p pkd
+cargo build --locked --release -p pkgdeck -p pkd
 
 rm -rf "$app"
 mkdir -p "$contents/MacOS" "$contents/Resources" "$contents/Resources/licenses"
 cp "$target/pkgdeck" "$target/pkd" "$contents/MacOS/"
 cp LICENSE "$contents/Resources/licenses/PkgDeck"
+cp crates/pkgdeck/assets/fonts/Inter-LICENSE.txt "$contents/Resources/licenses/Inter"
 # sudo's password prompt for Homebrew casks that need administrator access.
 install -m 755 packaging/macos/pkgdeck-askpass "$contents/Resources/pkgdeck-askpass"
 iconset=$work/PkgDeck.iconset
@@ -36,11 +36,6 @@ for pair in 16:16x16 32:16x16@2x 32:32x32 64:32x32@2x 128:128x128 256:128x128@2x
 done
 iconutil -c icns "$iconset" -o "$contents/Resources/PkgDeck.icns"
 
-# The bundle starts empty, so -always-overwrite would only make macdeployqt
-# copy, strip and fix every framework again for each of the ~90 plugins it
-# deploys. Its ad-hoc signatures would not survive the rpath fixes below.
-"$brew/bin/macdeployqt" "$app" -no-codesign -qmldir="$PWD/crates/pkgdeck/qml"
-
 # Every Mach-O file must load only system libraries or bundled copies. One
 # file(1) call finds them among the ~2000 files; running it per file is slow.
 leaks=
@@ -52,7 +47,9 @@ while IFS= read -r -d '' file && IFS= read -r kind; do
     awk '/cmd LC_RPATH/ {getline; getline; print $2}' <<<"$load" | while IFS= read -r rpath; do
         [[ $rpath == @* ]] || install_name_tool -delete_rpath "$rpath" "$file"
     done
-    minos+=$(awk '/minos/ {print $2}' <<<"$load")$'\n'
+    # Older targets (x86_64 defaults to 10.12) record it as
+    # LC_VERSION_MIN_MACOSX's version instead of LC_BUILD_VERSION's minos.
+    minos+=$(awk '/minos/ {print $2} /cmd LC_VERSION_MIN_MACOSX/ {getline; getline; print $2}' <<<"$load")$'\n'
     # A copied library keeps its original install name as its ID; only the
     # libraries it loads matter.
     id=$(otool -D "$file" | sed -n 2p)
@@ -64,7 +61,8 @@ done < <(find "$app" -type f -exec file -0 {} +)
 [[ -z $leaks ]] || { printf 'Unbundled library references in:\n%s' "$leaks" >&2; exit 1; }
 
 # The newest minimum OS among bundled binaries is the app's minimum.
-minimum=$(grep . <<<"$minos" | sort -t. -k1,1n -k2,2n | tail -n 1)
+minimum=$(grep . <<<"$minos" | sort -t. -k1,1n -k2,2n | tail -n 1) ||
+    { echo 'No bundled binary records a minimum macOS version' >&2; exit 1; }
 cat > "$contents/Info.plist" <<XML
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

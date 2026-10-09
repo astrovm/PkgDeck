@@ -169,15 +169,19 @@ fn inspect_reads_the_inventory_of_a_manager_that_owns_the_file() {
 #[test]
 fn a_closed_output_is_an_error() {
     let fixture = Fixture::new();
-    let mut child = fixture
+    // Close the reading end before pkd starts. Closing it after could lose
+    // the race to pkd's first write, which then lands in the pipe and
+    // succeeds.
+    let (reader, writer) = std::io::pipe().unwrap();
+    drop(reader);
+    let status = fixture
         .command()
         .args(["--json", "--from", "homebrew", "sources"])
-        .stdout(Stdio::piped())
+        .stdout(writer)
         .stderr(Stdio::null())
-        .spawn()
+        .status()
         .unwrap();
-    drop(child.stdout.take());
-    assert_eq!(child.wait().unwrap().code(), Some(1));
+    assert_eq!(status.code(), Some(1));
 }
 
 #[test]

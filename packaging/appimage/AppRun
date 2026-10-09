@@ -12,6 +12,4 @@ if [ "${1:-}" = "--cli" ]; then
     exec "$appdir/usr/bin/pkd" "$@"
 fi
 export LD_LIBRARY_PATH="$appdir/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-export QT_PLUGIN_PATH="$appdir/usr/plugins"
-export QML_IMPORT_PATH="$appdir/usr/qml"
 exec "$appdir/usr/bin/pkgdeck" "$@"

@@ -15,7 +15,7 @@ cleanup() {
     rm -rf "$work"
 }
 trap cleanup EXIT
-# Qt asks IconServices for the generic app icon when a window first becomes
+# AppKit asks IconServices for the generic app icon when a window first becomes
 # key, synchronously on the main thread. Some runners start iconservicesd
 # lazily or leave it unresponsive; probe it from a separate process so a
 # stalled daemon is reported as such instead of as a PkgDeck startup hang.
@@ -62,12 +62,11 @@ crash_report() {
     ' || head -c 20000 "$report"
 }
 # Exercise the installed wrapper and native window system outside brew test's
-# sandbox. Keep offscreen coverage in the formula and full source GUI suite.
+# sandbox.
 # Shutdown has crashed intermittently, so one clean run is not enough.
 runs=15
 for ((run=1; run<=runs; run++)); do
-    env QT_QPA_PLATFORM=cocoa QT_QUICK_BACKEND=software QT_DEBUG_PLUGINS=1 \
-        XDG_CONFIG_HOME="$work" XDG_DATA_HOME="$work" \
+    env XDG_CONFIG_HOME="$work" XDG_DATA_HOME="$work" \
         "$binary" --smoke-test >"$logs/cocoa-$run.log" 2>&1 &
     pid=$!
     status=
@@ -109,7 +108,7 @@ for ((run=1; run<=runs; run++)); do
     # The pipe is a literal separator. grep without -F would treat it as OR.
     grep -qF 'PKGDECK_TRAY_MENU Open|Check now|Quit' "$logs/cocoa-$run.log" || {
         cat "$logs/cocoa-$run.log"
-        echo "Installed Cocoa startup did not open the menu bar menu (run $run of $runs)" >&2
+        echo "Installed Cocoa startup did not build the menu bar menu (run $run of $runs)" >&2
         exit 1
     }
 done

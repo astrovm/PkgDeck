@@ -2,7 +2,7 @@
 
 `pkgdeck-core` is the engine behind both the app and `pkd`. It handles package
 identity, finding package managers, choosing packages, and running changes. It
-doesn't depend on Qt or on CLI parsing. The engine is synchronous and owns its
+doesn't depend on a GUI toolkit or on CLI parsing. The engine is synchronous and owns its
 `Send` backends. The GUI runs queries on worker threads and receives typed
 results and progress events. For CLI behavior, see the [CLI guide](cli.md).
 

@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
+# Neither the window nor the terminal tool depends on Qt any more; keep it
+# that way, in the dependency graph and in what pkd links.
 set -euo pipefail
-tree=$(cargo tree --locked -p pkd)
+tree=$(cargo tree --locked --workspace)
 if [[ $tree == *cxx-qt* || $tree == *qt-build* ]]; then
-    echo 'Qt dependency leaked into pkd' >&2
+    echo 'Qt dependency leaked into the workspace' >&2
     exit 1
 fi
 binary=${CARGO_TARGET_DIR:-target}/debug/pkd
@@ -17,4 +19,4 @@ if grep -qi 'qt' <<<"$links"; then
     echo 'pkd links Qt' >&2
     exit 1
 fi
-echo 'Terminal dependency graph and binary are Qt-free'
+echo 'Dependency graph and pkd are Qt-free'

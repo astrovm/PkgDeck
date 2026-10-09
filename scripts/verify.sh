@@ -83,23 +83,22 @@ if [[ "$mode" == fast ]]; then
     stage check-qt-free scripts/check-qt-free.sh
 else
     source scripts/dev-env.sh
-    [[ $(qtpaths6 --qt-version) == 6.10.2 ]] || {
-        echo 'Ubuntu Qt 6.10.2 toolchain missing. Install the development prerequisites.' >&2; exit 1;
-    }
     if want coverage; then
         command -v cargo-llvm-cov >/dev/null && [[ $(cargo llvm-cov --version) == 'cargo-llvm-cov 0.9.1' ]] || {
             echo 'cargo-llvm-cov 0.9.1 missing. Run scripts/setup-dev.sh.' >&2; exit 1;
         }
     fi
-    export QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=software
     want lint && stage lint-workspace cargo clippy --workspace --all-targets --locked -- -D warnings
     if want coverage; then
+        # Drawing code is checked by eye and by the GUI tests, as the QML
+        # was; what the window decides is measured like the rest.
+        coverage_ignore='pkgdeck-tools|pkgdeck/src/(ui/|platform\.rs|main\.rs)|pkgdeck/build\.rs'
         mkdir -p coverage
-        stage test-coverage cargo llvm-cov --workspace --include-build-script --ignore-filename-regex pkgdeck-tools --locked --lcov --output-path coverage/lcov.info
+        stage test-coverage cargo llvm-cov --workspace --include-build-script --ignore-filename-regex "$coverage_ignore" --locked --lcov --output-path coverage/lcov.info
         # The 100% gate counts every platform together (CI's Coverage /
         # Combined); code for other platforms is not built here, so this one
         # report is shown, not gated.
-        stage coverage-summary cargo llvm-cov report --summary-only --include-build-script --ignore-filename-regex pkgdeck-tools
+        stage coverage-summary cargo llvm-cov report --summary-only --include-build-script --ignore-filename-regex "$coverage_ignore"
     fi
     want release && stage build-release cargo build --workspace --release --locked
     # Plain debug test run without coverage instrumentation; the aarch64 CI
