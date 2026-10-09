@@ -11777,7 +11777,10 @@ mod tests {
             "{}: Anchor (AVM) couldn't run: No such file or directory (os error 2).",
             operation_title(&operation)
         );
-        assert!(line.contains("/home/fixture"), "the old line named the path");
+        assert!(
+            line.contains("/home/fixture"),
+            "the old line named the path"
+        );
         let notice = write_notice(
             &Job::AutoUpgrade(vec![operation.clone()], false),
             &Ok(Payload::Batch(
@@ -11807,7 +11810,10 @@ mod tests {
             false,
             &names,
         );
-        assert_eq!(install["title"], "Install Anchor (AVM) (Anchor (AVM)) failed");
+        assert_eq!(
+            install["title"],
+            "Install Anchor (AVM) (Anchor (AVM)) failed"
+        );
     }
     #[test]
     fn automatic_runs_skip_updates_that_failed() {
