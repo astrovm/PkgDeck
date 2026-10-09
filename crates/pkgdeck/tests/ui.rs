@@ -237,16 +237,21 @@ fn the_activity_drawer_opens_and_closes() {
 
 #[test]
 fn a_new_page_opens_no_row() {
-    let mut harness = show(Page::Installed);
-    harness.get_by_label_contains("GIMP, APT, System").click();
+    let mut app = app();
+    let task = json!({"kind": "cleanup", "name": "cache", "display_name": "APT download cache",
+                      "source": "apt", "cleanup_kind": "package_cache", "summary": "12 cached downloads"});
+    app.c().set_rows(json!([task]).to_string().into());
+    app.react();
+    app.page = Page::Clean;
+    app.invalidate();
+    let mut harness = harness(app);
     harness.run_steps(4);
-    assert!(harness.state().1.page_open);
-    harness
-        .get_by_role_and_label(Role::Button, "Updates")
-        .click();
-    harness.run_steps(4);
+    // Opening a page focuses its list, as the sidebar does.
+    harness.state_mut().1.ui.focus_list = true;
+    harness.run_steps(3);
+    assert!(!harness.state().1.items.is_empty());
     assert!(harness.state().1.selected.is_none());
-    assert!(!harness.state().1.page_open);
+    assert!(harness.query_by_label("Close details").is_none());
 }
 
 #[test]
