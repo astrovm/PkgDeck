@@ -550,6 +550,18 @@ mod tests {
     }
 
     #[test]
+    fn text_sizes_go_from_small_to_larger() {
+        let zooms = [
+            TextSize::Small,
+            TextSize::Normal,
+            TextSize::Large,
+            TextSize::Larger,
+        ]
+        .map(TextSize::zoom);
+        assert_eq!(zooms, [0.9, 1.0, 1.12, 1.25]);
+    }
+
+    #[test]
     fn without_a_directory_nothing_is_saved() {
         let (mut store, settings) = Store::open(None, None);
         store.save(&Settings {
