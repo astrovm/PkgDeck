@@ -29,6 +29,8 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         });
 }
 
+const SWITCH: Vec2 = vec2(40.0, 24.0);
+
 fn section(ui: &mut Ui, title: &str, content: impl FnOnce(&mut Ui)) {
     let palette = Palette::current(ui.ctx());
     card(&palette)
@@ -42,40 +44,67 @@ fn section(ui: &mut Ui, title: &str, content: impl FnOnce(&mut Ui)) {
         });
 }
 
-/// A label with an optional line under it, and a control on the right.
-fn setting_row(ui: &mut Ui, label: &str, hint: &str, control: impl FnOnce(&mut Ui)) {
+/// A label with an optional line under it, and a control `size` big: on
+/// the right, both centred, while the text keeps room to wrap; under the
+/// text when it wouldn't.
+fn setting_row(ui: &mut Ui, label: &str, hint: &str, size: Vec2, control: impl FnOnce(&mut Ui)) {
     let palette = Palette::current(ui.ctx());
-    let text = |ui: &mut Ui| {
-        ui.vertical(|ui| {
-            ui.label(
-                egui::RichText::new(label)
-                    .font(theme::font(14.5))
-                    .color(palette.ink),
-            );
-            if !hint.is_empty() {
-                ui.label(
-                    egui::RichText::new(hint)
-                        .font(theme::font(12.5))
-                        .color(palette.muted),
-                );
-            }
-        });
+    let full = ui.available_width();
+    let gap = 20.0;
+    let beside = full - size.x - gap >= 200.0;
+    let text_width = if beside { full - size.x - gap } else { full };
+    // Laid out once, so what's measured is exactly what's drawn.
+    let layout = |text: &str, size: f32, color| {
+        ui.painter()
+            .layout(text.to_owned(), theme::font(size), color, text_width)
     };
-    if ui.available_width() < 480.0 {
-        text(ui);
-        control(ui);
+    let title = layout(label, 14.5, palette.ink);
+    let note = (!hint.is_empty()).then(|| layout(hint, 12.5, palette.muted));
+    let spacing = 2.0;
+    let text_height = title.size().y + note.as_ref().map_or(0.0, |n| spacing + n.size().y);
+    let height = if beside {
+        text_height.max(size.y)
     } else {
-        ui.horizontal(|ui| {
-            text(ui);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), control);
-        });
-    }
-    ui.add_space(10.0);
+        text_height + 8.0 + size.y
+    };
+    let (rect, _) = ui.allocate_exact_size(vec2(full, height), Sense::hover());
+    let text_top = if beside {
+        rect.center().y - text_height / 2.0
+    } else {
+        rect.top()
+    };
+    let text_rect = egui::Rect::from_min_size(
+        egui::pos2(rect.left(), text_top),
+        vec2(text_width, text_height),
+    );
+    ui.scope_builder(egui::UiBuilder::new().max_rect(text_rect), |ui| {
+        ui.spacing_mut().item_spacing.y = spacing;
+        ui.add(egui::Label::new(title));
+        if let Some(note) = note {
+            ui.add(egui::Label::new(note));
+        }
+    });
+    let control_rect = if beside {
+        egui::Rect::from_min_size(
+            egui::pos2(rect.right() - size.x, rect.center().y - size.y / 2.0),
+            size,
+        )
+    } else {
+        egui::Rect::from_min_size(egui::pos2(rect.left(), rect.bottom() - size.y), size)
+    };
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(control_rect)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        control,
+    );
+    // Clearly more than the gap between lines, so wrapped rows stay apart.
+    ui.add_space(14.0);
 }
 
 fn appearance(app: &mut App, ui: &mut Ui) {
     section(ui, "Appearance", |ui| {
-        setting_row(ui, "Theme", "", |ui| {
+        setting_row(ui, "Theme", "", vec2(252.0, 34.0), |ui| {
             let current = match app.settings.appearance {
                 Appearance::System => 0,
                 Appearance::Light => 1,
@@ -92,6 +121,7 @@ fn appearance(app: &mut App, ui: &mut Ui) {
             ui,
             "Animations",
             "Movement when things open, close and change",
+            SWITCH,
             |ui| {
                 let mut on = !app.settings.reduce_motion;
                 if switch(ui, &mut on, true, "Animations").changed() {
@@ -174,6 +204,7 @@ fn update_checks(app: &mut App, ui: &mut Ui) {
             } else {
                 "Keeps checking from the system tray after the window closes"
             },
+            SWITCH,
             |ui| {
                 let mut on = background;
                 if switch(ui, &mut on, true, "Background checks").changed() {
@@ -189,22 +220,28 @@ fn update_checks(app: &mut App, ui: &mut Ui) {
             },
         );
         let interval = model::nearest_interval(app.settings.check_interval);
-        setting_row(ui, "Check every", model::INTERVALS[interval].1, |ui| {
-            let mut index = interval;
-            if steps(
-                ui,
-                Id::new("interval"),
-                model::INTERVALS.len(),
-                &mut index,
-                background,
-                240.0,
-            ) {
-                let minutes = model::INTERVALS[index].0;
-                app.settings.check_interval = minutes;
-                app.c().set_check_interval(minutes);
-            }
-        });
-        setting_row(ui, "Install updates automatically", "", |ui| {
+        setting_row(
+            ui,
+            "Check every",
+            model::INTERVALS[interval].1,
+            vec2(240.0, 28.0),
+            |ui| {
+                let mut index = interval;
+                if steps(
+                    ui,
+                    Id::new("interval"),
+                    model::INTERVALS.len(),
+                    &mut index,
+                    background,
+                    240.0,
+                ) {
+                    let minutes = model::INTERVALS[index].0;
+                    app.settings.check_interval = minutes;
+                    app.c().set_check_interval(minutes);
+                }
+            },
+        );
+        setting_row(ui, "Install updates automatically", "", SWITCH, |ui| {
             let mut on = app.settings.auto_update;
             if switch(ui, &mut on, background, "Install updates automatically").changed() {
                 app.settings.auto_update = on;
@@ -215,6 +252,7 @@ fn update_checks(app: &mut App, ui: &mut Ui) {
             ui,
             "Allow updates that remove packages",
             "Like an old kernel replaced by a new one",
+            SWITCH,
             |ui| {
                 let mut on = app.settings.allow_removals;
                 if switch(ui, &mut on, true, "Allow updates that remove packages").changed() {
@@ -227,6 +265,7 @@ fn update_checks(app: &mut App, ui: &mut Ui) {
             ui,
             "Allow automatic updates without a password",
             "Changes you start still ask",
+            SWITCH,
             |ui| {
                 let mut on = !app.settings.system_approval.is_empty();
                 if switch(
@@ -247,7 +286,7 @@ fn update_checks(app: &mut App, ui: &mut Ui) {
             ui.label(egui::RichText::new(error).color(palette.danger));
         }
         if cfg!(any(target_os = "linux", target_os = "macos")) {
-            setting_row(ui, "Start in background at login", "", |ui| {
+            setting_row(ui, "Start in background at login", "", SWITCH, |ui| {
                 let mut on = app.settings.autostart;
                 let can = background && app.platform.tray_available();
                 if switch(ui, &mut on, can, "Start in background at login").changed()

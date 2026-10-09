@@ -366,7 +366,7 @@ fn app_page(
         ui.add_space(8.0);
         // Body.
         let loaded = details.as_ref().is_some_and(|d| !d.more || opened);
-        let fade = progress_since(&ctx, app.details_loaded.elapsed().as_secs_f32(), 0.18);
+        let fade = progress_since(&ctx, app.details_loaded.elapsed().as_secs_f32(), 0.14);
         egui::ScrollArea::vertical().id_salt(("page-body", &identity)).auto_shrink([false, false]).show(ui, |ui| {
             ui.set_width(ui.available_width());
             if app.review_on_page {

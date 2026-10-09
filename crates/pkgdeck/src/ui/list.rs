@@ -531,8 +531,8 @@ fn rows(app: &mut App, ui: &mut Ui, body: Rect, width: Width) {
                         pos2(ui.max_rect().right(), origin + offsets[index + 1]),
                     );
                     // Rows arrive one after another, rising into place.
-                    let delay = (index - first).min(12) as f32 * 0.025;
-                    let appear = progress_since(&ctx, since - delay, 0.26);
+                    let delay = (index - first).min(10) as f32 * 0.014;
+                    let appear = progress_since(&ctx, since - delay, 0.2);
                     let hovered = if appear < 1.0 {
                         let mut child = ui.new_child(
                             UiBuilder::new()
