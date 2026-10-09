@@ -885,5 +885,8 @@ fn the_window_sleeps_until_something_is_due() {
     app.c().set_needs_poll(true);
     let wait = app.tick(later);
     assert_eq!(app.last_poll, later);
-    assert!(wait == Duration::from_secs(1) || wait == SLEEP, "{wait:?}");
+    // Still reading, and nothing is due: it looks again in a second in case
+    // a worker stops without a reply.
+    assert!(*app.ctl.needs_poll());
+    assert_eq!(wait, Duration::from_secs(1));
 }

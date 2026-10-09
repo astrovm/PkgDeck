@@ -975,3 +975,16 @@ fn the_installed_filter_ignores_case_and_spaces_and_keeps_same_app_copies() {
     assert_eq!(shown("nothing"), Vec::<String>::new());
     assert_eq!(shown("").len(), 4);
 }
+
+#[test]
+fn a_rows_filter_cache_does_not_change_what_it_equals() {
+    let rows = vec![row(json!({"name": "gimp"})), row(json!({"name": "gimp"}))];
+    let options = ViewOptions {
+        page: Some(Page::Installed),
+        filter: "gimp",
+        ..ViewOptions::default()
+    };
+    assert_eq!(visible(&rows[..1], &options).len(), 1);
+    assert_eq!(rows[0], rows[1]);
+    assert_ne!(rows[0], row(json!({"name": "htop"})));
+}

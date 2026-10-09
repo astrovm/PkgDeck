@@ -3,7 +3,10 @@
 //! controller with no package managers; rows are set by hand.
 
 use eframe::egui::{self, accesskit::Role};
-use egui_kittest::{kittest::Queryable, Harness};
+use egui_kittest::{
+    kittest::{NodeT, Queryable},
+    Harness,
+};
 use pkgdeck::{
     app::{App, Launch},
     model::Page,
@@ -272,4 +275,92 @@ fn rows_work_while_they_animate_in() {
     harness.key_press(egui::Key::ArrowDown);
     harness.run_steps(30);
     assert_eq!(harness.state().1.selected_row().unwrap().name, "htop");
+}
+
+#[test]
+fn a_running_change_shows_its_words_only_while_it_is_the_live_one() {
+    let mut app = app();
+    app.activity = serde_json::from_value(json!([{
+        "id": 7, "operations": [{"upgrade_all": {"backend": "apt"}}],
+        "labels": ["Update all (APT)"], "started_at": 1, "state": "running", "outcomes": []
+    }]))
+    .unwrap();
+    app.drawer_open = true;
+    app.busy = true;
+    app.writing = true;
+    app.progress.activity_id = Some(7);
+    app.progress.label = "Unpacking htop".into();
+    let mut harness = harness(app);
+    harness.run_steps(4);
+    // The drawer is on the right; the page may have its own Cancel.
+    let cancel_in_drawer = |harness: &Harness<'static, (bool, App)>| {
+        harness
+            .query_all_by_label("Cancel")
+            .any(|node| node.rect().left() > 700.0)
+    };
+    assert!(harness.query_by_label("Unpacking htop").is_some());
+    assert!(cancel_in_drawer(&harness));
+    // Reading with a count: the count, but nothing to cancel.
+    {
+        let app = &mut harness.state_mut().1;
+        // Not busy, so the page has no Cancel of its own for a load.
+        app.busy = false;
+        app.writing = false;
+        app.reading = true;
+        app.progress.label.clear();
+        app.progress.done = 1;
+        app.progress.total = 3;
+    }
+    harness.run_steps(2);
+    assert!(harness.query_by_label("1 of 3").is_some());
+    assert!(!cancel_in_drawer(&harness));
+    // Another change is the live one.
+    {
+        let app = &mut harness.state_mut().1;
+        app.writing = true;
+        app.progress.label = "Unpacking htop".into();
+        app.progress.activity_id = Some(8);
+    }
+    harness.run_steps(2);
+    assert!(harness.query_by_label("Unpacking htop").is_none());
+    assert!(harness.query_by_label("1 of 3").is_none());
+    assert!(!cancel_in_drawer(&harness));
+}
+
+#[test]
+fn clean_all_works_while_lists_load_but_waits_for_a_change() {
+    let mut app = app();
+    let task = |name: &str| {
+        json!({"kind": "cleanup", "name": name, "display_name": name, "source": "apt",
+               "cleanup_kind": "package_cache", "summary": "12 cached downloads"})
+    };
+    app.c().set_rows(
+        json!([task("APT download cache"), task("Unused dependencies")])
+            .to_string()
+            .into(),
+    );
+    app.react();
+    app.page = Page::Clean;
+    app.invalidate();
+    app.busy = true;
+    app.reading = true;
+    let mut harness = harness(app);
+    harness.run_steps(4);
+    let enabled = |harness: &Harness<'static, (bool, App)>| {
+        !harness
+            .get_by_role_and_label(Role::Button, "Clean all")
+            .accesskit_node()
+            .is_disabled()
+    };
+    assert!(enabled(&harness));
+    harness.state_mut().1.reading = false;
+    harness.run_steps(2);
+    assert!(!enabled(&harness));
+    {
+        let app = &mut harness.state_mut().1;
+        app.busy = false;
+        app.retained = Some(Vec::new());
+    }
+    harness.run_steps(2);
+    assert!(!enabled(&harness));
 }

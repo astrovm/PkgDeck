@@ -2928,9 +2928,10 @@ fn write_views(
     generation: u64,
     written: &std::sync::Mutex<u64>,
 ) -> bool {
-    let Ok(mut last) = written.lock() else {
-        return false;
-    };
+    // A writer that panicked left a generation that's still worth comparing.
+    let mut last = written
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if *last > generation {
         return false;
     }
