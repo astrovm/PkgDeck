@@ -945,3 +945,33 @@ fn only_another_machines_apt_architecture_is_named() {
         "{line}"
     );
 }
+
+#[test]
+fn the_installed_filter_ignores_case_and_spaces_and_keeps_same_app_copies() {
+    let rows = vec![
+        row(
+            json!({"name": "firefox", "display_name": "Firefox", "installed": "1", "same_app_group": "fx"}),
+        ),
+        row(
+            json!({"name": "org.mozilla.firefox", "source": "flatpak", "installed": "1", "same_app_group": "fx"}),
+        ),
+        row(json!({"name": "gimp", "summary": "Image Editor", "installed": "1"})),
+        row(json!({"name": "htop", "installed": "1"})),
+    ];
+    let shown = |filter: &str| {
+        let options = ViewOptions {
+            page: Some(Page::Installed),
+            filter,
+            ..ViewOptions::default()
+        };
+        let mut names = names(&rows, &visible(&rows, &options));
+        names.sort();
+        names
+    };
+    assert_eq!(shown("  IMAGE "), ["gimp"]);
+    // A match on one copy keeps the other copies of that app.
+    assert_eq!(shown("Firefox"), ["firefox", "org.mozilla.firefox"]);
+    assert_eq!(shown("flatpak"), ["firefox", "org.mozilla.firefox"]);
+    assert_eq!(shown("nothing"), Vec::<String>::new());
+    assert_eq!(shown("").len(), 4);
+}

@@ -99,6 +99,20 @@ pub struct Row {
     pub availability_kind: String,
     pub check_failed: bool,
     pub capabilities: Vec<String>,
+    #[serde(skip)]
+    search: SearchText,
+}
+
+/// A row's searchable text, lowercased the first time a filter needs it so
+/// each keystroke doesn't build it again for every row.
+#[derive(Clone, Debug, Default)]
+struct SearchText(std::sync::OnceLock<String>);
+
+/// A cache, not part of what a row is.
+impl PartialEq for SearchText {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
 }
 
 impl Row {
@@ -1029,15 +1043,20 @@ pub fn relevance(row: &Row, query: &str) -> u32 {
     score + if row.fabricated() { 6 } else { 0 }
 }
 
+/// Whether `row` matches `filter`, already trimmed and lowercased.
 fn filter_matches(row: &Row, filter: &str) -> bool {
-    let filter = filter.trim().to_lowercase();
     filter.is_empty()
-        || format!(
-            "{} {} {} {}",
-            row.name, row.display_name, row.summary, row.source
-        )
-        .to_lowercase()
-        .contains(&filter)
+        || row
+            .search
+            .0
+            .get_or_init(|| {
+                format!(
+                    "{} {} {} {}",
+                    row.name, row.display_name, row.summary, row.source
+                )
+                .to_lowercase()
+            })
+            .contains(filter)
 }
 
 fn sort_key(row: &Row, column: Column) -> String {
@@ -1101,15 +1120,21 @@ pub fn visible(rows: &[Row], options: &ViewOptions) -> Vec<Item> {
         })
         .collect();
     if page == Some(Page::Installed) {
+        let filter = options.filter.trim().to_lowercase();
+        let matching: Vec<bool> = kept
+            .iter()
+            .map(|&index| filter_matches(&rows[index], &filter))
+            .collect();
         let groups_matching: HashSet<&str> = kept
             .iter()
-            .map(|&index| &rows[index])
-            .filter(|row| filter_matches(row, options.filter))
-            .filter_map(|row| row.same_app_group.as_deref())
+            .zip(&matching)
+            .filter(|(_, &matches)| matches)
+            .filter_map(|(&index, _)| rows[index].same_app_group.as_deref())
             .collect();
+        let mut matching = matching.into_iter();
         kept.retain(|&index| {
             let row = &rows[index];
-            (filter_matches(row, options.filter)
+            (matching.next().unwrap_or(false)
                 || row
                     .same_app_group
                     .as_deref()
