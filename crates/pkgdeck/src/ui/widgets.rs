@@ -14,9 +14,9 @@ use eframe::egui::{
 };
 
 pub const CONTROL_HEIGHT: f32 = 36.0;
-pub const FEEDBACK: f32 = 0.08;
-pub const REVEAL: f32 = 0.16;
-pub const LAYOUT: f32 = 0.22;
+pub const FEEDBACK: f32 = 0.06;
+pub const REVEAL: f32 = 0.12;
+pub const LAYOUT: f32 = 0.17;
 
 fn motion_id() -> Id {
     Id::new("pkgdeck-reduce-motion")
@@ -39,9 +39,67 @@ pub fn secs(ctx: &egui::Context, seconds: f32) -> f32 {
 pub fn ease(ctx: &egui::Context, id: Id, value: bool, seconds: f32) -> f32 {
     ctx.animate_bool_with_time_and_easing(id, value, secs(ctx, seconds), easing::cubic_out)
 }
-/// Moves smoothly toward `target`.
+/// Where a [`glide`] is and how fast it moves.
+#[derive(Clone, Copy)]
+struct Spring {
+    at: f32,
+    speed: f32,
+    time: f64,
+}
+
+/// Moves toward `target` like a critically damped spring: it settles in
+/// about `seconds` without overshooting, and a target that changes on the
+/// way bends the motion instead of restarting it.
 pub fn glide(ctx: &egui::Context, id: Id, target: f32, seconds: f32) -> f32 {
-    ctx.animate_value_with_time(id, target, secs(ctx, seconds))
+    let seconds = secs(ctx, seconds);
+    let now = ctx.input(|input| input.time);
+    let id = id.with("glide");
+    let Some(mut spring) = ctx.data(|data| data.get_temp::<Spring>(id)) else {
+        ctx.data_mut(|data| {
+            data.insert_temp(
+                id,
+                Spring {
+                    at: target,
+                    speed: 0.0,
+                    time: now,
+                },
+            )
+        });
+        return target;
+    };
+    let dt = ((now - spring.time) as f32).clamp(0.0, 0.1);
+    spring.time = now;
+    if seconds <= 0.0 {
+        spring.at = target;
+        spring.speed = 0.0;
+    } else {
+        let (at, speed) = spring_step(spring.at - target, spring.speed, 6.0 / seconds, dt);
+        // Close enough to stop asking for frames: under a fraction of a
+        // pixel, or of a percent for fractions.
+        let close = 2e-4 * target.abs().max(1.0);
+        if at.abs() < close && speed.abs() < close * 10.0 {
+            spring.at = target;
+            spring.speed = 0.0;
+        } else {
+            spring.at = target + at;
+            spring.speed = speed;
+            ctx.request_repaint();
+        }
+    }
+    ctx.data_mut(|data| data.insert_temp(id, spring));
+    spring.at
+}
+
+/// One step of a critically damped spring: `offset` from rest and `speed`
+/// after `dt` seconds with stiffness `omega`. Exact, so uneven frames don't
+/// change the path.
+pub fn spring_step(offset: f32, speed: f32, omega: f32, dt: f32) -> (f32, f32) {
+    let decay = (-omega * dt).exp();
+    let push = speed + omega * offset;
+    (
+        (offset + push * dt) * decay,
+        (speed - omega * push * dt) * decay,
+    )
 }
 /// How far along an animation that started `elapsed` seconds ago is.
 pub fn progress_since(ctx: &egui::Context, elapsed: f32, seconds: f32) -> f32 {

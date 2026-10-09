@@ -376,3 +376,28 @@ fn clean_all_works_while_lists_load_but_waits_for_a_change() {
     harness.run_steps(2);
     assert!(!enabled(&harness));
 }
+
+#[test]
+fn glides_settle_without_overshoot_whatever_the_frame_rate() {
+    use pkgdeck::ui::widgets::spring_step;
+    let omega = 6.0 / 0.17;
+    // From 100 px away at rest, in 60 Hz frames.
+    let (mut offset, mut speed) = (100.0_f32, 0.0_f32);
+    for _ in 0..60 {
+        (offset, speed) = spring_step(offset, speed, omega, 1.0 / 60.0);
+        assert!(offset >= 0.0, "overshot to {offset}");
+    }
+    assert!(offset < 0.01, "still {offset} away after a second");
+    // Two half steps land where one whole step does.
+    let whole = spring_step(40.0, -300.0, omega, 0.02);
+    let half = spring_step(40.0, -300.0, omega, 0.01);
+    let halves = spring_step(half.0, half.1, omega, 0.01);
+    assert!((whole.0 - halves.0).abs() < 1e-3 && (whole.1 - halves.1).abs() < 1e-2);
+    // Most of the way there in the time it's given.
+    let mut offset = 100.0_f32;
+    let mut speed = 0.0_f32;
+    for _ in 0..10 {
+        (offset, speed) = spring_step(offset, speed, omega, 0.017);
+    }
+    assert!(offset < 5.0, "{offset}");
+}

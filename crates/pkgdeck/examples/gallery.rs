@@ -243,6 +243,11 @@ fn main() {
     render("settings", [1180.0, 900.0], true, |app| {
         offline(app, Page::Settings)
     });
+    for width in [900.0, 700.0, 460.0] {
+        render(&format!("settings-{width}"), [width, 900.0], true, |app| {
+            offline(app, Page::Settings)
+        });
+    }
     render("narrow", [520.0, 760.0], true, |app| {
         offline(app, Page::Installed)
     });

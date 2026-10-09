@@ -415,7 +415,7 @@ fn content_ui(app: &mut App, ui: &mut Ui, rect: Rect) {
         pos2(inner.right(), rect.bottom() - margin.min(20.0)),
     );
     // Each page fades and rises into place.
-    let entered = progress_since(&ctx, app.page_changed.elapsed().as_secs_f32(), 0.22);
+    let entered = progress_since(&ctx, app.page_changed.elapsed().as_secs_f32(), 0.16);
     let lift = (1.0 - entered) * 10.0;
     let inner = inner.translate(vec2(0.0, lift));
     ui.scope_builder(UiBuilder::new().max_rect(inner).id_salt("content"), |ui| {
