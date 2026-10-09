@@ -27,13 +27,16 @@ jobs:
   # starts from main's build outputs instead of compiling from scratch.
   changes:
     # A pull request that only touches docs/ or Markdown builds nothing, so
-    # it skips the test and package jobs and CI / Required passes alone.
+    # it skips the test and package jobs and CI / Required passes alone. A
+    # release formula PR only changes the recipes, so it runs just the
+    # Homebrew tests against the published release.
     name: PR / Check changed files
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     outputs:
-      docs_only: ${{ steps.check.outputs.docs_only }}
+      scope: ${{ steps.check.outputs.scope }}
+      builds: ${{ steps.check.outputs.scope == 'full' }}
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -42,14 +45,20 @@ jobs:
           fetch-depth: 2
       - name: List what the pull request changes
         id: check
+        env:
+          HEAD_REF: ${{ github.head_ref }}
         run: |
           changed=$(git diff --name-only HEAD^1 HEAD)
           printf '%s\n' "$changed"
-          if [[ -n $changed ]] && ! grep -qvE '^docs/|\.md$' <<< "$changed"; then
+          only() { [[ -n $changed ]] && ! grep -qvE "$1" <<< "$changed"; }
+          if only '^docs/|\.md$'; then
               echo '::notice::Only docs changed, so tests and packages are skipped.'
-              echo docs_only=true >> "$GITHUB_OUTPUT"
+              echo scope=docs >> "$GITHUB_OUTPUT"
+          elif [[ $HEAD_REF == release/homebrew-* ]] && only '^(Formula|Casks)/|^docs/|\.md$'; then
+              echo '::notice::Only the Homebrew recipes changed, so only the Homebrew tests run.'
+              echo scope=homebrew >> "$GITHUB_OUTPUT"
           else
-              echo docs_only=false >> "$GITHUB_OUTPUT"
+              echo scope=full >> "$GITHUB_OUTPUT"
           fi
 
   reviewed:
@@ -114,7 +123,7 @@ jobs:
     # and the real sudo/polkit authorization tests.
     name: Test / Linux (${{ matrix.arch }})
     needs: [changes, reviewed, release-proof]
-    if: "!cancelled() && (github.event_name != 'push' || github.ref == 'refs/heads/main' || (startsWith(github.ref, 'refs/tags/v') && needs.release-proof.outputs.tested != 'true')) && !inputs.homebrew_only && needs.changes.outputs.docs_only != 'true'"
+    if: "!cancelled() && (github.event_name != 'push' || github.ref == 'refs/heads/main' || (startsWith(github.ref, 'refs/tags/v') && needs.release-proof.outputs.tested != 'true')) && !inputs.homebrew_only && needs.changes.outputs.builds != 'false'"
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -179,7 +188,7 @@ jobs:
     # macOS runners, so separate jobs for each queued behind one another.
     name: Test / macOS (${{ matrix.arch }})
     needs: [changes, reviewed, release-proof]
-    if: "!cancelled() && (github.event_name != 'push' || github.ref == 'refs/heads/main' || (startsWith(github.ref, 'refs/tags/v') && needs.release-proof.outputs.tested != 'true')) && !inputs.homebrew_only && needs.changes.outputs.docs_only != 'true'"
+    if: "!cancelled() && (github.event_name != 'push' || github.ref == 'refs/heads/main' || (startsWith(github.ref, 'refs/tags/v') && needs.release-proof.outputs.tested != 'true')) && !inputs.homebrew_only && needs.changes.outputs.builds != 'false'"
     timeout-minutes: 70
     strategy:
       fail-fast: false
@@ -266,7 +275,7 @@ jobs:
   test-podman:
     name: Test / Podman (${{ matrix.arch }})
     needs: [changes, reviewed, release-proof]
-    if: "!cancelled() && (github.event_name != 'push' || github.ref == 'refs/heads/main' || (startsWith(github.ref, 'refs/tags/v') && needs.release-proof.outputs.tested != 'true')) && !inputs.homebrew_only && needs.changes.outputs.docs_only != 'true'"
+    if: "!cancelled() && (github.event_name != 'push' || github.ref == 'refs/heads/main' || (startsWith(github.ref, 'refs/tags/v') && needs.release-proof.outputs.tested != 'true')) && !inputs.homebrew_only && needs.changes.outputs.builds != 'false'"
     timeout-minutes: 35
     strategy:
       fail-fast: false
@@ -335,7 +344,7 @@ jobs:
     # their time queued for runners and setting up. scripts/tests/backends.sh
     # still reports each backend. The macOS managers run in Test / macOS.
     name: Test / Backends / ${{ matrix.group }} (${{ matrix.platform }})
-    if: "!cancelled() && (github.event_name != 'push' || (startsWith(github.ref, 'refs/tags/v') && needs.release-proof.outputs.tested != 'true')) && !inputs.homebrew_only && needs.changes.outputs.docs_only != 'true'"
+    if: "!cancelled() && (github.event_name != 'push' || (startsWith(github.ref, 'refs/tags/v') && needs.release-proof.outputs.tested != 'true')) && !inputs.homebrew_only && needs.changes.outputs.builds != 'false'"
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -409,7 +418,7 @@ jobs:
   package-macos:
     needs: [changes, reviewed]
     name: Package / macOS app (${{ matrix.arch }})
-    if: "!cancelled() && !inputs.homebrew_only && needs.changes.outputs.docs_only != 'true'"
+    if: "!cancelled() && !inputs.homebrew_only && needs.changes.outputs.builds != 'false'"
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     strategy:
@@ -495,7 +504,7 @@ jobs:
   package-linux-cli:
     needs: [changes, reviewed]
     name: Package / Linux CLI (${{ matrix.arch }})
-    if: "!cancelled() && !inputs.homebrew_only && needs.changes.outputs.docs_only != 'true'"
+    if: "!cancelled() && !inputs.homebrew_only && needs.changes.outputs.builds != 'false'"
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     strategy:
@@ -556,12 +565,12 @@ jobs:
 
   test-homebrew:
     name: Test / Homebrew (${{ matrix.runner }})
-    needs: [reviewed, release-proof, package-linux-cli]
+    needs: [changes, reviewed, release-proof, package-linux-cli]
     # Release formula PRs and homebrew_only runs test the committed recipes
     # against published assets; other runs test this checkout's packages.
     if: >-
       !cancelled() && (github.event_name != 'push' || github.ref == 'refs/heads/main' || (startsWith(github.ref, 'refs/tags/v') && needs.release-proof.outputs.tested != 'true')) &&
-      (inputs.homebrew_only || (needs.package-linux-cli.result == 'success' && needs.reviewed.outputs.tested != 'true'))
+      (inputs.homebrew_only || needs.changes.outputs.scope == 'homebrew' || (needs.package-linux-cli.result == 'success' && needs.reviewed.outputs.tested != 'true'))
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     strategy:
@@ -659,7 +668,7 @@ jobs:
   package-bundles:
     needs: [changes, reviewed]
     name: Package / AppImage + Snap (${{ matrix.arch }})
-    if: "!cancelled() && !inputs.homebrew_only && needs.changes.outputs.docs_only != 'true'"
+    if: "!cancelled() && !inputs.homebrew_only && needs.changes.outputs.builds != 'false'"
     # Usually under 12 minutes; a slow Ubuntu mirror has stretched it past 30.
     timeout-minutes: 45
     strategy:
@@ -783,7 +792,7 @@ jobs:
   package-flatpak:
     name: Package / Flatpak (${{ matrix.arch }})
     needs: changes
-    if: "!cancelled() && github.ref != 'refs/heads/main' && !inputs.homebrew_only && needs.changes.outputs.docs_only != 'true'"
+    if: "!cancelled() && github.ref != 'refs/heads/main' && !inputs.homebrew_only && needs.changes.outputs.builds != 'false'"
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -981,13 +990,16 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Require every PR validation job to pass
-        if: needs.changes.outputs.docs_only != 'true'
+        if: needs.changes.outputs.builds != 'false'
         env:
           RESULTS: ${{ toJSON(needs.*.result) }}
         run: jq --exit-status 'length > 0 and all(. == "success")' <<< "$RESULTS"
       - name: Require the changed files check to pass
-        if: needs.changes.outputs.docs_only == 'true'
+        if: needs.changes.outputs.scope == 'docs'
         run: test '${{ needs.changes.result }}' = success
+      - name: Require the changed files check and Homebrew tests to pass
+        if: needs.changes.outputs.scope == 'homebrew'
+        run: test '${{ needs.changes.result }}/${{ needs.test-homebrew.result }}' = success/success
       - name: Check out tested source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Record tested source tree
