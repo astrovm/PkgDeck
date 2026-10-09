@@ -202,7 +202,9 @@ fn settings_switches_change_settings() {
     harness.get_by_label("Light").click();
     harness.run_steps(3);
     assert_eq!(harness.state().1.settings.appearance, Appearance::Light);
-    for choice in ["Black", "Paper", "Teal", "Large"] {
+    // Only the colours of the mode on screen are offered.
+    assert!(harness.query_by_label("Black").is_none());
+    for choice in ["Paper", "Dark", "Black", "Teal", "Large"] {
         harness.get_by_label(choice).click();
         harness.run_steps(3);
     }

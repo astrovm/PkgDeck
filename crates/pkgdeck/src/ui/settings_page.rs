@@ -115,12 +115,10 @@ fn appearance(app: &mut App, ui: &mut Ui) {
                 app.settings.appearance = all[choice];
             }
         });
-        setting_row(
-            ui,
-            "Dark colours",
-            "Charcoal is neutral grey, Black is for OLED screens",
-            vec2(252.0, 34.0),
-            |ui| {
+        // Only the colours of the appearance on screen; the other mode keeps
+        // its own choice.
+        setting_row(ui, "Colours", "", vec2(252.0, 34.0), |ui| {
+            if ui.ctx().theme() == egui::Theme::Dark {
                 let all = [DarkTheme::Charcoal, DarkTheme::Black, DarkTheme::Slate];
                 if let Some(choice) = segmented(
                     ui,
@@ -130,14 +128,7 @@ fn appearance(app: &mut App, ui: &mut Ui) {
                 ) {
                     app.settings.dark_theme = all[choice];
                 }
-            },
-        );
-        setting_row(
-            ui,
-            "Light colours",
-            "Paper is warm, White is neutral grey",
-            vec2(252.0, 34.0),
-            |ui| {
+            } else {
                 let all = [LightTheme::Classic, LightTheme::White, LightTheme::Paper];
                 if let Some(choice) = segmented(
                     ui,
@@ -147,19 +138,13 @@ fn appearance(app: &mut App, ui: &mut Ui) {
                 ) {
                     app.settings.light_theme = all[choice];
                 }
-            },
-        );
-        setting_row(
-            ui,
-            "Accent",
-            "Buttons, selection and links",
-            vec2(swatches_width(), 34.0),
-            |ui| {
-                if let Some(accent) = swatches(ui, app.settings.accent) {
-                    app.settings.accent = accent;
-                }
-            },
-        );
+            }
+        });
+        setting_row(ui, "Accent", "", vec2(swatches_width(), 34.0), |ui| {
+            if let Some(accent) = swatches(ui, app.settings.accent) {
+                app.settings.accent = accent;
+            }
+        });
         setting_row(ui, "Text size", "", vec2(336.0, 34.0), |ui| {
             let all = [
                 TextSize::Small,

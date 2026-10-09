@@ -459,9 +459,10 @@ out of date, and each page refreshes when you open it.
 ## Settings
 
 - **Theme**: **System**, **Light** or **Dark**.
-- **Dark colours**: **Charcoal** (neutral grey, the default), **Black** (for
-  OLED screens) or **Slate** (the blue-grey of earlier versions).
-- **Light colours**: **Classic**, **White** (neutral grey) or **Paper** (warm).
+- **Colours**: the colours of the mode on screen. In dark mode, **Charcoal**
+  (neutral grey, the default), **Black** (for OLED screens) or **Slate** (the
+  blue-grey of earlier versions). In light mode, **Classic**, **White**
+  (neutral grey) or **Paper** (warm). Each mode keeps its own choice.
 - **Accent**: the colour of buttons, selection and links. Blue, purple, pink,
   red, orange, green, teal or graphite.
 - **Text size**: **Small**, **Normal**, **Large** or **Larger**. Everything
