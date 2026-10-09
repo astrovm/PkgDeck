@@ -74,7 +74,11 @@ fn draw(
         .build_ui_state(
             move |ui, (ready, app): &mut (bool, App)| {
                 if !*ready {
-                    crate::setup(ui.ctx(), std::path::Path::new("/"), None);
+                    // This root has no host font directories: snapshots use the
+                    // bundled faces and egui fallbacks on every OS and architecture.
+                    let root =
+                        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+                    crate::setup(ui.ctx(), &root, None);
                     set_reduce_motion(ui.ctx(), true);
                     *ready = true;
                     return;
@@ -222,6 +226,12 @@ fn package_headers_show_actions_for_opened_files_and_both_flatpak_scopes() {
         let texts = painted.as_array().unwrap();
         let has_user = texts.iter().any(|entry| entry["text"] == "User");
         assert_eq!(has_user, count > 1);
+        let has_merged_label = texts.iter().any(|entry| {
+            entry["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("System and user"))
+        });
+        assert_eq!(has_merged_label, count > 1);
     }
 }
 
@@ -355,6 +365,7 @@ fn page_headers_keep_their_title_and_actions_in_the_reviewed_positions() {
             (480.0, false),
             (500.0, false),
             (504.0, false),
+            (560.0, false),
             (600.0, false),
             (700.0, false),
             (1000.0, false),

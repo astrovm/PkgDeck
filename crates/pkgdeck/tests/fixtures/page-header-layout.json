@@ -212,6 +212,50 @@
       "y": 26.0
     }
   ],
+  "cleanup-560-false-false": [
+    {
+      "height": 66.0,
+      "text": "A long fixture title with accents áé and emoji 🦀 that must leave room for the header actions",
+      "width": 299.53125,
+      "x": 80.0,
+      "y": 26.0
+    },
+    {
+      "height": 18.0,
+      "text": "APT",
+      "width": 28.625,
+      "x": 80.0,
+      "y": 100.0
+    },
+    {
+      "height": 17.0,
+      "text": "Clean",
+      "width": 39.0,
+      "x": 439.0,
+      "y": 35.5
+    },
+    {
+      "height": 54.0,
+      "text": "Fixture summary\n\nFixture preview",
+      "width": 114.9375,
+      "x": 26.0,
+      "y": 138.0
+    },
+    {
+      "control": "Close details",
+      "height": 32.0,
+      "width": 32.0,
+      "x": 502.0,
+      "y": 26.0
+    },
+    {
+      "control": "Clean",
+      "height": 36.0,
+      "width": 93.0,
+      "x": 399.0,
+      "y": 26.0
+    }
+  ],
   "cleanup-600-false-false": [
     {
       "height": 66.0,
@@ -316,9 +360,9 @@
       "y": 58.0
     },
     {
-      "height": 17.0,
+      "height": 15.0,
       "text": "1.0",
-      "width": 22.5,
+      "width": 22.5625,
       "x": 90.0,
       "y": 84.0
     },
@@ -341,14 +385,14 @@
       "text": "Fixture summary",
       "width": 126.40625,
       "x": 28.0,
-      "y": 133.0
+      "y": 131.0
     },
     {
       "height": 22.0,
       "text": "Fixture description",
       "width": 128.125,
       "x": 28.0,
-      "y": 164.0
+      "y": 162.0
     },
     {
       "control": "Close",
@@ -388,9 +432,9 @@
       "y": 63.0
     },
     {
-      "height": 17.0,
+      "height": 15.0,
       "text": "1.0",
-      "width": 22.5,
+      "width": 22.5625,
       "x": 156.0,
       "y": 89.0
     },
@@ -406,7 +450,7 @@
       "text": "Fixture summary",
       "width": 126.40625,
       "x": 28.0,
-      "y": 138.0
+      "y": 136.0
     },
     {
       "control": "Back",
@@ -439,9 +483,9 @@
       "y": 58.0
     },
     {
-      "height": 17.0,
+      "height": 15.0,
       "text": "1.0",
-      "width": 22.5,
+      "width": 22.5625,
       "x": 136.0,
       "y": 84.0
     },
@@ -450,14 +494,14 @@
       "text": "Remove",
       "width": 54.34375,
       "x": 68.0,
-      "y": 128.5
+      "y": 126.5
     },
     {
       "height": 17.0,
       "text": "Manage",
       "width": 54.59375,
       "x": 186.34375,
-      "y": 128.5
+      "y": 126.5
     },
     {
       "control": "Back",
@@ -471,14 +515,14 @@
       "height": 36.0,
       "width": 108.34375,
       "x": 28.0,
-      "y": 119.0
+      "y": 117.0
     },
     {
       "control": "Manage",
       "height": 36.0,
       "width": 108.59375,
       "x": 146.34375,
-      "y": 119.0
+      "y": 117.0
     }
   ],
   "package-440-true-true": [
@@ -497,9 +541,9 @@
       "y": 63.0
     },
     {
-      "height": 17.0,
+      "height": 15.0,
       "text": "1.0",
-      "width": 22.5,
+      "width": 22.5625,
       "x": 136.0,
       "y": 89.0
     },
@@ -508,7 +552,7 @@
       "text": "Remove",
       "width": 54.34375,
       "x": 68.0,
-      "y": 133.5
+      "y": 131.5
     },
     {
       "control": "Back",
@@ -522,7 +566,7 @@
       "height": 36.0,
       "width": 108.34375,
       "x": 28.0,
-      "y": 124.0
+      "y": 122.0
     }
   ],
   "package-480-false-false": [
@@ -541,9 +585,9 @@
       "y": 58.0
     },
     {
-      "height": 17.0,
+      "height": 15.0,
       "text": "1.0",
-      "width": 22.5,
+      "width": 22.5625,
       "x": 90.0,
       "y": 84.0
     },
@@ -552,14 +596,14 @@
       "text": "Remove",
       "width": 54.34375,
       "x": 68.0,
-      "y": 128.5
+      "y": 126.5
     },
     {
       "height": 17.0,
       "text": "Manage",
       "width": 54.59375,
       "x": 186.34375,
-      "y": 128.5
+      "y": 126.5
     },
     {
       "control": "Close",
@@ -573,14 +617,14 @@
       "height": 36.0,
       "width": 108.34375,
       "x": 28.0,
-      "y": 119.0
+      "y": 117.0
     },
     {
       "control": "Manage",
       "height": 36.0,
       "width": 108.59375,
       "x": 146.34375,
-      "y": 119.0
+      "y": 117.0
     }
   ],
   "package-480-false-true": [
@@ -599,9 +643,9 @@
       "y": 63.0
     },
     {
-      "height": 17.0,
+      "height": 15.0,
       "text": "1.0",
-      "width": 22.5,
+      "width": 22.5625,
       "x": 156.0,
       "y": 89.0
     },
@@ -610,7 +654,7 @@
       "text": "Remove",
       "width": 54.34375,
       "x": 68.0,
-      "y": 133.5
+      "y": 131.5
     },
     {
       "control": "Back",
@@ -624,7 +668,7 @@
       "height": 36.0,
       "width": 108.34375,
       "x": 28.0,
-      "y": 124.0
+      "y": 122.0
     }
   ],
   "package-500-false-false": [
@@ -643,9 +687,9 @@
       "y": 58.0
     },
     {
-      "height": 17.0,
+      "height": 15.0,
       "text": "1.0",
-      "width": 22.5,
+      "width": 22.5625,
       "x": 90.0,
       "y": 84.0
     },
@@ -654,14 +698,14 @@
       "text": "Remove",
       "width": 54.34375,
       "x": 68.0,
-      "y": 128.5
+      "y": 126.5
     },
     {
       "height": 17.0,
       "text": "Manage",
       "width": 54.59375,
       "x": 186.34375,
-      "y": 128.5
+      "y": 126.5
     },
     {
       "control": "Close",
@@ -675,14 +719,14 @@
       "height": 36.0,
       "width": 108.34375,
       "x": 28.0,
-      "y": 119.0
+      "y": 117.0
     },
     {
       "control": "Manage",
       "height": 36.0,
       "width": 108.59375,
       "x": 146.34375,
-      "y": 119.0
+      "y": 117.0
     }
   ],
   "package-500-false-true": [
@@ -701,9 +745,9 @@
       "y": 63.0
     },
     {
-      "height": 17.0,
+      "height": 15.0,
       "text": "1.0",
-      "width": 22.5,
+      "width": 22.5625,
       "x": 156.0,
       "y": 89.0
     },
@@ -712,7 +756,7 @@
       "text": "Remove",
       "width": 54.34375,
       "x": 68.0,
-      "y": 133.5
+      "y": 131.5
     },
     {
       "control": "Back",
@@ -726,7 +770,7 @@
       "height": 36.0,
       "width": 108.34375,
       "x": 28.0,
-      "y": 124.0
+      "y": 122.0
     }
   ],
   "package-504-false-false": [
@@ -745,9 +789,9 @@
       "y": 58.0
     },
     {
-      "height": 17.0,
+      "height": 15.0,
       "text": "1.0",
-      "width": 22.5,
+      "width": 22.5625,
       "x": 90.0,
       "y": 84.0
     },
@@ -756,14 +800,14 @@
       "text": "Remove",
       "width": 54.34375,
       "x": 68.0,
-      "y": 128.5
+      "y": 126.5
     },
     {
       "height": 17.0,
       "text": "Manage",
       "width": 54.59375,
       "x": 186.34375,
-      "y": 128.5
+      "y": 126.5
     },
     {
       "control": "Close",
@@ -777,14 +821,14 @@
       "height": 36.0,
       "width": 108.34375,
       "x": 28.0,
-      "y": 119.0
+      "y": 117.0
     },
     {
       "control": "Manage",
       "height": 36.0,
       "width": 108.59375,
       "x": 146.34375,
-      "y": 119.0
+      "y": 117.0
     }
   ],
   "package-504-false-true": [
@@ -803,9 +847,9 @@
       "y": 63.0
     },
     {
-      "height": 17.0,
+      "height": 15.0,
       "text": "1.0",
-      "width": 22.5,
+      "width": 22.5625,
       "x": 156.0,
       "y": 89.0
     },
@@ -821,7 +865,7 @@
       "text": "Fixture summary",
       "width": 126.40625,
       "x": 28.0,
-      "y": 138.0
+      "y": 136.0
     },
     {
       "control": "Back",
@@ -835,6 +879,115 @@
       "height": 36.0,
       "width": 108.34375,
       "x": 367.65625,
+      "y": 26.0
+    }
+  ],
+  "package-560-false-false": [
+    {
+      "height": 24.0,
+      "text": "A long fixture title with accents áé and emoji 🦀 that must leave room for the header actions",
+      "width": 393.125,
+      "x": 90.0,
+      "y": 26.0
+    },
+    {
+      "height": 18.0,
+      "text": "fixture, APT",
+      "width": 80.9375,
+      "x": 90.0,
+      "y": 58.0
+    },
+    {
+      "height": 15.0,
+      "text": "1.0",
+      "width": 22.5625,
+      "x": 90.0,
+      "y": 84.0
+    },
+    {
+      "height": 17.0,
+      "text": "Remove",
+      "width": 54.34375,
+      "x": 68.0,
+      "y": 126.5
+    },
+    {
+      "height": 17.0,
+      "text": "Manage",
+      "width": 54.59375,
+      "x": 186.34375,
+      "y": 126.5
+    },
+    {
+      "control": "Close",
+      "height": 32.0,
+      "width": 32.0,
+      "x": 500.0,
+      "y": 26.0
+    },
+    {
+      "control": "Remove",
+      "height": 36.0,
+      "width": 108.34375,
+      "x": 28.0,
+      "y": 117.0
+    },
+    {
+      "control": "Manage",
+      "height": 36.0,
+      "width": 108.59375,
+      "x": 146.34375,
+      "y": 117.0
+    }
+  ],
+  "package-560-false-true": [
+    {
+      "height": 29.0,
+      "text": "A long fixture title with accents áé and emoji 🦀 that must leave room for the header actions",
+      "width": 254.9375,
+      "x": 156.0,
+      "y": 26.0
+    },
+    {
+      "height": 18.0,
+      "text": "fixture, APT",
+      "width": 80.9375,
+      "x": 156.0,
+      "y": 63.0
+    },
+    {
+      "height": 15.0,
+      "text": "1.0",
+      "width": 22.5625,
+      "x": 156.0,
+      "y": 89.0
+    },
+    {
+      "height": 17.0,
+      "text": "Remove",
+      "width": 54.34375,
+      "x": 463.65625,
+      "y": 35.5
+    },
+    {
+      "height": 19.0,
+      "text": "Fixture summary",
+      "width": 126.40625,
+      "x": 28.0,
+      "y": 136.0
+    },
+    {
+      "control": "Back",
+      "height": 36.0,
+      "width": 36.0,
+      "x": 28.0,
+      "y": 26.0
+    },
+    {
+      "control": "Remove",
+      "height": 36.0,
+      "width": 108.34375,
+      "x": 423.65625,
       "y": 26.0
     }
   ],
@@ -854,9 +1007,9 @@
       "y": 58.0
     },
     {
-      "height": 17.0,
+      "height": 15.0,
       "text": "1.0",
-      "width": 22.5,
+      "width": 22.5625,
       "x": 90.0,
       "y": 84.0
     },
@@ -879,14 +1032,14 @@
       "text": "Fixture summary",
       "width": 126.40625,
       "x": 28.0,
-      "y": 133.0
+      "y": 131.0
     },
     {
       "height": 22.0,
       "text": "Fixture description",
       "width": 128.125,
       "x": 28.0,
-      "y": 164.0
+      "y": 162.0
     },
     {
       "control": "Close",
@@ -926,9 +1079,9 @@
       "y": 63.0
     },
     {
-      "height": 17.0,
+      "height": 15.0,
       "text": "1.0",
-      "width": 22.5,
+      "width": 22.5625,
       "x": 156.0,
       "y": 89.0
     },
@@ -944,7 +1097,7 @@
       "text": "Fixture summary",
       "width": 126.40625,
       "x": 28.0,
-      "y": 138.0
+      "y": 136.0
     },
     {
       "control": "Back",
@@ -977,9 +1130,9 @@
       "y": 58.0
     },
     {
-      "height": 17.0,
+      "height": 15.0,
       "text": "1.0",
-      "width": 22.5,
+      "width": 22.5625,
       "x": 90.0,
       "y": 84.0
     },
@@ -1002,14 +1155,14 @@
       "text": "Fixture summary",
       "width": 126.40625,
       "x": 28.0,
-      "y": 133.0
+      "y": 131.0
     },
     {
       "height": 22.0,
       "text": "Fixture description",
       "width": 128.125,
       "x": 28.0,
-      "y": 164.0
+      "y": 162.0
     },
     {
       "control": "Close",
@@ -1049,9 +1202,9 @@
       "y": 63.0
     },
     {
-      "height": 17.0,
+      "height": 15.0,
       "text": "1.0",
-      "width": 22.5,
+      "width": 22.5625,
       "x": 156.0,
       "y": 89.0
     },
@@ -1067,7 +1220,7 @@
       "text": "Fixture summary",
       "width": 126.40625,
       "x": 28.0,
-      "y": 138.0
+      "y": 136.0
     },
     {
       "control": "Back",
@@ -1315,6 +1468,64 @@
       "height": 24.0,
       "width": 40.0,
       "x": 364.625,
+      "y": 26.0
+    }
+  ],
+  "source-560-false-false": [
+    {
+      "height": 44.0,
+      "text": "A long fixture source name that must leave room for its switch",
+      "width": 276.53125,
+      "x": 80.0,
+      "y": 26.0
+    },
+    {
+      "height": 18.0,
+      "text": "Off",
+      "width": 21.375,
+      "x": 492.0,
+      "y": 26.0
+    },
+    {
+      "height": 18.0,
+      "text": "Fixture summary",
+      "width": 114.9375,
+      "x": 26.0,
+      "y": 90.0
+    },
+    {
+      "height": 14.0,
+      "text": "CAN",
+      "width": 26.6875,
+      "x": 26.0,
+      "y": 128.0
+    },
+    {
+      "height": 26.0,
+      "text": "search",
+      "width": 40.0625,
+      "x": 35.0,
+      "y": 154.0
+    },
+    {
+      "height": 26.0,
+      "text": "install",
+      "width": 34.25,
+      "x": 99.0625,
+      "y": 154.0
+    },
+    {
+      "control": "Close details",
+      "height": 32.0,
+      "width": 32.0,
+      "x": 502.0,
+      "y": 26.0
+    },
+    {
+      "control": "Enabled",
+      "height": 24.0,
+      "width": 40.0,
+      "x": 420.625,
       "y": 26.0
     }
   ],
