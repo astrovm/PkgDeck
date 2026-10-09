@@ -15,6 +15,7 @@ pub mod activity;
 pub mod artifact;
 pub mod background;
 pub mod engine;
+pub mod failed_updates;
 pub mod flatpak_ref;
 pub mod local_deb;
 pub mod manifest;

@@ -117,6 +117,37 @@ fn updates_rows_can_be_unchecked() {
 }
 
 #[test]
+fn updates_that_failed_or_need_the_password_are_marked() {
+    let mut app = app();
+    app.page = Page::Updates;
+    app.c().set_held_updates(
+        json!([
+            {"reason": "failed", "source": "apt", "name": "htop",
+                "identity": ["apt", "htop", "x86_64", null, "system", null]},
+            {"reason": "password", "source": "homebrew-cask", "name": "htop"},
+        ])
+        .to_string()
+        .into(),
+    );
+    app.react();
+    app.invalidate();
+    let mut harness = harness(app);
+    harness.run_steps(4);
+    assert!(harness
+        .query_by_label_contains("Didn't update last time. Update all skips it")
+        .is_some());
+    // The cask mark belongs to the cask of that name, not this APT row.
+    assert!(harness
+        .query_by_label_contains("Needs your password")
+        .is_none());
+    // A row that isn't held says nothing extra.
+    harness.state_mut().1.c().set_held_updates("[]".into());
+    harness.state_mut().1.react();
+    harness.run_steps(3);
+    assert!(harness.query_by_label_contains("last time").is_none());
+}
+
+#[test]
 fn the_installed_filter_narrows_the_list() {
     let mut harness = show(Page::Installed);
     // The filter box is the page's only text field.

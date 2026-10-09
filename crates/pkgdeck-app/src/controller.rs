@@ -8,6 +8,7 @@ use pkgdeck_core::repositories::{self, Action as RepositoryAction};
 use pkgdeck_core::repository_input::{self, Import as RepositoryImport};
 use pkgdeck_core::{
     engine::*,
+    failed_updates::FailedUpdates,
     host::Authorization,
     manifest,
     needs_password::NeedsPassword,
@@ -122,6 +123,7 @@ pub mod ffi {
         rust.autostart_path = None;
         rust.install = None;
         rust.needs_password = super::NeedsPassword::default();
+        rust.failed_updates = super::FailedUpdates::default();
         UniquePtr::new(PackageController {
             rust,
             listeners: Vec::new(),
@@ -193,6 +195,7 @@ pub mod ffi {
         system_approval, set_system_approval, on_system_approval_changed: QString;
         approval_error, set_approval_error, on_approval_error_changed: QString;
         auto_update_result, set_auto_update_result, on_auto_update_result_changed: QString;
+        held_updates, set_held_updates, on_held_updates_changed: QString;
         self_update, set_self_update, on_self_update_changed: QString;
         confirmation, set_confirmation, on_confirmation_changed: QString;
         confirmation_data, set_confirmation_data, on_confirmation_data_changed: QString;
@@ -1310,6 +1313,7 @@ pub struct Controller {
     system_approval: QString,
     approval_error: QString,
     auto_update_result: QString,
+    held_updates: QString,
     self_update: QString,
     /// The running copy, to tell after a change whether it was replaced.
     install: Option<pkgdeck_core::relaunch::Install>,
@@ -1365,6 +1369,9 @@ pub struct Controller {
     password_casks: Vec<PackageId>,
     /// Casks automatic runs skip until a newer version.
     needs_password: NeedsPassword,
+    /// Updates that failed, which automatic runs and Update all skip until
+    /// a newer version.
+    failed_updates: FailedUpdates,
     /// The version each cask of the queued automatic run updates to.
     cask_versions: BTreeMap<PackageId, String>,
     /// The change the banner's Retry runs again.
@@ -1437,6 +1444,7 @@ impl Default for Controller {
             system_approval: QString::default(),
             approval_error: QString::default(),
             auto_update_result: "{}".into(),
+            held_updates: "[]".into(),
             self_update: QString::default(),
             notification_history: "{}".into(),
             version: pkgdeck_core::VERSION.into(),
@@ -1499,6 +1507,11 @@ impl Default for Controller {
                 NeedsPassword::default()
             } else {
                 NeedsPassword::default_store()
+            },
+            failed_updates: if cfg!(test) {
+                FailedUpdates::default()
+            } else {
+                FailedUpdates::default_store()
             },
             cask_versions: BTreeMap::new(),
             retry_job: None,
@@ -1655,11 +1668,46 @@ fn upgrade_plan(packages: &[Package]) -> Vec<Operation> {
         )
         .collect()
 }
+/// Whether this is an update that already failed at the version it would
+/// go to now.
+fn failed_before(operation: &Operation, packages: &[Package], failed: &FailedUpdates) -> bool {
+    let Operation::Upgrade(id) = operation else {
+        return false;
+    };
+    packages
+        .iter()
+        .find(|package| package.id == *id)
+        .is_some_and(|package| failed.skips(id, cask_version(package)))
+}
+/// Update all leaves out updates that failed before, so one broken update
+/// doesn't fail every run. When nothing else is left it tries them again:
+/// that's what the person asked for.
+fn without_failed(
+    operations: Vec<Operation>,
+    packages: &[Package],
+    failed: &FailedUpdates,
+) -> Vec<Operation> {
+    let kept: Vec<Operation> = operations
+        .iter()
+        .filter(|operation| !failed_before(operation, packages, failed))
+        .cloned()
+        .collect();
+    if kept.is_empty() {
+        operations
+    } else {
+        kept
+    }
+}
 /// [`upgrade_plan`] for an automatic run, which only downloads macOS
 /// updates, with the one command the saved approval names. Casks update
 /// one at a time, so one that needs the password stops only itself, and
-/// those that needed it before wait for a newer version.
-fn automatic_plan(packages: &[Package], needs_password: &NeedsPassword) -> Vec<Operation> {
+/// those that needed it before wait for a newer version, like any update
+/// that failed.
+fn automatic_plan(
+    packages: &[Package],
+    needs_password: &NeedsPassword,
+    failed: &FailedUpdates,
+) -> Vec<Operation> {
     let mut seen = std::collections::BTreeSet::new();
     let casks: Vec<Operation> = packages
         .iter()
@@ -1675,6 +1723,7 @@ fn automatic_plan(packages: &[Package], needs_password: &NeedsPassword) -> Vec<O
             Operation::UpgradeAll { backend } if backend == "homebrew-cask" => casks.clone(),
             operation => vec![operation],
         })
+        .filter(|operation| !failed_before(operation, packages, failed))
         .collect();
     if operations
         .iter()
@@ -2575,6 +2624,27 @@ fn password_notice(
         "detail": format!("Update {it} here and enter your password when asked. Automatic updates skip {it} until there's a newer version."),
     }))
 }
+/// The name a failure line starts with: the package, or the source for a
+/// whole-source step.
+fn short_name(operation: &Operation, names: &Names) -> String {
+    match operation {
+        Operation::Install(id) | Operation::Remove(id) | Operation::Upgrade(id) => {
+            display_name_for(id, names)
+        }
+        Operation::UpgradeAll { backend } => source_display_name(backend),
+        _ => operation_title_named(operation, names),
+    }
+}
+/// The banner title for one change that failed, such as "Firefox didn't
+/// update".
+fn failed_title(operation: &Operation, names: &Names) -> String {
+    match operation {
+        Operation::Upgrade(_) | Operation::UpgradeAll { .. } => {
+            format!("{} didn't update", short_name(operation, names))
+        }
+        _ => format!("{} failed", operation_title_named(operation, names)),
+    }
+}
 /// What the banner says once a change finishes.
 fn write_notice(
     job: &Job,
@@ -2609,7 +2679,10 @@ fn write_notice(
         }
         Err(error) => json!({
             "kind": "error",
-            "title": format!("{title} failed"),
+            "title": match operations.as_slice() {
+                [one] => failed_title(one, names),
+                _ => format!("{title} failed"),
+            },
             "detail": write_error_text(error, job_backend(&operations), sudo),
         }),
         Ok(Payload::Batch(_, outcomes))
@@ -2622,20 +2695,38 @@ fn write_notice(
             })
         }
         Ok(Payload::Batch(status, outcomes)) if outcomes.contains(&Outcome::Failed) => {
+            // One line per failure, named the way people know the package.
+            let failed: Vec<(&Operation, String)> = operations
+                .iter()
+                .zip(outcomes)
+                .zip(status.lines().skip(1))
+                .filter(|((_, outcome), _)| **outcome == Outcome::Failed)
+                .map(|((operation, _), line)| {
+                    let reason = line
+                        .strip_prefix(&format!("{}: ", operation_title(operation)))
+                        .unwrap_or(line);
+                    let name = short_name(operation, names);
+                    let line = if reason.starts_with(&name) {
+                        reason.to_owned()
+                    } else {
+                        format!("{name}: {reason}")
+                    };
+                    (operation, line)
+                })
+                .collect();
             let detail = batch_status_text(
-                &status
-                    .lines()
-                    .skip(1)
-                    .filter(|line| !line.ends_with(": Completed"))
+                &failed
+                    .iter()
+                    .map(|(_, line)| line.as_str())
                     .collect::<Vec<_>>()
                     .join("\n"),
                 sudo,
             );
-            json!({
-                "kind": "error",
-                "title": format!("{} of {} changes failed", outcomes.iter().filter(|o| **o == Outcome::Failed).count(), outcomes.len()),
-                "detail": detail,
-            })
+            let title = match failed.as_slice() {
+                [(one, _)] => failed_title(one, names),
+                many => format!("{} of {} changes failed", many.len(), outcomes.len()),
+            };
+            json!({"kind": "error", "title": title, "detail": detail})
         }
         Ok(payload) => {
             // Keep what the user must still do or know, such as a firmware
@@ -2712,8 +2803,12 @@ struct CheckedPlan {
     details: String,
     status: Option<String>,
 }
-fn plan_checked_upgrade(packages: &[Package], identities: &str) -> CheckedPlan {
-    let operations = checked_upgrades(packages, identities);
+fn plan_checked_upgrade(
+    packages: &[Package],
+    identities: &str,
+    failed: &FailedUpdates,
+) -> CheckedPlan {
+    let operations = without_failed(checked_upgrades(packages, identities), packages, failed);
     if operations.is_empty() {
         return CheckedPlan {
             operations: vec![],
@@ -3822,7 +3917,11 @@ impl ffi::PackageController {
                 .needs_password
                 .remember(&[], &casks);
         }
-        let operations = automatic_plan(&packages, &self.rust().needs_password);
+        let operations = automatic_plan(
+            &packages,
+            &self.rust().needs_password,
+            &self.rust().failed_updates,
+        );
         if operations.is_empty() {
             return false;
         }
@@ -3872,7 +3971,146 @@ impl ffi::PackageController {
         self.as_mut()
             .set_notification_history(saved.as_str().into());
     }
+    /// Remember which updates of a finished change failed, so automatic
+    /// runs and Update all skip them, and forget the ones that worked.
+    /// Casks that stopped for the password are remembered apart.
+    fn remember_update_outcomes(
+        mut self: Pin<&mut Self>,
+        job: &Job,
+        result: &Result<Payload, EngineError>,
+        password_casks: &[PackageId],
+    ) {
+        let operations = job.operations();
+        let failed: Vec<bool> = match result {
+            Ok(Payload::Batch(_, outcomes)) => {
+                outcomes.iter().map(|o| *o == Outcome::Failed).collect()
+            }
+            Ok(_) => vec![false; operations.len()],
+            Err(
+                EngineError::Cancelled
+                | EngineError::Execution(pkgdeck_core::process::ExecutionError::Cancelled),
+            ) => return,
+            // One change on its own failed as a whole.
+            Err(_) if operations.len() == 1 => vec![true],
+            Err(_) => return,
+        };
+        let version = |id: &PackageId| -> Option<String> {
+            let rust = self.rust();
+            rust.packages
+                .iter()
+                .find(|package| package.id == *id)
+                .and_then(|package| package.candidate_version.clone())
+                .or_else(|| rust.cask_versions.get(id).cloned())
+        };
+        let mut failures = Vec::new();
+        let mut worked = Vec::new();
+        let mut needed = Vec::new();
+        for (operation, failed) in operations.iter().zip(failed) {
+            let Operation::Upgrade(id) = operation else {
+                continue;
+            };
+            if !failed {
+                worked.push(id.clone());
+            } else if password_casks.contains(id) {
+                needed.extend(version(id).map(|version| (id.name.clone(), version)));
+            } else if let Some(version) = version(id) {
+                failures.push((id.clone(), version));
+            }
+        }
+        if failures.is_empty() && worked.is_empty() && needed.is_empty() {
+            return;
+        }
+        let worked_casks: Vec<String> = worked
+            .iter()
+            .filter(|id| id.backend == "homebrew-cask")
+            .map(|id| id.name.clone())
+            .collect();
+        let rust = self.as_mut().rust_mut();
+        rust.failed_updates.remember(&failures, &worked);
+        // Automatic runs remember theirs once the run ends.
+        if !matches!(job, Job::AutoUpgrade(..)) {
+            rust.needs_password.update(&needed, &worked_casks);
+        }
+        self.publish_held_updates();
+    }
+    /// A failure banner goes away once every update it reports is no longer
+    /// waiting, such as after updating them some other way.
+    fn clear_settled_failure(self: Pin<&mut Self>) {
+        let Some(job) = &self.rust().retry_job else {
+            return;
+        };
+        let operations = job.operations();
+        let settled = !operations.is_empty()
+            && operations.iter().all(|operation| match operation {
+                Operation::Upgrade(id) => !self
+                    .rust()
+                    .packages
+                    .iter()
+                    .any(|p| p.id == *id && p.update == UpdateAvailability::Available),
+                _ => false,
+            });
+        if settled {
+            self.dismiss_notice();
+        }
+    }
+    /// The updates the Updates page marks: ones that failed last time, and
+    /// casks that need the password. Each still waits at that version.
+    fn publish_held_updates(self: Pin<&mut Self>) {
+        let rust = self.rust();
+        let candidate = |backend: &str, name: &str, id: Option<&PackageId>| {
+            rust.packages
+                .iter()
+                .find(|p| {
+                    id.map_or(p.id.backend == backend && p.id.name == name, |id| {
+                        p.id == *id
+                    })
+                })
+                .map(|p| cask_version(p).to_owned())
+        };
+        let mut held: Vec<Value> = rust
+            .failed_updates
+            .updates()
+            .iter()
+            .filter(|update| {
+                candidate("", "", Some(&update.id)).is_none_or(|version| version == update.version)
+            })
+            .map(|update| {
+                let id = &update.id;
+                json!({"reason": "failed", "source": id.backend, "name": id.name,
+                    "identity": [id.backend, id.name, id.architecture, id.remote, id.scope, id.reference]})
+            })
+            .collect();
+        held.extend(
+            rust.needs_password
+                .casks()
+                .filter(|(name, version)| {
+                    candidate("homebrew-cask", name, None).is_none_or(|current| current == *version)
+                })
+                .map(|(name, _)| json!({"reason": "password", "source": "homebrew-cask", "name": name})),
+        );
+        self.set_held_updates(encoded(json!(held)));
+    }
     fn finish_background_check(mut self: Pin<&mut Self>, report: PackageReport) {
+        // Updated by hand or replaced by a newer version: try it again.
+        let answered: Vec<String> = self
+            .rust()
+            .failed_updates
+            .updates()
+            .iter()
+            .map(|update| update.id.backend.clone())
+            .filter(|backend| !report.failures.iter().any(|f| f.backend == *backend))
+            .collect();
+        let waiting: Vec<(PackageId, String)> = report
+            .packages
+            .iter()
+            .filter(|p| p.update == UpdateAvailability::Available)
+            .map(|p| (p.id.clone(), cask_version(p).to_owned()))
+            .collect();
+        let answered: Vec<&str> = answered.iter().map(String::as_str).collect();
+        self.as_mut()
+            .rust_mut()
+            .failed_updates
+            .keep_waiting(&answered, &waiting);
         let result = self
             .as_mut()
             .rust_mut()
@@ -4921,6 +5159,13 @@ impl ffi::PackageController {
             if !self.rust().updates_view || operations.is_empty() {
                 return;
             }
+            let all = operations.len();
+            let operations = without_failed(
+                operations,
+                &self.rust().packages,
+                &self.rust().failed_updates,
+            );
+            let skipped = all - operations.len();
             let mut failed_sources: Vec<_> = self
                 .rust()
                 .failures
@@ -4944,7 +5189,8 @@ impl ffi::PackageController {
                     package.installed_version.is_some()
                         && package.update == UpdateAvailability::Available
                 })
-                .count();
+                .count()
+                - skipped;
             if !writing && operations.iter().any(|operation| {
                 matches!(operation, Operation::UpgradeAll { backend } if backend == "apt")
             }) {
@@ -5103,7 +5349,11 @@ impl ffi::PackageController {
     /// or vanished while streaming) are skipped, never guessed. An empty
     /// resolution clears any pending confirmation and says so in status.
     pub fn propose_checked(mut self: Pin<&mut Self>, identities: QString) {
-        let plan = plan_checked_upgrade(&self.rust().packages, &identities.to_string());
+        let plan = plan_checked_upgrade(
+            &self.rust().packages,
+            &identities.to_string(),
+            &self.rust().failed_updates,
+        );
         if plan.operations.is_empty() {
             self.as_mut().rust_mut().pending = None;
             self.as_mut().set_confirmation(QString::default());
@@ -5595,7 +5845,11 @@ impl ffi::PackageController {
                 self.as_mut().rust_mut().packages = report.packages;
                 self.as_mut().rust_mut().failures = report.failures;
                 self.as_mut().set_rows(rows.as_str().into());
-                self.set_status(status.as_str().into());
+                self.as_mut().set_status(status.as_str().into());
+                self.as_mut().publish_held_updates();
+                if self.rust().updates_view && self.rust().worker.is_none() {
+                    self.clear_settled_failure();
+                }
             }
             Ok(Payload::Cleanup(report)) => {
                 let sudo = self.rust().sudo;
@@ -6223,6 +6477,14 @@ impl ffi::PackageController {
             // A source that never answered is not waited for any more.
             self.as_mut().set_asked(vec![]);
             let password_casks = std::mem::take(&mut self.as_mut().rust_mut().password_casks);
+            let done = replies.iter().find_map(|reply| match reply {
+                Reply::Done(result) => Some(result),
+                _ => None,
+            });
+            if let Some(done) = done {
+                self.as_mut()
+                    .remember_update_outcomes(&job, done, &password_casks);
+            }
             if matches!(job, Job::AutoUpgrade(..)) && !password_casks.is_empty() {
                 let needed: Vec<(String, String)> = password_casks
                     .iter()
@@ -9555,13 +9817,14 @@ mod tests {
         let partial = write_notice(
             &batch,
             &Ok(Payload::Batch(
-                "Completed 1 of 2 updates.\nUpdate all packages from apt: Completed\nUpdate all packages from flatpak: busy".into(),
+                "Completed 1 of 2 updates.\nUpdate all APT packages: Completed\nUpdate all Flatpak packages: busy".into(),
                 vec![Outcome::Finished, Outcome::Failed],
             )),
             false, &Names::new(),
         );
-        assert_eq!(partial["title"], "1 of 2 changes failed");
-        assert_eq!(partial["detail"], "Update all packages from flatpak: busy");
+        // One failure names the source, without the step's long title.
+        assert_eq!(partial["title"], "Flatpak didn't update");
+        assert_eq!(partial["detail"], "Flatpak: busy");
         let cancelled_batch = write_notice(
             &batch,
             &Ok(Payload::Batch(
@@ -9589,7 +9852,7 @@ mod tests {
         let denied_batch = write_notice(
             &batch,
             &Ok(Payload::Batch(
-                "Completed 0 of 2 updates.\nUpdate all packages from apt: authorization denied or unavailable\nUpdate all packages from flatpak: Completed".into(),
+                "Completed 0 of 2 updates.\nUpdate all APT packages: authorization denied or unavailable\nUpdate all Flatpak packages: Completed".into(),
                 vec![Outcome::Failed, Outcome::Finished],
             )),
             false, &Names::new(),
@@ -11368,6 +11631,306 @@ mod tests {
         assert!(!controller.rust().needs_password.skips("editor-app", "5"));
         assert!(controller.rust().password_casks.is_empty());
     }
+    /// A standalone tool whose updates fail while `broken`.
+    struct BrokenTool {
+        broken: bool,
+    }
+    impl Backend for BrokenTool {
+        fn id(&self) -> &str {
+            "anchor"
+        }
+        fn capabilities(&self) -> &[Capability] {
+            &[Capability::Installed, Capability::Upgrade]
+        }
+        fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
+            Ok(Availability::Available)
+        }
+        fn execute(
+            &mut self,
+            _: &Operation,
+            _: &Cancellation,
+            _: &mut dyn FnMut(Progress),
+        ) -> Result<OperationOutcome, EngineError> {
+            if self.broken {
+                Err(EngineError::Execution(
+                    pkgdeck_core::process::ExecutionError::Io(
+                        "No such file or directory (os error 2)".into(),
+                    ),
+                ))
+            } else {
+                Ok(OperationOutcome::default())
+            }
+        }
+    }
+    #[test]
+    fn update_all_skips_updates_that_failed_until_they_work() {
+        let available = |backend: &str, name: &str, display: &str, version: &str| {
+            let mut package = synthetic_package(name, display);
+            package.id.backend = backend.into();
+            package.installed_version = Some("1".into());
+            package.candidate_version = Some(version.into());
+            package.update = UpdateAvailability::Available;
+            package
+        };
+        let mail = available("homebrew-cask", "mail-app", "Mail App", "2");
+        let mut tool = available("anchor", "anchor", "Anchor (AVM)", "2.0");
+        tool.id.reference = Some("/home/fixture/.avm/bin/avm".into());
+        let upgrade = |package: &Package| Operation::Upgrade(package.id.clone());
+        let run = |controller: &mut Pin<&mut ffi::PackageController>, job: Job, broken: bool| {
+            let mut engine = Engine::default();
+            engine
+                .register(PasswordCask { locked: "mail-app" })
+                .unwrap();
+            engine.register(BrokenTool { broken }).unwrap();
+            let replies = run_job(&mut engine, job.clone(), &Cancellation::default())
+                .into_iter()
+                .filter(|reply| matches!(reply, Reply::NeedsPassword(_) | Reply::Done(_)))
+                .collect();
+            controller.as_mut().rust_mut().worker = Some(fake_worker(job, replies));
+            controller.as_mut().poll();
+        };
+        let held = |controller: &Pin<&mut ffi::PackageController>| -> Vec<(String, String)> {
+            serde_json::from_str::<Vec<Value>>(controller.held_updates().as_str())
+                .unwrap()
+                .iter()
+                .map(|held| {
+                    (
+                        held["name"].as_str().unwrap().to_owned(),
+                        held["reason"].as_str().unwrap().to_owned(),
+                    )
+                })
+                .collect()
+        };
+        let mut controller = synthetic_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().rust_mut().packages = vec![mail.clone(), tool.clone()];
+        controller.as_mut().rust_mut().updates_view = true;
+        run(
+            &mut controller,
+            Job::UpgradeAll(vec![upgrade(&mail), upgrade(&tool)], None),
+            true,
+        );
+        // Each failure is one short line named the way people know it.
+        let notice: Value = serde_json::from_str(&controller.notice().to_string()).unwrap();
+        assert_eq!(notice["title"], "2 of 2 changes failed", "{notice}");
+        let detail = notice["detail"].as_str().unwrap();
+        assert!(!detail.contains("/home/fixture"), "{detail}");
+        assert!(detail.contains("Anchor (AVM): "), "{detail}");
+        assert!(detail.contains("Mail App: "), "{detail}");
+        // The tool waits as a failure, the cask for the password.
+        assert!(controller.rust().failed_updates.skips(&tool.id, "2.0"));
+        assert!(!controller.rust().failed_updates.skips(&mail.id, "2"));
+        assert!(controller.rust().needs_password.skips("mail-app", "2"));
+        assert_eq!(
+            held(&controller),
+            [
+                ("anchor".into(), "failed".into()),
+                ("mail-app".into(), "password".into())
+            ]
+        );
+        // Update all leaves the failed one out, and asks for the cask.
+        controller.as_mut().propose("upgrade-all".into(), -1);
+        assert!(matches!(
+            &controller.rust().pending,
+            Some(Job::UpgradeAll(operations, _))
+                if !operations.is_empty() && !operations.contains(&upgrade(&tool))
+        ));
+        // With nothing else left, it tries it again.
+        controller.as_mut().confirm(false);
+        controller.as_mut().rust_mut().packages = vec![tool.clone()];
+        controller.as_mut().propose("upgrade-all".into(), -1);
+        assert!(matches!(
+            &controller.rust().pending,
+            Some(Job::UpgradeAll(operations, _)) if operations == &[upgrade(&tool)]
+        ));
+        controller.as_mut().confirm(false);
+        // A newer version is tried again and isn't marked.
+        let newer = available("anchor", "anchor", "Anchor (AVM)", "2.1");
+        let newer = Package {
+            id: tool.id.clone(),
+            ..newer
+        };
+        controller.as_mut().rust_mut().packages = vec![newer.clone()];
+        controller.as_mut().publish_held_updates();
+        assert!(held(&controller).iter().all(|(name, _)| name != "anchor"));
+        controller.as_mut().rust_mut().packages = vec![mail.clone(), tool.clone()];
+        // Once it works, it's forgotten, and so is the cask.
+        run(&mut controller, Job::Write(upgrade(&tool), None), false);
+        assert!(!controller.rust().failed_updates.skips(&tool.id, "2.0"));
+        let mut engine = Engine::default();
+        engine.register(PasswordCask { locked: "other" }).unwrap();
+        let job = Job::Write(upgrade(&mail), None);
+        let replies = run_job(&mut engine, job.clone(), &Cancellation::default());
+        controller.as_mut().rust_mut().worker = Some(fake_worker(job, replies));
+        controller.as_mut().poll();
+        assert!(!controller.rust().needs_password.skips("mail-app", "2"));
+        assert!(held(&controller).is_empty());
+    }
+    #[test]
+    fn one_failed_update_is_named_without_its_path() {
+        let mut tool = synthetic_package("anchor", "Anchor (AVM)");
+        tool.id.backend = "anchor".into();
+        tool.id.reference = Some("/home/fixture/.avm/bin/avm".into());
+        let operation = Operation::Upgrade(tool.id.clone());
+        let names = Names::from([(tool.id.clone(), "Anchor (AVM)".to_owned())]);
+        let line = format!(
+            "{}: Anchor (AVM) couldn't run: No such file or directory (os error 2).",
+            operation_title(&operation)
+        );
+        assert!(
+            line.contains("/home/fixture"),
+            "the old line named the path"
+        );
+        let notice = write_notice(
+            &Job::AutoUpgrade(vec![operation.clone()], false),
+            &Ok(Payload::Batch(
+                format!("Completed 0 of 1 updates.\n{line}"),
+                vec![Outcome::Failed],
+            )),
+            false,
+            &names,
+        );
+        assert_eq!(notice["title"], "Anchor (AVM) didn't update");
+        assert_eq!(
+            notice["detail"],
+            "Anchor (AVM) couldn't run: No such file or directory (os error 2)."
+        );
+        // A single change that fails on its own reads the same way.
+        let single = write_notice(
+            &Job::Write(operation, None),
+            &Err(EngineError::NotFound),
+            false,
+            &names,
+        );
+        assert_eq!(single["title"], "Anchor (AVM) didn't update");
+        // Anything else keeps saying what failed.
+        let install = write_notice(
+            &Job::Write(Operation::Install(tool.id.clone()), None),
+            &Err(EngineError::NotFound),
+            false,
+            &names,
+        );
+        assert_eq!(
+            install["title"],
+            "Install Anchor (AVM) (Anchor (AVM)) failed"
+        );
+    }
+    #[test]
+    fn a_failure_notice_goes_once_its_updates_are_done() {
+        let mut tool = synthetic_package("anchor", "Anchor (AVM)");
+        tool.id.backend = "anchor".into();
+        tool.installed_version = Some("1".into());
+        tool.candidate_version = Some("2.0".into());
+        tool.update = UpdateAvailability::Available;
+        let mut controller = synthetic_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().rust_mut().updates_view = true;
+        let list = |controller: &mut Pin<&mut ffi::PackageController>, packages: Vec<Package>| {
+            controller
+                .as_mut()
+                .apply(Ok(Payload::Packages(PackageReport {
+                    packages,
+                    failures: vec![],
+                    successful_sources: vec!["anchor".into()],
+                })));
+        };
+        let fail = |controller: &mut Pin<&mut ffi::PackageController>, job: Job| {
+            controller.as_mut().rust_mut().retry_job = Some(job);
+            controller
+                .as_mut()
+                .set_notice(r#"{"kind":"error","title":"Anchor (AVM) didn't update"}"#.into());
+        };
+        // Still waiting: the notice stays.
+        fail(
+            &mut controller,
+            Job::Write(Operation::Upgrade(tool.id.clone()), None),
+        );
+        list(&mut controller, vec![tool.clone()]);
+        assert_ne!(controller.notice().to_string(), "{}");
+        // Updated somewhere else: it goes.
+        list(&mut controller, vec![]);
+        assert_eq!(controller.notice().to_string(), "{}");
+        assert!(controller.rust().retry_job.is_none());
+        // A whole source can't be told apart by package, so it stays.
+        fail(
+            &mut controller,
+            Job::UpgradeAll(
+                vec![Operation::UpgradeAll {
+                    backend: "anchor".into(),
+                }],
+                None,
+            ),
+        );
+        list(&mut controller, vec![]);
+        assert_ne!(controller.notice().to_string(), "{}");
+    }
+    #[test]
+    fn a_failed_cleanup_line_names_the_step() {
+        let clean = Operation::Clean(CleanupId {
+            backend: "apt".into(),
+            key: "cache".into(),
+        });
+        let notice = write_notice(
+            &Job::CleanAll(vec![clean.clone()]),
+            &Ok(Payload::Batch(
+                format!(
+                    "Completed 0 of 1 cleanup tasks.\n{}: disk full",
+                    operation_title(&clean)
+                ),
+                vec![Outcome::Failed],
+            )),
+            false,
+            &Names::new(),
+        );
+        assert_eq!(notice["title"], "Clean cache (APT) failed");
+        assert_eq!(notice["detail"], "Clean cache (APT): disk full");
+    }
+    #[test]
+    fn automatic_runs_skip_updates_that_failed() {
+        let mut tool = synthetic_package("anchor", "Anchor (AVM)");
+        tool.id.backend = "anchor".into();
+        tool.installed_version = Some("1".into());
+        tool.candidate_version = Some("2.0".into());
+        tool.update = UpdateAvailability::Available;
+        let dir = std::env::temp_dir().join(format!("pkgdeck-auto-failed-{}", std::process::id()));
+        let mut failed = FailedUpdates::at(&dir.join("failed-updates.json"));
+        let plan = |failed: &FailedUpdates, packages: &[Package]| {
+            automatic_plan(packages, &NeedsPassword::default(), failed)
+        };
+        assert_eq!(
+            plan(&failed, &[tool.clone()]),
+            [Operation::Upgrade(tool.id.clone())]
+        );
+        failed.remember(&[(tool.id.clone(), "2.0".into())], &[]);
+        // Automatic runs never fall back to trying it again.
+        assert!(plan(&failed, &[tool.clone()]).is_empty());
+        let mut newer = tool.clone();
+        newer.candidate_version = Some("2.1".into());
+        assert_eq!(
+            plan(&failed, &[newer]),
+            [Operation::Upgrade(tool.id.clone())]
+        );
+        // An update that failed to the same version isn't run when checked
+        // with others either.
+        let identity = |p: &Package| {
+            json!([
+                p.id.backend,
+                p.id.name,
+                p.id.architecture,
+                p.id.remote,
+                p.id.scope
+            ])
+        };
+        let mut other = tool.clone();
+        other.id.name = "foundry".into();
+        let checked = plan_checked_upgrade(
+            &[tool.clone(), other.clone()],
+            &json!([identity(&tool), identity(&other)]).to_string(),
+            &failed,
+        );
+        assert_eq!(checked.operations, [Operation::Upgrade(other.id.clone())]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
     /// APT whose dry run removes `removals`, and whose writes succeed.
     struct AptPlanFixture {
         removals: Vec<String>,
@@ -11532,12 +12095,17 @@ mod tests {
                     available("homebrew", "wget"),
                     available("macos-updates", "macOS Tahoe 26.1"),
                 ],
-                &NeedsPassword::default()
+                &NeedsPassword::default(),
+                &FailedUpdates::default()
             ),
             [all("homebrew"), all("macos-updates")]
         );
         assert_eq!(
-            automatic_plan(&[available("homebrew", "wget")], &NeedsPassword::default()),
+            automatic_plan(
+                &[available("homebrew", "wget")],
+                &NeedsPassword::default(),
+                &FailedUpdates::default()
+            ),
             [all("homebrew")]
         );
     }
@@ -11557,16 +12125,24 @@ mod tests {
         let mut needs = NeedsPassword::at(&dir.join("needs-password.json"));
         // One at a time, so one cask's password stops only that cask.
         assert_eq!(
-            automatic_plan(&[mail.clone(), editor.clone()], &needs),
+            automatic_plan(
+                &[mail.clone(), editor.clone()],
+                &needs,
+                &FailedUpdates::default()
+            ),
             [upgrade(&mail), upgrade(&editor)]
         );
         needs.remember(&[("mail-app".into(), "2".into())], &[]);
         assert_eq!(
-            automatic_plan(&[mail.clone(), editor.clone()], &needs),
+            automatic_plan(
+                &[mail.clone(), editor.clone()],
+                &needs,
+                &FailedUpdates::default()
+            ),
             [upgrade(&editor)]
         );
         assert_eq!(
-            automatic_plan(&[cask("mail-app", "3")], &needs),
+            automatic_plan(&[cask("mail-app", "3")], &needs, &FailedUpdates::default()),
             [upgrade(&cask("mail-app", "3"))]
         );
 
@@ -12360,7 +12936,11 @@ mod tests {
         };
         let packages = vec![package("upgradable")];
         // Stale identities resolve to nothing: empty confirmation, status set.
-        let empty = plan_checked_upgrade(&packages, &format!("[{}]", row("vanished")));
+        let empty = plan_checked_upgrade(
+            &packages,
+            &format!("[{}]", row("vanished")),
+            &FailedUpdates::default(),
+        );
         assert!(empty.operations.is_empty());
         assert!(empty.confirmation.is_empty());
         assert_eq!(
@@ -12371,6 +12951,7 @@ mod tests {
         let plan = plan_checked_upgrade(
             &packages,
             &format!("[{}, {}]", row("upgradable"), row("vanished")),
+            &FailedUpdates::default(),
         );
         assert_eq!(plan.operations.len(), 1);
         assert!(matches!(&plan.operations[0], Operation::Upgrade(id) if id.name == "upgradable"));
@@ -12631,6 +13212,7 @@ mod tests {
                 firmware.id.scope
             ]])
             .to_string(),
+            &FailedUpdates::default(),
         );
         assert!(checked.confirmation.contains("Synthetic BIOS"));
         let mut firmware_engine = Engine::default();

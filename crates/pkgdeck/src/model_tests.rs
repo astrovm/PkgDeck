@@ -988,3 +988,31 @@ fn a_rows_filter_cache_does_not_change_what_it_equals() {
     assert_eq!(rows[0], rows[1]);
     assert_ne!(rows[0], row(json!({"name": "htop"})));
 }
+
+#[test]
+fn held_updates_say_why_and_match_their_row() {
+    let row: Row = parse(
+        &json!({"kind": "package", "name": "app", "source": "homebrew-cask",
+            "architecture": "aarch64", "scope": "system"})
+        .to_string(),
+    );
+    let held = |value: Value| -> Held { parse(&value.to_string()) };
+    let password = held(json!({"reason": "password", "source": "homebrew-cask", "name": "app"}));
+    assert!(password.matches(&row));
+    assert_eq!(password.icon(), "lock");
+    assert!(password.tip().starts_with("Needs your password"));
+    let failed = held(
+        json!({"reason": "failed", "source": "homebrew-cask", "name": "app",
+        "identity": row.identity_value()}),
+    );
+    assert!(failed.matches(&row));
+    assert_eq!(failed.icon(), "warning");
+    assert!(failed.tip().starts_with("Didn't update last time"));
+    // Another copy of the same name in another scope isn't this row.
+    let other = held(
+        json!({"reason": "failed", "source": "homebrew-cask", "name": "app",
+        "identity": ["homebrew-cask", "app", "aarch64", null, {"user": {"uid": 501}}, null]}),
+    );
+    assert!(!other.matches(&row));
+    assert!(!held(json!({"reason": "failed", "source": "apt", "name": "app"})).matches(&row));
+}

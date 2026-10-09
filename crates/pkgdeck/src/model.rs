@@ -189,6 +189,46 @@ fn identity_of(value: &Value) -> String {
     value.to_string()
 }
 
+/// An update the Updates page marks: one that failed last time, which
+/// Update all skips, or a cask that needs the password.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct Held {
+    pub reason: String,
+    pub source: String,
+    pub name: String,
+    /// The exact package; casks are known by name alone.
+    pub identity: Option<Value>,
+}
+
+impl Held {
+    pub fn matches(&self, row: &Row) -> bool {
+        row.source == self.source
+            && row.name == self.name
+            && self
+                .identity
+                .as_ref()
+                .is_none_or(|identity| *identity == row.identity_value())
+    }
+    pub fn needs_password(&self) -> bool {
+        self.reason == "password"
+    }
+    pub fn icon(&self) -> &'static str {
+        if self.needs_password() {
+            "lock"
+        } else {
+            "warning"
+        }
+    }
+    pub fn tip(&self) -> &'static str {
+        if self.needs_password() {
+            "Needs your password. Automatic updates skip it."
+        } else {
+            "Didn't update last time. Update all skips it until there's a newer version."
+        }
+    }
+}
+
 /// Parse a JSON property, or the default when it's empty or broken. A
 /// field that is `null` reads as missing, so it takes its default.
 pub fn parse<T: for<'de> Deserialize<'de> + Default>(text: &str) -> T {

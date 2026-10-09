@@ -649,6 +649,15 @@ fn source_note(app: &App, row: &model::Row) -> String {
     }
 }
 
+/// The warning or lock beside an update that failed last time or needs
+/// the password, which says why when hovered.
+fn held_mark(ui: &mut Ui, held: &model::Held, rect: Rect, row: Id) {
+    let palette = Palette::current(ui.ctx());
+    theme::paint_icon(ui.painter(), rect, held.icon(), palette.warning);
+    ui.interact(rect, row.with("held"), Sense::hover())
+        .on_hover_text(held.tip());
+}
+
 /// Draws one row; returns its raw index when the pointer rests on it.
 fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Option<usize> {
     let ctx = ui.ctx().clone();
@@ -662,6 +671,10 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
     };
     let identity = row.identity();
     let retaining = app.retained.is_some();
+    // An update that failed last time or needs the password.
+    let held = (app.page == Page::Updates && row.has_update())
+        .then(|| app.held.iter().find(|held| held.matches(&row)).cloned())
+        .flatten();
     let mut rect = rect;
     if let Some(group) = &item.group {
         let heading = Rect::from_min_size(
@@ -814,7 +827,11 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
         };
         let width = cols.name.width();
         let version = one_line(ui, &version, theme::font(12.5), version_color, width * 0.5);
-        let at = pos2(cols.name.left(), top_y + 30.0);
+        let mut at = pos2(cols.name.left(), top_y + 30.0);
+        if let Some(held) = &held {
+            held_mark(ui, held, Rect::from_min_size(at, Vec2::splat(15.0)), id);
+            at.x += 20.0;
+        }
         let used = version.size().x;
         painter.galley(at, version, version_color);
         if !row.summary.is_empty() && width - used > 40.0 {
@@ -831,9 +848,18 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
     if let Some(v) = cols.version {
         if app.page == Page::Updates && row.has_update() {
             let new = row.candidate.clone().unwrap_or_else(|| "Unknown".into());
+            let mut left = v.left();
+            if let Some(held) = &held {
+                let mark = Rect::from_center_size(
+                    pos2(left + 8.0, rect.center().y - 10.0),
+                    Vec2::splat(16.0),
+                );
+                held_mark(ui, held, mark, id);
+                left += 22.0;
+            }
             let galley = one_line(ui, &new, theme::mono(13.0), palette.accent, v.width());
             painter.galley(
-                pos2(v.left(), rect.center().y - 10.0 - galley.size().y / 2.0),
+                pos2(left, rect.center().y - 10.0 - galley.size().y / 2.0),
                 galley,
                 palette.accent,
             );
@@ -845,7 +871,7 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
                     palette.muted,
                     v.width(),
                 );
-                painter.galley(pos2(v.left(), rect.center().y + 2.0), galley, palette.muted);
+                painter.galley(pos2(left, rect.center().y + 2.0), galley, palette.muted);
             }
         } else {
             let font = if row.kind == "package" {
@@ -969,7 +995,9 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
         Stroke::new(1.0, alpha(palette.line, 0.55)),
     );
     let accessible = format!(
-        "{}{title}, {line}, {}",
+        "{}{}{title}, {line}, {}",
+        held.as_ref()
+            .map_or(String::new(), |held| format!("{} ", held.tip())),
         if row.has_update() {
             "Update available. "
         } else if row.is_installed() {

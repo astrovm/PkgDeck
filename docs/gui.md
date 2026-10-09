@@ -118,6 +118,16 @@ other sources still appear as they answer.
   PkgDeck updates Cargo, uv, pip, Composer, rustup, pixi, Nix and Conda
   packages one at a time itself. For managers that don't say (npm, for
   one), all of their rows show progress until they finish.
+- An update that failed shows a warning on its row. **Update all**, **Update
+  selected** and automatic updates skip it until there's a newer version, so
+  one broken update doesn't fail every run. Its row's arrow tries it again,
+  and once it works the warning goes away. When it's the only update left,
+  **Update all** tries it too.
+- A Homebrew cask that needs your password shows a lock. Automatic updates
+  skip it. Its row's arrow asks for the password.
+- A failed update's notice names the app and says what went wrong, one line
+  each. It goes away once those updates are done, even if you ran them
+  somewhere else.
 
 Cargo and Bun have no command that lists outdated tools, so PkgDeck asks
 crates.io and the npm registry about each installed tool when it lists them.

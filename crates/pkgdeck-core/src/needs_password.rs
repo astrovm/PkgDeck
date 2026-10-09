@@ -47,6 +47,22 @@ impl NeedsPassword {
             self.save();
         }
     }
+    /// Cask names and the version each couldn't update to.
+    pub fn casks(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.casks
+            .iter()
+            .map(|(name, version)| (name.as_str(), version.as_str()))
+    }
+    /// After an update the person started: remember the casks that needed
+    /// the password and forget the ones that updated.
+    pub fn update(&mut self, needed: &[(String, String)], updated: &[String]) {
+        let before = self.casks.clone();
+        self.casks.retain(|name, _| !updated.contains(name));
+        self.casks.extend(needed.iter().cloned());
+        if self.casks != before {
+            self.save();
+        }
+    }
     fn save(&self) {
         let Some(path) = &self.path else { return };
         if let Some(parent) = path.parent() {
@@ -89,6 +105,15 @@ mod tests {
         let mut reopened = reopened;
         reopened.remember(&[], &[pair("other-app", "1.0")]);
         assert!(!NeedsPassword::at(&path).skips("example-app", "2.0"));
+        // Updates the person starts add and forget casks too.
+        let mut store = NeedsPassword::at(&path);
+        store.update(&[pair("example-app", "3.0")], &[]);
+        assert_eq!(
+            NeedsPassword::at(&path).casks().collect::<Vec<_>>(),
+            [("example-app", "3.0")]
+        );
+        store.update(&[], &["example-app".into()]);
+        assert_eq!(NeedsPassword::at(&path).casks().count(), 0);
         fs::remove_dir_all(dir).unwrap();
     }
 }
