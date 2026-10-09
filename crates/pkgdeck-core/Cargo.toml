@@ -23,7 +23,7 @@ flate2 = { version = "1", default-features = false, features = ["miniz_oxide"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 backhand = { version = "=0.25.5", default-features = false, features = ["gzip", "xz", "zstd", "lz4"] }
 dwarfs = { version = "=0.2.1", default-features = false, features = ["zstd", "lzma"] }
-positioned-io = { version = "=0.3.4", default-features = false }
+positioned-io = { version = "=0.3.5", default-features = false }
 
 [lints]
 workspace = true
