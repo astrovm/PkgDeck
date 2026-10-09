@@ -729,8 +729,12 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
     let action_count =
         usize::from(action.is_some() && !page_open_here) + usize::from(pull && !running);
     let cols = columns(rect, width, app.page, action_count as f32 * 38.0);
-    let opacity = if retaining { 0.55 } else { 1.0 };
-    let painter = ui.painter().clone();
+    // Text laid out with its colour ignores a colour given when painting,
+    // so old results dim through the painter.
+    let mut painter = ui.painter().clone();
+    if retaining {
+        painter.multiply_opacity(0.55);
+    }
     let compact = width == Width::Compact;
 
     // Check box on Updates.
@@ -782,7 +786,7 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
     painter.galley(
         pos2(cols.name.left(), top_y - name.size().y / 2.0),
         name,
-        alpha(palette.ink, opacity),
+        palette.ink,
     );
     let sub = one_line(
         ui,
@@ -791,11 +795,7 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
         palette.muted,
         cols.name.width(),
     );
-    painter.galley(
-        pos2(cols.name.left(), top_y + 10.0),
-        sub,
-        alpha(palette.muted, opacity),
-    );
+    painter.galley(pos2(cols.name.left(), top_y + 10.0), sub, palette.muted);
     let version = model::version_text(&row);
     let version_color = match row.kind.as_str() {
         "failure" => palette.danger,
@@ -805,12 +805,18 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
         _ => palette.muted,
     };
     if compact && !source {
-        // Version in its own colour, then the summary in what's left.
+        // Version in its own colour, then the summary in what's left. Every
+        // task here is a cache unless it says otherwise.
+        let version = if row.kind == "cleanup" && version == model::cleanup_type("") {
+            String::new()
+        } else {
+            version.clone()
+        };
         let width = cols.name.width();
         let version = one_line(ui, &version, theme::font(12.5), version_color, width * 0.5);
         let at = pos2(cols.name.left(), top_y + 30.0);
         let used = version.size().x;
-        painter.galley(at, version, alpha(version_color, opacity));
+        painter.galley(at, version, version_color);
         if !row.summary.is_empty() && width - used > 40.0 {
             let summary = one_line(
                 ui,
@@ -819,11 +825,7 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
                 palette.muted,
                 width - used - 12.0,
             );
-            painter.galley(
-                at + vec2(used + 12.0, 0.0),
-                summary,
-                alpha(palette.muted, opacity),
-            );
+            painter.galley(at + vec2(used + 12.0, 0.0), summary, palette.muted);
         }
     }
     if let Some(v) = cols.version {
@@ -833,7 +835,7 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
             painter.galley(
                 pos2(v.left(), rect.center().y - 10.0 - galley.size().y / 2.0),
                 galley,
-                alpha(palette.accent, opacity),
+                palette.accent,
             );
             if let Some(old) = row.installed.as_deref().filter(|o| !o.is_empty()) {
                 let galley = one_line(
@@ -843,11 +845,7 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
                     palette.muted,
                     v.width(),
                 );
-                painter.galley(
-                    pos2(v.left(), rect.center().y + 2.0),
-                    galley,
-                    alpha(palette.muted, opacity),
-                );
+                painter.galley(pos2(v.left(), rect.center().y + 2.0), galley, palette.muted);
             }
         } else {
             let font = if row.kind == "package" {
@@ -859,7 +857,7 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
             painter.galley(
                 pos2(v.left(), rect.center().y - galley.size().y / 2.0),
                 galley,
-                alpha(version_color, opacity),
+                version_color,
             );
         }
     }
@@ -874,7 +872,7 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
         painter.galley(
             pos2(s.left(), rect.center().y - galley.size().y / 2.0),
             galley,
-            alpha(palette.muted, opacity),
+            palette.muted,
         );
     }
     // Buttons.
@@ -895,7 +893,12 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
         let color = if !enabled || running {
             palette.muted
         } else {
-            mix(palette.muted, tone(&palette, action.tone()), near)
+            // Faint until then too, so the names and versions lead.
+            mix(
+                alpha(palette.muted, 0.45),
+                tone(&palette, action.tone()),
+                near,
+            )
         };
         let icon = if running { "cancel" } else { action.icon() };
         let tip = if running {
@@ -1008,7 +1011,6 @@ pub fn package_icon(app: &App, ui: &mut Ui, rect: Rect, row: &Row) {
         ui.painter()
             .rect_filled(rect, CornerRadius::same(10), alpha(palette.accent, 0.1));
         let name = match row.kind.as_str() {
-            "cleanup" => "remove",
             "failure" => "warning",
             _ => row.source.as_str(),
         };

@@ -252,7 +252,15 @@ impl<'a> Button<'a> {
                     palette.ink,
                 ),
             };
-            let opacity = if self.enabled { 1.0 } else { 0.42 };
+            // A filled button that's off goes grey; a faded colour reads as
+            // a lighter variant rather than unavailable.
+            let filled = matches!(self.look, Look::Primary | Look::Solid(_));
+            let (fill, ink) = if filled && !self.enabled {
+                (palette.hover_solid(), palette.muted)
+            } else {
+                (fill, ink)
+            };
+            let opacity = if self.enabled || filled { 1.0 } else { 0.42 };
             let painter = ui.painter();
             painter.rect(
                 rect,
@@ -279,7 +287,7 @@ impl<'a> Button<'a> {
             }
             if let Some(galley) = galley {
                 let pos = Pos2::new(x, rect.center().y - galley.size().y / 2.0);
-                painter.galley(pos, galley, ink);
+                painter.galley_with_override_text_color(pos, galley, ink);
             }
         }
         let tooltip = self

@@ -198,6 +198,48 @@ fn main() {
         app.rows = rows;
         app.invalidate();
     });
+    render("clean", [1500.0, 860.0], true, |app| {
+        let task = |name: &str, display: &str, source: &str, kind: &str, summary: &str| {
+            serde_json::from_value::<model::Row>(json!({
+                "kind": "cleanup", "name": name, "display_name": display, "source": source,
+                "cleanup_kind": kind, "summary": summary, "preview": "",
+            }))
+            .unwrap()
+        };
+        app.rows = vec![
+            task(
+                "apt-cache",
+                "APT download cache",
+                "apt",
+                "package_cache",
+                "104 cached downloads",
+            ),
+            task(
+                "brew-cleanup",
+                "Old Homebrew downloads and versions",
+                "homebrew",
+                "package_cache",
+                "Old files that brew cleanup would remove",
+            ),
+            task(
+                "apt-autoremove",
+                "Unused dependencies",
+                "apt",
+                "orphan_dependencies",
+                "3 packages nothing needs",
+            ),
+            task(
+                "npm-cache",
+                "npm package cache",
+                "npm",
+                "package_cache",
+                "Clear cached downloads",
+            ),
+        ];
+        offline(app, Page::Clean);
+        app.refresh_items();
+        app.selected = Some(app.rows[app.items[1].raw].identity());
+    });
     render("settings", [1180.0, 900.0], true, |app| {
         offline(app, Page::Settings)
     });

@@ -76,56 +76,66 @@ fn panel(app: &mut App, ui: &mut Ui, rect: Rect, row: &Row, narrow: bool) {
             ui.painter()
                 .rect_filled(icon, CornerRadius::same(10), alpha(palette.accent, 0.1));
             let name = match row.kind.as_str() {
-                "source" => row.source.as_str(),
                 "failure" => "warning",
-                _ => "package",
+                _ => row.source.as_str(),
             };
             theme::paint_icon(ui.painter(), icon.shrink(11.0), name, palette.accent);
             ui.vertical(|ui| {
-                ui.label(
-                    egui::RichText::new(row.title())
-                        .font(theme::bold(18.0))
-                        .color(palette.ink),
+                // Long titles wrap rather than run under the close button.
+                ui.set_max_width((ui.available_width() - 40.0).max(80.0));
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(row.title())
+                            .font(theme::bold(18.0))
+                            .color(palette.ink),
+                    )
+                    .wrap(),
                 );
                 let source = model::source_name(&row.source);
                 if source != row.title() {
                     ui.label(egui::RichText::new(source).color(palette.muted));
                 }
             });
+            // Narrow windows already have Back for this.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                if icon_button(ui, "cancel", "Close details", palette.muted, true).clicked() {
+                if !narrow
+                    && icon_button(ui, "cancel", "Close details", palette.muted, true).clicked()
+                {
                     app.deselect();
                     app.ui.focus_list = true;
                 }
-                if row.kind == "cleanup" {
-                    if let Some(index) = app.selected_index() {
-                        if Button::new(Look::Soft(Tone::Danger), "Clean")
-                            .icon("remove")
-                            .enabled(app.can_act() && app.retained.is_none())
-                            .show(ui)
-                            .clicked()
-                        {
-                            app.run_row_action(index);
-                        }
-                    }
-                }
-                if row.kind == "source" && app.page == Page::Sources {
-                    let enabled = app.enabled_sources().contains(&row.source);
-                    let mut on = enabled;
-                    let can = row.available.unwrap_or(false)
-                        && !app.writing
-                        && !(enabled && !app.can_turn_off(&row.source));
-                    if switch(ui, &mut on, can, "Enabled").changed() {
-                        let source = row.source.clone();
-                        app.set_source_enabled(&source, on);
-                    }
-                    ui.label(
-                        egui::RichText::new(if enabled { "On" } else { "Off" })
-                            .color(palette.muted),
-                    );
-                }
             });
         });
+        if row.kind == "cleanup" {
+            if let Some(index) = app.selected_index() {
+                ui.add_space(12.0);
+                if Button::new(Look::Soft(Tone::Danger), "Clean")
+                    .icon("remove")
+                    .enabled(app.can_act() && app.retained.is_none())
+                    .show(ui)
+                    .clicked()
+                {
+                    app.run_row_action(index);
+                }
+            }
+        }
+        if row.kind == "source" && app.page == Page::Sources {
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                let enabled = app.enabled_sources().contains(&row.source);
+                let mut on = enabled;
+                let can = row.available.unwrap_or(false)
+                    && !app.writing
+                    && !(enabled && !app.can_turn_off(&row.source));
+                if switch(ui, &mut on, can, "Enabled").changed() {
+                    let source = row.source.clone();
+                    app.set_source_enabled(&source, on);
+                }
+                ui.label(
+                    egui::RichText::new(if enabled { "On" } else { "Off" }).color(palette.muted),
+                );
+            });
+        }
         ui.add_space(12.0);
         let text = app.details.panel_text(&app.report);
         let text = if text.is_empty() {

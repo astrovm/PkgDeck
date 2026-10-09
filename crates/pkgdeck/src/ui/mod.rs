@@ -1037,7 +1037,7 @@ fn page_actions(app: &mut App, ui: &mut Ui) {
         Page::Clean => {
             if Button::new(Look::Solid(Tone::Danger), "Clean all")
                 .icon("remove")
-                .enabled(!app.busy || app.writing)
+                .enabled(app.can_act() && app.retained.is_none())
                 .show(ui)
                 .clicked()
             {
