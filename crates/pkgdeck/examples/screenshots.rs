@@ -160,12 +160,58 @@ fn update_rows() -> Vec<model::Row> {
     ]
 }
 
+/// The height of the window's title bar, in points.
+const TITLE_BAR: f32 = 34.0;
+
+/// A title bar and outline like a desktop's around the window, so the
+/// screenshots look like a window rather than a bare page.
+fn title_bar(ui: &egui::Ui, bar: egui::Rect, window: egui::Rect) {
+    use egui::{pos2, vec2, Align2, CornerRadius, Rect, Stroke, StrokeKind};
+    let palette = pkgdeck::theme::Palette::current(ui.ctx());
+    let painter = ui.painter();
+    painter.rect_filled(bar, CornerRadius::ZERO, palette.surface);
+    painter.line_segment(
+        [bar.left_bottom(), bar.right_bottom()],
+        Stroke::new(1.0, palette.line),
+    );
+    let logo = Rect::from_center_size(pos2(bar.left() + 20.0, bar.center().y), vec2(18.0, 18.0));
+    egui::Image::new(egui::include_image!("../assets/logo.svg"))
+        .fit_to_exact_size(logo.size())
+        .paint_at(ui, logo);
+    painter.text(
+        bar.center(),
+        Align2::CENTER_CENTER,
+        "PkgDeck",
+        pkgdeck::theme::font(13.5),
+        palette.ink,
+    );
+    // Minimize, maximize and close, right to left.
+    let stroke = Stroke::new(1.4, palette.ink);
+    let center = |slot: f32| pos2(bar.right() - 20.0 - slot * 30.0, bar.center().y);
+    let close = center(0.0);
+    for (a, b) in [(-4.5, -4.5), (-4.5, 4.5)] {
+        painter.line_segment([close + vec2(a, b), close - vec2(a, b)], stroke);
+    }
+    let up = center(1.0);
+    painter.line_segment([up + vec2(-5.0, 2.5), up + vec2(0.0, -2.5)], stroke);
+    painter.line_segment([up + vec2(0.0, -2.5), up + vec2(5.0, 2.5)], stroke);
+    let down = center(2.0);
+    painter.line_segment([down + vec2(-5.0, -2.5), down + vec2(0.0, 2.5)], stroke);
+    painter.line_segment([down + vec2(0.0, 2.5), down + vec2(5.0, -2.5)], stroke);
+    painter.rect_stroke(
+        window,
+        CornerRadius::ZERO,
+        Stroke::new(1.0, palette.strong_line),
+        StrokeKind::Inside,
+    );
+}
+
 fn render(name: &str, size: [f32; 2], prepare: impl FnOnce(&mut App)) {
     let mut app = app();
     prepare(&mut app);
     app.invalidate();
     let mut harness = Harness::builder()
-        .with_size(egui::vec2(size[0], size[1]))
+        .with_size(egui::vec2(size[0], size[1] + TITLE_BAR))
         .with_pixels_per_point(2.0)
         .wgpu()
         .build_ui_state(
@@ -175,7 +221,14 @@ fn render(name: &str, size: [f32; 2], prepare: impl FnOnce(&mut App)) {
                     *ready = true;
                     return;
                 }
-                pkgdeck::ui::show(app, ui)
+                let full = ui.max_rect();
+                let bar = egui::Rect::from_min_size(full.min, egui::vec2(full.width(), TITLE_BAR));
+                let body =
+                    egui::Rect::from_min_max(egui::pos2(full.left(), bar.bottom()), full.max);
+                ui.scope_builder(egui::UiBuilder::new().max_rect(body), |ui| {
+                    pkgdeck::ui::show(app, ui)
+                });
+                title_bar(ui, bar, full);
             },
             (false, app),
         );
