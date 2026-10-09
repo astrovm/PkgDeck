@@ -16077,4 +16077,64 @@ mod tests {
             Some(Job::Write(Operation::Refresh { backend }, None)) if backend == "fixture"
         ));
     }
+
+    #[test]
+    fn running_worker_events_publish_progress_only_while_tracking_a_write() {
+        let mut controller = synthetic_controller();
+        let mut controller = controller.pin_mut();
+        let operation = Operation::Refresh {
+            backend: "apt".into(),
+        };
+        let job = Job::Write(operation.clone(), None);
+        controller.as_mut().rust_mut().progress_state =
+            Some(ProgressState::new(&job, Some(42), &Names::new()));
+        let (sender, receiver) = mpsc::channel();
+        let (release, hold) = mpsc::channel::<()>();
+        // Keep the worker alive until after polling: a finished worker takes
+        // a different path that clears progress instead of publishing it.
+        controller.as_mut().rust_mut().worker = Some(Worker {
+            handle: thread::spawn(move || {
+                let _ = hold.recv();
+            }),
+            receiver,
+            cancel: Cancellation::default(),
+            job,
+        });
+        sender
+            .send(Reply::ProgressEvent(Event::Started(operation.clone())))
+            .unwrap();
+        sender
+            .send(Reply::ProgressEvent(Event::Progress {
+                operation: operation.clone(),
+                progress: Progress::Transfer {
+                    completed: 50,
+                    total: Some(100),
+                },
+            }))
+            .unwrap();
+        controller.as_mut().poll();
+        let progress: Value = serde_json::from_str(&controller.progress().to_string()).unwrap();
+        assert_eq!(progress["activity_id"], 42);
+        assert_eq!(progress["label"], "Refresh APT package lists");
+        assert_eq!(progress["transferred"], 50);
+        assert_eq!(progress["transfer_total"], 100);
+
+        // A late event without a tracked write leaves the visible snapshot.
+        controller.as_mut().rust_mut().progress_state = None;
+        sender
+            .send(Reply::ProgressEvent(Event::Finished {
+                operation,
+                result: Ok(OperationOutcome::default()),
+            }))
+            .unwrap();
+        controller.as_mut().poll();
+        assert_eq!(
+            serde_json::from_str::<Value>(&controller.progress().to_string()).unwrap(),
+            progress
+        );
+        drop(release);
+        drop(sender);
+        settle(&mut controller);
+        assert_eq!(controller.progress().to_string(), "{}");
+    }
 }
