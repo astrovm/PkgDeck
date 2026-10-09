@@ -141,6 +141,16 @@ fn updates_that_failed_or_need_the_password_are_marked() {
         .query_by_label_contains("Needs your password")
         .is_none());
     // A row that isn't held says nothing extra.
+    // Only the Updates page marks them.
+    harness.state_mut().1.page = Page::Installed;
+    harness.state_mut().1.invalidate();
+    harness.run_steps(4);
+    assert!(harness.query_by_label_contains("htop, APT").is_some());
+    assert!(harness.query_by_label_contains("last time").is_none());
+    harness.state_mut().1.page = Page::Updates;
+    harness.state_mut().1.invalidate();
+    harness.run_steps(4);
+    assert!(harness.query_by_label_contains("last time").is_some());
     harness.state_mut().1.c().set_held_updates("[]".into());
     harness.state_mut().1.react();
     harness.run_steps(3);

@@ -11728,6 +11728,15 @@ mod tests {
                 ("mail-app".into(), "password".into())
             ]
         );
+        // A cask is known by its source and name, at the version it needed
+        // the password for.
+        let other = available("homebrew-cask", "other-app", "Other App", "7");
+        let same_name = available("apt", "mail-app", "Mail App", "9");
+        controller.as_mut().rust_mut().packages =
+            vec![other, same_name, mail.clone(), tool.clone()];
+        controller.as_mut().publish_held_updates();
+        assert!(held(&controller).contains(&("mail-app".into(), "password".into())));
+        controller.as_mut().rust_mut().packages = vec![mail.clone(), tool.clone()];
         // Update all leaves the failed one out, and asks for the cask.
         controller.as_mut().propose("upgrade-all".into(), -1);
         assert!(matches!(
@@ -11735,6 +11744,13 @@ mod tests {
             Some(Job::UpgradeAll(operations, _))
                 if !operations.is_empty() && !operations.contains(&upgrade(&tool))
         ));
+        let data: Value =
+            serde_json::from_str(&controller.confirmation_data().to_string()).unwrap();
+        let summary = data["summary"].as_str().unwrap();
+        assert!(
+            summary.starts_with("Update 1 package") && !summary.starts_with("Update 1 packages"),
+            "{summary}"
+        );
         // With nothing else left, it tries it again.
         controller.as_mut().confirm(false);
         controller.as_mut().rust_mut().packages = vec![tool.clone()];
@@ -11753,6 +11769,18 @@ mod tests {
         controller.as_mut().rust_mut().packages = vec![newer.clone()];
         controller.as_mut().publish_held_updates();
         assert!(held(&controller).iter().all(|(name, _)| name != "anchor"));
+        // One change that fails on its own is remembered too.
+        run(&mut controller, Job::Write(upgrade(&tool), None), true);
+        assert!(controller.rust().failed_updates.skips(&tool.id, "2.1"));
+        // A batch that failed before any step ran blames none of them.
+        controller.as_mut().rust_mut().packages = vec![mail.clone(), newer.clone()];
+        let job = Job::UpgradeAll(vec![upgrade(&mail), upgrade(&tool)], None);
+        controller.as_mut().rust_mut().worker = Some(fake_worker(
+            job,
+            vec![Reply::Done(Err(EngineError::NotFound))],
+        ));
+        controller.as_mut().poll();
+        assert!(!controller.rust().failed_updates.skips(&mail.id, "2"));
         controller.as_mut().rust_mut().packages = vec![mail.clone(), tool.clone()];
         // Once it works, it's forgotten, and so is the cask.
         run(&mut controller, Job::Write(upgrade(&tool), None), false);
@@ -11847,8 +11875,15 @@ mod tests {
         );
         list(&mut controller, vec![tool.clone()]);
         assert_ne!(controller.notice().to_string(), "{}");
-        // Updated somewhere else: it goes.
+        // Only the Updates list tells: another page doesn't list it.
+        controller.as_mut().rust_mut().updates_view = false;
         list(&mut controller, vec![]);
+        assert_ne!(controller.notice().to_string(), "{}");
+        controller.as_mut().rust_mut().updates_view = true;
+        // Updated somewhere else, so still listed but current: it goes.
+        let mut current = tool.clone();
+        current.update = UpdateAvailability::Current;
+        list(&mut controller, vec![current]);
         assert_eq!(controller.notice().to_string(), "{}");
         assert!(controller.rust().retry_job.is_none());
         // A whole source can't be told apart by package, so it stays.
@@ -11863,6 +11898,45 @@ mod tests {
         );
         list(&mut controller, vec![]);
         assert_ne!(controller.notice().to_string(), "{}");
+    }
+    #[test]
+    fn a_background_check_forgets_failed_updates_that_are_done() {
+        let package = |backend: &str, update: UpdateAvailability| {
+            let mut package = synthetic_package(backend, backend);
+            package.id.backend = backend.into();
+            package.installed_version = Some("1".into());
+            package.candidate_version = Some("2.0".into());
+            package.update = update;
+            package
+        };
+        let waiting = package("anchor", UpdateAvailability::Available);
+        let done = package("foundry", UpdateAvailability::Current);
+        let unchecked = package("nix", UpdateAvailability::Available);
+        let mut controller = synthetic_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().rust_mut().failed_updates.remember(
+            &[
+                (waiting.id.clone(), "2.0".into()),
+                (done.id.clone(), "2.0".into()),
+                (unchecked.id.clone(), "2.0".into()),
+            ],
+            &[],
+        );
+        controller.as_mut().finish_background_check(PackageReport {
+            packages: vec![waiting.clone(), done.clone()],
+            failures: vec![BackendFailure {
+                backend: "nix".into(),
+                error: EngineError::NotFound,
+            }],
+            successful_sources: vec!["anchor".into(), "foundry".into()],
+        });
+        let failed = &controller.rust().failed_updates;
+        // Still listed at that version: kept.
+        assert!(failed.skips(&waiting.id, "2.0"));
+        // Up to date now: forgotten.
+        assert!(!failed.skips(&done.id, "2.0"));
+        // Its source didn't answer: kept until it does.
+        assert!(failed.skips(&unchecked.id, "2.0"));
     }
     #[test]
     fn a_failed_cleanup_line_names_the_step() {
