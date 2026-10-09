@@ -78,7 +78,7 @@ computer can handle.
 
 ## Installed
 
-Filter the list by name, or turn on **Duplicate installs** to see apps
+Filter the list by name, or turn on **Duplicates** to see apps
 installed from more than one source. Grouping is only visual. Each copy stays a
 separate package.
 
@@ -459,6 +459,14 @@ out of date, and each page refreshes when you open it.
 ## Settings
 
 - **Theme**: **System**, **Light** or **Dark**.
+- **Colours**: the colours of the mode on screen. In dark mode, **Charcoal**
+  (neutral grey, the default), **Black** (for OLED screens) or **Slate** (the
+  blue-grey of earlier versions). In light mode, **Classic**, **White**
+  (neutral grey) or **Paper** (warm). Each mode keeps its own choice.
+- **Accent**: the colour of buttons, selection and links. Blue, purple, pink,
+  red, orange, green, teal or graphite.
+- **Text size**: **Small**, **Normal**, **Large** or **Larger**. Everything
+  scales with the text.
 - **Animations**: turn motion on or off.
 - **Background checks**, **Check every**, **Install updates automatically**,
   **Allow updates that remove packages**, **Allow automatic updates without

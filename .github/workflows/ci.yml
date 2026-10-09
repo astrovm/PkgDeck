@@ -256,6 +256,8 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Pull Docker Hub images through a mirror
+        uses: ./.github/actions/registry-mirror
       - name: Install Podman dependencies
         run: |
           sudo apt-get update
@@ -323,6 +325,8 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Pull Docker Hub images through a mirror
+        uses: ./.github/actions/registry-mirror
       - name: Install Podman and Snap
         if: matrix.group == 'native'
         run: |
@@ -478,6 +482,8 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Pull Docker Hub images through a mirror
+        uses: ./.github/actions/registry-mirror
       - name: Install static toolchain and APT headers
         run: |
           sudo apt-get update

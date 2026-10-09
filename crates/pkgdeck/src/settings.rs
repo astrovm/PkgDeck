@@ -16,10 +16,117 @@ pub enum Appearance {
     Dark,
 }
 
+/// The colours dark mode uses.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DarkTheme {
+    /// Neutral greys, no tint.
+    #[default]
+    Charcoal,
+    /// Black behind everything, for OLED screens.
+    Black,
+    /// The blue-grey PkgDeck first shipped with.
+    Slate,
+}
+
+/// The colours light mode uses.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LightTheme {
+    /// Cool greys, as PkgDeck first shipped.
+    #[default]
+    Classic,
+    /// Neutral greys, no tint.
+    White,
+    /// Warm, like paper.
+    Paper,
+}
+
+/// The colour of buttons, selection and links.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Accent {
+    #[default]
+    Blue,
+    Purple,
+    Pink,
+    Red,
+    Orange,
+    Green,
+    Teal,
+    Graphite,
+}
+
+impl Accent {
+    pub const ALL: [Self; 8] = [
+        Self::Blue,
+        Self::Purple,
+        Self::Pink,
+        Self::Red,
+        Self::Orange,
+        Self::Green,
+        Self::Teal,
+        Self::Graphite,
+    ];
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Blue => "Blue",
+            Self::Purple => "Purple",
+            Self::Pink => "Pink",
+            Self::Red => "Red",
+            Self::Orange => "Orange",
+            Self::Green => "Green",
+            Self::Teal => "Teal",
+            Self::Graphite => "Graphite",
+        }
+    }
+}
+
+/// How big everything is drawn.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TextSize {
+    Small,
+    #[default]
+    Normal,
+    Large,
+    Larger,
+}
+
+impl TextSize {
+    /// egui's zoom for this size.
+    pub fn zoom(self) -> f32 {
+        match self {
+            Self::Small => 0.9,
+            Self::Normal => 1.0,
+            Self::Large => 1.12,
+            Self::Larger => 1.25,
+        }
+    }
+}
+
+/// A choice this version doesn't know, from a newer one, reads as the
+/// default rather than losing every other setting.
+fn or_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Ok(T::deserialize(Value::deserialize(deserializer)?).unwrap_or_default())
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Settings {
     pub appearance: Appearance,
+    #[serde(deserialize_with = "or_default")]
+    pub dark_theme: DarkTheme,
+    #[serde(deserialize_with = "or_default")]
+    pub light_theme: LightTheme,
+    #[serde(deserialize_with = "or_default")]
+    pub accent: Accent,
+    #[serde(deserialize_with = "or_default")]
+    pub text_size: TextSize,
     pub reduce_motion: bool,
     /// The sources the list reads, as the controller's comma list; empty is
     /// all of them.
@@ -47,6 +154,10 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             appearance: Appearance::System,
+            dark_theme: DarkTheme::Charcoal,
+            light_theme: LightTheme::Classic,
+            accent: Accent::Blue,
+            text_size: TextSize::Normal,
             reduce_motion: false,
             source_list: String::new(),
             sort_column: String::new(),
@@ -415,6 +526,39 @@ mod tests {
         let read = Store::open(Some(config), Some(&home)).1;
         assert_eq!(read.auto_update, cfg!(target_os = "macos"));
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn looks_are_read_and_unknown_ones_fall_back() {
+        let settings: Settings = serde_json::from_str(
+            r#"{"darkTheme":"black","lightTheme":"paper","accent":"teal","textSize":"large"}"#,
+        )
+        .unwrap();
+        assert_eq!(settings.dark_theme, DarkTheme::Black);
+        assert_eq!(settings.light_theme, LightTheme::Paper);
+        assert_eq!(settings.accent, Accent::Teal);
+        assert_eq!(settings.text_size, TextSize::Large);
+        let settings: Settings = serde_json::from_str(
+            r#"{"darkTheme":"neon","lightTheme":"x","accent":"gold","textSize":"huge","autostart":true}"#,
+        )
+        .unwrap();
+        assert_eq!(settings.dark_theme, DarkTheme::Charcoal);
+        assert_eq!(settings.light_theme, LightTheme::Classic);
+        assert_eq!(settings.accent, Accent::Blue);
+        assert_eq!(settings.text_size, TextSize::Normal);
+        assert!(settings.autostart);
+    }
+
+    #[test]
+    fn text_sizes_go_from_small_to_larger() {
+        let zooms = [
+            TextSize::Small,
+            TextSize::Normal,
+            TextSize::Large,
+            TextSize::Larger,
+        ]
+        .map(TextSize::zoom);
+        assert_eq!(zooms, [0.9, 1.0, 1.12, 1.25]);
     }
 
     #[test]
