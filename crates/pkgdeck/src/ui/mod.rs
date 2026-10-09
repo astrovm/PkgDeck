@@ -60,7 +60,7 @@ pub struct State {
 pub const RAIL_BELOW: f32 = 820.0;
 pub const MEDIUM_BELOW: f32 = 748.0;
 pub const COMPACT_BELOW: f32 = 560.0;
-pub const SPLIT_FROM: f32 = 900.0;
+pub const SPLIT_FROM: f32 = 600.0;
 
 pub fn search_id() -> Id {
     Id::new("pkgdeck-search")
@@ -940,7 +940,7 @@ fn main_area(app: &mut App, ui: &mut Ui, rect: Rect) {
     } else {
         0.44
     };
-    let side_width = (rect.width() * share).clamp(340.0, rect.width() - 380.0) * open;
+    let side_width = (rect.width() * share).clamp(280.0, rect.width() - 280.0) * open;
     let gap = 14.0 * open;
     let list_rect = Rect::from_min_max(
         rect.min,

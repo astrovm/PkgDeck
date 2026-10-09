@@ -441,10 +441,9 @@ fn rows(app: &mut App, ui: &mut Ui, body: Rect, width: Width) {
     );
     if app.ui.focus_list {
         app.ui.focus_list = false;
+        // Focus alone selects nothing: on Clean and Sources a selected row
+        // opens its panel, so a new page would open its first row.
         list_focus.request_focus();
-        if app.selected.is_none() && !app.items.is_empty() {
-            app.choose(0, false);
-        }
     }
     let focused = list_focus.has_focus();
     app.ui.list_focused = focused;
