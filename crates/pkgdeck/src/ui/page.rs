@@ -14,6 +14,10 @@ use eframe::egui::{
 };
 use std::time::Instant;
 
+#[cfg(test)]
+#[path = "page_tests.rs"]
+mod tests;
+
 /// A button in an app page's header.
 #[derive(Clone, Copy)]
 enum PageButton {
