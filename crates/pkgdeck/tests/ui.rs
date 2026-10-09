@@ -119,9 +119,12 @@ fn updates_rows_can_be_unchecked() {
 #[test]
 fn the_installed_filter_narrows_the_list() {
     let mut harness = show(Page::Installed);
-    harness.state_mut().1.filter = "gim".into();
-    harness.state_mut().1.invalidate();
+    // The filter box is the page's only text field.
+    harness.get_by_role(Role::TextInput).focus();
+    harness.run_steps(1);
+    harness.get_by_role(Role::TextInput).type_text("gim");
     harness.run_steps(3);
+    assert_eq!(harness.state().1.filter, "gim");
     assert!(harness.query_by_label_contains("GIMP, APT").is_some());
     assert!(harness.query_by_label_contains("htop, APT").is_none());
 }
@@ -313,6 +316,15 @@ fn a_running_change_shows_its_words_only_while_it_is_the_live_one() {
     }
     harness.run_steps(2);
     assert!(harness.query_by_label("1 of 3").is_some());
+    assert!(!cancel_in_drawer(&harness));
+    // Words without a count, still with nothing to cancel.
+    {
+        let app = &mut harness.state_mut().1;
+        app.progress.total = 0;
+        app.progress.label = "Reading package lists".into();
+    }
+    harness.run_steps(2);
+    assert!(harness.query_by_label("Reading package lists").is_some());
     assert!(!cancel_in_drawer(&harness));
     // Another change is the live one.
     {
