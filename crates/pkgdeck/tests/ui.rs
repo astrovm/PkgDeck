@@ -11,7 +11,7 @@ use pkgdeck::{
     app::{App, Launch},
     model::Page,
     platform::Platform,
-    settings::{Appearance, Store},
+    settings::{Accent, Appearance, DarkTheme, LightTheme, Store, TextSize},
 };
 use pkgdeck_app::controller::ffi::create_synthetic_controller;
 use serde_json::json;
@@ -202,6 +202,15 @@ fn settings_switches_change_settings() {
     harness.get_by_label("Light").click();
     harness.run_steps(3);
     assert_eq!(harness.state().1.settings.appearance, Appearance::Light);
+    for choice in ["Black", "Paper", "Teal", "Large"] {
+        harness.get_by_label(choice).click();
+        harness.run_steps(3);
+    }
+    let settings = &harness.state().1.settings;
+    assert_eq!(settings.dark_theme, DarkTheme::Black);
+    assert_eq!(settings.light_theme, LightTheme::Paper);
+    assert_eq!(settings.accent, Accent::Teal);
+    assert_eq!(settings.text_size, TextSize::Large);
     harness
         .get_by_role_and_label(Role::CheckBox, "Animations")
         .click();

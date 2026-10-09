@@ -1,7 +1,8 @@
-//! PkgDeck's look: the colours of the Qt app's Theme.qml, the system's
-//! fonts, and its line icons.
+//! PkgDeck's look: the colours of the chosen theme and accent, the
+//! system's fonts, and its line icons.
 
 use super::icons;
+use crate::settings::{Accent, DarkTheme, LightTheme, TextSize};
 use eframe::egui::{
     self, epaint::PathStroke, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId,
     Painter, Pos2, Rect, Shape, Stroke, TextStyle, Vec2,
@@ -43,21 +44,78 @@ fn over(base: Color32, top: Color32, amount: f32) -> Color32 {
         lerp(base.b(), top.b()),
     )
 }
+/// The person's choice of colours and size, for either appearance.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Scheme {
+    pub dark: DarkTheme,
+    pub light: LightTheme,
+    pub accent: Accent,
+    pub text_size: TextSize,
+}
+
+fn scheme_id() -> egui::Id {
+    egui::Id::new("pkgdeck-scheme")
+}
+fn scheme(ctx: &egui::Context) -> Scheme {
+    ctx.data(|data| data.get_temp(scheme_id()).unwrap_or_default())
+}
+/// Shows `scheme` from now on, restyling only when it changed.
+pub fn set_scheme(ctx: &egui::Context, scheme: Scheme) {
+    let before: Option<Scheme> = ctx.data(|data| data.get_temp(scheme_id()));
+    if before == Some(scheme) {
+        return;
+    }
+    ctx.data_mut(|data| data.insert_temp(scheme_id(), scheme));
+    if before.is_none_or(|before| before.text_size != scheme.text_size) {
+        ctx.set_zoom_factor(scheme.text_size.zoom());
+    }
+    apply(ctx);
+}
+
+fn rgb(hex: u32) -> Color32 {
+    Color32::from_rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8)
+}
+
+/// The accent's colour on a light and on a dark background.
+fn accent_colors(accent: Accent) -> (u32, u32) {
+    match accent {
+        Accent::Blue => (0x2f68d8, 0x7aa7ff),
+        Accent::Purple => (0x7247d1, 0xb49cff),
+        Accent::Pink => (0xbf2f78, 0xf48fc4),
+        Accent::Red => (0xc22f3a, 0xff8f8f),
+        Accent::Orange => (0xb85300, 0xffab66),
+        Accent::Green => (0x1d7a46, 0x72d39b),
+        Accent::Teal => (0x0b7580, 0x5ccfd6),
+        Accent::Graphite => (0x3d3d3d, 0xd4d4d4),
+    }
+}
+
 impl Palette {
-    pub fn of(dark: bool) -> Self {
-        let rgb = |hex: u32| Color32::from_rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8);
-        let (ink, accent) = if dark {
-            (rgb(0xe9edf3), rgb(0x7aa7ff))
+    pub fn of(scheme: Scheme, dark: bool) -> Self {
+        // Canvas, surface, ink and muted text of the chosen theme.
+        let (canvas, surface, ink, muted) = if dark {
+            match scheme.dark {
+                DarkTheme::Charcoal => (0x121212, 0x1d1d1d, 0xececec, 0xa3a3a3),
+                DarkTheme::Black => (0x000000, 0x111111, 0xe6e6e6, 0x9a9a9a),
+                DarkTheme::Slate => (0x0e1015, 0x161a21, 0xe9edf3, 0x98a3b3),
+            }
         } else {
-            (rgb(0x18212d), rgb(0x2f68d8))
+            match scheme.light {
+                LightTheme::Classic => (0xf4f6f9, 0xffffff, 0x18212d, 0x5a6676),
+                LightTheme::White => (0xf3f3f3, 0xffffff, 0x1b1b1b, 0x5f5f5f),
+                LightTheme::Paper => (0xf2ede3, 0xfbf8f2, 0x2a251e, 0x6b6357),
+            }
         };
+        let (on_light, on_dark) = accent_colors(scheme.accent);
+        let (canvas, ink) = (rgb(canvas), rgb(ink));
+        let accent = rgb(if dark { on_dark } else { on_light });
         Self {
-            canvas: rgb(if dark { 0x0e1015 } else { 0xf4f6f9 }),
-            surface: rgb(if dark { 0x161a21 } else { 0xffffff }),
+            canvas,
+            surface: rgb(surface),
             ink,
-            muted: rgb(if dark { 0x98a3b3 } else { 0x5a6676 }),
+            muted: rgb(muted),
             accent,
-            accent_ink: rgb(if dark { 0x0e1015 } else { 0xffffff }),
+            accent_ink: if dark { canvas } else { rgb(0xffffff) },
             line: tint(ink, if dark { 0.12 } else { 0.13 }),
             strong_line: tint(ink, if dark { 0.3 } else { 0.32 }),
             hover: tint(ink, if dark { 0.06 } else { 0.05 }),
@@ -79,7 +137,7 @@ impl Palette {
     }
     /// The palette of what `ctx` shows now.
     pub fn current(ctx: &egui::Context) -> Self {
-        Self::of(ctx.theme() == egui::Theme::Dark)
+        Self::of(scheme(ctx), ctx.theme() == egui::Theme::Dark)
     }
 }
 
@@ -209,10 +267,12 @@ pub fn fonts(root: &Path) -> FontDefinitions {
     fonts
 }
 
-/// PkgDeck's colours, shapes and type on both of egui's themes.
+/// PkgDeck's colours, shapes and type on both of egui's themes, in the
+/// scheme last set.
 pub fn apply(ctx: &egui::Context) {
+    let scheme = scheme(ctx);
     for theme in [egui::Theme::Light, egui::Theme::Dark] {
-        let palette = Palette::of(theme == egui::Theme::Dark);
+        let palette = Palette::of(scheme, theme == egui::Theme::Dark);
         ctx.style_mut_of(theme, |style| {
             style.text_styles = [
                 (TextStyle::Small, font(12.5)),

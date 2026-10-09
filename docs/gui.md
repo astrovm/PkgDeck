@@ -459,6 +459,13 @@ out of date, and each page refreshes when you open it.
 ## Settings
 
 - **Theme**: **System**, **Light** or **Dark**.
+- **Dark colours**: **Charcoal** (neutral grey, the default), **Black** (for
+  OLED screens) or **Slate** (the blue-grey of earlier versions).
+- **Light colours**: **Classic**, **White** (neutral grey) or **Paper** (warm).
+- **Accent**: the colour of buttons, selection and links. Blue, purple, pink,
+  red, orange, green, teal or graphite.
+- **Text size**: **Small**, **Normal**, **Large** or **Larger**. Everything
+  scales with the text.
 - **Animations**: turn motion on or off.
 - **Background checks**, **Check every**, **Install updates automatically**,
   **Allow updates that remove packages**, **Allow automatic updates without

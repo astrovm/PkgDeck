@@ -5,7 +5,7 @@ use super::widgets::*;
 use crate::{
     app::App,
     model::{self, Tone},
-    settings::Appearance,
+    settings::{Accent, Appearance, DarkTheme, LightTheme, TextSize},
     theme::{self, Palette},
 };
 use eframe::egui::{self, vec2, CornerRadius, Id, Sense, Stroke, Ui, Vec2};
@@ -105,16 +105,75 @@ fn setting_row(ui: &mut Ui, label: &str, hint: &str, size: Vec2, control: impl F
 fn appearance(app: &mut App, ui: &mut Ui) {
     section(ui, "Appearance", |ui| {
         setting_row(ui, "Theme", "", vec2(252.0, 34.0), |ui| {
-            let current = match app.settings.appearance {
-                Appearance::System => 0,
-                Appearance::Light => 1,
-                Appearance::Dark => 2,
-            };
-            if let Some(choice) =
-                segmented(ui, Id::new("theme"), &["System", "Light", "Dark"], current)
-            {
-                app.settings.appearance =
-                    [Appearance::System, Appearance::Light, Appearance::Dark][choice];
+            let all = [Appearance::System, Appearance::Light, Appearance::Dark];
+            if let Some(choice) = segmented(
+                ui,
+                Id::new("theme"),
+                &["System", "Light", "Dark"],
+                position(&all, app.settings.appearance),
+            ) {
+                app.settings.appearance = all[choice];
+            }
+        });
+        setting_row(
+            ui,
+            "Dark colours",
+            "Charcoal is neutral grey, Black is for OLED screens",
+            vec2(252.0, 34.0),
+            |ui| {
+                let all = [DarkTheme::Charcoal, DarkTheme::Black, DarkTheme::Slate];
+                if let Some(choice) = segmented(
+                    ui,
+                    Id::new("dark-theme"),
+                    &["Charcoal", "Black", "Slate"],
+                    position(&all, app.settings.dark_theme),
+                ) {
+                    app.settings.dark_theme = all[choice];
+                }
+            },
+        );
+        setting_row(
+            ui,
+            "Light colours",
+            "Paper is warm, White is neutral grey",
+            vec2(252.0, 34.0),
+            |ui| {
+                let all = [LightTheme::Classic, LightTheme::White, LightTheme::Paper];
+                if let Some(choice) = segmented(
+                    ui,
+                    Id::new("light-theme"),
+                    &["Classic", "White", "Paper"],
+                    position(&all, app.settings.light_theme),
+                ) {
+                    app.settings.light_theme = all[choice];
+                }
+            },
+        );
+        setting_row(
+            ui,
+            "Accent",
+            "Buttons, selection and links",
+            vec2(swatches_width(), 34.0),
+            |ui| {
+                if let Some(accent) = swatches(ui, app.settings.accent) {
+                    app.settings.accent = accent;
+                }
+            },
+        );
+        setting_row(ui, "Text size", "", vec2(336.0, 34.0), |ui| {
+            let all = [
+                TextSize::Small,
+                TextSize::Normal,
+                TextSize::Large,
+                TextSize::Larger,
+            ];
+            if let Some(choice) = segmented(
+                ui,
+                Id::new("text-size"),
+                &["Small", "Normal", "Large", "Larger"],
+                position(&all, app.settings.text_size),
+            ) {
+                app.settings.text_size = all[choice];
             }
         });
         setting_row(
@@ -130,6 +189,73 @@ fn appearance(app: &mut App, ui: &mut Ui) {
             },
         );
     });
+}
+
+fn position<T: PartialEq>(all: &[T], current: T) -> usize {
+    all.iter().position(|item| *item == current).unwrap_or(0)
+}
+
+const SWATCH: f32 = 26.0;
+const SWATCH_GAP: f32 = 8.0;
+
+fn swatches_width() -> f32 {
+    let count = Accent::ALL.len() as f32;
+    count * SWATCH + (count - 1.0) * SWATCH_GAP
+}
+
+/// A dot of each accent, in this appearance's shade, the current one
+/// ringed. Returns a new choice.
+fn swatches(ui: &mut Ui, current: Accent) -> Option<Accent> {
+    let palette = Palette::current(ui.ctx());
+    let (rect, _) = ui.allocate_exact_size(vec2(swatches_width(), 34.0), Sense::hover());
+    let mut chosen = None;
+    for (index, accent) in Accent::ALL.into_iter().enumerate() {
+        let center = egui::pos2(
+            rect.left() + SWATCH / 2.0 + index as f32 * (SWATCH + SWATCH_GAP),
+            rect.center().y,
+        );
+        let cell = egui::Rect::from_center_size(center, Vec2::splat(SWATCH));
+        let response = ui
+            .interact(cell, Id::new("accent").with(index), Sense::click())
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text(accent.name());
+        response.widget_info(|| {
+            egui::WidgetInfo::selected(
+                egui::WidgetType::RadioButton,
+                true,
+                accent == current,
+                accent.name(),
+            )
+        });
+        let color = Palette::of(
+            theme::Scheme {
+                accent,
+                ..Default::default()
+            },
+            palette.dark,
+        )
+        .accent;
+        let shown = ease(
+            ui.ctx(),
+            response.id.with("on"),
+            accent == current,
+            FEEDBACK,
+        );
+        let hovered = if response.hovered() { 1.0 } else { 0.0 };
+        ui.painter()
+            .circle_filled(center, SWATCH / 2.0 - 4.0 + 2.0 * hovered, color);
+        if shown > 0.0 {
+            ui.painter().circle_stroke(
+                center,
+                SWATCH / 2.0 - 1.0,
+                Stroke::new(2.0, alpha(color, shown)),
+            );
+        }
+        if response.clicked() && accent != current {
+            chosen = Some(accent);
+        }
+    }
+    chosen
 }
 
 /// Choices side by side with a sliding marker. Returns a new choice.

@@ -78,6 +78,15 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         Appearance::Light => egui::ThemePreference::Light,
         Appearance::Dark => egui::ThemePreference::Dark,
     });
+    theme::set_scheme(
+        &ctx,
+        theme::Scheme {
+            dark: app.settings.dark_theme,
+            light: app.settings.light_theme,
+            accent: app.settings.accent,
+            text_size: app.settings.text_size,
+        },
+    );
     if !app.ui.started {
         app.ui.started = true;
         app.ui.focus_search = app.page == Page::Search;
