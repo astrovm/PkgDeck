@@ -880,8 +880,8 @@ mod tests {
     use pkgdeck_core::package::{PackageId, Scope, UpdateAvailability};
     use std::io::Write;
 
-    /// Waits for a background thread. Yields before each look, so every line
-    /// runs however fast the thread was.
+    /// Waits for a background thread, yielding before each check.
+    /// Its retry test covers waiting even when real loads finish immediately.
     fn settle(done: impl Fn() -> bool) {
         loop {
             std::thread::yield_now();
@@ -1548,5 +1548,15 @@ Description: '&invalid;'
             web_url(" https://example.invalid/a ").as_deref(),
             Some("https://example.invalid/a")
         );
+    }
+
+    #[test]
+    fn settling_rechecks_until_the_condition_is_true() {
+        let checks = std::cell::Cell::new(0);
+        settle(|| {
+            checks.set(checks.get() + 1);
+            checks.get() == 2
+        });
+        assert_eq!(checks.get(), 2);
     }
 }
