@@ -32,7 +32,7 @@ fn pages_name_their_icons_capabilities_and_filters() {
 #[test]
 fn rows_know_their_title_identity_and_state() {
     let firefox = row(
-        json!({"name": "org.mozilla.firefox", "display_name": "Firefox", "source": "flatpak", "installed": "", "remote": "", "reference": "app/org.mozilla.firefox/x86_64/stable"}),
+        json!({"name": "org.mozilla.firefox", "display_name": "Firefox", "source": "flatpak", "architecture": "x86_64", "installed": "", "remote": "", "reference": "app/org.mozilla.firefox/x86_64/stable"}),
     );
     assert_eq!(firefox.title(), "Firefox");
     assert!(firefox.is_installed());
