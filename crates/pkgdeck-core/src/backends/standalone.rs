@@ -1094,7 +1094,13 @@ impl NativeStandalone {
             StandaloneTool::Solana => vec!["update".into()],
             // `avm install` activates the release it installs. `avm update`
             // is not used: older AVMs pick pre-releases without binaries.
-            StandaloneTool::Anchor => vec!["install".into(), candidate.to_string().into()],
+            // `--force` finishes an install that stopped after downloading
+            // Anchor; without it AVM says it's installed and never switches.
+            StandaloneTool::Anchor => vec![
+                "install".into(),
+                "--force".into(),
+                candidate.to_string().into(),
+            ],
             StandaloneTool::Foundry => vec!["--install".into(), "stable".into()],
         };
         Ok(self
@@ -2345,7 +2351,7 @@ mod tests {
                     StandaloneTool::OpenCode => {
                         assert_eq!(args, "upgrade\n2.0.0\n--method\ncurl\n")
                     }
-                    StandaloneTool::Anchor => assert_eq!(args, "install\n2.0.0\n"),
+                    StandaloneTool::Anchor => assert_eq!(args, "install\n--force\n2.0.0\n"),
                     StandaloneTool::Foundry => assert_eq!(args, "--install\nstable\n"),
                     _ => assert!(args.starts_with("update\n")),
                 }

@@ -612,7 +612,7 @@ How updates are checked and installed:
 | Amp | Amp's published CLI version | `amp update` |
 | Factory Droid | The release Droid's installer names | `droid update` |
 | Solana CLI (Agave) | The release on your channel (stable, beta or edge). A pinned release (`agave-install init VERSION`) is never updated | `agave-install update` |
-| Anchor (AVM) | Latest stable Anchor release | `avm install VERSION`, which also switches to it. AVM also rebuilds its `solana-verify` helper from source, so this takes a few minutes |
+| Anchor (AVM) | Latest stable Anchor release | `avm install --force VERSION`, which also switches to it, even when an earlier try stopped halfway. AVM also rebuilds its `solana-verify` helper from source with Cargo (found in `~/.cargo/bin` or `CARGO_HOME` when it's not on PATH), so this takes a few minutes |
 | Foundry | Latest stable release. Nightly builds aren't checked | `foundryup --install stable` |
 
 `curl` is needed for the release checks and the Codex installer. If a check
