@@ -127,6 +127,8 @@ pub struct App {
     pub unchecked: HashSet<String>,
     pub active_rows: HashSet<String>,
     pub flashes: HashMap<String, Instant>,
+    /// Updates that failed last time or need the password.
+    pub held: Vec<model::Held>,
     snapshot: HashMap<String, (Option<String>, Option<String>, String)>,
     quick_change: bool,
     auto_confirm: Option<String>,
@@ -205,6 +207,7 @@ impl App {
             on_notification_history_changed: "notification_history",
             on_system_approval_changed: "system_approval",
             on_auto_update_result_changed: "auto_update_result",
+            on_held_updates_changed: "held_updates",
             on_self_update_changed: "self_update",
             on_confirmation_changed: "confirmation",
             on_confirmation_data_changed: "confirmation_data",
@@ -268,6 +271,7 @@ impl App {
             unchecked: HashSet::new(),
             active_rows: HashSet::new(),
             flashes: HashMap::new(),
+            held: Vec::new(),
             snapshot: HashMap::new(),
             quick_change: false,
             auto_confirm: None,
@@ -597,6 +601,9 @@ impl App {
         }
         if has("background_state") {
             self.background_changed();
+        }
+        if has("held_updates") {
+            self.held = model::parse(self.ctl.held_updates().as_str());
         }
         if has("auto_update_result") {
             let result: AutoUpdateResult = model::parse(self.ctl.auto_update_result().as_str());
