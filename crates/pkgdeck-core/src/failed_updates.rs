@@ -137,7 +137,7 @@ mod tests {
         assert_eq!(store.updates().len(), 1);
         assert!(store.skips(&tool, "2.1"));
         // Updated on its own: forgotten.
-        store.remember(&[], &[tool.clone()]);
+        store.remember(&[], std::slice::from_ref(&tool));
         assert!(!FailedUpdates::at(&path).skips(&tool, "2.1"));
         fs::remove_dir_all(dir).unwrap();
     }
