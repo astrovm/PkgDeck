@@ -719,7 +719,8 @@ jobs:
           data=$PWD/build/appimage-backend-data
           XDG_DATA_HOME="$data" "$appimage" --cli --json --yes --from appimage search "$appimage" | jq -e '.exit_code == 0'
           XDG_DATA_HOME="$data" "$appimage" --cli --json --yes --from appimage install "$appimage" | jq -e '.exit_code == 0'
-          imported=$(XDG_DATA_HOME="$data" "$appimage" --cli --json --from appimage list | jq -r '.data.packages[0].id.name')
+          listed=$(XDG_DATA_HOME="$data" "$appimage" --cli --json --from appimage list) || { echo "$listed"; exit 1; }
+          imported=$(jq -er '.data.packages[0].id.name' <<< "$listed") || { echo "$listed"; exit 1; }
           XDG_DATA_HOME="$data" "$appimage" --cli --json --yes --from appimage remove "$imported" | jq -e '.exit_code == 0'
       - name: Build and test Snap
         if: needs.reviewed.outputs.tested != 'true'
