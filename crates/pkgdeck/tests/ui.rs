@@ -236,6 +236,46 @@ fn the_activity_drawer_opens_and_closes() {
 }
 
 #[test]
+fn a_new_page_opens_no_row() {
+    let mut harness = show(Page::Installed);
+    harness.get_by_label_contains("GIMP, APT, System").click();
+    harness.run_steps(4);
+    assert!(harness.state().1.page_open);
+    harness
+        .get_by_role_and_label(Role::Button, "Updates")
+        .click();
+    harness.run_steps(4);
+    assert!(harness.state().1.selected.is_none());
+    assert!(!harness.state().1.page_open);
+}
+
+#[test]
+fn mid_width_windows_keep_the_list_beside_the_page() {
+    let mut app = app();
+    app.page = Page::Installed;
+    app.invalidate();
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(760.0, 760.0))
+        .build_ui_state(
+            |ui, (ready, app): &mut (bool, App)| {
+                if !*ready {
+                    pkgdeck::setup(ui.ctx(), std::path::Path::new("/"), None);
+                    *ready = true;
+                    return;
+                }
+                pkgdeck::ui::show(app, ui);
+            },
+            (false, app),
+        );
+    harness.run_steps(4);
+    harness.get_by_label_contains("GIMP, APT, System").click();
+    harness.run_steps(6);
+    assert!(harness.state().1.page_open);
+    assert!(harness.query_by_label_contains("Krita, APT").is_some());
+    assert!(harness.query_by_label("Back").is_none());
+}
+
+#[test]
 fn narrow_windows_still_show_rows_and_their_page() {
     let mut app = app();
     app.page = Page::Installed;
