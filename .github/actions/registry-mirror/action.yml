@@ -1,0 +1,18 @@
+name: Pull Docker Hub images through a mirror
+description: Docker Hub rate-limits and times out anonymous pulls from shared runners, so Podman and Docker try Google's mirror first.
+# Either engine falls back to Docker Hub for an image the mirror lacks.
+runs:
+  using: composite
+  steps:
+    - name: Use mirror.gcr.io for docker.io
+      shell: bash
+      run: |
+        sudo mkdir -p /etc/containers/registries.conf.d
+        printf '[[registry]]\nprefix = "docker.io"\nlocation = "docker.io"\n\n[[registry.mirror]]\nlocation = "mirror.gcr.io"\n' |
+            sudo tee /etc/containers/registries.conf.d/50-mirror.conf >/dev/null
+        if command -v docker >/dev/null; then
+            daemon=/etc/docker/daemon.json
+            config=$(sudo cat "$daemon" 2>/dev/null || echo '{}')
+            jq '."registry-mirrors" = ["https://mirror.gcr.io"]' <<<"$config" | sudo tee "$daemon" >/dev/null
+            sudo systemctl restart docker
+        fi
