@@ -49,19 +49,21 @@ fn app() -> App {
 }
 
 fn harness(app: App) -> Harness<'static, (bool, App)> {
-    Harness::builder()
-        .with_size(egui::vec2(1200.0, 800.0))
-        .build_ui_state(
-            |ui, (ready, app): &mut (bool, App)| {
-                if !*ready {
-                    pkgdeck::setup(ui.ctx(), std::path::Path::new("/"), None);
-                    *ready = true;
-                    return;
-                }
-                pkgdeck::ui::show(app, ui);
-            },
-            (false, app),
-        )
+    harness_at(app, egui::vec2(1200.0, 800.0))
+}
+
+fn harness_at(app: App, size: egui::Vec2) -> Harness<'static, (bool, App)> {
+    Harness::builder().with_size(size).build_ui_state(
+        |ui, (ready, app): &mut (bool, App)| {
+            if !*ready {
+                pkgdeck::setup(ui.ctx(), std::path::Path::new("/"), None);
+                *ready = true;
+                return;
+            }
+            pkgdeck::ui::show(app, ui);
+        },
+        (false, app),
+    )
 }
 
 fn show(page: Page) -> Harness<'static, (bool, App)> {
@@ -233,6 +235,149 @@ fn the_activity_drawer_opens_and_closes() {
     harness.key_press(egui::Key::Escape);
     harness.run_steps(3);
     assert!(!harness.state().1.drawer_open);
+}
+
+#[test]
+fn a_new_page_opens_no_row() {
+    let mut app = app();
+    let task = json!({"kind": "cleanup", "name": "cache", "display_name": "APT download cache",
+                      "source": "apt", "cleanup_kind": "package_cache", "summary": "12 cached downloads"});
+    app.c().set_rows(json!([task]).to_string().into());
+    app.react();
+    app.page = Page::Clean;
+    app.invalidate();
+    let mut harness = harness(app);
+    harness.run_steps(4);
+    // Opening a page focuses its list, as the sidebar does.
+    harness.state_mut().1.ui.focus_list = true;
+    harness.run_steps(3);
+    assert!(!harness.state().1.items.is_empty());
+    assert!(harness.state().1.selected.is_none());
+    assert!(harness.query_by_label("Close details").is_none());
+}
+
+#[test]
+fn mid_width_windows_keep_the_list_beside_the_page() {
+    let mut app = app();
+    app.page = Page::Installed;
+    app.invalidate();
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(760.0, 760.0))
+        .build_ui_state(
+            |ui, (ready, app): &mut (bool, App)| {
+                if !*ready {
+                    pkgdeck::setup(ui.ctx(), std::path::Path::new("/"), None);
+                    *ready = true;
+                    return;
+                }
+                pkgdeck::ui::show(app, ui);
+            },
+            (false, app),
+        );
+    harness.run_steps(4);
+    harness.get_by_label_contains("GIMP, APT, System").click();
+    harness.run_steps(6);
+    assert!(harness.state().1.page_open);
+    assert!(harness.query_by_label_contains("Krita, APT").is_some());
+    assert!(harness.query_by_label("Back").is_none());
+}
+
+fn list_and_page_cards(harness: &Harness<'_, (bool, App)>) -> Vec<egui::Rect> {
+    harness
+        .output()
+        .shapes
+        .iter()
+        .filter_map(|shape| match &shape.shape {
+            egui::Shape::Rect(shape)
+                if shape.stroke.width == 1.0
+                    && shape.corner_radius == egui::CornerRadius::same(12)
+                    && shape.rect.height() > 350.0
+                    && shape.rect.width() > 250.0 =>
+            {
+                Some(shape.rect)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn both_columns_keep_room_when_the_details_width_is_changed() {
+    for width in [760.0, 1200.0, 1800.0] {
+        for share in [0.3, 0.5, 0.65] {
+            let mut app = app();
+            app.page = Page::Installed;
+            app.settings.details_width = share;
+            app.invalidate();
+            let mut harness = harness_at(app, egui::vec2(width, 800.0));
+            harness.run_steps(4);
+            harness.get_by_label_contains("GIMP, APT, System").click();
+            harness.run_steps(4);
+            let cards = list_and_page_cards(&harness);
+            assert_eq!(cards.len(), 2, "{width}, {share}: {cards:?}");
+            let (list, page) = (cards[0], cards[1]);
+            assert!(
+                list.width() >= 265.9 && page.width() >= 279.9,
+                "{width}, {share}: {cards:?}"
+            );
+            assert!((page.left() - list.right() - 14.0).abs() < 0.1);
+            assert_eq!(page.top(), list.top());
+            assert_eq!(page.bottom(), list.bottom());
+            assert!(page.right() <= width);
+            if width == 760.0 && share == 0.3 {
+                assert!((page.width() - 280.0).abs() < 0.1);
+            }
+            if width == 760.0 && share == 0.65 {
+                assert!((list.width() - 266.0).abs() < 0.1);
+            }
+            if share == 0.5 {
+                assert!((page.width() - list.width() - 14.0).abs() < 0.1);
+            }
+        }
+    }
+}
+
+#[test]
+fn the_columns_stay_inside_the_window_as_the_page_opens_and_closes() {
+    let mut app = app();
+    app.page = Page::Installed;
+    app.settings.reduce_motion = false;
+    app.invalidate();
+    let mut harness = harness_at(app, egui::vec2(1200.0, 800.0));
+    harness.run_steps(30);
+    let list = list_and_page_cards(&harness)[0];
+    harness.get_by_label_contains("GIMP, APT, System").click();
+    for step in 0..30 {
+        harness.run_steps(1);
+        for card in list_and_page_cards(&harness) {
+            assert!(
+                card.is_finite() && card.width() >= 0.0,
+                "step {step}: {card:?}"
+            );
+            assert!(
+                card.left() >= list.left() && card.right() <= list.right() + 24.1,
+                "step {step}: {card:?}"
+            );
+        }
+    }
+    harness.get_by_label("Close").click();
+    for step in 0..30 {
+        harness.run_steps(1);
+        for card in list_and_page_cards(&harness) {
+            assert!(
+                card.is_finite() && card.width() >= 0.0,
+                "step {step}: {card:?}"
+            );
+            assert!(
+                card.left() >= list.left() && card.right() <= list.right() + 24.1,
+                "step {step}: {card:?}"
+            );
+        }
+    }
+    let cards = list_and_page_cards(&harness);
+    assert_eq!(cards.len(), 1);
+    assert!((cards[0].left() - list.left()).abs() < 0.1);
+    assert!((cards[0].right() - list.right()).abs() < 0.1);
 }
 
 #[test]

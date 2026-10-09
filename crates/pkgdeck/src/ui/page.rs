@@ -14,6 +14,19 @@ use eframe::egui::{
 };
 use std::time::Instant;
 
+#[cfg(test)]
+#[path = "page_tests.rs"]
+mod tests;
+
+/// A button in an app page's header.
+#[derive(Clone, Copy)]
+enum PageButton {
+    Launch,
+    Main,
+    Manage,
+    Scope,
+}
+
 /// The launch settings being edited, for one row.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct LaunchDraft {
@@ -72,6 +85,11 @@ fn panel(app: &mut App, ui: &mut Ui, rect: Rect, row: &Row, narrow: bool) {
             {
                 app.deselect();
             }
+            let cleanup = row.kind == "cleanup" && app.selected_index().is_some();
+            let source = row.kind == "source" && app.page == Page::Sources;
+            let reserve = if narrow { 0.0 } else { 40.0 }
+                + if cleanup { 110.0 } else { 0.0 }
+                + if source { 90.0 } else { 0.0 };
             let (icon, _) = ui.allocate_exact_size(Vec2::splat(44.0), Sense::hover());
             ui.painter()
                 .rect_filled(icon, CornerRadius::same(10), alpha(palette.accent, 0.1));
@@ -81,8 +99,8 @@ fn panel(app: &mut App, ui: &mut Ui, rect: Rect, row: &Row, narrow: bool) {
             };
             theme::paint_icon(ui.painter(), icon.shrink(11.0), name, palette.accent);
             ui.vertical(|ui| {
-                // Long titles wrap rather than run under the close button.
-                ui.set_max_width((ui.available_width() - 40.0).max(80.0));
+                // Long titles wrap rather than run under the buttons.
+                ui.set_max_width((ui.available_width() - reserve).max(80.0));
                 ui.add(
                     egui::Label::new(
                         egui::RichText::new(row.title())
@@ -104,38 +122,34 @@ fn panel(app: &mut App, ui: &mut Ui, rect: Rect, row: &Row, narrow: bool) {
                     app.deselect();
                     app.ui.focus_list = true;
                 }
+                // Right to left: the switch's label goes before the switch.
+                if source {
+                    let enabled = app.enabled_sources().contains(&row.source);
+                    ui.label(
+                        egui::RichText::new(if enabled { "On" } else { "Off" })
+                            .color(palette.muted),
+                    );
+                    let mut on = enabled;
+                    let can = row.available.unwrap_or(false)
+                        && !app.writing
+                        && !(enabled && !app.can_turn_off(&row.source));
+                    if switch(ui, &mut on, can, "Enabled").changed() {
+                        let source = row.source.clone();
+                        app.set_source_enabled(&source, on);
+                    }
+                }
+                if let Some(index) = app.selected_index().filter(|_| cleanup) {
+                    if Button::new(Look::Soft(Tone::Danger), "Clean")
+                        .icon("remove")
+                        .enabled(app.can_act() && app.retained.is_none())
+                        .show(ui)
+                        .clicked()
+                    {
+                        app.run_row_action(index);
+                    }
+                }
             });
         });
-        if row.kind == "cleanup" {
-            if let Some(index) = app.selected_index() {
-                ui.add_space(12.0);
-                if Button::new(Look::Soft(Tone::Danger), "Clean")
-                    .icon("remove")
-                    .enabled(app.can_act() && app.retained.is_none())
-                    .show(ui)
-                    .clicked()
-                {
-                    app.run_row_action(index);
-                }
-            }
-        }
-        if row.kind == "source" && app.page == Page::Sources {
-            ui.add_space(12.0);
-            ui.horizontal(|ui| {
-                let enabled = app.enabled_sources().contains(&row.source);
-                let mut on = enabled;
-                let can = row.available.unwrap_or(false)
-                    && !app.writing
-                    && !(enabled && !app.can_turn_off(&row.source));
-                if switch(ui, &mut on, can, "Enabled").changed() {
-                    let source = row.source.clone();
-                    app.set_source_enabled(&source, on);
-                }
-                ui.label(
-                    egui::RichText::new(if enabled { "On" } else { "Off" }).color(palette.muted),
-                );
-            });
-        }
         ui.add_space(12.0);
         let text = app.details.panel_text(&app.report);
         let text = if text.is_empty() {
@@ -256,40 +270,26 @@ fn app_page(
     let can_act = app.can_act() && app.retained.is_none() && !app.review_on_page;
     let inner = rect.shrink2(vec2(20.0, 18.0));
     ui.scope_builder(UiBuilder::new().max_rect(inner).id_salt(("app-page", &identity)), |ui| {
-        // Header.
-        ui.horizontal(|ui| {
-            if (opened || narrow)
-                && Button::new(Look::Flat, "Back").icon("back").icon_only(true).enabled(!app.review_on_page).tooltip("Back").show(ui).clicked()
-            {
-                app.close_page();
-                app.ui.focus_list = true;
-            }
-            let size = if opened && !narrow { 72.0 } else { 52.0 };
-            let (icon, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
-            package_icon(app, ui, icon, row);
-            ui.vertical(|ui| {
-                ui.set_max_width((ui.available_width() - 160.0).max(120.0));
-                ui.add(egui::Label::new(egui::RichText::new(row.title()).font(theme::bold(if opened { 24.0 } else { 20.0 })).color(palette.ink)).truncate());
-                let variants = item.as_ref().map(|i| i.variants.clone()).unwrap_or_default();
-                let line = model::source_line(row, variants.len() > 1);
-                ui.add(egui::Label::new(egui::RichText::new(line).color(palette.muted)).truncate());
-                let version = row.installed.clone().filter(|v| !v.is_empty()).or(row.candidate.clone()).unwrap_or_default();
-                if !version.is_empty() {
-                    ui.label(egui::RichText::new(version).font(theme::mono(12.5)).color(palette.muted));
-                }
-            });
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                if !opened && !narrow && icon_button(ui, "cancel", "Close", palette.muted, true).clicked() {
-                    app.close_page();
-                    app.ui.focus_list = true;
-                }
-            });
-        });
-        ui.add_space(10.0);
-        // Actions.
-        ui.horizontal_wrapped(|ui| {
-            let update_waits = row.has_update();
-            if launchable {
+        let update_waits = row.has_update();
+        let manage = !opened
+            && model::can_adopt(row, &app.catalog)
+            && !matches!(main, Some(Main::Row(model::Action::Adopt)));
+        let scope = item.as_ref().filter(|i| i.variants.len() > 1).map(|i| i.variants.clone());
+        let mut buttons = Vec::new();
+        if launchable {
+            buttons.push(PageButton::Launch);
+        }
+        if matches!(&main, Some(Main::Opened(_)) if !launchable) || matches!(main, Some(Main::Row(_))) {
+            buttons.push(PageButton::Main);
+        }
+        if manage {
+            buttons.push(PageButton::Manage);
+        }
+        if scope.is_some() {
+            buttons.push(PageButton::Scope);
+        }
+        let show = |app: &mut App, ui: &mut Ui, button: PageButton| match button {
+            PageButton::Launch => {
                 let look = if update_waits { Look::Secondary } else { Look::Primary };
                 if Button::new(look, "Launch").icon("launch").show(ui).clicked() {
                     let error = if opened {
@@ -300,8 +300,8 @@ fn app_page(
                     app.launch_error = error;
                 }
             }
-            match &main {
-                Some(Main::Opened(action)) if !launchable => {
+            PageButton::Main => match &main {
+                Some(Main::Opened(action)) => {
                     if Button::new(Look::Solid(Tone::Success), action).icon("install").enabled(can_act).show(ui).clicked() {
                         app.run_page_action();
                     }
@@ -328,9 +328,9 @@ fn app_page(
                         app.run_page_action();
                     }
                 }
-                _ => {}
-            }
-            if !opened && model::can_adopt(row, &app.catalog) && !matches!(main, Some(Main::Row(model::Action::Adopt))) {
+                None => {}
+            },
+            PageButton::Manage => {
                 if let Some(index) = app.selected_index() {
                     if Button::new(Look::Soft(Tone::Accent), "Manage").icon("install").enabled(can_act).show(ui).clicked() {
                         app.run_adopt(index);
@@ -338,13 +338,61 @@ fn app_page(
                 }
             }
             // System or User, for a Flatpak installed both ways.
-            if let Some(item) = &item {
-                if item.variants.len() > 1 {
-                    ui.add_space(6.0);
-                    scope_toggle(app, ui, item.variants.clone(), &identity, can_act);
+            PageButton::Scope => {
+                if let Some(variants) = scope.clone() {
+                    scope_toggle(app, ui, variants, &identity, can_act);
                 }
             }
+        };
+        // The buttons sit right of the title when they fit, else below it.
+        let size = if opened && !narrow { 72.0 } else { 52.0 };
+        let back = if opened || narrow { 44.0 } else { 0.0 };
+        let close = if !opened && !narrow { 40.0 } else { 0.0 };
+        let title_room = inner.width() - back - size - close - 12.0 - 120.0 * buttons.len() as f32;
+        let beside = !narrow && title_room >= 200.0;
+        // Header.
+        ui.horizontal(|ui| {
+            if (opened || narrow)
+                && Button::new(Look::Flat, "Back").icon("back").icon_only(true).enabled(!app.review_on_page).tooltip("Back").show(ui).clicked()
+            {
+                app.close_page();
+                app.ui.focus_list = true;
+            }
+            let (icon, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
+            package_icon(app, ui, icon, row);
+            ui.vertical(|ui| {
+                let reserve = close + if beside { 120.0 * buttons.len() as f32 } else { 0.0 };
+                ui.set_max_width((ui.available_width() - reserve).max(120.0));
+                ui.add(egui::Label::new(egui::RichText::new(row.title()).font(theme::bold(if opened { 24.0 } else { 20.0 })).color(palette.ink)).truncate());
+                let variants = item.as_ref().map(|i| i.variants.clone()).unwrap_or_default();
+                let line = model::source_line(row, variants.len() > 1);
+                ui.add(egui::Label::new(egui::RichText::new(line).color(palette.muted)).truncate());
+                let version = row.installed.clone().filter(|v| !v.is_empty()).or(row.candidate.clone()).unwrap_or_default();
+                if !version.is_empty() {
+                    ui.label(egui::RichText::new(version).font(theme::mono(12.5)).color(palette.muted));
+                }
+            });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                if !opened && !narrow && icon_button(ui, "cancel", "Close", palette.muted, true).clicked() {
+                    app.close_page();
+                    app.ui.focus_list = true;
+                }
+                if beside {
+                    // Right to left, so the last button is drawn first.
+                    for &button in buttons.iter().rev() {
+                        show(app, ui, button);
+                    }
+                }
+            });
         });
+        ui.add_space(10.0);
+        if !beside && !buttons.is_empty() {
+            ui.horizontal_wrapped(|ui| {
+                for &button in &buttons {
+                    show(app, ui, button);
+                }
+            });
+        }
         if !opened && model::can_adopt(row, &app.catalog) && row.source == "appimage" {
             ui.label(egui::RichText::new("Manage moves it into PkgDeck, which then keeps it updated with its menu entry and icon.").font(theme::font(13.0)).color(palette.muted));
         }

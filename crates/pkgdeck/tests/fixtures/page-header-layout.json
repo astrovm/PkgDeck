@@ -1,0 +1,1648 @@
+{
+  "cleanup-1000-false-false": [
+    {
+      "height": 44.0,
+      "text": "A long fixture title with accents áé and emoji 🦀 that must leave room for the header actions",
+      "width": 726.53125,
+      "x": 80.0,
+      "y": 26.0
+    },
+    {
+      "height": 18.0,
+      "text": "APT",
+      "width": 28.625,
+      "x": 80.0,
+      "y": 78.0
+    },
+    {
+      "height": 17.0,
+      "text": "Clean",
+      "width": 39.0,
+      "x": 879.0,
+      "y": 35.5
+    },
+    {
+      "height": 54.0,
+      "text": "Fixture summary\n\nFixture preview",
+      "width": 114.9375,
+      "x": 26.0,
+      "y": 116.0
+    },
+    {
+      "control": "Close details",
+      "height": 32.0,
+      "width": 32.0,
+      "x": 942.0,
+      "y": 26.0
+    },
+    {
+      "control": "Clean",
+      "height": 36.0,
+      "width": 93.0,
+      "x": 839.0,
+      "y": 26.0
+    }
+  ],
+  "cleanup-440-true-false": [
+    {
+      "height": 110.0,
+      "text": "A long fixture title with accents áé and emoji 🦀 that must leave room for the header actions",
+      "width": 177.53125,
+      "x": 126.0,
+      "y": 26.0
+    },
+    {
+      "height": 18.0,
+      "text": "APT",
+      "width": 28.625,
+      "x": 126.0,
+      "y": 144.0
+    },
+    {
+      "height": 17.0,
+      "text": "Clean",
+      "width": 39.0,
+      "x": 361.0,
+      "y": 35.5
+    },
+    {
+      "control": "Back",
+      "height": 36.0,
+      "width": 36.0,
+      "x": 26.0,
+      "y": 26.0
+    },
+    {
+      "control": "Clean",
+      "height": 36.0,
+      "width": 93.0,
+      "x": 321.0,
+      "y": 26.0
+    }
+  ],
+  "cleanup-480-false-false": [
+    {
+      "height": 88.0,
+      "text": "A long fixture title with accents áé and emoji 🦀 that must leave room for the header actions",
+      "width": 215.53125,
+      "x": 80.0,
+      "y": 26.0
+    },
+    {
+      "height": 18.0,
+      "text": "APT",
+      "width": 28.625,
+      "x": 80.0,
+      "y": 122.0
+    },
+    {
+      "height": 17.0,
+      "text": "Clean",
+      "width": 39.0,
+      "x": 359.0,
+      "y": 35.5
+    },
+    {
+      "height": 54.0,
+      "text": "Fixture summary\n\nFixture preview",
+      "width": 114.9375,
+      "x": 26.0,
+      "y": 160.0
+    },
+    {
+      "control": "Close details",
+      "height": 32.0,
+      "width": 32.0,
+      "x": 422.0,
+      "y": 26.0
+    },
+    {
+      "control": "Clean",
+      "height": 36.0,
+      "width": 93.0,
+      "x": 319.0,
+      "y": 26.0
+    }
+  ],
+  "cleanup-500-false-false": [
+    {
+      "height": 88.0,
+      "text": "A long fixture title with accents áé and emoji 🦀 that must leave room for the header actions",
+      "width": 215.53125,
+      "x": 80.0,
+      "y": 26.0
+    },
+    {
+      "height": 18.0,
+      "text": "APT",
+      "width": 28.625,
+      "x": 80.0,
+      "y": 122.0
+    },
+    {
+      "height": 17.0,
+      "text": "Clean",
+      "width": 39.0,
+      "x": 379.0,
+      "y": 35.5
+    },
+    {
+      "height": 54.0,
+      "text": "Fixture summary\n\nFixture preview",
+      "width": 114.9375,
+      "x": 26.0,
+      "y": 160.0
+    },
+    {
+      "control": "Close details",
+      "height": 32.0,
+      "width": 32.0,
+      "x": 442.0,
+      "y": 26.0
+    },
+    {
+      "control": "Clean",
+      "height": 36.0,
+      "width": 93.0,
+      "x": 339.0,
+      "y": 26.0
+    }
+  ],
+  "cleanup-504-false-false": [
+    {
+      "height": 88.0,
+      "text": "A long fixture title with accents áé and emoji 🦀 that must leave room for the header actions",
+      "width": 215.53125,
+      "x": 80.0,
+      "y": 26.0
+    },
+    {
+      "height": 18.0,
+      "text": "APT",
+      "width": 28.625,
+      "x": 80.0,
+      "y": 122.0
+    },
+    {
+      "height": 17.0,
+      "text": "Clean",
+      "width": 39.0,
+      "x": 383.0,
+      "y": 35.5
+    },
+    {
+      "height": 54.0,
+      "text": "Fixture summary\n\nFixture preview",
+      "width": 114.9375,
+      "x": 26.0,
+      "y": 160.0
+    },
+    {
+      "control": "Close details",
+      "height": 32.0,
+      "width": 32.0,
+      "x": 446.0,
+      "y": 26.0
+    },
+    {
+      "control": "Clean",
+      "height": 36.0,
+      "width": 93.0,
+      "x": 343.0,
+      "y": 26.0
+    }
+  ],
+  "cleanup-560-false-false": [
+    {
+      "height": 66.0,
+      "text": "A long fixture title with accents áé and emoji 🦀 that must leave room for the header actions",
+      "width": 299.53125,
+      "x": 80.0,
+      "y": 26.0
+    },
+    {
+      "height": 18.0,
+      "text": "APT",
+      "width": 28.625,
+      "x": 80.0,
+      "y": 100.0
+    },
+    {
+      "height": 17.0,
+      "text": "Clean",
+      "width": 39.0,
+      "x": 439.0,
+      "y": 35.5
+    },
+    {
+      "height": 54.0,
+      "text": "Fixture summary\n\nFixture preview",
+      "width": 114.9375,
+      "x": 26.0,
+      "y": 138.0
+    },
+    {
+      "control": "Close details",
+      "height": 32.0,
+      "width": 32.0,
+      "x": 502.0,
+      "y": 26.0
+    },
+    {
+      "control": "Clean",
+      "height": 36.0,
+      "width": 93.0,
+      "x": 399.0,
+      "y": 26.0
+    }
+  ],
+  "cleanup-600-false-false": [
+    {
+      "height": 66.0,
+      "text": "A long fixture title with accents áé and emoji 🦀 that must leave room for the header actions",
+      "width": 336.53125,
+      "x": 80.0,
+      "y": 26.0
+    },
+    {
+      "height": 18.0,
+      "text": "APT",
+      "width": 28.625,
+      "x": 80.0,
+      "y": 100.0
+    },
+    {
+      "height": 17.0,
+      "text": "Clean",
+      "width": 39.0,
+      "x": 479.0,
+      "y": 35.5
+    },
+    {
+      "height": 54.0,
+      "text": "Fixture summary\n\nFixture preview",
+      "width": 114.9375,
+      "x": 26.0,
+      "y": 138.0
+    },
+    {
+      "control": "Close details",
+      "height": 32.0,
+      "width": 32.0,
+      "x": 542.0,
+      "y": 26.0
+    },
+    {
+      "control": "Clean",
+      "height": 36.0,
+      "width": 93.0,
+      "x": 439.0,
+      "y": 26.0
+    }
+  ],
+  "cleanup-700-false-false": [
+    {
+      "height": 44.0,
+      "text": "A long fixture title with accents áé and emoji 🦀 that must leave room for the header actions",
+      "width": 411.53125,
+      "x": 80.0,
+      "y": 26.0
+    },
+    {
+      "height": 18.0,
+      "text": "APT",
+      "width": 28.625,
+      "x": 80.0,
+      "y": 78.0
+    },
+    {
+      "height": 17.0,
+      "text": "Clean",
+      "width": 39.0,
+      "x": 579.0,
+      "y": 35.5
+    },
+    {
+      "height": 54.0,
+      "text": "Fixture summary\n\nFixture preview",
+      "width": 114.9375,
+      "x": 26.0,
+      "y": 116.0
+    },
+    {
+      "control": "Close details",
+      "height": 32.0,
+      "width": 32.0,
+      "x": 642.0,
+      "y": 26.0
+    },
+    {
+      "control": "Clean",
+      "height": 36.0,
+      "width": 93.0,
+      "x": 539.0,
+      "y": 26.0
+    }
+  ],
+  "package-1000-false-false": [
+    {
+      "height": 24.0,
+      "text": "A long fixture title with accents áé and emoji 🦀 that must leave room for the header actions",
+      "width": 601.125,
+      "x": 90.0,
+      "y": 26.0
+    },
+    {
+      "height": 18.0,
+      "text": "fixture, APT",
+      "width": 80.9375,
+      "x": 90.0,
+      "y": 58.0
+    },
+    {
+      "height": 15.0,
+      "text": "1.0",
+      "width": 22.5625,
+      "x": 90.0,
+      "y": 84.0
+    },
+    {
+      "height": 17.0,
+      "text": "Manage",
+      "width": 54.59375,
+      "x": 861.40625,
+      "y": 35.5
+    },
+    {
+      "height": 17.0,
+      "text": "Remove",
+      "width": 54.34375,
+      "x": 743.0625,
+      "y": 35.5
+    },
+    {
+      "height": 19.0,
+      "text": "Fixture summary",
+      "width": 126.40625,
+      "x": 28.0,
+      "y": 131.0
+    },
+    {
+      "height": 22.0,
+      "text": "Fixture description",
+      "width": 128.125,
+      "x": 28.0,
+      "y": 162.0
+    },
+    {
+      "control": "Close",
+      "height": 32.0,
+      "width": 32.0,
+      "x": 940.0,
+      "y": 26.0
+    },
+    {
+      "control": "Remove",
+      "height": 36.0,
+      "width": 108.34375,
+      "x": 703.0625,
+      "y": 26.0
+    },
+    {
+      "control": "Manage",
+      "height": 36.0,
+      "width": 108.59375,
+      "x": 821.40625,
+      "y": 26.0
+    }
+  ],
+  "package-1000-false-true": [
+    {
+      "height": 29.0,
+      "text": "A long fixture title with accents áé and emoji 🦀 that must leave room for the header actions",
+      "width": 692.9375,
+      "x": 156.0,
+      "y": 26.0
+    },
+    {
+      "height": 18.0,
+      "text": "fixture, APT",
+      "width": 80.9375,
+      "x": 156.0,
+      "y": 63.0
+    },
+    {
+      "height": 15.0,
+      "text": "1.0",
+      "width": 22.5625,
+      "x": 156.0,
+      "y": 89.0
+    },
+    {
+      "height": 17.0,
+      "text": "Remove",
+      "width": 54.34375,
+      "x": 903.65625,
+      "y": 35.5
+    },
+    {
+      "height": 19.0,
+      "text": "Fixture summary",
+      "width": 126.40625,
+      "x": 28.0,
+      "y": 136.0
+    },
+    {
+      "control": "Back",
+      "height": 36.0,
+      "width": 36.0,
+      "x": 28.0,
+      "y": 26.0
+    },
+    {
+      "control": "Remove",
+      "height": 36.0,
+      "width": 108.34375,
+      "x": 863.65625,
+      "y": 26.0
+    }
+  ],
+  "package-440-true-false": [
+    {
+      "height": 24.0,
+      "text": "A long fixture title with accents áé and emoji 🦀 that must leave room for the header actions",
+      "width": 264.125,
+      "x": 136.0,
+      "y": 26.0
+    },
+    {
+      "height": 18.0,
+      "text": "fixture, APT",
+      "width": 80.9375,
+      "x": 136.0,
+      "y": 58.0
+    },
+    {
+      "height": 15.0,
+      "text": "1.0",
+      "width": 22.5625,
+      "x": 136.0,
+      "y": 84.0
+    },
+    {
+      "height": 17.0,
+      "text": "Remove",
+      "width": 54.34375,
+      "x": 68.0,
+      "y": 126.5
+    },
+    {
+      "height": 17.0,
+      "text": "Manage",
+      "width": 54.59375,
+      "x": 186.34375,
+      "y": 126.5
+    },
+    {
+      "control": "Back",
+      "height": 36.0,
+      "width": 36.0,
+      "x": 28.0,
+      "y": 26.0
+    },
+    {
+      "control": "Remove",
+      "height": 36.0,
+      "width": 108.34375,
+      "x": 28.0,
+      "y": 117.0
+    },
+    {
+      "control": "Manage",
+      "height": 36.0,
+      "width": 108.59375,
+      "x": 146.34375,
+      "y": 117.0
+    }
+  ],
+  "package-440-true-true": [
+    {
+      "height": 29.0,
+      "text": "A long fixture title with accents áé and emoji 🦀 that must leave room for the header actions",
+      "width": 268.9375,
+      "x": 136.0,
+      "y": 26.0
+    },
+    {
+      "height": 18.0,
+      "text": "fixture, APT",
+      "width": 80.9375,
+      "x": 136.0,
+      "y": 63.0
+    },
+    {
+      "height": 15.0,
+      "text": "1.0",
+      "width": 22.5625,
+      "x": 136.0,
+      "y": 89.0
+    },
+    {
+      "height": 17.0,
+      "text": "Remove",
+      "width": 54.34375,
+      "x": 68.0,
+      "y": 131.5
+    },
+    {
+      "control": "Back",
+      "height": 36.0,
+      "width": 36.0,
+      "x": 28.0,
+      "y": 26.0
+    },
+    {
+      "control": "Remove",
+      "height": 36.0,
+      "width": 108.34375,
+      "x": 28.0,
+      "y": 122.0
+    }
+  ],
+  "package-480-false-false": [
+    {
+      "height": 24.0,
+      "text": "A long fixture title with accents áé and emoji 🦀 that must leave room for the header actions",
+      "width": 319.125,
+      "x": 90.0,
+      "y": 26.0
+    },
+    {
+      "height": 18.0,
+      "text": "fixture, APT",
+      "width": 80.9375,
+      "x": 90.0,
+      "y": 58.0
+    },
+    {
+      "height": 15.0,
+      "text": "1.0",
+      "width": 22.5625,
+      "x": 90.0,
+      "y": 84.0
+    },
+    {
+      "height": 17.0,
+      "text": "Remove",
+      "width": 54.34375,
+      "x": 68.0,
+      "y": 126.5
+    },
+    {
+      "height": 17.0,
+      "text": "Manage",
+      "width": 54.59375,
+      "x": 186.34375,
+      "y": 126.5
+    },
+    {
+      "control": "Close",
+      "height": 32.0,
+      "width": 32.0,
+      "x": 420.0,
+      "y": 26.0
+    },
+    {
+      "control": "Remove",
+      "height": 36.0,
+      "width": 108.34375,
+      "x": 28.0,
+      "y": 117.0
+    },
+    {
+      "control": "Manage",
+      "height": 36.0,
+      "width": 108.59375,
+      "x": 146.34375,
+      "y": 117.0
+    }
+  ],
+  "package-480-false-true": [
+    {
+      "height": 29.0,
+      "text": "A long fixture title with accents áé and emoji 🦀 that must leave room for the header actions",
+      "width": 289.9375,
+      "x": 156.0,
+      "y": 26.0
+    },
+    {
+      "height": 18.0,
+      "text": "fixture, APT",
+      "width": 80.9375,
+      "x": 156.0,
+      "y": 63.0
+    },
+    {
+      "height": 15.0,
+      "text": "1.0",
+      "width": 22.5625,
+      "x": 156.0,
+      "y": 89.0
+    },
+    {
+      "height": 17.0,
+      "text": "Remove",
+      "width": 54.34375,
+      "x": 68.0,
+      "y": 131.5
+    },
+    {
+      "control": "Back",
+      "height": 36.0,
+      "width": 36.0,
+      "x": 28.0,
+      "y": 26.0
+    },
+    {
+      "control": "Remove",
+      "height": 36.0,
+      "width": 108.34375,
+      "x": 28.0,
+      "y": 122.0
+    }
+  ],
+  "package-500-false-false": [
+    {
+      "height": 24.0,
+      "text": "A long fixture title with accents áé and emoji 🦀 that must leave room for the header actions",
+      "width": 335.125,
+      "x": 90.0,
+      "y": 26.0
+    },
+    {
+      "height": 18.0,
+      "text": "fixture, APT",
+      "width": 80.9375,
+      "x": 90.0,
+      "y": 58.0
+    },
+    {
+      "height": 15.0,
+      "text": "1.0",
+      "width": 22.5625,
+      "x": 90.0,
+      "y": 84.0
+    },
+    {
+      "height": 17.0,
+      "text": "Remove",
+      "width": 54.34375,
+      "x": 68.0,
+      "y": 126.5
+    },
+    {
+      "height": 17.0,
+      "text": "Manage",
+      "width": 54.59375,
+      "x": 186.34375,
+      "y": 126.5
+    },
+    {
+      "control": "Close",
+      "height": 32.0,
+      "width": 32.0,
+      "x": 440.0,
+      "y": 26.0
+    },
+    {
+      "control": "Remove",
+      "height": 36.0,
+      "width": 108.34375,
+      "x": 28.0,
+      "y": 117.0
+    },
+    {
+      "control": "Manage",
+      "height": 36.0,
+      "width": 108.59375,
+      "x": 146.34375,
+      "y": 117.0
+    }
+  ],
+  "package-500-false-true": [
+    {
+      "height": 29.0,
+      "text": "A long fixture title with accents áé and emoji 🦀 that must leave room for the header actions",
+      "width": 302.9375,
+      "x": 156.0,
+      "y": 26.0
+    },
+    {
+      "height": 18.0,
+      "text": "fixture, APT",
+      "width": 80.9375,
+      "x": 156.0,
+      "y": 63.0
+    },
+    {
+      "height": 15.0,
+      "text": "1.0",
+      "width": 22.5625,
+      "x": 156.0,
+      "y": 89.0
+    },
+    {
+      "height": 17.0,
+      "text": "Remove",
+      "width": 54.34375,
+      "x": 68.0,
+      "y": 131.5
+    },
+    {
+      "control": "Back",
+      "height": 36.0,
+      "width": 36.0,
+      "x": 28.0,
+      "y": 26.0
+    },
+    {
+      "control": "Remove",
+      "height": 36.0,
+      "width": 108.34375,
+      "x": 28.0,
+      "y": 122.0
+    }
+  ],
+  "package-504-false-false": [
+    {
+      "height": 24.0,
+      "text": "A long fixture title with accents áé and emoji 🦀 that must leave room for the header actions",
+      "width": 335.125,
+      "x": 90.0,
+      "y": 26.0
+    },
+    {
+      "height": 18.0,
+      "text": "fixture, APT",
+      "width": 80.9375,
+      "x": 90.0,
+      "y": 58.0
+    },
+    {
+      "height": 15.0,
+      "text": "1.0",
+      "width": 22.5625,
+      "x": 90.0,
+      "y": 84.0
+    },
+    {
+      "height": 17.0,
+      "text": "Remove",
+      "width": 54.34375,
+      "x": 68.0,
+      "y": 126.5
+    },
+    {
+      "height": 17.0,
+      "text": "Manage",
+      "width": 54.59375,
+      "x": 186.34375,
+      "y": 126.5
+    },
+    {
+      "control": "Close",
+      "height": 32.0,
+      "width": 32.0,
+      "x": 444.0,
+      "y": 26.0
+    },
+    {
+      "control": "Remove",
+      "height": 36.0,
+      "width": 108.34375,
+      "x": 28.0,
+      "y": 117.0
+    },
+    {
+      "control": "Manage",
+      "height": 36.0,
+      "width": 108.59375,
+      "x": 146.34375,
+      "y": 117.0
+    }
+  ],
+  "package-504-false-true": [
+    {
+      "height": 29.0,
+      "text": "A long fixture title with accents áé and emoji 🦀 that must leave room for the header actions",
+      "width": 198.9375,
+      "x": 156.0,
+      "y": 26.0
+    },
+    {
+      "height": 18.0,
+      "text": "fixture, APT",
+      "width": 80.9375,
+      "x": 156.0,
+      "y": 63.0
+    },
+    {
+      "height": 15.0,
+      "text": "1.0",
+      "width": 22.5625,
+      "x": 156.0,
+      "y": 89.0
+    },
+    {
+      "height": 17.0,
+      "text": "Remove",
+      "width": 54.34375,
+      "x": 407.65625,
+      "y": 35.5
+    },
+    {
+      "height": 19.0,
+      "text": "Fixture summary",
+      "width": 126.40625,
+      "x": 28.0,
+      "y": 136.0
+    },
+    {
+      "control": "Back",
+      "height": 36.0,
+      "width": 36.0,
+      "x": 28.0,
+      "y": 26.0
+    },
+    {
+      "control": "Remove",
+      "height": 36.0,
+      "width": 108.34375,
+      "x": 367.65625,
+      "y": 26.0
+    }
+  ],
+  "package-560-false-false": [
+    {
+      "height": 24.0,
+      "text": "A long fixture title with accents áé and emoji 🦀 that must leave room for the header actions",
+      "width": 393.125,
+      "x": 90.0,
+      "y": 26.0
+    },
+    {
+      "height": 18.0,
+      "text": "fixture, APT",
+      "width": 80.9375,
+      "x": 90.0,
+      "y": 58.0
+    },
+    {
+      "height": 15.0,
+      "text": "1.0",
+      "width": 22.5625,
+      "x": 90.0,
+      "y": 84.0
+    },
+    {
+      "height": 17.0,
+      "text": "Remove",
+      "width": 54.34375,
+      "x": 68.0,
+      "y": 126.5
+    },
+    {
+      "height": 17.0,
+      "text": "Manage",
+      "width": 54.59375,
+      "x": 186.34375,
+      "y": 126.5
+    },
+    {
+      "control": "Close",
+      "height": 32.0,
+      "width": 32.0,
+      "x": 500.0,
+      "y": 26.0
+    },
+    {
+      "control": "Remove",
+      "height": 36.0,
+      "width": 108.34375,
+      "x": 28.0,
+      "y": 117.0
+    },
+    {
+      "control": "Manage",
+      "height": 36.0,
+      "width": 108.59375,
+      "x": 146.34375,
+      "y": 117.0
+    }
+  ],
+  "package-560-false-true": [
+    {
+      "height": 29.0,
+      "text": "A long fixture title with accents áé and emoji 🦀 that must leave room for the header actions",
+      "width": 254.9375,
+      "x": 156.0,
+      "y": 26.0
+    },
+    {
+      "height": 18.0,
+      "text": "fixture, APT",
+      "width": 80.9375,
+      "x": 156.0,
+      "y": 63.0
+    },
+    {
+      "height": 15.0,
+      "text": "1.0",
+      "width": 22.5625,
+      "x": 156.0,
+      "y": 89.0
+    },
+    {
+      "height": 17.0,
+      "text": "Remove",
+      "width": 54.34375,
+      "x": 463.65625,
+      "y": 35.5
+    },
+    {
+      "height": 19.0,
+      "text": "Fixture summary",
+      "width": 126.40625,
+      "x": 28.0,
+      "y": 136.0
+    },
+    {
+      "control": "Back",
+      "height": 36.0,
+      "width": 36.0,
+      "x": 28.0,
+      "y": 26.0
+    },
+    {
+      "control": "Remove",
+      "height": 36.0,
+      "width": 108.34375,
+      "x": 423.65625,
+      "y": 26.0
+    }
+  ],
+  "package-600-false-false": [
+    {
+      "height": 24.0,
+      "text": "A long fixture title with accents áé and emoji 🦀 that must leave room for the header actions",
+      "width": 195.125,
+      "x": 90.0,
+      "y": 26.0
+    },
+    {
+      "height": 18.0,
+      "text": "fixture, APT",
+      "width": 80.9375,
+      "x": 90.0,
+      "y": 58.0
+    },
+    {
+      "height": 15.0,
+      "text": "1.0",
+      "width": 22.5625,
+      "x": 90.0,
+      "y": 84.0
+    },
+    {
+      "height": 17.0,
+      "text": "Manage",
+      "width": 54.59375,
+      "x": 461.40625,
+      "y": 35.5
+    },
+    {
+      "height": 17.0,
+      "text": "Remove",
+      "width": 54.34375,
+      "x": 343.0625,
+      "y": 35.5
+    },
+    {
+      "height": 19.0,
+      "text": "Fixture summary",
+      "width": 126.40625,
+      "x": 28.0,
+      "y": 131.0
+    },
+    {
+      "height": 22.0,
+      "text": "Fixture description",
+      "width": 128.125,
+      "x": 28.0,
+      "y": 162.0
+    },
+    {
+      "control": "Close",
+      "height": 32.0,
+      "width": 32.0,
+      "x": 540.0,
+      "y": 26.0
+    },
+    {
+      "control": "Remove",
+      "height": 36.0,
+      "width": 108.34375,
+      "x": 303.0625,
+      "y": 26.0
+    },
+    {
+      "control": "Manage",
+      "height": 36.0,
+      "width": 108.59375,
+      "x": 421.40625,
+      "y": 26.0
+    }
+  ],
+  "package-600-false-true": [
+    {
+      "height": 29.0,
+      "text": "A long fixture title with accents áé and emoji 🦀 that must leave room for the header actions",
+      "width": 289.9375,
+      "x": 156.0,
+      "y": 26.0
+    },
+    {
+      "height": 18.0,
+      "text": "fixture, APT",
+      "width": 80.9375,
+      "x": 156.0,
+      "y": 63.0
+    },
+    {
+      "height": 15.0,
+      "text": "1.0",
+      "width": 22.5625,
+      "x": 156.0,
+      "y": 89.0
+    },
+    {
+      "height": 17.0,
+      "text": "Remove",
+      "width": 54.34375,
+      "x": 503.65625,
+      "y": 35.5
+    },
+    {
+      "height": 19.0,
+      "text": "Fixture summary",
+      "width": 126.40625,
+      "x": 28.0,
+      "y": 136.0
+    },
+    {
+      "control": "Back",
+      "height": 36.0,
+      "width": 36.0,
+      "x": 28.0,
+      "y": 26.0
+    },
+    {
+      "control": "Remove",
+      "height": 36.0,
+      "width": 108.34375,
+      "x": 463.65625,
+      "y": 26.0
+    }
+  ],
+  "package-700-false-false": [
+    {
+      "height": 24.0,
+      "text": "A long fixture title with accents áé and emoji 🦀 that must leave room for the header actions",
+      "width": 300.125,
+      "x": 90.0,
+      "y": 26.0
+    },
+    {
+      "height": 18.0,
+      "text": "fixture, APT",
+      "width": 80.9375,
+      "x": 90.0,
+      "y": 58.0
+    },
+    {
+      "height": 15.0,
+      "text": "1.0",
+      "width": 22.5625,
+      "x": 90.0,
+      "y": 84.0
+    },
+    {
+      "height": 17.0,
+      "text": "Manage",
+      "width": 54.59375,
+      "x": 561.40625,
+      "y": 35.5
+    },
+    {
+      "height": 17.0,
+      "text": "Remove",
+      "width": 54.34375,
+      "x": 443.0625,
+      "y": 35.5
+    },
+    {
+      "height": 19.0,
+      "text": "Fixture summary",
+      "width": 126.40625,
+      "x": 28.0,
+      "y": 131.0
+    },
+    {
+      "height": 22.0,
+      "text": "Fixture description",
+      "width": 128.125,
+      "x": 28.0,
+      "y": 162.0
+    },
+    {
+      "control": "Close",
+      "height": 32.0,
+      "width": 32.0,
+      "x": 640.0,
+      "y": 26.0
+    },
+    {
+      "control": "Remove",
+      "height": 36.0,
+      "width": 108.34375,
+      "x": 403.0625,
+      "y": 26.0
+    },
+    {
+      "control": "Manage",
+      "height": 36.0,
+      "width": 108.59375,
+      "x": 521.40625,
+      "y": 26.0
+    }
+  ],
+  "package-700-false-true": [
+    {
+      "height": 29.0,
+      "text": "A long fixture title with accents áé and emoji 🦀 that must leave room for the header actions",
+      "width": 388.9375,
+      "x": 156.0,
+      "y": 26.0
+    },
+    {
+      "height": 18.0,
+      "text": "fixture, APT",
+      "width": 80.9375,
+      "x": 156.0,
+      "y": 63.0
+    },
+    {
+      "height": 15.0,
+      "text": "1.0",
+      "width": 22.5625,
+      "x": 156.0,
+      "y": 89.0
+    },
+    {
+      "height": 17.0,
+      "text": "Remove",
+      "width": 54.34375,
+      "x": 603.65625,
+      "y": 35.5
+    },
+    {
+      "height": 19.0,
+      "text": "Fixture summary",
+      "width": 126.40625,
+      "x": 28.0,
+      "y": 136.0
+    },
+    {
+      "control": "Back",
+      "height": 36.0,
+      "width": 36.0,
+      "x": 28.0,
+      "y": 26.0
+    },
+    {
+      "control": "Remove",
+      "height": 36.0,
+      "width": 108.34375,
+      "x": 563.65625,
+      "y": 26.0
+    }
+  ],
+  "source-1000-false-false": [
+    {
+      "height": 22.0,
+      "text": "A long fixture source name that must leave room for its switch",
+      "width": 537.75,
+      "x": 80.0,
+      "y": 26.0
+    },
+    {
+      "height": 18.0,
+      "text": "Off",
+      "width": 21.375,
+      "x": 932.0,
+      "y": 26.0
+    },
+    {
+      "height": 18.0,
+      "text": "Fixture summary",
+      "width": 114.9375,
+      "x": 26.0,
+      "y": 90.0
+    },
+    {
+      "height": 14.0,
+      "text": "CAN",
+      "width": 26.6875,
+      "x": 26.0,
+      "y": 128.0
+    },
+    {
+      "height": 26.0,
+      "text": "search",
+      "width": 40.0625,
+      "x": 35.0,
+      "y": 154.0
+    },
+    {
+      "height": 26.0,
+      "text": "install",
+      "width": 34.25,
+      "x": 99.0625,
+      "y": 154.0
+    },
+    {
+      "control": "Close details",
+      "height": 32.0,
+      "width": 32.0,
+      "x": 942.0,
+      "y": 26.0
+    },
+    {
+      "control": "Enabled",
+      "height": 24.0,
+      "width": 40.0,
+      "x": 860.625,
+      "y": 26.0
+    }
+  ],
+  "source-440-true-false": [
+    {
+      "height": 66.0,
+      "text": "A long fixture source name that must leave room for its switch",
+      "width": 189.53125,
+      "x": 126.0,
+      "y": 26.0
+    },
+    {
+      "height": 18.0,
+      "text": "Off",
+      "width": 21.375,
+      "x": 414.0,
+      "y": 26.0
+    },
+    {
+      "height": 18.0,
+      "text": "Fixture summary",
+      "width": 114.9375,
+      "x": 26.0,
+      "y": 112.0
+    },
+    {
+      "height": 14.0,
+      "text": "CAN",
+      "width": 26.6875,
+      "x": 26.0,
+      "y": 150.0
+    },
+    {
+      "control": "Back",
+      "height": 36.0,
+      "width": 36.0,
+      "x": 26.0,
+      "y": 26.0
+    },
+    {
+      "control": "Enabled",
+      "height": 24.0,
+      "width": 40.0,
+      "x": 342.625,
+      "y": 26.0
+    }
+  ],
+  "source-480-false-false": [
+    {
+      "height": 66.0,
+      "text": "A long fixture source name that must leave room for its switch",
+      "width": 241.53125,
+      "x": 80.0,
+      "y": 26.0
+    },
+    {
+      "height": 18.0,
+      "text": "Off",
+      "width": 21.375,
+      "x": 412.0,
+      "y": 26.0
+    },
+    {
+      "height": 18.0,
+      "text": "Fixture summary",
+      "width": 114.9375,
+      "x": 26.0,
+      "y": 112.0
+    },
+    {
+      "height": 14.0,
+      "text": "CAN",
+      "width": 26.6875,
+      "x": 26.0,
+      "y": 150.0
+    },
+    {
+      "control": "Close details",
+      "height": 32.0,
+      "width": 32.0,
+      "x": 422.0,
+      "y": 26.0
+    },
+    {
+      "control": "Enabled",
+      "height": 24.0,
+      "width": 40.0,
+      "x": 340.625,
+      "y": 26.0
+    }
+  ],
+  "source-500-false-false": [
+    {
+      "height": 66.0,
+      "text": "A long fixture source name that must leave room for its switch",
+      "width": 241.53125,
+      "x": 80.0,
+      "y": 26.0
+    },
+    {
+      "height": 18.0,
+      "text": "Off",
+      "width": 21.375,
+      "x": 432.0,
+      "y": 26.0
+    },
+    {
+      "height": 18.0,
+      "text": "Fixture summary",
+      "width": 114.9375,
+      "x": 26.0,
+      "y": 112.0
+    },
+    {
+      "height": 14.0,
+      "text": "CAN",
+      "width": 26.6875,
+      "x": 26.0,
+      "y": 150.0
+    },
+    {
+      "control": "Close details",
+      "height": 32.0,
+      "width": 32.0,
+      "x": 442.0,
+      "y": 26.0
+    },
+    {
+      "control": "Enabled",
+      "height": 24.0,
+      "width": 40.0,
+      "x": 360.625,
+      "y": 26.0
+    }
+  ],
+  "source-504-false-false": [
+    {
+      "height": 66.0,
+      "text": "A long fixture source name that must leave room for its switch",
+      "width": 241.53125,
+      "x": 80.0,
+      "y": 26.0
+    },
+    {
+      "height": 18.0,
+      "text": "Off",
+      "width": 21.375,
+      "x": 436.0,
+      "y": 26.0
+    },
+    {
+      "height": 18.0,
+      "text": "Fixture summary",
+      "width": 114.9375,
+      "x": 26.0,
+      "y": 112.0
+    },
+    {
+      "height": 14.0,
+      "text": "CAN",
+      "width": 26.6875,
+      "x": 26.0,
+      "y": 150.0
+    },
+    {
+      "control": "Close details",
+      "height": 32.0,
+      "width": 32.0,
+      "x": 446.0,
+      "y": 26.0
+    },
+    {
+      "control": "Enabled",
+      "height": 24.0,
+      "width": 40.0,
+      "x": 364.625,
+      "y": 26.0
+    }
+  ],
+  "source-560-false-false": [
+    {
+      "height": 44.0,
+      "text": "A long fixture source name that must leave room for its switch",
+      "width": 276.53125,
+      "x": 80.0,
+      "y": 26.0
+    },
+    {
+      "height": 18.0,
+      "text": "Off",
+      "width": 21.375,
+      "x": 492.0,
+      "y": 26.0
+    },
+    {
+      "height": 18.0,
+      "text": "Fixture summary",
+      "width": 114.9375,
+      "x": 26.0,
+      "y": 90.0
+    },
+    {
+      "height": 14.0,
+      "text": "CAN",
+      "width": 26.6875,
+      "x": 26.0,
+      "y": 128.0
+    },
+    {
+      "height": 26.0,
+      "text": "search",
+      "width": 40.0625,
+      "x": 35.0,
+      "y": 154.0
+    },
+    {
+      "height": 26.0,
+      "text": "install",
+      "width": 34.25,
+      "x": 99.0625,
+      "y": 154.0
+    },
+    {
+      "control": "Close details",
+      "height": 32.0,
+      "width": 32.0,
+      "x": 502.0,
+      "y": 26.0
+    },
+    {
+      "control": "Enabled",
+      "height": 24.0,
+      "width": 40.0,
+      "x": 420.625,
+      "y": 26.0
+    }
+  ],
+  "source-600-false-false": [
+    {
+      "height": 44.0,
+      "text": "A long fixture source name that must leave room for its switch",
+      "width": 325.53125,
+      "x": 80.0,
+      "y": 26.0
+    },
+    {
+      "height": 18.0,
+      "text": "Off",
+      "width": 21.375,
+      "x": 532.0,
+      "y": 26.0
+    },
+    {
+      "height": 18.0,
+      "text": "Fixture summary",
+      "width": 114.9375,
+      "x": 26.0,
+      "y": 90.0
+    },
+    {
+      "height": 14.0,
+      "text": "CAN",
+      "width": 26.6875,
+      "x": 26.0,
+      "y": 128.0
+    },
+    {
+      "height": 26.0,
+      "text": "search",
+      "width": 40.0625,
+      "x": 35.0,
+      "y": 154.0
+    },
+    {
+      "height": 26.0,
+      "text": "install",
+      "width": 34.25,
+      "x": 99.0625,
+      "y": 154.0
+    },
+    {
+      "control": "Close details",
+      "height": 32.0,
+      "width": 32.0,
+      "x": 542.0,
+      "y": 26.0
+    },
+    {
+      "control": "Enabled",
+      "height": 24.0,
+      "width": 40.0,
+      "x": 460.625,
+      "y": 26.0
+    }
+  ],
+  "source-700-false-false": [
+    {
+      "height": 44.0,
+      "text": "A long fixture source name that must leave room for its switch",
+      "width": 454.53125,
+      "x": 80.0,
+      "y": 26.0
+    },
+    {
+      "height": 18.0,
+      "text": "Off",
+      "width": 21.375,
+      "x": 632.0,
+      "y": 26.0
+    },
+    {
+      "height": 18.0,
+      "text": "Fixture summary",
+      "width": 114.9375,
+      "x": 26.0,
+      "y": 90.0
+    },
+    {
+      "height": 14.0,
+      "text": "CAN",
+      "width": 26.6875,
+      "x": 26.0,
+      "y": 128.0
+    },
+    {
+      "height": 26.0,
+      "text": "search",
+      "width": 40.0625,
+      "x": 35.0,
+      "y": 154.0
+    },
+    {
+      "height": 26.0,
+      "text": "install",
+      "width": 34.25,
+      "x": 99.0625,
+      "y": 154.0
+    },
+    {
+      "control": "Close details",
+      "height": 32.0,
+      "width": 32.0,
+      "x": 642.0,
+      "y": 26.0
+    },
+    {
+      "control": "Enabled",
+      "height": 24.0,
+      "width": 40.0,
+      "x": 560.625,
+      "y": 26.0
+    }
+  ]
+}
