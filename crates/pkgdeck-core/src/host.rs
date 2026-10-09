@@ -641,6 +641,22 @@ impl Host {
     ) -> Result<Completion, ExecutionError> {
         refuse_root(true)?;
         let mut host = self.clone();
+        // Updaters such as AVM run Cargo themselves, which a desktop app's
+        // PATH misses when rustup installed it in the user's home.
+        if self.resolve("cargo")?.is_none() {
+            if let Some(dir) = self
+                .user_install("cargo")?
+                .as_deref()
+                .and_then(Path::parent)
+            {
+                let key = OsString::from("PATH");
+                let mut dirs: Vec<PathBuf> = std::env::split_paths(&host.env[&key]).collect();
+                dirs.push(dir.to_owned());
+                if let Ok(path) = std::env::join_paths(dirs) {
+                    host.env.insert(key, path);
+                }
+            }
+        }
         host.env.extend(
             env.iter()
                 .map(|(key, value)| ((*key).into(), value.clone())),
@@ -2548,6 +2564,34 @@ mod boundary_tests {
                 assert_eq!(host.user_install(name).unwrap(), Some(home.join(relative)));
             }
         }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn standalone_updaters_find_cargo_off_path() {
+        let root = scratch("updater-cargo");
+        let home = root.join("home");
+        let bin = root.join("bin");
+        let updater = root.join("updater");
+        executable(&updater, "printf %s \"$PATH\"");
+        let path = |host: &Host| {
+            let result = host
+                .standalone_write(&updater, &[], &[], &Cancellation::default())
+                .unwrap();
+            String::from_utf8(result.stdout).unwrap()
+        };
+        let host = host(Runtime::Native, &[("PATH", &bin), ("HOME", &home)]);
+        // No Cargo anywhere: PATH stays as it is.
+        assert_eq!(path(&host), bin.to_str().unwrap());
+        // rustup's Cargo in the home folder joins the end of PATH.
+        executable(&home.join(".cargo/bin/cargo"), "exit 0");
+        assert_eq!(
+            path(&host),
+            format!("{}:{}", bin.display(), home.join(".cargo/bin").display())
+        );
+        // A Cargo already on PATH wins, so nothing is added.
+        executable(&bin.join("cargo"), "exit 0");
+        assert_eq!(path(&host), bin.to_str().unwrap());
         fs::remove_dir_all(root).unwrap();
     }
 
