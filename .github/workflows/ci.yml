@@ -160,7 +160,7 @@ jobs:
           cargo build --workspace --locked
       - name: Upload coverage report
         if: ${{ matrix.coverage == 'true' && needs.reviewed.outputs.tested != 'true' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: coverage-linux-${{ matrix.arch }}
           path: coverage/lcov.info
@@ -232,7 +232,7 @@ jobs:
           fi
       - name: Upload coverage report
         if: ${{ matrix.arch == 'aarch64' && needs.reviewed.outputs.tested != 'true' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: coverage-macos-aarch64
           path: coverage/lcov.info
@@ -248,7 +248,7 @@ jobs:
         run: bash scripts/tests/macos-adoption.sh
       - name: Upload native inventory evidence
         if: ${{ always() && needs.reviewed.outputs.tested != 'true' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: macos-native-${{ matrix.arch }}
           path: build/macos-native
@@ -266,7 +266,7 @@ jobs:
           scripts/tests/backends.sh dev "$PWD/target/debug/pkd"
       - name: Upload MacPorts logs
         if: ${{ !cancelled() && ((github.event_name != 'push' && matrix.arch == 'aarch64') || (startsWith(github.ref, 'refs/tags/v') && needs.release-proof.outputs.tested != 'true')) }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: macports-macos-${{ matrix.arch }}
           path: build/macports
@@ -333,7 +333,7 @@ jobs:
         run: scripts/verify.sh containers --engine podman
       - name: Upload Podman logs
         if: ${{ always() && needs.reviewed.outputs.tested != 'true' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: logs-podman-${{ matrix.arch }}
           path: build/verification
@@ -405,7 +405,7 @@ jobs:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Download coverage reports
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: coverage-*
           path: coverage
@@ -474,7 +474,7 @@ jobs:
           fi
       - name: Upload macOS startup diagnostics
         if: ${{ !cancelled() && needs.reviewed.outputs.tested != 'true' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: macos-startup-${{ matrix.arch }}
           path: ${{ runner.temp }}/pkgdeck-macos-startup
@@ -488,14 +488,14 @@ jobs:
         if: ${{ !cancelled() && needs.reviewed.outputs.tested != 'true' }}
         # Diagnostics only: an upload outage must not fail a passing build.
         continue-on-error: true
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: macos-cask-startup-${{ matrix.arch }}
           path: ${{ runner.temp }}/pkgdeck-macos-startup
           if-no-files-found: ignore
       - name: Upload app
         if: needs.reviewed.outputs.tested != 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: packages-macos-${{ matrix.arch }}
           path: build/artifacts/PkgDeck-v*-macos-${{ matrix.arch }}.zip
@@ -557,7 +557,7 @@ jobs:
           ' | jq -e '.exit_code == 0 and .data.package.id.name == "bash" and .data.package.installed_version != null'
       - name: Upload CLI
         if: needs.reviewed.outputs.tested != 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: packages-linux-cli-${{ matrix.arch }}
           path: build/artifacts/PkgDeck-v*-linux-${{ matrix.arch }}-cli.tar.gz
@@ -601,7 +601,7 @@ jobs:
           fi
       - name: Download packages
         if: env.PUBLISHED != 'true'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: packages-linux-cli-*
           path: dist
@@ -659,7 +659,7 @@ jobs:
           test ! -e "$(brew --prefix)/bin/pkd"
       - name: Upload macOS startup diagnostics
         if: ${{ !cancelled() && runner.os == 'macOS' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: homebrew-startup-${{ matrix.runner }}
           path: ${{ runner.temp }}/pkgdeck-macos-startup
@@ -783,7 +783,7 @@ jobs:
           scripts/tests/host-package.sh direct snap run pkgdeck.pkd
       - name: Upload packages
         if: needs.reviewed.outputs.tested != 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: packages-linux-bundles-${{ matrix.arch }}
           path: build/artifacts/*
@@ -829,7 +829,7 @@ jobs:
           flatpak run --command=sh io.github.astrovm.PkgDeck -c '/app/lib/pkgdeck/appimageupdatetool.AppImage --appimage-extract-and-run --version 2>&1' | grep -F 'appimageupdatetool version'
           scripts/tests/flatpak-package.sh
       - name: Upload Flatpak
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: packages-linux-flatpak-${{ matrix.arch }}
           path: build/artifacts/PkgDeck-v*-${{ matrix.arch }}.flatpak
@@ -921,7 +921,7 @@ jobs:
       - name: Check out tagged source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Download packages
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: packages-*
           path: dist
@@ -1007,7 +1007,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/tested-source-tree"
           git rev-parse 'HEAD^{tree}' > "$RUNNER_TEMP/tested-source-tree/tree"
       - name: Upload tested source tree
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: tested-source-tree
           path: ${{ runner.temp }}/tested-source-tree/tree
