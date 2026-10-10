@@ -247,6 +247,10 @@ fn heading_row(app: &mut App, ui: &mut Ui, rect: Rect) {
 }
 
 struct Columns {
+    /// Where the name starts and how wide the name, version and summary
+    /// may be together, for the dividers in the headings.
+    start: f32,
+    available: f32,
     tick: Option<Rect>,
     icon: Option<Rect>,
     name: Rect,
@@ -255,7 +259,27 @@ struct Columns {
     actions: Rect,
 }
 
-fn columns(row: Rect, width: Width, page: Page, actions: f32) -> Columns {
+/// Room kept for a row's buttons. Every row and the headings share it, so
+/// the columns line up whatever buttons a row has.
+const ACTIONS_ROOM: f32 = 76.0;
+
+/// Shares of the row the name and version take, 0 for the default.
+#[derive(Clone, Copy, Default)]
+struct Shares {
+    name: f32,
+    version: f32,
+}
+
+impl Shares {
+    fn of(app: &App) -> Self {
+        Self {
+            name: app.settings.name_column,
+            version: app.settings.version_column,
+        }
+    }
+}
+
+fn columns(row: Rect, width: Width, page: Page, actions: f32, shares: Shares) -> Columns {
     let mut x = row.left() + 14.0;
     let tick = (page == Page::Updates).then(|| {
         let r = Rect::from_min_size(pos2(x, row.top()), vec2(26.0, row.height()));
@@ -272,16 +296,21 @@ fn columns(row: Rect, width: Width, page: Page, actions: f32) -> Columns {
         pos2(row.right() - actions - 10.0, row.top()),
         pos2(row.right() - 10.0, row.bottom()),
     );
-    let right = actions_rect.left() - 10.0;
+    let right = row.right() - ACTIONS_ROOM.max(actions) - 20.0;
     let available = (right - x).max(60.0);
+    let start = x;
+    let share = |dragged: f32, default: f32| if dragged > 0.0 { dragged } else { default };
     let (name_w, version_w, summary) = match width {
         Width::Wide => {
-            let name = (available * 0.36).clamp(170.0, 340.0);
-            let version = (available * 0.2).clamp(110.0, 180.0);
+            let name =
+                (available * share(shares.name, 0.36)).clamp(120.0, (available - 200.0).max(120.0));
+            let version = (available * share(shares.version, 0.2))
+                .clamp(80.0, (available - name - 64.0).max(80.0));
             (name, version, true)
         }
         Width::Medium => {
-            let version = (available * 0.32).clamp(100.0, 170.0);
+            let version =
+                (available * share(shares.version, 0.32)).clamp(80.0, (available * 0.6).max(80.0));
             (available - version - 12.0, version, false)
         }
         Width::Compact => (available, 0.0, false),
@@ -296,6 +325,8 @@ fn columns(row: Rect, width: Width, page: Page, actions: f32) -> Columns {
     let summary = (summary && page != Page::Sources && right - x > 40.0)
         .then(|| Rect::from_min_max(pos2(x, row.top()), pos2(right, row.bottom())));
     Columns {
+        start,
+        available,
         tick,
         icon,
         name,
@@ -307,7 +338,7 @@ fn columns(row: Rect, width: Width, page: Page, actions: f32) -> Columns {
 
 fn column_titles(app: &mut App, ui: &mut Ui, rect: Rect, width: Width) {
     let palette = Palette::current(ui.ctx());
-    let cols = columns(rect, width, app.page, 76.0);
+    let cols = columns(rect, width, app.page, ACTIONS_ROOM, Shares::of(app));
     let version_title = match app.page {
         Page::Clean => "TYPE",
         Page::Sources => "STATUS",
@@ -399,6 +430,7 @@ fn column_titles(app: &mut App, ui: &mut Ui, rect: Rect, width: Width) {
             app.invalidate();
         }
     }
+    column_dividers(app, ui, rect, &cols);
     ui.painter().line_segment(
         [
             pos2(rect.left() + 12.0, rect.bottom()),
@@ -406,6 +438,78 @@ fn column_titles(app: &mut App, ui: &mut Ui, rect: Rect, width: Width) {
         ],
         Stroke::new(1.0, alpha(palette.line, 0.7)),
     );
+}
+
+/// Drag the line after a column heading to resize it; double-click it for
+/// the default width.
+fn column_dividers(app: &mut App, ui: &mut Ui, rect: Rect, cols: &Columns) {
+    let palette = Palette::current(ui.ctx());
+    let mut dividers = Vec::new();
+    if let (Some(version), true) = (cols.version, app.page != Page::Sources) {
+        dividers.push(("name", version.left() - 6.0));
+        if cols.summary.is_some() {
+            dividers.push(("version", version.right() + 6.0));
+        }
+    }
+    for (column, x) in dividers {
+        let handle = Rect::from_center_size(pos2(x, rect.center().y), vec2(10.0, rect.height()));
+        let response = ui
+            .interact(
+                handle,
+                Id::new(("column-divider", column)),
+                Sense::click_and_drag(),
+            )
+            .on_hover_cursor(CursorIcon::ResizeHorizontal);
+        response.widget_info(|| {
+            let label = if column == "name" {
+                "Resize Name column"
+            } else {
+                "Resize Version column"
+            };
+            egui::WidgetInfo::labeled(egui::WidgetType::Other, true, label)
+        });
+        let active = response.hovered() || response.dragged();
+        ui.painter().line_segment(
+            [pos2(x, rect.top() + 9.0), pos2(x, rect.bottom() - 9.0)],
+            Stroke::new(
+                if active { 2.0 } else { 1.0 },
+                if active {
+                    palette.accent
+                } else {
+                    alpha(palette.line, 0.9)
+                },
+            ),
+        );
+        if response.dragged() {
+            if let Some(pointer) = ui.ctx().pointer_interact_pos() {
+                let share = dragged_share(column, pointer.x, cols);
+                match column {
+                    "name" => app.settings.name_column = share,
+                    _ => app.settings.version_column = share,
+                }
+            }
+        }
+        if response.drag_stopped() {
+            app.save_settings();
+        }
+        if response.double_clicked() {
+            match column {
+                "name" => app.settings.name_column = 0.0,
+                _ => app.settings.version_column = 0.0,
+            }
+            app.save_settings();
+        }
+    }
+}
+
+/// The share of the row a column takes when its divider is at `x`: the
+/// divider sits 6 past the column's right edge.
+fn dragged_share(column: &str, x: f32, cols: &Columns) -> f32 {
+    let left = match column {
+        "name" => cols.start,
+        _ => cols.version.map_or(cols.start, |v| v.left()),
+    };
+    ((x - 6.0 - left) / cols.available).clamp(0.05, 0.9)
 }
 
 fn row_height(app: &App, index: usize, width: Width) -> f32 {
@@ -740,7 +844,13 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
     let page_open_here = selected && app.page_open;
     let action_count =
         usize::from(action.is_some() && !page_open_here) + usize::from(pull && !running);
-    let cols = columns(rect, width, app.page, action_count as f32 * 38.0);
+    let cols = columns(
+        rect,
+        width,
+        app.page,
+        action_count as f32 * 38.0,
+        Shares::of(app),
+    );
     // Text laid out with its colour ignores a colour given when painting,
     // so old results dim through the painter.
     let mut painter = ui.painter().clone();
@@ -1362,5 +1472,112 @@ mod tests {
             waiting_text(&names(&["APT", "Snap", "npm"])),
             "Waiting for 3 sources"
         );
+    }
+}
+
+#[cfg(test)]
+mod column_tests {
+    use super::*;
+
+    fn row(width: f32) -> Rect {
+        Rect::from_min_size(pos2(0.0, 0.0), vec2(width, 60.0))
+    }
+
+    #[test]
+    fn every_row_lines_up_with_the_headings_whatever_its_buttons() {
+        for (width, kind) in [
+            (1000.0, Width::Wide),
+            (650.0, Width::Wide),
+            (600.0, Width::Medium),
+        ] {
+            let heading = columns(
+                row(width),
+                kind,
+                Page::Installed,
+                ACTIONS_ROOM,
+                Shares::default(),
+            );
+            for buttons in [0.0, 38.0, 76.0] {
+                let cols = columns(
+                    row(width),
+                    kind,
+                    Page::Installed,
+                    buttons,
+                    Shares::default(),
+                );
+                assert_eq!(cols.name, heading.name, "{width} {buttons}");
+                assert_eq!(cols.version, heading.version, "{width} {buttons}");
+                assert_eq!(cols.summary, heading.summary, "{width} {buttons}");
+                assert_eq!(cols.actions.right(), heading.actions.right());
+            }
+        }
+    }
+
+    #[test]
+    fn the_summary_fits_beside_the_list_of_a_4_by_3_window() {
+        // The list in a 1040×780 window is about 700 wide.
+        let cols = columns(
+            row(700.0),
+            Width::Wide,
+            Page::Installed,
+            38.0,
+            Shares::default(),
+        );
+        assert!(cols.summary.is_some_and(|s| s.width() > 150.0));
+        const { assert!(700.0 >= MEDIUM_BELOW) };
+    }
+
+    #[test]
+    fn a_divider_dropped_where_a_column_ends_keeps_that_width() {
+        let cols = columns(
+            row(1000.0),
+            Width::Wide,
+            Page::Installed,
+            38.0,
+            Shares::default(),
+        );
+        let version = cols.version.unwrap();
+        let name = dragged_share("name", version.left() - 6.0, &cols);
+        assert!((name * cols.available - cols.name.width()).abs() < 0.5);
+        let share = dragged_share("version", version.right() + 6.0, &cols);
+        assert!((share * cols.available - version.width()).abs() < 0.5);
+        assert_eq!(dragged_share("name", -500.0, &cols), 0.05);
+        assert_eq!(dragged_share("version", 5000.0, &cols), 0.9);
+    }
+
+    #[test]
+    fn dragged_shares_resize_the_columns_within_limits() {
+        let default = columns(
+            row(1000.0),
+            Width::Wide,
+            Page::Installed,
+            38.0,
+            Shares::default(),
+        );
+        let wide_name = Shares {
+            name: 0.6,
+            version: 0.0,
+        };
+        let cols = columns(row(1000.0), Width::Wide, Page::Installed, 38.0, wide_name);
+        assert!(cols.name.width() > default.name.width());
+        assert!((cols.name.width() - cols.available * 0.6).abs() < 0.5);
+        // The summary keeps some room, and nothing overlaps.
+        let greedy = Shares {
+            name: 0.9,
+            version: 0.9,
+        };
+        let cols = columns(row(1000.0), Width::Wide, Page::Installed, 38.0, greedy);
+        let version = cols.version.unwrap();
+        assert!(cols.name.right() < version.left());
+        assert!(cols.summary.is_none_or(|s| version.right() < s.left()));
+        assert!(version.right() < cols.actions.left());
+        // Tiny shares still leave readable columns.
+        let tiny = Shares {
+            name: 0.01,
+            version: 0.01,
+        };
+        let cols = columns(row(1000.0), Width::Wide, Page::Installed, 38.0, tiny);
+        assert!(cols.name.width() >= 120.0);
+        assert!(cols.version.unwrap().width() >= 80.0);
     }
 }

@@ -58,7 +58,7 @@ pub struct State {
 
 /// Widths the layout switches at.
 pub const RAIL_BELOW: f32 = 820.0;
-pub const MEDIUM_BELOW: f32 = 748.0;
+pub const MEDIUM_BELOW: f32 = 640.0;
 pub const COMPACT_BELOW: f32 = 560.0;
 pub const SPLIT_FROM: f32 = 600.0;
 
@@ -1119,12 +1119,13 @@ fn toasts(app: &mut App, ui: &mut Ui, content: Rect) {
         let shown = ease(&ctx, id, toast.is_some(), REVEAL);
         let Some(toast) = toast else { continue };
         let width = 460.0f32.min(content.width() - 32.0);
+        let text_width = ToastParts::text_width(width, toast.action.is_some());
         let text = wrapped(
             ui,
             &toast.text,
             theme::font(14.0),
             palette.ink,
-            width - 120.0,
+            text_width,
             3,
         );
         let height = (text.size().y + 28.0).max(52.0);
@@ -1142,6 +1143,7 @@ fn toasts(app: &mut App, ui: &mut Ui, content: Rect) {
             .show(&ctx, |ui| {
                 ui.multiply_opacity(shown);
                 let (frame_rect, response) = ui.allocate_exact_size(rect.size(), Sense::hover());
+                let parts = ToastParts::new(frame_rect, toast.action.is_some());
                 ui.painter().add(
                     egui::epaint::Shadow {
                         offset: [0, 4],
@@ -1174,18 +1176,11 @@ fn toasts(app: &mut App, ui: &mut Ui, content: Rect) {
                     color,
                 );
                 ui.painter().galley(
-                    pos2(
-                        frame_rect.left() + 46.0,
-                        frame_rect.center().y - text.size().y / 2.0,
-                    ),
+                    pos2(parts.text_left, frame_rect.center().y - text.size().y / 2.0),
                     text.clone(),
                     palette.ink,
                 );
-                let close = Rect::from_center_size(
-                    pos2(frame_rect.right() - 24.0, frame_rect.center().y),
-                    Vec2::splat(30.0),
-                );
-                let mut ui_close = ui.new_child(UiBuilder::new().max_rect(close));
+                let mut ui_close = ui.new_child(UiBuilder::new().max_rect(parts.close));
                 if icon_button(&mut ui_close, "cancel", "Close", palette.muted, true).clicked() {
                     if restart {
                         app.restart_toast = None;
@@ -1193,15 +1188,11 @@ fn toasts(app: &mut App, ui: &mut Ui, content: Rect) {
                         app.hide_toast();
                     }
                 }
-                if let Some(action) = toast.action {
+                if let (Some(action), Some(action_rect)) = (toast.action, parts.action) {
                     let label = match action {
                         crate::app::ToastAction::Undo => "Undo",
                         crate::app::ToastAction::Restart => "Restart",
                     };
-                    let action_rect = Rect::from_min_size(
-                        pos2(close.left() - 86.0, frame_rect.center().y - 15.0),
-                        vec2(80.0, 30.0),
-                    );
                     let mut ui_action = ui.new_child(
                         UiBuilder::new()
                             .max_rect(action_rect)
@@ -1230,7 +1221,76 @@ fn toasts(app: &mut App, ui: &mut Ui, content: Rect) {
     }
 }
 
+/// Where a toast's text, button and close cross go. The text stops
+/// before the button, so a long line wraps instead of running under it.
+struct ToastParts {
+    text_left: f32,
+    text_right: f32,
+    close: Rect,
+    action: Option<Rect>,
+}
+
+impl ToastParts {
+    fn new(frame: Rect, has_action: bool) -> Self {
+        let close = Rect::from_center_size(
+            pos2(frame.right() - 24.0, frame.center().y),
+            Vec2::splat(30.0),
+        );
+        let action = has_action.then(|| {
+            Rect::from_min_size(
+                pos2(close.left() - 86.0, frame.center().y - 15.0),
+                vec2(80.0, 30.0),
+            )
+        });
+        Self {
+            text_left: frame.left() + 46.0,
+            text_right: action.unwrap_or(close).left() - 12.0,
+            close,
+            action,
+        }
+    }
+    /// How wide the text may wrap in a toast this wide.
+    fn text_width(width: f32, has_action: bool) -> f32 {
+        let parts = Self::new(
+            Rect::from_min_size(pos2(0.0, 0.0), vec2(width, 52.0)),
+            has_action,
+        );
+        parts.text_right - parts.text_left
+    }
+}
+
 /// The window's state for the shell around it after a frame.
 pub fn window_request(app: &mut App) -> WindowRequest {
     std::mem::take(&mut app.window_request)
+}
+
+#[cfg(test)]
+mod toast_tests {
+    use super::*;
+
+    #[test]
+    fn toast_text_stops_before_its_button_and_close() {
+        let frame = Rect::from_min_size(pos2(10.0, 20.0), vec2(460.0, 52.0));
+        let with_button = ToastParts::new(frame, true);
+        let button = with_button.action.unwrap();
+        assert!(with_button.text_right <= button.left());
+        assert!(button.right() <= with_button.close.left());
+        assert!(with_button.close.right() <= frame.right());
+
+        let plain = ToastParts::new(frame, false);
+        assert_eq!(plain.action, None);
+        assert!(plain.text_right <= plain.close.left());
+        // Without a button, the text gets that room back.
+        assert!(plain.text_right > with_button.text_right + button.width());
+        assert!(plain.text_left > frame.left() + 30.0);
+
+        assert_eq!(
+            ToastParts::text_width(460.0, true),
+            with_button.text_right - with_button.text_left
+        );
+        assert_eq!(
+            ToastParts::text_width(460.0, false),
+            plain.text_right - plain.text_left
+        );
+    }
 }

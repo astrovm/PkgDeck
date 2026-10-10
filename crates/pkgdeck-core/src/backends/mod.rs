@@ -1002,6 +1002,41 @@ fn brew_update_turn() -> std::sync::MutexGuard<'static, ()> {
     static TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
     TURN.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
+/// How long `brew update` waits for another process's update to finish, and
+/// how often it looks again.
+const BREW_UPDATE_PATIENCE: Duration = Duration::from_secs(if cfg!(test) { 1 } else { 180 });
+const BREW_UPDATE_POLL: Duration = Duration::from_millis(if cfg!(test) { 10 } else { 2000 });
+/// Runs `brew update` in its turn. When another process, such as a terminal
+/// or a second PkgDeck, is already updating Homebrew, brew refuses at once;
+/// this waits for that update to finish and runs again, instead of reporting
+/// the source as broken.
+fn brew_update(
+    cancel: &Cancellation,
+    mut run: impl FnMut() -> Result<Completion, EngineError>,
+) -> Result<Completion, EngineError> {
+    let _turn = brew_update_turn();
+    let deadline = std::time::Instant::now() + BREW_UPDATE_PATIENCE;
+    loop {
+        match run() {
+            Err(EngineError::Execution(ExecutionError::Failed(result)))
+                if brew_update_locked(&result) && std::time::Instant::now() < deadline =>
+            {
+                let wake = std::time::Instant::now() + BREW_UPDATE_POLL;
+                while std::time::Instant::now() < wake {
+                    if cancel.requested() {
+                        return Err(EngineError::Cancelled);
+                    }
+                    std::thread::sleep(Duration::from_millis(10).min(BREW_UPDATE_POLL));
+                }
+            }
+            other => return other,
+        }
+    }
+}
+fn brew_update_locked(result: &Completion) -> bool {
+    String::from_utf8_lossy(&result.stderr)
+        .contains("Another `brew update` process is already running")
+}
 impl<T: Transport> Homebrew<T> {
     pub fn new(transport: T) -> Self {
         Self {
@@ -2742,8 +2777,7 @@ impl<T: Transport> Backend for Homebrew<T> {
         // the other waits and reuses its result. A different check waits its
         // turn, then fetches again.
         crate::engine::once_per_check(token, || {
-            let _turn = brew_update_turn();
-            self.call(&["update"], cancel, true)?;
+            brew_update(cancel, || self.call(&["update"], cancel, true))?;
             Ok(())
         })
     }
@@ -2878,8 +2912,7 @@ impl<T: Transport> Backend for Homebrew<T> {
             "Running brew. If you cancel, PkgDeck waits for it to finish.".into(),
         ));
         let result = if args == ["update"] {
-            let _turn = brew_update_turn();
-            self.call(&args, cancel, true)?
+            brew_update(cancel, || self.call(&args, cancel, true))?
         } else {
             self.call(&args, cancel, true)?
         };
@@ -3048,8 +3081,7 @@ impl<T: Transport> Backend for HomebrewCask<T> {
         };
         self.found.clear();
         crate::engine::once_per_check(token, || {
-            let _turn = brew_update_turn();
-            self.call(&["update"], cancel, true)?;
+            brew_update(cancel, || self.call(&["update"], cancel, true))?;
             Ok(())
         })
     }
@@ -3213,8 +3245,7 @@ impl<T: Transport> Backend for HomebrewCask<T> {
             "Running brew. If you cancel, PkgDeck waits for it to finish.".into(),
         ));
         let result = if args == ["update"] {
-            let _turn = brew_update_turn();
-            self.call(&args, cancel, true)?
+            brew_update(cancel, || self.call(&args, cancel, true))?
         } else {
             self.call(&args, cancel, true)?
         };
@@ -6489,6 +6520,164 @@ mod tests {
         path::Path,
         sync::{Arc, Mutex},
     };
+
+    fn brew_run(code: i32, stderr: &str) -> Result<Completion, ExecutionError> {
+        let result = Completion {
+            code: Some(code),
+            signal: None,
+            stdout: vec![],
+            stderr: stderr.into(),
+            truncated: false,
+            cancellation_deferred: false,
+        };
+        if code == 0 {
+            Ok(result)
+        } else {
+            Err(ExecutionError::Failed(result))
+        }
+    }
+    fn brew_exit(code: i32, stderr: &str) -> Result<Completion, EngineError> {
+        Ok(brew_run(code, stderr)?)
+    }
+    const BREW_LOCKED: &str = "Error: Another `brew update` process is already running.\n\
+        Please wait for it to finish or terminate it to continue.\n";
+
+    /// `brew` whose `update` finds another update running the first time.
+    #[derive(Clone, Default)]
+    struct LockedBrew {
+        calls: Arc<Mutex<Vec<String>>>,
+    }
+    impl Transport for LockedBrew {
+        fn brew(
+            &self,
+            args: &[OsString],
+            _: &Cancellation,
+            write: bool,
+        ) -> Result<Completion, ExecutionError> {
+            let line = args
+                .iter()
+                .map(|arg| arg.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join(" ");
+            let mut calls = self.calls.lock().unwrap();
+            calls.push(line.clone());
+            assert_eq!(line, "update");
+            assert!(write);
+            let locked = calls.len() == 1;
+            brew_run(i32::from(locked), if locked { BREW_LOCKED } else { "" })
+        }
+    }
+
+    #[test]
+    fn homebrew_update_checks_wait_for_another_brew_update() {
+        let token = crate::engine::begin_update_check_token();
+        let formulae = LockedBrew::default();
+        let mut homebrew = Homebrew::new(formulae.clone());
+        homebrew.arm_update_check(Some(token));
+        homebrew
+            .refresh_update_index(&Cancellation::default())
+            .unwrap();
+        crate::engine::end_update_check_token(token);
+        assert_eq!(*formulae.calls.lock().unwrap(), ["update", "update"]);
+
+        let token = crate::engine::begin_update_check_token();
+        let casks = LockedBrew::default();
+        let mut cask = HomebrewCask::new(casks.clone());
+        cask.arm_update_check(Some(token));
+        cask.refresh_update_index(&Cancellation::default()).unwrap();
+        crate::engine::end_update_check_token(token);
+        assert_eq!(*casks.calls.lock().unwrap(), ["update", "update"]);
+    }
+
+    #[test]
+    fn homebrew_refresh_waits_for_another_brew_update() {
+        for backend in ["homebrew", "homebrew-cask"] {
+            let brew = LockedBrew::default();
+            let operation = Operation::Refresh {
+                backend: backend.into(),
+            };
+            let outcome = if backend == "homebrew" {
+                Homebrew::new(brew.clone()).execute(
+                    &operation,
+                    &Cancellation::default(),
+                    &mut |_| {},
+                )
+            } else {
+                HomebrewCask::new(brew.clone()).execute(
+                    &operation,
+                    &Cancellation::default(),
+                    &mut |_| {},
+                )
+            };
+            assert!(outcome.is_ok(), "{backend}: {outcome:?}");
+            assert_eq!(
+                *brew.calls.lock().unwrap(),
+                ["update", "update"],
+                "{backend}"
+            );
+        }
+    }
+
+    #[test]
+    fn brew_update_waits_for_another_update_to_finish() {
+        let mut calls = 0;
+        let result = brew_update(&Cancellation::default(), || {
+            calls += 1;
+            if calls < 3 {
+                brew_exit(1, BREW_LOCKED)
+            } else {
+                brew_exit(0, "")
+            }
+        });
+        assert_eq!(result.unwrap().code, Some(0));
+        assert_eq!(calls, 3);
+    }
+
+    #[test]
+    fn brew_update_reports_other_failures_at_once() {
+        let mut calls = 0;
+        let result = brew_update(&Cancellation::default(), || {
+            calls += 1;
+            brew_exit(
+                1,
+                "Error: Failure while executing; `git fetch` exited with 128.",
+            )
+        });
+        assert!(matches!(
+            result,
+            Err(EngineError::Execution(ExecutionError::Failed(r))) if r.code == Some(1)
+        ));
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn brew_update_gives_up_when_the_other_update_never_ends() {
+        let started = std::time::Instant::now();
+        let mut calls = 0;
+        let result = brew_update(&Cancellation::default(), || {
+            calls += 1;
+            brew_exit(1, BREW_LOCKED)
+        });
+        assert!(matches!(
+            result,
+            Err(EngineError::Execution(ExecutionError::Failed(r))) if brew_update_locked(&r)
+        ));
+        assert!(started.elapsed() >= BREW_UPDATE_PATIENCE);
+        assert!(calls > 2);
+    }
+
+    #[test]
+    fn brew_update_stops_waiting_when_cancelled() {
+        let cancel = Cancellation::default();
+        let mut calls = 0;
+        let result = brew_update(&cancel, || {
+            calls += 1;
+            cancel.cancel();
+            brew_exit(1, BREW_LOCKED)
+        });
+        assert!(matches!(result, Err(EngineError::Cancelled)));
+        assert_eq!(calls, 1);
+    }
 
     #[test]
     fn linux_searches_only_offer_casks_linux_can_install() {

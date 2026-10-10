@@ -5,7 +5,7 @@
 use eframe::egui;
 use egui_kittest::Harness;
 use pkgdeck::{
-    app::{Launch, Toast},
+    app::{Launch, Toast, ToastAction},
     model::{self, Page, Tone},
     platform::Platform,
     settings::Store,
@@ -271,5 +271,21 @@ fn main() {
             lasts: std::time::Duration::from_secs(60),
             from_notice: false,
         });
+    });
+    render("toasts", [1180.0, 780.0], false, |app| {
+        offline(app, Page::Installed);
+        let toast = |text: &str, action| Toast {
+            text: text.into(),
+            tone: Tone::Success,
+            action,
+            shown: std::time::Instant::now(),
+            lasts: std::time::Duration::from_secs(60),
+            from_notice: false,
+        };
+        app.toast = Some(toast("Update all Flatpak packages finished", None));
+        app.restart_toast = Some(toast(
+            "PkgDeck was updated. Restart it to use the new version.",
+            Some(ToastAction::Restart),
+        ));
     });
 }

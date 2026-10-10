@@ -7326,10 +7326,12 @@ mod tests {
         controller
             .as_mut()
             .open_input(base.join("unsupported.txt").to_str().unwrap().into());
+        // The deadline and the answer share one exit, so a slow runner
+        // doesn't leave a line unrun.
         let deadline = Instant::now() + Duration::from_secs(15);
-        while Instant::now() < deadline {
+        loop {
             controller.as_mut().poll();
-            if !controller.busy() {
+            if !controller.busy() || Instant::now() >= deadline {
                 break;
             }
             std::thread::sleep(Duration::from_millis(10));

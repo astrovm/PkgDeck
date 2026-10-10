@@ -104,7 +104,31 @@ fn update_checks() -> std::sync::MutexGuard<'static, Option<HashMap<u64, IndexRe
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
-fn begin_update_check_token() -> u64 {
+/// How long a read waits before its second try.
+const READ_AGAIN_AFTER: std::time::Duration =
+    std::time::Duration::from_millis(if cfg!(test) { 10 } else { 1500 });
+/// A read the manager refused for a moment, because it was busy or exited
+/// with an error, gets a second try before its source is shown as broken.
+/// Timeouts aren't tried again, since that would double a long wait.
+pub(crate) fn read_again_once<T>(
+    cancel: &Cancellation,
+    mut read: impl FnMut() -> Result<T, EngineError>,
+) -> Result<T, EngineError> {
+    match read() {
+        Err(EngineError::Execution(ExecutionError::Failed(_) | ExecutionError::LockBusy)) => {
+            let wake = std::time::Instant::now() + READ_AGAIN_AFTER;
+            while std::time::Instant::now() < wake {
+                if cancel.requested() {
+                    return Err(EngineError::Cancelled);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            read()
+        }
+        other => other,
+    }
+}
+pub(crate) fn begin_update_check_token() -> u64 {
     let token = NEXT_UPDATE_CHECK.fetch_add(1, Ordering::Relaxed);
     update_checks().get_or_insert_with(HashMap::new).insert(
         token,
@@ -116,7 +140,7 @@ fn begin_update_check_token() -> u64 {
     );
     token
 }
-fn end_update_check_token(token: u64) {
+pub(crate) fn end_update_check_token(token: u64) {
     if let Some(checks) = update_checks().as_mut() {
         checks.remove(&token);
     }
@@ -755,7 +779,9 @@ impl Engine {
                 ) {
                     continue;
                 }
-                let result = available.and_then(|()| backend.refresh_update_index(cancel));
+                let result = available.and_then(|()| {
+                    read_again_once(cancel, || backend.refresh_update_index(cancel))
+                });
                 if let Err(error) = result {
                     failures.push(BackendFailure {
                         backend: id.clone(),
@@ -1115,17 +1141,17 @@ impl Engine {
         // lists what is already known and reports the failure beside those rows.
         let mut index_error = None;
         if query.is_none() {
-            match backend.refresh_update_index(cancel) {
+            match read_again_once(cancel, || backend.refresh_update_index(cancel)) {
                 Ok(()) => {}
                 Err(EngineError::Cancelled) => return Err(EngineError::Cancelled),
                 Err(error) => index_error = Some(error),
             }
         }
-        let packages = match query {
-            Some(name) if exact => backend.lookup(name, cancel)?,
-            Some(query) => backend.search(query, cancel)?,
-            None => backend.installed(cancel)?,
-        };
+        let packages = read_again_once(cancel, || match query {
+            Some(name) if exact => backend.lookup(name, cancel),
+            Some(query) => backend.search(query, cancel),
+            None => backend.installed(cancel),
+        })?;
         let mut seen = BTreeSet::new();
         if packages.iter().any(|p| {
             p.id.backend != id
@@ -1907,6 +1933,96 @@ mod update_check_tests {
     use super::*;
     use std::{sync::mpsc, thread, time::Duration};
 
+    fn failed_read() -> EngineError {
+        EngineError::Execution(ExecutionError::Failed(crate::process::Completion {
+            code: Some(1),
+            signal: None,
+            stdout: vec![],
+            stderr: b"busy for a moment".to_vec(),
+            truncated: false,
+            cancellation_deferred: false,
+        }))
+    }
+
+    #[test]
+    fn a_read_that_fails_once_is_tried_again() {
+        for first in [
+            failed_read(),
+            EngineError::Execution(ExecutionError::LockBusy),
+        ] {
+            let mut calls = 0;
+            let result = read_again_once(&Cancellation::default(), || {
+                calls += 1;
+                if calls == 1 {
+                    Err(first.clone())
+                } else {
+                    Ok("rows")
+                }
+            });
+            assert_eq!(result.unwrap(), "rows");
+            assert_eq!(calls, 2);
+        }
+    }
+
+    #[test]
+    fn a_read_that_fails_twice_reports_the_second_failure() {
+        let mut calls = 0;
+        let result: Result<(), _> = read_again_once(&Cancellation::default(), || {
+            calls += 1;
+            Err(if calls == 1 {
+                failed_read()
+            } else {
+                EngineError::Execution(ExecutionError::LockBusy)
+            })
+        });
+        assert!(matches!(
+            result,
+            Err(EngineError::Execution(ExecutionError::LockBusy))
+        ));
+        assert_eq!(calls, 2);
+    }
+
+    #[test]
+    fn timeouts_and_other_errors_are_not_tried_again() {
+        for error in [
+            EngineError::Execution(ExecutionError::TimedOut),
+            EngineError::Execution(ExecutionError::Io("no such file".into())),
+            EngineError::NotFound,
+            EngineError::Cancelled,
+        ] {
+            let mut calls = 0;
+            let result: Result<(), _> = read_again_once(&Cancellation::default(), || {
+                calls += 1;
+                Err(error.clone())
+            });
+            assert!(result.is_err());
+            assert_eq!(calls, 1, "{error}");
+        }
+        let mut calls = 0;
+        assert_eq!(
+            read_again_once(&Cancellation::default(), || {
+                calls += 1;
+                Ok::<_, EngineError>(1)
+            })
+            .unwrap(),
+            1
+        );
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn cancelling_skips_the_second_try() {
+        let cancel = Cancellation::default();
+        let mut calls = 0;
+        let result: Result<(), _> = read_again_once(&cancel, || {
+            calls += 1;
+            cancel.cancel();
+            Err(failed_read())
+        });
+        assert!(matches!(result, Err(EngineError::Cancelled)));
+        assert_eq!(calls, 1);
+    }
+
     #[test]
     fn a_check_without_a_live_token_does_not_refresh() {
         assert_eq!(
@@ -1951,5 +2067,120 @@ mod update_check_tests {
             )))
         );
         end_update_check_token(token);
+    }
+}
+
+#[cfg(test)]
+mod read_again_tests {
+    use super::*;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    fn busy() -> EngineError {
+        EngineError::Execution(ExecutionError::LockBusy)
+    }
+    fn package(name: &str) -> Package {
+        Package {
+            id: PackageId {
+                backend: "flaky".into(),
+                name: name.into(),
+                architecture: "amd64".into(),
+                scope: Scope::System,
+                remote: None,
+                reference: None,
+            },
+            display_name: name.into(),
+            summary: String::new(),
+            installed_version: Some("1".into()),
+            candidate_version: Some("1".into()),
+            update: UpdateAvailability::Current,
+            icon: None,
+            component_ids: vec![],
+            homepages: vec![],
+            adopt_with: None,
+        }
+    }
+    /// Busy on every first read, and always busy refreshing its index.
+    #[derive(Default)]
+    struct Flaky {
+        reads: Arc<AtomicUsize>,
+        refreshes: Arc<AtomicUsize>,
+    }
+    impl Flaky {
+        fn read(&self, name: &str) -> Result<Vec<Package>, EngineError> {
+            if self.reads.fetch_add(1, Ordering::SeqCst).is_multiple_of(2) {
+                Err(busy())
+            } else {
+                Ok(vec![package(name)])
+            }
+        }
+    }
+    impl Backend for Flaky {
+        fn id(&self) -> &str {
+            "flaky"
+        }
+        fn capabilities(&self) -> &[Capability] {
+            &[Capability::Search, Capability::Installed]
+        }
+        fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
+            Ok(Availability::Available)
+        }
+        fn has_update_index(&self) -> bool {
+            true
+        }
+        fn refresh_update_index(&mut self, _: &Cancellation) -> Result<(), EngineError> {
+            self.refreshes.fetch_add(1, Ordering::SeqCst);
+            Err(busy())
+        }
+        fn search(&mut self, _: &str, _: &Cancellation) -> Result<Vec<Package>, EngineError> {
+            self.read("searched")
+        }
+        fn lookup(&mut self, _: &str, _: &Cancellation) -> Result<Vec<Package>, EngineError> {
+            self.read("looked-up")
+        }
+        fn installed(&mut self, _: &Cancellation) -> Result<Vec<Package>, EngineError> {
+            self.read("installed")
+        }
+    }
+    fn names(report: &PackageReport) -> Vec<&str> {
+        report.packages.iter().map(|p| p.id.name.as_str()).collect()
+    }
+
+    #[test]
+    fn searches_lookups_and_listings_survive_one_busy_read() {
+        let flaky = Flaky::default();
+        let reads = flaky.reads.clone();
+        let mut engine = Engine::default();
+        engine.register(flaky).unwrap();
+        let cancel = Cancellation::default();
+        let search = engine.search("x", &cancel);
+        assert_eq!(names(&search), ["searched"]);
+        assert!(search.failures.is_empty());
+        let lookup = engine.lookup("x", &cancel);
+        assert_eq!(names(&lookup), ["looked-up"]);
+        assert!(lookup.failures.is_empty());
+        // The listing still arrives; only the busy index is reported.
+        let installed = engine.installed(&cancel);
+        assert_eq!(names(&installed), ["installed"]);
+        assert_eq!(installed.failures.len(), 1);
+        assert_eq!(reads.load(Ordering::SeqCst), 6);
+    }
+
+    #[test]
+    fn an_index_that_stays_busy_is_reported_after_a_second_try() {
+        let flaky = Flaky::default();
+        let refreshes = flaky.refreshes.clone();
+        let mut engine = Engine::default();
+        engine.register(flaky).unwrap();
+        let failures = engine.refresh_update_indexes(&[], &Cancellation::default());
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].backend, "flaky");
+        assert!(matches!(
+            failures[0].error,
+            EngineError::Execution(ExecutionError::LockBusy)
+        ));
+        assert_eq!(refreshes.load(Ordering::SeqCst), 2);
     }
 }

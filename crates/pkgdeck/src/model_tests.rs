@@ -567,7 +567,7 @@ fn visible_rows_filter_by_page_source_and_text() {
     };
     assert_eq!(
         names(&rows, &visible(&rows, &only_apt)),
-        ["zsh", "cache", "ghost", "apt"]
+        ["apt", "cache", "ghost", "zsh"]
     );
     let filtered = ViewOptions {
         filter: "SHELL",
@@ -741,8 +741,8 @@ fn the_same_app_from_several_sources_sits_together() {
             "org.mozilla.firefox",
             "htop",
             "lonely",
-            "vim-gtk",
-            "vim"
+            "vim",
+            "vim-gtk"
         ]
     );
     let heading = items[0].group.as_ref().unwrap();
@@ -1015,4 +1015,84 @@ fn held_updates_say_why_and_match_their_row() {
     );
     assert!(!other.matches(&row));
     assert!(!held(json!({"reason": "failed", "source": "apt", "name": "app"})).matches(&row));
+}
+
+#[test]
+fn npm_packages_name_their_node_version_instead_of_its_path() {
+    for (path, node) in [
+        (
+            "/home/fixture/.local/share/fnm/node-versions/v24.15.0/installation/lib/node_modules",
+            Some("Node 24.15.0"),
+        ),
+        (
+            "/home/fixture/.nvm/versions/node/v22.11.0/lib/node_modules",
+            Some("Node 22.11.0"),
+        ),
+        (
+            "/home/fixture/.local/share/mise/installs/node/20.18.1/lib/node_modules",
+            Some("Node 20.18.1"),
+        ),
+        ("/usr/lib/node_modules", None),
+        ("/home/fixture/.npm-global/lib/node_modules", None),
+        ("/home/fixture/v1.2.3/lib/node_modules", None),
+        ("/home/fixture/.nvm/versions/node/v22.11/lib", None),
+        ("/home/fixture/.nvm/versions/node/v22.x.0/lib", None),
+        ("/home/fixture/.nvm/versions/node/v.1.0/lib", None),
+        ("", None),
+    ] {
+        assert_eq!(node_version(path).as_deref(), node, "{path}");
+    }
+    let mut row = Row {
+        kind: "package".into(),
+        name: "cf".into(),
+        display_name: "cf".into(),
+        source: "npm".into(),
+        scope_label:
+            "/home/fixture/.local/share/fnm/node-versions/v24.15.0/installation/lib/node_modules"
+                .into(),
+        ..Row::default()
+    };
+    assert_eq!(source_line(&row, false), "npm, Node 24.15.0");
+    // Other sources keep their path.
+    row.source = "cargo".into();
+    assert!(source_line(&row, false).contains("node-versions"));
+}
+
+#[test]
+fn installed_lists_every_source_a_to_z() {
+    let rows = vec![
+        row(json!({"name": "zed", "source": "appimage", "installed": "1"})),
+        row(json!({"name": "Anchor", "source": "standalone", "installed": "1"})),
+        row(json!({"name": "7zip", "source": "apt", "installed": "1"})),
+        row(json!({"name": "bat", "source": "cargo", "installed": "1"})),
+        row(json!({"name": "bat", "source": "apt", "installed": "1"})),
+    ];
+    let installed = ViewOptions {
+        page: Some(Page::Installed),
+        ..ViewOptions::default()
+    };
+    let items = visible(&rows, &installed);
+    assert_eq!(
+        names(&rows, &items),
+        ["7zip", "Anchor", "bat", "bat", "zed"]
+    );
+    // The same name keeps a steady order by source.
+    assert_eq!(rows[items[2].raw].source, "apt");
+    // Updates keeps the order the sources answered in.
+    let updates = ViewOptions {
+        page: Some(Page::Updates),
+        ..ViewOptions::default()
+    };
+    let rows: Vec<Row> = rows
+        .into_iter()
+        .map(|mut r| {
+            r.candidate = Some("2".into());
+            r.update = "available".into();
+            r
+        })
+        .collect();
+    assert_eq!(
+        names(&rows, &visible(&rows, &updates)),
+        ["zed", "Anchor", "7zip", "bat", "bat"]
+    );
 }

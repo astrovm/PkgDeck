@@ -8,7 +8,7 @@ use egui_kittest::{
     Harness,
 };
 use pkgdeck::{
-    app::{App, Launch},
+    app::{App, Launch, Toast, ToastAction},
     model::Page,
     platform::Platform,
     settings::{Accent, Appearance, DarkTheme, LightTheme, Store, TextSize},
@@ -53,17 +53,25 @@ fn harness(app: App) -> Harness<'static, (bool, App)> {
 }
 
 fn harness_at(app: App, size: egui::Vec2) -> Harness<'static, (bool, App)> {
-    Harness::builder().with_size(size).build_ui_state(
-        |ui, (ready, app): &mut (bool, App)| {
-            if !*ready {
-                pkgdeck::setup(ui.ctx(), std::path::Path::new("/"), None);
-                *ready = true;
-                return;
-            }
-            pkgdeck::ui::show(app, ui);
-        },
-        (false, app),
-    )
+    harness_with(app, size, 0.25)
+}
+
+/// `step` seconds pass each frame.
+fn harness_with(app: App, size: egui::Vec2, step: f32) -> Harness<'static, (bool, App)> {
+    Harness::builder()
+        .with_size(size)
+        .with_step_dt(step)
+        .build_ui_state(
+            |ui, (ready, app): &mut (bool, App)| {
+                if !*ready {
+                    pkgdeck::setup(ui.ctx(), std::path::Path::new("/"), None);
+                    *ready = true;
+                    return;
+                }
+                pkgdeck::ui::show(app, ui);
+            },
+            (false, app),
+        )
 }
 
 fn show(page: Page) -> Harness<'static, (bool, App)> {
@@ -73,6 +81,140 @@ fn show(page: Page) -> Harness<'static, (bool, App)> {
     let mut harness = harness(app);
     harness.run_steps(4);
     harness
+}
+
+#[test]
+fn the_restart_toast_offers_restart_and_closes() {
+    let mut harness = show(Page::Installed);
+    harness.state_mut().1.restart_toast = Some(Toast {
+        text: "PkgDeck was updated. Restart it to use the new version.".into(),
+        tone: pkgdeck::model::Tone::Success,
+        action: Some(ToastAction::Restart),
+        shown: std::time::Instant::now(),
+        lasts: std::time::Duration::from_secs(60),
+        from_notice: false,
+    });
+    harness.run_steps(3);
+    assert!(harness.query_by_label("Restart").is_some());
+    harness.get_by_label("Close").click();
+    harness.run_steps(3);
+    assert!(harness.state().1.restart_toast.is_none());
+}
+
+#[test]
+fn an_update_can_start_from_the_installed_page() {
+    let mut harness = show(Page::Installed);
+    harness.get_by_label_contains("htop, APT, System").click();
+    harness.run_steps(4);
+    assert!(harness
+        .query_by_role_and_label(Role::Button, "Remove")
+        .is_some());
+    harness
+        .get_by_role_and_label(Role::Button, "Update")
+        .click();
+    harness.run_steps(3);
+    let app = &harness.state().1;
+    let htop = app.selected_row().unwrap().identity();
+    assert!(app.active_rows.contains(&htop));
+
+    // Only a running change hides it, not one waiting for review.
+    assert!(harness
+        .query_by_role_and_label(Role::Button, "Update")
+        .is_some());
+    // While it runs, the page offers Cancel, not a second Update.
+    harness.state_mut().1.writing = true;
+    harness.state_mut().1.active_rows.insert(htop);
+    harness.run_steps(3);
+    assert!(harness
+        .query_by_role_and_label(Role::Button, "Cancel")
+        .is_some());
+    assert!(harness
+        .query_by_role_and_label(Role::Button, "Update")
+        .is_none());
+
+    // Without an update waiting, there is nothing to update.
+    let mut harness = show(Page::Installed);
+    harness.get_by_label_contains("GIMP, APT, System").click();
+    harness.run_steps(4);
+    assert!(harness
+        .query_by_role_and_label(Role::Button, "Remove")
+        .is_some());
+    assert!(harness
+        .query_by_role_and_label(Role::Button, "Update")
+        .is_none());
+}
+
+#[test]
+fn dragging_a_column_divider_resizes_and_double_click_resets() {
+    let mut app = app();
+    app.page = Page::Installed;
+    app.invalidate();
+    // 60 frames a second, so two clicks can be a double-click.
+    let mut harness = harness_with(app, egui::vec2(1200.0, 800.0), 1.0 / 60.0);
+    harness.run_steps(4);
+    let divider = harness.get_by_label("Resize Name column").rect().center();
+    assert!(harness.query_by_label("Resize Version column").is_some());
+    harness.hover_at(divider);
+    harness.run_steps(1);
+    harness.drag_at(divider);
+    harness.run_steps(1);
+    for step in 1..=4 {
+        harness.hover_at(divider + egui::vec2(-20.0 * step as f32, 0.0));
+        harness.run_steps(1);
+    }
+    harness.drop_at(divider + egui::vec2(-80.0, 0.0));
+    harness.run_steps(2);
+    let narrower = harness.state().1.settings.name_column;
+    assert!(narrower > 0.0, "{narrower}");
+    let moved = harness.get_by_label("Resize Name column").rect().center();
+    assert!(
+        (moved.x - (divider.x - 80.0)).abs() < 2.0,
+        "{moved:?} {divider:?}"
+    );
+    assert_eq!(harness.state().1.settings.version_column, 0.0);
+
+    // Two clicks a frame apart, well inside the double-click time.
+    harness.hover_at(moved);
+    harness.step();
+    for _ in 0..2 {
+        for pressed in [true, false] {
+            harness.event(egui::Event::PointerButton {
+                pos: moved,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+        }
+        harness.step();
+    }
+    harness.run_steps(1);
+    assert_eq!(harness.state().1.settings.name_column, 0.0);
+
+    // The version divider resizes only the version.
+    let version = harness
+        .get_by_label("Resize Version column")
+        .rect()
+        .center();
+    harness.hover_at(version);
+    harness.step();
+    harness.drag_at(version);
+    harness.step();
+    for step in 1..=4 {
+        harness.hover_at(version + egui::vec2(10.0 * step as f32, 0.0));
+        harness.step();
+    }
+    harness.drop_at(version + egui::vec2(40.0, 0.0));
+    harness.run_steps(2);
+    assert!(harness.state().1.settings.version_column > 0.0);
+    assert_eq!(harness.state().1.settings.name_column, 0.0);
+    let moved = harness
+        .get_by_label("Resize Version column")
+        .rect()
+        .center();
+    assert!(
+        (moved.x - (version.x + 40.0)).abs() < 2.0,
+        "{moved:?} {version:?}"
+    );
 }
 
 #[test]

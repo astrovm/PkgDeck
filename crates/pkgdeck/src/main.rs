@@ -84,12 +84,16 @@ fn parse(args: &[String]) -> app::Launch {
     launch
 }
 
+/// The window's first size: 4:3, as tall as before so it still fits a
+/// 1366×768 screen.
+const DEFAULT_SIZE: [f32; 2] = [1040.0, 780.0];
+
 fn options() -> eframe::NativeOptions {
     eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("PkgDeck")
             .with_app_id("io.github.astrovm.PkgDeck")
-            .with_inner_size([1180.0, 780.0])
+            .with_inner_size(DEFAULT_SIZE)
             .with_min_inner_size([360.0, 400.0])
             .with_drag_and_drop(true)
             .with_icon(
@@ -193,5 +197,17 @@ fn main() {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_window_opens_at_4_by_3() {
+        let size = options().viewport.inner_size.unwrap();
+        assert_eq!(size, DEFAULT_SIZE.into());
+        assert_eq!(size.x * 3.0, size.y * 4.0);
     }
 }

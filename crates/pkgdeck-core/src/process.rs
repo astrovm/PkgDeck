@@ -309,12 +309,59 @@ pub(crate) fn run_observed(
         }
     })();
     if supervise.is_err() && !reaped {
-        // The child has not been reaped, so its process-group ID cannot be reused.
+        // The caller gets its answer now; the group is killed and reaped
+        // beside it, so a stop never keeps the app busy.
         let pid = rustix::process::Pid::from_raw(child.id() as i32).expect("live child PID");
-        let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
-        let _ = child.wait();
+        let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::TERM);
+        std::thread::spawn(move || stop_group(&mut child, stdout, stderr, STOP_GRACE));
     }
     supervise
+}
+
+/// How long a stopped command gets to exit before it is killed.
+const STOP_GRACE: Duration = Duration::from_millis(500);
+
+/// Finishes stopping a child's process group that was sent SIGTERM: SIGKILL
+/// after `grace`. In the Flatpak the child is `flatpak-spawn --host`, which
+/// passes SIGTERM on to the command it started on the host. SIGKILL can't be
+/// passed on, so the host command would keep running with nobody reading
+/// its output, and some (grok) crash when they finally print.
+///
+/// Its output keeps being read and dropped until it exits: a command that
+/// prints while it stops would otherwise die from a broken pipe, which is
+/// how grok crashed.
+fn stop_group(
+    child: &mut std::process::Child,
+    mut stdout: impl Read,
+    mut stderr: impl Read,
+    grace: Duration,
+) {
+    use rustix::process::{kill_process_group, waitid, Pid, Signal, WaitId, WaitIdOptions};
+    // The child is not reaped until the end, so its process-group ID
+    // cannot be reused while it is signalled.
+    let pid = Pid::from_raw(child.id() as i32).expect("live child PID");
+    let exited = || {
+        matches!(
+            waitid(
+                WaitId::Pid(pid),
+                WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
+            ),
+            Ok(Some(_))
+        )
+    };
+    let mut drop_output = || {
+        let _ = drain(&mut stdout, &mut Vec::new(), 0, &mut false);
+        let _ = drain(&mut stderr, &mut Vec::new(), 0, &mut false);
+    };
+    let deadline = Instant::now() + grace;
+    while !exited() && Instant::now() < deadline {
+        drop_output();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    // Whatever else is left in the group, such as a child that ignored
+    // SIGTERM or the leader's own children.
+    let _ = kill_process_group(pid, Signal::KILL);
+    let _ = child.wait();
 }
 
 #[cfg(test)]
@@ -400,6 +447,76 @@ mod tests {
         );
         assert_eq!(failed(None, None, "").outcome(), "was stopped");
     }
+    /// Waits up to `limit` for `done`, and says whether it happened. It always
+    /// sleeps once first, so no line depends on how fast the runner is.
+    fn wait_for(limit: Duration, done: impl Fn() -> bool) -> bool {
+        let deadline = Instant::now() + limit;
+        loop {
+            std::thread::sleep(Duration::from_millis(5));
+            if done() || Instant::now() >= deadline {
+                return done();
+            }
+        }
+    }
+
+    /// A read that runs past its limit, in a fresh folder for its marker files.
+    fn stopped_read(name: &str, script: &str) -> (std::path::PathBuf, Duration) {
+        let dir = std::env::temp_dir().join(format!("pkgdeck-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ready = dir.join("ready");
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", script, "sh"]).arg(&dir);
+        let start = Instant::now();
+        let thread = std::thread::spawn(move || {
+            let cancel = Cancellation::default();
+            let stopper = cancel.clone();
+            let watcher = std::thread::spawn(move || {
+                wait_for(Duration::from_secs(10), || ready.exists());
+                stopper.cancel();
+            });
+            let result = run(command, Limits::default(), &cancel, false);
+            watcher.join().unwrap();
+            result
+        });
+        assert_eq!(thread.join().unwrap(), Err(ExecutionError::Cancelled));
+        (dir, start.elapsed())
+    }
+
+    #[test]
+    fn a_stopped_read_is_asked_to_exit_before_it_is_killed() {
+        // flatpak-spawn passes SIGTERM on to the host command; SIGKILL
+        // would leave that command running on the host.
+        let (dir, _) = stopped_read(
+            "terminated",
+            // It prints while stopping, as grok did: a closed pipe would
+            // kill it before it gets to its marker.
+            "trap 'echo stopping; echo stopping >&2; : > \"$1/terminated\"; exit 0' TERM; \
+             : > \"$1/ready\"; \
+             while :; do sleep 0.01; done",
+        );
+        // The trap runs beside the answer, before any SIGKILL.
+        assert!(wait_for(STOP_GRACE, || dir.join("terminated").exists()));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_stopped_read_that_ignores_sigterm_is_still_killed() {
+        let (dir, elapsed) = stopped_read(
+            "ignores-term",
+            "trap '' TERM; echo $$ > \"$1/pid\"; : > \"$1/ready\"; while :; do sleep 0.01; done",
+        );
+        // The read answers at once; the kill follows after the grace.
+        assert!(elapsed < STOP_GRACE, "{elapsed:?}");
+        let pid = std::fs::read_to_string(dir.join("pid")).unwrap();
+        let pid = rustix::process::Pid::from_raw(pid.trim().parse().unwrap()).unwrap();
+        // Signal 0 only asks whether it is still there; macOS has no /proc.
+        let alive = || rustix::process::test_kill_process(pid).is_ok();
+        assert!(alive());
+        assert!(wait_for(Duration::from_secs(5), || !alive()));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn writes_defer_cancellation_and_timeout_until_native_completion() {
         let cancel = Cancellation::default();
