@@ -9,7 +9,8 @@ use crate::{
     theme::{self, Palette},
 };
 use eframe::egui::{
-    self, vec2, Color32, CornerRadius, Id, Key, Modifiers, Response, Sense, Stroke, Ui, Vec2,
+    self, pos2, vec2, Color32, CornerRadius, Id, Key, Modifiers, Rect, Response, Sense, Stroke, Ui,
+    Vec2,
 };
 use serde_json::json;
 use std::collections::HashSet;
@@ -697,12 +698,68 @@ pub fn open_picker(app: &mut App) {
     app.c().check_sources();
     app.react();
     app.ui.picker_search.clear();
+    app.ui.picker_duplicates = app.duplicates_only;
     let page = app.page;
     app.ui.picker_draft = app
         .effective_sources(page)
         .into_iter()
         .filter(|id| app.usable(id, page))
         .collect();
+}
+
+/// Where a picker line's name starts: after the tick and the mark.
+const PICKER_TEXT_INSET: f32 = 62.0;
+
+/// A picker line: tick, mark and name, all one click target. True when
+/// clicked.
+fn picker_row(
+    ui: &mut Ui,
+    palette: &Palette,
+    id: &str,
+    name: &str,
+    checked: bool,
+    enabled: bool,
+    mark: impl FnOnce(&mut Ui, Rect, Color32),
+) -> bool {
+    let (rect, response) = ui.allocate_exact_size(
+        vec2(ui.available_width(), 30.0),
+        if enabled {
+            Sense::click()
+        } else {
+            Sense::hover()
+        },
+    );
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Checkbox, enabled, checked, name)
+    });
+    if enabled && response.hovered() {
+        ui.painter()
+            .rect_filled(rect, CornerRadius::same(6), palette.hover);
+    }
+    let tick = Rect::from_center_size(pos2(rect.left() + 13.0, rect.center().y), Vec2::splat(22.0));
+    paint_tick(
+        ui,
+        tick,
+        Id::new(("picker-tick", id)),
+        checked,
+        enabled,
+        response.hovered(),
+    );
+    let ink = if enabled { palette.ink } else { palette.muted };
+    let icon = Rect::from_center_size(pos2(rect.left() + 42.0, rect.center().y), Vec2::splat(18.0));
+    mark(ui, icon, ink);
+    ui.painter().text(
+        pos2(rect.left() + PICKER_TEXT_INSET, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        name,
+        egui::TextStyle::Body.resolve(ui.style()),
+        ink,
+    );
+    let clicked = enabled && response.clicked();
+    if enabled {
+        response.on_hover_cursor(egui::CursorIcon::PointingHand);
+    }
+    clicked
 }
 
 pub fn source_picker(app: &mut App, ui: &mut Ui, button: &Response) {
@@ -760,10 +817,35 @@ pub fn source_picker(app: &mut App, ui: &mut Ui, button: &Response) {
                         field.response.request_focus();
                     }
                     ui.add_space(6.0);
+                    // Installed only, and only while something is installed
+                    // twice. Stays while on, so it can be turned off.
+                    if page == Page::Installed
+                        && (app.duplicates_only
+                            || app.rows.iter().any(|row| !row.same_app_from.is_empty()))
+                    {
+                        let on = app.ui.picker_duplicates;
+                        if picker_row(
+                            ui,
+                            &palette,
+                            "duplicates",
+                            "Only duplicates",
+                            on,
+                            true,
+                            |ui, rect, color| {
+                                theme::paint_icon(ui.painter(), rect, "duplicates", color);
+                            },
+                        ) {
+                            app.ui.picker_duplicates = !on;
+                        }
+                        ui.add_space(2.0);
+                        ui.separator();
+                    }
                     let search = app.ui.picker_search.trim().to_lowercase();
                     let enabled = app.enabled_sources();
                     let ids = model::all_sources(&app.catalog);
                     egui::ScrollArea::vertical()
+                        // Full width, so the bar sits on the card's edge.
+                        .auto_shrink([false, true])
                         .max_height((ctx.content_rect().height() * 0.6).min(440.0))
                         .show(ui, |ui| {
                             let mut sections: Vec<(&str, Vec<String>)> =
@@ -802,35 +884,29 @@ pub fn source_picker(app: &mut App, ui: &mut Ui, button: &Response) {
                                     let checked = app.ui.picker_draft.contains(&id);
                                     let last = checked && app.ui.picker_draft.len() == 1;
                                     let can = usable && !last;
-                                    ui.horizontal(|ui| {
-                                        let tick = tickbox(
-                                            ui,
-                                            checked && usable,
-                                            can,
-                                            model::source_name(&id),
-                                        );
-                                        let label = ui.add(
-                                            egui::Label::new(
-                                                egui::RichText::new(model::source_name(&id)).color(
-                                                    if usable {
-                                                        palette.ink
-                                                    } else {
-                                                        palette.muted
-                                                    },
-                                                ),
-                                            )
-                                            .sense(
-                                                if can { Sense::click() } else { Sense::hover() },
-                                            ),
-                                        );
-                                        if (tick.clicked() || label.clicked()) && can {
-                                            if checked {
-                                                app.ui.picker_draft.remove(&id);
-                                            } else {
-                                                app.ui.picker_draft.insert(id.clone());
-                                            }
+                                    let name = model::source_name(&id);
+                                    if picker_row(
+                                        ui,
+                                        &palette,
+                                        &id,
+                                        name,
+                                        checked && usable,
+                                        can,
+                                        |ui, rect, color| {
+                                            theme::paint_source_icon(
+                                                ui.painter(),
+                                                rect,
+                                                &id,
+                                                color,
+                                            );
+                                        },
+                                    ) {
+                                        if checked {
+                                            app.ui.picker_draft.remove(&id);
+                                        } else {
+                                            app.ui.picker_draft.insert(id.clone());
                                         }
-                                    });
+                                    }
                                     if !usable {
                                         let reason = if !app.available(&id) {
                                             model::catalog_entry(&app.catalog, &id).summary
@@ -839,11 +915,17 @@ pub fn source_picker(app: &mut App, ui: &mut Ui, button: &Response) {
                                         } else {
                                             "Not supported in this view".into()
                                         };
-                                        ui.indent(("reason", &id), |ui| {
-                                            ui.label(
-                                                egui::RichText::new(reason)
-                                                    .font(theme::font(12.0))
-                                                    .color(palette.muted),
+                                        // Lined up with the name, just under it.
+                                        ui.add_space(-6.0);
+                                        ui.horizontal(|ui| {
+                                            ui.add_space(PICKER_TEXT_INSET);
+                                            ui.add(
+                                                egui::Label::new(
+                                                    egui::RichText::new(reason)
+                                                        .font(theme::font(12.0))
+                                                        .color(palette.muted),
+                                                )
+                                                .wrap(),
                                             );
                                         });
                                     }
@@ -882,6 +964,7 @@ pub fn source_picker(app: &mut App, ui: &mut Ui, button: &Response) {
                 });
         });
     if reset {
+        app.ui.picker_duplicates = false;
         let page = app.page;
         app.ui.picker_draft = app
             .enabled_sources()
@@ -891,8 +974,21 @@ pub fn source_picker(app: &mut App, ui: &mut Ui, button: &Response) {
     }
     if apply {
         app.ui.picker_open = false;
+        if page == Page::Installed && app.duplicates_only != app.ui.picker_duplicates {
+            app.duplicates_only = app.ui.picker_duplicates;
+            app.invalidate();
+        }
+        // Duplicates are found among the loaded rows: only a change of
+        // sources needs a reload.
         let draft: HashSet<String> = app.ui.picker_draft.clone();
-        app.set_page_sources(page, draft);
+        let current: HashSet<String> = app
+            .effective_sources(page)
+            .into_iter()
+            .filter(|id| app.usable(id, page))
+            .collect();
+        if draft != current {
+            app.set_page_sources(page, draft);
+        }
     }
     let clicked_outside = ctx.input(|i| i.pointer.any_click())
         && !area
@@ -934,6 +1030,238 @@ mod tests {
         assert!(!repo_url_valid("https://.flatpakrepo"));
         assert!(!repo_url_valid("http://x/y.flatpakrepo"));
         assert!(!repo_url_valid("https://x/y.flatpakref"));
+    }
+
+    fn picker_harness(page: Page, duplicates: bool) -> egui_kittest::Harness<'static, (bool, App)> {
+        use crate::{app::Launch, model::Source, platform::Platform, settings::Store};
+        use egui_kittest::Harness;
+        use pkgdeck_app::controller::ffi::create_synthetic_controller;
+
+        let (store, settings) = Store::open(None, None);
+        let mut app = App::with_controller(
+            create_synthetic_controller(|_, _, _, _| Ok(pkgdeck_core::engine::Engine::default())),
+            settings,
+            store,
+            Platform::start(|| {}),
+            Launch::default(),
+        );
+        app.catalog = ["apt", "flatpak", "dnf"]
+            .map(|source| Source {
+                source: source.into(),
+                available: true,
+                capabilities: vec!["installed".into(), "upgrade".into(), "remove".into()],
+                ..Source::default()
+            })
+            .to_vec();
+        app.rows = ["apt", "flatpak"]
+            .map(|source| {
+                serde_json::from_value(json!({
+                    "kind": "package", "name": "fixture", "display_name": "Fixture",
+                    "source": source, "scope": "system", "installed": "1.0",
+                    "same_app_from": if duplicates { vec![if source == "apt" { "flatpak" } else { "apt" }] } else { vec![] },
+                }))
+                .unwrap()
+            })
+            .to_vec();
+        app.page = page;
+        app.invalidate();
+        app.refresh_items();
+        open_picker(&mut app);
+        app.ui.picker_open = true;
+        let mut harness = Harness::builder()
+            .with_size(vec2(600.0, 700.0))
+            .build_ui_state(
+                |ui, (ready, app): &mut (bool, App)| {
+                    if !*ready {
+                        let root =
+                            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+                        crate::setup(ui.ctx(), &root, None);
+                        set_reduce_motion(ui.ctx(), true);
+                        *ready = true;
+                        return;
+                    }
+                    let button = ui.allocate_rect(
+                        Rect::from_min_size(pos2(420.0, 10.0), vec2(160.0, 34.0)),
+                        Sense::click(),
+                    );
+                    source_picker(app, ui, &button);
+                },
+                (false, app),
+            );
+        harness.run_steps(4);
+        harness
+    }
+
+    fn flat_shapes(harness: &egui_kittest::Harness<'_, (bool, App)>) -> Vec<egui::Shape> {
+        fn flatten(shape: &egui::Shape, out: &mut Vec<egui::Shape>) {
+            match shape {
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| flatten(shape, out)),
+                shape => out.push(shape.clone()),
+            }
+        }
+        let mut shapes = Vec::new();
+        for clipped in &harness.output().shapes {
+            flatten(&clipped.shape, &mut shapes);
+        }
+        shapes
+    }
+
+    #[test]
+    fn picker_offers_duplicates_only_when_something_is_installed_twice() {
+        use egui_kittest::kittest::Queryable;
+        let harness = picker_harness(Page::Installed, false);
+        assert!(harness.query_by_label("Only duplicates").is_none());
+        assert!(harness.query_by_label(model::source_name("apt")).is_some());
+
+        let mut harness = picker_harness(Page::Installed, true);
+        harness.get_by_label("Only duplicates").click();
+        harness.run_steps(2);
+        harness.get_by_label("Apply").click();
+        harness.run_steps(2);
+        let app = &harness.state().1;
+        assert!(app.duplicates_only);
+        assert!(!app.ui.picker_open);
+        // Only the duplicates changed: the sources stay unfiltered, and the
+        // loaded rows are filtered without a reload.
+        assert!(app.page_sources.is_empty());
+        assert!(app.retained.is_none());
+
+        // Other pages don't offer it, duplicates or not.
+        let harness = picker_harness(Page::Updates, true);
+        assert!(harness.query_by_label("Only duplicates").is_none());
+        harness.get_by_label(model::source_name("apt"));
+    }
+
+    #[test]
+    fn picker_applies_a_change_of_sources_and_reset_elsewhere_keeps_duplicates() {
+        use egui_kittest::kittest::Queryable;
+        let mut harness = picker_harness(Page::Installed, true);
+        for source in ["flatpak", "dnf"] {
+            harness.get_by_label(model::source_name(source)).click();
+            harness.run_steps(2);
+        }
+        harness.get_by_label("Apply").click();
+        harness.run_steps(2);
+        let app = &harness.state().1;
+        assert_eq!(
+            app.page_sources.get(&Page::Installed),
+            Some(&HashSet::from(["apt".to_owned()]))
+        );
+        assert!(!app.duplicates_only);
+
+        // Reset on another page leaves Installed's duplicates alone.
+        let mut harness = picker_harness(Page::Updates, true);
+        harness.state_mut().1.duplicates_only = true;
+        harness.get_by_label("Reset").click();
+        harness.run_steps(2);
+        harness.get_by_label("Apply").click();
+        harness.run_steps(2);
+        assert!(harness.state().1.duplicates_only);
+    }
+
+    #[test]
+    fn picker_keeps_duplicates_on_while_turned_on_and_reset_clears_it() {
+        use egui_kittest::kittest::Queryable;
+        let mut harness = picker_harness(Page::Installed, false);
+        harness.state_mut().1.duplicates_only = true;
+        open_picker(&mut harness.state_mut().1);
+        harness.state_mut().1.ui.picker_open = true;
+        harness.run_steps(2);
+        // No duplicates left, but it's on: still there to turn off.
+        harness.get_by_label("Only duplicates");
+        harness.get_by_label("Reset").click();
+        harness.run_steps(2);
+        assert!(!harness.state().1.ui.picker_duplicates);
+        harness.get_by_label("Apply").click();
+        harness.run_steps(2);
+        assert!(!harness.state().1.duplicates_only);
+    }
+
+    #[test]
+    fn picker_rows_span_the_card_and_the_last_source_stays_ticked() {
+        use egui_kittest::kittest::{NodeT, Queryable};
+        let mut harness = picker_harness(Page::Installed, true);
+        let card_right = 420.0 + 160.0;
+        for name in ["Only duplicates", model::source_name("apt")] {
+            let rect = harness.get_by_label(name).rect();
+            // Out to the card's inner margin, where the scroll bar sits.
+            assert!(rect.right() > card_right - 30.0, "{name} {rect:?}");
+            assert!(rect.right() <= card_right - 12.0, "{name} {rect:?}");
+            assert!(rect.left() < card_right - 300.0, "{name} {rect:?}");
+        }
+        for source in ["flatpak", "dnf"] {
+            harness.get_by_label(model::source_name(source)).click();
+            harness.run_steps(2);
+        }
+        assert_eq!(
+            harness.state().1.ui.picker_draft,
+            HashSet::from(["apt".to_owned()])
+        );
+        let apt = harness.get_by_label(model::source_name("apt"));
+        assert!(apt.accesskit_node().is_disabled());
+        apt.click();
+        harness.run_steps(2);
+        assert_eq!(harness.state().1.ui.picker_draft.len(), 1);
+
+        // Tick, mark, then name, left to right.
+        let row = harness.get_by_label(model::source_name("apt")).rect();
+        let shapes = flat_shapes(&harness);
+        let name = shapes
+            .iter()
+            .find_map(|shape| match shape {
+                egui::Shape::Text(text) if text.galley.text() == model::source_name("apt") => {
+                    Some(text.pos)
+                }
+                _ => None,
+            })
+            .expect("the name");
+        assert!(
+            (name.x - (row.left() + PICKER_TEXT_INSET)).abs() < 0.5,
+            "{name:?} {row:?}"
+        );
+        let within = |rect: Rect| row.contains_rect(rect);
+        assert!(shapes.iter().any(|shape| matches!(shape,
+            egui::Shape::Rect(tick) if tick.rect.size() == Vec2::splat(18.0)
+                && (tick.rect.center().x - (row.left() + 13.0)).abs() < 0.5 && within(tick.rect))));
+        assert!(shapes.iter().any(|shape| matches!(shape,
+        egui::Shape::Path(path) if {
+            let mark = path.visual_bounding_rect();
+            within(mark) && mark.left() >= row.left() + 31.0 && mark.right() <= row.left() + 53.0
+        })));
+
+        // Only rows that can change light up under the pointer.
+        let lit = |harness: &egui_kittest::Harness<'_, (bool, App)>, row: Rect| {
+            flat_shapes(harness)
+                .iter()
+                .any(|shape| matches!(shape, egui::Shape::Rect(fill) if fill.rect == row))
+        };
+        harness.get_by_label(model::source_name("apt")).hover();
+        harness.run_steps(2);
+        assert!(!lit(&harness, row));
+        let dnf = harness.get_by_label(model::source_name("dnf")).rect();
+        harness.get_by_label(model::source_name("dnf")).hover();
+        harness.run_steps(2);
+        assert!(lit(&harness, dnf));
+
+        // A reason sits just under its row, lined up with the name.
+        harness.state_mut().1.ui.picker_unavailable = true;
+        harness.run_steps(2);
+        let firmware = harness.get_by_label(model::source_name("fwupd")).rect();
+        let reason = harness
+            .query_all_by_label("Unsupported on this platform")
+            .next()
+            .expect("a reason")
+            .rect();
+        // The text's own top: the row's spacing above it, less 6 points.
+        let gap = reason.top() - firmware.bottom();
+        assert!((0.0..14.0).contains(&gap), "{reason:?} {firmware:?}");
+        assert!((reason.left() - (firmware.left() + PICKER_TEXT_INSET)).abs() < 1.0);
+        if std::env::var_os("PKGDECK_PICKER_PNG").is_some() {
+            let image = harness.render().unwrap();
+            image
+                .save(std::env::var("PKGDECK_PICKER_PNG").unwrap())
+                .unwrap();
+        }
     }
 
     #[test]

@@ -316,6 +316,41 @@ pub fn apply(ctx: &egui::Context) {
     }
 }
 
+/// Draw a source's mark into `rect`: its icon, or its monogram when it has
+/// no drawing of its own.
+pub fn paint_source_icon(painter: &Painter, rect: Rect, id: &str, color: Color32) {
+    if icons::drawn(id) {
+        paint_icon(painter, rect, id, color);
+        return;
+    }
+    let letters = icons::monogram(id);
+    // Too small for two letters to read: the first alone, unboxed.
+    if rect.width() < 16.0 {
+        painter.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            letters.get(..1).unwrap_or(""),
+            bold(rect.height() * 0.95),
+            color,
+        );
+        return;
+    }
+    let scale = rect.width() / 24.0;
+    painter.rect_stroke(
+        rect.shrink(2.5 * scale),
+        CornerRadius::same((5.0 * scale) as u8),
+        Stroke::new((1.7 * scale).max(1.0), color),
+        egui::StrokeKind::Middle,
+    );
+    painter.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        letters,
+        bold(rect.height() * 0.4),
+        color,
+    );
+}
+
 /// Draw the icon called `name` into `rect`, as the Qt app's DeckIcon does.
 pub fn paint_icon(painter: &Painter, rect: Rect, name: &str, color: Color32) {
     let scale = rect.width() / 24.0;
@@ -358,10 +393,123 @@ pub fn paint_icon(painter: &Painter, rect: Rect, name: &str, color: Color32) {
         "search" => arc((10.0, 10.0), 7.0, 0.0, 360.0),
         "info" | "help" => arc((12.0, 12.0), 10.0, 0.0, 360.0),
         "spinner" => arc((12.0, 12.0), 9.0, -90.0, 180.0),
+        "system-image" => {
+            arc((12.0, 12.0), 9.5, 0.0, 360.0);
+            arc((12.0, 12.0), 2.5, 0.0, 360.0);
+        }
+        "rustup" => {
+            arc((12.0, 12.0), 7.5, 0.0, 360.0);
+            arc((12.0, 12.0), 2.5, 0.0, 360.0);
+        }
         "refresh" => {
             arc((12.0, 12.0), 9.0, -158.4, -21.6);
             arc((12.0, 12.0), 9.0, 21.6, 158.4);
         }
         _ => {}
+    }
+}
+
+/// The shapes `paint` lays down in one frame, flattened.
+#[cfg(test)]
+pub fn painted(paint: impl FnOnce(&mut egui::Ui)) -> Vec<Shape> {
+    fn flatten(shape: Shape, out: &mut Vec<Shape>) {
+        match shape {
+            Shape::Vec(shapes) => shapes.into_iter().for_each(|shape| flatten(shape, out)),
+            shape => out.push(shape),
+        }
+    }
+    let ctx = egui::Context::default();
+    // The app's fonts, as the window has them, take a frame to bind.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    crate::setup(&ctx, &root, None);
+    ctx.run_ui(egui::RawInput::default(), |_| {})
+        .textures_delta
+        .clear();
+    let mut paint = Some(paint);
+    let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+        if let Some(paint) = paint.take() {
+            paint(ui);
+        }
+    });
+    output.textures_delta.clear();
+    let mut shapes = Vec::new();
+    for clipped in output.shapes {
+        flatten(clipped.shape, &mut shapes);
+    }
+    shapes
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn paint(paint: impl FnOnce(&Painter)) -> Vec<Shape> {
+        painted(|ui| paint(ui.painter()))
+    }
+
+    /// The text shapes: what they say and at what size.
+    fn texts(shapes: &[Shape]) -> Vec<(String, f32)> {
+        shapes
+            .iter()
+            .filter_map(|shape| match shape {
+                Shape::Text(text) => Some((
+                    text.galley.text().to_owned(),
+                    text.galley.job.sections[0].format.font_id.size,
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn square(at: f32, side: f32) -> Rect {
+        Rect::from_min_size(Pos2::new(at, at), Vec2::splat(side))
+    }
+
+    #[test]
+    fn circle_icons_draw_their_rings() {
+        // Rings are 33 point lines; straight strokes are shorter.
+        let rings = |name: &str| {
+            paint(|painter| paint_icon(painter, square(0.0, 24.0), name, Color32::WHITE))
+                .iter()
+                .filter(|shape| matches!(shape, Shape::Path(path) if path.points.len() > 30))
+                .count()
+        };
+        assert_eq!(rings("system-image"), 2);
+        assert_eq!(rings("rustup"), 2);
+        assert_eq!(rings("package"), 0);
+    }
+
+    #[test]
+    fn drawn_sources_paint_their_icon_and_others_their_letters() {
+        let apt =
+            paint(|painter| paint_source_icon(painter, square(0.0, 24.0), "apt", Color32::WHITE));
+        assert!(texts(&apt).is_empty());
+        assert!(!apt.is_empty());
+
+        // Big enough for both letters, boxed, all in proportion.
+        let big =
+            paint(|painter| paint_source_icon(painter, square(10.0, 48.0), "dnf", Color32::WHITE));
+        assert_eq!(texts(&big), [("Dn".to_owned(), 48.0 * 0.4)]);
+        let frame = big
+            .iter()
+            .find_map(|shape| match shape {
+                Shape::Rect(rect) => Some(rect.clone()),
+                _ => None,
+            })
+            .expect("a box");
+        assert_eq!(frame.rect, square(10.0, 48.0).shrink(5.0));
+        assert_eq!(frame.corner_radius, CornerRadius::same(10));
+        assert_eq!(frame.stroke.width, 3.4);
+
+        // From 16 points the box shows; below, just the first letter.
+        let at = |side: f32| {
+            paint(|painter| paint_source_icon(painter, square(0.0, side), "dnf", Color32::WHITE))
+        };
+        let sixteen = at(16.0);
+        assert_eq!(texts(&sixteen)[0].0, "Dn");
+        assert!(sixteen.iter().any(|shape| matches!(shape, Shape::Rect(_))));
+        let small = at(15.0);
+        assert_eq!(texts(&small), [("D".to_owned(), 15.0 * 0.95)]);
+        assert!(!small.iter().any(|shape| matches!(shape, Shape::Rect(_))));
     }
 }

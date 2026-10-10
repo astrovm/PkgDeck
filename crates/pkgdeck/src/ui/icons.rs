@@ -181,6 +181,67 @@ pub fn strokes(name: &str) -> &'static [&'static [f32]] {
             &[6.0, 8.0, 18.0, 8.0],
             &[9.0, 8.0, 12.0, 13.0, 15.0, 8.0],
         ],
+        // Sources without a mark of their own get a monogram instead; see
+        // `monogram`.
+        "flatpak" => &[
+            &[12.0, 3.0, 21.0, 8.0, 12.0, 13.0, 3.0, 8.0, 12.0, 3.0],
+            &[3.0, 12.0, 12.0, 17.0, 21.0, 12.0],
+            &[3.0, 16.0, 12.0, 21.0, 21.0, 16.0],
+        ],
+        "snap" => &[&[
+            13.0, 2.0, 5.0, 13.0, 11.0, 13.0, 10.0, 22.0, 19.0, 10.0, 13.0, 10.0, 13.0, 2.0,
+        ]],
+        "appimage" => &[
+            &[
+                6.0, 2.0, 14.0, 2.0, 19.0, 7.0, 19.0, 22.0, 6.0, 22.0, 6.0, 2.0,
+            ],
+            &[14.0, 2.0, 14.0, 7.0, 19.0, 7.0],
+            &[10.0, 11.0, 15.0, 14.5, 10.0, 18.0, 10.0, 11.0],
+        ],
+        "macos-apps" => &[
+            &[3.0, 4.0, 21.0, 4.0, 21.0, 20.0, 3.0, 20.0, 3.0, 4.0],
+            &[3.0, 8.0, 21.0, 8.0],
+            &[7.0, 11.0, 11.0, 11.0, 11.0, 16.0, 7.0, 16.0, 7.0, 11.0],
+            &[13.0, 11.0, 17.0, 11.0, 17.0, 16.0, 13.0, 16.0, 13.0, 11.0],
+        ],
+        "mas" => &[
+            &[5.0, 8.0, 19.0, 8.0, 20.0, 21.0, 4.0, 21.0, 5.0, 8.0],
+            &[
+                9.0, 11.0, 9.0, 6.0, 10.0, 4.0, 12.0, 3.0, 14.0, 4.0, 15.0, 6.0, 15.0, 11.0,
+            ],
+        ],
+        "macos-updates" => &[
+            &[5.0, 4.0, 19.0, 4.0, 19.0, 15.0, 5.0, 15.0, 5.0, 4.0],
+            &[5.0, 15.0, 2.0, 19.0, 22.0, 19.0, 19.0, 15.0],
+            &[12.0, 13.0, 12.0, 7.0],
+            &[9.5, 9.5, 12.0, 7.0, 14.5, 9.5],
+        ],
+        // Arcs only; see `theme::paint_icon`.
+        "system-image" => &[],
+        "rustup" => &[
+            &[19.5, 12.0, 22.0, 12.0],
+            &[17.3, 17.3, 19.07, 19.07],
+            &[12.0, 19.5, 12.0, 22.0],
+            &[6.7, 17.3, 4.93, 19.07],
+            &[4.5, 12.0, 2.0, 12.0],
+            &[6.7, 6.7, 4.93, 4.93],
+            &[12.0, 4.5, 12.0, 2.0],
+            &[17.3, 6.7, 19.07, 4.93],
+        ],
+        "toolbox" => &[
+            &[3.0, 9.0, 21.0, 9.0, 21.0, 20.0, 3.0, 20.0, 3.0, 9.0],
+            &[9.0, 9.0, 9.0, 5.0, 15.0, 5.0, 15.0, 9.0],
+            &[3.0, 14.0, 21.0, 14.0],
+        ],
+        "distrobox" => &[
+            &[3.0, 12.0, 11.0, 12.0, 11.0, 20.0, 3.0, 20.0, 3.0, 12.0],
+            &[13.0, 12.0, 21.0, 12.0, 21.0, 20.0, 13.0, 20.0, 13.0, 12.0],
+            &[8.0, 12.0, 8.0, 4.0, 16.0, 4.0, 16.0, 12.0],
+        ],
+        "duplicates" => &[
+            &[8.0, 8.0, 20.0, 8.0, 20.0, 20.0, 8.0, 20.0, 8.0, 8.0],
+            &[16.0, 8.0, 16.0, 4.0, 4.0, 4.0, 4.0, 16.0, 8.0, 16.0],
+        ],
         "warning" => &[
             &[12.0, 2.0, 23.0, 21.0, 1.0, 21.0, 12.0, 2.0],
             &[12.0, 8.0, 12.0, 14.0],
@@ -247,6 +308,17 @@ pub const NAMES: &[&str] = &[
     "mise",
     "composer",
     "gem",
+    "flatpak",
+    "snap",
+    "appimage",
+    "macos-apps",
+    "mas",
+    "macos-updates",
+    "system-image",
+    "rustup",
+    "toolbox",
+    "distrobox",
+    "duplicates",
     "warning",
     "lock",
     "external",
@@ -257,3 +329,81 @@ pub const NAMES: &[&str] = &[
     "info",
     "spinner",
 ];
+
+/// Whether `name` has a drawing of its own, rather than the package
+/// fallback.
+pub fn drawn(name: &str) -> bool {
+    NAMES.contains(&name)
+}
+
+/// Letters that stand in for a source with no drawing of its own: short,
+/// and different from every other source's.
+pub fn monogram(id: &str) -> &str {
+    match id {
+        "dnf" => "Dn",
+        "pacman" => "Pm",
+        "aur" => "Au",
+        "zypper" => "Zy",
+        "apk" => "Ak",
+        "xbps" => "Xb",
+        "macports" => "Mp",
+        "go" => "Go",
+        "dotnet" => ".N",
+        "pixi" => "Px",
+        "conda" => "Cd",
+        "nix" => "Nx",
+        "oh-my-zsh" => "Oz",
+        "codex" => "Cx",
+        "claude" => "Cl",
+        "grok" => "Gk",
+        "opencode" => "Oc",
+        "cursor" => "Cu",
+        "copilot" => "Cp",
+        "kiro" => "Ki",
+        "antigravity" => "Ag",
+        "amp" => "Am",
+        "droid" => "Dr",
+        "solana" => "So",
+        "anchor" => "An",
+        "foundry" => "Fo",
+        other => other.get(..1).unwrap_or(""),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn every_source_has_its_own_mark() {
+        let mut marks = HashSet::new();
+        for id in pkgdeck_core::backends::BACKEND_IDS {
+            let mark = if drawn(id) {
+                format!("icon:{id}")
+            } else {
+                assert!(!monogram(id).is_empty(), "{id} has no mark");
+                format!("letters:{}", monogram(id))
+            };
+            assert!(marks.insert(mark.clone()), "{id} shares {mark}");
+        }
+    }
+
+    #[test]
+    fn every_named_icon_has_a_drawing_of_its_own() {
+        // The heart is filled, not stroked; see `theme::paint_icon`.
+        for name in NAMES
+            .iter()
+            .filter(|name| !matches!(**name, "package" | "heart"))
+        {
+            assert_ne!(strokes(name), strokes("package"), "{name}");
+        }
+    }
+
+    #[test]
+    fn unknown_names_fall_back_to_the_package() {
+        assert!(!drawn("not-a-source"));
+        assert_eq!(strokes("not-a-source"), strokes("package"));
+        assert_eq!(monogram("zzz"), "z");
+    }
+}

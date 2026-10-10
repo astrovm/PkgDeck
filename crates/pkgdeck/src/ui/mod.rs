@@ -32,6 +32,8 @@ pub struct State {
     pub picker_draft: HashSet<String>,
     pub picker_search: String,
     pub picker_unavailable: bool,
+    /// The picker's "Only duplicates", applied with the sources.
+    pub picker_duplicates: bool,
     pub open_dialog: bool,
     pub open_link: String,
     pub repos_open: bool,
@@ -483,8 +485,14 @@ fn header(app: &mut App, ui: &mut Ui) {
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if app.page.filters_sources() && app.opened.is_none() {
-                let filtered = app.page_sources.contains_key(&app.page);
-                let label = app.source_summary(app.page);
+                let sources = app.page_sources.contains_key(&app.page);
+                let duplicates = app.page == Page::Installed && app.duplicates_only;
+                let filtered = sources || duplicates;
+                let label = match (sources, duplicates) {
+                    (true, true) => format!("{}, duplicates", app.source_summary(app.page)),
+                    (false, true) => "Duplicates".into(),
+                    _ => app.source_summary(app.page),
+                };
                 let response = Button::new(
                     if filtered {
                         Look::Soft(Tone::Accent)
@@ -605,54 +613,26 @@ fn search_field(app: &mut App, ui: &mut Ui) {
 }
 
 fn installed_filters(app: &mut App, ui: &mut Ui) {
-    let has_packages = app.rows.iter().any(model::Row::is_package);
-    let toggle = has_packages || app.duplicates_only;
-    // Right to left, so the toggle sits at the edge and the field takes
-    // the rest.
-    ui.allocate_ui_with_layout(
-        vec2(ui.available_width(), CONTROL_HEIGHT),
-        egui::Layout::right_to_left(egui::Align::Center),
-        |ui| {
-            if toggle {
-                // Looks like the source filter: tinted while on.
-                let on = app.duplicates_only;
-                let look = if on {
-                    Look::Soft(Tone::Accent)
-                } else {
-                    Look::Secondary
-                };
-                if Button::new(look, "Duplicates")
-                    .tooltip("Only apps installed more than once")
-                    .show(ui)
-                    .clicked()
-                {
-                    app.duplicates_only = !on;
-                    app.invalidate();
-                }
-            }
-            let width = ui.available_width().max(160.0);
-            let field = Field::new(&mut app.filter, "Filter installed packages", filter_id())
-                .icon("filter")
-                .width(width)
-                .show(ui);
-            if app.ui.focus_filter {
-                app.ui.focus_filter = false;
-                app.ui.focus_list = false;
-                field.response.request_focus();
-            }
-            if field.response.changed() || field.cleared {
-                app.invalidate();
-            }
-            if field.response.has_focus()
-                && ui.input(|i| i.key_pressed(Key::ArrowDown) || i.key_pressed(Key::Enter))
-                && !app.items.is_empty()
-            {
-                app.ui.focus_list = true;
-                app.ui.keyboard_nav = true;
-                app.choose(0, false);
-            }
-        },
-    );
+    let field = Field::new(&mut app.filter, "Filter installed packages", filter_id())
+        .icon("filter")
+        .width(ui.available_width())
+        .show(ui);
+    if app.ui.focus_filter {
+        app.ui.focus_filter = false;
+        app.ui.focus_list = false;
+        field.response.request_focus();
+    }
+    if field.response.changed() || field.cleared {
+        app.invalidate();
+    }
+    if field.response.has_focus()
+        && ui.input(|i| i.key_pressed(Key::ArrowDown) || i.key_pressed(Key::Enter))
+        && !app.items.is_empty()
+    {
+        app.ui.focus_list = true;
+        app.ui.keyboard_nav = true;
+        app.choose(0, false);
+    }
 }
 
 /// The AppImages on Installed that PkgDeck could manage, when there's
@@ -1292,5 +1272,160 @@ mod toast_tests {
             ToastParts::text_width(460.0, false),
             plain.text_right - plain.text_left
         );
+    }
+}
+
+#[cfg(test)]
+mod header_tests {
+    use super::*;
+    use crate::{app::Launch, model::Source, platform::Platform, settings::Store};
+    use egui_kittest::{kittest::Queryable, Harness};
+    use pkgdeck_app::controller::ffi::create_synthetic_controller;
+
+    fn app(page: Page, rows: usize) -> App {
+        let (store, settings) = Store::open(None, None);
+        let mut app = App::with_controller(
+            create_synthetic_controller(|_, _, _, _| Ok(pkgdeck_core::engine::Engine::default())),
+            settings,
+            store,
+            Platform::start(|| {}),
+            Launch::default(),
+        );
+        app.catalog = vec![Source {
+            source: "apt".into(),
+            available: true,
+            capabilities: vec!["installed".into(), "upgrade".into()],
+            ..Source::default()
+        }];
+        app.rows = (0..rows)
+            .map(|i| {
+                serde_json::from_value(serde_json::json!({
+                    "kind": "package", "name": format!("fixture-{i}"), "source": "apt",
+                    "scope": "system", "installed": "1.0",
+                }))
+                .unwrap()
+            })
+            .collect();
+        app.page = page;
+        app.invalidate();
+        app.refresh_items();
+        app
+    }
+
+    fn draw(app: App, paint: fn(&mut App, &mut Ui)) -> Harness<'static, (bool, App)> {
+        let mut harness = Harness::builder()
+            .with_size(vec2(1000.0, 600.0))
+            .build_ui_state(
+                move |ui, (ready, app): &mut (bool, App)| {
+                    if !*ready {
+                        let root =
+                            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+                        crate::setup(ui.ctx(), &root, None);
+                        set_reduce_motion(ui.ctx(), true);
+                        *ready = true;
+                        return;
+                    }
+                    paint(app, ui);
+                },
+                (false, app),
+            );
+        harness.run_steps(3);
+        harness
+    }
+
+    #[test]
+    fn the_source_filter_button_says_when_duplicates_are_on() {
+        let label = |page: Page, sources: bool| {
+            let mut app = app(page, 1);
+            app.duplicates_only = true;
+            if sources {
+                app.page_sources
+                    .insert(page, HashSet::from(["apt".to_owned()]));
+            }
+            let harness = draw(app, header);
+            [
+                "Filter sources",
+                "Duplicates",
+                &format!("{}, duplicates", model::source_name("apt")),
+                model::source_name("apt"),
+            ]
+            .into_iter()
+            .find(|label| harness.query_by_label(label).is_some())
+            .map(str::to_owned)
+        };
+        assert_eq!(label(Page::Installed, false).as_deref(), Some("Duplicates"));
+        assert_eq!(
+            label(Page::Installed, true),
+            Some(format!("{}, duplicates", model::source_name("apt")))
+        );
+        // Duplicates belong to Installed.
+        assert_eq!(
+            label(Page::Updates, false).as_deref(),
+            Some("Filter sources")
+        );
+        assert_eq!(
+            label(Page::Updates, true).as_deref(),
+            Some(model::source_name("apt"))
+        );
+    }
+
+    #[test]
+    fn the_source_filter_button_opens_the_picker_and_hides_behind_an_opened_file() {
+        let mut harness = draw(app(Page::Installed, 1), header);
+        harness.get_by_label("Filter sources").click();
+        harness.run_steps(2);
+        assert!(harness.state().1.ui.picker_open);
+
+        let mut opened = app(Page::Installed, 1);
+        opened.opened = Some(Default::default());
+        let harness = draw(opened, header);
+        assert!(harness.query_by_label("Filter sources").is_none());
+    }
+
+    #[test]
+    fn the_installed_filter_takes_focus_filters_and_hands_down_to_the_list() {
+        let mut start = app(Page::Installed, 2);
+        start.ui.focus_filter = true;
+        start.ui.focus_list = true;
+        let mut harness = draw(start, installed_filters);
+        assert!(!harness.state().1.ui.focus_filter);
+        assert!(!harness.state().1.ui.focus_list);
+        assert!(harness
+            .get_by_role(egui::accesskit::Role::TextInput)
+            .is_focused());
+        // No Duplicates button beside it any more: it's in Filter sources.
+        assert!(harness.query_by_label("Duplicates").is_none());
+
+        harness
+            .get_by_role(egui::accesskit::Role::TextInput)
+            .type_text("-1");
+        harness.run_steps(2);
+        assert_eq!(harness.state().1.filter, "-1");
+        // The list follows the filter.
+        harness.state_mut().1.refresh_items();
+        assert_eq!(harness.state().1.items.len(), 1);
+
+        harness.key_press(Key::ArrowDown);
+        harness.run_steps(2);
+        let app = &harness.state().1;
+        assert!(app.ui.focus_list && app.ui.keyboard_nav);
+        assert!(app.selected.is_some());
+    }
+
+    #[test]
+    fn the_installed_filter_keeps_focus_when_the_list_is_empty_or_it_is_not_focused() {
+        let mut harness = draw(app(Page::Installed, 0), installed_filters);
+        harness.key_press(Key::ArrowDown);
+        harness.run_steps(2);
+        // Not focused: the arrow isn't the field's.
+        assert!(!harness.state().1.ui.focus_list);
+        harness
+            .get_by_role(egui::accesskit::Role::TextInput)
+            .focus();
+        harness.run_steps(2);
+        harness.key_press(Key::Enter);
+        harness.run_steps(2);
+        assert!(!harness.state().1.ui.focus_list);
+        assert!(harness.state().1.selected.is_none());
     }
 }

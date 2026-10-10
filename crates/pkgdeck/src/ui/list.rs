@@ -1150,16 +1150,12 @@ pub fn package_icon(app: &App, ui: &mut Ui, rect: Rect, row: &Row) {
     let fallback = |ui: &mut Ui| {
         ui.painter()
             .rect_filled(rect, CornerRadius::same(10), alpha(palette.accent, 0.1));
-        let name = match row.kind.as_str() {
-            "failure" => "warning",
-            _ => row.source.as_str(),
-        };
-        theme::paint_icon(
-            ui.painter(),
-            rect.shrink(rect.width() * 0.24),
-            name,
-            palette.accent,
-        );
+        let mark = rect.shrink(rect.width() * 0.24);
+        if row.kind == "failure" {
+            theme::paint_icon(ui.painter(), mark, "warning", palette.accent);
+        } else {
+            theme::paint_source_icon(ui.painter(), mark, &row.source, palette.accent);
+        }
     };
     let uri = row
         .icon
@@ -1192,7 +1188,7 @@ pub fn package_icon(app: &App, ui: &mut Ui, rect: Rect, row: &Row) {
                             palette.surface,
                             Stroke::new(1.0, palette.line),
                         );
-                        theme::paint_icon(
+                        theme::paint_source_icon(
                             ui.painter(),
                             badge.shrink(3.5),
                             &row.source,
@@ -1610,5 +1606,47 @@ mod column_tests {
         let cols = columns(row(1000.0), Width::Wide, Page::Installed, 38.0, tiny);
         assert!(cols.name.width() >= 120.0);
         assert!(cols.version.unwrap().width() >= 80.0);
+    }
+}
+
+#[cfg(test)]
+mod icon_tests {
+    use super::*;
+
+    #[test]
+    fn rows_without_an_icon_show_their_source_mark_or_a_warning() {
+        use crate::{app::Launch, platform::Platform, settings::Store};
+        let (store, settings) = Store::open(None, None);
+        let app = App::with_controller(
+            pkgdeck_app::controller::ffi::create_synthetic_controller(|_, _, _, _| {
+                Ok(pkgdeck_core::engine::Engine::default())
+            }),
+            settings,
+            store,
+            Platform::start(|| {}),
+            Launch::default(),
+        );
+        let texts = |kind: &str| {
+            let row: Row = serde_json::from_value(serde_json::json!({
+                "kind": kind, "name": "fixture", "source": "dnf"
+            }))
+            .unwrap();
+            theme::painted(|ui| {
+                let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(50.0, 50.0));
+                package_icon(&app, ui, rect, &row);
+            })
+            .into_iter()
+            .filter_map(|shape| match shape {
+                egui::Shape::Text(text) => Some((
+                    text.galley.text().to_owned(),
+                    text.galley.job.sections[0].format.font_id.size,
+                )),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+        };
+        // The mark takes the middle half: 50 less 24% each side.
+        assert_eq!(texts("package"), [("Dn".to_owned(), 26.0 * 0.4)]);
+        assert!(texts("failure").is_empty());
     }
 }

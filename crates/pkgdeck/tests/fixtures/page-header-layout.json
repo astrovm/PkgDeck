@@ -1239,6 +1239,13 @@
   ],
   "source-1000-false-false": [
     {
+      "height": 11.0,
+      "text": "A",
+      "width": 6.40625,
+      "x": 44.796875,
+      "y": 42.5
+    },
+    {
       "height": 22.0,
       "text": "A long fixture source name that must leave room for its switch",
       "width": 537.75,
@@ -1297,6 +1304,13 @@
   ],
   "source-440-true-false": [
     {
+      "height": 11.0,
+      "text": "A",
+      "width": 6.40625,
+      "x": 90.796875,
+      "y": 42.5
+    },
+    {
       "height": 66.0,
       "text": "A long fixture source name that must leave room for its switch",
       "width": 189.53125,
@@ -1340,6 +1354,13 @@
     }
   ],
   "source-480-false-false": [
+    {
+      "height": 11.0,
+      "text": "A",
+      "width": 6.40625,
+      "x": 44.796875,
+      "y": 42.5
+    },
     {
       "height": 66.0,
       "text": "A long fixture source name that must leave room for its switch",
@@ -1385,6 +1406,13 @@
   ],
   "source-500-false-false": [
     {
+      "height": 11.0,
+      "text": "A",
+      "width": 6.40625,
+      "x": 44.796875,
+      "y": 42.5
+    },
+    {
       "height": 66.0,
       "text": "A long fixture source name that must leave room for its switch",
       "width": 241.53125,
@@ -1429,6 +1457,13 @@
   ],
   "source-504-false-false": [
     {
+      "height": 11.0,
+      "text": "A",
+      "width": 6.40625,
+      "x": 44.796875,
+      "y": 42.5
+    },
+    {
       "height": 66.0,
       "text": "A long fixture source name that must leave room for its switch",
       "width": 241.53125,
@@ -1472,6 +1507,13 @@
     }
   ],
   "source-560-false-false": [
+    {
+      "height": 11.0,
+      "text": "A",
+      "width": 6.40625,
+      "x": 44.796875,
+      "y": 42.5
+    },
     {
       "height": 44.0,
       "text": "A long fixture source name that must leave room for its switch",
@@ -1531,6 +1573,13 @@
   ],
   "source-600-false-false": [
     {
+      "height": 11.0,
+      "text": "A",
+      "width": 6.40625,
+      "x": 44.796875,
+      "y": 42.5
+    },
+    {
       "height": 44.0,
       "text": "A long fixture source name that must leave room for its switch",
       "width": 325.53125,
@@ -1588,6 +1637,13 @@
     }
   ],
   "source-700-false-false": [
+    {
+      "height": 11.0,
+      "text": "A",
+      "width": 6.40625,
+      "x": 44.796875,
+      "y": 42.5
+    },
     {
       "height": 44.0,
       "text": "A long fixture source name that must leave room for its switch",
