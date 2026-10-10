@@ -2161,7 +2161,11 @@ mod read_again_tests {
         let lookup = engine.lookup("x", &cancel);
         assert_eq!(names(&lookup), ["looked-up"]);
         assert!(lookup.failures.is_empty());
-        assert_eq!(reads.load(Ordering::SeqCst), 4);
+        // The listing still arrives; only the busy index is reported.
+        let installed = engine.installed(&cancel);
+        assert_eq!(names(&installed), ["installed"]);
+        assert_eq!(installed.failures.len(), 1);
+        assert_eq!(reads.load(Ordering::SeqCst), 6);
     }
 
     #[test]

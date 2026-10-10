@@ -6521,7 +6521,7 @@ mod tests {
         sync::{Arc, Mutex},
     };
 
-    fn brew_exit(code: i32, stderr: &str) -> Result<Completion, EngineError> {
+    fn brew_run(code: i32, stderr: &str) -> Result<Completion, ExecutionError> {
         let result = Completion {
             code: Some(code),
             signal: None,
@@ -6533,8 +6533,11 @@ mod tests {
         if code == 0 {
             Ok(result)
         } else {
-            Err(EngineError::Execution(ExecutionError::Failed(result)))
+            Err(ExecutionError::Failed(result))
         }
+    }
+    fn brew_exit(code: i32, stderr: &str) -> Result<Completion, EngineError> {
+        Ok(brew_run(code, stderr)?)
     }
     const BREW_LOCKED: &str = "Error: Another `brew update` process is already running.\n\
         Please wait for it to finish or terminate it to continue.\n";
@@ -6561,11 +6564,7 @@ mod tests {
             assert_eq!(line, "update");
             assert!(write);
             let locked = calls.len() == 1;
-            match brew_exit(i32::from(locked), if locked { BREW_LOCKED } else { "" }) {
-                Ok(result) => Ok(result),
-                Err(EngineError::Execution(error)) => Err(error),
-                Err(other) => panic!("{other}"),
-            }
+            brew_run(i32::from(locked), if locked { BREW_LOCKED } else { "" })
         }
     }
 
