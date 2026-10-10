@@ -460,6 +460,14 @@ fn column_dividers(app: &mut App, ui: &mut Ui, rect: Rect, cols: &Columns) {
                 Sense::click_and_drag(),
             )
             .on_hover_cursor(CursorIcon::ResizeHorizontal);
+        response.widget_info(|| {
+            let label = if column == "name" {
+                "Resize Name column"
+            } else {
+                "Resize Version column"
+            };
+            egui::WidgetInfo::labeled(egui::WidgetType::Other, true, label)
+        });
         let active = response.hovered() || response.dragged();
         ui.painter().line_segment(
             [pos2(x, rect.top() + 9.0), pos2(x, rect.bottom() - 9.0)],
@@ -474,14 +482,7 @@ fn column_dividers(app: &mut App, ui: &mut Ui, rect: Rect, cols: &Columns) {
         );
         if response.dragged() {
             if let Some(pointer) = ui.ctx().pointer_interact_pos() {
-                let share = match column {
-                    "name" => (pointer.x - 6.0 - cols.start) / cols.available,
-                    _ => {
-                        let version_left = cols.version.map_or(cols.start, |v| v.left());
-                        (pointer.x - 6.0 - version_left) / cols.available
-                    }
-                };
-                let share = share.clamp(0.05, 0.9);
+                let share = dragged_share(column, pointer.x, cols);
                 match column {
                     "name" => app.settings.name_column = share,
                     _ => app.settings.version_column = share,
@@ -499,6 +500,16 @@ fn column_dividers(app: &mut App, ui: &mut Ui, rect: Rect, cols: &Columns) {
             app.save_settings();
         }
     }
+}
+
+/// The share of the row a column takes when its divider is at `x`: the
+/// divider sits 6 past the column's right edge.
+fn dragged_share(column: &str, x: f32, cols: &Columns) -> f32 {
+    let left = match column {
+        "name" => cols.start,
+        _ => cols.version.map_or(cols.start, |v| v.left()),
+    };
+    ((x - 6.0 - left) / cols.available).clamp(0.05, 0.9)
 }
 
 fn row_height(app: &App, index: usize, width: Width) -> f32 {
@@ -1514,6 +1525,24 @@ mod column_tests {
         );
         assert!(cols.summary.is_some_and(|s| s.width() > 150.0));
         const { assert!(700.0 >= MEDIUM_BELOW) };
+    }
+
+    #[test]
+    fn a_divider_dropped_where_a_column_ends_keeps_that_width() {
+        let cols = columns(
+            row(1000.0),
+            Width::Wide,
+            Page::Installed,
+            38.0,
+            Shares::default(),
+        );
+        let version = cols.version.unwrap();
+        let name = dragged_share("name", version.left() - 6.0, &cols);
+        assert!((name * cols.available - cols.name.width()).abs() < 0.5);
+        let share = dragged_share("version", version.right() + 6.0, &cols);
+        assert!((share * cols.available - version.width()).abs() < 0.5);
+        assert_eq!(dragged_share("name", -500.0, &cols), 0.05);
+        assert_eq!(dragged_share("version", 5000.0, &cols), 0.9);
     }
 
     #[test]

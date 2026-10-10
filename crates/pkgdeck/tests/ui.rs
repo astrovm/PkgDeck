@@ -137,6 +137,47 @@ fn an_update_can_start_from_the_installed_page() {
 }
 
 #[test]
+fn dragging_a_column_divider_resizes_and_double_click_resets() {
+    let mut harness = show(Page::Installed);
+    let divider = harness.get_by_label("Resize Name column").rect().center();
+    assert!(harness.query_by_label("Resize Version column").is_some());
+    harness.hover_at(divider);
+    harness.run_steps(1);
+    harness.drag_at(divider);
+    harness.run_steps(1);
+    for step in 1..=4 {
+        harness.hover_at(divider + egui::vec2(-20.0 * step as f32, 0.0));
+        harness.run_steps(1);
+    }
+    harness.drop_at(divider + egui::vec2(-80.0, 0.0));
+    harness.run_steps(2);
+    let narrower = harness.state().1.settings.name_column;
+    assert!(narrower > 0.0, "{narrower}");
+    let moved = harness.get_by_label("Resize Name column").rect().center();
+    assert!(
+        (moved.x - (divider.x - 80.0)).abs() < 2.0,
+        "{moved:?} {divider:?}"
+    );
+    assert_eq!(harness.state().1.settings.version_column, 0.0);
+
+    // Two quick presses on the divider.
+    for _ in 0..2 {
+        harness.hover_at(moved);
+        harness.drag_at(moved);
+        harness.step();
+        harness.event(egui::Event::PointerButton {
+            pos: moved,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        harness.step();
+    }
+    harness.run_steps(1);
+    assert_eq!(harness.state().1.settings.name_column, 0.0);
+}
+
+#[test]
 fn the_sidebar_switches_pages() {
     let mut harness = show(Page::Installed);
     harness
