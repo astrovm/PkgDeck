@@ -2110,7 +2110,7 @@ mod read_again_tests {
     }
     impl Flaky {
         fn read(&self, name: &str) -> Result<Vec<Package>, EngineError> {
-            if self.reads.fetch_add(1, Ordering::SeqCst) % 2 == 0 {
+            if self.reads.fetch_add(1, Ordering::SeqCst).is_multiple_of(2) {
                 Err(busy())
             } else {
                 Ok(vec![package(name)])
