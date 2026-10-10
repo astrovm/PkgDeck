@@ -53,17 +53,25 @@ fn harness(app: App) -> Harness<'static, (bool, App)> {
 }
 
 fn harness_at(app: App, size: egui::Vec2) -> Harness<'static, (bool, App)> {
-    Harness::builder().with_size(size).build_ui_state(
-        |ui, (ready, app): &mut (bool, App)| {
-            if !*ready {
-                pkgdeck::setup(ui.ctx(), std::path::Path::new("/"), None);
-                *ready = true;
-                return;
-            }
-            pkgdeck::ui::show(app, ui);
-        },
-        (false, app),
-    )
+    harness_with(app, size, 0.25)
+}
+
+/// `step` seconds pass each frame.
+fn harness_with(app: App, size: egui::Vec2, step: f32) -> Harness<'static, (bool, App)> {
+    Harness::builder()
+        .with_size(size)
+        .with_step_dt(step)
+        .build_ui_state(
+            |ui, (ready, app): &mut (bool, App)| {
+                if !*ready {
+                    pkgdeck::setup(ui.ctx(), std::path::Path::new("/"), None);
+                    *ready = true;
+                    return;
+                }
+                pkgdeck::ui::show(app, ui);
+            },
+            (false, app),
+        )
 }
 
 fn show(page: Page) -> Harness<'static, (bool, App)> {
@@ -138,7 +146,12 @@ fn an_update_can_start_from_the_installed_page() {
 
 #[test]
 fn dragging_a_column_divider_resizes_and_double_click_resets() {
-    let mut harness = show(Page::Installed);
+    let mut app = app();
+    app.page = Page::Installed;
+    app.invalidate();
+    // 60 frames a second, so two clicks can be a double-click.
+    let mut harness = harness_with(app, egui::vec2(1200.0, 800.0), 1.0 / 60.0);
+    harness.run_steps(4);
     let divider = harness.get_by_label("Resize Name column").rect().center();
     assert!(harness.query_by_label("Resize Version column").is_some());
     harness.hover_at(divider);
@@ -160,21 +173,48 @@ fn dragging_a_column_divider_resizes_and_double_click_resets() {
     );
     assert_eq!(harness.state().1.settings.version_column, 0.0);
 
-    // Two quick presses on the divider.
+    // Two clicks a frame apart, well inside the double-click time.
+    harness.hover_at(moved);
+    harness.step();
     for _ in 0..2 {
-        harness.hover_at(moved);
-        harness.drag_at(moved);
-        harness.step();
-        harness.event(egui::Event::PointerButton {
-            pos: moved,
-            button: egui::PointerButton::Primary,
-            pressed: false,
-            modifiers: egui::Modifiers::NONE,
-        });
+        for pressed in [true, false] {
+            harness.event(egui::Event::PointerButton {
+                pos: moved,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+        }
         harness.step();
     }
     harness.run_steps(1);
     assert_eq!(harness.state().1.settings.name_column, 0.0);
+
+    // The version divider resizes only the version.
+    let version = harness
+        .get_by_label("Resize Version column")
+        .rect()
+        .center();
+    harness.hover_at(version);
+    harness.step();
+    harness.drag_at(version);
+    harness.step();
+    for step in 1..=4 {
+        harness.hover_at(version + egui::vec2(10.0 * step as f32, 0.0));
+        harness.step();
+    }
+    harness.drop_at(version + egui::vec2(40.0, 0.0));
+    harness.run_steps(2);
+    assert!(harness.state().1.settings.version_column > 0.0);
+    assert_eq!(harness.state().1.settings.name_column, 0.0);
+    let moved = harness
+        .get_by_label("Resize Version column")
+        .rect()
+        .center();
+    assert!(
+        (moved.x - (version.x + 40.0)).abs() < 2.0,
+        "{moved:?} {version:?}"
+    );
 }
 
 #[test]
