@@ -309,7 +309,11 @@ pub(crate) fn run_observed(
         }
     })();
     if supervise.is_err() && !reaped {
-        stop_group(&mut child, STOP_GRACE);
+        // The caller gets its answer now; the group is killed and reaped
+        // beside it, so a stop never keeps the app busy.
+        let pid = rustix::process::Pid::from_raw(child.id() as i32).expect("live child PID");
+        let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::TERM);
+        std::thread::spawn(move || stop_group(&mut child, stdout, stderr, STOP_GRACE));
     }
     supervise
 }
@@ -317,17 +321,25 @@ pub(crate) fn run_observed(
 /// How long a stopped command gets to exit before it is killed.
 const STOP_GRACE: Duration = Duration::from_millis(500);
 
-/// Stops a child's process group: SIGTERM first, then SIGKILL after `grace`.
-/// In the Flatpak the child is `flatpak-spawn --host`, which passes SIGTERM
-/// on to the command it started on the host. SIGKILL can't be passed on, so
-/// the host command would keep running with nobody reading its output, and
-/// some (grok) crash when they finally print.
-fn stop_group(child: &mut std::process::Child, grace: Duration) {
+/// Finishes stopping a child's process group that was sent SIGTERM: SIGKILL
+/// after `grace`. In the Flatpak the child is `flatpak-spawn --host`, which
+/// passes SIGTERM on to the command it started on the host. SIGKILL can't be
+/// passed on, so the host command would keep running with nobody reading
+/// its output, and some (grok) crash when they finally print.
+///
+/// Its output keeps being read and dropped until it exits: a command that
+/// prints while it stops would otherwise die from a broken pipe, which is
+/// how grok crashed.
+fn stop_group(
+    child: &mut std::process::Child,
+    mut stdout: impl Read,
+    mut stderr: impl Read,
+    grace: Duration,
+) {
     use rustix::process::{kill_process_group, waitid, Pid, Signal, WaitId, WaitIdOptions};
     // The child is not reaped until the end, so its process-group ID
     // cannot be reused while it is signalled.
     let pid = Pid::from_raw(child.id() as i32).expect("live child PID");
-    let _ = kill_process_group(pid, Signal::TERM);
     let exited = || {
         matches!(
             waitid(
@@ -337,8 +349,13 @@ fn stop_group(child: &mut std::process::Child, grace: Duration) {
             Ok(Some(_))
         )
     };
+    let mut drop_output = || {
+        let _ = drain(&mut stdout, &mut Vec::new(), 0, &mut false);
+        let _ = drain(&mut stderr, &mut Vec::new(), 0, &mut false);
+    };
     let deadline = Instant::now() + grace;
     while !exited() && Instant::now() < deadline {
+        drop_output();
         std::thread::sleep(Duration::from_millis(5));
     }
     // Whatever else is left in the group, such as a child that ignored
@@ -463,9 +480,17 @@ mod tests {
         // would leave that command running on the host.
         let (dir, _) = stopped_read(
             "terminated",
-            "trap ': > \"$1/terminated\"; exit 0' TERM; : > \"$1/ready\"; \
+            // It prints while stopping, as grok did: a closed pipe would
+            // kill it before it gets to its marker.
+            "trap 'echo stopping; echo stopping >&2; : > \"$1/terminated\"; exit 0' TERM; \
+             : > \"$1/ready\"; \
              while :; do sleep 0.01; done",
         );
+        // The trap runs beside the answer, before any SIGKILL.
+        let deadline = Instant::now() + STOP_GRACE;
+        while !dir.join("terminated").exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
         assert!(dir.join("terminated").exists());
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -476,10 +501,16 @@ mod tests {
             "ignores-term",
             "trap '' TERM; echo $$ > \"$1/pid\"; : > \"$1/ready\"; while :; do sleep 0.01; done",
         );
-        assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
-        assert!(elapsed >= STOP_GRACE, "{elapsed:?}");
+        // The read answers at once; the kill follows after the grace.
+        assert!(elapsed < STOP_GRACE, "{elapsed:?}");
         let pid = std::fs::read_to_string(dir.join("pid")).unwrap();
-        assert!(!std::path::Path::new("/proc").join(pid.trim()).exists());
+        let proc = std::path::Path::new("/proc").join(pid.trim());
+        assert!(proc.exists());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while proc.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!proc.exists());
         std::fs::remove_dir_all(dir).unwrap();
     }
 

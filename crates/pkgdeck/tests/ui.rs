@@ -110,7 +110,9 @@ fn an_update_can_start_from_the_installed_page() {
     assert!(app.active_rows.contains(&htop));
 
     // Only a running change hides it, not one waiting for review.
-    assert!(harness.query_by_role_and_label(Role::Button, "Update").is_some());
+    assert!(harness
+        .query_by_role_and_label(Role::Button, "Update")
+        .is_some());
     // While it runs, the page offers Cancel, not a second Update.
     harness.state_mut().1.writing = true;
     harness.state_mut().1.active_rows.insert(htop);
