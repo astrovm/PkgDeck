@@ -22,6 +22,7 @@ mod tests;
 #[derive(Clone, Copy)]
 enum PageButton {
     Launch,
+    Update,
     Main,
     Manage,
     Scope,
@@ -279,6 +280,12 @@ fn app_page(
         if launchable {
             buttons.push(PageButton::Launch);
         }
+        // Outside Updates the main action is Remove; an update waiting there
+        // gets its own button, so it needn't be found on the Updates page.
+        let running = app.writing && app.active_rows.contains(&identity);
+        if !opened && update_waits && !running && !matches!(main, Some(Main::Row(model::Action::Upgrade))) {
+            buttons.push(PageButton::Update);
+        }
         if matches!(&main, Some(Main::Opened(_)) if !launchable) || matches!(main, Some(Main::Row(_))) {
             buttons.push(PageButton::Main);
         }
@@ -298,6 +305,11 @@ fn app_page(
                         raw.map(|raw| app.c().launch_app(raw as i32).to_string()).unwrap_or_default()
                     };
                     app.launch_error = error;
+                }
+            }
+            PageButton::Update => {
+                if Button::new(Look::Primary, "Update").icon("updates").tooltip("Ctrl+U").enabled(can_act).show(ui).clicked() {
+                    app.propose("upgrade");
                 }
             }
             PageButton::Main => match &main {

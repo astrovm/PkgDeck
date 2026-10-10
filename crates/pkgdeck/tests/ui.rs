@@ -94,6 +94,34 @@ fn the_restart_toast_offers_restart_and_closes() {
 }
 
 #[test]
+fn an_update_can_start_from_the_installed_page() {
+    let mut harness = show(Page::Installed);
+    harness.get_by_label_contains("htop, APT, System").click();
+    harness.run_steps(4);
+    assert!(harness
+        .query_by_role_and_label(Role::Button, "Remove")
+        .is_some());
+    harness
+        .get_by_role_and_label(Role::Button, "Update")
+        .click();
+    harness.run_steps(3);
+    let app = &harness.state().1;
+    let htop = app.selected_row().unwrap().identity();
+    assert!(app.active_rows.contains(&htop));
+
+    // Without an update waiting, there is nothing to update.
+    let mut harness = show(Page::Installed);
+    harness.get_by_label_contains("GIMP, APT, System").click();
+    harness.run_steps(4);
+    assert!(harness
+        .query_by_role_and_label(Role::Button, "Remove")
+        .is_some());
+    assert!(harness
+        .query_by_role_and_label(Role::Button, "Update")
+        .is_none());
+}
+
+#[test]
 fn the_sidebar_switches_pages() {
     let mut harness = show(Page::Installed);
     harness
