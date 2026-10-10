@@ -2069,3 +2069,114 @@ mod update_check_tests {
         end_update_check_token(token);
     }
 }
+
+#[cfg(test)]
+mod read_again_tests {
+    use super::*;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    fn busy() -> EngineError {
+        EngineError::Execution(ExecutionError::LockBusy)
+    }
+    fn package(name: &str) -> Package {
+        Package {
+            id: PackageId {
+                backend: "flaky".into(),
+                name: name.into(),
+                architecture: "amd64".into(),
+                scope: Scope::System,
+                remote: None,
+                reference: None,
+            },
+            display_name: name.into(),
+            summary: String::new(),
+            installed_version: Some("1".into()),
+            candidate_version: Some("1".into()),
+            update: UpdateAvailability::Current,
+            icon: None,
+            component_ids: vec![],
+            homepages: vec![],
+            adopt_with: None,
+        }
+    }
+    /// Busy on every first read, and always busy refreshing its index.
+    #[derive(Default)]
+    struct Flaky {
+        reads: Arc<AtomicUsize>,
+        refreshes: Arc<AtomicUsize>,
+    }
+    impl Flaky {
+        fn read(&self, name: &str) -> Result<Vec<Package>, EngineError> {
+            if self.reads.fetch_add(1, Ordering::SeqCst) % 2 == 0 {
+                Err(busy())
+            } else {
+                Ok(vec![package(name)])
+            }
+        }
+    }
+    impl Backend for Flaky {
+        fn id(&self) -> &str {
+            "flaky"
+        }
+        fn capabilities(&self) -> &[Capability] {
+            &[Capability::Search, Capability::Installed]
+        }
+        fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
+            Ok(Availability::Available)
+        }
+        fn has_update_index(&self) -> bool {
+            true
+        }
+        fn refresh_update_index(&mut self, _: &Cancellation) -> Result<(), EngineError> {
+            self.refreshes.fetch_add(1, Ordering::SeqCst);
+            Err(busy())
+        }
+        fn search(&mut self, _: &str, _: &Cancellation) -> Result<Vec<Package>, EngineError> {
+            self.read("searched")
+        }
+        fn lookup(&mut self, _: &str, _: &Cancellation) -> Result<Vec<Package>, EngineError> {
+            self.read("looked-up")
+        }
+        fn installed(&mut self, _: &Cancellation) -> Result<Vec<Package>, EngineError> {
+            self.read("installed")
+        }
+    }
+    fn names(report: &PackageReport) -> Vec<&str> {
+        report.packages.iter().map(|p| p.id.name.as_str()).collect()
+    }
+
+    #[test]
+    fn searches_lookups_and_listings_survive_one_busy_read() {
+        let flaky = Flaky::default();
+        let reads = flaky.reads.clone();
+        let mut engine = Engine::default();
+        engine.register(flaky).unwrap();
+        let cancel = Cancellation::default();
+        let search = engine.search("x", &cancel);
+        assert_eq!(names(&search), ["searched"]);
+        assert!(search.failures.is_empty());
+        let lookup = engine.lookup("x", &cancel);
+        assert_eq!(names(&lookup), ["looked-up"]);
+        assert!(lookup.failures.is_empty());
+        assert_eq!(reads.load(Ordering::SeqCst), 4);
+    }
+
+    #[test]
+    fn an_index_that_stays_busy_is_reported_after_a_second_try() {
+        let flaky = Flaky::default();
+        let refreshes = flaky.refreshes.clone();
+        let mut engine = Engine::default();
+        engine.register(flaky).unwrap();
+        let failures = engine.refresh_update_indexes(&[], &Cancellation::default());
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].backend, "flaky");
+        assert!(matches!(
+            failures[0].error,
+            EngineError::Execution(ExecutionError::LockBusy)
+        ));
+        assert_eq!(refreshes.load(Ordering::SeqCst), 2);
+    }
+}

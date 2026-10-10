@@ -109,6 +109,19 @@ fn an_update_can_start_from_the_installed_page() {
     let htop = app.selected_row().unwrap().identity();
     assert!(app.active_rows.contains(&htop));
 
+    // Only a running change hides it, not one waiting for review.
+    assert!(harness.query_by_role_and_label(Role::Button, "Update").is_some());
+    // While it runs, the page offers Cancel, not a second Update.
+    harness.state_mut().1.writing = true;
+    harness.state_mut().1.active_rows.insert(htop);
+    harness.run_steps(3);
+    assert!(harness
+        .query_by_role_and_label(Role::Button, "Cancel")
+        .is_some());
+    assert!(harness
+        .query_by_role_and_label(Role::Button, "Update")
+        .is_none());
+
     // Without an update waiting, there is nothing to update.
     let mut harness = show(Page::Installed);
     harness.get_by_label_contains("GIMP, APT, System").click();
