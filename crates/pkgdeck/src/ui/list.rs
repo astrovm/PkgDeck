@@ -513,7 +513,8 @@ fn dragged_share(column: &str, x: f32, cols: &Columns) -> f32 {
 }
 
 fn row_height(app: &App, index: usize, width: Width) -> f32 {
-    let base = if width == Width::Compact {
+    // Compact rows add a version and summary line, which sources don't have.
+    let base = if width == Width::Compact && app.page != Page::Sources {
         ROW_COMPACT
     } else {
         ROW
@@ -941,7 +942,9 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
             held_mark(ui, held, Rect::from_min_size(at, Vec2::splat(15.0)), id);
             at.x += 20.0;
         }
+        // No version, no gap before the summary.
         let used = version.size().x;
+        let gap = if used > 0.0 { 12.0 } else { 0.0 };
         painter.galley(at, version, version_color);
         if !row.summary.is_empty() && width - used > 40.0 {
             let summary = one_line(
@@ -949,9 +952,9 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
                 &row.summary,
                 theme::font(12.5),
                 palette.muted,
-                width - used - 12.0,
+                width - used - gap,
             );
-            painter.galley(at + vec2(used + 12.0, 0.0), summary, palette.muted);
+            painter.galley(at + vec2(used + gap, 0.0), summary, palette.muted);
         }
     }
     if let Some(v) = cols.version {
@@ -1481,6 +1484,34 @@ mod column_tests {
 
     fn row(width: f32) -> Rect {
         Rect::from_min_size(pos2(0.0, 0.0), vec2(width, 60.0))
+    }
+
+    #[test]
+    fn compact_source_rows_keep_the_one_line_height() {
+        use crate::{app::Launch, platform::Platform, settings::Store};
+        let (store, settings) = Store::open(None, None);
+        let mut app = App::with_controller(
+            pkgdeck_app::controller::ffi::create_synthetic_controller(|_, _, _, _| {
+                Ok(pkgdeck_core::engine::Engine::default())
+            }),
+            settings,
+            store,
+            Platform::start(|| {}),
+            Launch::default(),
+        );
+        app.rows = vec![serde_json::from_value(serde_json::json!({
+            "kind": "source", "name": "apt", "source": "apt", "available": true
+        }))
+        .unwrap()];
+        app.show_unavailable = true;
+        for (page, compact) in [(Page::Sources, ROW), (Page::Installed, ROW_COMPACT)] {
+            app.page = page;
+            app.invalidate();
+            app.refresh_items();
+            assert!(!app.items.is_empty(), "{page:?}");
+            assert_eq!(row_height(&app, 0, Width::Compact), compact, "{page:?}");
+            assert_eq!(row_height(&app, 0, Width::Wide), ROW, "{page:?}");
+        }
     }
 
     #[test]

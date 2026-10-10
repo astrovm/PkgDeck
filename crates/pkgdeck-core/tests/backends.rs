@@ -712,6 +712,8 @@ struct FlatpakFixture {
     unreachable: Vec<&'static str>,
     /// Flatpak has never fetched a summary, so cached reads fail.
     uncached: bool,
+    /// Refreshing AppStream data fails, such as offline.
+    appstream_fails: bool,
 }
 impl Transport for FlatpakFixture {
     fn apt_query(
@@ -749,6 +751,16 @@ impl Transport for FlatpakFixture {
             .lock()
             .unwrap()
             .push((args.clone(), write, system));
+        if self.appstream_fails && args.contains(&"--appstream".into()) {
+            return Err(ExecutionError::Failed(Completion {
+                code: Some(1),
+                signal: None,
+                stdout: vec![],
+                stderr: b"error: Unable to load summary from remote flathub: Could not resolve hostname\n".to_vec(),
+                truncated: false,
+                cancellation_deferred: false,
+            }));
+        }
         if args.contains(&"remote-ls".into()) {
             if self.uncached && args.contains(&"--cached".into()) {
                 return Err(ExecutionError::Failed(Completion {
@@ -4824,6 +4836,53 @@ fn flatpak_asks_remotes_again_only_during_an_update_check() {
     let mut asks = update_asks(&uncached);
     asks.sort();
     assert_eq!(asks, [false, false, true, true]);
+}
+
+#[test]
+fn flatpak_update_checks_refresh_appstream_before_reading_versions() {
+    let cancel = Cancellation::default();
+    let fixture = FlatpakFixture::default();
+    let mut backend = Flatpak::new(fixture.clone());
+    let refreshes = |fixture: &FlatpakFixture| {
+        let calls = std::mem::take(&mut *fixture.calls.lock().unwrap());
+        let refresh = |args: &Vec<String>| args.iter().any(|arg| arg == "--appstream");
+        // Each refresh comes before the listing of the same installation.
+        for (index, (args, write, system)) in calls.iter().enumerate() {
+            if refresh(args) {
+                assert!(!write, "{args:?}");
+                assert!(calls[index + 1..]
+                    .iter()
+                    .any(|(later, _, s)| s == system && later.contains(&"remote-ls".into())));
+            }
+        }
+        calls
+            .iter()
+            .filter(|(args, _, _)| refresh(args))
+            .map(|(_, _, system)| *system)
+            .collect::<Vec<_>>()
+    };
+    backend.installed(&cancel).unwrap();
+    assert!(refreshes(&fixture).is_empty());
+    backend.arm_update_check(Some(1));
+    backend.installed(&cancel).unwrap();
+    let mut scopes = refreshes(&fixture);
+    scopes.sort();
+    assert_eq!(scopes, [false, true]);
+    // A failed refresh still lists the updates.
+    let failing = FlatpakFixture {
+        appstream_fails: true,
+        ..FlatpakFixture::default()
+    };
+    let mut backend = Flatpak::new(failing.clone());
+    backend.arm_update_check(Some(1));
+    let rows = backend.installed(&cancel).unwrap();
+    assert!(rows.iter().any(|row| row.candidate_version.is_some()));
+    assert_eq!(refreshes(&failing).len(), 2);
+    // A cancelled check asks for nothing more.
+    let cancelled = Cancellation::default();
+    cancelled.cancel();
+    let _ = backend.installed(&cancelled);
+    assert!(refreshes(&failing).is_empty());
 }
 
 #[test]

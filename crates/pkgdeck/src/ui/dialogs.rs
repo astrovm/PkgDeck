@@ -381,47 +381,52 @@ fn repositories(app: &mut App, ctx: &egui::Context) {
                             .corner_radius(CornerRadius::same(10))
                             .inner_margin(egui::Margin::same(12))
                             .show(ui, |ui| {
+                                // The card stacks its lines: the row's
+                                // left-to-right layout would set them side
+                                // by side and widen the dialog.
                                 ui.set_width(width - 24.0);
-                                let flatpak_editable = repo.backend == "flatpak" && if repo.scope == "system" { repos.features.flatpak_system } else { repos.features.flatpak_user };
-                                let editable = repo.backend == "fwupd" || flatpak_editable;
-                                let target = json!({"backend": repo.backend, "name": repo.name, "scope": repo.scope});
-                                ui.horizontal(|ui| {
-                                    let tick = tickbox(ui, repo.enabled, editable && !app.busy, "Enabled");
-                                    if tick.clicked() {
-                                        let mut change = target.clone();
-                                        change["action"] = json!("set_enabled");
-                                        change["enabled"] = json!(!repo.enabled);
-                                        changes.push(change);
-                                    }
-                                    ui.vertical(|ui| {
-                                        let name = if repo.title.is_empty() { &repo.name } else { &repo.title };
-                                        ui.add(egui::Label::new(egui::RichText::new(name).font(theme::bold(14.0)).color(palette.ink)).truncate());
-                                        let scope = if repo.scope == "system" { "System" } else { "User" };
-                                        ui.label(egui::RichText::new(format!("{}, {scope}", model::source_name(&repo.backend))).font(theme::font(12.5)).color(palette.muted));
-                                        if !repo.url.is_empty() && !name.contains(&repo.url) {
-                                            ui.add(egui::Label::new(egui::RichText::new(&repo.url).font(theme::font(12.0)).color(palette.muted)).truncate());
+                                ui.vertical(|ui| {
+                                    let flatpak_editable = repo.backend == "flatpak" && if repo.scope == "system" { repos.features.flatpak_system } else { repos.features.flatpak_user };
+                                    let editable = repo.backend == "fwupd" || flatpak_editable;
+                                    let target = json!({"backend": repo.backend, "name": repo.name, "scope": repo.scope});
+                                    ui.horizontal(|ui| {
+                                        let tick = tickbox(ui, repo.enabled, editable && !app.busy, "Enabled");
+                                        if tick.clicked() {
+                                            let mut change = target.clone();
+                                            change["action"] = json!("set_enabled");
+                                            change["enabled"] = json!(!repo.enabled);
+                                            changes.push(change);
                                         }
+                                        ui.vertical(|ui| {
+                                            let name = if repo.title.is_empty() { &repo.name } else { &repo.title };
+                                            ui.add(egui::Label::new(egui::RichText::new(name).font(theme::bold(14.0)).color(palette.ink)).truncate());
+                                            let scope = if repo.scope == "system" { "System" } else { "User" };
+                                            ui.label(egui::RichText::new(format!("{}, {scope}", model::source_name(&repo.backend))).font(theme::font(12.5)).color(palette.muted));
+                                            if !repo.url.is_empty() && !name.contains(&repo.url) {
+                                                ui.add(egui::Label::new(egui::RichText::new(&repo.url).font(theme::font(12.0)).color(palette.muted)).truncate());
+                                            }
+                                        });
                                     });
-                                });
-                                ui.horizontal(|ui| {
-                                    if let Some(priority) = repo.priority {
-                                        ui.label(egui::RichText::new(format!("Priority {priority}")).font(theme::font(12.5)).color(palette.muted));
-                                        if flatpak_editable {
-                                            for (icon, tip, delta, ok) in [("up", "Raise priority", 1, priority < 9999), ("down", "Lower priority", -1, priority > 0)] {
-                                                if icon_button(ui, icon, tip, palette.muted, ok && !app.busy).clicked() {
-                                                    let mut change = target.clone();
-                                                    change["action"] = json!("set_priority");
-                                                    change["priority"] = json!(priority + delta);
-                                                    changes.push(change);
+                                    if repo.priority.is_some() || flatpak_editable { ui.horizontal(|ui| {
+                                        if let Some(priority) = repo.priority {
+                                            ui.label(egui::RichText::new(format!("Priority {priority}")).font(theme::font(12.5)).color(palette.muted));
+                                            if flatpak_editable {
+                                                for (icon, tip, delta, ok) in [("up", "Raise priority", 1, priority < 9999), ("down", "Lower priority", -1, priority > 0)] {
+                                                    if icon_button(ui, icon, tip, palette.muted, ok && !app.busy).clicked() {
+                                                        let mut change = target.clone();
+                                                        change["action"] = json!("set_priority");
+                                                        change["priority"] = json!(priority + delta);
+                                                        changes.push(change);
+                                                    }
                                                 }
                                             }
                                         }
-                                    }
-                                    if flatpak_editable && icon_button(ui, "remove", "Remove repository", palette.danger, !app.busy).clicked() {
-                                        let mut change = target.clone();
-                                        change["action"] = json!("remove");
-                                        changes.push(change);
-                                    }
+                                        if flatpak_editable && icon_button(ui, "remove", "Remove repository", palette.danger, !app.busy).clicked() {
+                                            let mut change = target.clone();
+                                            change["action"] = json!("remove");
+                                            changes.push(change);
+                                        }
+                                    }); }
                                 });
                             });
                     }
@@ -929,5 +934,66 @@ mod tests {
         assert!(!repo_url_valid("https://.flatpakrepo"));
         assert!(!repo_url_valid("http://x/y.flatpakrepo"));
         assert!(!repo_url_valid("https://x/y.flatpakref"));
+    }
+
+    #[test]
+    fn repository_cards_stack_their_lines_inside_the_dialog() {
+        use crate::{app::Launch, platform::Platform, settings::Store};
+        use egui_kittest::{kittest::Queryable, Harness};
+        use pkgdeck_app::controller::ffi::create_synthetic_controller;
+
+        let (store, settings) = Store::open(None, None);
+        let mut app = App::with_controller(
+            create_synthetic_controller(|_, _, _, _| Ok(pkgdeck_core::engine::Engine::default())),
+            settings,
+            store,
+            Platform::start(|| {}),
+            Launch::default(),
+        );
+        let long = "io.github.example.a_very_long_bundle_name_that_goes_on.flatpak";
+        app.repositories = serde_json::from_value(json!({
+            "repositories": [
+                {"backend": "flatpak", "name": "flathub", "title": "Flathub", "scope": "user",
+                 "url": "https://dl.flathub.org/repo/", "enabled": true, "priority": 8},
+                {"backend": "flatpak", "name": "bundle", "title": long, "scope": "system",
+                 "url": "", "enabled": false, "priority": 0}
+            ],
+            "features": {"flatpak_user": true, "flatpak_system": true}
+        }))
+        .unwrap();
+        app.ui.repos_open = true;
+        let width = 1300.0;
+        let mut harness = Harness::builder()
+            .with_size(vec2(width, 900.0))
+            .build_ui_state(
+                |ui, (ready, app): &mut (bool, App)| {
+                    let ctx = &ui.ctx().clone();
+                    if !*ready {
+                        let root =
+                            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+                        crate::setup(ctx, &root, None);
+                        set_reduce_motion(ctx, true);
+                        *ready = true;
+                        return;
+                    }
+                    show(app, ctx);
+                },
+                (false, app),
+            );
+        harness.run_steps(6);
+        // The dialog keeps its 850 point width, centred.
+        let right = (width + 850.0) / 2.0;
+        let flathub = harness.get_by_label("Flathub").rect();
+        let title = harness.get_by_label_contains("a_very_long").rect();
+        for priority in ["Priority 8", "Priority 0"] {
+            let priority = harness.get_by_label(priority).rect();
+            assert!(priority.right() <= right, "{priority:?}");
+            assert!(
+                priority.top() >= flathub.bottom(),
+                "{priority:?} {flathub:?}"
+            );
+        }
+        assert!(title.right() <= right, "{title:?}");
+        assert!(harness.query_by_label("Flatpak, User").is_some());
     }
 }

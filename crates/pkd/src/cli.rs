@@ -1060,8 +1060,10 @@ fn execute(
     cancel: &Cancellation,
     events: &mut dyn FnMut(Event),
 ) -> Vec<Result<OperationOutcome, EngineError>> {
-    let activity_id =
-        history.and_then(|store| store.begin("cli", operations.to_vec(), State::Running).ok());
+    // Nothing to run leaves no entry: the drawer would show a bare "Change".
+    let activity_id = history
+        .filter(|_| !operations.is_empty())
+        .and_then(|store| store.begin("cli", operations.to_vec(), State::Running).ok());
     let results = engine.execute_batch(operations, cancel, events);
     if let (Some(store), Some(id)) = (history, activity_id) {
         let outcomes = results
@@ -2870,6 +2872,25 @@ mod tests {
         assert_eq!(code, 0, "{data}");
         assert_eq!(manifest::read(&path).unwrap().packages[0].backend, "apt");
         std::fs::remove_file(path).unwrap();
+    }
+    #[test]
+    fn running_no_operations_records_no_activity() {
+        let root = std::env::temp_dir().join(format!(
+            "pkgdeck-cli-empty-history-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let history = History::new(root.join("activity.json"));
+        let results = execute(
+            &mut engine(),
+            Some(&history),
+            &[],
+            &Cancellation::default(),
+            &mut ignore,
+        );
+        assert!(results.is_empty());
+        assert!(history.entries().unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(root);
     }
     #[test]
     fn approval_errors_stop_changes_and_history_records_each_outcome() {

@@ -431,3 +431,38 @@ fn page_headers_keep_their_title_and_actions_in_the_reviewed_positions() {
     }
     compare(&actual, &expected, "headers");
 }
+
+#[test]
+fn source_capability_chips_wrap_whole_instead_of_squeezing_their_text() {
+    let capabilities = [
+        "search",
+        "details",
+        "installed",
+        "install",
+        "remove",
+        "refresh",
+        "upgrade",
+    ];
+    let mut row = row("source");
+    row.capabilities = capabilities.map(String::from).to_vec();
+    for width in [300.0, 420.0, 700.0] {
+        let harness = draw(app(&row, Page::Sources), row.clone(), width, false, false);
+        let heights: Vec<_> = capabilities
+            .iter()
+            .map(|label| harness.get_by_label(label).rect())
+            .inspect(|chip| assert!(chip.right() <= width, "{width}: {chip:?}"))
+            .map(|chip| chip.height())
+            .collect();
+        assert!(
+            heights
+                .iter()
+                .all(|height| (height - heights[0]).abs() < 0.5),
+            "{width}: {heights:?}"
+        );
+        let rows: std::collections::BTreeSet<_> = capabilities
+            .iter()
+            .map(|label| harness.get_by_label(label).rect().top() as i32)
+            .collect();
+        assert!(width < 500.0 || rows.len() == 1, "{width}: {rows:?}");
+    }
+}
