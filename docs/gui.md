@@ -86,6 +86,8 @@ Grouping is only visual. Each copy stays a separate package.
 These controls work on every package page:
 
 - Click a column heading to sort it. Click it again to reverse the order.
+- Drag the line between two column headings to resize them. Double-click it
+  for the default width.
 - A source that fails to check is tried once more before its warning shows.
   Homebrew waits for a `brew update` that is already running elsewhere.
 - **Filter sources** filters the current page. It also lists sources you

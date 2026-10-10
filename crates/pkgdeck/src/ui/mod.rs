@@ -58,7 +58,7 @@ pub struct State {
 
 /// Widths the layout switches at.
 pub const RAIL_BELOW: f32 = 820.0;
-pub const MEDIUM_BELOW: f32 = 748.0;
+pub const MEDIUM_BELOW: f32 = 640.0;
 pub const COMPACT_BELOW: f32 = 560.0;
 pub const SPLIT_FROM: f32 = 600.0;
 

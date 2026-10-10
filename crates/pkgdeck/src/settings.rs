@@ -146,6 +146,10 @@ pub struct Settings {
     pub sidebar_width: f32,
     /// The share of the page the details take, 0 for the default.
     pub details_width: f32,
+    /// The shares of a list row the name and version columns take, dragged
+    /// in the column headings; 0 for the default.
+    pub name_column: f32,
+    pub version_column: f32,
     pub flatpak_scope_choices: String,
     pub search_hint: String,
 }
@@ -172,6 +176,8 @@ impl Default for Settings {
             last_background_state: "{}".into(),
             sidebar_width: 212.0,
             details_width: 0.0,
+            name_column: 0.0,
+            version_column: 0.0,
             flatpak_scope_choices: "{}".into(),
             search_hint: String::new(),
         }
