@@ -504,13 +504,15 @@ mod tests {
         // The read answers at once; the kill follows after the grace.
         assert!(elapsed < STOP_GRACE, "{elapsed:?}");
         let pid = std::fs::read_to_string(dir.join("pid")).unwrap();
-        let proc = std::path::Path::new("/proc").join(pid.trim());
-        assert!(proc.exists());
+        let pid = rustix::process::Pid::from_raw(pid.trim().parse().unwrap()).unwrap();
+        // Signal 0 only asks whether it is still there; macOS has no /proc.
+        let alive = || rustix::process::test_kill_process(pid).is_ok();
+        assert!(alive());
         let deadline = Instant::now() + Duration::from_secs(5);
-        while proc.exists() && Instant::now() < deadline {
+        while alive() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(10));
         }
-        assert!(!proc.exists());
+        assert!(!alive());
         std::fs::remove_dir_all(dir).unwrap();
     }
 
