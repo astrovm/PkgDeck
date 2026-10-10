@@ -198,21 +198,27 @@ fn paint_card(ui: &Ui, rect: Rect, palette: &Palette) {
     );
 }
 
+/// Chips that move to the next line whole: a chip only wraps its own text
+/// when it is wider than the full row.
 fn chips(ui: &mut Ui, items: &[String], palette: &Palette) {
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
+        let padding = vec2(9.0, 4.0);
+        let row = (ui.max_rect().width() - 2.0 * padding.x).max(1.0);
         for item in items {
-            egui::Frame::new()
-                .fill(palette.hover_solid())
-                .corner_radius(CornerRadius::same(8))
-                .inner_margin(egui::Margin::symmetric(9, 4))
-                .show(ui, |ui| {
-                    ui.label(
-                        egui::RichText::new(item)
-                            .font(theme::font(12.5))
-                            .color(palette.ink),
-                    );
-                });
+            let galley = ui
+                .painter()
+                .layout(item.clone(), theme::font(12.5), palette.ink, row);
+            let (rect, response) =
+                ui.allocate_exact_size(galley.size() + 2.0 * padding, Sense::hover());
+            response.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::Label, true, item.as_str())
+            });
+            if ui.is_rect_visible(rect) {
+                ui.painter()
+                    .rect_filled(rect, CornerRadius::same(8), palette.hover_solid());
+                ui.painter().galley(rect.min + padding, galley, palette.ink);
+            }
         }
     });
 }

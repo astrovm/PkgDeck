@@ -2277,6 +2277,11 @@ fn repositories_json(report: &repositories::Report) -> QString {
     let mut value = serde_json::to_value(report).unwrap_or_else(|_| json!({}));
     let rows = value["repositories"].as_array_mut().into_iter().flatten();
     for (row, repository) in rows.zip(&report.repositories) {
+        // The window and `change_repository` name scopes as plain words.
+        row["scope"] = json!(match repository.scope {
+            Scope::System => "system",
+            _ => "user",
+        });
         row["source_name"] = json!(source_display_name(&repository.backend));
         row["where"] = json!(source_and_scope(&repository.backend, &repository.scope));
     }
@@ -10994,20 +10999,32 @@ mod tests {
         controller
             .as_mut()
             .apply(Ok(Payload::Repositories(repositories::Report {
-                repositories: vec![repositories::Repository {
-                    backend: "flatpak".into(),
-                    name: "fixture".into(),
-                    title: "Fixture".into(),
-                    url: "https://example.invalid".into(),
-                    scope: Scope::System,
-                    enabled: true,
-                    priority: Some(1),
-                }],
+                repositories: vec![
+                    repositories::Repository {
+                        backend: "flatpak".into(),
+                        name: "fixture".into(),
+                        title: "Fixture".into(),
+                        url: "https://example.invalid".into(),
+                        scope: Scope::System,
+                        enabled: true,
+                        priority: Some(1),
+                    },
+                    repositories::Repository {
+                        backend: "flatpak".into(),
+                        name: "fixture-user".into(),
+                        title: "Fixture user".into(),
+                        url: "https://example.invalid".into(),
+                        scope: Scope::User { uid: 1000 },
+                        enabled: true,
+                        priority: None,
+                    },
+                ],
                 errors: vec!["Synthetic partial failure".into()],
                 features: repositories::Features::default(),
             })));
         let report: Value = serde_json::from_str(&controller.repositories().to_string()).unwrap();
         assert_eq!(report["repositories"][0]["scope"], "system");
+        assert_eq!(report["repositories"][1]["scope"], "user");
         assert_eq!(report["errors"][0], "Synthetic partial failure.");
         assert_eq!(report["repositories"][0]["where"], "Flatpak, System");
         assert!(controller
