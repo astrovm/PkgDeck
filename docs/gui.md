@@ -28,7 +28,8 @@ choice for that app.
 - Click a row (or press Space on it) to open its app page: icon, version,
   screenshots, description, publisher, license, homepage, and dependencies,
   when the source provides them, with its **Install**, **Remove** or
-  **Update** button. **Back** (or Esc, Alt+←, or the mouse's back button)
+  **Update** button. An installed package with an update waiting shows
+  **Update** next to **Remove**. **Back** (or Esc, Alt+←, or the mouse's back button)
   returns to the list as it was. Arrow
   keys only move the selection.
 - In wide windows the app page opens beside the list. Drag the line between
@@ -78,13 +79,15 @@ computer can handle.
 
 ## Installed
 
-Filter the list by name, or turn on **Duplicates** to see apps
+Packages from every source are listed A to Z. Filter the list by name, or turn on **Duplicates** to see apps
 installed from more than one source. Grouping is only visual. Each copy stays a
 separate package.
 
 These controls work on every package page:
 
 - Click a column heading to sort it. Click it again to reverse the order.
+- A source that fails to check is tried once more before its warning shows.
+  Homebrew waits for a `brew update` that is already running elsewhere.
 - **Filter sources** filters the current page. It also lists sources you
   can't use, with the reason.
 - **Reload** gets fresh package data.

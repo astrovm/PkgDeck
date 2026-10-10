@@ -777,6 +777,22 @@ pub fn friendly_scope(label: &str, home: Option<&str>, uid: u32) -> String {
     }
 }
 
+/// "Node 24.15.0" for global npm packages that belong to one Node install
+/// from a version manager (fnm, nvm, mise, asdf), instead of its long path.
+pub fn node_version(path: &str) -> Option<String> {
+    let parts: Vec<&str> = path.split('/').collect();
+    parts.iter().enumerate().find_map(|(at, part)| {
+        let version = part.strip_prefix('v').unwrap_or(part);
+        let numbers: Vec<&str> = version.split('.').collect();
+        let looks_like_version = numbers.len() == 3
+            && numbers
+                .iter()
+                .all(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+        let under_node = parts[..at].iter().any(|p| p.contains("node"));
+        (looks_like_version && under_node).then(|| format!("Node {version}"))
+    })
+}
+
 /// "Flatpak, flathub, System": where a row comes from.
 pub fn source_line(row: &Row, merged_scopes: bool) -> String {
     let mut parts: Vec<String> = vec![];
@@ -809,6 +825,11 @@ pub fn source_line(row: &Row, merged_scopes: bool) -> String {
             }
             .into(),
         );
+    } else if let Some(node) = (row.source == "npm")
+        .then(|| node_version(&row.scope_label))
+        .flatten()
+    {
+        parts.push(node);
     } else if !row.scope_label.is_empty() && row.kind == "package" {
         parts.push(friendly_scope(
             &row.scope_label,
@@ -1207,6 +1228,9 @@ pub fn visible(rows: &[Row], options: &ViewOptions) -> Vec<Item> {
             let (a, b) = (&rows[a], &rows[b]);
             disabled(a).cmp(&disabled(b)).then_with(|| by_name(a, b))
         });
+    } else if page == Some(Page::Installed) {
+        // A to Z across sources, so a package is where its name says.
+        kept.sort_by(|&a, &b| by_name(&rows[a], &rows[b]));
     } else if page == Some(Page::Search) && !options.query.trim().is_empty() {
         kept.sort_by(|&a, &b| {
             relevance(&rows[a], options.query)
