@@ -6539,6 +6539,86 @@ mod tests {
     const BREW_LOCKED: &str = "Error: Another `brew update` process is already running.\n\
         Please wait for it to finish or terminate it to continue.\n";
 
+    /// `brew` whose `update` finds another update running the first time.
+    #[derive(Clone, Default)]
+    struct LockedBrew {
+        calls: Arc<Mutex<Vec<String>>>,
+    }
+    impl Transport for LockedBrew {
+        fn brew(
+            &self,
+            args: &[OsString],
+            _: &Cancellation,
+            write: bool,
+        ) -> Result<Completion, ExecutionError> {
+            let line = args
+                .iter()
+                .map(|arg| arg.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join(" ");
+            let mut calls = self.calls.lock().unwrap();
+            calls.push(line.clone());
+            assert_eq!(line, "update");
+            assert!(write);
+            let locked = calls.len() == 1;
+            match brew_exit(i32::from(locked), if locked { BREW_LOCKED } else { "" }) {
+                Ok(result) => Ok(result),
+                Err(EngineError::Execution(error)) => Err(error),
+                Err(other) => panic!("{other}"),
+            }
+        }
+    }
+
+    #[test]
+    fn homebrew_update_checks_wait_for_another_brew_update() {
+        let token = crate::engine::begin_update_check_token();
+        let formulae = LockedBrew::default();
+        let mut homebrew = Homebrew::new(formulae.clone());
+        homebrew.arm_update_check(Some(token));
+        homebrew
+            .refresh_update_index(&Cancellation::default())
+            .unwrap();
+        crate::engine::end_update_check_token(token);
+        assert_eq!(*formulae.calls.lock().unwrap(), ["update", "update"]);
+
+        let token = crate::engine::begin_update_check_token();
+        let casks = LockedBrew::default();
+        let mut cask = HomebrewCask::new(casks.clone());
+        cask.arm_update_check(Some(token));
+        cask.refresh_update_index(&Cancellation::default()).unwrap();
+        crate::engine::end_update_check_token(token);
+        assert_eq!(*casks.calls.lock().unwrap(), ["update", "update"]);
+    }
+
+    #[test]
+    fn homebrew_refresh_waits_for_another_brew_update() {
+        for backend in ["homebrew", "homebrew-cask"] {
+            let brew = LockedBrew::default();
+            let operation = Operation::Refresh {
+                backend: backend.into(),
+            };
+            let outcome = if backend == "homebrew" {
+                Homebrew::new(brew.clone()).execute(
+                    &operation,
+                    &Cancellation::default(),
+                    &mut |_| {},
+                )
+            } else {
+                HomebrewCask::new(brew.clone()).execute(
+                    &operation,
+                    &Cancellation::default(),
+                    &mut |_| {},
+                )
+            };
+            assert!(outcome.is_ok(), "{backend}: {outcome:?}");
+            assert_eq!(
+                *brew.calls.lock().unwrap(),
+                ["update", "update"],
+                "{backend}"
+            );
+        }
+    }
+
     #[test]
     fn brew_update_waits_for_another_update_to_finish() {
         let mut calls = 0;

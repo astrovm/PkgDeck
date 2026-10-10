@@ -104,7 +104,7 @@ fn update_checks() -> std::sync::MutexGuard<'static, Option<HashMap<u64, IndexRe
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
-fn begin_update_check_token() -> u64 {
+pub(crate) fn begin_update_check_token() -> u64 {
     let token = NEXT_UPDATE_CHECK.fetch_add(1, Ordering::Relaxed);
     update_checks().get_or_insert_with(HashMap::new).insert(
         token,
@@ -116,7 +116,7 @@ fn begin_update_check_token() -> u64 {
     );
     token
 }
-fn end_update_check_token(token: u64) {
+pub(crate) fn end_update_check_token(token: u64) {
     if let Some(checks) = update_checks().as_mut() {
         checks.remove(&token);
     }
