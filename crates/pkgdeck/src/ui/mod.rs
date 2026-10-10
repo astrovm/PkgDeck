@@ -1119,13 +1119,7 @@ fn toasts(app: &mut App, ui: &mut Ui, content: Rect) {
         let shown = ease(&ctx, id, toast.is_some(), REVEAL);
         let Some(toast) = toast else { continue };
         let width = 460.0f32.min(content.width() - 32.0);
-        let text_width = {
-            let parts = ToastParts::new(
-                Rect::from_min_size(pos2(0.0, 0.0), vec2(width, 52.0)),
-                toast.action.is_some(),
-            );
-            parts.text_right - parts.text_left
-        };
+        let text_width = ToastParts::text_width(width, toast.action.is_some());
         let text = wrapped(
             ui,
             &toast.text,
@@ -1255,6 +1249,14 @@ impl ToastParts {
             action,
         }
     }
+    /// How wide the text may wrap in a toast this wide.
+    fn text_width(width: f32, has_action: bool) -> f32 {
+        let parts = Self::new(
+            Rect::from_min_size(pos2(0.0, 0.0), vec2(width, 52.0)),
+            has_action,
+        );
+        parts.text_right - parts.text_left
+    }
 }
 
 /// The window's state for the shell around it after a frame.
@@ -1281,5 +1283,14 @@ mod toast_tests {
         // Without a button, the text gets that room back.
         assert!(plain.text_right > with_button.text_right + button.width());
         assert!(plain.text_left > frame.left() + 30.0);
+
+        assert_eq!(
+            ToastParts::text_width(460.0, true),
+            with_button.text_right - with_button.text_left
+        );
+        assert_eq!(
+            ToastParts::text_width(460.0, false),
+            plain.text_right - plain.text_left
+        );
     }
 }

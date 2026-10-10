@@ -8,7 +8,7 @@ use egui_kittest::{
     Harness,
 };
 use pkgdeck::{
-    app::{App, Launch},
+    app::{App, Launch, Toast, ToastAction},
     model::Page,
     platform::Platform,
     settings::{Accent, Appearance, DarkTheme, LightTheme, Store, TextSize},
@@ -73,6 +73,24 @@ fn show(page: Page) -> Harness<'static, (bool, App)> {
     let mut harness = harness(app);
     harness.run_steps(4);
     harness
+}
+
+#[test]
+fn the_restart_toast_offers_restart_and_closes() {
+    let mut harness = show(Page::Installed);
+    harness.state_mut().1.restart_toast = Some(Toast {
+        text: "PkgDeck was updated. Restart it to use the new version.".into(),
+        tone: pkgdeck::model::Tone::Success,
+        action: Some(ToastAction::Restart),
+        shown: std::time::Instant::now(),
+        lasts: std::time::Duration::from_secs(60),
+        from_notice: false,
+    });
+    harness.run_steps(3);
+    assert!(harness.query_by_label("Restart").is_some());
+    harness.get_by_label("Close").click();
+    harness.run_steps(3);
+    assert!(harness.state().1.restart_toast.is_none());
 }
 
 #[test]
