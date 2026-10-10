@@ -94,11 +94,16 @@ fn panel(app: &mut App, ui: &mut Ui, rect: Rect, row: &Row, narrow: bool) {
             let (icon, _) = ui.allocate_exact_size(Vec2::splat(44.0), Sense::hover());
             ui.painter()
                 .rect_filled(icon, CornerRadius::same(10), alpha(palette.accent, 0.1));
-            let name = match row.kind.as_str() {
-                "failure" => "warning",
-                _ => row.source.as_str(),
-            };
-            theme::paint_icon(ui.painter(), icon.shrink(11.0), name, palette.accent);
+            if row.kind == "failure" {
+                theme::paint_icon(ui.painter(), icon.shrink(11.0), "warning", palette.accent);
+            } else {
+                theme::paint_source_icon(
+                    ui.painter(),
+                    icon.shrink(11.0),
+                    &row.source,
+                    palette.accent,
+                );
+            }
             ui.vertical(|ui| {
                 // Long titles wrap rather than run under the buttons.
                 ui.set_max_width((ui.available_width() - reserve).max(80.0));

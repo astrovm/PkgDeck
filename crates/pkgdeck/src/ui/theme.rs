@@ -316,6 +316,41 @@ pub fn apply(ctx: &egui::Context) {
     }
 }
 
+/// Draw a source's mark into `rect`: its icon, or its monogram when it has
+/// no drawing of its own.
+pub fn paint_source_icon(painter: &Painter, rect: Rect, id: &str, color: Color32) {
+    if icons::drawn(id) {
+        paint_icon(painter, rect, id, color);
+        return;
+    }
+    let letters = icons::monogram(id);
+    // Too small for two letters to read: the first alone, unboxed.
+    if rect.width() < 16.0 {
+        painter.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            letters.get(..1).unwrap_or(""),
+            bold(rect.height() * 0.95),
+            color,
+        );
+        return;
+    }
+    let scale = rect.width() / 24.0;
+    painter.rect_stroke(
+        rect.shrink(2.5 * scale),
+        CornerRadius::same((5.0 * scale) as u8),
+        Stroke::new((1.7 * scale).max(1.0), color),
+        egui::StrokeKind::Middle,
+    );
+    painter.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        letters,
+        bold(rect.height() * 0.4),
+        color,
+    );
+}
+
 /// Draw the icon called `name` into `rect`, as the Qt app's DeckIcon does.
 pub fn paint_icon(painter: &Painter, rect: Rect, name: &str, color: Color32) {
     let scale = rect.width() / 24.0;
@@ -358,6 +393,14 @@ pub fn paint_icon(painter: &Painter, rect: Rect, name: &str, color: Color32) {
         "search" => arc((10.0, 10.0), 7.0, 0.0, 360.0),
         "info" | "help" => arc((12.0, 12.0), 10.0, 0.0, 360.0),
         "spinner" => arc((12.0, 12.0), 9.0, -90.0, 180.0),
+        "system-image" => {
+            arc((12.0, 12.0), 9.5, 0.0, 360.0);
+            arc((12.0, 12.0), 2.5, 0.0, 360.0);
+        }
+        "rustup" => {
+            arc((12.0, 12.0), 7.5, 0.0, 360.0);
+            arc((12.0, 12.0), 2.5, 0.0, 360.0);
+        }
         "refresh" => {
             arc((12.0, 12.0), 9.0, -158.4, -21.6);
             arc((12.0, 12.0), 9.0, 21.6, 158.4);

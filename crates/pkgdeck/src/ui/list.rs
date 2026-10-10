@@ -1150,16 +1150,12 @@ pub fn package_icon(app: &App, ui: &mut Ui, rect: Rect, row: &Row) {
     let fallback = |ui: &mut Ui| {
         ui.painter()
             .rect_filled(rect, CornerRadius::same(10), alpha(palette.accent, 0.1));
-        let name = match row.kind.as_str() {
-            "failure" => "warning",
-            _ => row.source.as_str(),
-        };
-        theme::paint_icon(
-            ui.painter(),
-            rect.shrink(rect.width() * 0.24),
-            name,
-            palette.accent,
-        );
+        let mark = rect.shrink(rect.width() * 0.24);
+        if row.kind == "failure" {
+            theme::paint_icon(ui.painter(), mark, "warning", palette.accent);
+        } else {
+            theme::paint_source_icon(ui.painter(), mark, &row.source, palette.accent);
+        }
     };
     let uri = row
         .icon
@@ -1192,7 +1188,7 @@ pub fn package_icon(app: &App, ui: &mut Ui, rect: Rect, row: &Row) {
                             palette.surface,
                             Stroke::new(1.0, palette.line),
                         );
-                        theme::paint_icon(
+                        theme::paint_source_icon(
                             ui.painter(),
                             badge.shrink(3.5),
                             &row.source,

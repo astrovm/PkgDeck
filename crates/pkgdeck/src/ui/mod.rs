@@ -32,6 +32,8 @@ pub struct State {
     pub picker_draft: HashSet<String>,
     pub picker_search: String,
     pub picker_unavailable: bool,
+    /// The picker's "Only duplicates", applied with the sources.
+    pub picker_duplicates: bool,
     pub open_dialog: bool,
     pub open_link: String,
     pub repos_open: bool,
@@ -483,8 +485,14 @@ fn header(app: &mut App, ui: &mut Ui) {
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if app.page.filters_sources() && app.opened.is_none() {
-                let filtered = app.page_sources.contains_key(&app.page);
-                let label = app.source_summary(app.page);
+                let sources = app.page_sources.contains_key(&app.page);
+                let duplicates = app.page == Page::Installed && app.duplicates_only;
+                let filtered = sources || duplicates;
+                let label = match (sources, duplicates) {
+                    (true, true) => format!("{}, duplicates", app.source_summary(app.page)),
+                    (false, true) => "Duplicates".into(),
+                    _ => app.source_summary(app.page),
+                };
                 let response = Button::new(
                     if filtered {
                         Look::Soft(Tone::Accent)
@@ -605,54 +613,26 @@ fn search_field(app: &mut App, ui: &mut Ui) {
 }
 
 fn installed_filters(app: &mut App, ui: &mut Ui) {
-    let has_packages = app.rows.iter().any(model::Row::is_package);
-    let toggle = has_packages || app.duplicates_only;
-    // Right to left, so the toggle sits at the edge and the field takes
-    // the rest.
-    ui.allocate_ui_with_layout(
-        vec2(ui.available_width(), CONTROL_HEIGHT),
-        egui::Layout::right_to_left(egui::Align::Center),
-        |ui| {
-            if toggle {
-                // Looks like the source filter: tinted while on.
-                let on = app.duplicates_only;
-                let look = if on {
-                    Look::Soft(Tone::Accent)
-                } else {
-                    Look::Secondary
-                };
-                if Button::new(look, "Duplicates")
-                    .tooltip("Only apps installed more than once")
-                    .show(ui)
-                    .clicked()
-                {
-                    app.duplicates_only = !on;
-                    app.invalidate();
-                }
-            }
-            let width = ui.available_width().max(160.0);
-            let field = Field::new(&mut app.filter, "Filter installed packages", filter_id())
-                .icon("filter")
-                .width(width)
-                .show(ui);
-            if app.ui.focus_filter {
-                app.ui.focus_filter = false;
-                app.ui.focus_list = false;
-                field.response.request_focus();
-            }
-            if field.response.changed() || field.cleared {
-                app.invalidate();
-            }
-            if field.response.has_focus()
-                && ui.input(|i| i.key_pressed(Key::ArrowDown) || i.key_pressed(Key::Enter))
-                && !app.items.is_empty()
-            {
-                app.ui.focus_list = true;
-                app.ui.keyboard_nav = true;
-                app.choose(0, false);
-            }
-        },
-    );
+    let field = Field::new(&mut app.filter, "Filter installed packages", filter_id())
+        .icon("filter")
+        .width(ui.available_width())
+        .show(ui);
+    if app.ui.focus_filter {
+        app.ui.focus_filter = false;
+        app.ui.focus_list = false;
+        field.response.request_focus();
+    }
+    if field.response.changed() || field.cleared {
+        app.invalidate();
+    }
+    if field.response.has_focus()
+        && ui.input(|i| i.key_pressed(Key::ArrowDown) || i.key_pressed(Key::Enter))
+        && !app.items.is_empty()
+    {
+        app.ui.focus_list = true;
+        app.ui.keyboard_nav = true;
+        app.choose(0, false);
+    }
 }
 
 /// The AppImages on Installed that PkgDeck could manage, when there's

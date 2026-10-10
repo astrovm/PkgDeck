@@ -80,8 +80,9 @@ computer can handle.
 ## Installed
 
 Packages from every source are listed A to Z. Filter the list by name, or
-turn on **Duplicates** to see apps installed from more than one source.
-Grouping is only visual. Each copy stays a separate package.
+tick **Only duplicates** in **Filter sources** to see apps installed from more
+than one source. It's only there while some app is installed twice. Grouping
+is only visual. Each copy stays a separate package.
 
 These controls work on every package page:
 
@@ -90,8 +91,8 @@ These controls work on every package page:
   for the default width.
 - A source that fails to check is tried once more before its warning shows.
   Homebrew waits for a `brew update` that is already running elsewhere.
-- **Filter sources** filters the current page. It also lists sources you
-  can't use, with the reason.
+- **Filter sources** filters the current page. Each source shows its icon.
+  It also lists sources you can't use, with the reason.
 - **Reload** gets fresh package data.
 
 Docker and Podman images are shown as separate sources. Each row shows
