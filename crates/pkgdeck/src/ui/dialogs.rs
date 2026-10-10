@@ -1032,7 +1032,7 @@ mod tests {
         assert!(!repo_url_valid("https://x/y.flatpakref"));
     }
 
-    fn picker_harness(duplicates: bool) -> egui_kittest::Harness<'static, (bool, App)> {
+    fn picker_harness(page: Page, duplicates: bool) -> egui_kittest::Harness<'static, (bool, App)> {
         use crate::{app::Launch, model::Source, platform::Platform, settings::Store};
         use egui_kittest::Harness;
         use pkgdeck_app::controller::ffi::create_synthetic_controller;
@@ -1049,7 +1049,7 @@ mod tests {
             .map(|source| Source {
                 source: source.into(),
                 available: true,
-                capabilities: vec!["installed".into(), "remove".into()],
+                capabilities: vec!["installed".into(), "upgrade".into(), "remove".into()],
                 ..Source::default()
             })
             .to_vec();
@@ -1063,7 +1063,7 @@ mod tests {
                 .unwrap()
             })
             .to_vec();
-        app.page = Page::Installed;
+        app.page = page;
         app.invalidate();
         app.refresh_items();
         open_picker(&mut app);
@@ -1092,14 +1092,28 @@ mod tests {
         harness
     }
 
+    fn flat_shapes(harness: &egui_kittest::Harness<'_, (bool, App)>) -> Vec<egui::Shape> {
+        fn flatten(shape: &egui::Shape, out: &mut Vec<egui::Shape>) {
+            match shape {
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| flatten(shape, out)),
+                shape => out.push(shape.clone()),
+            }
+        }
+        let mut shapes = Vec::new();
+        for clipped in &harness.output().shapes {
+            flatten(&clipped.shape, &mut shapes);
+        }
+        shapes
+    }
+
     #[test]
     fn picker_offers_duplicates_only_when_something_is_installed_twice() {
         use egui_kittest::kittest::Queryable;
-        let harness = picker_harness(false);
+        let harness = picker_harness(Page::Installed, false);
         assert!(harness.query_by_label("Only duplicates").is_none());
         assert!(harness.query_by_label(model::source_name("apt")).is_some());
 
-        let mut harness = picker_harness(true);
+        let mut harness = picker_harness(Page::Installed, true);
         harness.get_by_label("Only duplicates").click();
         harness.run_steps(2);
         harness.get_by_label("Apply").click();
@@ -1107,14 +1121,48 @@ mod tests {
         let app = &harness.state().1;
         assert!(app.duplicates_only);
         assert!(!app.ui.picker_open);
-        // Only the duplicates changed: the sources stay unfiltered.
+        // Only the duplicates changed: the sources stay unfiltered, and the
+        // loaded rows are filtered without a reload.
         assert!(app.page_sources.is_empty());
+        assert!(app.retained.is_none());
+
+        // Other pages don't offer it, duplicates or not.
+        let harness = picker_harness(Page::Updates, true);
+        assert!(harness.query_by_label("Only duplicates").is_none());
+        harness.get_by_label(model::source_name("apt"));
+    }
+
+    #[test]
+    fn picker_applies_a_change_of_sources_and_reset_elsewhere_keeps_duplicates() {
+        use egui_kittest::kittest::Queryable;
+        let mut harness = picker_harness(Page::Installed, true);
+        for source in ["flatpak", "dnf"] {
+            harness.get_by_label(model::source_name(source)).click();
+            harness.run_steps(2);
+        }
+        harness.get_by_label("Apply").click();
+        harness.run_steps(2);
+        let app = &harness.state().1;
+        assert_eq!(
+            app.page_sources.get(&Page::Installed),
+            Some(&HashSet::from(["apt".to_owned()]))
+        );
+        assert!(!app.duplicates_only);
+
+        // Reset on another page leaves Installed's duplicates alone.
+        let mut harness = picker_harness(Page::Updates, true);
+        harness.state_mut().1.duplicates_only = true;
+        harness.get_by_label("Reset").click();
+        harness.run_steps(2);
+        harness.get_by_label("Apply").click();
+        harness.run_steps(2);
+        assert!(harness.state().1.duplicates_only);
     }
 
     #[test]
     fn picker_keeps_duplicates_on_while_turned_on_and_reset_clears_it() {
         use egui_kittest::kittest::Queryable;
-        let mut harness = picker_harness(false);
+        let mut harness = picker_harness(Page::Installed, false);
         harness.state_mut().1.duplicates_only = true;
         open_picker(&mut harness.state_mut().1);
         harness.state_mut().1.ui.picker_open = true;
@@ -1132,7 +1180,7 @@ mod tests {
     #[test]
     fn picker_rows_span_the_card_and_the_last_source_stays_ticked() {
         use egui_kittest::kittest::{NodeT, Queryable};
-        let mut harness = picker_harness(true);
+        let mut harness = picker_harness(Page::Installed, true);
         let card_right = 420.0 + 160.0;
         for name in ["Only duplicates", model::source_name("apt")] {
             let rect = harness.get_by_label(name).rect();
@@ -1154,9 +1202,61 @@ mod tests {
         apt.click();
         harness.run_steps(2);
         assert_eq!(harness.state().1.ui.picker_draft.len(), 1);
+
+        // Tick, mark, then name, left to right.
+        let row = harness.get_by_label(model::source_name("apt")).rect();
+        let shapes = flat_shapes(&harness);
+        let name = shapes
+            .iter()
+            .find_map(|shape| match shape {
+                egui::Shape::Text(text) if text.galley.text() == model::source_name("apt") => {
+                    Some(text.pos)
+                }
+                _ => None,
+            })
+            .expect("the name");
+        assert!(
+            (name.x - (row.left() + PICKER_TEXT_INSET)).abs() < 0.5,
+            "{name:?} {row:?}"
+        );
+        let within = |rect: Rect| row.contains_rect(rect);
+        assert!(shapes.iter().any(|shape| matches!(shape,
+            egui::Shape::Rect(tick) if tick.rect.size() == Vec2::splat(18.0)
+                && (tick.rect.center().x - (row.left() + 13.0)).abs() < 0.5 && within(tick.rect))));
+        assert!(shapes.iter().any(|shape| matches!(shape,
+        egui::Shape::Path(path) if {
+            let mark = path.visual_bounding_rect();
+            within(mark) && mark.left() >= row.left() + 31.0 && mark.right() <= row.left() + 53.0
+        })));
+
+        // Only rows that can change light up under the pointer.
+        let lit = |harness: &egui_kittest::Harness<'_, (bool, App)>, row: Rect| {
+            flat_shapes(harness)
+                .iter()
+                .any(|shape| matches!(shape, egui::Shape::Rect(fill) if fill.rect == row))
+        };
+        harness.get_by_label(model::source_name("apt")).hover();
+        harness.run_steps(2);
+        assert!(!lit(&harness, row));
+        let dnf = harness.get_by_label(model::source_name("dnf")).rect();
+        harness.get_by_label(model::source_name("dnf")).hover();
+        harness.run_steps(2);
+        assert!(lit(&harness, dnf));
+
+        // A reason sits just under its row, lined up with the name.
+        harness.state_mut().1.ui.picker_unavailable = true;
+        harness.run_steps(2);
+        let firmware = harness.get_by_label(model::source_name("fwupd")).rect();
+        let reason = harness
+            .query_all_by_label("Unsupported on this platform")
+            .next()
+            .expect("a reason")
+            .rect();
+        // The text's own top: the row's spacing above it, less 6 points.
+        let gap = reason.top() - firmware.bottom();
+        assert!((0.0..14.0).contains(&gap), "{reason:?} {firmware:?}");
+        assert!((reason.left() - (firmware.left() + PICKER_TEXT_INSET)).abs() < 1.0);
         if std::env::var_os("PKGDECK_PICKER_PNG").is_some() {
-            harness.state_mut().1.ui.picker_unavailable = true;
-            harness.run_steps(2);
             let image = harness.render().unwrap();
             image
                 .save(std::env::var("PKGDECK_PICKER_PNG").unwrap())

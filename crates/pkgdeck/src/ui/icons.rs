@@ -390,6 +390,17 @@ mod tests {
     }
 
     #[test]
+    fn every_named_icon_has_a_drawing_of_its_own() {
+        // The heart is filled, not stroked; see `theme::paint_icon`.
+        for name in NAMES
+            .iter()
+            .filter(|name| !matches!(**name, "package" | "heart"))
+        {
+            assert_ne!(strokes(name), strokes("package"), "{name}");
+        }
+    }
+
+    #[test]
     fn unknown_names_fall_back_to_the_package() {
         assert!(!drawn("not-a-source"));
         assert_eq!(strokes("not-a-source"), strokes("package"));

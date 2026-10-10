@@ -1608,3 +1608,45 @@ mod column_tests {
         assert!(cols.version.unwrap().width() >= 80.0);
     }
 }
+
+#[cfg(test)]
+mod icon_tests {
+    use super::*;
+
+    #[test]
+    fn rows_without_an_icon_show_their_source_mark_or_a_warning() {
+        use crate::{app::Launch, platform::Platform, settings::Store};
+        let (store, settings) = Store::open(None, None);
+        let app = App::with_controller(
+            pkgdeck_app::controller::ffi::create_synthetic_controller(|_, _, _, _| {
+                Ok(pkgdeck_core::engine::Engine::default())
+            }),
+            settings,
+            store,
+            Platform::start(|| {}),
+            Launch::default(),
+        );
+        let texts = |kind: &str| {
+            let row: Row = serde_json::from_value(serde_json::json!({
+                "kind": kind, "name": "fixture", "source": "dnf"
+            }))
+            .unwrap();
+            theme::painted(|ui| {
+                let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(50.0, 50.0));
+                package_icon(&app, ui, rect, &row);
+            })
+            .into_iter()
+            .filter_map(|shape| match shape {
+                egui::Shape::Text(text) => Some((
+                    text.galley.text().to_owned(),
+                    text.galley.job.sections[0].format.font_id.size,
+                )),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+        };
+        // The mark takes the middle half: 50 less 24% each side.
+        assert_eq!(texts("package"), [("Dn".to_owned(), 26.0 * 0.4)]);
+        assert!(texts("failure").is_empty());
+    }
+}
