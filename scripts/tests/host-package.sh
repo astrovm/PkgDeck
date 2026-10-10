@@ -52,6 +52,8 @@ esac
 BREW
 chmod +x "$fixture/bin/brew"
 export PATH="$fixture/bin:$PATH"
+# The fixture's installs and removals stay out of the real Activity history.
+export XDG_STATE_HOME="$fixture/state"
 if [[ $mode = flatpak ]]; then
     # A private session prevents changing the desktop's activation environment.
     # Flatpak's host bridge discovers this PATH from its host-side service.
