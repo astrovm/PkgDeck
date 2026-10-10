@@ -1267,18 +1267,18 @@
       "y": 128.0
     },
     {
-      "height": 26.0,
+      "height": 15.0,
       "text": "search",
       "width": 40.0625,
       "x": 35.0,
-      "y": 154.0
+      "y": 159.5
     },
     {
-      "height": 26.0,
+      "height": 15.0,
       "text": "install",
       "width": 34.25,
       "x": 99.0625,
-      "y": 154.0
+      "y": 159.5
     },
     {
       "control": "Close details",
@@ -1501,18 +1501,18 @@
       "y": 128.0
     },
     {
-      "height": 26.0,
+      "height": 15.0,
       "text": "search",
       "width": 40.0625,
       "x": 35.0,
-      "y": 154.0
+      "y": 159.5
     },
     {
-      "height": 26.0,
+      "height": 15.0,
       "text": "install",
       "width": 34.25,
       "x": 99.0625,
-      "y": 154.0
+      "y": 159.5
     },
     {
       "control": "Close details",
@@ -1559,18 +1559,18 @@
       "y": 128.0
     },
     {
-      "height": 26.0,
+      "height": 15.0,
       "text": "search",
       "width": 40.0625,
       "x": 35.0,
-      "y": 154.0
+      "y": 159.5
     },
     {
-      "height": 26.0,
+      "height": 15.0,
       "text": "install",
       "width": 34.25,
       "x": 99.0625,
-      "y": 154.0
+      "y": 159.5
     },
     {
       "control": "Close details",
@@ -1617,18 +1617,18 @@
       "y": 128.0
     },
     {
-      "height": 26.0,
+      "height": 15.0,
       "text": "search",
       "width": 40.0625,
       "x": 35.0,
-      "y": 154.0
+      "y": 159.5
     },
     {
-      "height": 26.0,
+      "height": 15.0,
       "text": "install",
       "width": 34.25,
       "x": 99.0625,
-      "y": 154.0
+      "y": 159.5
     },
     {
       "control": "Close details",
