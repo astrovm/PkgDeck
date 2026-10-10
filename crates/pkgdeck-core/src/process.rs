@@ -309,12 +309,42 @@ pub(crate) fn run_observed(
         }
     })();
     if supervise.is_err() && !reaped {
-        // The child has not been reaped, so its process-group ID cannot be reused.
-        let pid = rustix::process::Pid::from_raw(child.id() as i32).expect("live child PID");
-        let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
-        let _ = child.wait();
+        stop_group(&mut child, STOP_GRACE);
     }
     supervise
+}
+
+/// How long a stopped command gets to exit before it is killed.
+const STOP_GRACE: Duration = Duration::from_millis(500);
+
+/// Stops a child's process group: SIGTERM first, then SIGKILL after `grace`.
+/// In the Flatpak the child is `flatpak-spawn --host`, which passes SIGTERM
+/// on to the command it started on the host. SIGKILL can't be passed on, so
+/// the host command would keep running with nobody reading its output, and
+/// some (grok) crash when they finally print.
+fn stop_group(child: &mut std::process::Child, grace: Duration) {
+    use rustix::process::{kill_process_group, waitid, Pid, Signal, WaitId, WaitIdOptions};
+    // The child is not reaped until the end, so its process-group ID
+    // cannot be reused while it is signalled.
+    let pid = Pid::from_raw(child.id() as i32).expect("live child PID");
+    let _ = kill_process_group(pid, Signal::TERM);
+    let exited = || {
+        matches!(
+            waitid(
+                WaitId::Pid(pid),
+                WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
+            ),
+            Ok(Some(_))
+        )
+    };
+    let deadline = Instant::now() + grace;
+    while !exited() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    // Whatever else is left in the group, such as a child that ignored
+    // SIGTERM or the leader's own children.
+    let _ = kill_process_group(pid, Signal::KILL);
+    let _ = child.wait();
 }
 
 #[cfg(test)]
@@ -400,6 +430,59 @@ mod tests {
         );
         assert_eq!(failed(None, None, "").outcome(), "was stopped");
     }
+    /// A read that runs past its limit, in a fresh folder for its marker files.
+    fn stopped_read(name: &str, script: &str) -> (std::path::PathBuf, Duration) {
+        let dir = std::env::temp_dir().join(format!("pkgdeck-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ready = dir.join("ready");
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", script, "sh"]).arg(&dir);
+        let start = Instant::now();
+        let thread = std::thread::spawn(move || {
+            let cancel = Cancellation::default();
+            let stopper = cancel.clone();
+            let watcher = std::thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while !ready.exists() && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                stopper.cancel();
+            });
+            let result = run(command, Limits::default(), &cancel, false);
+            watcher.join().unwrap();
+            result
+        });
+        assert_eq!(thread.join().unwrap(), Err(ExecutionError::Cancelled));
+        (dir, start.elapsed())
+    }
+
+    #[test]
+    fn a_stopped_read_is_asked_to_exit_before_it_is_killed() {
+        // flatpak-spawn passes SIGTERM on to the host command; SIGKILL
+        // would leave that command running on the host.
+        let (dir, _) = stopped_read(
+            "terminated",
+            "trap ': > \"$1/terminated\"; exit 0' TERM; : > \"$1/ready\"; \
+             while :; do sleep 0.01; done",
+        );
+        assert!(dir.join("terminated").exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_stopped_read_that_ignores_sigterm_is_still_killed() {
+        let (dir, elapsed) = stopped_read(
+            "ignores-term",
+            "trap '' TERM; echo $$ > \"$1/pid\"; : > \"$1/ready\"; while :; do sleep 0.01; done",
+        );
+        assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
+        assert!(elapsed >= STOP_GRACE, "{elapsed:?}");
+        let pid = std::fs::read_to_string(dir.join("pid")).unwrap();
+        assert!(!std::path::Path::new("/proc").join(pid.trim()).exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn writes_defer_cancellation_and_timeout_until_native_completion() {
         let cancel = Cancellation::default();
