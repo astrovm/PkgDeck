@@ -79,9 +79,9 @@ computer can handle.
 
 ## Installed
 
-Packages from every source are listed A to Z. Filter the list by name, or turn on **Duplicates** to see apps
-installed from more than one source. Grouping is only visual. Each copy stays a
-separate package.
+Packages from every source are listed A to Z. Filter the list by name, or
+turn on **Duplicates** to see apps installed from more than one source.
+Grouping is only visual. Each copy stays a separate package.
 
 These controls work on every package page:
 
