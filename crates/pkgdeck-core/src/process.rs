@@ -447,6 +447,18 @@ mod tests {
         );
         assert_eq!(failed(None, None, "").outcome(), "was stopped");
     }
+    /// Waits up to `limit` for `done`, and says whether it happened. It always
+    /// sleeps once first, so no line depends on how fast the runner is.
+    fn wait_for(limit: Duration, done: impl Fn() -> bool) -> bool {
+        let deadline = Instant::now() + limit;
+        loop {
+            std::thread::sleep(Duration::from_millis(5));
+            if done() || Instant::now() >= deadline {
+                return done();
+            }
+        }
+    }
+
     /// A read that runs past its limit, in a fresh folder for its marker files.
     fn stopped_read(name: &str, script: &str) -> (std::path::PathBuf, Duration) {
         let dir = std::env::temp_dir().join(format!("pkgdeck-{name}-{}", std::process::id()));
@@ -460,10 +472,7 @@ mod tests {
             let cancel = Cancellation::default();
             let stopper = cancel.clone();
             let watcher = std::thread::spawn(move || {
-                let deadline = Instant::now() + Duration::from_secs(10);
-                while !ready.exists() && Instant::now() < deadline {
-                    std::thread::sleep(Duration::from_millis(5));
-                }
+                wait_for(Duration::from_secs(10), || ready.exists());
                 stopper.cancel();
             });
             let result = run(command, Limits::default(), &cancel, false);
@@ -487,11 +496,7 @@ mod tests {
              while :; do sleep 0.01; done",
         );
         // The trap runs beside the answer, before any SIGKILL.
-        let deadline = Instant::now() + STOP_GRACE;
-        while !dir.join("terminated").exists() && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        assert!(dir.join("terminated").exists());
+        assert!(wait_for(STOP_GRACE, || dir.join("terminated").exists()));
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -508,11 +513,7 @@ mod tests {
         // Signal 0 only asks whether it is still there; macOS has no /proc.
         let alive = || rustix::process::test_kill_process(pid).is_ok();
         assert!(alive());
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while alive() && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        assert!(!alive());
+        assert!(wait_for(Duration::from_secs(5), || !alive()));
         std::fs::remove_dir_all(dir).unwrap();
     }
 
