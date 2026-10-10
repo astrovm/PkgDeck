@@ -382,9 +382,9 @@ mod tests {
             let mark = if drawn(id) {
                 format!("icon:{id}")
             } else {
+                assert!(!monogram(id).is_empty(), "{id} has no mark");
                 format!("letters:{}", monogram(id))
             };
-            assert!(mark.len() > "letters:".len(), "{id} has no mark");
             assert!(marks.insert(mark.clone()), "{id} shares {mark}");
         }
     }
