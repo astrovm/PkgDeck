@@ -1190,6 +1190,18 @@ impl<T: Transport + Sync> Flatpak<T> {
         if packages.is_empty() || !updates {
             return Ok(packages);
         }
+        // `remote-ls` reads versions from the AppStream data Flatpak keeps,
+        // which it refreshes about once a day. An update check fetches it
+        // first, or a new build shows the version of an older one. A failure
+        // only leaves the labels as they were.
+        if self.update_check.is_some() && !cancel.requested() {
+            let _ = self.call(
+                &[prefix, "update", "--appstream", "--noninteractive"],
+                cancel,
+                false,
+                system,
+            );
+        }
         // Flatpak compares commits, not version labels: rebuilds and runtimes
         // can have an update even when the version is unchanged or empty.
         let remote_updates = |remote: Option<&str>| -> Result<String, EngineError> {
