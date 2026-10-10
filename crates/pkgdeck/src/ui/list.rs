@@ -1513,7 +1513,7 @@ mod column_tests {
             Shares::default(),
         );
         assert!(cols.summary.is_some_and(|s| s.width() > 150.0));
-        assert!(700.0 >= MEDIUM_BELOW);
+        const { assert!(700.0 >= MEDIUM_BELOW) };
     }
 
     #[test]
