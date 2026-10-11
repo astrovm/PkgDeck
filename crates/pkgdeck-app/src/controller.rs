@@ -16645,6 +16645,16 @@ mod tests {
         assert!(Job::AutoClean.operations().is_empty());
     }
     #[test]
+    fn automatic_updates_read_back_as_set() {
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        assert!(!controller.auto_update());
+        controller.as_mut().set_auto_update(true);
+        assert!(controller.auto_update());
+        controller.as_mut().set_auto_update(false);
+        assert!(!controller.auto_update());
+    }
+    #[test]
     fn automatic_cleaning_waits_a_day_for_power_builds_and_other_work() {
         let state = |controller: &ffi::PackageController| -> Value {
             serde_json::from_str(&controller.background_state().to_string()).unwrap()

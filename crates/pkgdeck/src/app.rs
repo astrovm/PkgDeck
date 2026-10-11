@@ -47,8 +47,6 @@ pub struct Toast {
 pub enum ToastAction {
     Undo,
     Restart,
-    StartAtLogin,
-    AutoUpdate,
 }
 
 /// How the window asked to be launched.
@@ -852,65 +850,27 @@ impl App {
                 self.restart_toast = None;
                 self.restart();
             }
-            ToastAction::StartAtLogin => {
-                self.restart_toast = None;
-                if self.c().set_autostart(true) {
-                    self.settings.autostart = true;
-                }
-                self.ask_about_updates();
-            }
-            ToastAction::AutoUpdate => {
-                self.restart_toast = None;
-                self.settings.auto_update = true;
-                self.c().set_auto_update(true);
-            }
         }
     }
 
-    /// Offers once to start at login, so updates are checked without
-    /// opening PkgDeck first. Only when it can keep running in the tray.
-    /// Once that was asked, offers automatic updates instead, so the window
-    /// shows at most one of them each time it opens.
-    pub fn ask_about_login(&mut self) {
-        if self.settings.login_asked
-            || self.settings.autostart
-            || !self.settings.background_mode
-            || !self.platform.tray_available()
-            || self.restart_toast.is_some()
-        {
-            self.ask_about_updates();
-            return;
-        }
-        self.settings.login_asked = true;
-        self.restart_toast = Some(Toast {
-            text: "Check for updates in the background after you log in?".into(),
-            tone: Tone::Accent,
-            action: Some(ToastAction::StartAtLogin),
-            shown: Instant::now(),
-            lasts: Duration::from_secs(24 * 60 * 60),
-            from_notice: false,
-        });
-    }
-
-    /// Offers once to install updates automatically, which needs background
-    /// checks.
-    fn ask_about_updates(&mut self) {
-        if self.settings.updates_asked
-            || self.settings.auto_update
+    /// Opens the first-run dialog once: start at login, install updates
+    /// and clean automatically, and updates without a password. All of them
+    /// need background checks. Waits for the next start while a sticky
+    /// toast shows, and skips it when everything is already on.
+    pub fn ask_about_setup(&mut self) {
+        let all_on = self.settings.auto_update
+            && self.settings.auto_clean
+            && !self.settings.system_approval.is_empty()
+            && (self.settings.autostart || !self.platform.tray_available());
+        if self.settings.setup_asked
             || !self.settings.background_mode
             || self.restart_toast.is_some()
+            || all_on
         {
             return;
         }
-        self.settings.updates_asked = true;
-        self.restart_toast = Some(Toast {
-            text: "Install updates automatically when PkgDeck finds them?".into(),
-            tone: Tone::Accent,
-            action: Some(ToastAction::AutoUpdate),
-            shown: Instant::now(),
-            lasts: Duration::from_secs(24 * 60 * 60),
-            from_notice: false,
-        });
+        self.settings.setup_asked = true;
+        self.ui.setup_open = true;
     }
 
     /// Whether to keep movement down: asked here, or by the desktop.

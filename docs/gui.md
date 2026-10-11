@@ -410,6 +410,12 @@ See [supported install layouts and what removal keeps](cli.md#standalone-cli-too
 **Background checks** are on by default: PkgDeck checks for updates while it
 is running. Turn them off in Settings.
 
+The first time the window opens, **Set up PkgDeck** offers the rest, all off
+until you turn them on: **Start in background at login**, **Install updates
+automatically**, **Allow automatic updates without a password** and **Clean
+automatically**. Each switch works right away, like in Settings. It shows
+once; change them later in Settings.
+
 - The first check runs about 30 seconds after launch, then at most once per
   **Check every** interval: 15 minutes to a week, 6 hours by default. The
   Updates page refreshes in the background no more often than that either.
@@ -418,8 +424,7 @@ is running. Turn them off in Settings.
 - **Start in background at login** keeps checks running after you log in.
   On Linux it adds an autostart entry; on macOS it adds a LaunchAgent,
   `~/Library/LaunchAgents/io.github.astrovm.PkgDeck.plist`. It's off by
-  default. The first time the window opens, PkgDeck asks once with a
-  **Start at login** button.
+  default.
 - While background checks are on, PkgDeck shows a tray icon (a menu bar
   icon on macOS). Its menu has **Open**, **Check now** and **Quit**.
 - On Linux, clicking the tray icon also shows or hides the window.
@@ -442,8 +447,7 @@ notification.
 Turn on **Install updates automatically**. When a background check finds
 updates, PkgDeck installs them and sends one notification.
 
-It's off by default. PkgDeck asks once with a **Turn on** button: right after
-you pick **Start at login**, or the next time the window opens.
+It's off by default.
 
 - Each run shows in Activity, marked **Automatic**.
 - It waits if another change is running, and skips sources whose check
