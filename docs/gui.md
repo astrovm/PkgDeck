@@ -190,7 +190,8 @@ that failed are shown separately.
 
 | Source | What it cleans |
 | --- | --- |
-| APT, Homebrew | Unused dependencies and old downloads |
+| APT | Unused dependencies and the download cache |
+| Homebrew | Unused dependencies and old downloads |
 | Docker, Podman | Untagged images, unused images, stopped containers, unused volumes |
 | Docker Buildx | Unused build cache |
 | npm, pip, uv | Download caches |
@@ -202,9 +203,9 @@ that failed are shown separately.
 - A worktree counts as finished when its branch was merged or deleted on the
   remote, and it has no changes. Removing it keeps the branch.
 - Old project build files wait while something is being built.
-- APT finds unused dependencies without a password. It only counts cached
-  downloads at this stage. APT picks which cached downloads to delete when
-  the cleanup runs, and asks for your password then.
+- APT finds unused dependencies and sizes its download cache without a
+  password. Cleaning the cache deletes every cached download, so a package
+  you reinstall downloads again. Both ask for your password when they run.
 
 ### Clean settings
 
@@ -213,9 +214,10 @@ that failed are shown separately.
   default, without hidden folders and, on macOS, without Library. **Add
   folder** adds another one.
 
-### Clean automatically
+### Clean caches automatically
 
-Turn on **Clean automatically** in Settings. It needs **Background checks**.
+Turn on **Clean caches automatically** in Settings. It needs **Background
+checks**.
 
 - At most once a day, after a background check.
 - Only what comes back on its own: download caches, unused images, build
@@ -410,6 +412,12 @@ See [supported install layouts and what removal keeps](cli.md#standalone-cli-too
 **Background checks** are on by default: PkgDeck checks for updates while it
 is running. Turn them off in Settings.
 
+The first time the window opens, **Set up PkgDeck** offers the rest, all off
+until you turn them on: **Start in background at login**, **Update apps and
+packages automatically**, **Update system packages without a password** and
+**Clean caches automatically**. Each switch works right away, like in Settings. It shows
+once; change them later in Settings.
+
 - The first check runs about 30 seconds after launch, then at most once per
   **Check every** interval: 15 minutes to a week, 6 hours by default. The
   Updates page refreshes in the background no more often than that either.
@@ -418,8 +426,7 @@ is running. Turn them off in Settings.
 - **Start in background at login** keeps checks running after you log in.
   On Linux it adds an autostart entry; on macOS it adds a LaunchAgent,
   `~/Library/LaunchAgents/io.github.astrovm.PkgDeck.plist`. It's off by
-  default. The first time the window opens, PkgDeck asks once with a
-  **Start at login** button.
+  default.
 - While background checks are on, PkgDeck shows a tray icon (a menu bar
   icon on macOS). Its menu has **Open**, **Check now** and **Quit**.
 - On Linux, clicking the tray icon also shows or hides the window.
@@ -439,8 +446,10 @@ notification.
 
 ### Automatic updates
 
-Turn on **Install updates automatically**. When a background check finds
-updates, PkgDeck installs them and sends one notification.
+Turn on **Update apps and packages automatically**. When a background check
+finds updates, PkgDeck installs them and sends one notification.
+
+It's off by default.
 
 - Each run shows in Activity, marked **Automatic**.
 - It waits if another change is running, and skips sources whose check
@@ -467,7 +476,8 @@ AppImage or system package), the running copy is still the old one:
 
 #### System packages
 
-System packages need **Allow automatic updates without a password**.
+To update system packages too, turn on **Update system packages without a
+password**.
 
 - It asks for your password once, to turn it on.
 - It only covers automatic updates. Anything you start yourself, **Update
@@ -520,8 +530,9 @@ out of date, and each page refreshes when you open it.
 - **Theme**: **System**, **Light** or **Dark**.
 - **Colours**: the colours of the mode on screen. In dark mode, **Charcoal**
   (neutral grey, the default), **Black** (for OLED screens) or **Slate** (the
-  blue-grey of earlier versions). In light mode, **Classic**, **White**
-  (neutral grey) or **Paper** (warm). Each mode keeps its own choice.
+  blue-grey of earlier versions). In light mode, **Classic** (blue-grey, the
+  default), **White** (neutral grey) or **Paper** (warm). Each mode keeps its
+  own choice.
 - **Accent**: the colour of buttons, selection and links. Blue, purple, pink,
   red, orange, green, teal or graphite.
 - **Text size**: **Small**, **Normal**, **Large** or **Larger**. Everything
@@ -529,13 +540,14 @@ out of date, and each page refreshes when you open it.
 - **Animations**: turn motion on or off. When the system turns motion off
   (**Reduce motion** on macOS, animations off in GNOME or KDE), it stays off
   and reads **Off in system settings**.
-- **Background checks**, **Check every**, **Install updates automatically**,
-  **Allow updates that remove packages**, **Allow automatic updates without
-  a password** and **Start in background at login**: see
+- **Background checks**, **Check every**, **Update apps and packages
+  automatically**, **Allow updates that remove packages**, **Update system
+  packages without a password** and **Start in background at login**: see
   [Update notifications](#update-notifications).
 - **Sources**: which package managers PkgDeck uses, and **Repositories**.
   See [Sources](#sources).
-- **Clean automatically**: see [Clean automatically](#clean-automatically).
+- **Clean caches automatically**: see
+  [Clean caches automatically](#clean-caches-automatically).
 - **Old projects** and **Look for projects in**: see
   [Clean settings](#clean-settings).
 - **Last check** shows when PkgDeck last checked and what it found.

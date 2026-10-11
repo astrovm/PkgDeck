@@ -1,6 +1,6 @@
 //! Dialogs and the source picker: confirming a change, repositories,
-//! adding a Flatpak repository, opening a file or link, source checks and
-//! a screenshot up close.
+//! adding a Flatpak repository, opening a file or link, source checks,
+//! first-run setup and a screenshot up close.
 
 use super::widgets::*;
 use crate::{
@@ -28,6 +28,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
     repositories(app, ctx);
     add_repository(app, ctx);
     source_checks(app, ctx);
+    setup(app, ctx);
     screenshot(app, ctx);
 }
 
@@ -641,6 +642,41 @@ fn source_checks(app: &mut App, ctx: &egui::Context) {
     }
 }
 
+/// Shown once, the first time the window opens: what PkgDeck can do on its
+/// own. Each switch applies right away, as in Settings.
+fn setup(app: &mut App, ctx: &egui::Context) {
+    use super::settings_page::{auto_clean_row, auto_update_row, login_row, password_row};
+    let open = app.ui.setup_open;
+    let mut close = false;
+    let still = modal(ctx, "setup", open, 560.0, |ui| {
+        if title(ui, "Set up PkgDeck") {
+            close = true;
+        }
+        ui.spacing_mut().item_spacing.y = 10.0;
+        if cfg!(any(target_os = "linux", target_os = "macos")) && app.platform.tray_available() {
+            login_row(app, ui);
+        }
+        auto_update_row(app, ui);
+        // Only matters with automatic updates; still there to turn off.
+        let approved = !app.settings.system_approval.is_empty();
+        password_row(app, ui, app.settings.auto_update || approved);
+        auto_clean_row(app, ui);
+        ui.add_space(6.0);
+        right(ui, |ui| {
+            if Button::new(Look::Primary, "Done")
+                .min_width(96.0)
+                .show(ui)
+                .clicked()
+            {
+                close = true;
+            }
+        });
+    });
+    if open && (!still || close) {
+        app.ui.setup_open = false;
+    }
+}
+
 fn screenshot(app: &mut App, ctx: &egui::Context) {
     let open = app.ui.screenshot.is_some();
     let (url, caption) = app.ui.screenshot.clone().unwrap_or_default();
@@ -1086,6 +1122,99 @@ mod tests {
             );
         harness.run_steps(4);
         harness
+    }
+
+    fn setup_harness() -> egui_kittest::Harness<'static, (bool, App)> {
+        use crate::{app::Launch, platform::Platform, settings::Store};
+        use egui_kittest::Harness;
+        use pkgdeck_app::controller::ffi::create_synthetic_controller;
+
+        let (store, settings) = Store::open(None, None);
+        let mut app = App::with_controller(
+            create_synthetic_controller(|_, _, _, _| Ok(pkgdeck_core::engine::Engine::default())),
+            settings,
+            store,
+            Platform::start(|| {}),
+            Launch::default(),
+        );
+        app.ask_about_setup();
+        let mut harness = Harness::builder()
+            .with_size(vec2(700.0, 600.0))
+            .build_ui_state(
+                |ui, (ready, app): &mut (bool, App)| {
+                    if !*ready {
+                        let root =
+                            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+                        crate::setup(ui.ctx(), &root, None);
+                        set_reduce_motion(ui.ctx(), true);
+                        *ready = true;
+                        return;
+                    }
+                    setup(app, &ui.ctx().clone());
+                },
+                (false, app),
+            );
+        harness.run_steps(4);
+        harness
+    }
+
+    #[test]
+    fn setup_turns_on_what_runs_on_its_own_and_closes() {
+        use egui_kittest::kittest::{NodeT, Queryable};
+        let mut harness = setup_harness();
+        use egui::accesskit::Role;
+        let disabled = |harness: &egui_kittest::Harness<'_, (bool, App)>, label: &str| {
+            harness
+                .get_by_role_and_label(Role::CheckBox, label)
+                .accesskit_node()
+                .is_disabled()
+        };
+        let password = "Update system packages without a password";
+        if cfg!(any(target_os = "linux", target_os = "macos")) {
+            assert!(harness
+                .query_by_role_and_label(Role::CheckBox, "Start in background at login")
+                .is_some());
+        }
+        // Without automatic updates, no password setting to pick.
+        assert!(disabled(&harness, password));
+        assert!(!disabled(
+            &harness,
+            "Update apps and packages automatically"
+        ));
+
+        harness
+            .get_by_role_and_label(Role::CheckBox, "Update apps and packages automatically")
+            .click();
+        harness.run_steps(2);
+        assert!(harness.state().1.settings.auto_update);
+        assert!(harness.state_mut().1.c().auto_update());
+        assert!(!disabled(&harness, password));
+
+        harness
+            .get_by_role_and_label(Role::CheckBox, "Clean caches automatically")
+            .click();
+        harness.run_steps(2);
+        assert!(harness.state().1.settings.auto_clean);
+        assert!(harness.state_mut().1.c().auto_clean());
+
+        // Done closes it; the choices stay.
+        harness.get_by_label("Done").click();
+        harness.run_steps(2);
+        let app = &harness.state().1;
+        assert!(!app.ui.setup_open);
+        assert!(app.settings.auto_update && app.settings.auto_clean);
+    }
+
+    #[test]
+    fn setup_closes_with_its_cross_and_changes_nothing() {
+        use egui_kittest::kittest::Queryable;
+        let mut harness = setup_harness();
+        harness.get_by_label("Close (Esc)").click();
+        harness.run_steps(2);
+        let app = &harness.state().1;
+        assert!(!app.ui.setup_open);
+        assert!(!app.settings.auto_update && !app.settings.auto_clean);
+        assert!(app.settings.setup_asked);
     }
 
     fn flat_shapes(harness: &egui_kittest::Harness<'_, (bool, App)>) -> Vec<egui::Shape> {

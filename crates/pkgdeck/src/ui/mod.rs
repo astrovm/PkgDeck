@@ -39,6 +39,7 @@ pub struct State {
     pub repos_open: bool,
     pub add_repo: Option<dialogs::AddRepo>,
     pub checks_open: bool,
+    pub setup_open: bool,
     pub screenshot: Option<(String, String)>,
     pub confirm_details: bool,
     pub notice_output: bool,
@@ -125,6 +126,7 @@ fn keyboard(app: &mut App, ctx: &egui::Context) {
         || app.ui.repos_open
         || app.ui.open_dialog
         || app.ui.checks_open
+        || app.ui.setup_open
         || app.ui.screenshot.is_some()
         || app.ui.add_repo.is_some()
         || app.ui.picker_open;
@@ -1221,7 +1223,6 @@ fn toasts(app: &mut App, ui: &mut Ui, content: Rect) {
                     let label = match action {
                         crate::app::ToastAction::Undo => "Undo",
                         crate::app::ToastAction::Restart => "Restart",
-                        crate::app::ToastAction::StartAtLogin => "Start at login",
                     };
                     let mut ui_action = ui.new_child(
                         UiBuilder::new()

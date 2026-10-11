@@ -311,6 +311,96 @@ fn segmented(ui: &mut Ui, id: Id, labels: &[&str], current: usize) -> Option<usi
     chosen
 }
 
+/// The switches Settings shares with the first-run dialog. Each needs
+/// background checks.
+pub(super) fn auto_update_row(app: &mut App, ui: &mut Ui) {
+    let background = app.settings.background_mode;
+    setting_row(
+        ui,
+        "Update apps and packages automatically",
+        "After each background check",
+        SWITCH,
+        |ui| {
+            let mut on = app.settings.auto_update;
+            if switch(
+                ui,
+                &mut on,
+                background,
+                "Update apps and packages automatically",
+            )
+            .changed()
+            {
+                app.settings.auto_update = on;
+                app.c().set_auto_update(on);
+            }
+        },
+    );
+}
+
+pub(super) fn auto_clean_row(app: &mut App, ui: &mut Ui) {
+    let background = app.settings.background_mode;
+    setting_row(
+        ui,
+        "Clean caches automatically",
+        "Once a day. Also unused images and build files of old projects",
+        SWITCH,
+        |ui| {
+            let mut on = app.settings.auto_clean;
+            if switch(ui, &mut on, background, "Clean caches automatically").changed() {
+                app.settings.auto_clean = on;
+                let at = app.settings.auto_cleaned_at;
+                app.c().set_auto_clean(on, at);
+            }
+        },
+    );
+}
+
+/// Turning it on or off asks for the password, then the result comes back
+/// through the controller.
+pub(super) fn password_row(app: &mut App, ui: &mut Ui, enabled: bool) {
+    let palette = Palette::current(ui.ctx());
+    setting_row(
+        ui,
+        "Update system packages without a password",
+        if cfg!(target_os = "macos") {
+            "Only automatic updates of MacPorts and macOS"
+        } else {
+            "Only automatic updates of APT, Flatpak and other system sources"
+        },
+        SWITCH,
+        |ui| {
+            let mut on = !app.settings.system_approval.is_empty();
+            if switch(
+                ui,
+                &mut on,
+                enabled,
+                "Update system packages without a password",
+            )
+            .changed()
+            {
+                app.c().allow_system_updates(on);
+                app.react();
+            }
+        },
+    );
+    let error = app.ctl.approval_error().to_string();
+    if !error.is_empty() {
+        ui.label(egui::RichText::new(error).color(palette.danger));
+    }
+}
+
+pub(super) fn login_row(app: &mut App, ui: &mut Ui) {
+    setting_row(ui, "Start in background at login", "", SWITCH, |ui| {
+        let mut on = app.settings.autostart;
+        let can = app.settings.background_mode && app.platform.tray_available();
+        if switch(ui, &mut on, can, "Start in background at login").changed()
+            && app.c().set_autostart(on)
+        {
+            app.settings.autostart = on;
+        }
+    });
+}
+
 fn update_checks(app: &mut App, ui: &mut Ui) {
     let palette = Palette::current(ui.ctx());
     section(ui, "Update checks", |ui| {
@@ -360,27 +450,8 @@ fn update_checks(app: &mut App, ui: &mut Ui) {
                 }
             },
         );
-        setting_row(ui, "Install updates automatically", "", SWITCH, |ui| {
-            let mut on = app.settings.auto_update;
-            if switch(ui, &mut on, background, "Install updates automatically").changed() {
-                app.settings.auto_update = on;
-                app.c().set_auto_update(on);
-            }
-        });
-        setting_row(
-            ui,
-            "Clean automatically",
-            "Once a day: caches, unused images and build files of old projects",
-            SWITCH,
-            |ui| {
-                let mut on = app.settings.auto_clean;
-                if switch(ui, &mut on, background, "Clean automatically").changed() {
-                    app.settings.auto_clean = on;
-                    let at = app.settings.auto_cleaned_at;
-                    app.c().set_auto_clean(on, at);
-                }
-            },
-        );
+        auto_update_row(app, ui);
+        auto_clean_row(app, ui);
         setting_row(
             ui,
             "Allow updates that remove packages",
@@ -394,40 +465,9 @@ fn update_checks(app: &mut App, ui: &mut Ui) {
                 }
             },
         );
-        setting_row(
-            ui,
-            "Allow automatic updates without a password",
-            "Changes you start still ask",
-            SWITCH,
-            |ui| {
-                let mut on = !app.settings.system_approval.is_empty();
-                if switch(
-                    ui,
-                    &mut on,
-                    true,
-                    "Allow automatic updates without a password",
-                )
-                .changed()
-                {
-                    app.c().allow_system_updates(on);
-                    app.react();
-                }
-            },
-        );
-        let error = app.ctl.approval_error().to_string();
-        if !error.is_empty() {
-            ui.label(egui::RichText::new(error).color(palette.danger));
-        }
+        password_row(app, ui, true);
         if cfg!(any(target_os = "linux", target_os = "macos")) {
-            setting_row(ui, "Start in background at login", "", SWITCH, |ui| {
-                let mut on = app.settings.autostart;
-                let can = background && app.platform.tray_available();
-                if switch(ui, &mut on, can, "Start in background at login").changed()
-                    && app.c().set_autostart(on)
-                {
-                    app.settings.autostart = on;
-                }
-            });
+            login_row(app, ui);
         }
         ui.separator();
         ui.horizontal(|ui| {

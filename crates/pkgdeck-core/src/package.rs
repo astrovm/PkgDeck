@@ -803,7 +803,7 @@ mod tests {
                 CleanupKind::DuplicateCopy,
             ),
             // System managers ask for a password.
-            item("apt", "autoclean", CleanupKind::PackageCache),
+            item("apt", "clean", CleanupKind::PackageCache),
             item("fwupd", "cache", CleanupKind::PackageCache),
         ] {
             assert!(!reviewed.automatic(), "{reviewed:?}");

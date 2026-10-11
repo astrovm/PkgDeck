@@ -14,6 +14,12 @@ write() {
     echo "LIFECYCLE ${PKGDECK_FRONTEND:-cli} $source $operation $name"
     # Driver and GUI must own the same runtime/history directory. Preserve the
     # disposable user's native configuration (including Homebrew tap trust).
+    # Set up PkgDeck takes the keyboard on first launch. Mark it answered.
+    if [[ ${PKGDECK_FRONTEND:-cli} == gui ]]; then
+        # shellcheck disable=SC2016 # Expands in the test user's shell.
+        runuser -u "$user" -- sh -c 'f=$HOME/.config/pkgdeck/window.json
+            [ -e "$f" ] || { mkdir -p "${f%/*}" && echo "{\"setupAsked\":true}" >"$f"; }'
+    fi
     case ${PKGDECK_FRONTEND:-cli} in
         gui) runuser -u "$user" -- env PATH=/home/linuxbrew/.linuxbrew/bin:/usr/bin:/bin /mnt/pkgdeck-tools gui-write "$operation" "$name" env -u XDG_CONFIG_HOME /mnt/pkgdeck-app/AppRun --from "$source" --auth sudo ;;
         cli) if [[ -n $name ]]; then cli "$source" "$operation" "$name"; else cli "$source" "$operation"; fi ;;

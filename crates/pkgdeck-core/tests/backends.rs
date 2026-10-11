@@ -127,7 +127,7 @@ impl Transport for Fixture {
                 *self.installed.lock().unwrap() = Some(self.candidate.lock().unwrap().clone())
             }
             AptAction::Remove(_) => *self.installed.lock().unwrap() = None,
-            AptAction::Autoremove | AptAction::Autoclean => {}
+            AptAction::Autoremove | AptAction::Clean => {}
         }
         Ok(output(""))
     }
@@ -217,7 +217,8 @@ impl Transport for Fixture {
         }
         if executable == "find" {
             assert_eq!(args[0], "/var/cache/apt/archives/");
-            return Ok(output("..."));
+            assert_eq!(args.last().unwrap(), "%s\\n");
+            return Ok(output("1000\n2000\n500\n"));
         }
         if executable == "dpkg-query" {
             assert_eq!(args.last().unwrap(), "synthetic-orphan");
@@ -240,7 +241,7 @@ impl Transport for Fixture {
             if args.contains(&"autoremove".into()) {
                 return Ok(output("Remv synthetic-orphan [1.0]\n"));
             }
-            if args.contains(&"autoclean".into()) {
+            if args.contains(&"clean".into()) {
                 return Ok(output("Del synthetic-cache 1.0 [1024 B]\n"));
             }
         }
@@ -493,12 +494,30 @@ fn apt_cleanup_uses_dry_run_plans_and_fixed_operations() {
     assert_eq!(items[0].id.backend, "apt");
     assert_eq!(items[0].id.key, "autoremove");
     assert_eq!(items[0].bytes, Some(2048 * 1024));
-    assert_eq!(items[1].id.key, "autoclean");
+    assert_eq!(items[1].id.key, "clean");
     assert_eq!(items[1].summary, "3 cached downloads");
+    // What `apt-get clean` frees: every download in the cache.
+    assert_eq!(items[1].bytes, Some(3500));
     assert!(!items[1].preview.contains("synthetic-cache"));
     for item in items {
         apt.execute(&Operation::Clean(item.id), &cancel, &mut |_| {})
             .unwrap();
+    }
+    // Only APT's own tasks run; anything else never reaches apt-get.
+    for (backend, key) in [
+        ("apt", "arbitrary"),
+        ("homebrew", "clean"),
+        ("homebrew", "autoremove"),
+    ] {
+        let id = CleanupId {
+            backend: backend.into(),
+            key: key.into(),
+        };
+        assert!(
+            apt.execute(&Operation::Clean(id), &cancel, &mut |_| {})
+                .is_err(),
+            "{backend}:{key}"
+        );
     }
 }
 
@@ -512,7 +531,7 @@ fn apt_cache_plan_survives_engine_revalidation_without_preview_authentication() 
     let cache = report
         .items
         .into_iter()
-        .find(|item| item.id.key == "autoclean")
+        .find(|item| item.id.key == "clean")
         .unwrap();
     engine
         .execute(&Operation::Clean(cache.id.clone()), &cancel, &mut |_| {})
@@ -5241,6 +5260,8 @@ struct CleanupFixture {
     truncated: bool,
     apt_cache_denied: bool,
     apt_cache_empty: bool,
+    apt_cache_garbled: bool,
+    apt_cache_one: bool,
     calls: Arc<Mutex<Vec<DevCall>>>,
 }
 impl Transport for CleanupFixture {
@@ -5280,8 +5301,18 @@ impl Transport for CleanupFixture {
         if exe == "find" && self.apt_cache_denied {
             return Err(ExecutionError::Io("Permission denied".into()));
         }
+        if exe == "find" && self.apt_cache_one {
+            return Ok(output("4096\n"));
+        }
+        if exe == "find" && self.apt_cache_garbled {
+            return Ok(output("12\nnot a size\n"));
+        }
         if exe == "find" {
-            return Ok(output(if self.apt_cache_empty { "" } else { "..." }));
+            return Ok(output(if self.apt_cache_empty {
+                ""
+            } else {
+                "1\n2\n3\n"
+            }));
         }
         if exe == "dpkg-query" {
             return Err(ExecutionError::Io("dpkg-query is missing".into()));
@@ -5557,15 +5588,15 @@ fn apt_cleanup_loads_cache_without_authentication_and_preserves_orphans_on_failu
         .cleanup_plan(
             &CleanupId {
                 backend: "apt".into(),
-                key: "autoclean".into(),
+                key: "clean".into(),
             },
             &Cancellation::default(),
         )
         .unwrap();
-    assert_eq!(plan.id.key, "autoclean");
+    assert_eq!(plan.id.key, "clean");
     for (_, args, authenticated) in fixture.calls.lock().unwrap().iter() {
         assert!(!authenticated);
-        assert!(!args.contains(&"autoclean".into()));
+        assert!(!args.contains(&"clean".into()));
     }
     assert!(backend
         .cleanup_plan(
@@ -5583,6 +5614,26 @@ fn apt_cleanup_loads_cache_without_authentication_and_preserves_orphans_on_failu
     let report = backend.cleanup_report(&Cancellation::default());
     assert_eq!(report.items.len(), 1);
     assert_eq!(report.items[0].id.key, "autoremove");
+    // Output that isn't sizes is a failure, never a made-up size.
+    let mut backend = Apt::new(CleanupFixture {
+        apt_cache_garbled: true,
+        ..Default::default()
+    });
+    let report = backend.cleanup_report(&Cancellation::default());
+    assert_eq!(report.items.len(), 1);
+    assert_eq!(report.items[0].id.key, "autoremove");
+    assert_eq!(report.failures.len(), 1);
+    // The size is every download's, added up.
+    let mut backend = Apt::new(CleanupFixture::default());
+    let cache = backend.cleanup_report(&Cancellation::default());
+    assert_eq!(cache.items[1].bytes, Some(6));
+    let mut backend = Apt::new(CleanupFixture {
+        apt_cache_one: true,
+        ..Default::default()
+    });
+    let one = backend.cleanup_report(&Cancellation::default());
+    assert_eq!(one.items[1].summary, "1 cached download");
+    assert_eq!(one.items[1].bytes, Some(4096));
 }
 
 #[test]

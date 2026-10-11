@@ -208,6 +208,13 @@ impl Desktop {
     }
     pub fn launch(&mut self, args: &[String]) {
         let log = fs::File::create(self.dir.0.join("application.log")).unwrap();
+        // The first window opens Set up PkgDeck, and a dialog takes the
+        // keyboard. Answered already, unless an earlier launch saved more.
+        let settings = self.dir.0.join("pkgdeck/window.json");
+        if !settings.exists() {
+            fs::create_dir_all(settings.parent().unwrap()).unwrap();
+            fs::write(&settings, r#"{"setupAsked":true}"#).unwrap();
+        }
         self.process = Some(Process(
             command(args)
                 .env("DISPLAY", &self.display)

@@ -295,19 +295,13 @@ fn apt_cleanup_reports_simulation_failures_and_empty_plans() {
         ok(""),
     ));
     assert!(matches!(
-        apt.cleanup_plan(&cleanup_id("apt", "autoclean"), &cancel),
+        apt.cleanup_plan(&cleanup_id("apt", "clean"), &cancel),
         Err(EngineError::Execution(ExecutionError::Disabled(_)))
     ));
     let mut apt = Apt::new(answer(ok(""), exit(1, ""), ok("")));
-    native_failure(
-        apt.cleanup_plan(&cleanup_id("apt", "autoclean"), &cancel),
-        1,
-    );
+    native_failure(apt.cleanup_plan(&cleanup_id("apt", "clean"), &cancel), 1);
     let mut apt = Apt::new(answer(ok(""), ok(config), exit(1, "")));
-    native_failure(
-        apt.cleanup_plan(&cleanup_id("apt", "autoclean"), &cancel),
-        1,
-    );
+    native_failure(apt.cleanup_plan(&cleanup_id("apt", "clean"), &cancel), 1);
     // Both failures are reported, not an empty cleanup list.
     let report = Apt::new(answer(exit(100, ""), exit(1, ""), ok(""))).cleanup_report(&cancel);
     assert!(report.items.is_empty());

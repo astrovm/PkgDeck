@@ -1343,17 +1343,33 @@ struct ActivityWorker {
     receiver: mpsc::Receiver<std::io::Result<Vec<pkgdeck_core::activity::Entry>>>,
 }
 impl Drop for Controller {
+    /// Stops every thread that runs commands and waits for them, so their
+    /// commands get SIGTERM before PkgDeck exits. Left running, they lose
+    /// their pipe when it does, and some tools (grok) crash on that. All are
+    /// told first, so their grace periods run together.
     fn drop(&mut self) {
-        if let Some(worker) = self.activity_worker.take() {
-            let _ = worker.handle.join();
+        let worker = self.worker.take();
+        let prefetch = self.prefetch_worker.take();
+        let details = self.details_worker.take();
+        let catalog = self.catalog_worker.take();
+        let cancels = [
+            worker.as_ref().map(|w| &w.cancel),
+            prefetch.as_ref().map(|w| &w.cancel),
+            details.as_ref().map(|w| &w.cancel),
+            catalog.as_ref().map(|w| &w.cancel),
+        ];
+        for cancel in cancels.into_iter().flatten() {
+            cancel.cancel();
         }
-        if let Some(worker) = self.worker.take() {
-            worker.cancel.cancel();
-            let _ = worker.handle.join();
-        }
-        if let Some(worker) = self.catalog_worker.take() {
-            worker.cancel.cancel();
-            let _ = worker.handle.join();
+        let handles = [
+            self.activity_worker.take().map(|w| w.handle),
+            worker.map(|w| w.handle),
+            prefetch.map(|w| w.handle),
+            details.map(|w| w.handle),
+            catalog.map(|w| w.handle),
+        ];
+        for handle in handles.into_iter().flatten() {
+            let _ = handle.join();
         }
     }
 }
@@ -3961,6 +3977,9 @@ impl ffi::PackageController {
         if !enabled {
             self.as_mut().rust_mut().auto_held = None;
         }
+    }
+    pub fn auto_update(&self) -> bool {
+        self.rust().auto_update
     }
     /// Why automatic updates wait now, if they still do. A new reason
     /// replaces the old one in the background state.
@@ -11167,6 +11186,42 @@ mod tests {
     }
 
     #[test]
+    fn dropping_controller_stops_preloads_and_details_too() {
+        // A preload still checking for updates would otherwise outlive
+        // PkgDeck, and its command would lose its pipe.
+        let prefetch = fake_prefetch("updates", "key".into(), Vec::new(), false);
+        let preload = prefetch.cancel.clone();
+        let (sender, receiver) = mpsc::channel();
+        let details = Cancellation::default();
+        let mut controller = Controller::default();
+        controller.prefetch_worker = Some(prefetch);
+        controller.details_worker = Some(DetailsWorker {
+            handle: std::thread::spawn(move || drop(sender)),
+            receiver,
+            cancel: details.clone(),
+            id: synthetic_package("synthetic", "Synthetic").id,
+        });
+        drop(controller);
+        assert!(preload.requested());
+        assert!(details.requested());
+    }
+
+    #[test]
+    fn dropping_controller_waits_for_its_threads() {
+        let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let done = finished.clone();
+        let mut prefetch = fake_prefetch("updates", "key".into(), Vec::new(), false);
+        prefetch.handle = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            done.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        let mut controller = Controller::default();
+        controller.prefetch_worker = Some(prefetch);
+        drop(controller);
+        assert!(finished.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
     fn dropping_controller_cancels_source_catalog_check() {
         let cancel = Cancellation::default();
         let (sender, receiver) = mpsc::channel();
@@ -16431,7 +16486,7 @@ mod tests {
             CleanupKind::Data,
             Some(9_000_000_000),
         );
-        let unknown = sized("apt", "autoclean", CleanupKind::PackageCache, None);
+        let unknown = sized("apt", "clean", CleanupKind::PackageCache, None);
         let build = sized(
             "projects",
             "build:/home/me/app",
@@ -16499,7 +16554,7 @@ mod tests {
         );
         let body = data["body"].as_str().unwrap();
         assert!(body.starts_with("cargo task (Developer caches), about 2.0 GB\nEmpties cargo"));
-        assert!(body.contains("autoclean task (APT)\nEmpties autoclean"));
+        assert!(body.contains("clean task (APT)\nEmpties clean"));
         assert!(!body.contains("unused-volumes"));
         controller.as_mut().confirm(false);
         // Only data: nothing for Clean all to do.
@@ -16640,6 +16695,16 @@ mod tests {
         assert_eq!(ran.lock().unwrap().len(), 3);
         assert!(Job::AutoClean.writes());
         assert!(Job::AutoClean.operations().is_empty());
+    }
+    #[test]
+    fn automatic_updates_read_back_as_set() {
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        assert!(!controller.auto_update());
+        controller.as_mut().set_auto_update(true);
+        assert!(controller.auto_update());
+        controller.as_mut().set_auto_update(false);
+        assert!(!controller.auto_update());
     }
     #[test]
     fn automatic_cleaning_waits_a_day_for_power_builds_and_other_work() {

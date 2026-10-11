@@ -33,7 +33,7 @@ pub enum DarkTheme {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LightTheme {
-    /// Cool greys, as PkgDeck first shipped.
+    /// Blue-grey, the light match for Slate.
     #[default]
     Classic,
     /// Neutral greys, no tint.
@@ -145,8 +145,8 @@ pub struct Settings {
     pub auto_cleaned_at: u64,
     pub system_approval: String,
     pub autostart: bool,
-    /// Whether PkgDeck already offered to start at login. It asks once.
-    pub login_asked: bool,
+    /// Whether the first-run dialog showed. It shows once.
+    pub setup_asked: bool,
     pub notification_history: String,
     pub last_background_state: String,
     pub sidebar_width: f32,
@@ -180,7 +180,7 @@ impl Default for Settings {
             auto_cleaned_at: 0,
             system_approval: String::new(),
             autostart: false,
-            login_asked: false,
+            setup_asked: false,
             notification_history: "{}".into(),
             last_background_state: "{}".into(),
             sidebar_width: 212.0,
