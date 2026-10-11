@@ -308,6 +308,32 @@ fn cleanup_discovery_omits_unsupported_sources() {
 }
 
 #[test]
+fn sources_that_only_clean_stay_out_of_package_lists() {
+    let mut engine = engine(Fault::None);
+    engine.register(Cleaner).unwrap();
+    let cancel = Cancellation::default();
+    for report in [
+        engine.installed(&cancel),
+        engine.search("synthetic", &cancel),
+    ] {
+        assert!(
+            report
+                .failures
+                .iter()
+                .all(|failure| failure.backend != "cleaner"),
+            "{:?}",
+            report.failures
+        );
+        assert!(report
+            .packages
+            .iter()
+            .all(|package| package.id.backend != "cleaner"));
+    }
+    // Still there to clean after the lists.
+    assert_eq!(engine.cleanup(&cancel).items.len(), 1);
+}
+
+#[test]
 fn cleanup_rejects_invalid_plans_and_preserves_backend_failures() {
     for (name, result) in [
         (

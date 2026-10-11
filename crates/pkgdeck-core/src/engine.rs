@@ -476,10 +476,13 @@ pub struct Engine {
     unattended: bool,
 }
 /// Whether `backend` has packages at all. Sources that only clean, such as
-/// developer caches, stay out of searches and installed lists.
+/// developer caches, stay out of searches and installed lists; a package
+/// manager missing one of those still reports it as unsupported.
 fn lists_packages(backend: &dyn Backend) -> bool {
-    let capabilities = backend.capabilities();
-    capabilities.contains(&Capability::Search) || capabilities.contains(&Capability::Installed)
+    backend
+        .capabilities()
+        .iter()
+        .any(|capability| *capability != Capability::Clean)
 }
 /// Whether an exact-name lookup should ask `backend`. A source that can't
 /// search, such as macOS Updates, holds no name to look up.
