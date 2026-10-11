@@ -310,6 +310,24 @@ fn autostart_exec(
 mod tests {
     use super::*;
     #[test]
+    fn a_resumed_schedule_waits_out_the_interval() {
+        // Nothing to carry over: the first check runs at once.
+        let mut schedule = Schedule::default();
+        schedule.resume(0);
+        assert!(schedule.ready(10, true, false, false, false, false));
+        let mut schedule = Schedule::default();
+        schedule.resume(100);
+        assert!(!schedule.ready(150, true, false, false, false, false));
+        assert!(schedule.ready(
+            100 + CHECK_INTERVAL_SECONDS,
+            true,
+            false,
+            false,
+            false,
+            false
+        ));
+    }
+    #[test]
     fn schedule_skips_offline_metered_busy_and_resume_bursts() {
         let mut schedule = Schedule::default();
         assert!(!schedule.ready(10, false, false, false, false, false));

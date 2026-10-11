@@ -8657,6 +8657,14 @@ mod tests {
             assert_eq!(cached.contains_key(&installed), installed_cached);
             assert_eq!(cached.contains_key(&updates), refreshed);
         }
+        // Without a window, nothing is kept for later.
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().set_window_open(false);
+        controller
+            .as_mut()
+            .warm_inventory(PackageReport::default(), true);
+        assert!(controller.rust().prefetched.is_empty());
     }
 
     #[test]
@@ -8914,10 +8922,30 @@ mod tests {
         controller.as_mut().set_window_open(true);
         assert!(controller.rust().view_cache.get(&key).is_some());
         assert_eq!(controller.rust().prefetch, prefetch_views());
-        // Sections already in memory aren't read again.
-        std::fs::remove_file(&path).unwrap();
+        // Opening twice changes nothing.
         controller.as_mut().set_window_open(true);
         assert!(controller.rust().view_cache.get(&key).is_some());
+        // Sections already in memory aren't read again.
+        controller.as_mut().set_window_open(false);
+        let fresh = cache_key("Updates", "", &[], false);
+        controller
+            .as_mut()
+            .rust_mut()
+            .view_cache
+            .insert(fresh.clone(), cached_view("loaded while closed"));
+        controller.as_mut().set_window_open(true);
+        let cache = &controller.rust().view_cache;
+        assert!(cache.get(&fresh).is_some());
+        assert!(cache.get(&key).is_none());
+    }
+
+    #[test]
+    fn a_new_copy_waits_out_the_last_ones_check() {
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().resume_checks(100);
+        let schedule = &mut controller.as_mut().rust_mut().background_schedule;
+        assert!(!schedule.ready(150, true, false, false, false, false));
     }
 
     #[test]

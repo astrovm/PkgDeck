@@ -212,12 +212,9 @@ where
 
 /// A roundness from 0 to 2; anything else reads as the style's own, 1.
 fn roundness<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<f32, D::Error> {
+    // JSON has no NaN; a number too big for f32 clamps to 2.
     let value = Value::deserialize(deserializer)?.as_f64().unwrap_or(1.0) as f32;
-    Ok(if value.is_finite() {
-        value.clamp(0.0, 2.0)
-    } else {
-        1.0
-    })
+    Ok(value.clamp(0.0, 2.0))
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -847,6 +844,8 @@ mod tests {
         for (roundness, read) in [
             ("2.5", 2.0),
             ("-1", 0.0),
+            ("1e300", 2.0),
+            ("-1e300", 0.0),
             ("0.5", 0.5),
             ("\"round\"", 1.0),
             ("null", 1.0),

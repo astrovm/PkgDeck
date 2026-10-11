@@ -63,3 +63,15 @@ pub fn tune() {
 pub fn release() {
     native::release();
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn memory_goes_back_any_number_of_times() {
+        super::tune();
+        let held = vec![1u8; 4 << 20];
+        drop(held);
+        super::release();
+        super::release();
+    }
+}
