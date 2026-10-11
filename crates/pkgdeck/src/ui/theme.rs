@@ -744,6 +744,245 @@ pub fn painted(paint: impl FnOnce(&mut egui::Ui)) -> Vec<Shape> {
 mod tests {
     use super::*;
 
+    fn schemes() -> Vec<(Scheme, bool)> {
+        let mut all = vec![];
+        for style in Style::ALL {
+            for accent in Accent::ALL {
+                for dark in [false, true] {
+                    all.push((
+                        Scheme {
+                            style,
+                            accent,
+                            ..Scheme::default()
+                        },
+                        dark,
+                    ));
+                }
+            }
+        }
+        all
+    }
+
+    #[test]
+    fn every_style_reads_in_light_and_dark_with_every_accent() {
+        for (scheme, dark) in schemes() {
+            let palette = Palette::of(scheme, dark);
+            let at = format!("{:?} {:?} dark={dark}", scheme.style, scheme.accent);
+            assert_eq!(palette.dark, dark);
+            assert!(contrast(palette.ink, palette.canvas) >= 7.0, "{at}");
+            assert!(contrast(palette.ink, palette.surface) >= 7.0, "{at}");
+            assert!(contrast(palette.muted, palette.surface) >= 4.5, "{at}");
+            assert!(contrast(palette.accent, palette.surface) >= 2.0, "{at}");
+            // Dark canvases are darker than their ink, light ones lighter.
+            assert_eq!(
+                luminance(palette.canvas) < luminance(palette.ink),
+                dark,
+                "{at}"
+            );
+        }
+        // Each style looks its own.
+        for dark in [false, true] {
+            let canvases: std::collections::HashSet<_> = Style::ALL
+                .map(|style| {
+                    let palette = Palette::of(
+                        Scheme {
+                            style,
+                            ..Scheme::default()
+                        },
+                        dark,
+                    );
+                    (palette.canvas, palette.surface)
+                })
+                .into();
+            assert_eq!(canvases.len(), Style::ALL.len());
+        }
+    }
+
+    #[test]
+    fn modern_keeps_its_colours_whatever_the_new_choices() {
+        let modern = Palette::of(Scheme::default(), true);
+        assert_eq!(modern.canvas, rgb(0x121212));
+        assert_eq!(modern.accent, rgb(0x7aa7ff));
+        let light = Palette::of(Scheme::default(), false);
+        assert_eq!(light.canvas, rgb(0xe8edf5));
+        assert_eq!(light.accent_ink, Color32::WHITE);
+        let tuned = Scheme {
+            roundness: 2.0,
+            density: Density::Roomy,
+            typeface: Typeface::System,
+            custom_accent: Some(Color32::RED),
+            ..Scheme::default()
+        };
+        // A picked colour counts only once Custom is the accent.
+        assert_eq!(Palette::of(tuned, true), modern);
+        // Older styles bring their own colours whatever Modern's theme.
+        let retro = |dark: DarkTheme| {
+            Palette::of(
+                Scheme {
+                    style: Style::Retro,
+                    dark,
+                    ..Scheme::default()
+                },
+                true,
+            )
+        };
+        assert_eq!(retro(DarkTheme::Slate), retro(DarkTheme::Black));
+    }
+
+    #[test]
+    fn a_picked_accent_is_made_to_read_with_ink_that_reads_on_it() {
+        let picks = [
+            0xffff00, 0xffffff, 0x000000, 0x777777, 0x00ff00, 0x0000ff, 0xff8800, 0x3a6ea5,
+        ];
+        for style in Style::ALL {
+            for dark in [false, true] {
+                for pick in picks {
+                    let scheme = Scheme {
+                        style,
+                        accent: Accent::Custom,
+                        custom_accent: Some(rgb(pick)),
+                        ..Scheme::default()
+                    };
+                    let palette = Palette::of(scheme, dark);
+                    let at = format!("{style:?} dark={dark} {pick:06x}");
+                    assert!(contrast(palette.accent, palette.canvas) >= 3.0, "{at}");
+                    assert!(contrast(palette.accent_ink, palette.accent) >= 3.0, "{at}");
+                }
+            }
+        }
+        // A colour that already reads is kept as it is.
+        let blue = rgb(0x2050c0);
+        assert_eq!(readable_accent(blue, Color32::WHITE, false), blue);
+        // Yellow on white darkens; black on black lightens.
+        let yellow = readable_accent(rgb(0xffff00), Color32::WHITE, false);
+        assert!(luminance(yellow) < luminance(rgb(0xffff00)));
+        let black = readable_accent(Color32::BLACK, Color32::BLACK, true);
+        assert!(luminance(black) > 0.0);
+        // Custom without a colour is the blue it starts from.
+        let unset = Palette::of(
+            Scheme {
+                accent: Accent::Custom,
+                ..Scheme::default()
+            },
+            false,
+        );
+        assert_eq!(unset.accent, rgb(accent_colors(Accent::Custom).0));
+        assert!((contrast(Color32::WHITE, Color32::BLACK) - 21.0).abs() < 0.01);
+        assert_eq!(contrast(blue, blue), 1.0);
+    }
+
+    #[test]
+    fn colours_go_to_hex_and_back() {
+        for color in [rgb(0x000000), rgb(0xffffff), rgb(0x3a6ea5), rgb(0x0a0b0c)] {
+            assert_eq!(parse_hex(&hex(color)), Some(color));
+        }
+        assert_eq!(hex(rgb(0x0a0b0c)), "#0a0b0c");
+        assert_eq!(parse_hex(" #FF8800 "), Some(rgb(0xff8800)));
+        for bad in [
+            "", "#", "ff8800", "#ff880", "#ff88000", "#gg8800", "#ff 800", "#ÿÿÿ",
+        ] {
+            assert_eq!(parse_hex(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn each_style_rounds_corners_its_own_way_and_the_person_scales_it() {
+        let round = |style, roundness: f32, radius| {
+            Skin {
+                style,
+                roundness,
+                density: Density::Normal,
+            }
+            .round(radius)
+        };
+        assert_eq!(round(Style::Modern, 1.0, 12), CornerRadius::same(12));
+        assert_eq!(round(Style::Gel, 1.0, 9), CornerRadius::same(9));
+        assert_eq!(round(Style::Retro, 2.0, 12), CornerRadius::ZERO);
+        assert_eq!(round(Style::Luna, 1.0, 12), CornerRadius::same(5));
+        assert_eq!(round(Style::Glass, 1.0, 10), CornerRadius::same(4));
+        assert_eq!(round(Style::Platinum, 1.0, 10), CornerRadius::same(3));
+        assert_eq!(round(Style::Modern, 0.0, 12), CornerRadius::ZERO);
+        assert_eq!(round(Style::Modern, 2.0, 12), CornerRadius::same(24));
+        assert_eq!(round(Style::Modern, 9.0, 12), CornerRadius::same(24));
+        assert_eq!(round(Style::Modern, -1.0, 12), CornerRadius::ZERO);
+        assert_eq!(round(Style::Modern, 2.0, 200), CornerRadius::same(255));
+        assert_eq!(Skin::default().style, Style::Modern);
+        // A preview borrows a style and gives it back.
+        let luna = Skin {
+            style: Style::Luna,
+            ..Skin::default()
+        };
+        let before = skin();
+        assert_eq!(with_skin(luna, || skin()), luna);
+        assert_eq!(with_skin(luna, || super::round(12)), CornerRadius::same(5));
+        assert_eq!(skin(), before);
+    }
+
+    #[test]
+    fn styles_choose_their_faces_unless_the_person_does() {
+        assert_eq!(face(Style::Modern, Typeface::Style), Face::Inter);
+        assert_eq!(face(Style::Glass, Typeface::Style), Face::Inter);
+        assert_eq!(face(Style::Retro, Typeface::Style), Face::Style(TAHOMA));
+        assert_eq!(face(Style::Luna, Typeface::Style), Face::Style(TAHOMA));
+        assert_eq!(face(Style::Gel, Typeface::Style), Face::Style(LUCIDA));
+        assert_eq!(face(Style::Platinum, Typeface::Style), Face::Style(LUCIDA));
+        for style in Style::ALL {
+            assert_eq!(face(style, Typeface::Inter), Face::Inter);
+            assert_eq!(face(style, Typeface::System), Face::System);
+        }
+    }
+
+    #[test]
+    fn a_style_face_goes_first_when_installed_and_inter_otherwise() {
+        let root = std::env::temp_dir().join(format!("pkgdeck-faces-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let regular = |fonts: &FontDefinitions| fonts.families[&FontFamily::Proportional].clone();
+        // Nothing installed: Inter, whatever was asked.
+        for face in [Face::Inter, Face::System, Face::Style(TAHOMA)] {
+            assert_eq!(regular(&fonts_with(&root, face))[0], "inter");
+        }
+        let (tahoma, tahoma_bold) = TAHOMA[0];
+        for path in [tahoma, tahoma_bold, SANS[0].0, SANS[0].1] {
+            let path = root.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"face").unwrap();
+        }
+        let fonts = fonts_with(&root, Face::Style(TAHOMA));
+        assert_eq!(regular(&fonts)[..2], ["style", "inter"]);
+        assert_eq!(fonts.families[&bold_family()][0], "style-bold");
+        assert_eq!(fonts.font_data["style-bold"].index, 0);
+        assert_eq!(regular(&fonts_with(&root, Face::System))[0], "system");
+        let inter = fonts_with(&root, Face::Inter);
+        assert_eq!(regular(&inter)[0], "inter");
+        assert!(regular(&inter).contains(&"system".to_owned()));
+        // A collection keeps its bold face second.
+        let (lucida, _) = LUCIDA[0];
+        let path = root.join(lucida);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"collection").unwrap();
+        let fonts = fonts_with(&root, Face::Style(LUCIDA));
+        assert_eq!(fonts.font_data["style-bold"].index, 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_new_style_loads_its_face_and_reshapes_at_once() {
+        let ctx = egui::Context::default();
+        let root = std::env::temp_dir().join(format!("pkgdeck-scheme-{}", std::process::id()));
+        set_font_root(&ctx, &root);
+        let retro = Scheme {
+            style: Style::Retro,
+            ..Scheme::default()
+        };
+        set_scheme(&ctx, retro);
+        assert_eq!(skin().style, Style::Retro);
+        assert_eq!(scheme(&ctx), retro);
+        assert_eq!(super::round(12), CornerRadius::ZERO);
+        set_scheme(&ctx, Scheme::default());
+        assert_eq!(skin().style, Style::Modern);
+        assert_eq!(super::round(12), CornerRadius::same(12));
+    }
+
     fn paint(paint: impl FnOnce(&Painter)) -> Vec<Shape> {
         painted(|ui| paint(ui.painter()))
     }

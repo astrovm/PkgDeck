@@ -175,6 +175,37 @@ fn render(name: &str, size: [f32; 2], dark: bool, prepare: impl FnOnce(&mut App)
 }
 
 fn main() {
+    // Each style, light and dark, on a list and on Settings. Only these
+    // with `--styles`.
+    for style in pkgdeck::settings::Style::ALL {
+        let name = style.name().to_lowercase();
+        for dark in [false, true] {
+            let mode = if dark { "dark" } else { "light" };
+            render(
+                &format!("style-{name}-installed-{mode}"),
+                [1180.0, 780.0],
+                dark,
+                |app| {
+                    app.settings.style = style;
+                    app.settings.accent = style.accent();
+                    offline(app, Page::Installed);
+                },
+            );
+            render(
+                &format!("style-{name}-settings-{mode}"),
+                [1180.0, 1100.0],
+                dark,
+                |app| {
+                    app.settings.style = style;
+                    app.settings.accent = style.accent();
+                    offline(app, Page::Settings);
+                },
+            );
+        }
+    }
+    if std::env::args().any(|arg| arg == "--styles") {
+        return;
+    }
     render("search-empty", [1180.0, 780.0], true, |app| {
         app.rows.clear()
     });

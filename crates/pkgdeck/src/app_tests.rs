@@ -1096,3 +1096,33 @@ fn sources_can_be_checked_again() {
     app.c().recheck_sources();
     assert!(*app.ctl.needs_poll());
 }
+
+#[test]
+fn the_tray_is_idle_only_with_nothing_running_or_waiting() {
+    let mut app = app();
+    app.c().set_window_open(false);
+    // The first check of the sources, from the start, runs even then.
+    assert!(!app.idle());
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !app.idle() && Instant::now() < deadline {
+        app.tick(Instant::now() + Duration::from_secs(2));
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(app.idle());
+    app.busy = true;
+    assert!(!app.idle());
+    app.busy = false;
+    app.search_due = Some(Instant::now());
+    assert!(!app.idle());
+    app.search_due = None;
+    app.restart_at = Some(Instant::now());
+    assert!(!app.idle());
+    app.restart_at = None;
+    app.c().set_needs_poll(true);
+    assert!(!app.idle());
+    app.c().set_needs_poll(false);
+    app.c().set_confirmation("{\"title\":\"Remove?\"}".into());
+    assert!(!app.idle());
+    app.c().set_confirmation(QString::default());
+    assert!(app.idle());
+}

@@ -842,6 +842,253 @@ pub fn title_needs_backing() -> bool {
 mod tests {
     use super::*;
 
+    use crate::settings::Accent;
+    use eframe::egui::Shape;
+
+    /// What painting `paint` in `style` adds, with the palette it drew in.
+    fn drawn(style: Style, dark: bool, paint: impl FnOnce(&Painter, &Palette)) -> Vec<Shape> {
+        let scheme = theme::Scheme {
+            style,
+            accent: style.accent(),
+            ..theme::Scheme::default()
+        };
+        let palette = Palette::of(scheme, dark);
+        let skin = theme::Skin {
+            style,
+            ..theme::Skin::default()
+        };
+        // Whatever an empty frame draws comes first.
+        let empty = theme::painted(|_| {}).len();
+        let mut shapes =
+            theme::with_skin(skin, || theme::painted(|ui| paint(ui.painter(), &palette)));
+        shapes.drain(..empty);
+        shapes
+    }
+
+    fn rect() -> Rect {
+        Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(120.0, 36.0))
+    }
+
+    fn rounded(shapes: &[Shape]) -> bool {
+        shapes.iter().any(|shape| match shape {
+            Shape::Rect(rect) => rect.corner_radius != CornerRadius::ZERO,
+            _ => false,
+        })
+    }
+
+    fn meshes(shapes: &[Shape]) -> usize {
+        shapes
+            .iter()
+            .filter(|shape| matches!(shape, Shape::Mesh(_)))
+            .count()
+    }
+
+    const STILL: State = State {
+        hover: 0.0,
+        press: 0.0,
+        opacity: 1.0,
+    };
+
+    #[test]
+    fn modern_draws_buttons_and_fields_as_before() {
+        let fill = Color32::from_rgb(1, 2, 3);
+        let stroke = Stroke::new(1.0, Color32::from_rgb(4, 5, 6));
+        for dark in [false, true] {
+            let shapes = drawn(Style::Modern, dark, |painter, palette| {
+                paint_button(
+                    painter,
+                    rect(),
+                    Weight::Normal,
+                    fill,
+                    stroke,
+                    STILL,
+                    palette,
+                )
+            });
+            assert_eq!(shapes.len(), 1);
+            let Shape::Rect(button) = &shapes[0] else {
+                panic!("{shapes:?}")
+            };
+            assert_eq!(
+                (button.rect, button.fill, button.stroke),
+                (rect(), fill, stroke)
+            );
+            assert_eq!(button.corner_radius, CornerRadius::same(9));
+            // A field gets its focus ring only while focused.
+            let field = |focus| {
+                drawn(Style::Modern, dark, |painter, palette| {
+                    paint_field(painter, rect(), CornerRadius::same(9), palette, focus)
+                })
+                .len()
+            };
+            assert_eq!((field(0.0), field(1.0)), (1, 2));
+            // No strips, the plain canvas, and Modern's bar by the selection.
+            let strip = drawn(Style::Modern, dark, |painter, palette| {
+                assert!(paint_title_strip(painter, rect(), palette).is_none());
+                assert!(paint_selection(painter, rect(), palette).is_none());
+                paint_canvas(painter, rect(), palette);
+            });
+            assert_eq!(meshes(&strip), 0);
+        }
+        assert!(theme::with_skin(theme::Skin::default(), selection_bar));
+    }
+
+    #[test]
+    fn every_style_draws_every_piece_in_light_and_dark() {
+        for style in Style::ALL {
+            for dark in [false, true] {
+                let at = format!("{style:?} dark={dark}");
+                let shapes = drawn(style, dark, |painter, palette| {
+                    paint_canvas(painter, rect(), palette);
+                    paint_sidebar(painter, rect(), palette);
+                    paint_panel(painter, rect(), palette, true, panel_stroke(palette));
+                    paint_panel(painter, rect(), palette, false, panel_stroke(palette));
+                    for weight in [Weight::Strong, Weight::Normal, Weight::Flat] {
+                        for state in [
+                            STILL,
+                            State {
+                                hover: 1.0,
+                                press: 1.0,
+                                opacity: 0.4,
+                            },
+                        ] {
+                            paint_button(
+                                painter,
+                                rect(),
+                                weight,
+                                palette.accent,
+                                Stroke::new(1.0, palette.line),
+                                state,
+                                palette,
+                            );
+                        }
+                    }
+                    paint_field(painter, rect(), theme::round(9), palette, 0.5);
+                    let tick = paint_check(painter, rect(), palette, 1.0, true, 1.0);
+                    assert!(tick.a() > 0, "{at}");
+                    paint_check(painter, rect(), palette, 0.0, false, 0.4);
+                    paint_knob(painter, rect().center(), 9.0, palette, 1.0);
+                    if let Some(ink) = paint_selection(painter, rect(), palette) {
+                        assert!(theme::contrast(ink, palette.accent) >= 3.0, "{at}");
+                    }
+                    let strip = paint_title_strip(painter, rect(), palette);
+                    assert_eq!(strip.is_some(), style != Style::Modern, "{at}");
+                });
+                assert!(shapes.len() > 10, "{at}");
+                // Retro is square through and through.
+                if style == Style::Retro {
+                    assert!(!rounded(&shapes), "{at}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn flat_buttons_stay_bare_until_hovered_in_every_style() {
+        for style in Style::ALL {
+            let still = drawn(style, false, |painter, palette| {
+                paint_button(
+                    painter,
+                    rect(),
+                    Weight::Flat,
+                    Color32::TRANSPARENT,
+                    Stroke::NONE,
+                    STILL,
+                    palette,
+                )
+            });
+            assert!(still.is_empty(), "{style:?}");
+            let hovered = drawn(style, false, |painter, palette| {
+                let state = State {
+                    hover: 1.0,
+                    ..STILL
+                };
+                paint_button(
+                    painter,
+                    rect(),
+                    Weight::Flat,
+                    palette.hover,
+                    Stroke::NONE,
+                    state,
+                    palette,
+                )
+            });
+            assert!(!hovered.is_empty(), "{style:?}");
+        }
+    }
+
+    #[test]
+    fn styles_add_their_own_texture_and_depth() {
+        let canvas = |style| {
+            drawn(style, false, |painter, palette| {
+                paint_canvas(painter, rect(), palette)
+            })
+        };
+        // Pinstripes and light from above are meshes over the colour.
+        assert_eq!(meshes(&canvas(Style::Gel)), 1);
+        assert_eq!(meshes(&canvas(Style::Glass)), 1);
+        assert_eq!(meshes(&canvas(Style::Retro)), 0);
+        // Gel's controls are pills.
+        let gel = drawn(Style::Gel, false, |painter, palette| {
+            paint_button(
+                painter,
+                rect(),
+                Weight::Normal,
+                palette.surface,
+                Stroke::NONE,
+                STILL,
+                palette,
+            )
+        });
+        assert!(gel.iter().any(|shape| matches!(shape,
+            Shape::Rect(outline) if outline.corner_radius == CornerRadius::same(18))));
+        // The old desktops cast no shadows; the glossy ones do.
+        let palette = Palette::of(theme::Scheme::default(), false);
+        for (style, shadowed) in [
+            (Style::Retro, false),
+            (Style::Platinum, false),
+            (Style::Modern, true),
+            (Style::Gel, true),
+        ] {
+            let shadow = theme::with_skin(
+                theme::Skin {
+                    style,
+                    ..theme::Skin::default()
+                },
+                || shadow(&palette),
+            );
+            assert_eq!(shadow.color.a() > 0, shadowed, "{style:?}");
+        }
+        // Platinum's lines need clearing behind a title; no one else's do.
+        for style in Style::ALL {
+            let skin = theme::Skin {
+                style,
+                ..theme::Skin::default()
+            };
+            assert_eq!(
+                theme::with_skin(skin, title_needs_backing),
+                style == Style::Platinum
+            );
+            assert_eq!(
+                theme::with_skin(skin, selection_bar),
+                style == Style::Modern
+            );
+        }
+        // Empty areas draw nothing rather than a broken shape.
+        let none = drawn(Style::Luna, false, |painter, _| {
+            gradient(
+                painter,
+                Rect::NOTHING,
+                CornerRadius::ZERO,
+                Color32::RED,
+                Color32::BLUE,
+                false,
+            )
+        });
+        assert!(none.is_empty());
+        let _ = Accent::Blue;
+    }
+
     #[test]
     fn blends_reach_both_ends_and_stay_inside() {
         let (a, b) = (

@@ -364,6 +364,48 @@ fn settings_switches_change_settings() {
     assert!(!harness.state().1.settings.reduce_motion);
 }
 
+#[test]
+fn styles_and_their_choices_change_the_look() {
+    use pkgdeck::settings::{Density, Style, Typeface};
+    let mut harness = show(Page::Settings);
+    // Every style is offered, Modern first and chosen.
+    for style in Style::ALL {
+        assert!(harness.query_by_label(style.name()).is_some(), "{style:?}");
+    }
+    assert!(harness.query_by_label("Charcoal").is_some());
+    harness.get_by_label("Retro").click();
+    harness.run_steps(3);
+    let settings = &harness.state().1.settings;
+    assert_eq!(settings.style, Style::Retro);
+    assert_eq!(settings.accent, Accent::Navy);
+    // Retro has its own colours and is always square.
+    assert!(harness.query_by_label("Charcoal").is_none());
+    assert!(harness.query_by_label("Roundness").is_none());
+    harness.get_by_label("Luna").click();
+    harness.run_steps(3);
+    assert!(harness.query_by_label("Roundness").is_some());
+    for choice in ["Roomy", "Inter", "Teal"] {
+        harness.get_by_label(choice).click();
+        harness.run_steps(3);
+    }
+    let settings = &harness.state().1.settings;
+    assert_eq!(settings.style, Style::Luna);
+    assert_eq!(settings.density, Density::Roomy);
+    assert_eq!(settings.typeface, Typeface::Inter);
+    assert_eq!(settings.accent, Accent::Teal);
+    // Choosing the style on screen again keeps the accent picked since.
+    harness.get_by_label("Luna").click();
+    harness.run_steps(3);
+    assert_eq!(harness.state().1.settings.accent, Accent::Teal);
+    assert!(harness.query_by_label("Custom accent").is_some());
+    assert!(harness.query_by_label("Export").is_some());
+    assert!(harness.query_by_label("Import").is_some());
+    harness.get_by_label("Modern").click();
+    harness.run_steps(3);
+    assert_eq!(harness.state().1.settings.accent, Accent::Blue);
+    assert!(harness.query_by_label("Charcoal").is_some());
+}
+
 /// A catalog with two package managers, one whose check failed and one
 /// that isn't on this computer.
 fn with_sources(mut app: App) -> App {

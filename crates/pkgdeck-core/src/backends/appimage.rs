@@ -1875,6 +1875,60 @@ mod tests {
 
     #[test]
     #[cfg(target_os = "linux")]
+    fn contents_are_remembered_on_disk_without_the_icon_until_the_file_changes() {
+        let base = test_base("remembered");
+        let uid = rustix::process::getuid().as_raw();
+        let root = base.join("data/pkgdeck/appimages");
+        let backend = AppImage::new(root.clone(), base.join("data/applications"), uid);
+        let path = base.join("demo.AppImage");
+        appimage_with(
+            &path,
+            backhand::compression::Compressor::Gzip,
+            &[("demo.desktop", DEMO_ENTRY), ("demo.png", DEMO_PNG)],
+        );
+        // Just read: the icon comes along, but isn't kept.
+        let read = backend.contents(&path);
+        assert_eq!(read.name.as_deref(), Some("Demo App"));
+        assert!(read.icon.is_some());
+        let file = fs::read_to_string(root.with_file_name("appimage-contents.json")).unwrap();
+        assert!(file.contains("Demo App"));
+        assert!(!file.contains("demo icon"));
+        assert!(backend.contents(&path).icon.is_none());
+
+        // Another start reads the file, not the image: here the image is
+        // garbage of the remembered size and time.
+        let other = base.join("other.AppImage");
+        fs::write(&other, b"not an image").unwrap();
+        let metadata = fs::metadata(&other).unwrap();
+        let key = (metadata.len(), metadata.mtime(), metadata.mtime_nsec());
+        let remembered = Contents {
+            name: Some("Remembered".into()),
+            ..Contents::default()
+        };
+        backend.remember_contents(&other, key, &remembered);
+        assert_eq!(
+            backend.contents(&other).name.as_deref(),
+            Some("Remembered")
+        );
+        // Changed since: read again, and garbage reads as nothing.
+        let changed = base.join("changed.AppImage");
+        fs::write(&changed, b"not an image either").unwrap();
+        backend.remember_contents(&changed, (1, 0, 0), &remembered);
+        assert_eq!(backend.contents(&changed).name, None);
+        // Files that are gone are dropped the next time one is kept.
+        fs::remove_file(&other).unwrap();
+        backend.remember_contents(&path, (1, 0, 0), &remembered);
+        let kept = backend.remembered_contents();
+        assert!(!kept.contains_key(&other.display().to_string()));
+        assert!(kept.contains_key(&path.display().to_string()));
+        // A damaged file is the same as none.
+        fs::write(root.with_file_name("appimage-contents.json"), b"{").unwrap();
+        assert!(backend.remembered_contents().is_empty());
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
     fn an_extra_copy_of_a_managed_appimage_is_cleaned_up_or_moved_in() {
         let base = test_base("extra");
         let uid = rustix::process::getuid().as_raw();

@@ -184,11 +184,17 @@ fn appearance(app: &mut App, ui: &mut Ui) {
         });
         // Retro is square whatever the roundness.
         if app.settings.style != Style::Retro {
-            setting_row(ui, "Roundness", "", vec2(200.0, 34.0), |ui| {
-                let slider = egui::Slider::new(&mut app.settings.roundness, 0.0..=2.0)
-                    .show_value(false)
-                    .step_by(0.05);
-                ui.add_sized(vec2(200.0, 34.0), slider);
+            // Quarter steps from square to twice the style's own.
+            let mut step = (app.settings.roundness * 4.0).round().clamp(0.0, 8.0) as usize;
+            let hint = match step {
+                0 => "Square".to_owned(),
+                4 => "As the style draws it".to_owned(),
+                _ => format!("{}%", step * 25),
+            };
+            setting_row(ui, "Roundness", &hint, vec2(240.0, 28.0), |ui| {
+                if steps(ui, Id::new("roundness"), 9, &mut step, true, 240.0) {
+                    app.settings.roundness = step as f32 / 4.0;
+                }
             });
         }
         setting_row(ui, "Density", "", vec2(252.0, 34.0), |ui| {
@@ -246,8 +252,8 @@ fn appearance(app: &mut App, ui: &mut Ui) {
     });
 }
 
-const PREVIEW: Vec2 = vec2(116.0, 80.0);
-const PREVIEW_GAP: f32 = 12.0;
+const PREVIEW: Vec2 = vec2(104.0, 74.0);
+const PREVIEW_GAP: f32 = 10.0;
 
 /// A small window drawn in each style, the current one ringed. Picking
 /// one also picks the accent it was made with.

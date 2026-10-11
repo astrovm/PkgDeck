@@ -829,6 +829,175 @@ mod tests {
     }
 
     #[test]
+    fn settings_from_before_styles_stay_modern_with_their_colours() {
+        let settings: Settings = serde_json::from_str(
+            r#"{"darkTheme":"slate","lightTheme":"paper","accent":"pink","textSize":"large"}"#,
+        )
+        .unwrap();
+        assert_eq!(settings.style, Style::Modern);
+        assert_eq!(settings.roundness, 1.0);
+        assert_eq!(settings.density, Density::Normal);
+        assert_eq!(settings.typeface, Typeface::Style);
+        assert_eq!(settings.custom_accent, "");
+        assert_eq!(
+            (settings.dark_theme, settings.light_theme, settings.accent),
+            (DarkTheme::Slate, LightTheme::Paper, Accent::Pink)
+        );
+        // Values a newer or broken version wrote read sensibly.
+        for (roundness, read) in [
+            ("2.5", 2.0),
+            ("-1", 0.0),
+            ("0.5", 0.5),
+            ("\"round\"", 1.0),
+            ("null", 1.0),
+        ] {
+            let text = format!(
+                r#"{{"style":"aqua","density":"tiny","typeface":"comic","roundness":{roundness}}}"#
+            );
+            let settings: Settings = serde_json::from_str(&text).unwrap();
+            assert_eq!(settings.roundness, read, "{roundness}");
+            assert_eq!(settings.style, Style::Modern);
+            assert_eq!(settings.density, Density::Normal);
+            assert_eq!(settings.typeface, Typeface::Style);
+        }
+        let saved = Settings {
+            style: Style::Platinum,
+            accent: Accent::Custom,
+            custom_accent: "#ff8800".into(),
+            roundness: 1.5,
+            density: Density::Roomy,
+            typeface: Typeface::System,
+            ..Settings::default()
+        };
+        let read: Settings = serde_json::from_str(&serde_json::to_string(&saved).unwrap()).unwrap();
+        assert_eq!(read, saved);
+    }
+
+    #[test]
+    fn every_style_has_a_name_and_an_accent_of_its_own() {
+        let names: std::collections::HashSet<_> = Style::ALL.map(Style::name).into();
+        assert_eq!(names.len(), Style::ALL.len());
+        assert_eq!(Style::Modern.accent(), Accent::Blue);
+        assert_eq!(Style::Retro.accent(), Accent::Navy);
+        assert_eq!(Style::Platinum.accent(), Accent::Lavender);
+        for style in Style::ALL {
+            assert!(Accent::ALL.contains(&style.accent()));
+        }
+        assert!(!Accent::ALL.contains(&Accent::Custom));
+        assert_eq!(Accent::Custom.name(), "Custom");
+        let scales = [Density::Compact, Density::Normal, Density::Roomy].map(Density::scale);
+        assert!(scales[0] < scales[1] && scales[1] < scales[2]);
+        assert_eq!(scales[1], 1.0);
+    }
+
+    #[test]
+    fn a_theme_goes_to_a_file_and_back() {
+        let mut settings = Settings {
+            style: Style::Luna,
+            accent: Accent::Custom,
+            custom_accent: "#3a6ea5".into(),
+            roundness: 0.75,
+            density: Density::Compact,
+            typeface: Typeface::Inter,
+            dark_theme: DarkTheme::Black,
+            light_theme: LightTheme::White,
+            text_size: TextSize::Larger,
+            appearance: Appearance::Dark,
+            reduce_motion: true,
+            ..Settings::default()
+        };
+        let text = Theme::of(&settings).to_toml();
+        assert!(text.contains("style = \"luna\""), "{text}");
+        assert!(text.contains("custom-accent = \"#3a6ea5\""), "{text}");
+        let theme = Theme::from_toml(&text).unwrap();
+        assert_eq!(theme, Theme::of(&settings));
+        // What suits a person rather than a look stays.
+        let mut other = Settings::default();
+        theme.apply(&mut other);
+        assert_eq!(Theme::of(&other), theme);
+        assert_eq!(other.text_size, TextSize::Normal);
+        assert_eq!(other.appearance, Appearance::System);
+        assert!(!other.reduce_motion);
+        // A preset accent leaves the colour picked by hand alone.
+        settings.accent = Accent::Teal;
+        let preset = Theme::of(&settings);
+        assert!(!preset.to_toml().contains("custom-accent"));
+        let mut kept = Settings {
+            custom_accent: "#123456".into(),
+            ..Settings::default()
+        };
+        preset.apply(&mut kept);
+        assert_eq!(
+            (kept.accent, kept.custom_accent.as_str()),
+            (Accent::Teal, "#123456")
+        );
+
+        let dir = std::env::temp_dir().join(format!("pkgdeck-theme-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("luna.toml");
+        preset.write(&path).unwrap();
+        assert_eq!(Theme::read(&path).unwrap(), preset);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bad_theme_files_are_turned_away_and_odd_values_fall_back() {
+        for text in ["", "not toml at all {", "colour = \"red\"", "style = ["] {
+            assert_eq!(Theme::from_toml(text), Err(ThemeError::NotATheme), "{text}");
+        }
+        // Keys from newer versions are skipped; unknown values read as
+        // the defaults.
+        let theme =
+            Theme::from_toml("style = \"aqua\"\naccent = \"gold\"\nroundness = 9\nshine = true")
+                .unwrap();
+        assert_eq!(theme.style, Style::Modern);
+        assert_eq!(theme.accent, Accent::Blue);
+        assert_eq!(theme.roundness, 2.0);
+        // A wrong type is the same as a missing value.
+        let theme = Theme::from_toml("style = 3\ndensity = \"roomy\"").unwrap();
+        assert_eq!(
+            (theme.style, theme.density),
+            (Style::Modern, Density::Roomy)
+        );
+        // A custom accent that isn't a colour takes the style's.
+        for colour in ["", "red", "#12345", "#gggggg", "#1234567"] {
+            let text =
+                format!("style = \"retro\"\naccent = \"custom\"\ncustom-accent = \"{colour}\"");
+            let theme = Theme::from_toml(&text).unwrap();
+            assert_eq!(theme.accent, Accent::Navy, "{colour}");
+            assert!(theme.custom_accent.is_empty());
+        }
+
+        let dir = std::env::temp_dir().join(format!("pkgdeck-bad-theme-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let big = dir.join("big.toml");
+        std::fs::write(&big, vec![b'#'; Theme::MAX_BYTES as usize + 1]).unwrap();
+        assert_eq!(Theme::read(&big), Err(ThemeError::TooBig));
+        let binary = dir.join("binary.toml");
+        std::fs::write(&binary, [0xff, 0xfe, 0x00, 0x80]).unwrap();
+        assert_eq!(Theme::read(&binary), Err(ThemeError::NotATheme));
+        assert!(matches!(
+            Theme::read(&dir.join("missing.toml")),
+            Err(ThemeError::Unreadable(_))
+        ));
+        assert!(matches!(Theme::read(&dir), Err(ThemeError::Unreadable(_))));
+        assert!(Theme::default()
+            .write(&dir.join("no/such/dir.toml"))
+            .is_err());
+        for error in [
+            ThemeError::TooBig,
+            ThemeError::NotATheme,
+            ThemeError::Unreadable("denied".into()),
+        ] {
+            assert!(!error.to_string().is_empty());
+        }
+        assert!(ThemeError::Unreadable("denied".into())
+            .to_string()
+            .contains("denied"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn text_sizes_go_from_small_to_larger() {
         let zooms = [
             TextSize::Small,

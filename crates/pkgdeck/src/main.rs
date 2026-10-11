@@ -303,6 +303,39 @@ mod tests {
     }
 
     #[test]
+    fn a_fresh_start_keeps_the_options_but_not_what_was_opened() {
+        let fresh = |args: &[&str]| {
+            let mut args: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
+            args.insert(0, "pkgdeck".into());
+            fresh_args(&args)
+        };
+        assert_eq!(fresh(&[]), ["--background"]);
+        // Never twice, and always last.
+        assert_eq!(fresh(&["--background"]), ["--background"]);
+        assert_eq!(
+            fresh(&["--background", "--auth", "sudo", "--from=apt"]),
+            ["--auth", "sudo", "--from=apt", "--background"]
+        );
+        // A file opened at launch was handled; the fresh copy doesn't
+        // open it again.
+        assert_eq!(
+            fresh(&["/tmp/a.flatpakref", "--from", "flatpak"]),
+            ["--from", "flatpak", "--background"]
+        );
+        assert_eq!(
+            fresh(&["https://example.com/app.flatpakref"]),
+            ["--background"]
+        );
+        assert!(quiet(&parse(
+            &std::iter::once("pkgdeck".to_owned())
+                .chain(fresh(&["/tmp/a.deb"]))
+                .collect::<Vec<_>>()
+        )));
+        // The program's own name doesn't count as something to open.
+        assert_eq!(fresh_args(&[]), ["--background"]);
+    }
+
+    #[test]
     fn the_window_opens_at_4_by_3() {
         let size = options().viewport.inner_size.unwrap();
         assert_eq!(size, DEFAULT_SIZE.into());

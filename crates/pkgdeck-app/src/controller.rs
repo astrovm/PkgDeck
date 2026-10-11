@@ -8874,6 +8874,50 @@ mod tests {
     }
 
     #[test]
+    fn a_closed_window_keeps_no_sections_in_memory_and_gets_them_back() {
+        let dir = Scratch::new("window-views");
+        let path = dir.path().join("views.json");
+        let key = cache_key("Installed", "", &[], false);
+        let view = StoredView {
+            key: key.clone(),
+            packages: vec![],
+            cleanup: vec![],
+            rows: "[]".into(),
+            status: "kept".into(),
+            report_state: String::new(),
+            upgradable: false,
+            updates_view: false,
+        };
+        let written = std::sync::Mutex::new(std::collections::HashMap::new());
+        assert!(write_view(&path, view, 1, &written));
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().rust_mut().open_view_store(Some(path.clone()));
+        assert!(controller.rust().view_cache.get(&key).is_some());
+        assert!(!controller.rust().prefetch.is_empty());
+
+        controller.as_mut().set_window_open(false);
+        let rust = controller.rust();
+        assert!(rust.view_cache.entries.is_empty());
+        assert!(rust.prefetch.is_empty());
+        assert!(rust.engine.is_none());
+        // Nothing left to load, so the tray can sleep.
+        assert!(!rust.outstanding());
+        assert!(!*controller.needs_poll());
+        // Closing twice changes nothing.
+        controller.as_mut().set_window_open(false);
+        assert!(controller.rust().prefetch.is_empty());
+
+        controller.as_mut().set_window_open(true);
+        assert!(controller.rust().view_cache.get(&key).is_some());
+        assert_eq!(controller.rust().prefetch, prefetch_views());
+        // Sections already in memory aren't read again.
+        std::fs::remove_file(&path).unwrap();
+        controller.as_mut().set_window_open(true);
+        assert!(controller.rust().view_cache.get(&key).is_some());
+    }
+
+    #[test]
     fn a_damaged_or_older_store_is_ignored() {
         let dir = Scratch::new("damaged-views");
         let key = cache_key("Installed", "", &[], false);
