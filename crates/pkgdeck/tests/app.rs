@@ -360,6 +360,13 @@ fn sources_turn_off_and_pages_narrow() {
         .collect();
     app.set_page_sources(Page::Installed, narrowed);
     assert_eq!(app.source_summary(Page::Installed), "2 sources");
+    // Another page's filter waits for that page, leaving this one as it is.
+    let rows = app.rows.len();
+    let flatpak = ["flatpak".to_owned()].into_iter().collect();
+    app.set_page_sources(Page::Updates, flatpak);
+    assert_eq!(app.page, Page::Installed);
+    assert_eq!(app.rows.len(), rows);
+    assert_eq!(app.source_summary(Page::Updates), "Flatpak");
     app.set_source_enabled("flatpak", true);
     assert!(
         app.page_sources.is_empty(),
