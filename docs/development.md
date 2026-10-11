@@ -101,18 +101,18 @@ The workflow is called `CI`. Check names follow `Category / Scope (architecture)
 
 | Check | What it does |
 | --- | --- |
-| `Test / Linux (x86_64, aarch64)` | Everything on Linux once per architecture: format and infrastructure checks, the APT helper, clippy (x86_64), all workspace tests (measured for coverage on x86_64), and real sudo/polkit and APT lock tests |
+| `Test / Linux (x86_64, aarch64)` | Everything on Linux once per architecture: format and infrastructure checks, the APT helper, and all workspace tests. x86_64 measures them for coverage, the slowest build, so aarch64 also runs clippy and the real sudo/polkit and APT lock tests |
 | `Test / macOS (x86_64, aarch64)` | All core/CLI tests (measured for coverage on Apple Silicon), real app inventory, Homebrew cask ownership and adoption, including recovery from a failed adoption, then real lifecycle tests for every development manager and MacPorts (prebuilt archives only). Pull requests run the lifecycle tests on Apple Silicon only; the Intel runner takes over half an hour for them, and Linux covers the same managers. Release tags without PR proof run them on both. One job per Mac, since only 5 macOS runners run at once |
 | `Coverage / Combined` | The 100% gate: merges the Linux and macOS reports; a line counts once and is covered when a test ran it on any platform |
 | `Test / Podman (x86_64, aarch64)` | CLI build in the development container and CLI APT/Homebrew install/remove tests |
-| `Test / Backends / native (linux-x86_64, linux-aarch64)` | Real DNF, Zypper, apk, XBPS, Snap, Toolbx and Distrobox lifecycle tests, plus Pacman and the AUR on x86_64 |
+| `Test / Backends / native (linux-x86_64, linux-aarch64)` | Real DNF, Zypper, apk, XBPS, Snap, Toolbx and Distrobox lifecycle tests, plus Pacman and the AUR on x86_64. On main it only builds the CLI, to save the cache both backend groups restore |
 | `Test / Backends / dev (linux-x86_64, linux-aarch64)` | Real lifecycle tests for every development manager on Linux; the job summary lists each backend's result |
 | `Package / AppImage + Snap (x86_64, aarch64)` | Release build, packages, and GUI tests on the packaged app |
 | `Package / Flatpak (x86_64, aarch64)` | Flatpak build, installed GUI, and host bridge tests |
 | `Package / macOS app (x86_64, aarch64)` | Self-contained `PkgDeck.app` build, bundle checks, window, controller, startup and media tests, then installs that app through a Homebrew cask and checks it starts |
 | `Package / Linux CLI (x86_64, aarch64)` | Static `pkd` and host runner archive, tested on Alpine |
 | `Test / Homebrew (Linux)` | Renders the tap from the Linux packages and installs and tests the formula; published recipes are checked on macOS too |
-| `Prune superseded caches` | On main only: keeps the newest copy of each build cache so the 10 GB limit never evicts the ones pull requests restore |
+| `Prune superseded caches` | On main only: keeps the newest copy of each build cache, whatever lockfile built it, so the 10 GB limit never evicts the ones pull requests restore |
 
 The macOS job's native tests use real `plutil` with XML and binary bundles, system and
 user application directories, a locally built cask installed by Homebrew, and
@@ -147,12 +147,16 @@ workspace tests, or release builds.
 Rust caches are split by architecture and purpose (terminal, lint, tests,
 coverage, release, macOS native, Homebrew GUI tests). Cache keys include
 dependencies, toolchain, and source revision, and fall back to the newest cache
-for the same dependencies, then to any cache of that purpose. Only pushes to
-main save caches; they rerun the cache-owning jobs so every pull request starts
-from main's build outputs. Pull requests restore without saving, because GitHub
-never shares one pull request's caches with another. Backend jobs reuse the
-terminal cache without saving it. Container caches are separate. Incremental
-build folders aren't uploaded.
+for the same dependencies. Pull requests also fall back to any cache of that
+purpose; main doesn't, so a cache never carries old dependency builds along.
+Only pushes to main save caches; they rerun the cache-owning jobs, building
+what pull requests build (coverage, clippy and test binaries included), so
+every pull request starts from main's build outputs. Pull requests restore
+without saving, because GitHub never shares one pull request's caches with
+another. The native backend jobs save the terminal cache on main and both
+backend groups restore it. Container caches are separate. CI builds keep line
+tables only, not full debug info, and no incremental data, which keeps caches
+well under the 10 GB limit.
 
 ## Podman details
 

@@ -1410,6 +1410,25 @@ mod header_tests {
     }
 
     #[test]
+    fn a_button_keeps_room_for_the_clear_button_beside_its_label() {
+        fn plain(_: &mut App, ui: &mut Ui) {
+            Button::new(Look::Secondary, "Same").show(ui);
+        }
+        fn roomy(_: &mut App, ui: &mut Ui) {
+            Button::new(Look::Secondary, "Same")
+                .trailing(CLEAR_WIDTH)
+                .show(ui);
+        }
+        let width = |paint| {
+            draw(app(Page::Installed, 1), paint)
+                .get_by_label("Same")
+                .rect()
+                .width()
+        };
+        assert!((width(roomy) - width(plain) - CLEAR_WIDTH).abs() < 0.5);
+    }
+
+    #[test]
     fn a_filtered_page_clears_from_the_filter_s_right_end() {
         let harness = draw(app(Page::Installed, 1), header);
         assert!(harness.query_by_label("Clear filter").is_none());
