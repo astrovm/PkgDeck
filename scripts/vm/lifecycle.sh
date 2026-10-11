@@ -16,6 +16,7 @@ write() {
     # disposable user's native configuration (including Homebrew tap trust).
     # Set up PkgDeck takes the keyboard on first launch. Mark it answered.
     if [[ ${PKGDECK_FRONTEND:-cli} == gui ]]; then
+        # shellcheck disable=SC2016 # Expands in the test user's shell.
         runuser -u "$user" -- sh -c 'f=$HOME/.config/pkgdeck/window.json
             [ -e "$f" ] || { mkdir -p "${f%/*}" && echo "{\"setupAsked\":true}" >"$f"; }'
     fi
