@@ -195,20 +195,39 @@ void pkgdeck_mac_pump(double seconds) {
     }
 }
 
-// Clicking the Dock icon while no window is open brings the window back.
-static id pkgdeck_reopen_observer = nil;
-void pkgdeck_mac_watch_reopen(int watching) {
-    if (pkgdeck_reopen_observer) {
-        [[NSNotificationCenter defaultCenter] removeObserver:pkgdeck_reopen_observer];
-        [pkgdeck_reopen_observer release];
-        pkgdeck_reopen_observer = nil;
+// Opening PkgDeck again (its Dock icon, Finder, Launchpad, Spotlight) while
+// no window is open brings the window back. Only that "reopen" event does:
+// macOS also makes an app active on its own, as when the app in front
+// closes, and that must not show the window.
+static BOOL pkgdeck_watching_reopen = NO;
+
+@interface PkgDeckReopenHandler : NSObject
+@end
+@implementation PkgDeckReopenHandler
+- (void)reopen:(NSAppleEventDescriptor *)event withReplyEvent:(NSAppleEventDescriptor *)reply {
+    if (pkgdeck_watching_reopen) {
+        if (pkgdeck_mac_event) pkgdeck_mac_event(PKGDECK_OPEN);
+        return;
     }
+    // With the window up, what AppKit does by itself: bring it back.
+    [NSApp unhide:nil];
+    for (NSWindow *window in [NSApp windows]) {
+        if ([window isMiniaturized]) [window deminiaturize:nil];
+    }
+}
+@end
+
+static PkgDeckReopenHandler *pkgdeck_reopen_handler = nil;
+void pkgdeck_mac_watch_reopen(int watching) {
+    pkgdeck_watching_reopen = watching != 0;
     if (!watching) return;
-    pkgdeck_reopen_observer = [[[NSNotificationCenter defaultCenter]
-        addObserverForName:NSApplicationDidBecomeActiveNotification
-                    object:nil
-                     queue:nil
-                usingBlock:^(__unused NSNotification *note) { if (pkgdeck_mac_event) pkgdeck_mac_event(PKGDECK_OPEN); }] retain];
+    // AppKit installs its own handler as it finishes launching, which can
+    // come after this, so it is set again each time.
+    if (!pkgdeck_reopen_handler) pkgdeck_reopen_handler = [[PkgDeckReopenHandler alloc] init];
+    [[NSAppleEventManager sharedAppleEventManager] setEventHandler:pkgdeck_reopen_handler
+                                                       andSelector:@selector(reopen:withReplyEvent:)
+                                                     forEventClass:kCoreEventClass
+                                                        andEventID:kAEReopenApplication];
 }
 
 // The menu bar menu's item titles, one per line, or "" without the icon.

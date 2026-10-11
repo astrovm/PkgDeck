@@ -398,6 +398,7 @@ fn background_checks_badge_and_tray_events() {
         .settings
         .last_background_state
         .contains("\"available\":1"));
+    app.window_visible = true;
     for (event, request) in [
         (Event::Open, WindowRequest::Show),
         (Event::Toggle, WindowRequest::Hide),

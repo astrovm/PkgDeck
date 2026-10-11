@@ -385,6 +385,8 @@ is running. Turn them off in Settings.
   tray or menu bar. **Open** brings a new window back.
 - On macOS, Cmd+W closes the window too, and clicking the Dock icon brings
   it back.
+- At login, and when PkgDeck restarts after updating itself with the window
+  closed, the window stays closed.
 - **Quit** in the tray menu, or Ctrl+Q (Cmd+Q on macOS), exits PkgDeck.
 
 You get one notification for each new batch of updates, including on the first

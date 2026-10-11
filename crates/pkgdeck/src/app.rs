@@ -155,6 +155,8 @@ pub struct App {
     post_write_reload: bool,
     close_pending: bool,
     pub force_quit: bool,
+    /// Set while a [`crate::ui::Window`] is up. A copy started in the
+    /// background never had one, so a restart keeps it hidden.
     pub window_visible: bool,
     pub window_request: WindowRequest,
     /// Second launches hand their input here.
@@ -296,7 +298,7 @@ impl App {
             post_write_reload: false,
             close_pending: false,
             force_quit: false,
-            window_visible: true,
+            window_visible: false,
             window_request: WindowRequest::None,
             listener: None,
             ui: crate::ui::State::default(),

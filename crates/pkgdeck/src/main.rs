@@ -122,7 +122,9 @@ fn main() {
     let listener = if launch.smoke_test {
         None
     } else {
-        match opening::claim(&socket, &launch.input, pkgdeck::wake) {
+        // At login or after a restart there's nothing to show.
+        let quiet = launch.background && launch.input.is_empty();
+        match opening::claim(&socket, &launch.input, quiet, pkgdeck::wake) {
             Ok(None) => return,
             Ok(Some(listener)) => Some(listener),
             Err(_) => None,

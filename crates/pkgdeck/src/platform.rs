@@ -381,7 +381,7 @@ impl Platform {
         return vec!["Open".into(), "Check now".into(), "Quit".into()];
     }
 
-    /// While no window is open, a click on the Dock icon sends [`Event::Open`].
+    /// While no window is open, opening PkgDeck again sends [`Event::Open`].
     pub fn watch_reopen(&self, watching: bool) {
         #[cfg(target_os = "macos")]
         native::watch_reopen(watching);
