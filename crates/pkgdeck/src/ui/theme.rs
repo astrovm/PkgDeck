@@ -913,7 +913,7 @@ mod tests {
             ..Skin::default()
         };
         let before = skin();
-        assert_eq!(with_skin(luna, || skin()), luna);
+        assert_eq!(with_skin(luna, skin), luna);
         assert_eq!(with_skin(luna, || super::round(12)), CornerRadius::same(5));
         assert_eq!(skin(), before);
     }
