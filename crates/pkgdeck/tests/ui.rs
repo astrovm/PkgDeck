@@ -364,6 +364,105 @@ fn settings_switches_change_settings() {
     assert!(!harness.state().1.settings.reduce_motion);
 }
 
+/// A catalog with two package managers, one whose check failed and one
+/// that isn't on this computer.
+fn with_sources(mut app: App) -> App {
+    app.c().set_source_catalog(
+        json!([
+            {"source": "apt", "name": "APT", "summary": "Available", "available": true,
+             "availability_kind": "available", "capabilities": ["installed", "upgrade", "refresh"]},
+            {"source": "flatpak", "name": "Flatpak", "summary": "Available", "available": true,
+             "availability_kind": "available", "capabilities": ["installed", "upgrade"]},
+            {"source": "homebrew", "name": "Homebrew", "summary": "Homebrew didn't answer.",
+             "available": false, "availability_kind": "failed", "check_failed": true,
+             "capabilities": ["installed", "refresh"]},
+            {"source": "snap", "name": "Snap", "summary": "Unavailable: not installed",
+             "available": false, "availability_kind": "unavailable", "capabilities": ["installed"]},
+        ])
+        .to_string()
+        .into(),
+    );
+    app.react();
+    app
+}
+
+fn switch_enabled(harness: &Harness<'_, (bool, App)>, label: &str) -> bool {
+    !harness
+        .get_by_role_and_label(Role::CheckBox, label)
+        .accesskit_node()
+        .is_disabled()
+}
+
+#[test]
+fn settings_turn_package_managers_on_and_off() {
+    let mut harness = show(Page::Settings);
+    harness.run_steps(2);
+    assert!(harness
+        .query_by_label("Looking for package managers…")
+        .is_some());
+    let mut app = with_sources(app());
+    app.page = Page::Settings;
+    app.invalidate();
+    let mut harness = harness_at(app, egui::vec2(1200.0, 2400.0));
+    harness.run_steps(3);
+    assert!(harness
+        .query_by_label("Looking for package managers…")
+        .is_none());
+    for name in ["APT", "Flatpak", "Homebrew"] {
+        assert!(switch_enabled(&harness, name), "{name}");
+    }
+    // Only what is on this computer, and why a check failed.
+    assert!(harness.query_by_label("Snap").is_none());
+    assert!(harness.query_by_label("Homebrew didn't answer.").is_some());
+    for name in ["Flatpak", "Homebrew"] {
+        harness.get_by_role_and_label(Role::CheckBox, name).click();
+        harness.run_steps(2);
+        assert!(!harness
+            .state()
+            .1
+            .enabled_sources()
+            .contains(&name.to_lowercase()));
+    }
+    // The last one here stays on, whatever else is on.
+    assert!(!switch_enabled(&harness, "APT"));
+    harness
+        .get_by_role_and_label(Role::CheckBox, "Flatpak")
+        .click();
+    harness.run_steps(2);
+    assert!(switch_enabled(&harness, "APT"));
+    assert!(harness.state().1.enabled_sources().contains("flatpak"));
+    // Nothing can change while a change runs.
+    harness.state_mut().1.writing = true;
+    harness.run_steps(2);
+    assert!(!switch_enabled(&harness, "Flatpak"));
+    harness.state_mut().1.writing = false;
+    harness.get_by_label("Repositories").click();
+    harness.run_steps(2);
+    assert!(harness.state().1.ui.repos_open);
+}
+
+#[test]
+fn updates_refresh_the_package_lists_it_shows() {
+    let mut app = with_sources(app());
+    app.page = Page::Updates;
+    app.invalidate();
+    let mut harness = harness(app);
+    harness.run_steps(3);
+    harness.get_by_label("Refresh sources").click();
+    harness.run_steps(3);
+    // APT can refresh; Flatpak can't, and Homebrew's check failed.
+    assert!(harness
+        .query_by_label_contains("Refresh 1 source")
+        .is_some());
+    harness.get_by_label("Cancel").click();
+    harness.run_steps(3);
+    // Without a source that can refresh there's no button.
+    harness.state_mut().1.set_source_enabled("flatpak", true);
+    harness.state_mut().1.set_source_enabled("apt", false);
+    harness.run_steps(3);
+    assert!(harness.query_by_label("Refresh sources").is_none());
+}
+
 #[test]
 fn settings_say_what_automatic_updates_wait_for() {
     for (waiting, text) in [

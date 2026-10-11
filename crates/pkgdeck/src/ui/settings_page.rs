@@ -1,5 +1,6 @@
-//! Settings: how PkgDeck looks, when it checks for updates, where Clean
-//! looks for old projects, what it is, and its keyboard shortcuts.
+//! Settings: how PkgDeck looks, when it checks for updates, which package
+//! managers it uses, where Clean looks for old projects, what it is, and
+//! its keyboard shortcuts.
 
 use super::widgets::*;
 use crate::{
@@ -23,6 +24,8 @@ pub fn show(app: &mut App, ui: &mut Ui) {
             appearance(app, ui);
             ui.add_space(8.0);
             update_checks(app, ui);
+            ui.add_space(8.0);
+            sources(app, ui);
             ui.add_space(8.0);
             clean(ui);
             ui.add_space(8.0);
@@ -531,6 +534,79 @@ fn shown_folder(path: &Path, home: Option<&Path>) -> String {
 
 /// Where Clean looks for old projects, kept in PkgDeck's own config file
 /// for the engine and `pkd` to read too.
+/// Package managers that manage repositories in PkgDeck.
+const REPOSITORY_SOURCES: [&str; 5] = ["flatpak", "fwupd", "apt", "dnf", "zypper"];
+
+/// Every package manager found on this computer, with a switch, and the
+/// repositories of those that have them.
+fn sources(app: &mut App, ui: &mut Ui) {
+    let palette = Palette::current(ui.ctx());
+    let shown = shown_sources(&app.catalog);
+    let enabled = app.enabled_sources();
+    section(ui, "Sources", |ui| {
+        let note = if app.catalog.is_empty() {
+            "Looking for package managers…"
+        } else {
+            "PkgDeck uses the package managers that are on."
+        };
+        ui.label(egui::RichText::new(note).color(palette.muted));
+        ui.add_space(4.0);
+        for entry in &shown {
+            let on_now = enabled.contains(&entry.source);
+            ui.horizontal(|ui| {
+                ui.set_min_height(SWITCH.y + 6.0);
+                let (icon, _) = ui.allocate_exact_size(Vec2::splat(20.0), Sense::hover());
+                theme::paint_source_icon(ui.painter(), icon, &entry.source, palette.accent);
+                ui.label(
+                    egui::RichText::new(model::source_name(&entry.source))
+                        .font(theme::font(14.5))
+                        .color(palette.ink),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let mut on = on_now;
+                    let can = !app.writing && !(on_now && !app.can_turn_off(&entry.source));
+                    if switch(ui, &mut on, can, model::source_name(&entry.source)).changed() {
+                        app.set_source_enabled(&entry.source, on);
+                    }
+                });
+            });
+            if entry.check_failed {
+                ui.label(
+                    egui::RichText::new(&entry.summary)
+                        .font(theme::font(12.5))
+                        .color(palette.danger),
+                );
+            }
+        }
+        if REPOSITORY_SOURCES.iter().any(|id| app.available(id)) {
+            ui.add_space(6.0);
+            if Button::new(Look::Secondary, "Repositories")
+                .icon("sources")
+                .small()
+                .enabled(!app.busy)
+                .show(ui)
+                .clicked()
+            {
+                app.ui.repos_open = true;
+                app.c().load_repositories();
+                app.react();
+            }
+        }
+    });
+}
+
+/// The package managers worth a switch: found here, or found but failing
+/// their check, by name.
+fn shown_sources(catalog: &[model::Source]) -> Vec<model::Source> {
+    let mut shown: Vec<model::Source> = catalog
+        .iter()
+        .filter(|entry| entry.available || entry.check_failed)
+        .cloned()
+        .collect();
+    shown.sort_by_key(|entry| model::source_name(&entry.source).to_lowercase());
+    shown
+}
+
 fn clean(ui: &mut Ui) {
     let palette = Palette::current(ui.ctx());
     let id = Id::new("project-settings");
@@ -673,7 +749,6 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Installed", "Ctrl+2"),
     ("Updates", "Ctrl+3"),
     ("Clean", "Ctrl+4"),
-    ("Sources", "Ctrl+5"),
     ("Settings", "Ctrl+,"),
     ("Search or filter", "Ctrl+F"),
     ("Activity", "Ctrl+J"),

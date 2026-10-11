@@ -129,16 +129,9 @@ fn keyboard(app: &mut App, ctx: &egui::Context) {
         || app.ui.add_repo.is_some()
         || app.ui.picker_open;
     let command = |key: Key| ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, key));
-    for (index, key) in [
-        Key::Num1,
-        Key::Num2,
-        Key::Num3,
-        Key::Num4,
-        Key::Num5,
-        Key::Num6,
-    ]
-    .into_iter()
-    .enumerate()
+    for (index, key) in [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5]
+        .into_iter()
+        .enumerate()
     {
         if !dialog_open && command(key) {
             app.open_page(Page::ALL[index]);
@@ -604,10 +597,7 @@ fn header(app: &mut App, ui: &mut Ui) {
                 }
             }
             let can_open_files = !model::file_patterns(&app.catalog).is_empty();
-            if matches!(app.page, Page::Search | Page::Sources)
-                && can_open_files
-                && app.opened.is_none()
-            {
+            if app.page == Page::Search && can_open_files && app.opened.is_none() {
                 let response = Button::new(Look::Secondary, "Install from file…")
                     .icon("package")
                     .icon_only(compact)
@@ -862,7 +852,7 @@ fn notice_banner(app: &mut App, ui: &mut Ui) {
 }
 
 fn failure_banner(app: &mut App, ui: &mut Ui) {
-    if !app.page.lists() || app.page == Page::Sources {
+    if !app.page.lists() {
         return;
     }
     let failures = app.read_failures();
@@ -1023,12 +1013,13 @@ fn clean_all_frees(app: &App) -> u64 {
 
 fn page_actions_height(app: &App) -> f32 {
     let any = match app.page {
-        Page::Updates => app
-            .items
-            .iter()
-            .any(|i| app.shown_rows()[i.raw].is_package()),
+        Page::Updates => {
+            app.items
+                .iter()
+                .any(|i| app.shown_rows()[i.raw].is_package())
+                || !app.refreshable_sources().is_empty()
+        }
         Page::Clean => app.items.len() > 1,
-        Page::Sources => true,
         _ => false,
     };
     if any {
@@ -1093,6 +1084,25 @@ fn page_actions(app: &mut App, ui: &mut Ui) {
                     app.items.iter().map(|i| rows[i.raw].identity()).collect();
                 app.unchecked = all;
             }
+            // Package lists older than the last check can hide updates.
+            if !app.refreshable_sources().is_empty()
+                && Button::new(
+                    if total == 0 {
+                        Look::Primary
+                    } else {
+                        Look::Secondary
+                    },
+                    "Refresh sources",
+                )
+                .icon("refresh")
+                .icon_only(narrow && total > 0)
+                .tooltip("Download the latest package lists")
+                .enabled(app.can_act() && app.retained.is_none())
+                .show(ui)
+                .clicked()
+            {
+                app.refresh_sources();
+            }
         }
         Page::Clean => {
             let label = match clean_all_frees(app) {
@@ -1106,33 +1116,6 @@ fn page_actions(app: &mut App, ui: &mut Ui) {
                 .clicked()
             {
                 app.propose("clean-all");
-            }
-        }
-        Page::Sources => {
-            let selected = app.selected_row().map(|row| row.source.clone());
-            if let Some(source) = selected {
-                if Button::new(Look::Primary, "Refresh sources")
-                    .icon("refresh")
-                    .enabled((!app.busy || app.writing) && app.available(&source))
-                    .show(ui)
-                    .clicked()
-                {
-                    app.propose("refresh");
-                }
-            }
-            let repos = ["flatpak", "fwupd", "apt", "dnf", "zypper"]
-                .iter()
-                .any(|id| app.available(id));
-            if repos
-                && Button::new(Look::Secondary, "Repositories")
-                    .icon("sources")
-                    .enabled(!app.busy)
-                    .show(ui)
-                    .clicked()
-            {
-                app.ui.repos_open = true;
-                app.c().load_repositories();
-                app.react();
             }
         }
         _ => {}

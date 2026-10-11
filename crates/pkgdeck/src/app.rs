@@ -104,8 +104,7 @@ pub struct App {
     pub search_due: Option<Instant>,
     pub filter: String,
     pub duplicates_only: bool,
-    pub show_unavailable: bool,
-    /// Sources turned on in Sources; empty is all of them.
+    /// Sources turned on in Settings; empty is all of them.
     pub enabled: HashSet<String>,
     /// Sources a page shows, when the person narrowed it.
     pub page_sources: HashMap<Page, HashSet<String>>,
@@ -258,7 +257,6 @@ impl App {
             search_due: None,
             filter: String::new(),
             duplicates_only: false,
-            show_unavailable: false,
             enabled,
             page_sources: HashMap::new(),
             sort,
@@ -911,9 +909,6 @@ impl App {
     }
 
     fn sources_csv(&self, page: Page) -> String {
-        if page == Page::Sources {
-            return String::new();
-        }
         if self.enabled.is_empty() && !self.page_sources.contains_key(&page) {
             return String::new();
         }
@@ -987,6 +982,31 @@ impl App {
                 rows.retain(|row| shown.contains(&row.source));
             }
         }
+    }
+
+    /// The sources on Updates that can download their package lists.
+    pub fn refreshable_sources(&self) -> Vec<String> {
+        let shown = self.effective_sources(Page::Updates);
+        all_sources(&self.catalog)
+            .into_iter()
+            .filter(|id| shown.contains(id))
+            .filter(|id| {
+                let entry = catalog_entry(&self.catalog, id);
+                entry.available && entry.capabilities.iter().any(|c| c == "refresh")
+            })
+            .collect()
+    }
+
+    /// Refresh sources on Updates: the package lists of every source it
+    /// shows, after one review.
+    pub fn refresh_sources(&mut self) {
+        let sources = self.refreshable_sources();
+        if sources.is_empty() || self.retained.is_some() {
+            return;
+        }
+        self.review_on = ReviewOn::Dialog;
+        self.c().propose_refresh(sources.join(",").into());
+        self.react();
     }
 
     /// "Flatpak", "12 enabled sources", "3 sources".
@@ -1153,12 +1173,7 @@ impl App {
             return;
         }
         self.items_stale = false;
-        // Sources lists every manager, with the enabled ones first.
-        let sources = Some(if self.page == Page::Sources {
-            self.enabled_sources()
-        } else {
-            self.effective_sources(self.page)
-        });
+        let sources = Some(self.effective_sources(self.page));
         let narrowing = self.retained.is_some() && self.page == Page::Search;
         let rows = self.shown_rows();
         let options = ViewOptions {
@@ -1171,7 +1186,6 @@ impl App {
             sources: sources.as_ref(),
             filter: &self.filter,
             duplicates_only: self.duplicates_only,
-            show_unavailable: self.show_unavailable,
             sort: self.sort,
             scope_choices: Some(&self.scope_choices),
         };
@@ -1596,9 +1610,7 @@ impl App {
         } else {
             self.report.failures.clone()
         };
-        failures.retain(|f| {
-            f.kind != "cancelled" && (self.page == Page::Sources || sources.contains(&f.source))
-        });
+        failures.retain(|f| f.kind != "cancelled" && sources.contains(&f.source));
         failures
     }
 
@@ -1617,9 +1629,13 @@ impl App {
             .unwrap_or_else(|| "This source could not be checked.".into())
     }
 
+    /// Whether `source` is on and another source that is here stays on.
     pub fn can_turn_off(&self, source: &str) -> bool {
         let enabled = self.enabled_sources();
-        enabled.contains(source) && enabled.len() > 1
+        enabled.contains(source)
+            && enabled
+                .iter()
+                .any(|other| other != source && self.available(other))
     }
 
     pub fn queued_count(&self) -> usize {

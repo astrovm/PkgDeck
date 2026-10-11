@@ -77,21 +77,12 @@ fn turning_every_source_on_follows_new_sources_too() {
 }
 
 #[test]
-fn sources_list_the_enabled_ones_first() {
+fn pages_keep_their_own_choice_of_sources() {
     let mut app = app_with(Launch {
         from: vec!["homebrew".into()],
         ..Launch::default()
     });
-    app.page = Page::Sources;
-    let source = |id: &str| json!({"kind": "source", "name": id, "source": id, "available": true});
-    rows(&mut app, json!([source("apt"), source("homebrew")]));
-    let order: Vec<&str> = app
-        .items
-        .iter()
-        .map(|item| app.rows[item.raw].source.as_str())
-        .collect();
-    assert_eq!(order, ["homebrew", "apt"]);
-    // Other pages keep their own narrower choice.
+    // Pages keep their own narrower choice.
     app.page_sources
         .insert(Page::Installed, HashSet::from(["apt".to_owned()]));
     app.page = Page::Installed;
@@ -100,6 +91,34 @@ fn sources_list_the_enabled_ones_first() {
         json!([row("a", json!({})), row("b", json!({"source": "homebrew"}))]),
     );
     assert!(app.items.is_empty());
+}
+
+#[test]
+fn refreshing_sources_needs_one_that_can_and_a_settled_list() {
+    let mut app = app();
+    app.refresh_sources();
+    assert!(app.confirmation.is_none());
+    app.c().set_source_catalog(
+        json!([
+            {"source": "apt", "available": true, "capabilities": ["installed", "refresh"]},
+            {"source": "npm", "available": true, "capabilities": ["installed"]},
+            {"source": "dnf", "available": false, "capabilities": ["refresh"]},
+        ])
+        .to_string()
+        .into(),
+    );
+    app.react();
+    assert_eq!(app.refreshable_sources(), ["apt"]);
+    app.retained = Some(vec![]);
+    app.refresh_sources();
+    assert!(app.confirmation.is_none());
+    app.retained = None;
+    app.refresh_sources();
+    assert!(app.confirmation.is_some());
+    // Only what Updates shows.
+    app.page_sources
+        .insert(Page::Updates, HashSet::from(["npm".to_owned()]));
+    assert!(app.refreshable_sources().is_empty());
 }
 
 #[test]
@@ -553,10 +572,10 @@ fn selections_survive_reloads_or_clear() {
 #[test]
 fn row_actions_need_a_row_an_action_and_a_free_controller() {
     let mut app = app();
-    app.page = Page::Sources;
+    app.page = Page::Installed;
     rows(
         &mut app,
-        json!([{"kind": "source", "name": "apt", "source": "apt", "available": true}]),
+        json!([{"kind": "failure", "name": "apt", "source": "apt"}]),
     );
     app.run_row_action(0);
     app.run_row_action(7);
@@ -608,7 +627,6 @@ fn pages_load_what_they_show() {
         .insert(Page::Installed, HashSet::from(["apt".to_owned()]));
     assert_eq!(app.source_summary(Page::Installed), "APT");
     assert_eq!(app.sources_csv(Page::Installed), "apt");
-    assert_eq!(app.sources_csv(Page::Sources), "");
     app.enabled = HashSet::from(["apt".to_owned(), "snap".to_owned()]);
     assert_eq!(app.sources_csv(Page::Updates), "apt,snap");
     app.change_repository(

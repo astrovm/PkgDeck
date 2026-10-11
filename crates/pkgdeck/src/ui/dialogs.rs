@@ -949,7 +949,7 @@ pub fn source_picker(app: &mut App, ui: &mut Ui, button: &Response) {
                                         let reason = if !app.available(&id) {
                                             model::catalog_entry(&app.catalog, &id).summary
                                         } else if !enabled.contains(&id) {
-                                            "Turned off in Sources".into()
+                                            "Turned off in Settings".into()
                                         } else {
                                             "Not supported in this view".into()
                                         };

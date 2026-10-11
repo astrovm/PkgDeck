@@ -66,8 +66,7 @@ pub fn list_card(app: &mut App, ui: &mut Ui, rect: Rect) {
         Width::Wide
     };
     let mut top = rect.top();
-    let heading_shown =
-        !app.items.is_empty() || app.busy || app.writing || app.page == Page::Sources;
+    let heading_shown = !app.items.is_empty() || app.busy || app.writing;
     if heading_shown {
         let heading = Rect::from_min_size(rect.min, vec2(rect.width(), 48.0));
         heading_row(app, ui, heading);
@@ -146,7 +145,6 @@ fn heading_text(app: &App) -> String {
         }
     }
     let noun = match app.page {
-        Page::Sources => "source",
         Page::Clean => "cleanup task",
         Page::Updates => "update",
         _ => "package",
@@ -222,24 +220,6 @@ fn heading_row(app: &mut App, ui: &mut Ui, rect: Rect) {
                     .clicked()
                 {
                     app.cancel();
-                }
-                if app.page == Page::Sources {
-                    let hidden = app
-                        .rows
-                        .iter()
-                        .filter(|r| r.kind == "source" && !r.available.unwrap_or(false))
-                        .count();
-                    if hidden > 0 || app.show_unavailable {
-                        let label = if app.show_unavailable {
-                            "Hide unavailable".to_owned()
-                        } else {
-                            format!("Show unavailable ({hidden})")
-                        };
-                        if Button::new(Look::Flat, &label).small().show(ui).clicked() {
-                            app.show_unavailable = !app.show_unavailable;
-                            app.invalidate();
-                        }
-                    }
                 }
             });
         },
@@ -322,7 +302,7 @@ fn columns(row: Rect, width: Width, page: Page, actions: f32, shares: Shares) ->
         x += version_w + 12.0;
         r
     });
-    let summary = (summary && page != Page::Sources && right - x > 40.0)
+    let summary = (summary && right - x > 40.0)
         .then(|| Rect::from_min_max(pos2(x, row.top()), pos2(right, row.bottom())));
     Columns {
         start,
@@ -341,15 +321,9 @@ fn column_titles(app: &mut App, ui: &mut Ui, rect: Rect, width: Width) {
     let cols = columns(rect, width, app.page, ACTIONS_ROOM, Shares::of(app));
     let version_title = match app.page {
         Page::Clean => "SIZE",
-        Page::Sources => "STATUS",
         _ => "VERSION",
     };
-    let name_title = if app.page == Page::Sources {
-        "SOURCE"
-    } else {
-        "NAME"
-    };
-    let mut titles = vec![(Column::Name, name_title, cols.name)];
+    let mut titles = vec![(Column::Name, "NAME", cols.name)];
     if let Some(v) = cols.version {
         titles.push((Column::Version, version_title, v));
     }
@@ -445,7 +419,7 @@ fn column_titles(app: &mut App, ui: &mut Ui, rect: Rect, width: Width) {
 fn column_dividers(app: &mut App, ui: &mut Ui, rect: Rect, cols: &Columns) {
     let palette = Palette::current(ui.ctx());
     let mut dividers = Vec::new();
-    if let (Some(version), true) = (cols.version, app.page != Page::Sources) {
+    if let Some(version) = cols.version {
         dividers.push(("name", version.left() - 6.0));
         if cols.summary.is_some() {
             dividers.push(("version", version.right() + 6.0));
@@ -513,8 +487,8 @@ fn dragged_share(column: &str, x: f32, cols: &Columns) -> f32 {
 }
 
 fn row_height(app: &App, index: usize, width: Width) -> f32 {
-    // Compact rows add a version and summary line, which sources don't have.
-    let base = if width == Width::Compact && app.page != Page::Sources {
+    // Compact rows add a version and summary line.
+    let base = if width == Width::Compact {
         ROW_COMPACT
     } else {
         ROW
@@ -738,21 +712,6 @@ fn selection_highlight(app: &App, ui: &Ui, list_id: Id, offsets: &[f32], origin:
 
 /// What a source row adds to its status: why it can't be used, or that
 /// it's turned off.
-fn source_note(app: &App, row: &model::Row) -> String {
-    if !row.available.unwrap_or(false) {
-        return row
-            .summary
-            .strip_prefix("Unavailable: ")
-            .unwrap_or(&row.summary)
-            .to_owned();
-    }
-    if app.enabled_sources().contains(&row.source) {
-        String::new()
-    } else {
-        "Turned off".into()
-    }
-}
-
 /// The warning or lock beside an update that failed last time or needs
 /// the password, which says why when hovered.
 fn held_mark(ui: &mut Ui, held: &model::Held, rect: Rect, row: Id) {
@@ -834,7 +793,7 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
     }
     ui.painter()
         .rect_filled(surface, CornerRadius::same(10), fill);
-    let action = model::row_action(&row, app.page, &app.catalog).filter(|_| row.kind != "source");
+    let action = model::row_action(&row, app.page, &app.catalog);
     let running = app.writing
         && (app.active_rows.contains(&identity)
             || app.progress.for_row(&identity, &row.source).is_some());
@@ -885,16 +844,10 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
     }
     // Name and source.
     let title = row.title().to_owned();
-    let source = row.kind == "source";
-    let line = if source {
-        // The status column already says whether it's available.
-        source_note(app, &row)
-    } else {
-        model::source_line(&row, item.variants.len() > 1)
-    };
+    let line = model::source_line(&row, item.variants.len() > 1);
     let top_y = if line.is_empty() {
         rect.center().y
-    } else if compact && !source {
+    } else if compact {
         rect.top() + 14.0
     } else {
         rect.center().y - 10.0
@@ -922,12 +875,10 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
     let version = model::version_text(&row);
     let version_color = match row.kind.as_str() {
         "failure" => palette.danger,
-        "source" if !row.available.unwrap_or(false) => palette.muted,
-        "source" => palette.success,
         _ if row.has_update() => palette.accent,
         _ => palette.muted,
     };
-    if compact && !source {
+    if compact {
         // Version in its own colour, then the summary in what's left. Every
         // task here is a cache unless it says otherwise.
         let version = if row.kind == "cleanup" && version == model::cleanup_type("") {
@@ -999,7 +950,7 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
             );
         }
     }
-    if let Some(s) = cols.summary.filter(|_| !source) {
+    if let Some(s) = cols.summary {
         let galley = one_line(
             ui,
             &row.summary,
@@ -1303,7 +1254,6 @@ fn empty_state(app: &mut App, ui: &mut Ui, body: Rect) {
                 Page::Updates => "You're up to date",
                 Page::Clean => "Nothing to clean",
                 Page::Installed => "No installed packages.",
-                Page::Sources => "No available sources.",
                 Page::Search => "No matching packages.",
                 Page::Settings => "No results to show.",
             }
@@ -1483,7 +1433,7 @@ mod column_tests {
     }
 
     #[test]
-    fn compact_source_rows_keep_the_one_line_height() {
+    fn compact_rows_make_room_for_a_second_line() {
         use crate::{app::Launch, platform::Platform, settings::Store};
         let (store, settings) = Store::open(None, None);
         let mut app = App::with_controller(
@@ -1496,18 +1446,15 @@ mod column_tests {
             Launch::default(),
         );
         app.rows = vec![serde_json::from_value(serde_json::json!({
-            "kind": "source", "name": "apt", "source": "apt", "available": true
+            "kind": "package", "name": "apt", "source": "apt", "installed": "1.0"
         }))
         .unwrap()];
-        app.show_unavailable = true;
-        for (page, compact) in [(Page::Sources, ROW), (Page::Installed, ROW_COMPACT)] {
-            app.page = page;
-            app.invalidate();
-            app.refresh_items();
-            assert!(!app.items.is_empty(), "{page:?}");
-            assert_eq!(row_height(&app, 0, Width::Compact), compact, "{page:?}");
-            assert_eq!(row_height(&app, 0, Width::Wide), ROW, "{page:?}");
-        }
+        app.page = Page::Installed;
+        app.invalidate();
+        app.refresh_items();
+        assert!(!app.items.is_empty());
+        assert_eq!(row_height(&app, 0, Width::Compact), ROW_COMPACT);
+        assert_eq!(row_height(&app, 0, Width::Wide), ROW);
     }
 
     #[test]

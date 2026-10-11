@@ -15,16 +15,14 @@ pub enum Page {
     Installed,
     Updates,
     Clean,
-    Sources,
     Settings,
 }
 impl Page {
-    pub const ALL: [Page; 6] = [
+    pub const ALL: [Page; 5] = [
         Page::Search,
         Page::Installed,
         Page::Updates,
         Page::Clean,
-        Page::Sources,
         Page::Settings,
     ];
     /// The name the controller and the sidebar use.
@@ -34,7 +32,6 @@ impl Page {
             Page::Installed => "Installed",
             Page::Updates => "Updates",
             Page::Clean => "Clean",
-            Page::Sources => "Sources",
             Page::Settings => "Settings",
         }
     }
@@ -44,7 +41,6 @@ impl Page {
             Page::Installed => "installed",
             Page::Updates => "updates",
             Page::Clean => "remove",
-            Page::Sources => "sources",
             Page::Settings => "settings",
         }
     }
@@ -129,9 +125,6 @@ impl Row {
     }
     /// The name people know it by.
     pub fn title(&self) -> &str {
-        if self.kind == "source" {
-            return backends::display_name(&self.source);
-        }
         if self.display_name.trim().is_empty() {
             &self.name
         } else {
@@ -929,12 +922,6 @@ pub fn version_text(row: &Row) -> String {
             None => cleanup_type(&row.cleanup_kind).into(),
         },
         "failure" => "Failed".into(),
-        "source" => if row.available.unwrap_or(false) {
-            "Available"
-        } else {
-            "Unavailable"
-        }
-        .into(),
         _ if row.has_update() => match (known(&row.installed), known(&row.candidate)) {
             (Some(old), Some(new)) if old != new => format!("{old} → {new}"),
             (_, Some(new)) => new,
@@ -1133,7 +1120,6 @@ pub struct ViewOptions<'a> {
     pub sources: Option<&'a HashSet<String>>,
     pub filter: &'a str,
     pub duplicates_only: bool,
-    pub show_unavailable: bool,
     pub sort: Option<(Column, bool)>,
     pub scope_choices: Option<&'a HashMap<String, String>>,
 }
@@ -1189,13 +1175,7 @@ fn sort_key(row: &Row, column: Column) -> String {
             .or_else(|| row.candidate.clone())
             .unwrap_or_default()
             .to_lowercase(),
-        Column::Summary => {
-            if row.kind == "source" {
-                row.available.unwrap_or(false).to_string()
-            } else {
-                row.summary.to_lowercase()
-            }
-        }
+        Column::Summary => row.summary.to_lowercase(),
     }
 }
 
@@ -1225,18 +1205,13 @@ pub fn visible(rows: &[Row], options: &ViewOptions) -> Vec<Item> {
             match page {
                 Some(Page::Search) => !row.fabricated(),
                 Some(Page::Clean) => row.kind == "cleanup",
-                Some(Page::Sources) => {
-                    row.kind == "source"
-                        && (options.show_unavailable || row.available.unwrap_or(false))
-                }
                 _ => true,
             }
         })
         .filter(|&index| {
-            page == Some(Page::Sources)
-                || options
-                    .sources
-                    .is_none_or(|sources| sources.contains(&rows[index].source))
+            options
+                .sources
+                .is_none_or(|sources| sources.contains(&rows[index].source))
         })
         .collect();
     if page == Some(Page::Installed) {
@@ -1279,13 +1254,6 @@ pub fn visible(rows: &[Row], options: &ViewOptions) -> Vec<Item> {
             } else {
                 order.reverse()
             }
-        });
-    } else if page == Some(Page::Sources) {
-        // Enabled managers first, so the ones in use are easy to find.
-        let disabled = |row: &Row| options.sources.is_some_and(|s| !s.contains(&row.source));
-        kept.sort_by(|&a, &b| {
-            let (a, b) = (&rows[a], &rows[b]);
-            disabled(a).cmp(&disabled(b)).then_with(|| by_name(a, b))
         });
     } else if page == Some(Page::Installed) {
         // A to Z across sources, so a package is where its name says.
@@ -1509,7 +1477,7 @@ pub fn search_hint(catalog: &[Source], enabled: &HashSet<String>, saved: &str) -
         })
         .collect();
     match searchable.as_slice() {
-        [] => "No enabled source can search. Turn one on in Sources.".into(),
+        [] => "No enabled source can search. Turn one on in Settings.".into(),
         [one] => format!("Searches {} as you type.", source_name(&one.source)),
         many => format!("Searches {} sources as you type.", many.len()),
     }

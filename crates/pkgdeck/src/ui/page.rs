@@ -5,7 +5,7 @@
 use super::{list::package_icon, widgets::*};
 use crate::{
     app::App,
-    model::{self, Details, Page, Row, Tone, Variable},
+    model::{self, Details, Row, Tone, Variable},
     theme::{self, Palette},
 };
 use eframe::egui::{
@@ -87,10 +87,7 @@ fn panel(app: &mut App, ui: &mut Ui, rect: Rect, row: &Row, narrow: bool) {
                 app.deselect();
             }
             let cleanup = row.kind == "cleanup" && app.selected_index().is_some();
-            let source = row.kind == "source" && app.page == Page::Sources;
-            let reserve = if narrow { 0.0 } else { 40.0 }
-                + if cleanup { 110.0 } else { 0.0 }
-                + if source { 90.0 } else { 0.0 };
+            let reserve = if narrow { 0.0 } else { 40.0 } + if cleanup { 110.0 } else { 0.0 };
             let (icon, _) = ui.allocate_exact_size(Vec2::splat(44.0), Sense::hover());
             ui.painter()
                 .rect_filled(icon, CornerRadius::same(10), alpha(palette.accent, 0.1));
@@ -128,22 +125,6 @@ fn panel(app: &mut App, ui: &mut Ui, rect: Rect, row: &Row, narrow: bool) {
                     app.deselect();
                     app.ui.focus_list = true;
                 }
-                // Right to left: the switch's label goes before the switch.
-                if source {
-                    let enabled = app.enabled_sources().contains(&row.source);
-                    ui.label(
-                        egui::RichText::new(if enabled { "On" } else { "Off" })
-                            .color(palette.muted),
-                    );
-                    let mut on = enabled;
-                    let can = row.available.unwrap_or(false)
-                        && !app.writing
-                        && !(enabled && !app.can_turn_off(&row.source));
-                    if switch(ui, &mut on, can, "Enabled").changed() {
-                        let source = row.source.clone();
-                        app.set_source_enabled(&source, on);
-                    }
-                }
                 if let Some(index) = app.selected_index().filter(|_| cleanup) {
                     if Button::new(Look::Soft(Tone::Danger), "Clean")
                         .icon("remove")
@@ -179,11 +160,6 @@ fn panel(app: &mut App, ui: &mut Ui, rect: Rect, row: &Row, narrow: bool) {
                         .selectable(true)
                         .wrap(),
                 );
-                if row.kind == "source" && !row.capabilities.is_empty() {
-                    ui.add_space(12.0);
-                    caption(ui, "Can");
-                    chips(ui, &row.capabilities, &palette);
-                }
             });
     });
 }

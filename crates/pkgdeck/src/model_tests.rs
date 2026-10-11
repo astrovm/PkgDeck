@@ -26,7 +26,7 @@ fn pages_name_their_icons_capabilities_and_filters() {
     assert_eq!(Page::Clean.capability(), Some("clean"));
     assert_eq!(Page::Installed.capability(), Some("installed"));
     assert_eq!(Page::Search.capability(), Some("search"));
-    assert_eq!(Page::Sources.capability(), None);
+    assert_eq!(Page::Settings.capability(), None);
 }
 
 #[test]
@@ -43,8 +43,6 @@ fn rows_know_their_title_identity_and_state() {
     assert_eq!(identity_of_row_value(&target), firefox.identity());
     let blank = row(json!({"display_name": "  "}));
     assert_eq!(blank.title(), "app");
-    let source = row(json!({"kind": "source", "source": "flatpak"}));
-    assert_eq!(source.title(), "Flatpak");
     assert!(row(json!({})).fabricated());
     assert!(!row(json!({"candidate": "1"})).fabricated());
     assert!(!row(json!({"kind": "cleanup"})).fabricated());
@@ -377,11 +375,6 @@ fn versions_read_by_kind_and_state() {
     );
     assert_eq!(version(json!({"kind": "failure"})), "Failed");
     assert_eq!(
-        version(json!({"kind": "source", "available": true})),
-        "Available"
-    );
-    assert_eq!(version(json!({"kind": "source"})), "Unavailable");
-    assert_eq!(
         version(json!({"update": "available", "installed": "1", "candidate": "2"})),
         "1 → 2"
     );
@@ -431,7 +424,6 @@ fn row_actions_follow_source_page_and_state() {
         action(json!({"kind": "cleanup"}), Page::Clean),
         Some(Action::Clean)
     );
-    assert_eq!(action(json!({"kind": "source"}), Page::Sources), None);
     assert_eq!(
         action(json!({"installed": "1"}), Page::Updates),
         Some(Action::Upgrade)
@@ -555,8 +547,7 @@ fn visible_rows_filter_by_page_source_and_text() {
         row(json!({"kind": "failure", "name": "snap", "source": "snap"})),
         row(json!({"kind": "cleanup", "name": "cache", "cleanup_kind": "package_cache"})),
         row(json!({"name": "ghost"})),
-        row(json!({"kind": "source", "name": "apt", "source": "apt", "available": true})),
-        row(json!({"kind": "source", "name": "snap", "source": "snap", "available": false})),
+        row(json!({"name": "apt", "source": "apt", "installed": "1"})),
     ];
     let options = |page| ViewOptions {
         page: Some(page),
@@ -566,15 +557,6 @@ fn visible_rows_filter_by_page_source_and_text() {
         names(&rows, &visible(&rows, &options(Page::Clean))),
         ["cache"]
     );
-    assert_eq!(
-        names(&rows, &visible(&rows, &options(Page::Sources))),
-        ["apt"]
-    );
-    let all = ViewOptions {
-        show_unavailable: true,
-        ..options(Page::Sources)
-    };
-    assert_eq!(names(&rows, &visible(&rows, &all)), ["apt", "snap"]);
     let search = ViewOptions {
         query: "s",
         ..options(Page::Search)
@@ -626,38 +608,6 @@ fn visible_rows_sort_by_column_relevance_or_name() {
         ..ViewOptions::default()
     };
     assert_eq!(names(&rows, &visible(&rows, &options))[0], "c");
-    let sources = vec![
-        row(json!({"kind": "source", "name": "z", "source": "zypper", "available": true})),
-        row(json!({"kind": "source", "name": "a", "source": "apt", "available": false})),
-        row(json!({"kind": "source", "name": "b", "source": "bun", "available": true})),
-    ];
-    let options = ViewOptions {
-        page: Some(Page::Sources),
-        show_unavailable: true,
-        ..ViewOptions::default()
-    };
-    assert_eq!(
-        names(&sources, &visible(&sources, &options)),
-        ["a", "b", "z"]
-    );
-    // Enabled managers come first, and nothing is hidden for being off.
-    let enabled = HashSet::from(["zypper".to_owned(), "bun".to_owned()]);
-    let enabled_first = ViewOptions {
-        sources: Some(&enabled),
-        ..options
-    };
-    assert_eq!(
-        names(&sources, &visible(&sources, &enabled_first)),
-        ["b", "z", "a"]
-    );
-    let by_status = ViewOptions {
-        sort: Some((Column::Summary, true)),
-        ..options
-    };
-    assert_eq!(
-        names(&sources, &visible(&sources, &by_status)),
-        ["a", "b", "z"]
-    );
     for column in [Column::Name, Column::Version, Column::Summary] {
         assert_eq!(Column::from_key(column.key()), Some(column));
     }
@@ -838,7 +788,7 @@ fn the_search_hint_counts_what_can_search() {
     );
     assert_eq!(
         search_hint(&catalog(), &HashSet::new(), ""),
-        "No enabled source can search. Turn one on in Sources."
+        "No enabled source can search. Turn one on in Settings."
     );
 }
 

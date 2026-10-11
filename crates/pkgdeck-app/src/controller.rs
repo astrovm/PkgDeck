@@ -240,6 +240,9 @@ enum Job {
     /// then, as long as [`CleanupItem::automatic`] allows it.
     AutoClean,
     CleanAll(Vec<Operation>),
+    /// Download the latest package lists of several sources, one after
+    /// another.
+    RefreshAll(Vec<Operation>),
     ManifestExport(PathBuf, Vec<PackageId>),
     ManifestPreview(PathBuf),
 }
@@ -252,6 +255,7 @@ impl Job {
                 | Self::AutoUpgrade(..)
                 | Self::AutoClean
                 | Self::CleanAll(_)
+                | Self::RefreshAll(_)
                 | Self::Repositories(Some(_))
                 | Self::ImportRepository(_)
         )
@@ -268,7 +272,8 @@ impl Job {
             Self::Write(operation, _) => vec![operation.clone()],
             Self::UpgradeAll(operations, _)
             | Self::AutoUpgrade(operations, _)
-            | Self::CleanAll(operations) => operations.clone(),
+            | Self::CleanAll(operations)
+            | Self::RefreshAll(operations) => operations.clone(),
             _ => vec![],
         }
     }
@@ -901,7 +906,7 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
             let report = engine.cleanup(cancel);
             Ok(Payload::CleanPreview(operations, report.items))
         }
-        Job::UpgradeAll(operations, _) | Job::CleanAll(operations) => {
+        Job::UpgradeAll(operations, _) | Job::CleanAll(operations) | Job::RefreshAll(operations) => {
             Ok(run_batch(engine, &operations, Vec::new(), cancel, send))
         }
         Job::AutoClean => {
@@ -1857,7 +1862,7 @@ fn engine_source(job: &Job, filter: &[String]) -> Vec<String> {
         Job::PlanAdoption(_) => vec!["homebrew-cask".into()],
         Job::Write(operation, _) => vec![operation.backend().into()],
         Job::BackgroundUpdates(sources) => sources.clone(),
-        Job::UpgradeAll(operations, _) | Job::AutoUpgrade(operations, _) | Job::CleanAll(operations) => operations.iter().map(|op| op.backend().to_owned()).collect(),
+        Job::UpgradeAll(operations, _) | Job::AutoUpgrade(operations, _) | Job::CleanAll(operations) | Job::RefreshAll(operations) => operations.iter().map(|op| op.backend().to_owned()).collect(),
         Job::PlanCleanAll(operations) => operations.iter().map(|op| op.backend().to_owned()).collect(),
         // The picker needs to explain disabled and unavailable managers too.
         Job::Load(view, _) if view == "Sources" => vec![],
@@ -2679,6 +2684,10 @@ fn retry_job(job: &Job, result: &Result<Payload, EngineError>) -> Option<Job> {
         Job::CleanAll(operations) => {
             let retry = keep(operations);
             (!retry.is_empty()).then_some(Job::CleanAll(retry))
+        }
+        Job::RefreshAll(operations) => {
+            let retry = keep(operations);
+            (!retry.is_empty()).then_some(Job::RefreshAll(retry))
         }
         _ => None,
     }
@@ -5517,6 +5526,50 @@ impl ffi::PackageController {
     /// re-resolved against the current package list: stale rows (moved on
     /// or vanished while streaming) are skipped, never guessed. An empty
     /// resolution clears any pending confirmation and says so in status.
+    /// Refresh the package lists of `sources`, comma-joined ids, with one
+    /// review: those the catalog says are there and can refresh.
+    pub fn propose_refresh(mut self: Pin<&mut Self>, sources: QString) {
+        let sources = sources.to_string();
+        let wanted: Vec<&str> = sources.split(',').map(str::trim).collect();
+        let catalog: Vec<Value> =
+            serde_json::from_str(&self.source_catalog().to_string()).unwrap_or_default();
+        let operations: Vec<Operation> = catalog
+            .iter()
+            .filter(|row| {
+                row["available"] == true
+                    && row["capabilities"]
+                        .as_array()
+                        .is_some_and(|all| all.iter().any(|c| c == "refresh"))
+            })
+            .filter_map(|row| row["source"].as_str())
+            .filter(|source| wanted.contains(source))
+            .map(|backend| Operation::Refresh {
+                backend: backend.into(),
+            })
+            .collect();
+        if operations.is_empty() {
+            return;
+        }
+        let names: Vec<String> = operations
+            .iter()
+            .map(|operation| source_display_name(operation.backend()))
+            .collect();
+        let count = operations.len();
+        let noun = if count == 1 { "source" } else { "sources" };
+        let body = format!(
+            "Downloads the latest package lists for {}.\nSome may ask for your password.",
+            names.join(", ")
+        );
+        self.as_mut().set_confirmation_data(encoded(json!({
+            "action": "Refresh",
+            "body": body,
+            "summary": format!("Refresh {count} {noun}"),
+            "details": names.join("\n"),
+        })));
+        self.as_mut()
+            .set_confirmation(format!("Refresh {count} {noun}?\n\n{body}").as_str().into());
+        self.rust_mut().pending = Some(Job::RefreshAll(operations));
+    }
     pub fn propose_checked(mut self: Pin<&mut Self>, identities: QString) {
         let plan = plan_checked_upgrade(
             &self.rust().packages,
@@ -16185,6 +16238,73 @@ mod tests {
             bytes,
         }
     }
+    #[test]
+    fn refreshing_sources_reviews_only_those_that_can_refresh() {
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().set_source_catalog(
+            json!([
+                {"source": "apt", "available": true, "capabilities": ["installed", "refresh"]},
+                {"source": "npm", "available": true, "capabilities": ["installed"]},
+                {"source": "dnf", "available": false, "capabilities": ["refresh"]},
+                {"source": "flatpak", "available": true, "capabilities": ["refresh"]},
+                {"source": "homebrew", "available": true, "capabilities": ["refresh"]},
+            ])
+            .to_string()
+            .into(),
+        );
+        // Nothing that can refresh: no review at all.
+        controller
+            .as_mut()
+            .propose_refresh("npm,dnf,unknown".into());
+        assert!(controller.rust().pending.is_none());
+        assert_eq!(controller.confirmation().to_string(), "");
+        controller
+            .as_mut()
+            .propose_refresh("flatpak, apt,npm,dnf".into());
+        let refresh = |backend: &str| Operation::Refresh {
+            backend: backend.into(),
+        };
+        assert!(matches!(
+            &controller.rust().pending,
+            Some(Job::RefreshAll(operations)) if *operations == [refresh("apt"), refresh("flatpak")]
+        ));
+        let data: Value =
+            serde_json::from_str(&controller.confirmation_data().to_string()).unwrap();
+        assert_eq!(data["summary"], "Refresh 2 sources");
+        assert_eq!(data["details"], "APT\nFlatpak");
+        assert!(data["body"].as_str().unwrap().contains("for APT, Flatpak."));
+        assert!(controller
+            .confirmation()
+            .to_string()
+            .starts_with("Refresh 2 sources?"));
+        controller.as_mut().propose_refresh("homebrew".into());
+        let data: Value =
+            serde_json::from_str(&controller.confirmation_data().to_string()).unwrap();
+        assert_eq!(data["summary"], "Refresh 1 source");
+        // A refresh batch writes, and Retry runs only the sources that failed.
+        let job = Job::RefreshAll(vec![refresh("apt"), refresh("flatpak")]);
+        assert!(job.writes());
+        let retry = retry_job(
+            &job,
+            &Ok(Payload::Batch(
+                String::new(),
+                vec![Outcome::Finished, Outcome::Failed],
+            )),
+        );
+        assert!(
+            matches!(retry, Some(Job::RefreshAll(operations)) if operations == [refresh("flatpak")])
+        );
+        assert!(retry_job(
+            &job,
+            &Ok(Payload::Batch(
+                String::new(),
+                vec![Outcome::Finished, Outcome::Finished]
+            ))
+        )
+        .is_none());
+    }
+
     #[test]
     fn cleanup_shows_what_it_frees_and_clean_all_leaves_data_alone() {
         let mut controller = synthetic_controller();

@@ -270,7 +270,7 @@ fn main() {
         app.rows = firefox_rows();
     });
     render("repositories", [1180.0, 760.0], |app| {
-        app.page = Page::Sources;
+        app.page = Page::Settings;
         app.rows = vec![];
         app.ui.repos_open = true;
         app.repositories = serde_json::from_value(json!({

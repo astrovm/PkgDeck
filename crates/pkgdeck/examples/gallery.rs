@@ -124,10 +124,11 @@ fn sample_app() -> App {
         ),
     ];
     app.catalog = serde_json::from_value(json!([
-        {"source": "apt", "name": "APT", "available": true, "capabilities": ["search", "installed", "upgrade", "clean"]},
+        {"source": "apt", "name": "APT", "available": true, "capabilities": ["search", "installed", "upgrade", "clean", "refresh"]},
         {"source": "flatpak", "name": "Flatpak", "available": true, "capabilities": ["search", "installed", "upgrade"]},
         {"source": "cargo", "name": "Cargo", "available": true, "capabilities": ["installed", "upgrade"]},
         {"source": "snap", "name": "Snap", "available": false, "summary": "snapd isn't running"},
+        {"source": "homebrew", "name": "Homebrew", "available": false, "check_failed": true, "summary": "Homebrew took too long to answer."},
     ]))
     .unwrap();
     app.background =
@@ -261,7 +262,7 @@ fn main() {
         app.refresh_items();
         app.selected = Some(app.rows[app.items[1].raw].identity());
     });
-    render("settings", [1180.0, 900.0], true, |app| {
+    render("settings", [1180.0, 2200.0], true, |app| {
         offline(app, Page::Settings)
     });
     for width in [900.0, 700.0, 460.0] {

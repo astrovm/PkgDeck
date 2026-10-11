@@ -376,14 +376,8 @@ fn sources_turn_off_and_pages_narrow() {
     app.set_source_enabled("flatpak", false);
     assert_eq!(app.settings.source_list, "apt");
     idle(&mut app);
-    app.open_page(Page::Sources);
-    until(&mut app, "sources", |app| {
-        app.rows.iter().any(|row| row.kind == "source")
-    });
-    app.show_unavailable = true;
-    app.invalidate();
-    app.refresh_items();
-    assert!(!app.items.is_empty());
+    app.open_page(Page::Installed);
+    idle(&mut app);
     assert!(app.read_failures().iter().all(|f| f.kind != "cancelled"));
     app.retry_source("apt");
     idle(&mut app);
