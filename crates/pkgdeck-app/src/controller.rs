@@ -3962,6 +3962,9 @@ impl ffi::PackageController {
             self.as_mut().rust_mut().auto_held = None;
         }
     }
+    pub fn auto_update(&self) -> bool {
+        self.rust().auto_update
+    }
     /// Why automatic updates wait now, if they still do. A new reason
     /// replaces the old one in the background state.
     fn still_held(mut self: Pin<&mut Self>) -> Option<Hold> {

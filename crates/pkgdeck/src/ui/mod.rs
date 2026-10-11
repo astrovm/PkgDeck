@@ -1222,6 +1222,7 @@ fn toasts(app: &mut App, ui: &mut Ui, content: Rect) {
                         crate::app::ToastAction::Undo => "Undo",
                         crate::app::ToastAction::Restart => "Restart",
                         crate::app::ToastAction::StartAtLogin => "Start at login",
+                        crate::app::ToastAction::AutoUpdate => "Turn on",
                     };
                     let mut ui_action = ui.new_child(
                         UiBuilder::new()

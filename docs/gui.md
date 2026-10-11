@@ -442,6 +442,9 @@ notification.
 Turn on **Install updates automatically**. When a background check finds
 updates, PkgDeck installs them and sends one notification.
 
+It's off by default. PkgDeck asks once with a **Turn on** button: right after
+you pick **Start at login**, or the next time the window opens.
+
 - Each run shows in Activity, marked **Automatic**.
 - It waits if another change is running, and skips sources whose check
   failed.

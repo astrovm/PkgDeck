@@ -334,10 +334,12 @@ fn starting_at_login_is_offered_once() {
     // It waits for an answer for a day.
     assert_eq!(toast.lasts, Duration::from_secs(86_400));
     assert!(app.settings.login_asked);
-    // Once asked, never again, even after the toast goes.
+    // Once asked, never again, even after the toast goes. The next window
+    // offers automatic updates instead.
     app.restart_toast = None;
     app.ask_about_login();
-    assert!(app.restart_toast.is_none());
+    let offer = app.restart_toast.take().unwrap();
+    assert_eq!(offer.action, Some(ToastAction::AutoUpdate));
     // Saying yes writes the login item and remembers it.
     let dir = std::env::temp_dir().join(format!("pkgdeck-login-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -386,6 +388,69 @@ fn starting_at_login_is_not_offered_when_it_makes_no_sense() {
         );
         assert_eq!(app.settings.login_asked, case == 0, "{case}");
     }
+}
+
+#[test]
+fn automatic_updates_are_offered_once_after_login() {
+    let mut app = app();
+    let dir = std::env::temp_dir().join(format!("pkgdeck-updates-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    app.c()
+        .use_autostart_path(dir.join("autostart/app.desktop"));
+    app.ask_about_login();
+    // Saying yes to login asks about automatic updates right away.
+    app.toast_action(ToastAction::StartAtLogin);
+    let offer = app.restart_toast.clone().unwrap();
+    assert_eq!(offer.action, Some(ToastAction::AutoUpdate));
+    assert_eq!(offer.tone, Tone::Accent);
+    assert_eq!(offer.lasts, Duration::from_secs(86_400));
+    assert!(app.settings.updates_asked);
+    assert!(!app.settings.auto_update);
+    // Saying yes turns them on, here and in the background.
+    app.toast_action(ToastAction::AutoUpdate);
+    assert!(app.restart_toast.is_none());
+    assert!(app.settings.auto_update);
+    assert!(app.c().auto_update());
+    // Once asked, never again, even with them turned back off.
+    app.settings.auto_update = false;
+    app.ask_about_login();
+    assert!(app.restart_toast.is_none());
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn automatic_updates_are_not_offered_when_it_makes_no_sense() {
+    let toast = Toast {
+        text: "PkgDeck was updated.".into(),
+        tone: Tone::Success,
+        action: Some(ToastAction::Restart),
+        shown: Instant::now(),
+        lasts: Duration::from_secs(60),
+        from_notice: false,
+    };
+    for case in 0..4 {
+        let mut app = app();
+        app.settings.login_asked = true;
+        match case {
+            0 => app.settings.updates_asked = true,
+            1 => app.settings.auto_update = true,
+            // They need background checks.
+            2 => app.settings.background_mode = false,
+            // Another sticky toast is showing; it waits for the next start.
+            _ => app.restart_toast = Some(toast.clone()),
+        }
+        app.ask_about_login();
+        assert_ne!(
+            app.restart_toast.as_ref().and_then(|t| t.action),
+            Some(ToastAction::AutoUpdate),
+            "{case}"
+        );
+        assert_eq!(app.settings.updates_asked, case == 0, "{case}");
+    }
+    // The first window offers login, not both at once.
+    let mut app = app();
+    app.ask_about_login();
+    assert!(!app.settings.updates_asked);
 }
 
 #[test]

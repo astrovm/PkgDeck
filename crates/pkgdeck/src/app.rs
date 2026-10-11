@@ -48,6 +48,7 @@ pub enum ToastAction {
     Undo,
     Restart,
     StartAtLogin,
+    AutoUpdate,
 }
 
 /// How the window asked to be launched.
@@ -856,12 +857,20 @@ impl App {
                 if self.c().set_autostart(true) {
                     self.settings.autostart = true;
                 }
+                self.ask_about_updates();
+            }
+            ToastAction::AutoUpdate => {
+                self.restart_toast = None;
+                self.settings.auto_update = true;
+                self.c().set_auto_update(true);
             }
         }
     }
 
     /// Offers once to start at login, so updates are checked without
     /// opening PkgDeck first. Only when it can keep running in the tray.
+    /// Once that was asked, offers automatic updates instead, so the window
+    /// shows at most one of them each time it opens.
     pub fn ask_about_login(&mut self) {
         if self.settings.login_asked
             || self.settings.autostart
@@ -869,6 +878,7 @@ impl App {
             || !self.platform.tray_available()
             || self.restart_toast.is_some()
         {
+            self.ask_about_updates();
             return;
         }
         self.settings.login_asked = true;
@@ -876,6 +886,27 @@ impl App {
             text: "Check for updates in the background after you log in?".into(),
             tone: Tone::Accent,
             action: Some(ToastAction::StartAtLogin),
+            shown: Instant::now(),
+            lasts: Duration::from_secs(24 * 60 * 60),
+            from_notice: false,
+        });
+    }
+
+    /// Offers once to install updates automatically, which needs background
+    /// checks.
+    fn ask_about_updates(&mut self) {
+        if self.settings.updates_asked
+            || self.settings.auto_update
+            || !self.settings.background_mode
+            || self.restart_toast.is_some()
+        {
+            return;
+        }
+        self.settings.updates_asked = true;
+        self.restart_toast = Some(Toast {
+            text: "Install updates automatically when PkgDeck finds them?".into(),
+            tone: Tone::Accent,
+            action: Some(ToastAction::AutoUpdate),
             shown: Instant::now(),
             lasts: Duration::from_secs(24 * 60 * 60),
             from_notice: false,

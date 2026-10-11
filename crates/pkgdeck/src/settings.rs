@@ -147,6 +147,9 @@ pub struct Settings {
     pub autostart: bool,
     /// Whether PkgDeck already offered to start at login. It asks once.
     pub login_asked: bool,
+    /// Whether PkgDeck already offered to install updates automatically.
+    /// It asks once too.
+    pub updates_asked: bool,
     pub notification_history: String,
     pub last_background_state: String,
     pub sidebar_width: f32,
@@ -181,6 +184,7 @@ impl Default for Settings {
             system_approval: String::new(),
             autostart: false,
             login_asked: false,
+            updates_asked: false,
             notification_history: "{}".into(),
             last_background_state: "{}".into(),
             sidebar_width: 212.0,
