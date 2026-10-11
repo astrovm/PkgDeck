@@ -167,6 +167,8 @@ mod tests {
         symlink(&outside, root.join("link")).unwrap();
         let linked = usage(&root, &Cancellation::default());
         assert!(linked < alone + 64 * 1024, "{alone} {linked}");
+        // The linked file still counts, once.
+        assert!(linked >= alone, "{alone} {linked}");
         assert_eq!(usage(&root.join("missing"), &Cancellation::default()), 0);
         let cancelled = Cancellation::default();
         cancelled.cancel();
