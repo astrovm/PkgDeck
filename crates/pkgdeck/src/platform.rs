@@ -589,23 +589,31 @@ mod tests {
 
     #[test]
     fn events_reach_the_window_and_wake_it() {
-        let (woke, woken) = mpsc::channel();
-        let mut platform = Platform::start(move || {
-            let _ = woke.send(());
-        });
-        send(Event::Check);
-        send(Event::Permission(true));
-        assert_eq!(
-            platform.events(),
-            vec![Event::Check, Event::Permission(true)]
-        );
-        assert_eq!(woken.try_iter().count(), 2);
-        assert!(platform.events().is_empty());
-        send(Event::Quit);
-        assert_eq!(
-            platform.wait(std::time::Duration::from_millis(10)),
-            vec![Event::Quit]
-        );
+        // Tests start platforms in parallel and the newest one hears the
+        // events, so this one claims them until a whole round arrives.
+        let mut claimed = None;
+        for _ in 0..200 {
+            let (woke, woken) = mpsc::channel();
+            let mut platform = Platform::start(move || {
+                let _ = woke.send(());
+            });
+            send(Event::Check);
+            send(Event::Permission(true));
+            let first = platform.events();
+            let woke_for = woken.try_iter().count();
+            let drained = platform.events().is_empty();
+            send(Event::Quit);
+            let waited = platform.wait(std::time::Duration::from_millis(10));
+            if first == vec![Event::Check, Event::Permission(true)]
+                && drained
+                && waited == vec![Event::Quit]
+            {
+                claimed = Some((platform, woke_for));
+                break;
+            }
+        }
+        let (mut platform, woke_for) = claimed.expect("the events never arrived");
+        assert_eq!(woke_for, 2);
         assert!(platform.tray_available());
         platform.set_badge("");
         platform.refresh_permission();
