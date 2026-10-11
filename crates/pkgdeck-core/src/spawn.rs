@@ -327,15 +327,11 @@ mod tests {
             .read_to_string(&mut error)
             .unwrap();
         // It ends, and it is still there to collect. Each check waits
-        // first, so the coverage of these lines doesn't depend on timing.
-        let mut ended = false;
-        for _ in 0..2000 {
+        // first, with no branch, so every line runs however fast it ends.
+        let ended = (0..2000).any(|_| {
             std::thread::sleep(std::time::Duration::from_millis(5));
-            ended = child.ended();
-            if ended {
-                break;
-            }
-        }
+            child.ended()
+        });
         assert!(ended);
         assert_eq!(child.wait().unwrap().code(), Some(3));
         assert_eq!((output.as_str(), error.as_str()), ("got hi\n", "oops\n"));
