@@ -15762,6 +15762,16 @@ mod tests {
         hold: super::never_hold,
     };
     #[test]
+    fn sources_are_checked_again_on_request() {
+        let mut controller = ffi::create_synthetic_controller(fixture_engine);
+        let mut controller = controller.pin_mut();
+        controller.as_mut().rust_mut().catalog_checked = true;
+        controller.as_mut().check_sources();
+        assert!(controller.rust().catalog_worker.is_none());
+        controller.as_mut().recheck_sources();
+        assert!(controller.rust().catalog_worker.is_some());
+    }
+    #[test]
     fn synthetic_controllers_stay_off_the_system() {
         let mut controller = ffi::create_synthetic_controller(fixture_engine);
         let natives = controller.rust().natives;

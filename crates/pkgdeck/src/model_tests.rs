@@ -368,6 +368,11 @@ fn source_lines_say_where_a_row_comes_from() {
 #[test]
 fn versions_read_by_kind_and_state() {
     let version = |value: Value| version_text(&row(value));
+    // A newer version the source doesn't offer as an update isn't one.
+    assert_eq!(
+        version(json!({"installed": "1", "candidate": "2", "update": "current"})),
+        "1"
+    );
     assert_eq!(
         version(json!({"kind": "cleanup", "cleanup_kind": "orphan_dependencies"})),
         "Dependencies"
@@ -640,6 +645,19 @@ fn visible_rows_sort_by_column_relevance_or_name() {
         ..ViewOptions::default()
     };
     assert_eq!(names(&rows, &visible(&rows, &options))[0], "c");
+    // Without a search, or off Search, rows keep the order they came in.
+    for (page, query) in [(Page::Search, " "), (Page::Updates, "match")] {
+        let options = ViewOptions {
+            page: Some(page),
+            query,
+            ..ViewOptions::default()
+        };
+        assert_eq!(
+            names(&rows, &visible(&rows, &options)),
+            ["b", "a", "c"],
+            "{page:?}"
+        );
+    }
     for column in [Column::Name, Column::Version, Column::Summary] {
         assert_eq!(Column::from_key(column.key()), Some(column));
     }

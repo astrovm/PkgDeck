@@ -1011,13 +1011,13 @@ fn settings_wait_for_a_drag_to_end_before_they_are_written() {
 #[test]
 fn sources_can_be_checked_again() {
     let mut app = app();
-    for _ in 0..200 {
+    // The first check, from the start, ends first.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while *app.ctl.needs_poll() && Instant::now() < deadline {
         app.tick(Instant::now() + Duration::from_secs(2));
-        if !*app.ctl.needs_poll() {
-            break;
-        }
         std::thread::sleep(Duration::from_millis(5));
     }
+    assert!(!*app.ctl.needs_poll());
     app.c().recheck_sources();
     assert!(*app.ctl.needs_poll());
 }
