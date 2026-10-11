@@ -778,7 +778,8 @@ pub fn paint_title_strip(painter: &Painter, rect: Rect, palette: &Palette) -> Op
                 lighter(palette.accent, 0.55),
                 true,
             );
-            Some(Color32::WHITE)
+            // The title sits at the start, on the accent itself.
+            Some(ink_on(palette.accent))
         }
         Style::Luna => {
             gradient(
@@ -790,7 +791,11 @@ pub fn paint_title_strip(painter: &Painter, rect: Rect, palette: &Palette) -> Op
                 false,
             );
             gloss(painter, rect, top_only, 0.5);
-            Some(Color32::WHITE)
+            Some(ink_on(lerp(
+                lighter(palette.accent, 0.35),
+                palette.accent,
+                0.5,
+            )))
         }
         Style::Glass => {
             let base = if palette.dark {
@@ -829,6 +834,15 @@ pub fn paint_title_strip(painter: &Painter, rect: Rect, palette: &Palette) -> Op
             painter.add(mesh);
             Some(palette.ink)
         }
+    }
+}
+
+/// White or black, whichever reads better on `color`.
+pub fn ink_on(color: Color32) -> Color32 {
+    if theme::contrast(Color32::WHITE, color) >= theme::contrast(Color32::BLACK, color) {
+        Color32::WHITE
+    } else {
+        Color32::BLACK
     }
 }
 
@@ -973,6 +987,11 @@ mod tests {
                     }
                     let strip = paint_title_strip(painter, rect(), palette);
                     assert_eq!(strip.is_some(), style != Style::Modern, "{at}");
+                    // Titles read on the accent strips.
+                    if matches!(style, Style::Retro | Style::Luna) {
+                        let ink = strip.unwrap();
+                        assert!(theme::contrast(ink, palette.accent) >= 3.0, "{at}");
+                    }
                 });
                 assert!(shapes.len() > 10, "{at}");
                 // Retro is square through and through.
@@ -1087,6 +1106,14 @@ mod tests {
         });
         assert!(none.is_empty());
         let _ = Accent::Blue;
+    }
+
+    #[test]
+    fn ink_takes_whichever_of_white_and_black_reads_better() {
+        assert_eq!(ink_on(Color32::from_rgb(0, 0, 0x80)), Color32::WHITE);
+        assert_eq!(ink_on(Color32::from_rgb(0x7f, 0x9c, 0xff)), Color32::BLACK);
+        assert_eq!(ink_on(Color32::WHITE), Color32::BLACK);
+        assert_eq!(ink_on(Color32::BLACK), Color32::WHITE);
     }
 
     #[test]
