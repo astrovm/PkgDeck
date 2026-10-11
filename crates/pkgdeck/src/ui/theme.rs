@@ -362,6 +362,13 @@ pub const CARD_RADIUS: u8 = 12;
 pub fn bold_family() -> FontFamily {
     FontFamily::Name("bold".into())
 }
+/// The face for window titles.
+pub fn title_family() -> FontFamily {
+    FontFamily::Name("title".into())
+}
+pub fn title(size: f32) -> FontId {
+    FontId::new(size, title_family())
+}
 pub fn font(size: f32) -> FontId {
     FontId::proportional(size)
 }
@@ -471,6 +478,40 @@ const TAHOMA: &[(&str, &str)] = &[
         "System/Library/Fonts/Supplemental/Verdana Bold.ttf",
     ),
 ];
+/// Windows 98's dialogs drew MS Sans Serif; its outline heirs, then Arial.
+const MS_SANS: &[(&str, &str)] = &[
+    (
+        "usr/share/wine/fonts/tahoma.ttf",
+        "usr/share/wine/fonts/tahomabd.ttf",
+    ),
+    (
+        "System/Library/Fonts/Supplemental/Microsoft Sans Serif.ttf",
+        "System/Library/Fonts/Supplemental/Arial Bold.ttf",
+    ),
+    (
+        "usr/share/fonts/truetype/msttcorefonts/Arial.ttf",
+        "usr/share/fonts/truetype/msttcorefonts/Arial_Bold.ttf",
+    ),
+    (
+        "usr/share/fonts/msttcore/arial.ttf",
+        "usr/share/fonts/msttcore/arialbd.ttf",
+    ),
+    (
+        "usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    ),
+    (
+        "usr/share/fonts/liberation-sans/LiberationSans-Regular.ttf",
+        "usr/share/fonts/liberation-sans/LiberationSans-Bold.ttf",
+    ),
+];
+/// XP's title bars: Trebuchet MS in bold.
+const TREBUCHET_BOLD: &[&str] = &[
+    "usr/share/fonts/truetype/msttcorefonts/trebucbd.ttf",
+    "usr/share/fonts/truetype/msttcorefonts/Trebuchet_MS_Bold.ttf",
+    "usr/share/fonts/msttcore/trebucbd.ttf",
+    "System/Library/Fonts/Supplemental/Trebuchet MS Bold.ttf",
+];
 const LUCIDA: &[(&str, &str)] = &[
     (
         "System/Library/Fonts/LucidaGrande.ttc",
@@ -533,7 +574,8 @@ pub fn face(style: Style, typeface: Typeface) -> Face {
         Typeface::Inter => Face::Inter,
         Typeface::System => Face::System,
         Typeface::Style => match style {
-            Style::Retro | Style::Luna => Face::Style(TAHOMA),
+            Style::Retro => Face::Style(MS_SANS),
+            Style::Luna => Face::Style(TAHOMA),
             Style::Gel | Style::Platinum => Face::Style(LUCIDA),
             Style::Glass => Face::Style(SEGOE),
             Style::Modern => Face::Inter,
@@ -620,8 +662,19 @@ pub fn fonts_with(root: &Path, face: Face) -> FontDefinitions {
     }
     regular.extend(defaults.iter().cloned());
     bold.extend(defaults);
+    // Title bars take bold, or XP's own face for them.
+    let mut title = bold.clone();
+    if face == Face::Style(TAHOMA) {
+        if let Some(bytes) = TREBUCHET_BOLD.iter().find_map(|path| read(path)) {
+            fonts
+                .font_data
+                .insert("title".into(), Arc::new(FontData::from_static(bytes)));
+            title.insert(0, "title".into());
+        }
+    }
     fonts.families.insert(FontFamily::Proportional, regular);
     fonts.families.insert(bold_family(), bold);
+    fonts.families.insert(title_family(), title);
     if let Some(bytes) = MONO.iter().find_map(|path| read(path)) {
         fonts
             .font_data
@@ -1032,7 +1085,7 @@ mod tests {
     fn styles_choose_their_faces_unless_the_person_does() {
         assert_eq!(face(Style::Modern, Typeface::Style), Face::Inter);
         assert_eq!(face(Style::Glass, Typeface::Style), Face::Style(SEGOE));
-        assert_eq!(face(Style::Retro, Typeface::Style), Face::Style(TAHOMA));
+        assert_eq!(face(Style::Retro, Typeface::Style), Face::Style(MS_SANS));
         assert_eq!(face(Style::Luna, Typeface::Style), Face::Style(TAHOMA));
         assert_eq!(face(Style::Gel, Typeface::Style), Face::Style(LUCIDA));
         assert_eq!(face(Style::Platinum, Typeface::Style), Face::Style(LUCIDA));
@@ -1061,6 +1114,14 @@ mod tests {
         assert_eq!(regular(&fonts)[..2], ["style", "inter"]);
         assert_eq!(fonts.families[&bold_family()][0], "style-bold");
         assert_eq!(fonts.font_data["style-bold"].index, 0);
+        // Titles stay bold until XP's own face is around, and only XP takes it.
+        let title = |fonts: &FontDefinitions| fonts.families[&title_family()][0].clone();
+        assert_eq!(title(&fonts), "style-bold");
+        let path = root.join(TREBUCHET_BOLD[0]);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"title").unwrap();
+        assert_eq!(title(&fonts_with(&root, Face::Style(TAHOMA))), "title");
+        assert_eq!(title(&fonts_with(&root, Face::Inter)), "inter-semibold");
         assert_eq!(regular(&fonts_with(&root, Face::System))[0], "system");
         let inter = fonts_with(&root, Face::Inter);
         assert_eq!(regular(&inter)[0], "inter");

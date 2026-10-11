@@ -4,6 +4,7 @@
 
 mod activity;
 mod dialogs;
+mod frame;
 pub mod icons;
 mod list;
 mod page;
@@ -95,7 +96,9 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     }
 
     let palette = Palette::current(&ctx);
-    let full = ui.max_rect();
+    let window = ui.max_rect();
+    // The older styles draw the window's own frame around the app.
+    let full = frame::show(ui, window, "PkgDeck", &palette);
     skin::paint_canvas(ui.painter(), full, &palette);
     let rail = full.width() < RAIL_BELOW;
     let sidebar_width = glide(
@@ -111,6 +114,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     activity::drawer(app, ui, full);
     dialogs::show(app, &ctx);
     toasts(app, ui, content);
+    frame::edges(ui, window);
 }
 
 fn keyboard(app: &mut App, ctx: &egui::Context) {
@@ -514,38 +518,11 @@ fn header(app: &mut App, ui: &mut Ui) {
     let palette = Palette::current(ui.ctx());
     let width = ui.available_width();
     let compact = width < 600.0;
-    // The older styles put the heading in a window's title bar.
-    let bar = Rect::from_min_size(ui.cursor().min, vec2(width, 46.0));
-    let title_ink = skin::paint_title_strip(ui.painter(), bar, &palette);
     ui.horizontal(|ui| {
-        ui.set_min_height(if title_ink.is_some() { 46.0 } else { 38.0 });
-        match title_ink {
-            Some(ink) => {
-                ui.add_space(12.0);
-                let font = theme::bold(20.0);
-                // Read out as before, drawn by the style.
-                let label = ui.label(
-                    egui::RichText::new(app.page.name())
-                        .font(font.clone())
-                        .color(Color32::TRANSPARENT),
-                );
-                let galley = ui
-                    .painter()
-                    .layout_no_wrap(app.page.name().to_owned(), font, ink);
-                skin::paint_title_text(ui.painter(), label.rect.min, galley, ink, &palette);
-            }
-            None => {
-                ui.label(
-                    egui::RichText::new(app.page.name())
-                        .font(theme::bold(26.0))
-                        .color(palette.ink),
-                );
-            }
-        }
+        ui.set_min_height(38.0);
+        let (font, ink) = skin::heading(&palette);
+        ui.label(egui::RichText::new(app.page.name()).font(font).color(ink));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if title_ink.is_some() {
-                ui.add_space(8.0);
-            }
             if app.page.filters_sources() && app.opened.is_none() {
                 let sources = app.page_sources.contains_key(&app.page);
                 let duplicates = app.page == Page::Installed && app.duplicates_only;

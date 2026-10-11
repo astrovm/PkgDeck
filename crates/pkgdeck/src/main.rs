@@ -94,10 +94,13 @@ fn quiet(launch: &app::Launch) -> bool {
 /// 1366×768 screen.
 const DEFAULT_SIZE: [f32; 2] = [1040.0, 780.0];
 
-fn options() -> eframe::NativeOptions {
+/// `decorated` is whether the system draws the window's frame: the older
+/// styles draw their own.
+fn options(decorated: bool) -> eframe::NativeOptions {
     eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("PkgDeck")
+            .with_decorations(decorated)
             .with_app_id("io.github.astrovm.PkgDeck")
             .with_inner_size(DEFAULT_SIZE)
             .with_min_inner_size([360.0, 400.0])
@@ -216,7 +219,7 @@ fn main() {
             let media = media.clone();
             let result = eframe::run_native(
                 "PkgDeck",
-                options(),
+                options(app.settings.style == pkgdeck::settings::Style::Modern),
                 Box::new(|cc| {
                     pkgdeck::setup(&cc.egui_ctx, std::path::Path::new("/"), media);
                     Ok(Box::new(Window::new(&cc.egui_ctx, &mut app)))
@@ -337,7 +340,7 @@ mod tests {
 
     #[test]
     fn the_window_opens_at_4_by_3() {
-        let size = options().viewport.inner_size.unwrap();
+        let size = options(true).viewport.inner_size.unwrap();
         assert_eq!(size, DEFAULT_SIZE.into());
         assert_eq!(size.x * 3.0, size.y * 4.0);
     }

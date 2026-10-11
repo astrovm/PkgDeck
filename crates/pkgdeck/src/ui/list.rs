@@ -1160,9 +1160,13 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
 pub fn package_icon(app: &App, ui: &mut Ui, rect: Rect, row: &Row) {
     let palette = Palette::current(ui.ctx());
     let fallback = |ui: &mut Ui| {
-        ui.painter()
-            .rect_filled(rect, theme::round(10), alpha(palette.accent, 0.1));
-        let mark = rect.shrink(rect.width() * 0.24);
+        let mark = if skin::bare_icons() {
+            rect.shrink(rect.width() * 0.12)
+        } else {
+            ui.painter()
+                .rect_filled(rect, theme::round(10), alpha(palette.accent, 0.1));
+            rect.shrink(rect.width() * 0.24)
+        };
         if row.kind == "failure" {
             theme::paint_icon(ui.painter(), mark, "warning", palette.accent);
         } else {

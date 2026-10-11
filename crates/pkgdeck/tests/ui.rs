@@ -473,9 +473,83 @@ fn every_style_mixes_with_every_other_look_option() {
                     style != Style::Retro,
                     "{at}"
                 );
+                // The older styles bring their own title bar and buttons.
+                for caption in ["Minimize window", "Maximize window", "Close window"] {
+                    assert_eq!(
+                        harness
+                            .query_by_role_and_label(Role::Button, caption)
+                            .is_some(),
+                        style != Style::Modern,
+                        "{at} {caption}"
+                    );
+                }
             }
         }
     }
+}
+
+#[test]
+fn the_older_styles_title_bar_buttons_answer_clicks() {
+    use pkgdeck::settings::Style;
+    for style in [
+        Style::Retro,
+        Style::Luna,
+        Style::Glass,
+        Style::Gel,
+        Style::Platinum,
+    ] {
+        let mut harness = show(Page::Installed);
+        harness.state_mut().1.settings.style = style;
+        harness.state_mut().1.invalidate();
+        harness.run_steps(3);
+        // Each button asks the window for what it says.
+        for (caption, command) in [
+            ("Minimize window", egui::ViewportCommand::Minimized(true)),
+            ("Maximize window", egui::ViewportCommand::Maximized(true)),
+            ("Close window", egui::ViewportCommand::Close),
+        ] {
+            harness.get_by_role_and_label(Role::Button, caption).click();
+            let mut sent = Vec::new();
+            for _ in 0..3 {
+                harness.step();
+                sent.extend(
+                    harness.output().viewport_output[&egui::ViewportId::ROOT]
+                        .commands
+                        .clone(),
+                );
+            }
+            assert!(sent.contains(&command), "{style:?} {caption}: {sent:?}");
+        }
+    }
+    // Modern leaves the window to the system's frame, and the older styles
+    // take it back.
+    let mut harness = show(Page::Installed);
+    let decorations = |harness: &mut Harness<'static, (bool, App)>| {
+        let mut sent = Vec::new();
+        for _ in 0..3 {
+            harness.step();
+            sent.extend(
+                harness.output().viewport_output[&egui::ViewportId::ROOT]
+                    .commands
+                    .iter()
+                    .filter_map(|command| match command {
+                        egui::ViewportCommand::Decorations(on) => Some(*on),
+                        _ => None,
+                    }),
+            );
+        }
+        sent
+    };
+    decorations(&mut harness);
+    harness.state_mut().1.settings.style = Style::Retro;
+    harness.state_mut().1.invalidate();
+    assert_eq!(decorations(&mut harness), [false]);
+    harness.state_mut().1.settings.style = Style::Luna;
+    harness.state_mut().1.invalidate();
+    assert_eq!(decorations(&mut harness), Vec::<bool>::new());
+    harness.state_mut().1.settings.style = Style::Modern;
+    harness.state_mut().1.invalidate();
+    assert_eq!(decorations(&mut harness), [true]);
 }
 
 /// A catalog with two package managers, one whose check failed and one

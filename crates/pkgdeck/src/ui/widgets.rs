@@ -893,41 +893,14 @@ pub fn steps(
     }
     let opacity = if enabled { 1.0 } else { 0.42 };
     let x = glide(ui.ctx(), id, at(*index), REVEAL);
-    let painter = ui.painter();
-    painter.rect_filled(track, theme::round(2), alpha(palette.rail(), opacity));
-    painter.rect_filled(
-        Rect::from_min_max(track.min, Pos2::new(x, track.max.y)),
-        theme::round(2),
-        alpha(palette.accent, opacity),
-    );
-    for i in 0..count {
-        let color = if at(i) <= x {
-            palette.accent
-        } else {
-            palette.rail()
-        };
-        painter.circle_filled(
-            Pos2::new(at(i), track.center().y),
-            3.0,
-            alpha(color, opacity),
-        );
-    }
     let hover = ease(
         ui.ctx(),
         id.with("hover"),
         response.hovered() || response.dragged(),
         FEEDBACK,
     );
-    painter.circle_filled(
-        Pos2::new(x, track.center().y),
-        9.0 + hover * 1.5,
-        alpha(palette.accent, opacity),
-    );
-    painter.circle_filled(
-        Pos2::new(x, track.center().y),
-        4.0,
-        alpha(palette.surface, opacity),
-    );
+    let stops: Vec<f32> = (0..count).map(at).collect();
+    skin::paint_steps(ui.painter(), track, &stops, x, hover, &palette, opacity);
     if enabled {
         response.on_hover_cursor(CursorIcon::Grab);
     }

@@ -9,10 +9,10 @@
 use super::theme::{self, Palette};
 use crate::settings::Style;
 use eframe::egui::{
-    epaint::{tessellator::path, Mesh, RectShape, Shadow},
-    pos2, vec2, Color32, CornerRadius, Galley, Painter, Pos2, Rangef, Rect, Stroke, StrokeKind,
+    self, epaint,
+    epaint::{tessellator::path, Mesh, Shadow},
+    pos2, vec2, Color32, CornerRadius, FontId, Painter, Pos2, Rangef, Rect, Stroke, StrokeKind,
 };
-use std::sync::Arc;
 
 /// What a button is for, which decides how much it stands out.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -50,22 +50,22 @@ pub fn lerp(a: Color32, b: Color32, t: f32) -> Color32 {
         channel(a.a(), b.a()),
     )
 }
-fn lighter(color: Color32, amount: f32) -> Color32 {
+pub(super) fn lighter(color: Color32, amount: f32) -> Color32 {
     lerp(color, Color32::WHITE, amount)
 }
-fn darker(color: Color32, amount: f32) -> Color32 {
+pub(super) fn darker(color: Color32, amount: f32) -> Color32 {
     lerp(color, Color32::BLACK, amount)
 }
-fn faded(color: Color32, opacity: f32) -> Color32 {
+pub(super) fn faded(color: Color32, opacity: f32) -> Color32 {
     color.gamma_multiply(opacity.clamp(0.0, 1.0))
 }
-fn gray(level: u8) -> Color32 {
+pub(super) fn gray(level: u8) -> Color32 {
     Color32::from_gray(level)
 }
-fn rgb(hex: u32) -> Color32 {
+pub(super) fn rgb(hex: u32) -> Color32 {
     Color32::from_rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8)
 }
-fn top_corners(radius: CornerRadius) -> CornerRadius {
+pub(super) fn top_corners(radius: CornerRadius) -> CornerRadius {
     CornerRadius {
         sw: 0,
         se: 0,
@@ -208,7 +208,7 @@ pub fn bevel(painter: &Painter, rect: Rect, light: Color32, dark: Color32) {
 
 /// Windows 98's two-step edge around `rect`: white and light grey above,
 /// black and dark grey below; swapped when `sunken`.
-fn retro_edge(painter: &Painter, rect: Rect, face: Color32, sunken: bool, opacity: f32) {
+pub(super) fn retro_edge(painter: &Painter, rect: Rect, face: Color32, sunken: bool, opacity: f32) {
     let shade = |color| faded(color, opacity);
     let (outer_light, outer_dark) = (shade(lighter(face, 0.9)), shade(darker(face, 0.85)));
     let (inner_light, inner_dark) = (shade(lighter(face, 0.45)), shade(darker(face, 0.33)));
@@ -242,7 +242,7 @@ fn etched(painter: &Painter, rect: Rect, face: Color32) {
 
 /// The shine over the top half of a gel button: brightest at the top,
 /// kept off the rounded ends.
-fn gloss(painter: &Painter, rect: Rect, strength: f32) {
+pub(super) fn gloss(painter: &Painter, rect: Rect, strength: f32) {
     let side = (rect.height() * 0.25).min(rect.width() * 0.2);
     let top = Rect::from_min_max(
         pos2(rect.left() + side, rect.top() + 1.0),
@@ -929,6 +929,237 @@ pub fn paint_knob(painter: &Painter, center: Pos2, radius: f32, opacity: f32) {
     painter.circle_filled(center, radius, faded(Color32::WHITE, opacity));
 }
 
+/// A slider in `rect`: its track along `track`, a mark at each of `stops`
+/// and the thumb at `x`, `hover` lifting it.
+pub fn paint_steps(
+    painter: &Painter,
+    track: Rect,
+    stops: &[f32],
+    x: f32,
+    hover: f32,
+    palette: &Palette,
+    opacity: f32,
+) {
+    let shade = |color| faded(color, opacity);
+    let y = track.center().y;
+    let face = palette.canvas;
+    // Windows and the old Mac mark the steps with ticks under the track.
+    let ticks = |color: Color32| {
+        for &at in stops {
+            painter.vline(
+                at.round() + 0.5,
+                (y + 11.0)..=(y + 14.0),
+                Stroke::new(1.0, shade(color)),
+            );
+        }
+    };
+    // A thumb that points down at the ticks.
+    let pointed = |width: f32, height: f32| {
+        let (left, right) = ((x - width / 2.0).round(), (x + width / 2.0).round());
+        let (top, bottom) = (y - height / 2.0 - 1.0, y + height / 2.0 - 1.0);
+        let tip = width / 2.0;
+        [
+            pos2(left, top),
+            pos2(right, top),
+            pos2(right, bottom - tip),
+            pos2((left + right) / 2.0, bottom),
+            pos2(left, bottom - tip),
+        ]
+    };
+    let outline = |points: &[Pos2], light: Color32, dark: Color32| {
+        let stroke = |color| Stroke::new(1.0, shade(color));
+        painter.line_segment([points[4], points[0]], stroke(light));
+        painter.line_segment([points[0], points[1]], stroke(light));
+        painter.line_segment([points[1], points[2]], stroke(dark));
+        painter.line_segment([points[2], points[3]], stroke(dark));
+        painter.line_segment([points[3], points[4]], stroke(light));
+    };
+    let groove = Rect::from_center_size(track.center(), vec2(track.width() + 8.0, 4.0));
+    match style() {
+        Style::Modern => {
+            painter.rect_filled(track, theme::round(2), shade(palette.rail()));
+            painter.rect_filled(
+                Rect::from_min_max(track.min, pos2(x, track.max.y)),
+                theme::round(2),
+                shade(palette.accent),
+            );
+            for &at in stops {
+                let color = if at <= x {
+                    palette.accent
+                } else {
+                    palette.rail()
+                };
+                painter.circle_filled(pos2(at, y), 3.0, shade(color));
+            }
+            painter.circle_filled(pos2(x, y), 9.0 + hover * 1.5, shade(palette.accent));
+            painter.circle_filled(pos2(x, y), 4.0, shade(palette.surface));
+        }
+        Style::Retro => {
+            // A sunken slot, and a grey thumb raised out of it.
+            painter.rect_filled(groove, CornerRadius::ZERO, shade(face));
+            retro_edge(painter, groove, face, true, opacity);
+            ticks(palette.ink);
+            let thumb = pointed(11.0, 20.0);
+            painter.add(egui::Shape::convex_polygon(
+                thumb.to_vec(),
+                shade(face),
+                Stroke::NONE,
+            ));
+            outline(&thumb, lighter(face, 0.9), darker(face, 0.85));
+            let inner = [
+                thumb[0] + vec2(1.0, 1.0),
+                thumb[1] + vec2(-1.0, 1.0),
+                thumb[2] + vec2(-1.0, 0.0),
+                thumb[3] + vec2(0.0, -1.0),
+                thumb[4] + vec2(1.0, 0.0),
+            ];
+            outline(&inner, lighter(face, 0.45), darker(face, 0.33));
+        }
+        Style::Luna | Style::Glass => {
+            // A thin sunken line; XP's thumb is white with a green foot
+            // that turns orange under the pointer, 7's a grey gradient
+            // that turns blue.
+            let line = Rect::from_center_size(track.center(), vec2(track.width() + 8.0, 3.0));
+            painter.rect_filled(line, CornerRadius::ZERO, shade(lighter(face, 0.6)));
+            bevel(
+                painter,
+                line,
+                shade(darker(face, 0.3)),
+                shade(lighter(face, 0.9)),
+            );
+            ticks(darker(face, 0.45));
+            let luna = style() == Style::Luna;
+            let rect = Rect::from_center_size(pos2(x.round(), y - 1.0), vec2(11.0, 20.0));
+            let (top, bottom, border) = if luna {
+                (rgb(0xffffff), rgb(0xe6e6e0), rgb(0x76889f))
+            } else if hover > 0.5 {
+                (rgb(0xe3f4fc), rgb(0xa9daf5), rgb(0x3c7fb1))
+            } else {
+                (rgb(0xf2f2f2), rgb(0xcfcfcf), rgb(0x707070))
+            };
+            let radius = CornerRadius::same(2);
+            gradient(painter, rect, radius, shade(top), shade(bottom), false);
+            painter.rect_stroke(
+                rect,
+                radius,
+                Stroke::new(1.0, shade(border)),
+                StrokeKind::Inside,
+            );
+            if luna {
+                let foot = if hover > 0.5 {
+                    rgb(0xf8b636)
+                } else {
+                    rgb(0x21a121)
+                };
+                let foot_rect = Rect::from_min_max(
+                    pos2(rect.left() + 1.0, rect.bottom() - 4.0),
+                    pos2(rect.right() - 1.0, rect.bottom() - 1.0),
+                );
+                gradient(
+                    painter,
+                    foot_rect,
+                    CornerRadius::ZERO,
+                    shade(lighter(foot, 0.3)),
+                    shade(foot),
+                    false,
+                );
+            }
+        }
+        Style::Gel => {
+            // A rounded groove and a blue gel bead on it.
+            let groove = Rect::from_center_size(track.center(), vec2(track.width() + 8.0, 6.0));
+            let round = CornerRadius::same(3);
+            gradient(
+                painter,
+                groove,
+                round,
+                shade(darker(face, 0.25)),
+                shade(lighter(face, 0.4)),
+                false,
+            );
+            painter.rect_stroke(
+                groove,
+                round,
+                Stroke::new(1.0, shade(darker(face, 0.4))),
+                StrokeKind::Inside,
+            );
+            let bead = Rect::from_center_size(pos2(x, y), vec2(18.0, 18.0) + vec2(hover, hover));
+            let blue = palette.accent;
+            let round = CornerRadius::same(10);
+            painter.add(
+                epaint::RectShape::filled(
+                    bead.translate(vec2(0.0, 1.0)),
+                    round,
+                    shade(Color32::from_black_alpha(60)),
+                )
+                .with_blur_width(3.0),
+            );
+            gradient(
+                painter,
+                bead,
+                round,
+                shade(darker(blue, 0.2)),
+                shade(lighter(blue, 0.55)),
+                false,
+            );
+            gloss(painter, bead, 0.9 * opacity * gel_sheen(palette.dark));
+            painter.rect_stroke(
+                bead,
+                round,
+                Stroke::new(1.0, shade(darker(blue, 0.45))),
+                StrokeKind::Inside,
+            );
+        }
+        Style::Platinum => {
+            // A dark-edged slot and a grey thumb with grip lines.
+            let slot = Rect::from_center_size(track.center(), vec2(track.width() + 8.0, 6.0));
+            painter.rect_filled(slot, CornerRadius::ZERO, shade(darker(face, 0.12)));
+            painter.rect_stroke(
+                slot,
+                CornerRadius::ZERO,
+                Stroke::new(1.0, shade(darker(face, 0.7))),
+                StrokeKind::Inside,
+            );
+            bevel(
+                painter,
+                slot.shrink(1.0),
+                shade(darker(face, 0.3)),
+                shade(lighter(face, 0.6)),
+            );
+            ticks(darker(face, 0.6));
+            let thumb = pointed(13.0, 20.0);
+            let fill = if hover > 0.5 {
+                lerp(face, palette.accent, 0.25)
+            } else {
+                lighter(face, 0.25)
+            };
+            painter.add(egui::Shape::convex_polygon(
+                thumb.to_vec(),
+                shade(fill),
+                Stroke::NONE,
+            ));
+            let edge = Stroke::new(1.0, shade(darker(face, 0.75)));
+            painter.add(egui::Shape::closed_line(thumb.to_vec(), edge));
+            let inner = [
+                thumb[0] + vec2(1.0, 1.0),
+                thumb[1] + vec2(-1.0, 1.0),
+                thumb[2] + vec2(-1.0, 0.0),
+                thumb[3] + vec2(0.0, -1.0),
+                thumb[4] + vec2(1.0, 0.0),
+            ];
+            outline(&inner, lighter(face, 0.9), darker(face, 0.3));
+            for dx in [-2.0, 0.0, 2.0] {
+                let gx = x.round() + dx + 0.5;
+                painter.vline(
+                    gx,
+                    (y - 6.0)..=(y + 1.0),
+                    Stroke::new(1.0, shade(darker(face, 0.45))),
+                );
+            }
+        }
+    }
+}
+
 /// The shadow a panel casts, if the style has one.
 pub fn shadow(palette: &Palette) -> Shadow {
     let (offset, blur, alpha) = match style() {
@@ -1038,31 +1269,36 @@ pub fn paint_canvas(painter: &Painter, rect: Rect, palette: &Palette) {
                 CornerRadius::ZERO,
                 &[(0.0, top), (0.4 / reach.max(0.4), middle), (1.0, bottom)],
             );
-            let shine = if palette.dark { 9 } else { 30 };
-            let slant = rect.height().min(900.0) * 0.4;
-            let mut mesh = Mesh::default();
-            let mut x = rect.left() - slant;
-            let widths = [70.0, 24.0, 110.0, 36.0];
-            let gaps = [40.0, 150.0, 60.0, 220.0];
-            let mut index = 0;
-            let lit = Color32::from_white_alpha(shine);
-            let bottom = rect.top() + slant * 2.0;
-            while x < rect.right() {
-                let width = widths[index % widths.len()];
-                let streak = [
-                    (pos2(x + slant, rect.top()), lit),
-                    (pos2(x + slant + width, rect.top()), lit),
-                    (pos2(x - slant + width, bottom), Color32::TRANSPARENT),
-                    (pos2(x - slant, bottom), Color32::TRANSPARENT),
-                ];
-                fan(&mut mesh, &clip_sides(&streak, rect.x_range()));
-                x += width + gaps[index % gaps.len()];
-                index += 1;
-            }
-            painter.add(mesh);
+            glass_streaks(painter, rect, if palette.dark { 9 } else { 30 });
         }
         _ => {}
     }
+}
+
+/// Vista's diagonal streaks of light across glass in `rect`, `shine` the
+/// white's opacity.
+pub(super) fn glass_streaks(painter: &Painter, rect: Rect, shine: u8) {
+    let slant = rect.height().min(900.0) * 0.4;
+    let mut mesh = Mesh::default();
+    let mut x = rect.left() - slant;
+    let widths = [70.0, 24.0, 110.0, 36.0];
+    let gaps = [40.0, 150.0, 60.0, 220.0];
+    let mut index = 0;
+    let lit = Color32::from_white_alpha(shine);
+    let bottom = rect.top() + slant * 2.0;
+    while x < rect.right() {
+        let width = widths[index % widths.len()];
+        let streak = [
+            (pos2(x + slant, rect.top()), lit),
+            (pos2(x + slant + width, rect.top()), lit),
+            (pos2(x - slant + width, bottom), Color32::TRANSPARENT),
+            (pos2(x - slant, bottom), Color32::TRANSPARENT),
+        ];
+        fan(&mut mesh, &clip_sides(&streak, rect.x_range()));
+        x += width + gaps[index % gaps.len()];
+        index += 1;
+    }
+    painter.add(mesh);
 }
 
 /// The part of the convex `polygon` between the sides of `x`, its colours
@@ -1317,6 +1553,11 @@ pub fn selection_bar() -> bool {
     style() == Style::Modern
 }
 
+/// Whether app icons sit bare, as on the old desktops, rather than on tiles.
+pub fn bare_icons() -> bool {
+    style() != Style::Modern
+}
+
 /// The colour a selected list row's text takes, when the style fills the
 /// selection solid.
 pub fn row_selection_ink(palette: &Palette) -> Option<Color32> {
@@ -1440,52 +1681,21 @@ pub fn paint_title_strip(painter: &Painter, rect: Rect, palette: &Palette) -> Op
     }
 }
 
-/// A title bar's text at `pos`, with what the style puts behind it: XP's
-/// shadow, Vista's glow, Aqua's emboss, Platinum's clearing in the lines.
-pub fn paint_title_text(
-    painter: &Painter,
-    pos: Pos2,
-    galley: Arc<Galley>,
-    ink: Color32,
-    palette: &Palette,
-) {
-    let area = Rect::from_min_size(pos, galley.size());
+/// The page's heading: Vista's light blue, the others' plain bold.
+pub fn heading(palette: &Palette) -> (FontId, Color32) {
     match style() {
-        Style::Luna => {
-            painter.galley_with_override_text_color(
-                pos + vec2(1.0, 1.0),
-                galley.clone(),
-                faded(darker(palette.deep, 0.6), 0.8),
-            );
-        }
-        Style::Glass => {
-            let glow = if palette.dark {
-                Color32::from_black_alpha(140)
+        Style::Modern => (theme::bold(26.0), palette.ink),
+        Style::Glass => (
+            theme::font(24.0),
+            if palette.dark {
+                rgb(0x8fb8ff)
             } else {
-                Color32::from_white_alpha(190)
-            };
-            painter.add(
-                RectShape::filled(area.expand2(vec2(10.0, 2.0)), CornerRadius::same(12), glow)
-                    .with_blur_width(16.0),
-            );
-        }
-        Style::Gel if !palette.dark => {
-            painter.galley_with_override_text_color(
-                pos + vec2(0.0, 1.0),
-                galley.clone(),
-                Color32::from_white_alpha(150),
-            );
-        }
-        Style::Platinum => {
-            painter.rect_filled(
-                area.expand2(vec2(6.0, 0.0)),
-                CornerRadius::ZERO,
-                palette.canvas,
-            );
-        }
-        _ => {}
+                rgb(0x1e3287)
+            },
+        ),
+        Style::Luna => (theme::bold(22.0), palette.ink),
+        Style::Retro | Style::Gel | Style::Platinum => (theme::bold(22.0), palette.ink),
     }
-    painter.galley_with_override_text_color(pos, galley, ink);
 }
 
 /// A list's column headings as the style draws them: in title case in
@@ -1776,7 +1986,7 @@ mod tests {
     use super::*;
 
     use crate::settings::{Accent, Density};
-    use eframe::egui::{FontId, Shape};
+    use eframe::egui::Shape;
 
     fn scheme(style: Style) -> theme::Scheme {
         theme::Scheme {
@@ -1920,11 +2130,7 @@ mod tests {
         }
         let strip = paint_title_strip(painter, rect(), palette);
         assert_eq!(strip.is_some(), style != Style::Modern, "{at}");
-        if let Some(ink) = strip {
-            let galley = painter.layout_no_wrap("Installed".into(), FontId::default(), ink);
-            // Inset as the header sets it, so Glass's glow has room.
-            paint_title_text(painter, rect().min + vec2(12.0, 6.0), galley, ink, palette);
-        }
+        assert!(heading(palette).1.a() > 0, "{at}");
         let band = paint_column_band(painter, rect(), palette);
         assert_eq!(band, style != Style::Modern, "{at}");
         for (sorted, hovered) in [(false, false), (true, true)] {
@@ -2083,6 +2289,7 @@ mod tests {
         let palette = Palette::of(scheme(Style::Modern), false);
         in_style(Style::Modern, || {
             assert!(selection_bar());
+            assert!(!bare_icons());
             assert!(!switch_as_check());
             assert!(group(&palette).is_none());
             assert!(row_selection_ink(&palette).is_none());
@@ -2096,6 +2303,7 @@ mod tests {
             let palette = Palette::of(scheme(style), false);
             in_style(style, || {
                 assert!(!selection_bar(), "{style:?}");
+                assert!(bare_icons(), "{style:?}");
                 assert!(switch_as_check(), "{style:?}");
                 assert_eq!(column_title("SUMMARY"), "Summary");
                 assert_eq!(column_title(""), "");
