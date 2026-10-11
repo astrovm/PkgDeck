@@ -9386,7 +9386,9 @@ mod tests {
         ));
         let mut controller = ffi::create_controller();
         let mut controller = controller.pin_mut();
-        controller.as_mut().rust_mut().autostart_path = Some(path.join("autostart/app.desktop"));
+        controller
+            .as_mut()
+            .use_autostart_path(path.join("autostart/app.desktop"));
         assert!(controller.as_mut().set_autostart(true));
         assert!(std::fs::read_to_string(path.join("autostart/app.desktop"))
             .unwrap()

@@ -234,7 +234,11 @@ mod linux {
                 .ok()
         })?;
         let value: OwnedValue = reply.body().deserialize().ok()?;
-        let mut value: Value = value.into();
+        setting(value.into())
+    }
+
+    /// A portal value as a [`super::Setting`], unwrapped however deep.
+    pub(super) fn setting(mut value: Value) -> Option<super::Setting> {
         while let Value::Value(inner) = value {
             value = *inner;
         }
@@ -249,6 +253,7 @@ mod linux {
             _ => return None,
         })
     }
+
     pub fn spawn(icon: Vec<ksni::Icon>) -> Option<Handle> {
         // Flatpak won't let the app own a StatusNotifierItem name, so the
         // icon registers under its connection's own name there instead.
@@ -626,6 +631,24 @@ mod tests {
         ] {
             assert_eq!(reduces_motion(key, &value), reduced, "{key} {value:?}");
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn portal_values_become_settings() {
+        use linux::setting;
+        use zbus::zvariant::Value;
+        use Setting::*;
+        assert_eq!(setting(Value::Bool(false)), Some(Flag(false)));
+        assert_eq!(setting(Value::U8(1)), Some(Number(1.0)));
+        assert_eq!(setting(Value::I32(-1)), Some(Number(-1.0)));
+        assert_eq!(setting(Value::U32(1)), Some(Number(1.0)));
+        assert_eq!(setting(Value::F64(0.5)), Some(Number(0.5)));
+        assert_eq!(setting(Value::from("0")), Some(Text("0".into())));
+        // `Read` wraps the value once more.
+        let wrapped = Value::Value(Box::new(Value::Value(Box::new(Value::U32(1)))));
+        assert_eq!(setting(wrapped), Some(Number(1.0)));
+        assert_eq!(setting(Value::I64(1)), None);
     }
 
     #[test]

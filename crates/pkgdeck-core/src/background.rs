@@ -331,7 +331,8 @@ mod tests {
     #[test]
     fn a_changed_interval_applies_to_the_next_check() {
         let mut schedule = Schedule::default();
-        assert_eq!(schedule.interval(), CHECK_INTERVAL_SECONDS);
+        // Six hours unless changed.
+        assert_eq!(schedule.interval(), 21_600);
         assert!(schedule.ready(0, true, false, false, false, false));
         let day = 24 * 60 * 60;
         schedule.set_interval(day);

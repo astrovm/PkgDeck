@@ -331,6 +331,8 @@ fn starting_at_login_is_offered_once() {
     let toast = app.restart_toast.clone().unwrap();
     assert_eq!(toast.action, Some(ToastAction::StartAtLogin));
     assert_eq!(toast.tone, Tone::Accent);
+    // It waits for an answer for a day.
+    assert_eq!(toast.lasts, Duration::from_secs(86_400));
     assert!(app.settings.login_asked);
     // Once asked, never again, even after the toast goes.
     app.restart_toast = None;
