@@ -332,8 +332,10 @@ impl Desktop {
             "refresh" => ("ctrl+m", "alt+r"),
             _ => panic!("unknown operation"),
         };
-        // Refreshing reviews every source the Updates page shows.
-        if op != "refresh" {
+        // Refresh sources lives on Updates; open it and let it load first.
+        if op == "refresh" {
+            self.key("ctrl+3");
+        } else {
             self.search(name);
         }
         let started = || {
