@@ -2361,9 +2361,7 @@ impl<T: Transport> Backend for Apt<T> {
             Operation::Clean(id) if id.backend == "apt" && id.key == "autoremove" => {
                 AptAction::Autoremove
             }
-            Operation::Clean(id) if id.backend == "apt" && id.key == "autoclean" => {
-                AptAction::Autoclean
-            }
+            Operation::Clean(id) if id.backend == "apt" && id.key == "clean" => AptAction::Clean,
             _ => return Err(invalid("apt", "foreign operation")),
         };
         progress(Progress::Message(

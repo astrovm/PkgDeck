@@ -1450,7 +1450,7 @@ mod tests {
                 "kind": "data",
                 "bytes": 9_000_000_000u64
             }, {
-                "id": {"backend": "apt", "key": "autoclean"},
+                "id": {"backend": "apt", "key": "clean"},
                 "title": "Old downloads",
                 "summary": "Cache",
                 "kind": "package_cache"
@@ -1476,7 +1476,7 @@ mod tests {
         let empty = human(&json!({"items": [], "failures": []}), 80, false);
         assert!(empty.contains("Nothing to clean"));
         let unknown = human(
-            &json!({"items": [{"id": {"backend": "apt", "key": "autoclean"}, "title": "Old downloads", "kind": "package_cache"}], "failures": []}),
+            &json!({"items": [{"id": {"backend": "apt", "key": "clean"}, "title": "Old downloads", "kind": "package_cache"}], "failures": []}),
             80,
             false,
         );
@@ -1544,10 +1544,10 @@ mod tests {
             (
                 Operation::Clean(pkgdeck_core::package::CleanupId {
                     backend: "apt".into(),
-                    key: "autoclean".into(),
+                    key: "clean".into(),
                 }),
-                "Clean up autoclean",
-                "Cleaning up autoclean",
+                "Clean up clean",
+                "Cleaning up clean",
                 "APT",
             ),
         ];

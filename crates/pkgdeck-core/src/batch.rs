@@ -126,7 +126,7 @@ pub fn protected_commands(operation: &Operation) -> Result<Vec<ProtectedCommand>
         }
         Operation::Clean(id) if id.backend == "apt" => match id.key.as_str() {
             "autoremove" => apt_command(AptAction::Autoremove)?,
-            "autoclean" => apt_command(AptAction::Autoclean)?,
+            "clean" => apt_command(AptAction::Clean)?,
             _ => return Err(invalid("unknown APT cleanup task")),
         },
         Operation::Refresh { backend } if backend == "flatpak" => ProtectedCommand::new(
@@ -1392,10 +1392,10 @@ mod tests {
             (
                 Operation::Clean(CleanupId {
                     backend: "apt".into(),
-                    key: "autoclean".into(),
+                    key: "clean".into(),
                 }),
                 "apt-get",
-                "autoclean",
+                "clean",
             ),
             (
                 Operation::Refresh {

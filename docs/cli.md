@@ -251,7 +251,7 @@ PkgDeck checks the task again right before running it.
 
 | Source | What it cleans |
 | --- | --- |
-| APT | Unused dependencies and old downloaded packages |
+| APT | Unused dependencies and the download cache |
 | Homebrew | Unused dependencies and old downloads |
 | Docker, Podman | Untagged images, unused images, stopped containers, unused volumes |
 | Docker Buildx | Unused build cache |
@@ -267,8 +267,8 @@ PkgDeck checks the task again right before running it.
 - pip needs a virtual environment, like its other commands.
 - pnpm, the Podman build cache, and unused Flatpak runtimes aren't offered,
   because their package managers can't show an exact preview.
-- Listing APT tasks doesn't need a password. The list only counts cached
-  downloads. APT decides which ones are old when the cleanup runs.
+- Listing APT tasks doesn't need a password. Cleaning the download cache
+  deletes every cached download, so a package you reinstall downloads again.
 
 ## Inspecting your system
 

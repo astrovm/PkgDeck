@@ -1321,7 +1321,7 @@ impl Engine {
                 }
                 if let Operation::Clean(id) = operation {
                     // Backends may need an explicitly authorized preview for
-                    // this exact task (APT autoclean, for example). A general
+                    // this exact task (APT clean, for example). A general
                     // discovery would omit it and reject a valid reviewed plan.
                     let current = backend.cleanup_plan(id, cancel)?;
                     if expected.as_ref() != Some(&current) {

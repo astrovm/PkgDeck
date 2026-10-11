@@ -190,7 +190,8 @@ that failed are shown separately.
 
 | Source | What it cleans |
 | --- | --- |
-| APT, Homebrew | Unused dependencies and old downloads |
+| APT | Unused dependencies and the download cache |
+| Homebrew | Unused dependencies and old downloads |
 | Docker, Podman | Untagged images, unused images, stopped containers, unused volumes |
 | Docker Buildx | Unused build cache |
 | npm, pip, uv | Download caches |
@@ -202,9 +203,9 @@ that failed are shown separately.
 - A worktree counts as finished when its branch was merged or deleted on the
   remote, and it has no changes. Removing it keeps the branch.
 - Old project build files wait while something is being built.
-- APT finds unused dependencies without a password. It only counts cached
-  downloads at this stage. APT picks which cached downloads to delete when
-  the cleanup runs, and asks for your password then.
+- APT finds unused dependencies and sizes its download cache without a
+  password. Cleaning the cache deletes every cached download, so a package
+  you reinstall downloads again. Both ask for your password when they run.
 
 ### Clean settings
 

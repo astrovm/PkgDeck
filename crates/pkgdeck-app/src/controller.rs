@@ -16486,7 +16486,7 @@ mod tests {
             CleanupKind::Data,
             Some(9_000_000_000),
         );
-        let unknown = sized("apt", "autoclean", CleanupKind::PackageCache, None);
+        let unknown = sized("apt", "clean", CleanupKind::PackageCache, None);
         let build = sized(
             "projects",
             "build:/home/me/app",
@@ -16554,7 +16554,7 @@ mod tests {
         );
         let body = data["body"].as_str().unwrap();
         assert!(body.starts_with("cargo task (Developer caches), about 2.0 GB\nEmpties cargo"));
-        assert!(body.contains("autoclean task (APT)\nEmpties autoclean"));
+        assert!(body.contains("clean task (APT)\nEmpties clean"));
         assert!(!body.contains("unused-volumes"));
         controller.as_mut().confirm(false);
         // Only data: nothing for Clean all to do.

@@ -2206,7 +2206,7 @@ pub enum AptAction {
     InstallLocal(PathBuf),
     Remove(String),
     Autoremove,
-    Autoclean,
+    Clean,
 }
 
 impl AptAction {
@@ -2266,8 +2266,8 @@ impl AptAction {
                 .map(OsString::from)
                 .to_vec());
             }
-            Self::Autoclean => {
-                return Ok(["--assume-yes", "-o", "DPkg::Lock::Timeout=0", "autoclean"]
+            Self::Clean => {
+                return Ok(["--assume-yes", "-o", "DPkg::Lock::Timeout=0", "clean"]
                     .map(OsString::from)
                     .to_vec());
             }

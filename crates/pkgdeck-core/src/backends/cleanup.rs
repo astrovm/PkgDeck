@@ -229,7 +229,7 @@ impl<T: Transport> DevTool<T> {
 impl<T: Transport> Apt<T> {
     pub(super) fn cleanup_apt_report(&self, cancel: &Cancellation) -> CleanupReport {
         let mut report = CleanupReport::default();
-        for key in ["autoremove", "autoclean"] {
+        for key in ["autoremove", "clean"] {
             match self.cleanup_apt_task(key, cancel) {
                 Ok(Some(item)) => report.items.push(item),
                 Ok(None) => {}
@@ -247,7 +247,7 @@ impl<T: Transport> Apt<T> {
         key: &str,
         cancel: &Cancellation,
     ) -> Result<Option<CleanupItem>, EngineError> {
-        if key == "autoclean" {
+        if key == "clean" {
             return self.cleanup_apt_cache(cancel);
         }
         if key != "autoremove" {
@@ -315,9 +315,9 @@ impl<T: Transport> Apt<T> {
     }
 
     fn cleanup_apt_cache(&self, cancel: &Cancellation) -> Result<Option<CleanupItem>, EngineError> {
-        // `apt-get --simulate autoclean` reads the root-only archives/partial
-        // directory. Count visible downloads instead; APT selects obsolete
-        // files only when the user authorizes the actual cleanup.
+        // `apt-get clean` empties the download cache, so what it frees is
+        // the size of the downloads there. They are readable without a
+        // password; only archives/partial is root's.
         let config = String::from_utf8(bytes(
             "apt",
             self.transport.system_manager(
@@ -363,25 +363,36 @@ impl<T: Transport> Apt<T> {
                     "-name".into(),
                     "*.deb".into(),
                     "-printf".into(),
-                    ".".into(),
+                    "%s\\n".into(),
                 ],
                 cancel,
                 false,
             )?,
         )?;
-        if entries.is_empty() {
+        let sizes = String::from_utf8(entries)
+            .map_err(|error| invalid("apt", error))?
+            .lines()
+            .map(|line| line.trim().parse::<u64>())
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| invalid("apt", error))?;
+        if sizes.is_empty() {
             return Ok(None);
         }
+        let count = sizes.len();
         Ok(Some(CleanupItem {
             id: CleanupId {
                 backend: "apt".into(),
-                key: "autoclean".into(),
+                key: "clean".into(),
             },
             kind: CleanupKind::PackageCache,
             title: "APT download cache".into(),
-            summary: format!("{} cached downloads", entries.len()),
-            preview: "APT selects obsolete downloads during cleanup.".into(),
-            bytes: None,
+            summary: format!(
+                "{count} cached download{}",
+                if count == 1 { "" } else { "s" }
+            ),
+            preview: "Deletes every cached download. A package you reinstall downloads again."
+                .into(),
+            bytes: Some(sizes.iter().sum()),
         }))
     }
 }
