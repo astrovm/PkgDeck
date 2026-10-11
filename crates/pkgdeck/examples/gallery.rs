@@ -199,20 +199,38 @@ fn main() {
         app.invalidate();
     });
     render("clean", [1500.0, 860.0], true, |app| {
-        let task = |name: &str, display: &str, source: &str, kind: &str, summary: &str| {
-            serde_json::from_value::<model::Row>(json!({
-                "kind": "cleanup", "name": name, "display_name": display, "source": source,
-                "cleanup_kind": kind, "summary": summary, "preview": "",
-            }))
-            .unwrap()
-        };
+        let task =
+            |name: &str, display: &str, source: &str, kind: &str, summary: &str, bytes: u64| {
+                serde_json::from_value::<model::Row>(json!({
+                    "kind": "cleanup", "name": name, "display_name": display, "source": source,
+                    "cleanup_kind": kind, "summary": summary, "preview": "", "bytes": bytes,
+                }))
+                .unwrap()
+            };
         app.rows = vec![
             task(
-                "apt-cache",
-                "APT download cache",
-                "apt",
+                "build:~/code/website",
+                "website build files",
+                "projects",
+                "build_files",
+                "Unchanged for 3 months",
+                2_400_000_000,
+            ),
+            task(
+                "cargo",
+                "Cargo downloads",
+                "dev-caches",
                 "package_cache",
-                "104 cached downloads",
+                "Downloaded crates and Git checkouts",
+                1_800_000_000,
+            ),
+            task(
+                "unused-images",
+                "Unused images",
+                "docker",
+                "unused",
+                "4 images no container uses",
+                950_000_000,
             ),
             task(
                 "brew-cleanup",
@@ -220,6 +238,15 @@ fn main() {
                 "homebrew",
                 "package_cache",
                 "Old files that brew cleanup would remove",
+                310_000_000,
+            ),
+            task(
+                "unused-volumes",
+                "Unused volumes",
+                "docker",
+                "data",
+                "2 volumes no container uses",
+                120_000_000,
             ),
             task(
                 "apt-autoremove",
@@ -227,13 +254,7 @@ fn main() {
                 "apt",
                 "orphan_dependencies",
                 "3 packages nothing needs",
-            ),
-            task(
-                "npm-cache",
-                "npm package cache",
-                "npm",
-                "package_cache",
-                "Clear cached downloads",
+                48_000_000,
             ),
         ];
         offline(app, Page::Clean);

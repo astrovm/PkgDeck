@@ -160,6 +160,10 @@ fn panel(app: &mut App, ui: &mut Ui, rect: Rect, row: &Row, narrow: bool) {
         let text = app.details.panel_text(&app.report);
         let text = if text.is_empty() {
             match row.kind.as_str() {
+                "cleanup" if row.cleanup_kind == "data" => format!(
+                    "{}\n\n{}\n\nClean all leaves this alone. Clean it on its own.",
+                    row.summary, row.preview
+                ),
                 "cleanup" => format!("{}\n\n{}", row.summary, row.preview),
                 _ => row.summary.clone(),
             }

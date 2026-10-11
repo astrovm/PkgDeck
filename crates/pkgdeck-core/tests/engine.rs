@@ -238,6 +238,7 @@ impl Backend for Cleaner {
             title: "Synthetic orphans".into(),
             summary: "One synthetic dependency".into(),
             preview: "synthetic-runtime".into(),
+            bytes: None,
         }])
     }
     fn execute(
@@ -284,6 +285,7 @@ fn cleanup_item(backend: &str, key: &str, title: &str) -> CleanupItem {
         title: title.into(),
         summary: "Synthetic cache".into(),
         preview: "/tmp/synthetic-cache".into(),
+        bytes: None,
     }
 }
 

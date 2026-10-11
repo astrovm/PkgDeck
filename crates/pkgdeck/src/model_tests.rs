@@ -355,6 +355,26 @@ fn versions_read_by_kind_and_state() {
         version(json!({"kind": "cleanup", "cleanup_kind": "package_cache"})),
         "Cache"
     );
+    for (kind, text) in [
+        ("unused", "Unused"),
+        ("build_files", "Build files"),
+        ("worktree", "Worktree"),
+        ("data", "Data"),
+    ] {
+        assert_eq!(
+            version(json!({"kind": "cleanup", "cleanup_kind": kind})),
+            text
+        );
+    }
+    // What a task frees, when it can tell.
+    assert_eq!(
+        version(json!({"kind": "cleanup", "cleanup_kind": "data", "bytes": 4_200_000})),
+        "4.2 MB"
+    );
+    assert_eq!(
+        version(json!({"kind": "cleanup", "cleanup_kind": "worktree", "bytes": 0})),
+        "Worktree"
+    );
     assert_eq!(version(json!({"kind": "failure"})), "Failed");
     assert_eq!(
         version(json!({"kind": "source", "available": true})),
@@ -1095,4 +1115,50 @@ fn installed_lists_every_source_a_to_z() {
         names(&rows, &visible(&rows, &updates)),
         ["zed", "Anchor", "7zip", "bat", "bat"]
     );
+}
+
+#[test]
+fn cleanup_tasks_sort_by_what_they_free() {
+    let rows: Vec<Row> = [
+        ("small", Some(9_000)),
+        ("unknown", None),
+        ("big", Some(2_000_000_000)),
+    ]
+    .into_iter()
+    .map(|(name, bytes)| row(json!({"kind": "cleanup", "name": name, "bytes": bytes})))
+    .collect();
+    let sorted = |ascending| {
+        let options = ViewOptions {
+            page: Some(Page::Clean),
+            sort: Some((Column::Version, ascending)),
+            ..ViewOptions::default()
+        };
+        names(&rows, &visible(&rows, &options))
+    };
+    assert_eq!(sorted(false), ["big", "small", "unknown"]);
+    assert_eq!(sorted(true), ["unknown", "small", "big"]);
+}
+
+#[test]
+fn automatic_cleaning_says_what_it_freed() {
+    let said = |tasks, failed, bytes| {
+        AutoCleaned {
+            tasks,
+            failed,
+            bytes,
+        }
+        .message()
+    };
+    assert_eq!(said(0, 0, 0), None);
+    assert_eq!(said(3, 0, 4_200_000_000).as_deref(), Some("Freed 4.2 GB"));
+    assert_eq!(
+        said(1, 0, 0).as_deref(),
+        Some("Cleaned up caches and build files")
+    );
+    assert_eq!(
+        said(2, 1, 900).as_deref(),
+        Some("Freed 900 bytes, 1 task failed")
+    );
+    assert_eq!(said(0, 2, 0).as_deref(), Some("2 cleanup tasks failed"));
+    assert_eq!(said(0, 1, 0).as_deref(), Some("1 cleanup task failed"));
 }

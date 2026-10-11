@@ -40,8 +40,11 @@ fn first(battery: bool, building: impl FnOnce() -> bool) -> Option<Hold> {
 
 #[cfg(target_os = "macos")]
 fn on_battery(host: &Host) -> bool {
-    read(host, Path::new("/usr/bin/pmset"), &["-g", "batt"])
-        .is_some_and(|status| drawing_from_battery(&status))
+    pmset_battery(host, Path::new("/usr/bin/pmset"))
+}
+#[cfg(any(target_os = "macos", test))]
+fn pmset_battery(host: &Host, pmset: &Path) -> bool {
+    read(host, pmset, &["-g", "batt"]).is_some_and(|status| drawing_from_battery(&status))
 }
 #[cfg(target_os = "linux")]
 fn on_battery(_: &Host) -> bool {
@@ -80,13 +83,15 @@ fn discharging(supplies: &Path) -> bool {
         })
 }
 
-fn building(host: &Host) -> bool {
-    #[cfg(target_os = "macos")]
-    let ps = Some(std::path::PathBuf::from("/bin/ps"));
-    #[cfg(not(target_os = "macos"))]
-    let ps = host.resolve("ps").ok().flatten();
-    ps.and_then(|ps| read(host, &ps, &["-A", "-o", "args="]))
-        .is_some_and(|processes| builds_in(&processes))
+/// Whether something is being built right now.
+pub(crate) fn building(host: &Host) -> bool {
+    host.resolve("ps")
+        .ok()
+        .flatten()
+        .is_some_and(|ps| listed_builds(host, &ps))
+}
+fn listed_builds(host: &Host, ps: &Path) -> bool {
+    read(host, ps, &["-A", "-o", "args="]).is_some_and(|processes| builds_in(&processes))
 }
 
 fn read(host: &Host, program: &Path, args: &[&str]) -> Option<String> {
@@ -196,6 +201,9 @@ mod tests {
             "/usr/bin/java -Xmx2g -cp gradle-daemon.jar org.gradle.launcher.daemon.bootstrap.GradleDaemon 8.10",
             "/Users/me/.cargo/bin/sccache",
             "/usr/bin/makemkv",
+            // Other tools with a build or test command.
+            "npm test",
+            "docker build .",
         ] {
             assert!(!builds_in(line), "{line}");
         }
@@ -264,7 +272,67 @@ mod tests {
             Runtime::Native,
             BTreeMap::from([("PATH".into(), "/nonexistent/pkgdeck".into())]),
         );
-        assert!(!building(&bare) || cfg!(target_os = "macos"));
+        assert!(!building(&bare));
         assert_eq!(read(&bare, Path::new("/nonexistent/pkgdeck/ps"), &[]), None);
+    }
+
+    /// A shell script in a fresh folder, run as a stand-in for a tool.
+    fn tool(dir: &Path, name: &str, body: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(name);
+        fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[test]
+    fn power_and_builds_are_read_from_what_the_tools_print() {
+        let dir = std::env::temp_dir().join(format!("pkgdeck-hold-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let host = Host::current();
+        let battery = tool(&dir, "battery", "echo \"Now drawing from 'Battery Power'\"");
+        let plugged = tool(&dir, "plugged", "echo \"Now drawing from 'AC Power'\"");
+        let broken = tool(
+            &dir,
+            "broken",
+            "echo \"Now drawing from 'Battery Power'\"; exit 1",
+        );
+        assert!(pmset_battery(&host, &battery));
+        assert!(!pmset_battery(&host, &plugged));
+        // A tool that fails says nothing, whatever it printed.
+        assert!(!pmset_battery(&host, &broken));
+        assert_eq!(read(&host, &broken, &[]), None);
+        let build = tool(&dir, "build", "echo /sbin/launchd; echo cargo build");
+        let idle = tool(&dir, "idle", "echo /sbin/launchd");
+        assert!(listed_builds(&host, &build));
+        assert!(!listed_builds(&host, &idle));
+        // A long process list is read whole.
+        let long = tool(&dir, "long", "head -c 3000000 /dev/zero | tr '\\0' a");
+        assert_eq!(
+            read(&host, &long, &[]).map(|text| text.len()),
+            Some(3_000_000)
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_running_compiler_holds_updates() {
+        // A program named like a compiler, as ps lists it.
+        let dir = std::env::temp_dir().join(format!("pkgdeck-rustc-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let rustc = dir.join("rustc");
+        let _ = fs::remove_file(&rustc);
+        std::os::unix::fs::symlink("/bin/sleep", &rustc).unwrap();
+        let mut child = std::process::Command::new(&rustc)
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let host = Host::current();
+        let held = (building(&host), current(&host));
+        child.kill().unwrap();
+        child.wait().unwrap();
+        fs::remove_dir_all(&dir).unwrap();
+        assert!(held.0);
+        assert!(held.1.is_some());
     }
 }

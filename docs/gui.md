@@ -180,15 +180,50 @@ a standalone tool or an app from macOS Applications, has no Undo.
 
 ## Clean
 
-Clean lists maintenance tasks, such as removing unused dependencies or cached
-downloads. Open a task to see exactly what it will remove, or click
-**Clean all**. Every task asks for confirmation, and PkgDeck checks the task
-again right before running it. Sources that can't clean are not listed, and
-checks that failed are shown separately.
+Clean lists maintenance tasks, biggest first, with how much space each one
+frees. **Clean all** shows the total. Open a task to see exactly what it will
+remove. Every task asks for confirmation, and PkgDeck checks the task again
+right before running it. Sources that can't clean are not listed, and checks
+that failed are shown separately.
 
-APT finds unused dependencies without a password. It only counts cached
-downloads at this stage. APT picks which cached downloads to delete when the
-cleanup runs, and asks for your password then.
+| Source | What it cleans |
+| --- | --- |
+| APT, Homebrew | Unused dependencies and old downloads |
+| Docker, Podman | Untagged images, unused images, stopped containers, unused volumes |
+| Docker Buildx | Unused build cache |
+| npm, pip, uv | Download caches |
+| Developer caches | Cargo, Go, Gradle, Maven, Yarn, Bun and sccache caches; on macOS also CocoaPods and Xcode build data |
+| Old projects | Build folders (`target`, `node_modules`, `build`, `.gradle` and others) and finished Git worktrees of projects you haven't touched in a while |
+
+- Unused volumes hold data. **Clean all** leaves them alone; clean them on
+  their own.
+- A worktree counts as finished when its branch was merged or deleted on the
+  remote, and it has no changes. Removing it keeps the branch.
+- Old project build files wait while something is being built.
+- APT finds unused dependencies without a password. It only counts cached
+  downloads at this stage. APT picks which cached downloads to delete when
+  the cleanup runs, and asks for your password then.
+
+### Clean settings
+
+- **Old projects**: how long a project must stay untouched. A week by default.
+- **Look for projects in**: the folders PkgDeck searches. Your home folder by
+  default, without hidden folders and, on macOS, without Library. **Add
+  folder** adds another one.
+
+### Clean automatically
+
+Turn on **Clean automatically** in Settings. It needs **Background checks**.
+
+- At most once a day, after a background check.
+- Only what comes back on its own: download caches, unused images, build
+  caches, and build files of old projects.
+- Never unused dependencies, extra copies, worktrees, stopped containers or
+  volumes. Those stay in **Clean** for you to review.
+- Only sources that run as you, so it never asks for a password.
+- Like automatic updates, it waits for the charger, for builds, and for other
+  changes to finish.
+- A notification says how much space it freed.
 
 ## Sources
 
@@ -488,6 +523,9 @@ out of date, and each page refreshes when you open it.
   **Allow updates that remove packages**, **Allow automatic updates without
   a password** and **Start in background at login**: see
   [Update notifications](#update-notifications).
+- **Clean automatically**: see [Clean automatically](#clean-automatically).
+- **Old projects** and **Look for projects in**: see
+  [Clean settings](#clean-settings).
 - **Last check** shows when PkgDeck last checked and what it found.
 - **Test notification** sends a sample notification.
 - **About** shows the version and a link to GitHub.

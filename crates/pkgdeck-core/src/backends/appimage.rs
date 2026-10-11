@@ -1660,6 +1660,7 @@ impl Backend for AppImage {
                         package.display_name
                     ),
                     preview: format!("Removes {path} and its menu entries."),
+                    bytes: Some(crate::disk::usage(Path::new(&package.id.name), cancel)),
                 }
             })
             .collect())

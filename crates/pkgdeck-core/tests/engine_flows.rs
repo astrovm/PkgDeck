@@ -81,6 +81,7 @@ impl Backend for Fixture {
             title: "Cache".into(),
             summary: "Cached downloads".into(),
             preview: self.preview(),
+            bytes: None,
         }])
     }
     fn execute_group(

@@ -340,7 +340,7 @@ fn column_titles(app: &mut App, ui: &mut Ui, rect: Rect, width: Width) {
     let palette = Palette::current(ui.ctx());
     let cols = columns(rect, width, app.page, ACTIONS_ROOM, Shares::of(app));
     let version_title = match app.page {
-        Page::Clean => "TYPE",
+        Page::Clean => "SIZE",
         Page::Sources => "STATUS",
         _ => "VERSION",
     };

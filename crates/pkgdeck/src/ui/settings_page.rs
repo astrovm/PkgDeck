@@ -1,5 +1,5 @@
-//! Settings: how PkgDeck looks, when it checks for updates, what it is,
-//! and its keyboard shortcuts.
+//! Settings: how PkgDeck looks, when it checks for updates, where Clean
+//! looks for old projects, what it is, and its keyboard shortcuts.
 
 use super::widgets::*;
 use crate::{
@@ -9,6 +9,8 @@ use crate::{
     theme::{self, Palette},
 };
 use eframe::egui::{self, vec2, CornerRadius, Id, Sense, Stroke, Ui, Vec2};
+use pkgdeck_core::{backends::ProjectSettings, host::Host};
+use std::path::{Path, PathBuf};
 
 pub fn show(app: &mut App, ui: &mut Ui) {
     egui::ScrollArea::vertical()
@@ -21,6 +23,8 @@ pub fn show(app: &mut App, ui: &mut Ui) {
             appearance(app, ui);
             ui.add_space(8.0);
             update_checks(app, ui);
+            ui.add_space(8.0);
+            clean(ui);
             ui.add_space(8.0);
             about(app, ui);
             ui.add_space(8.0);
@@ -361,6 +365,20 @@ fn update_checks(app: &mut App, ui: &mut Ui) {
         });
         setting_row(
             ui,
+            "Clean automatically",
+            "Once a day: caches, unused images and build files of old projects",
+            SWITCH,
+            |ui| {
+                let mut on = app.settings.auto_clean;
+                if switch(ui, &mut on, background, "Clean automatically").changed() {
+                    app.settings.auto_clean = on;
+                    let at = app.settings.auto_cleaned_at;
+                    app.c().set_auto_clean(on, at);
+                }
+            },
+        );
+        setting_row(
+            ui,
             "Allow updates that remove packages",
             "Like an old kernel replaced by a new one",
             SWITCH,
@@ -481,6 +499,122 @@ fn update_checks(app: &mut App, ui: &mut Ui) {
     });
 }
 
+/// How long a project stays untouched before Clean offers its build files.
+const PROJECT_DAYS: [u32; 9] = [1, 3, 7, 14, 30, 60, 90, 180, 365];
+
+/// The step for `days`, or the next longer one.
+fn project_step(days: u32) -> usize {
+    PROJECT_DAYS
+        .iter()
+        .position(|step| *step >= days)
+        .unwrap_or(PROJECT_DAYS.len() - 1)
+}
+
+fn days_text(days: u32) -> String {
+    match days {
+        1 => "1 day".into(),
+        7 => "1 week".into(),
+        14 => "2 weeks".into(),
+        365 => "1 year".into(),
+        days => format!("{days} days"),
+    }
+}
+
+/// `path` with the home folder written as `~`.
+fn shown_folder(path: &Path, home: Option<&Path>) -> String {
+    match home.and_then(|home| path.strip_prefix(home).ok()) {
+        Some(rest) if rest.as_os_str().is_empty() => "~".into(),
+        Some(rest) => format!("~/{}", rest.display()),
+        None => path.display().to_string(),
+    }
+}
+
+/// Where Clean looks for old projects, kept in PkgDeck's own config file
+/// for the engine and `pkd` to read too.
+fn clean(ui: &mut Ui) {
+    let palette = Palette::current(ui.ctx());
+    let id = Id::new("project-settings");
+    let mut projects = ui
+        .data_mut(|data| data.get_temp::<ProjectSettings>(id))
+        .unwrap_or_else(|| ProjectSettings::load(&Host::current()));
+    let before = projects.clone();
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    section(ui, "Clean", |ui| {
+        let step = project_step(projects.days);
+        setting_row(
+            ui,
+            "Old projects",
+            &format!(
+                "Build files and worktrees unchanged for {}",
+                days_text(projects.days)
+            ),
+            vec2(240.0, 28.0),
+            |ui| {
+                let mut index = step;
+                if steps(
+                    ui,
+                    Id::new("project-days"),
+                    PROJECT_DAYS.len(),
+                    &mut index,
+                    true,
+                    240.0,
+                ) {
+                    projects.days = PROJECT_DAYS[index];
+                }
+            },
+        );
+        ui.label(egui::RichText::new("Look for projects in").color(palette.muted));
+        let mut removed = None;
+        for (index, folder) in projects.folders.iter().enumerate() {
+            ui.horizontal(|ui| {
+                ui.label(shown_folder(folder, home.as_deref()));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if icon_button(ui, "remove", "Stop looking here", palette.muted, true).clicked()
+                    {
+                        removed = Some(index);
+                    }
+                });
+            });
+        }
+        if let Some(index) = removed {
+            projects.folders.remove(index);
+        }
+        if Button::new(Look::Secondary, "Add folder")
+            .icon("add")
+            .small()
+            .show(ui)
+            .clicked()
+        {
+            let mut dialog = rfd::FileDialog::new().set_title("Look for projects in");
+            if let Some(home) = &home {
+                dialog = dialog.set_directory(home);
+            }
+            if let Some(folder) = dialog.pick_folder() {
+                if !projects.folders.contains(&folder) {
+                    projects.folders.push(folder);
+                }
+            }
+        }
+        let error_id = Id::new("project-settings-error");
+        if let Some(error) = ui.data_mut(|data| data.get_temp::<String>(error_id)) {
+            ui.label(egui::RichText::new(error).color(palette.danger));
+        }
+    });
+    if projects != before {
+        let error = projects
+            .save(&Host::current())
+            .err()
+            .map(|error| format!("Couldn't save the folders: {error}"));
+        ui.data_mut(|data| match error {
+            Some(error) => {
+                data.insert_temp(Id::new("project-settings-error"), error);
+            }
+            None => data.remove::<String>(Id::new("project-settings-error")),
+        });
+    }
+    ui.data_mut(|data| data.insert_temp(id, projects));
+}
+
 fn about(app: &mut App, ui: &mut Ui) {
     let palette = Palette::current(ui.ctx());
     section(ui, "About", |ui| {
@@ -593,4 +727,49 @@ fn shortcuts(ui: &mut Ui) {
             }
         });
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn project_waits_snap_to_steps_and_read_naturally() {
+        assert_eq!(PROJECT_DAYS[project_step(7)], 7);
+        // A hand-edited wait shows on the next longer step.
+        assert_eq!(PROJECT_DAYS[project_step(10)], 14);
+        assert_eq!(PROJECT_DAYS[project_step(0)], 1);
+        assert_eq!(PROJECT_DAYS[project_step(9999)], 365);
+        let said: Vec<_> = PROJECT_DAYS.iter().map(|days| days_text(*days)).collect();
+        assert_eq!(
+            said,
+            [
+                "1 day", "3 days", "1 week", "2 weeks", "30 days", "60 days", "90 days",
+                "180 days", "1 year"
+            ]
+        );
+        assert_eq!(days_text(10), "10 days");
+    }
+
+    #[test]
+    fn folders_are_shown_from_the_home() {
+        let home = Path::new("/home/me");
+        assert_eq!(shown_folder(home, Some(home)), "~");
+        assert_eq!(
+            shown_folder(Path::new("/home/me/code"), Some(home)),
+            "~/code"
+        );
+        assert_eq!(
+            shown_folder(Path::new("/srv/code"), Some(home)),
+            "/srv/code"
+        );
+        assert_eq!(
+            shown_folder(Path::new("/home/meg"), Some(home)),
+            "/home/meg"
+        );
+        assert_eq!(
+            shown_folder(Path::new("/home/me/code"), None),
+            "/home/me/code"
+        );
+    }
 }

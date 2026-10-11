@@ -9,6 +9,7 @@ mod cleanup;
 mod conda;
 mod container;
 mod desktop_exec;
+mod dev_caches;
 mod dev_containers;
 mod dotnet;
 mod firmware;
@@ -19,6 +20,7 @@ mod mas;
 mod nix;
 mod oh_my_zsh;
 mod pixi;
+mod projects;
 mod rustup;
 mod standalone;
 mod system_image;
@@ -42,6 +44,7 @@ pub use mas::MacAppStore;
 pub use nix::Nix;
 pub use oh_my_zsh::OhMyZsh;
 pub use pixi::Pixi;
+pub use projects::ProjectSettings;
 pub use rustup::Rustup;
 use serde::Deserialize;
 pub use standalone::{Standalone, StandaloneTool};
@@ -129,6 +132,8 @@ pub const BACKEND_IDS: &[&str] = &[
     "solana",
     "anchor",
     "foundry",
+    "dev-caches",
+    "projects",
 ];
 
 /// PkgDeck never installs from these sources: it updates what is already
@@ -284,6 +289,8 @@ pub fn display_name(id: &str) -> &str {
         "solana" => "Solana CLI (Agave)",
         "anchor" => "Anchor (AVM)",
         "foundry" => "Foundry",
+        "dev-caches" => "Developer caches",
+        "projects" => "Old projects",
         // npm, pnpm, pip, pipx, uv, mise, pixi, apk, and rustup are written in lower case.
         other => other,
     }
@@ -2674,6 +2681,18 @@ fn linux_casks_supported(version: &str) -> bool {
         .is_some_and(|major| major >= 6)
 }
 impl<T: Transport> Homebrew<T> {
+    /// What the formulae `brew autoremove --dry-run` lists take in the Cellar.
+    fn cellar_usage(&self, preview: &str, cancel: &Cancellation) -> Option<u64> {
+        let cellar = self.prefix.as_ref()?.join("Cellar");
+        Some(
+            preview
+                .lines()
+                .map(str::trim)
+                .filter(|name| formula_name(name) && !name.contains('/'))
+                .map(|name| crate::disk::usage(&cellar.join(name), cancel))
+                .sum(),
+        )
+    }
     fn call(
         &self,
         args: &[&str],
@@ -2861,6 +2880,13 @@ impl<T: Transport> Backend for Homebrew<T> {
         .ok_or(EngineError::NotFound)
     }
     fn cleanup(&mut self, cancel: &Cancellation) -> Result<Vec<CleanupItem>, EngineError> {
+        /// "==> This operation would free approximately 18.2GB of disk space."
+        fn brew_frees(preview: &str) -> Option<u64> {
+            preview.lines().find_map(|line| {
+                let size = line.split("would free approximately ").nth(1)?;
+                crate::disk::parse_size(size.split_whitespace().next()?)
+            })
+        }
         fn plan(result: Completion) -> Result<Option<String>, EngineError> {
             let output = String::from_utf8(bytes("homebrew", result)?)
                 .map_err(|error| invalid("homebrew", error))?;
@@ -2877,6 +2903,7 @@ impl<T: Transport> Backend for Homebrew<T> {
                 kind: CleanupKind::OrphanDependencies,
                 title: "Unused Homebrew dependencies".into(),
                 summary: "Formulae that no installed package needs anymore".into(),
+                bytes: self.cellar_usage(&preview, cancel),
                 preview,
             });
         }
@@ -2889,6 +2916,7 @@ impl<T: Transport> Backend for Homebrew<T> {
                 kind: CleanupKind::PackageCache,
                 title: "Old Homebrew downloads and versions".into(),
                 summary: "Old files that brew cleanup would remove".into(),
+                bytes: brew_frees(&preview),
                 preview,
             });
         }
@@ -6397,6 +6425,12 @@ fn native_engine_on(
     if allowed("fwupd") {
         candidates.push((Box::new(Firmware::new(transport())), true));
     }
+    if allowed("dev-caches") {
+        candidates.push((Box::new(dev_caches::DevCaches::new(host.clone())), true));
+    }
+    if allowed("projects") {
+        candidates.push((Box::new(projects::Projects::new(host.clone())), true));
+    }
     if allowed("appimage") {
         // Detection only checks the OS, so probing is free and keeps a
         // Linux-only source out of automatic queries on macOS.
@@ -6778,6 +6812,7 @@ mod tests {
             .filter(|id| display_name(id) != **id)
             .count();
         assert_eq!(renamed, BACKEND_IDS.len() - 9);
+        assert_eq!(display_name("projects"), "Old projects");
     }
 
     #[test]

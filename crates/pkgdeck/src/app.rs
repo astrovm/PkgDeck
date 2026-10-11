@@ -334,9 +334,11 @@ impl App {
             self.settings.auto_update,
             self.settings.allow_removals,
         );
+        let (clean, cleaned_at) = (self.settings.auto_clean, self.settings.auto_cleaned_at);
         self.c().set_check_interval(interval);
         self.c().set_auto_update(auto);
         self.c().set_allow_removals(removals);
+        self.c().set_auto_clean(clean, cleaned_at);
     }
 
     pub fn save_settings(&mut self) {
@@ -703,6 +705,18 @@ impl App {
                 "notify": false,
             })
             .to_string();
+        }
+        // Automatic cleaning just ran.
+        if let Some(at) = self
+            .background
+            .cleaned_at
+            .filter(|at| *at != self.settings.auto_cleaned_at)
+        {
+            self.settings.auto_cleaned_at = at;
+            let message = self.background.cleaned.as_ref().and_then(|c| c.message());
+            if let Some(message) = message.filter(|_| self.can_notify()) {
+                self.platform.notify("PkgDeck cleanup", &message);
+            }
         }
         let count = self.background.available;
         self.platform.set_badge(&if count > 0 {

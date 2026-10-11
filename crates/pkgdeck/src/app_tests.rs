@@ -306,6 +306,43 @@ fn self_updates_restart_now_or_ask() {
 }
 
 #[test]
+fn automatic_cleaning_is_remembered_and_told_once() {
+    let mut app = app();
+    app.settings.auto_clean = true;
+    app.apply_settings();
+    let cleaned = |at: u64, cleaned: Value| {
+        json!({"available": 0, "cleaned_at": at, "cleaned": cleaned}).to_string()
+    };
+    app.c().set_background_state(
+        cleaned(
+            500,
+            json!({"tasks": 2, "failed": 0, "bytes": 4_200_000_000u64}),
+        )
+        .into(),
+    );
+    app.react();
+    assert_eq!(app.settings.auto_cleaned_at, 500);
+    assert_eq!(
+        app.platform.recorded(),
+        [("PkgDeck cleanup".to_owned(), "Freed 4.2 GB".to_owned())]
+    );
+    // The same run seen again, a later check without it, and a run that
+    // found nothing say nothing more.
+    app.c()
+        .set_background_state(cleaned(500, json!({"tasks": 2, "failed": 0, "bytes": 1})).into());
+    app.react();
+    app.c()
+        .set_background_state(json!({"available": 0}).to_string().into());
+    app.react();
+    assert_eq!(app.settings.auto_cleaned_at, 500);
+    app.c()
+        .set_background_state(cleaned(900, json!({"tasks": 0})).into());
+    app.react();
+    assert_eq!(app.settings.auto_cleaned_at, 900);
+    assert_eq!(app.platform.recorded().len(), 1);
+}
+
+#[test]
 fn background_state_saves_badges_and_notifies() {
     let mut app = app();
     app.c().set_background_state("".into());

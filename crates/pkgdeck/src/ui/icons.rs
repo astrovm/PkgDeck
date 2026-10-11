@@ -368,6 +368,8 @@ pub fn monogram(id: &str) -> &str {
         "solana" => "So",
         "anchor" => "An",
         "foundry" => "Fo",
+        "dev-caches" => "Dc",
+        "projects" => "Pj",
         other => other.get(..1).unwrap_or(""),
     }
 }

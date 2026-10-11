@@ -236,6 +236,9 @@ enum Job {
     /// system managers only through the upgrade-only helper. With `true`,
     /// an APT update may remove packages.
     AutoUpgrade(Vec<Operation>, bool),
+    /// Cleanup that runs with nobody watching, once a day: what is found
+    /// then, as long as [`CleanupItem::automatic`] allows it.
+    AutoClean,
     CleanAll(Vec<Operation>),
     ManifestExport(PathBuf, Vec<PackageId>),
     ManifestPreview(PathBuf),
@@ -247,6 +250,7 @@ impl Job {
             Self::Write(..)
                 | Self::UpgradeAll(..)
                 | Self::AutoUpgrade(..)
+                | Self::AutoClean
                 | Self::CleanAll(_)
                 | Self::Repositories(Some(_))
                 | Self::ImportRepository(_)
@@ -300,6 +304,13 @@ enum Payload {
     ManifestExport(usize),
     ManifestPreview(manifest::Preview),
     CleanPreview(Vec<Operation>, Vec<CleanupItem>),
+    /// What automatic cleaning did: tasks finished and failed, and about
+    /// how much it freed.
+    AutoCleaned {
+        cleaned: usize,
+        failed: usize,
+        bytes: u64,
+    },
 }
 enum Reply {
     Progress(String),
@@ -893,6 +904,36 @@ fn execute(engine: &mut Engine, job: Job, cancel: &Cancellation, send: &mut dyn 
         Job::UpgradeAll(operations, _) | Job::CleanAll(operations) => {
             Ok(run_batch(engine, &operations, Vec::new(), cancel, send))
         }
+        Job::AutoClean => {
+            let items: Vec<_> = engine
+                .cleanup(cancel)
+                .items
+                .into_iter()
+                .filter(CleanupItem::automatic)
+                .collect();
+            let operations: Vec<_> = items
+                .iter()
+                .map(|item| Operation::Clean(item.id.clone()))
+                .collect();
+            let outcomes = match operations.is_empty() {
+                true => vec![],
+                false => match run_batch(engine, &operations, Vec::new(), cancel, send) {
+                    Payload::Batch(_, outcomes) => outcomes,
+                    _ => vec![],
+                },
+            };
+            let finished = |outcome: &&Outcome| **outcome == Outcome::Finished;
+            Ok(Payload::AutoCleaned {
+                cleaned: outcomes.iter().filter(finished).count(),
+                failed: outcomes.iter().filter(|o| **o == Outcome::Failed).count(),
+                bytes: items
+                    .iter()
+                    .zip(&outcomes)
+                    .filter(|(_, outcome)| finished(outcome))
+                    .filter_map(|(item, _)| item.bytes)
+                    .sum(),
+            })
+        }
         Job::AutoUpgrade(operations, removals) => {
             // Nobody reviews this run. Unless removals are allowed, APT goes
             // ahead only when its dry run removes nothing; otherwise it waits
@@ -1412,6 +1453,10 @@ pub struct Controller {
     auto_held: Option<Hold>,
     /// Let Update all remove packages when APT's plan does.
     allow_removals: bool,
+    /// Clean once a day after a background check.
+    auto_clean: bool,
+    /// When automatic cleaning last ran, in seconds since 1970.
+    auto_cleaned_at: u64,
     source_filter: Vec<String>,
     sudo: bool,
     worker: Option<Worker>,
@@ -1541,6 +1586,8 @@ impl Default for Controller {
             auto_update: false,
             auto_held: None,
             allow_removals: true,
+            auto_clean: false,
+            auto_cleaned_at: 0,
             source_filter: Vec::new(),
             sudo: false,
             worker: None,
@@ -1947,9 +1994,44 @@ fn source_display_name(id: &str) -> String {
         "solana" => "Solana CLI (Agave)",
         "anchor" => "Anchor (AVM)",
         "foundry" => "Foundry",
+        "dev-caches" => "Developer caches",
+        "projects" => "Old projects",
         other => other,
     }
     .to_owned()
+}
+/// A cleanup task for a confirmation: what, where, how much, then exactly
+/// what it does.
+fn cleanup_label(item: &CleanupItem) -> String {
+    let mut label = format!("{} ({})", item.title, source_display_name(&item.id.backend));
+    if let Some(bytes) = item.bytes.filter(|bytes| *bytes > 0) {
+        label.push_str(&format!(", about {}", pkgdeck_core::disk::size(bytes)));
+    }
+    format!("{label}\n{}", item.preview)
+}
+/// "Frees about 4.2 GB.", counting the tasks that can tell.
+fn cleanup_frees(items: &[&CleanupItem]) -> Option<String> {
+    let bytes: u64 = items.iter().filter_map(|item| item.bytes).sum();
+    (bytes > 0).then(|| format!("Frees about {}.", pkgdeck_core::disk::size(bytes)))
+}
+/// The confirmation for running `items` together.
+fn clean_confirmation(items: &[&CleanupItem]) -> Value {
+    let count = items.len();
+    let noun = if count == 1 { "task" } else { "tasks" };
+    let labels = items
+        .iter()
+        .map(|item| cleanup_label(item))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let frees = cleanup_frees(items)
+        .map(|frees| format!("\n{frees}"))
+        .unwrap_or_default();
+    json!({
+        "action": format!("Clean {count} {noun}"),
+        "body": format!("{labels}\n\nTasks run in order. Finished tasks cannot be undone."),
+        "summary": format!("Clean {count} {noun}{frees}\nFinished tasks cannot be undone."),
+        "details": labels,
+    })
 }
 /// "System" or "User" for people; an environment shows its location.
 fn scope_word(scope: &Scope) -> String {
@@ -3242,6 +3324,8 @@ fn confirmation_preview(
             title = format!("Clean {}", item.title);
             lines.push(item.preview.clone());
             summary.push(item.preview.clone());
+            lines.extend(cleanup_frees(&[item]));
+            summary.extend(cleanup_frees(&[item]));
         }
     }
     if let Operation::Refresh { backend } = operation {
@@ -3855,6 +3939,38 @@ impl ffi::PackageController {
         }
         hold
     }
+    /// Clean automatically, and when that last happened, so a restart
+    /// doesn't clean again the same day.
+    pub fn set_auto_clean(mut self: Pin<&mut Self>, enabled: bool, cleaned_at: u64) {
+        self.as_mut().rust_mut().auto_clean = enabled;
+        self.as_mut().rust_mut().auto_cleaned_at = cleaned_at;
+    }
+    /// Clean after this check when it's been a day, nothing else is
+    /// waiting to run, and the computer is plugged in and not building.
+    fn schedule_auto_clean(mut self: Pin<&mut Self>) {
+        const DAY: u64 = 24 * 60 * 60;
+        let now = epoch_seconds();
+        let rust = self.rust();
+        if !rust.auto_clean
+            || now < rust.auto_cleaned_at.saturating_add(DAY)
+            || rust.pending.is_some()
+            || rust.queued.is_some()
+            || rust.validated_confirmed.is_some()
+            || !rust.confirmed_queue.is_empty()
+        {
+            return;
+        }
+        let natives = rust.natives;
+        if (natives.hold)(&(natives.host)()).is_some() {
+            return;
+        }
+        self.as_mut().rust_mut().validated_confirmed = Some(Confirmed {
+            job: Job::AutoClean,
+            activity_id: None,
+            cleanup_preview: vec![],
+        });
+        self.sync_needs_poll();
+    }
     pub fn set_allow_removals(mut self: Pin<&mut Self>, allowed: bool) {
         self.as_mut().rust_mut().allow_removals = allowed;
     }
@@ -4180,6 +4296,9 @@ impl ffi::PackageController {
         // An automatic update tells what it did when it finishes, instead
         // of announcing updates it is about to install.
         let automatic = self.as_mut().schedule_auto_update(&report);
+        if !automatic {
+            self.as_mut().schedule_auto_clean();
+        }
         if automatic {
             self.as_mut()
                 .rust_mut()
@@ -4649,7 +4768,7 @@ impl ffi::PackageController {
                     if let Some(mode) = batch_mode {
                         engine.set_batch_mode(mode);
                     }
-                    engine.set_unattended(matches!(job, Job::AutoUpgrade(..)));
+                    engine.set_unattended(matches!(job, Job::AutoUpgrade(..) | Job::AutoClean));
                     if let Job::Write(_, Some(plan)) = &job {
                         engine.remember_operation_plan((**plan).clone());
                     }
@@ -5255,33 +5374,30 @@ impl ffi::PackageController {
             return;
         }
         if action == "clean-all" {
-            let operations: Vec<_> = self
-                .rust()
-                .cleanup
+            // Data that may be the only copy, such as container volumes, is
+            // only ever cleaned on its own.
+            let cleanup = self.rust().cleanup.clone();
+            let items: Vec<_> = cleanup
+                .iter()
+                .filter(|item| item.kind.in_clean_all())
+                .collect();
+            if items.is_empty() {
+                return;
+            }
+            let operations: Vec<_> = items
                 .iter()
                 .map(|item| Operation::Clean(item.id.clone()))
                 .collect();
-            if operations.is_empty() {
-                return;
-            }
-            let labels = self
-                .rust()
-                .cleanup
-                .iter()
-                .map(|item| {
-                    format!(
-                        "{} ({})\n{}",
-                        item.title,
-                        source_display_name(&item.id.backend),
-                        item.preview
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("\n\n");
+            let confirmation = clean_confirmation(&items);
             let count = operations.len();
             let noun = if count == 1 { "task" } else { "tasks" };
-            self.as_mut().set_confirmation_data(encoded(json!({"action":format!("Clean {count} {noun}"), "body": format!("{labels}\n\nTasks run in order. Finished tasks cannot be undone."), "summary": format!("Clean {count} {noun}\nFinished tasks cannot be undone."), "details": labels})));
-            self.as_mut().set_confirmation(format!("Run {count} cleanup {noun}?\n\n{labels}\n\nTasks run in order. Finished tasks cannot be undone.").as_str().into());
+            let body = confirmation["body"].as_str().unwrap_or_default().to_owned();
+            self.as_mut().set_confirmation_data(encoded(confirmation));
+            self.as_mut().set_confirmation(
+                format!("Run {count} cleanup {noun}?\n\n{body}")
+                    .as_str()
+                    .into(),
+            );
             self.rust_mut().pending = Some(Job::CleanAll(operations));
             return;
         }
@@ -5498,6 +5614,28 @@ impl ffi::PackageController {
         }
         match result {
             Ok(Payload::BackgroundUpdates(report)) => self.as_mut().finish_background_check(report),
+            Ok(Payload::AutoCleaned {
+                cleaned,
+                failed,
+                bytes,
+            }) => {
+                let now = epoch_seconds();
+                self.as_mut().rust_mut().auto_cleaned_at = now;
+                if cleaned > 0 {
+                    // Cleaning may remove packages, images and caches lists show.
+                    self.as_mut()
+                        .apply(Ok(Payload::Written(OperationOutcome::default())));
+                }
+                let mut state: Value =
+                    serde_json::from_str(&self.background_state().to_string()).unwrap_or_default();
+                if !state.is_object() {
+                    state = json!({});
+                }
+                state["cleaned_at"] = json!(now);
+                state["cleaned"] = json!({"tasks": cleaned, "failed": failed, "bytes": bytes});
+                state["notify"] = json!(false);
+                self.as_mut().set_background_state(encoded(state));
+            }
             Err(e) => {
                 if let Some(entry) = self.as_mut().rust_mut().revalidating.take() {
                     self.as_mut().fail_revalidation(entry);
@@ -5781,25 +5919,12 @@ impl ffi::PackageController {
                         .iter()
                         .map(|item| Operation::Clean(item.id.clone()))
                         .collect();
-                    let body = selected
-                        .iter()
-                        .map(|item| {
-                            format!(
-                                "{} ({})\n{}",
-                                item.title,
-                                source_display_name(&item.id.backend),
-                                item.preview
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n\n");
-                    let noun = if operations.len() == 1 {
-                        "task"
-                    } else {
-                        "tasks"
-                    };
-                    self.as_mut().set_confirmation_data(encoded(json!({"action": format!("Clean {} {noun}", operations.len()), "body": body, "summary": format!("Clean {} {noun}\nFinished tasks cannot be undone.", operations.len()), "details": body})));
-                    self.as_mut().set_confirmation(body.as_str().into());
+                    let mut confirmation = clean_confirmation(&selected.iter().collect::<Vec<_>>());
+                    let body = confirmation["details"].clone();
+                    confirmation["body"] = body.clone();
+                    self.as_mut().set_confirmation_data(encoded(confirmation));
+                    self.as_mut()
+                        .set_confirmation(body.as_str().unwrap_or_default().into());
                     self.as_mut().rust_mut().pending = Some(Job::CleanAll(operations));
                 }
             }
@@ -5904,7 +6029,12 @@ impl ffi::PackageController {
                     self.clear_settled_failure();
                 }
             }
-            Ok(Payload::Cleanup(report)) => {
+            Ok(Payload::Cleanup(mut report)) => {
+                // The biggest first; tasks that can't tell keep their order
+                // at the end.
+                report
+                    .items
+                    .sort_by_key(|item| std::cmp::Reverse(item.bytes.unwrap_or(0)));
                 let sudo = self.rust().sudo;
                 let empty = report.items.is_empty();
                 let mut rows: Vec<_> = report
@@ -5915,7 +6045,7 @@ impl ffi::PackageController {
                             "kind": "cleanup", "name": item.title, "display_name": item.title,
                             "source": item.id.backend, "summary": item.summary,
                             "cleanup_key": item.id.key, "cleanup_kind": item.kind,
-                            "preview": item.preview
+                            "preview": item.preview, "bytes": item.bytes
                         })
                     })
                     .collect();
@@ -5931,19 +6061,23 @@ impl ffi::PackageController {
                 let failures: Vec<_> = report.failures.iter().map(|failure| json!({"source": failure.backend, "kind": failure_kind(&failure.error), "detail": plain_error(&failure.error, Some(&failure.backend), sudo)})).collect();
                 let last_success = self.rust().last_success.clone();
                 self.as_mut().set_report_state(encoded(json!({"phase": if incomplete { if empty { "failed" } else { "partial" } } else { "complete" }, "failures": failures, "last_success": last_success, "checked_at": epoch_seconds()})));
+                let frees: u64 = report.items.iter().filter_map(|item| item.bytes).sum();
                 self.as_mut().rust_mut().cleanup = report.items;
                 self.as_mut().rust_mut().failures = report.failures;
                 self.as_mut().set_rows(encoded(rows));
-                self.set_status(
-                    if incomplete {
-                        "Some cleanup sources could not be checked."
-                    } else if empty {
-                        "Nothing to clean."
-                    } else {
-                        "Review a cleanup task before running it."
-                    }
-                    .into(),
-                );
+                let status = if incomplete {
+                    "Some cleanup sources could not be checked.".to_owned()
+                } else if empty {
+                    "Nothing to clean.".to_owned()
+                } else if frees > 0 {
+                    format!(
+                        "About {} can be freed. Review a cleanup task before running it.",
+                        pkgdeck_core::disk::size(frees)
+                    )
+                } else {
+                    "Review a cleanup task before running it.".to_owned()
+                };
+                self.set_status(status.as_str().into());
             }
             Ok(Payload::Repositories(report)) => {
                 self.as_mut().rust_mut().view_cache.expire();
@@ -8126,6 +8260,7 @@ mod tests {
             title: name.into(),
             summary: "Synthetic".into(),
             preview: "No changes".into(),
+            bytes: None,
         };
         let source = |name: &str, available| Source {
             backend: name.into(),
@@ -8973,6 +9108,7 @@ mod tests {
             title: "Synthetic cleanup".into(),
             summary: "Fixture".into(),
             preview: "Remove one cached file".into(),
+            bytes: None,
         };
         let operations = vec![Operation::Clean(item.id.clone())];
         let queued = || Confirmed {
@@ -10937,6 +11073,7 @@ mod tests {
             title: "Unused dependencies".into(),
             summary: "One package".into(),
             preview: "Remv synthetic-runtime [1.0]".into(),
+            bytes: None,
         };
         controller
             .as_mut()
@@ -12450,11 +12587,21 @@ mod tests {
         assert!(controller.rust().worker.is_none());
         assert_eq!(state(&controller)["waiting"], "build");
 
-        // Once the build ends, PkgDeck checks again right away.
+        // Once the build ends, PkgDeck checks again right away, but not
+        // while a confirmation is open.
         controller.as_mut().rust_mut().natives.hold = never_hold;
+        controller.as_mut().rust_mut().pending = Some(Job::CleanAll(vec![]));
         controller
             .as_mut()
             .check_updates("homebrew".into(), true, false, false, false);
+        assert!(controller.rust().worker.is_none());
+        controller.as_mut().rust_mut().pending = None;
+        controller
+            .as_mut()
+            .check_updates("homebrew".into(), true, false, false, false);
+        // The wait is over when that check finishes.
+        assert_eq!(controller.rust().auto_held, Some(Hold::Build));
+        assert_eq!(state(&controller)["waiting"], "build");
         assert!(matches!(
             controller.rust().worker.as_ref().map(|worker| &worker.job),
             Some(Job::BackgroundUpdates(sources)) if sources == &["homebrew"]
@@ -13630,6 +13777,8 @@ mod tests {
             ("solana", "Solana CLI (Agave)"),
             ("anchor", "Anchor (AVM)"),
             ("foundry", "Foundry"),
+            ("dev-caches", "Developer caches"),
+            ("projects", "Old projects"),
             ("fixture", "fixture"),
         ] {
             assert_eq!(source_display_name(id), name);
@@ -14752,6 +14901,7 @@ mod tests {
             summary: "Synthetic".into(),
             preview: "Removes 2 packages".into(),
             kind: CleanupKind::OrphanDependencies,
+            bytes: None,
         }];
         controller.as_mut().propose("clean-all".into(), -1);
         assert!(controller
@@ -16022,6 +16172,336 @@ mod tests {
         assert!(controller.rows().to_string().contains("synthetic"));
     }
 
+    fn sized(backend: &str, key: &str, kind: CleanupKind, bytes: Option<u64>) -> CleanupItem {
+        CleanupItem {
+            id: CleanupId {
+                backend: backend.into(),
+                key: key.into(),
+            },
+            kind,
+            title: format!("{key} task"),
+            summary: "Synthetic cleanup".into(),
+            preview: format!("Empties {key}"),
+            bytes,
+        }
+    }
+    #[test]
+    fn cleanup_shows_what_it_frees_and_clean_all_leaves_data_alone() {
+        let mut controller = synthetic_controller();
+        let mut controller = controller.pin_mut();
+        let volumes = sized(
+            "docker",
+            "unused-volumes",
+            CleanupKind::Data,
+            Some(9_000_000_000),
+        );
+        let unknown = sized("apt", "autoclean", CleanupKind::PackageCache, None);
+        let build = sized(
+            "projects",
+            "build:/home/me/app",
+            CleanupKind::BuildFiles,
+            Some(500_000_000),
+        );
+        let cargo = sized(
+            "dev-caches",
+            "cargo",
+            CleanupKind::PackageCache,
+            Some(2_000_000_000),
+        );
+        controller
+            .as_mut()
+            .apply(Ok(Payload::Cleanup(CleanupReport {
+                items: vec![
+                    unknown.clone(),
+                    build.clone(),
+                    volumes.clone(),
+                    cargo.clone(),
+                ],
+                failures: vec![],
+            })));
+        // The biggest first, and tasks that can't tell at the end.
+        assert_eq!(
+            controller.rust().cleanup,
+            [
+                volumes.clone(),
+                cargo.clone(),
+                build.clone(),
+                unknown.clone()
+            ]
+        );
+        let rows: Value = serde_json::from_str(&controller.rows().to_string()).unwrap();
+        assert_eq!(rows[1]["bytes"], 2_000_000_000u64);
+        assert_eq!(rows[3]["bytes"], Value::Null);
+        assert_eq!(
+            controller.status().to_string(),
+            "About 12 GB can be freed. Review a cleanup task before running it."
+        );
+        // One task tells its size.
+        controller.as_mut().propose("clean".into(), 1);
+        let confirmation = controller.confirmation().to_string();
+        assert!(
+            confirmation.contains("Frees about 2.0 GB."),
+            "{confirmation}"
+        );
+        controller.as_mut().confirm(false);
+        controller.as_mut().propose("clean".into(), 3);
+        assert!(!controller.confirmation().to_string().contains("Frees"));
+        controller.as_mut().confirm(false);
+        // Clean all: everything but the volumes, with what each frees.
+        controller.as_mut().propose("clean-all".into(), 0);
+        let Some(Job::CleanAll(operations)) = controller.rust().pending.clone() else {
+            panic!("no clean all");
+        };
+        assert_eq!(
+            operations,
+            [&cargo, &build, &unknown].map(|item| Operation::Clean(item.id.clone()))
+        );
+        let data: Value =
+            serde_json::from_str(&controller.confirmation_data().to_string()).unwrap();
+        assert_eq!(
+            data["summary"],
+            "Clean 3 tasks\nFrees about 2.5 GB.\nFinished tasks cannot be undone."
+        );
+        let body = data["body"].as_str().unwrap();
+        assert!(body.starts_with("cargo task (Developer caches), about 2.0 GB\nEmpties cargo"));
+        assert!(body.contains("autoclean task (APT)\nEmpties autoclean"));
+        assert!(!body.contains("unused-volumes"));
+        controller.as_mut().confirm(false);
+        // Only data: nothing for Clean all to do.
+        controller
+            .as_mut()
+            .apply(Ok(Payload::Cleanup(CleanupReport {
+                items: vec![volumes.clone()],
+                failures: vec![],
+            })));
+        controller.as_mut().propose("clean-all".into(), 0);
+        assert!(controller.rust().pending.is_none());
+        // Sizes that can't be told keep the plain status.
+        controller
+            .as_mut()
+            .apply(Ok(Payload::Cleanup(CleanupReport {
+                items: vec![unknown],
+                failures: vec![],
+            })));
+        assert_eq!(
+            controller.status().to_string(),
+            "Review a cleanup task before running it."
+        );
+        // A plan that changed while queued is confirmed again, sizes included.
+        let entry = Confirmed {
+            job: Job::CleanAll(vec![Operation::Clean(cargo.id.clone())]),
+            activity_id: None,
+            cleanup_preview: vec![cargo.clone()],
+        };
+        controller.as_mut().rust_mut().revalidating = Some(entry);
+        let mut changed = cargo.clone();
+        changed.preview = "Empties more".into();
+        controller.as_mut().apply(Ok(Payload::CleanPreview(
+            vec![Operation::Clean(cargo.id.clone())],
+            vec![changed],
+        )));
+        let data: Value =
+            serde_json::from_str(&controller.confirmation_data().to_string()).unwrap();
+        assert_eq!(
+            data["body"],
+            "cargo task (Developer caches), about 2.0 GB\nEmpties more"
+        );
+        assert_eq!(controller.confirmation().to_string(), data["body"]);
+    }
+
+    /// Cleanup tasks that run as they're told, and say which ran.
+    struct Cleaner {
+        items: Vec<CleanupItem>,
+        ran: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+    impl Backend for Cleaner {
+        fn id(&self) -> &str {
+            "fixture"
+        }
+        fn capabilities(&self) -> &[Capability] {
+            &[Capability::Clean]
+        }
+        fn detect(&mut self, _: &Cancellation) -> Result<Availability, EngineError> {
+            Ok(Availability::Available)
+        }
+        fn cleanup(&mut self, _: &Cancellation) -> Result<Vec<CleanupItem>, EngineError> {
+            Ok(self.items.clone())
+        }
+        fn execute(
+            &mut self,
+            operation: &Operation,
+            _: &Cancellation,
+            _: &mut dyn FnMut(Progress),
+        ) -> Result<OperationOutcome, EngineError> {
+            let Operation::Clean(id) = operation else {
+                unreachable!()
+            };
+            self.ran.lock().unwrap().push(id.key.clone());
+            if id.key == "broken" {
+                return Err(EngineError::Execution(ExecutionError::Io(
+                    "disk full".into(),
+                )));
+            }
+            Ok(OperationOutcome::default())
+        }
+    }
+    #[test]
+    fn automatic_cleaning_runs_only_what_needs_no_review() {
+        let ran = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
+        let mut engine = Engine::default();
+        engine
+            .register(Cleaner {
+                items: vec![
+                    sized("fixture", "cache", CleanupKind::PackageCache, Some(3_000)),
+                    sized(
+                        "fixture",
+                        "stopped-containers",
+                        CleanupKind::Unused,
+                        Some(1),
+                    ),
+                    sized("fixture", "worktrees", CleanupKind::Worktree, Some(1)),
+                    sized("fixture", "broken", CleanupKind::BuildFiles, Some(500)),
+                    sized("fixture", "images", CleanupKind::Unused, None),
+                ],
+                ran: ran.clone(),
+            })
+            .unwrap();
+        let replies = run_job(&mut engine, Job::AutoClean, &Cancellation::default());
+        assert!(matches!(
+            replies.last(),
+            Some(Reply::Done(Ok(Payload::AutoCleaned {
+                cleaned: 2,
+                failed: 1,
+                bytes: 3_000
+            })))
+        ));
+        let mut cleaned = ran.lock().unwrap().clone();
+        cleaned.sort();
+        assert_eq!(cleaned, ["broken", "cache", "images"]);
+        // Nothing to clean: nothing runs.
+        let mut idle = Engine::default();
+        idle.register(Cleaner {
+            items: vec![sized(
+                "fixture",
+                "worktrees",
+                CleanupKind::Worktree,
+                Some(1),
+            )],
+            ran: ran.clone(),
+        })
+        .unwrap();
+        assert!(matches!(
+            run_job(&mut idle, Job::AutoClean, &Cancellation::default()).last(),
+            Some(Reply::Done(Ok(Payload::AutoCleaned {
+                cleaned: 0,
+                failed: 0,
+                bytes: 0
+            })))
+        ));
+        assert_eq!(ran.lock().unwrap().len(), 3);
+        assert!(Job::AutoClean.writes());
+        assert!(Job::AutoClean.operations().is_empty());
+    }
+    #[test]
+    fn automatic_cleaning_waits_a_day_for_power_builds_and_other_work() {
+        let state = |controller: &ffi::PackageController| -> Value {
+            serde_json::from_str(&controller.background_state().to_string()).unwrap()
+        };
+        let empty = PackageReport {
+            packages: vec![],
+            failures: vec![],
+            successful_sources: vec![],
+        };
+        let scheduled = |controller: &Pin<&mut ffi::PackageController>| {
+            matches!(
+                controller
+                    .rust()
+                    .validated_confirmed
+                    .as_ref()
+                    .map(|entry| &entry.job),
+                Some(Job::AutoClean)
+            )
+        };
+        let mut controller = ffi::create_controller();
+        let mut controller = controller.pin_mut();
+        controller.as_mut().rust_mut().natives.hold = never_hold;
+        // Off by default.
+        controller.as_mut().finish_background_check(empty.clone());
+        assert!(!scheduled(&controller));
+        let now = epoch_seconds();
+        // Cleaned less than a day ago.
+        controller.as_mut().set_auto_clean(true, now - 23 * 60 * 60);
+        controller.as_mut().finish_background_check(empty.clone());
+        assert!(!scheduled(&controller));
+        // On battery or during a build.
+        controller.as_mut().set_auto_clean(true, now - 25 * 60 * 60);
+        controller.as_mut().rust_mut().natives.hold = on_battery;
+        controller.as_mut().finish_background_check(empty.clone());
+        assert!(!scheduled(&controller));
+        controller.as_mut().rust_mut().natives.hold = never_hold;
+        // Something else waits to run.
+        for busy in 0..3 {
+            match busy {
+                0 => controller.as_mut().rust_mut().pending = Some(Job::CleanAll(vec![])),
+                1 => {
+                    controller.as_mut().rust_mut().queued =
+                        Some(Job::Load("Installed".into(), String::new()))
+                }
+                _ => controller
+                    .as_mut()
+                    .rust_mut()
+                    .confirmed_queue
+                    .push_back(Confirmed {
+                        job: Job::CleanAll(vec![]),
+                        activity_id: None,
+                        cleanup_preview: vec![],
+                    }),
+            }
+            controller.as_mut().finish_background_check(empty.clone());
+            assert!(!scheduled(&controller), "{busy}");
+            controller.as_mut().rust_mut().pending = None;
+            controller.as_mut().rust_mut().queued = None;
+            controller.as_mut().rust_mut().confirmed_queue.clear();
+        }
+        controller.as_mut().finish_background_check(empty.clone());
+        assert!(scheduled(&controller));
+        // A second check while it waits changes nothing.
+        controller.as_mut().finish_background_check(empty);
+        assert!(scheduled(&controller));
+        controller.as_mut().rust_mut().validated_confirmed = None;
+
+        // What it did is kept for the window to tell and remember.
+        controller.as_mut().apply(Ok(Payload::AutoCleaned {
+            cleaned: 2,
+            failed: 1,
+            bytes: 3_000_000,
+        }));
+        let after = controller.rust().auto_cleaned_at;
+        assert!(after >= now);
+        assert_eq!(state(&controller)["cleaned_at"], after);
+        assert_eq!(
+            state(&controller)["cleaned"],
+            json!({"tasks": 2, "failed": 1, "bytes": 3_000_000})
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(&controller.report_state().to_string()).unwrap()["phase"],
+            "stale"
+        );
+        // Nothing cleaned leaves the lists alone.
+        let mut quiet = ffi::create_controller();
+        let mut quiet = quiet.pin_mut();
+        quiet.as_mut().set_background_state("not json".into());
+        quiet.as_mut().apply(Ok(Payload::AutoCleaned {
+            cleaned: 0,
+            failed: 0,
+            bytes: 0,
+        }));
+        assert_ne!(
+            serde_json::from_str::<Value>(&quiet.report_state().to_string()).unwrap()["phase"],
+            "stale"
+        );
+        assert_eq!(state(&quiet)["cleaned"]["tasks"], 0);
+    }
     fn cleanup_item(key: &str) -> CleanupItem {
         CleanupItem {
             id: CleanupId {
@@ -16032,6 +16512,7 @@ mod tests {
             title: format!("Remove {key}"),
             summary: "Synthetic cleanup".into(),
             preview: format!("would remove {key}"),
+            bytes: None,
         }
     }
     #[test]

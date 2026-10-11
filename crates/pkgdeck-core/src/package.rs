@@ -119,6 +119,40 @@ pub enum CleanupKind {
     PackageCache,
     /// A second copy of an app that's already installed.
     DuplicateCopy,
+    /// Containers, images or devices nothing uses, which come back with a
+    /// pull, a build or a download.
+    Unused,
+    /// What a build or an install made in a project: build folders and
+    /// installed dependencies.
+    BuildFiles,
+    /// A Git worktree that is merged, clean, or already gone.
+    Worktree,
+    /// Data nothing uses right now but that may be the only copy, such as a
+    /// container volume. Clean all leaves it alone.
+    Data,
+}
+
+impl CleanupKind {
+    /// Whether **Clean all** includes tasks of this kind. Data never goes
+    /// without being picked on its own.
+    pub fn in_clean_all(&self) -> bool {
+        *self != Self::Data
+    }
+}
+
+impl CleanupItem {
+    /// Whether automatic cleaning may run this with nobody watching: only
+    /// what tools download or build again on their own, from a source that
+    /// runs as the user, so it never asks for a password. Stopped containers
+    /// may still hold work, so they always wait for someone to look.
+    pub fn automatic(&self) -> bool {
+        matches!(
+            self.kind,
+            CleanupKind::PackageCache | CleanupKind::BuildFiles | CleanupKind::Unused
+        ) && self.id.key != "stopped-containers"
+            && crate::unattended::unattended(&self.id.backend)
+                == crate::unattended::Unattended::User
+    }
 }
 
 /// One manager-native cleanup plan. `key` is a backend-defined fixed token,
@@ -129,7 +163,7 @@ pub struct CleanupId {
     pub key: String,
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq)]
 pub struct CleanupItem {
     pub id: CleanupId,
     pub kind: CleanupKind,
@@ -138,6 +172,29 @@ pub struct CleanupItem {
     /// Exact native dry-run output, bounded by the process layer. Frontends
     /// show it so users can inspect the plan before authorizing the write.
     pub preview: String,
+    /// About how much disk space the task frees, when it can be told.
+    #[serde(default)]
+    pub bytes: Option<u64>,
+}
+
+/// The same plan, whatever it frees: a cache grows while it is reviewed,
+/// and that must not make the reviewed plan stale.
+impl PartialEq for CleanupItem {
+    fn eq(&self, other: &Self) -> bool {
+        (
+            &self.id,
+            &self.kind,
+            &self.title,
+            &self.summary,
+            &self.preview,
+        ) == (
+            &other.id,
+            &other.kind,
+            &other.title,
+            &other.summary,
+            &other.preview,
+        )
+    }
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq)]
@@ -711,5 +768,59 @@ mod tests {
         )
         .is_empty());
         assert!(same_app_sources_all(&packages).iter().all(Vec::is_empty));
+    }
+
+    #[test]
+    fn only_what_comes_back_on_its_own_is_cleaned_without_a_look() {
+        let item = |backend: &str, key: &str, kind: CleanupKind| CleanupItem {
+            id: CleanupId {
+                backend: backend.into(),
+                key: key.into(),
+            },
+            kind,
+            title: "Task".into(),
+            summary: String::new(),
+            preview: String::new(),
+            bytes: Some(1),
+        };
+        for automatic in [
+            item("dev-caches", "cargo", CleanupKind::PackageCache),
+            item("projects", "build:/home/me/app", CleanupKind::BuildFiles),
+            item("docker", "unused-images", CleanupKind::Unused),
+            item("homebrew", "cleanup", CleanupKind::PackageCache),
+        ] {
+            assert!(automatic.automatic(), "{automatic:?}");
+            assert!(automatic.kind.in_clean_all());
+        }
+        for reviewed in [
+            item("docker", "stopped-containers", CleanupKind::Unused),
+            item("projects", "worktrees:/home/me/app", CleanupKind::Worktree),
+            item("docker", "unused-volumes", CleanupKind::Data),
+            item("homebrew", "autoremove", CleanupKind::OrphanDependencies),
+            item(
+                "appimage",
+                "/home/me/App.AppImage",
+                CleanupKind::DuplicateCopy,
+            ),
+            // System managers ask for a password.
+            item("apt", "autoclean", CleanupKind::PackageCache),
+            item("fwupd", "cache", CleanupKind::PackageCache),
+        ] {
+            assert!(!reviewed.automatic(), "{reviewed:?}");
+        }
+        assert!(!CleanupKind::Data.in_clean_all());
+        assert!(CleanupKind::Worktree.in_clean_all());
+        // How much a plan frees may change; the plan itself doesn't.
+        let mut grown = item("dev-caches", "cargo", CleanupKind::PackageCache);
+        grown.bytes = Some(2);
+        assert_eq!(
+            grown,
+            item("dev-caches", "cargo", CleanupKind::PackageCache)
+        );
+        grown.preview = "Other".into();
+        assert_ne!(
+            grown,
+            item("dev-caches", "cargo", CleanupKind::PackageCache)
+        );
     }
 }

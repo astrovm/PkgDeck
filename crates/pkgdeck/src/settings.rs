@@ -139,6 +139,10 @@ pub struct Settings {
     pub check_interval: i32,
     pub auto_update: bool,
     pub allow_removals: bool,
+    /// Clean caches and build files once a day, from the background.
+    pub auto_clean: bool,
+    /// When that last happened, in seconds since 1970.
+    pub auto_cleaned_at: u64,
     pub system_approval: String,
     pub autostart: bool,
     pub notification_history: String,
@@ -170,6 +174,8 @@ impl Default for Settings {
             check_interval: 30,
             auto_update: false,
             allow_removals: true,
+            auto_clean: false,
+            auto_cleaned_at: 0,
             system_approval: String::new(),
             autostart: false,
             notification_history: "{}".into(),

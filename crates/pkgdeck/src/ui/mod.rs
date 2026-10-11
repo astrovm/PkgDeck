@@ -1008,6 +1008,19 @@ fn main_area(app: &mut App, ui: &mut Ui, rect: Rect) {
     }
 }
 
+/// How much **Clean all** frees: every shown task but data, which it
+/// leaves alone.
+fn clean_all_frees(app: &App) -> u64 {
+    let rows = app.shown_rows();
+    // Rows may be on their way while a list reloads.
+    app.items
+        .iter()
+        .filter_map(|item| rows.get(item.raw))
+        .filter(|row| row.kind == "cleanup" && row.cleanup_kind != "data")
+        .filter_map(|row| row.bytes)
+        .sum()
+}
+
 fn page_actions_height(app: &App) -> f32 {
     let any = match app.page {
         Page::Updates => app
@@ -1082,7 +1095,11 @@ fn page_actions(app: &mut App, ui: &mut Ui) {
             }
         }
         Page::Clean => {
-            if Button::new(Look::Solid(Tone::Danger), "Clean all")
+            let label = match clean_all_frees(app) {
+                0 => "Clean all".to_owned(),
+                bytes => format!("Clean all ({})", model::size(bytes)),
+            };
+            if Button::new(Look::Solid(Tone::Danger), &label)
                 .icon("remove")
                 .enabled(app.can_act() && app.retained.is_none())
                 .show(ui)
@@ -1406,6 +1423,45 @@ mod header_tests {
         assert_eq!(
             label(Page::Updates, true).as_deref(),
             Some(model::source_name("apt"))
+        );
+    }
+
+    #[test]
+    fn clean_all_says_what_it_frees_without_the_data_it_leaves() {
+        let clean = |tasks: &[(&str, Option<u64>)]| {
+            let mut app = app(Page::Clean, 0);
+            app.rows = tasks
+                .iter()
+                .enumerate()
+                .map(|(i, (kind, bytes))| {
+                    serde_json::from_value(serde_json::json!({
+                        "kind": "cleanup", "name": format!("task-{i}"), "source": "apt",
+                        "cleanup_kind": kind, "bytes": bytes,
+                    }))
+                    .unwrap()
+                })
+                .collect();
+            app.invalidate();
+            app.refresh_items();
+            let harness = draw(app, page_actions);
+            ["Clean all", "Clean all (2.5 GB)"]
+                .into_iter()
+                .find(|label| harness.query_by_label(label).is_some())
+                .map(str::to_owned)
+        };
+        assert_eq!(
+            clean(&[
+                ("package_cache", Some(2_000_000_000)),
+                ("build_files", Some(500_000_000)),
+                ("data", Some(9_000_000_000)),
+                ("package_cache", None),
+            ])
+            .as_deref(),
+            Some("Clean all (2.5 GB)")
+        );
+        assert_eq!(
+            clean(&[("package_cache", None), ("data", Some(9))]).as_deref(),
+            Some("Clean all")
         );
     }
 

@@ -697,14 +697,39 @@ pub fn human(data: &Value, width: usize, color: bool) -> String {
                             Paint::bold as Style,
                         ),
                         (value(&item["title"]), plain as Style),
+                        (
+                            item["bytes"]
+                                .as_u64()
+                                .filter(|bytes| *bytes > 0)
+                                .map(pkgdeck_core::disk::size)
+                                .unwrap_or_default(),
+                            plain as Style,
+                        ),
                         (value(&item["summary"]), Paint::dim as Style),
                     ]
                 })
                 .collect::<Vec<_>>();
-            output.push_str(&table(&["KEY", "TASK", "SUMMARY"], &rows, width, paint));
+            output.push_str(&table(
+                &["KEY", "TASK", "SIZE", "SUMMARY"],
+                &rows,
+                width,
+                paint,
+            ));
+            // What --all frees: everything but data, which goes by name.
+            let frees: u64 = items
+                .iter()
+                .filter(|item| item["kind"] != "data")
+                .filter_map(|item| item["bytes"].as_u64())
+                .sum();
+            if frees > 0 {
+                output.push_str(&format!(
+                    "\n\n`pkd clean --all` frees about {}.",
+                    pkgdeck_core::disk::size(frees)
+                ));
+            }
             output.push_str(&format!(
                 "\n\n{}",
-                paint.dim("Run one with `pkd clean <key>`, or all with `pkd clean --all`. Add --json to see each preview.")
+                paint.dim("Run one with `pkd clean <key>`, or all with `pkd clean --all`. Data is cleaned only by its key. Add --json to see each preview.")
             ));
         }
         let failures = data["failures"].as_array().map_or(&[][..], Vec::as_slice);
@@ -1415,7 +1440,20 @@ mod tests {
             "items": [{
                 "id": {"backend": "apt", "key": "autoremove"},
                 "title": "Unused dependencies",
-                "summary": "One package"
+                "summary": "One package",
+                "kind": "orphan_dependencies",
+                "bytes": 4_200_000
+            }, {
+                "id": {"backend": "docker", "key": "unused-volumes"},
+                "title": "Unused volumes",
+                "summary": "Data",
+                "kind": "data",
+                "bytes": 9_000_000_000u64
+            }, {
+                "id": {"backend": "apt", "key": "autoclean"},
+                "title": "Old downloads",
+                "summary": "Cache",
+                "kind": "package_cache"
             }],
             "failures": [
                 {"backend": "snap", "error": {"unsupported": {"capability": "clean"}}},
@@ -1425,12 +1463,24 @@ mod tests {
         let output = human(&plans, 100, false);
         assert!(output.contains("apt:autoremove"));
         assert!(output.contains("Unused dependencies"));
+        assert!(output.contains("4.2 MB"));
+        assert!(output.contains("9.0 GB"));
+        assert!(
+            output.contains("`pkd clean --all` frees about 4.2 MB."),
+            "{output}"
+        );
         assert!(output.contains("pkd clean --all"));
         assert!(output.contains("No cleanup tasks in: Snap"));
         assert!(output.contains("Homebrew: synthetic failure"));
 
         let empty = human(&json!({"items": [], "failures": []}), 80, false);
         assert!(empty.contains("Nothing to clean"));
+        let unknown = human(
+            &json!({"items": [{"id": {"backend": "apt", "key": "autoclean"}, "title": "Old downloads", "kind": "package_cache"}], "failures": []}),
+            80,
+            false,
+        );
+        assert!(!unknown.contains("frees about"));
     }
     #[test]
     fn package_table_shows_the_installed_version_when_present() {

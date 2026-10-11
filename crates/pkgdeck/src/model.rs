@@ -95,6 +95,8 @@ pub struct Row {
     pub cleanup_key: String,
     pub cleanup_kind: String,
     pub preview: String,
+    /// About how much disk space a cleanup task frees, when it can tell.
+    pub bytes: Option<u64>,
     pub available: Option<bool>,
     pub availability_kind: String,
     pub check_failed: bool,
@@ -672,6 +674,42 @@ pub struct BackgroundState {
     pub notify: bool,
     /// What automatic updates wait for, "battery" or "build".
     pub waiting: Option<String>,
+    /// When automatic cleaning last ran, and what it did.
+    pub cleaned_at: Option<u64>,
+    pub cleaned: Option<AutoCleaned>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct AutoCleaned {
+    pub tasks: u64,
+    pub failed: u64,
+    pub bytes: u64,
+}
+impl AutoCleaned {
+    /// The notification, or nothing when there was nothing to tell.
+    pub fn message(&self) -> Option<String> {
+        let cleaned = match (self.tasks, self.bytes) {
+            (0, _) => None,
+            (_, 0) => Some("Cleaned up caches and build files".to_owned()),
+            (_, bytes) => Some(format!("Freed {}", size(bytes))),
+        };
+        match (cleaned, self.failed) {
+            (None, 0) => None,
+            (None, failed) => Some(format!("{failed} cleanup {} failed", tasks(failed))),
+            (Some(cleaned), 0) => Some(cleaned),
+            (Some(cleaned), failed) => {
+                Some(format!("{cleaned}, {failed} {} failed", tasks(failed)))
+            }
+        }
+    }
+}
+fn tasks(count: u64) -> &'static str {
+    if count == 1 {
+        "task"
+    } else {
+        "tasks"
+    }
 }
 impl BackgroundState {
     /// What automatic updates wait for, as the Settings page says it.
@@ -874,6 +912,10 @@ pub fn cleanup_type(kind: &str) -> &'static str {
     match kind {
         "orphan_dependencies" => "Dependencies",
         "duplicate_copy" => "Extra copy",
+        "unused" => "Unused",
+        "build_files" => "Build files",
+        "worktree" => "Worktree",
+        "data" => "Data",
         _ => "Cache",
     }
 }
@@ -882,7 +924,10 @@ pub fn cleanup_type(kind: &str) -> &'static str {
 pub fn version_text(row: &Row) -> String {
     let known = |value: &Option<String>| value.clone().filter(|v| !v.is_empty());
     match row.kind.as_str() {
-        "cleanup" => cleanup_type(&row.cleanup_kind).into(),
+        "cleanup" => match row.bytes.filter(|bytes| *bytes > 0) {
+            Some(bytes) => size(bytes),
+            None => cleanup_type(&row.cleanup_kind).into(),
+        },
         "failure" => "Failed".into(),
         "source" => if row.available.unwrap_or(false) {
             "Available"
@@ -1135,6 +1180,8 @@ fn filter_matches(row: &Row, filter: &str) -> bool {
 fn sort_key(row: &Row, column: Column) -> String {
     match column {
         Column::Name => row.title().to_lowercase(),
+        // Cleanup tasks by how much they free.
+        Column::Version if row.kind == "cleanup" => format!("{:020}", row.bytes.unwrap_or(0)),
         Column::Version => row
             .installed
             .clone()
@@ -1543,26 +1590,7 @@ pub fn duration(seconds: i64) -> String {
     }
 }
 
-/// Bytes in base 1000: "820 bytes", "4.2 MB", "31 MB".
-pub fn size(bytes: u64) -> String {
-    if bytes < 1000 {
-        return format!("{bytes} bytes");
-    }
-    let mut value = bytes as f64;
-    let mut unit = "bytes";
-    for next in ["KB", "MB", "GB", "TB"] {
-        if value < 1000.0 {
-            break;
-        }
-        value /= 1000.0;
-        unit = next;
-    }
-    if value < 10.0 {
-        format!("{value:.1} {unit}")
-    } else {
-        format!("{value:.0} {unit}")
-    }
-}
+pub use pkgdeck_core::disk::size;
 
 /// How often background checks run, and how each is said.
 pub const INTERVALS: [(i32, &str); 10] = [

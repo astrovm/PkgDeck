@@ -475,6 +475,12 @@ pub struct Engine {
     batch_mode: crate::batch::BatchMode,
     unattended: bool,
 }
+/// Whether `backend` has packages at all. Sources that only clean, such as
+/// developer caches, stay out of searches and installed lists.
+fn lists_packages(backend: &dyn Backend) -> bool {
+    let capabilities = backend.capabilities();
+    capabilities.contains(&Capability::Search) || capabilities.contains(&Capability::Installed)
+}
 /// Whether an exact-name lookup should ask `backend`. A source that can't
 /// search, such as macOS Updates, holds no name to look up.
 fn can_look_up(backend: &dyn Backend, name: &str) -> bool {
@@ -958,7 +964,7 @@ impl Engine {
             let workers: Vec<_> = self
                 .backends
                 .iter_mut()
-                .filter(|(_, backend)| ask(&***backend))
+                .filter(|(_, backend)| lists_packages(&***backend) && ask(&***backend))
                 .map(|(id, backend)| {
                     let mut noted = noted.get(id).cloned();
                     s.spawn(move || {
@@ -1042,6 +1048,10 @@ impl Engine {
         let backends = std::mem::take(&mut self.backends);
         let (noted, optional) = (&self.detected, &self.optional);
         let (tx, rx) = std::sync::mpsc::channel();
+        let (backends, idle): (BTreeMap<_, _>, BTreeMap<_, _>) = backends
+            .into_iter()
+            .partition(|(_, backend)| lists_packages(&**backend));
+        self.backends = idle;
         let (accumulated, stash, learned) = std::thread::scope(|s| {
             for (id, mut backend) in backends {
                 let tx = tx.clone();
