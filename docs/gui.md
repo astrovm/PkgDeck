@@ -93,6 +93,8 @@ These controls work on every package page:
   Homebrew waits for a `brew update` that is already running elsewhere.
 - **Filter sources** filters the current page. Each source shows its icon.
   It also lists sources you can't use, with the reason.
+- Each tick in **Filter sources** applies right away.
+- While a filter is on, the **×** next to it clears it.
 - **Reload** gets fresh package data.
 
 Docker and Podman images are shown as separate sources. Each row shows

@@ -147,7 +147,11 @@ fn main() {
     let controller = pkgdeck_app::controller::ffi::create_controller();
     let mut app = App::with_controller(controller, settings, store, platform, launch);
     app.listener = listener;
-    app.sync_tray();
+    // An open window adds the menu bar or tray icon once it shows: making
+    // it first only delays the window.
+    if start_hidden {
+        app.sync_tray();
+    }
     let mut show = !start_hidden;
     loop {
         if show {

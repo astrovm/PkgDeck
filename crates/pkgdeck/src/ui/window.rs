@@ -32,6 +32,8 @@ pub fn setup(ctx: &egui::Context, root: &Path, media: Option<std::path::PathBuf>
 pub struct Window<'a> {
     app: &'a mut App,
     smoke_test: Option<u32>,
+    /// Whether a frame has been drawn, so the window is on screen.
+    shown: bool,
 }
 
 impl<'a> Window<'a> {
@@ -41,7 +43,11 @@ impl<'a> Window<'a> {
         }
         app.window_visible = true;
         let smoke_test = app.launch.smoke_test.then_some(0);
-        Self { app, smoke_test }
+        Self {
+            app,
+            smoke_test,
+            shown: false,
+        }
     }
 
     /// One frame: run what's due, draw, and answer what the frame asked.
@@ -55,6 +61,10 @@ impl<'a> Window<'a> {
         }
         let wait = self.app.tick(Instant::now());
         ui::show(self.app, ui);
+        if self.shown {
+            self.app.sync_tray();
+        }
+        self.shown = true;
         match ui::window_request(self.app) {
             WindowRequest::Show => {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));

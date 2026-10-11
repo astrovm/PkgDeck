@@ -963,6 +963,14 @@ impl App {
             self.page_sources.insert(page, sources);
         }
         self.reload(false, false);
+        // Rows from sources just turned off leave at once instead of when
+        // the reload ends.
+        if page == self.page {
+            let shown = self.effective_sources(page);
+            if let Some(rows) = self.retained.as_mut().filter(|_| !shown.is_empty()) {
+                rows.retain(|row| shown.contains(&row.source));
+            }
+        }
     }
 
     /// "Flatpak", "12 enabled sources", "3 sources".

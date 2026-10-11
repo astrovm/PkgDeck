@@ -493,6 +493,21 @@ fn header(app: &mut App, ui: &mut Ui) {
                     (false, true) => "Duplicates".into(),
                     _ => app.source_summary(app.page),
                 };
+                // Right beside what it clears, and only while there is
+                // something to clear.
+                if filtered
+                    && Button::new(Look::Soft(Tone::Accent), "Clear filter")
+                        .icon("cancel")
+                        .icon_only(true)
+                        .show(ui)
+                        .clicked()
+                {
+                    dialogs::clear_filter(app);
+                }
+                if filtered {
+                    // Snug against the filter, as one control.
+                    ui.add_space(4.0 - ui.spacing().item_spacing.x);
+                }
                 let response = Button::new(
                     if filtered {
                         Look::Soft(Tone::Accent)
@@ -1367,6 +1382,36 @@ mod header_tests {
             label(Page::Updates, true).as_deref(),
             Some(model::source_name("apt"))
         );
+    }
+
+    #[test]
+    fn a_filtered_page_has_a_clear_button_beside_the_filter() {
+        let harness = draw(app(Page::Installed, 1), header);
+        assert!(harness.query_by_label("Clear filter").is_none());
+
+        let mut filtered = app(Page::Installed, 1);
+        filtered.duplicates_only = true;
+        filtered
+            .page_sources
+            .insert(Page::Installed, HashSet::from(["apt".to_owned()]));
+        let mut harness = draw(filtered, header);
+        let filter = harness
+            .get_by_label(&format!("{}, duplicates", model::source_name("apt")))
+            .rect();
+        let clear = harness.get_by_label("Clear filter").rect();
+        // Just right of the filter, on its line.
+        assert!(
+            (clear.left() - filter.right() - 4.0).abs() < 1.0,
+            "{filter:?} {clear:?}"
+        );
+        assert!((clear.center().y - filter.center().y).abs() < 1.0);
+        harness.get_by_label("Clear filter").click();
+        harness.run_steps(2);
+        let app = &harness.state().1;
+        assert!(app.page_sources.is_empty());
+        assert!(!app.duplicates_only);
+        assert!(harness.query_by_label("Clear filter").is_none());
+        harness.get_by_label("Filter sources");
     }
 
     #[test]
