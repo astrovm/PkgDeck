@@ -27,10 +27,15 @@ impl Hold {
 
 /// Why automatic updates should wait right now, if they should.
 pub fn current(host: &Host) -> Option<Hold> {
-    if on_battery(host) {
+    first(on_battery(host), || building(host))
+}
+
+/// The battery comes first, as the cheaper check.
+fn first(battery: bool, building: impl FnOnce() -> bool) -> Option<Hold> {
+    if battery {
         return Some(Hold::Battery);
     }
-    building(host).then_some(Hold::Build)
+    building().then_some(Hold::Build)
 }
 
 #[cfg(target_os = "macos")]
@@ -194,6 +199,13 @@ mod tests {
         ] {
             assert!(!builds_in(line), "{line}");
         }
+    }
+
+    #[test]
+    fn the_battery_is_the_first_reason_to_wait() {
+        assert_eq!(first(true, || unreachable!()), Some(Hold::Battery));
+        assert_eq!(first(false, || true), Some(Hold::Build));
+        assert_eq!(first(false, || false), None);
     }
 
     #[test]
