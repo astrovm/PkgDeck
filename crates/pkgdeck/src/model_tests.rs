@@ -41,6 +41,15 @@ fn rows_know_their_title_identity_and_state() {
     // An empty remote counts as none, as notices and progress send it.
     let target = json!({"source": "flatpak", "name": "org.mozilla.firefox", "architecture": "x86_64", "remote": "", "scope": "system", "reference": "app/org.mozilla.firefox/x86_64/stable"});
     assert_eq!(identity_of_row_value(&target), firefox.identity());
+    // The quick text is the same as the JSON one, with an empty
+    // reference too.
+    for value in [
+        json!({"remote": "flathub", "reference": "", "scope": {"user": 1000}}),
+        json!({"remote": null, "reference": "app/x", "scope": "system"}),
+    ] {
+        let row = row(value);
+        assert_eq!(row.identity(), identity_of(&row.identity_value()));
+    }
     let blank = row(json!({"display_name": "  "}));
     assert_eq!(blank.title(), "app");
     assert!(row(json!({})).fabricated());
@@ -210,6 +219,14 @@ fn activity_entries_say_what_happened() {
     assert_eq!(entry(json!({"log": "line"})).log_text(), "line");
     assert_eq!(entry(json!({"output": ["a", 2]})).log_text(), "a\n2");
     assert_eq!(entry(json!({})).log_text(), "");
+    for (log, has) in [
+        (json!({"log": "line"}), true),
+        (json!({"log": "", "output": ["a"]}), true),
+        (json!({"log": [], "output": ""}), false),
+        (json!({"log": 3}), false),
+    ] {
+        assert_eq!(entry(log.clone()).has_log(), has, "{log}");
+    }
     assert_eq!(entry(json!({})).title(), "Change");
     let two_ops =
         entry(json!({"operations": [install, {"clean": {"backend": "apt", "key": "cache"}}]}));
@@ -336,6 +353,16 @@ fn source_lines_say_where_a_row_comes_from() {
         ),
         "Docker images, User"
     );
+    for (source, name) in [
+        ("docker", "Docker, System"),
+        ("podman", "Podman, System"),
+        ("apt", "APT"),
+    ] {
+        assert_eq!(
+            line(json!({"kind": "cleanup", "source": source}), false),
+            name
+        );
+    }
 }
 
 #[test]
@@ -376,7 +403,7 @@ fn versions_read_by_kind_and_state() {
     assert_eq!(version(json!({"kind": "failure"})), "Failed");
     assert_eq!(
         version(json!({"update": "available", "installed": "1", "candidate": "2"})),
-        "1 → 2"
+        "2 from 1"
     );
     assert_eq!(
         version(json!({"update": "available", "installed": "2", "candidate": "2"})),
@@ -618,6 +645,25 @@ fn visible_rows_sort_by_column_relevance_or_name() {
     }
     assert_eq!(Column::from_key("status"), Some(Column::Summary));
     assert_eq!(Column::from_key("capabilities"), None);
+    // Ties fall back to the name, then the source, both turned around too.
+    let rows = vec![
+        row(json!({"name": "x", "source": "snap", "installed": "1"})),
+        row(json!({"name": "x", "source": "apt", "installed": "1"})),
+        row(json!({"name": "w", "source": "apt", "installed": "1"})),
+    ];
+    let order = |column, ascending| {
+        let options = ViewOptions {
+            page: Some(Page::Updates),
+            sort: Some((column, ascending)),
+            ..ViewOptions::default()
+        };
+        visible(&rows, &options)
+            .iter()
+            .map(|item| format!("{}/{}", rows[item.raw].name, rows[item.raw].source))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(order(Column::Version, true), ["w/apt", "x/apt", "x/snap"]);
+    assert_eq!(order(Column::Version, false), ["x/snap", "x/apt", "w/apt"]);
 }
 
 #[test]
@@ -1116,4 +1162,21 @@ fn automatic_cleaning_says_what_it_freed() {
     );
     assert_eq!(said(0, 2, 0).as_deref(), Some("2 cleanup tasks failed"));
     assert_eq!(said(0, 1, 0).as_deref(), Some("1 cleanup task failed"));
+}
+
+#[test]
+fn cleanup_previews_split_into_a_note_and_items() {
+    assert_eq!(
+        cleanup_preview("Empties these folders:\n~/a\n\n  ~/b \n"),
+        ("Empties these folders:", vec!["~/a", "~/b"])
+    );
+    assert_eq!(
+        cleanup_preview("APT selects obsolete downloads during cleanup."),
+        ("APT selects obsolete downloads during cleanup.", vec![])
+    );
+    assert_eq!(
+        cleanup_preview("libfoo\nlibbar"),
+        ("", vec!["libfoo", "libbar"])
+    );
+    assert_eq!(cleanup_preview(""), ("", vec![]));
 }

@@ -351,6 +351,11 @@ pub struct Store {
 }
 
 impl Store {
+    #[cfg(test)]
+    pub fn saved(&self) -> &Settings {
+        &self.saved
+    }
+
     /// The settings in `directory`, the Qt app's if there are none yet, or
     /// the defaults. Without a directory nothing is saved.
     pub fn open(directory: Option<PathBuf>, home: Option<&Path>) -> (Self, Settings) {

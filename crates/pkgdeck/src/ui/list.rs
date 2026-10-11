@@ -179,8 +179,11 @@ fn heading_row(app: &mut App, ui: &mut Ui, rect: Rect) {
                     .font(theme::font(13.5))
                     .color(palette.muted),
             );
+            // The spinner's place is kept when it stops, so the text after
+            // it doesn't jump.
+            let (slot, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
             if (app.busy && !app.writing || app.refreshing) && !app.items.is_empty() {
-                spinner(ui, 16.0, palette.accent);
+                paint_spinner(ui, slot, palette.accent);
             }
             if app.waiting_shown() {
                 let names: Vec<String> = app
@@ -280,17 +283,24 @@ fn columns(row: Rect, width: Width, page: Page, actions: f32, shares: Shares) ->
     let available = (right - x).max(60.0);
     let start = x;
     let share = |dragged: f32, default: f32| if dragged > 0.0 { dragged } else { default };
+    // Sizes are short, and task names long.
+    let (name_share, version_share, medium_version, least) = if page == Page::Clean {
+        // Room for the size and "Not in Clean all" under it.
+        (0.42, 0.18, 0.26, 104.0)
+    } else {
+        (0.36, 0.2, 0.32, 80.0)
+    };
     let (name_w, version_w, summary) = match width {
         Width::Wide => {
-            let name =
-                (available * share(shares.name, 0.36)).clamp(120.0, (available - 200.0).max(120.0));
-            let version = (available * share(shares.version, 0.2))
-                .clamp(80.0, (available - name - 64.0).max(80.0));
+            let name = (available * share(shares.name, name_share))
+                .clamp(120.0, (available - 200.0).max(120.0));
+            let version = (available * share(shares.version, version_share))
+                .clamp(least, (available - name - 64.0).max(least));
             (name, version, true)
         }
         Width::Medium => {
-            let version =
-                (available * share(shares.version, 0.32)).clamp(80.0, (available * 0.6).max(80.0));
+            let version = (available * share(shares.version, medium_version))
+                .clamp(least, (available * 0.6).max(least));
             (available - version - 12.0, version, false)
         }
         Width::Compact => (available, 0.0, false),
@@ -632,17 +642,27 @@ fn rows(app: &mut App, ui: &mut Ui, body: Rect, width: Width) {
     app.hovered_row(hovered_raw);
 }
 
-/// Seconds since this list last went from empty to showing rows. A reload
-/// that keeps rows on screen doesn't count, so only new lists animate.
+/// What a task that Clean all skips says under its size.
+const LEFT_OUT: &str = "Not in Clean all";
+
+fn left_out_of_clean_all(row: &Row) -> bool {
+    row.kind == "cleanup" && row.cleanup_kind == "data"
+}
+
+/// Seconds since rows first showed after the page was opened. Reloads,
+/// searches and filters that empty the list for a moment don't count, so
+/// rows only rise into place when the person arrives.
 fn shown_since(app: &App, ctx: &egui::Context, list_id: Id) -> f32 {
     let key = list_id.with("shown-at");
     let now = ctx.input(|i| i.time);
-    if app.items.is_empty() {
-        ctx.data_mut(|d| d.remove::<f64>(key));
-        return 0.0;
-    }
-    let at = ctx.data_mut(|d| *d.get_temp_mut_or(key, now));
-    (now - at) as f32
+    let opened = app.page_changed;
+    let (seen, at) = ctx
+        .data(|d| d.get_temp::<(std::time::Instant, Option<f64>)>(key))
+        .filter(|(seen, _)| *seen == opened)
+        .unwrap_or((opened, None));
+    let at = at.or((!app.items.is_empty()).then_some(now));
+    ctx.data_mut(|d| d.insert_temp(key, (seen, at)));
+    at.map_or(0.0, |at| (now - at) as f32)
 }
 
 /// The selected row's background, sliding from row to row as the selection
@@ -883,6 +903,8 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
         // task here is a cache unless it says otherwise.
         let version = if row.kind == "cleanup" && version == model::cleanup_type("") {
             String::new()
+        } else if left_out_of_clean_all(&row) {
+            format!("{version}, {LEFT_OUT}")
         } else {
             version.clone()
         };
@@ -909,7 +931,9 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
         }
     }
     if let Some(v) = cols.version {
-        if app.page == Page::Updates && row.has_update() {
+        // An update reads the same on every page: the new version, and
+        // what it replaces under it.
+        if row.has_update() {
             let new = row.candidate.clone().unwrap_or_else(|| "Unknown".into());
             let mut left = v.left();
             if let Some(held) = &held {
@@ -943,11 +967,21 @@ fn row(app: &mut App, ui: &mut Ui, index: usize, rect: Rect, width: Width) -> Op
                 theme::font(13.0)
             };
             let galley = one_line(ui, &version, font, version_color, v.width());
-            painter.galley(
-                pos2(v.left(), rect.center().y - galley.size().y / 2.0),
-                galley,
-                version_color,
-            );
+            if left_out_of_clean_all(&row) {
+                painter.galley(
+                    pos2(v.left(), rect.center().y - 10.0 - galley.size().y / 2.0),
+                    galley,
+                    version_color,
+                );
+                let tag = one_line(ui, LEFT_OUT, theme::font(12.0), palette.warning, v.width());
+                painter.galley(pos2(v.left(), rect.center().y + 2.0), tag, palette.warning);
+            } else {
+                painter.galley(
+                    pos2(v.left(), rect.center().y - galley.size().y / 2.0),
+                    galley,
+                    version_color,
+                );
+            }
         }
     }
     if let Some(s) = cols.summary {

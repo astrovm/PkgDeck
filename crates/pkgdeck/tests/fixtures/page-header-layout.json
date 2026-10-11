@@ -22,11 +22,18 @@
       "y": 35.5
     },
     {
-      "height": 54.0,
-      "text": "Fixture summary\n\nFixture preview",
+      "height": 18.0,
+      "text": "Fixture summary",
       "width": 114.9375,
       "x": 26.0,
       "y": 116.0
+    },
+    {
+      "height": 15.0,
+      "text": "Fixture preview",
+      "width": 112.875,
+      "x": 37.0,
+      "y": 153.0
     },
     {
       "control": "Close details",
@@ -103,8 +110,8 @@
       "y": 35.5
     },
     {
-      "height": 54.0,
-      "text": "Fixture summary\n\nFixture preview",
+      "height": 18.0,
+      "text": "Fixture summary",
       "width": 114.9375,
       "x": 26.0,
       "y": 160.0
@@ -147,8 +154,8 @@
       "y": 35.5
     },
     {
-      "height": 54.0,
-      "text": "Fixture summary\n\nFixture preview",
+      "height": 18.0,
+      "text": "Fixture summary",
       "width": 114.9375,
       "x": 26.0,
       "y": 160.0
@@ -191,8 +198,8 @@
       "y": 35.5
     },
     {
-      "height": 54.0,
-      "text": "Fixture summary\n\nFixture preview",
+      "height": 18.0,
+      "text": "Fixture summary",
       "width": 114.9375,
       "x": 26.0,
       "y": 160.0
@@ -235,8 +242,8 @@
       "y": 35.5
     },
     {
-      "height": 54.0,
-      "text": "Fixture summary\n\nFixture preview",
+      "height": 18.0,
+      "text": "Fixture summary",
       "width": 114.9375,
       "x": 26.0,
       "y": 138.0
@@ -279,8 +286,8 @@
       "y": 35.5
     },
     {
-      "height": 54.0,
-      "text": "Fixture summary\n\nFixture preview",
+      "height": 18.0,
+      "text": "Fixture summary",
       "width": 114.9375,
       "x": 26.0,
       "y": 138.0
@@ -323,11 +330,18 @@
       "y": 35.5
     },
     {
-      "height": 54.0,
-      "text": "Fixture summary\n\nFixture preview",
+      "height": 18.0,
+      "text": "Fixture summary",
       "width": 114.9375,
       "x": 26.0,
       "y": 116.0
+    },
+    {
+      "height": 15.0,
+      "text": "Fixture preview",
+      "width": 112.875,
+      "x": 37.0,
+      "y": 153.0
     },
     {
       "control": "Close details",

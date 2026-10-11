@@ -119,9 +119,14 @@ fn content(app: &mut App, ui: &mut Ui) {
         .auto_shrink([false, false])
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 8.0;
-            let entries: Vec<Activity> = app.activity.iter().rev().cloned().collect();
-            for entry in entries {
-                entry_card(app, ui, &entry);
+            // Borrowed out, not copied: logs can be long. A card that
+            // cancels may read a newer list, which then stays.
+            let entries = std::mem::take(&mut app.activity);
+            for entry in entries.iter().rev() {
+                entry_card(app, ui, entry);
+            }
+            if app.activity.is_empty() {
+                app.activity = entries;
             }
         });
 }
@@ -130,8 +135,7 @@ fn entry_card(app: &mut App, ui: &mut Ui, entry: &Activity) {
     let palette = Palette::current(ui.ctx());
     let color = tone(&palette, entry.tone());
     let others = entry.others();
-    let log = entry.log_text();
-    let expandable = !others.is_empty() || !log.is_empty() || entry.finished_at.is_some();
+    let expandable = !others.is_empty() || entry.has_log() || entry.finished_at.is_some();
     let expanded = app.expanded.contains(&entry.id);
     let response = egui::Frame::new()
         .fill(palette.canvas)
@@ -272,6 +276,7 @@ fn entry_card(app: &mut App, ui: &mut Ui, entry: &Activity) {
                             .color(palette.muted),
                         );
                     }
+                    let log = entry.log_text();
                     if !log.is_empty() {
                         egui::Frame::new()
                             .fill(palette.surface)

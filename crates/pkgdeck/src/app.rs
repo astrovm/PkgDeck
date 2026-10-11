@@ -117,6 +117,8 @@ pub struct App {
     /// Rows still shown while a reload of the same list runs.
     pub retained: Option<Vec<Row>>,
     pub selected: Option<String>,
+    /// Where the selection was last found in `items`.
+    selected_hint: std::cell::Cell<usize>,
     /// The Flatpak group of the selected row, to find its other copy if
     /// this one goes away.
     selected_group: Option<String>,
@@ -154,6 +156,9 @@ pub struct App {
     post_write_reload: bool,
     close_pending: bool,
     pub force_quit: bool,
+    /// Set while something is being dragged, such as a column divider:
+    /// settings wait for the drop instead of being written every frame.
+    pub dragging: bool,
     /// Set while a [`crate::ui::Window`] is up. A copy started in the
     /// background never had one, so a restart keeps it hidden.
     pub window_visible: bool,
@@ -265,6 +270,7 @@ impl App {
             parsed: vec![],
             retained: None,
             selected: None,
+            selected_hint: Default::default(),
             selected_group: None,
             page_open: false,
             cursor_moved: false,
@@ -296,6 +302,7 @@ impl App {
             post_write_reload: false,
             close_pending: false,
             force_quit: false,
+            dragging: false,
             window_visible: false,
             window_request: WindowRequest::None,
             listener: None,
@@ -404,7 +411,9 @@ impl App {
         }
         self.flashes.retain(|_, at| now.duration_since(*at) < FLASH);
         self.expire_toasts(now);
-        self.save_settings();
+        if !self.dragging {
+            self.save_settings();
+        }
         // Workers wake the window when they reply, so it only has to come
         // back for a poll it put off and for its own timers.
         let mut wait = if deferred {
@@ -1009,14 +1018,14 @@ impl App {
         self.react();
     }
 
-    /// "Flatpak", "12 enabled sources", "3 sources".
+    /// "Flatpak", "3 sources", or "All sources": what the filter shows.
     pub fn source_summary(&self, page: Page) -> String {
         match self.page_sources.get(&page) {
             Some(chosen) if chosen.len() == 1 => {
                 source_name(chosen.iter().next().expect("one")).to_owned()
             }
             Some(chosen) => format!("{} sources", chosen.len()),
-            None => "Filter sources".into(),
+            None => "All sources".into(),
         }
     }
 
@@ -1210,11 +1219,7 @@ impl App {
     // Selection
 
     pub fn selected_item(&self) -> Option<&Item> {
-        let identity = self.selected.as_ref()?;
-        let rows = self.shown_rows();
-        self.items
-            .iter()
-            .find(|item| rows[item.raw].identity() == *identity)
+        self.selected_index().map(|index| &self.items[index])
     }
 
     pub fn selected_row(&self) -> Option<&Row> {
@@ -1222,12 +1227,24 @@ impl App {
             .map(|item| &self.shown_rows()[item.raw])
     }
 
+    /// Where the selected row is in the list. Each frame asks several
+    /// times, so the last answer is checked first.
     pub fn selected_index(&self) -> Option<usize> {
         let identity = self.selected.as_ref()?;
         let rows = self.shown_rows();
-        self.items
-            .iter()
-            .position(|item| rows[item.raw].identity() == *identity)
+        let is_selected = |index: usize| {
+            self.items
+                .get(index)
+                .and_then(|item| rows.get(item.raw))
+                .is_some_and(|row| row.identity() == *identity)
+        };
+        let last = self.selected_hint.get();
+        if is_selected(last) {
+            return Some(last);
+        }
+        let index = (0..self.items.len()).find(|&index| is_selected(index))?;
+        self.selected_hint.set(index);
+        Some(index)
     }
 
     /// The key of the open page: "opened", the open row's identity, or

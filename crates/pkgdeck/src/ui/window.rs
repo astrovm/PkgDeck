@@ -59,6 +59,7 @@ impl<'a> Window<'a> {
             }
             self.app.window_request = WindowRequest::Show;
         }
+        self.app.dragging = ctx.dragged_id().is_some();
         let wait = self.app.tick(Instant::now());
         ui::show(self.app, ui);
         if self.shown {

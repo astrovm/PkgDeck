@@ -80,7 +80,7 @@ computer can handle.
 ## Installed
 
 Packages from every source are listed A to Z. Filter the list by name, or
-tick **Only duplicates** in **Filter sources** to see apps installed from more
+tick **Only duplicates** in the sources filter (**All sources**) to see apps installed from more
 than one source. It's only there while some app is installed twice. Grouping
 is only visual. Each copy stays a separate package.
 
@@ -91,9 +91,10 @@ These controls work on every package page:
   for the default width.
 - A source that fails to check is tried once more before its warning shows.
   Homebrew waits for a `brew update` that is already running elsewhere.
-- **Filter sources** filters the current page. Each source shows its icon.
+- The sources filter, **All sources** until you pick some, filters the
+  current page. Each source shows its icon.
   It also lists sources you can't use, with the reason.
-- Each tick in **Filter sources** applies right away.
+- Each tick in the sources filter applies right away.
 - While a filter is on, the **×** at the end of its button clears it.
 - **Reload** gets fresh package data.
 
@@ -141,7 +142,8 @@ Cargo and Bun have no command that lists outdated tools, so PkgDeck asks
 crates.io and the npm registry about each installed tool when it lists them.
 Tools Cargo installed from Git or a local folder aren't checked.
 
-Versions appear as `installed → new` when the source provides both. Some
+An update shows the new version first, then the one it replaces, when the
+source provides both. Some
 Flatpak runtimes only report a branch or commit. PkgDeck shows what the
 source reports and never makes up a version.
 
@@ -181,8 +183,8 @@ a standalone tool or an app from macOS Applications, has no Undo.
 ## Clean
 
 Clean lists maintenance tasks, biggest first, with how much space each one
-frees. **Clean all** shows the total. Open a task to see exactly what it will
-remove. Every task asks for confirmation, and PkgDeck checks the task again
+frees. **Clean all** shows the total. Open a task to see how much it frees
+and each folder or item it will remove. Every task asks for confirmation, and PkgDeck checks the task again
 right before running it. Sources that can't clean are not listed, and checks
 that failed are shown separately.
 
@@ -195,8 +197,8 @@ that failed are shown separately.
 | Developer caches | Cargo, Go, Gradle, Maven, Yarn, Bun and sccache caches; on macOS also CocoaPods and Xcode build data |
 | Old projects | Build folders (`target`, `node_modules`, `build`, `.gradle` and others) and finished Git worktrees of projects you haven't touched in a while |
 
-- Unused volumes hold data. **Clean all** leaves them alone; clean them on
-  their own.
+- Unused volumes hold data. **Clean all** leaves them alone, and their row
+  says **Not in Clean all**. Clean them on their own.
 - A worktree counts as finished when its branch was merged or deleted on the
   remote, and it has no changes. Removing it keeps the branch.
 - Old project build files wait while something is being built.
@@ -229,9 +231,9 @@ Turn on **Clean automatically** in Settings. It needs **Background checks**.
 
 **Settings** → **Sources** lists the package managers found on this
 computer. Turn one off and PkgDeck stops checking it. A source whose check
-failed shows why in red.
+failed shows why in red, with **Try again** under it.
 
-**Filter sources** only filters one page. Neither one turns repositories on
+The sources filter only filters one page. Neither one turns repositories on
 or off.
 
 **Refresh sources** on **Updates** downloads the latest package lists of
@@ -535,7 +537,8 @@ out of date, and each page refreshes when you open it.
 - **Last check** shows when PkgDeck last checked and what it found.
 - **Test notification** sends a sample notification.
 - **About** shows the version and a link to GitHub.
-- **Keyboard shortcuts** lists the shortcuts below.
+- **Keyboard shortcuts**: **Show shortcuts** lists the main ones. The full
+  list is below.
 
 ## Keyboard shortcuts
 
@@ -544,7 +547,7 @@ out of date, and each page refreshes when you open it.
 | Ctrl+1 to Ctrl+4 | Go to Search, Installed, Updates, or Clean |
 | Ctrl+, or Ctrl+5 | Open Settings |
 | Ctrl+J | Show or hide Activity |
-| Ctrl+F | Focus the search field or package filter, or open **Filter sources** |
+| Ctrl+F | Focus the search field or package filter, or open the sources filter |
 | Ctrl+L | Move to the results list |
 | Up, Down, Page Up, Page Down, Home, End | Move through the list |
 | Space | Open the selected row's app page |

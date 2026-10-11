@@ -387,12 +387,20 @@ fn sidebar_ui(app: &mut App, ui: &mut Ui, rect: Rect, rail: bool) {
                 secs(&ctx, REVEAL),
                 egui::emath::easing::back_out,
             );
-            let center = if rail {
-                pos2(entry.center().x + 12.0, entry.top() + 9.0)
+            // In the rail, smaller and up in the corner, clear of the icon.
+            let (center, size) = if rail {
+                (pos2(entry.center().x + 15.0, entry.top() + 6.0), 0.8)
             } else {
-                pos2(entry.right() - 20.0, entry.center().y)
+                (pos2(entry.right() - 20.0, entry.center().y), 1.0)
             };
-            paint_badge(ui, center, &count, palette.accent, palette.accent_ink, pop);
+            paint_badge(
+                ui,
+                center,
+                &count,
+                palette.accent,
+                palette.accent_ink,
+                pop * size,
+            );
         }
         if rail {
             response.clone().on_hover_text(page.name());
@@ -1385,7 +1393,7 @@ mod header_tests {
             }
             let harness = draw(app, header);
             [
-                "Filter sources",
+                "All sources",
                 "Duplicates",
                 &format!("{}, duplicates", model::source_name("apt")),
                 model::source_name("apt"),
@@ -1400,10 +1408,7 @@ mod header_tests {
             Some(format!("{}, duplicates", model::source_name("apt")))
         );
         // Duplicates belong to Installed.
-        assert_eq!(
-            label(Page::Updates, false).as_deref(),
-            Some("Filter sources")
-        );
+        assert_eq!(label(Page::Updates, false).as_deref(), Some("All sources"));
         assert_eq!(
             label(Page::Updates, true).as_deref(),
             Some(model::source_name("apt"))
@@ -1472,7 +1477,7 @@ mod header_tests {
     fn a_filtered_page_clears_from_the_filter_s_right_end() {
         let harness = draw(app(Page::Installed, 1), header);
         assert!(harness.query_by_label("Clear filter").is_none());
-        let unfiltered = harness.get_by_label("Filter sources").rect();
+        let unfiltered = harness.get_by_label("All sources").rect();
 
         let mut filtered = app(Page::Installed, 1);
         filtered.duplicates_only = true;
@@ -1500,20 +1505,20 @@ mod header_tests {
         // Clearing doesn't open the menu.
         assert!(!app.ui.picker_open);
         assert!(harness.query_by_label("Clear filter").is_none());
-        harness.get_by_label("Filter sources");
+        harness.get_by_label("All sources");
     }
 
     #[test]
     fn the_source_filter_button_opens_the_picker_and_hides_behind_an_opened_file() {
         let mut harness = draw(app(Page::Installed, 1), header);
-        harness.get_by_label("Filter sources").click();
+        harness.get_by_label("All sources").click();
         harness.run_steps(2);
         assert!(harness.state().1.ui.picker_open);
 
         let mut opened = app(Page::Installed, 1);
         opened.opened = Some(Default::default());
         let harness = draw(opened, header);
-        assert!(harness.query_by_label("Filter sources").is_none());
+        assert!(harness.query_by_label("All sources").is_none());
     }
 
     #[test]
@@ -1527,7 +1532,7 @@ mod header_tests {
         assert!(harness
             .get_by_role(egui::accesskit::Role::TextInput)
             .is_focused());
-        // No Duplicates button beside it any more: it's in Filter sources.
+        // No Duplicates button beside it any more: it's in the sources filter.
         assert!(harness.query_by_label("Duplicates").is_none());
 
         harness

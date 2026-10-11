@@ -542,6 +542,31 @@ fn flatpak_copies_switch_scope_and_reselect_when_one_goes() {
 }
 
 #[test]
+fn the_selection_is_found_again_after_the_list_changes() {
+    let mut app = app();
+    app.page = Page::Installed;
+    rows(
+        &mut app,
+        json!([
+            row("a", json!({})),
+            row("b", json!({})),
+            row("c", json!({}))
+        ]),
+    );
+    app.choose(1, false);
+    assert_eq!(app.selected_index(), Some(1));
+    assert_eq!(app.selected_row().map(|row| row.name.as_str()), Some("b"));
+    // The list moves under it.
+    rows(&mut app, json!([row("b", json!({})), row("c", json!({}))]));
+    assert_eq!(app.selected_index(), Some(0));
+    assert_eq!(app.selected_index(), Some(0));
+    // Rows cleared mid-frame find nothing, without a crash.
+    app.rows.clear();
+    assert_eq!(app.selected_index(), None);
+    assert!(app.selected_item().is_none());
+}
+
+#[test]
 fn selections_survive_reloads_or_clear() {
     let mut app = app();
     app.page = Page::Search;
@@ -958,4 +983,41 @@ fn the_window_sleeps_until_something_is_due() {
     // a worker stops without a reply.
     assert!(*app.ctl.needs_poll());
     assert_eq!(wait, Duration::from_secs(1));
+}
+
+#[test]
+fn settings_wait_for_a_drag_to_end_before_they_are_written() {
+    let dir = std::env::temp_dir().join(format!("pkgdeck-drag-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (store, settings) = Store::open(Some(dir.clone()), None);
+    let mut app = App::with_controller(
+        create_synthetic_controller(empty),
+        settings,
+        store,
+        Platform::start(|| {}),
+        Launch::default(),
+    );
+    app.tick(Instant::now());
+    app.dragging = true;
+    app.settings.name_column = 0.4;
+    app.tick(Instant::now());
+    assert_eq!(app.store.saved().name_column, 0.0);
+    app.dragging = false;
+    app.tick(Instant::now());
+    assert_eq!(app.store.saved().name_column, 0.4);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn sources_can_be_checked_again() {
+    let mut app = app();
+    for _ in 0..200 {
+        app.tick(Instant::now() + Duration::from_secs(2));
+        if !*app.ctl.needs_poll() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    app.c().recheck_sources();
+    assert!(*app.ctl.needs_poll());
 }

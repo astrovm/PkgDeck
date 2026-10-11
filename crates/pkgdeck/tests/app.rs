@@ -347,7 +347,7 @@ fn sources_turn_off_and_pages_narrow() {
     assert!(app.available("apt"));
     assert!(app.usable("apt", Page::Installed));
     assert!(!app.can_turn_off("apt"), "the last source stays on");
-    assert_eq!(app.source_summary(Page::Installed), "Filter sources");
+    assert_eq!(app.source_summary(Page::Installed), "All sources");
     app.open_page(Page::Installed);
     let only = ["apt".to_owned()].into_iter().collect();
     app.set_page_sources(Page::Installed, only);

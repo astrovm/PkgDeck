@@ -238,6 +238,20 @@ pub fn strokes(name: &str) -> &'static [&'static [f32]] {
             &[13.0, 12.0, 21.0, 12.0, 21.0, 20.0, 13.0, 20.0, 13.0, 12.0],
             &[8.0, 12.0, 8.0, 4.0, 16.0, 4.0, 16.0, 12.0],
         ],
+        // A folder holding code.
+        "projects" => &[
+            &[
+                3.0, 6.0, 9.5, 6.0, 11.5, 8.5, 21.0, 8.5, 21.0, 19.0, 3.0, 19.0, 3.0, 6.0,
+            ],
+            &[10.0, 11.5, 7.5, 14.0, 10.0, 16.5],
+            &[14.0, 11.5, 16.5, 14.0, 14.0, 16.5],
+        ],
+        // Stacked layers, for downloads kept to build faster.
+        "dev-caches" => &[
+            &[12.0, 3.0, 21.0, 7.5, 12.0, 12.0, 3.0, 7.5, 12.0, 3.0],
+            &[3.0, 12.0, 12.0, 16.5, 21.0, 12.0],
+            &[3.0, 16.5, 12.0, 21.0, 21.0, 16.5],
+        ],
         "duplicates" => &[
             &[8.0, 8.0, 20.0, 8.0, 20.0, 20.0, 8.0, 20.0, 8.0, 8.0],
             &[16.0, 8.0, 16.0, 4.0, 4.0, 4.0, 4.0, 16.0, 8.0, 16.0],
@@ -319,6 +333,8 @@ pub const NAMES: &[&str] = &[
     "rustup",
     "toolbox",
     "distrobox",
+    "projects",
+    "dev-caches",
     "duplicates",
     "warning",
     "lock",
@@ -368,8 +384,6 @@ pub fn monogram(id: &str) -> &str {
         "solana" => "So",
         "anchor" => "An",
         "foundry" => "Fo",
-        "dev-caches" => "Dc",
-        "projects" => "Pj",
         other => other.get(..1).unwrap_or(""),
     }
 }

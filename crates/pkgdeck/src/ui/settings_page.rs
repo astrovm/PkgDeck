@@ -442,6 +442,8 @@ fn update_checks(app: &mut App, ui: &mut Ui) {
                 None => "Last check: never".into(),
             };
             ui.label(egui::RichText::new(text).color(palette.muted));
+        });
+        {
             let warning = if !app.platform.tray_available() {
                 Some(if cfg!(target_os = "macos") {
                     "No menu bar icon, so no notifications"
@@ -459,12 +461,15 @@ fn update_checks(app: &mut App, ui: &mut Ui) {
             } else {
                 None
             };
+            // Said, not hidden behind a hover: it is why nothing pops up.
             if let Some(warning) = warning {
-                let (rect, response) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
-                theme::paint_icon(ui.painter(), rect, "warning", palette.warning);
-                response.on_hover_text(warning);
+                ui.horizontal(|ui| {
+                    let (rect, _) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
+                    theme::paint_icon(ui.painter(), rect, "warning", palette.warning);
+                    ui.label(egui::RichText::new(warning).color(palette.warning));
+                });
             }
-        });
+        }
         if let Some(waiting) = app
             .background
             .waiting_text()
@@ -576,6 +581,15 @@ fn sources(app: &mut App, ui: &mut Ui) {
                         .font(theme::font(12.5))
                         .color(palette.danger),
                 );
+                if Button::new(Look::Flat, "Try again")
+                    .icon("refresh")
+                    .small()
+                    .show(ui)
+                    .clicked()
+                {
+                    app.c().recheck_sources();
+                    app.react();
+                }
             }
         }
         if REPOSITORY_SOURCES.iter().any(|id| app.available(id)) {
@@ -757,9 +771,6 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Open the selected row", "Space"),
     ("Install, remove or update the selected row", "Enter"),
     ("Update selected", "Ctrl+Shift+U"),
-    ("Install", "Ctrl+I"),
-    ("Remove", "Ctrl+D"),
-    ("Update", "Ctrl+U"),
     ("Reload the page", "Ctrl+R"),
     ("Apply a confirmation", "Ctrl+Enter"),
     ("Clear search or close details", "Esc"),
@@ -774,8 +785,34 @@ fn shortcuts(ui: &mut Ui) {
         } else {
             "Ctrl+M"
         };
+        // Folded away: most people never need the list.
+        let open_id = Id::new("shortcuts-open");
+        let open = ui
+            .data(|data| data.get_temp::<bool>(open_id))
+            .unwrap_or(false);
+        let label = if open {
+            "Hide shortcuts"
+        } else {
+            "Show shortcuts"
+        };
+        if Button::new(Look::Secondary, label)
+            .icon(if open { "up" } else { "down" })
+            .small()
+            .show(ui)
+            .clicked()
+        {
+            ui.data_mut(|data| data.insert_temp(open_id, !open));
+        }
+        if !open {
+            return;
+        }
+        ui.add_space(6.0);
         let mut all: Vec<(&str, &str)> = SHORTCUTS.to_vec();
-        all.insert(17, ("Refresh sources", refresh));
+        let after_reload = all
+            .iter()
+            .position(|(label, _)| *label == "Reload the page")
+            .map_or(all.len(), |at| at + 1);
+        all.insert(after_reload, ("Refresh sources", refresh));
         let columns = if ui.available_width() >= 620.0 { 2 } else { 1 };
         let per = all.len().div_ceil(columns);
         ui.columns(columns, |cols| {

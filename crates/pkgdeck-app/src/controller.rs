@@ -6302,6 +6302,15 @@ impl ffi::PackageController {
                 .unwrap_or_default()
         });
     }
+    /// Checks every source again, such as after one failed its check.
+    pub fn recheck_sources(mut self: Pin<&mut Self>) {
+        self.as_mut().forget_catalog();
+        self.check_sources();
+    }
+    /// Lets the next check run. One running already stays the only one.
+    fn forget_catalog(mut self: Pin<&mut Self>) {
+        self.as_mut().rust_mut().catalog_checked = false;
+    }
     fn begin_catalog_check(
         mut self: Pin<&mut Self>,
         discover: impl FnOnce(&Cancellation) -> Vec<Source> + Send + 'static,
@@ -11122,6 +11131,35 @@ mod tests {
         assert!(controller.rust().worker.is_none());
         controller.as_mut().begin_catalog_check(|_| Vec::new());
         assert!(controller.rust().catalog_worker.is_none());
+        // Try again: a fresh check replaces the catalog, and asking twice
+        // while it runs starts it once.
+        controller.as_mut().forget_catalog();
+        let (release, wait) = mpsc::channel::<()>();
+        controller.as_mut().begin_catalog_check(move |_| {
+            let _ = wait.recv();
+            vec![Source {
+                backend: "apt".into(),
+                capabilities: vec![Capability::Search],
+                availability: Err(EngineError::Execution(ExecutionError::Invalid(
+                    "apt broke".into(),
+                ))),
+            }]
+        });
+        assert!(controller.rust().catalog_worker.is_some());
+        controller.as_mut().forget_catalog();
+        // Would empty the catalog, if it ran.
+        controller.as_mut().begin_catalog_check(|_| Vec::new());
+        release.send(()).unwrap();
+        for _ in 0..100 {
+            std::thread::sleep(Duration::from_millis(1));
+            controller.as_mut().poll();
+            if controller.rust().catalog_checked {
+                break;
+            }
+        }
+        let catalog: Value =
+            serde_json::from_str(&controller.source_catalog().to_string()).unwrap();
+        assert_eq!(catalog[0]["check_failed"], true);
     }
 
     #[test]

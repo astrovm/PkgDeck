@@ -134,7 +134,20 @@ impl Row {
     /// What identifies a row across loads, as the controller reads it back
     /// in `propose_checked`.
     pub fn identity(&self) -> String {
-        identity_of(&self.identity_value())
+        // The same text as `identity_of(&self.identity_value())`, without
+        // building a JSON value first: lists ask for it often.
+        fn text(text: &Option<String>) -> Option<&str> {
+            text.as_deref().filter(|text| !text.is_empty())
+        }
+        let parts = (
+            &self.source,
+            &self.name,
+            &self.architecture,
+            text(&self.remote),
+            &self.scope,
+            text(&self.reference),
+        );
+        serde_json::to_string(&parts).unwrap_or_default()
     }
     pub fn identity_value(&self) -> Value {
         json!([
@@ -530,6 +543,15 @@ impl Activity {
     pub fn running(&self) -> bool {
         matches!(self.state.as_str(), "running" | "authorizing")
     }
+    /// Whether [`Self::log_text`] has anything, without building it.
+    pub fn has_log(&self) -> bool {
+        let some = |value: &Value| match value {
+            Value::String(text) => !text.is_empty(),
+            Value::Array(lines) => !lines.is_empty(),
+            _ => false,
+        };
+        some(&self.log) || some(&self.output)
+    }
     pub fn log_text(&self) -> String {
         let text = |value: &Value| match value {
             Value::String(text) => text.clone(),
@@ -780,6 +802,16 @@ pub fn source_name(id: &str) -> &str {
     backends::display_name(id)
 }
 
+/// The source as a row names it. Docker and Podman clean more than images:
+/// their cleanup tasks say the tool's name alone.
+pub fn row_source_name(row: &Row) -> &str {
+    match (row.kind.as_str(), row.source.as_str()) {
+        ("cleanup", "docker") => "Docker",
+        ("cleanup", "podman") => "Podman",
+        _ => source_name(&row.source),
+    }
+}
+
 fn simplified(text: &str) -> String {
     text.chars()
         .filter(|c| c.is_alphanumeric())
@@ -851,8 +883,8 @@ pub fn source_line(row: &Row, merged_scopes: bool) -> String {
         parts.push(row.name.clone());
     }
     // A standalone tool's row is named after its source already.
-    if source_name(&row.source) != row.title() {
-        parts.push(source_name(&row.source).to_owned());
+    if row_source_name(row) != row.title() {
+        parts.push(row_source_name(row).to_owned());
     }
     if let Some(remote) = row.remote.as_deref().filter(|r| !r.is_empty()) {
         parts.push(remote.to_owned());
@@ -901,6 +933,27 @@ pub fn source_line(row: &Row, merged_scopes: bool) -> String {
     parts.join(", ")
 }
 
+/// A cleanup preview split into what it says and what it lists: backends
+/// write a sentence ending in `.` or `:` and then one item per line.
+pub fn cleanup_preview(preview: &str) -> (&str, Vec<&str>) {
+    let mut lines = preview
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty());
+    let first = lines.next().unwrap_or("");
+    if first.ends_with(['.', ':']) {
+        (first, lines.collect())
+    } else {
+        (
+            "",
+            std::iter::once(first)
+                .chain(lines)
+                .filter(|line| !line.is_empty())
+                .collect(),
+        )
+    }
+}
+
 pub fn cleanup_type(kind: &str) -> &'static str {
     match kind {
         "orphan_dependencies" => "Dependencies",
@@ -923,7 +976,7 @@ pub fn version_text(row: &Row) -> String {
         },
         "failure" => "Failed".into(),
         _ if row.has_update() => match (known(&row.installed), known(&row.candidate)) {
-            (Some(old), Some(new)) if old != new => format!("{old} → {new}"),
+            (Some(old), Some(new)) if old != new => format!("{new} from {old}"),
             (_, Some(new)) => new,
             (Some(old), None) => old,
             _ => "Unknown".into(),
@@ -1193,6 +1246,31 @@ pub fn flatpak_group(row: &Row) -> Option<String> {
     })
 }
 
+/// Sorts `kept` by `key`, then by name and source. Each key is worked out
+/// once, not on every comparison: long lists sort as people type.
+fn sort_rows<K: Ord>(
+    kept: &mut Vec<usize>,
+    rows: &[Row],
+    ascending: bool,
+    key: impl Fn(&Row) -> K,
+) {
+    let mut keyed: Vec<_> = kept
+        .iter()
+        .map(|&index| {
+            let row = &rows[index];
+            ((key(row), row.title().to_lowercase(), &row.source), index)
+        })
+        .collect();
+    keyed.sort_by(|a, b| {
+        if ascending {
+            a.0.cmp(&b.0)
+        } else {
+            b.0.cmp(&a.0)
+        }
+    });
+    *kept = keyed.into_iter().map(|(_, index)| index).collect();
+}
+
 /// The rows the list shows, in order.
 pub fn visible(rows: &[Row], options: &ViewOptions) -> Vec<Item> {
     let page = options.page;
@@ -1237,33 +1315,13 @@ pub fn visible(rows: &[Row], options: &ViewOptions) -> Vec<Item> {
                 && (!options.duplicates_only || !row.same_app_from.is_empty())
         });
     }
-    let by_name = |a: &Row, b: &Row| {
-        a.title()
-            .to_lowercase()
-            .cmp(&b.title().to_lowercase())
-            .then_with(|| a.source.cmp(&b.source))
-    };
     if let Some((column, ascending)) = options.sort {
-        kept.sort_by(|&a, &b| {
-            let (a, b) = (&rows[a], &rows[b]);
-            let order = sort_key(a, column)
-                .cmp(&sort_key(b, column))
-                .then_with(|| by_name(a, b));
-            if ascending {
-                order
-            } else {
-                order.reverse()
-            }
-        });
+        sort_rows(&mut kept, rows, ascending, |row| sort_key(row, column));
     } else if page == Some(Page::Installed) {
         // A to Z across sources, so a package is where its name says.
-        kept.sort_by(|&a, &b| by_name(&rows[a], &rows[b]));
+        sort_rows(&mut kept, rows, true, |_| ());
     } else if page == Some(Page::Search) && !options.query.trim().is_empty() {
-        kept.sort_by(|&a, &b| {
-            relevance(&rows[a], options.query)
-                .cmp(&relevance(&rows[b], options.query))
-                .then_with(|| by_name(&rows[a], &rows[b]))
-        });
+        sort_rows(&mut kept, rows, true, |row| relevance(row, options.query));
     }
     let mut items: Vec<Item> = kept
         .into_iter()

@@ -145,6 +145,8 @@ fn offline(app: &mut App, page: Page) {
 fn render(name: &str, size: [f32; 2], dark: bool, prepare: impl FnOnce(&mut App)) {
     let mut app = sample_app();
     prepare(&mut app);
+    // Past the page's fade-in, which runs on the wall clock.
+    app.page_changed = std::time::Instant::now() - std::time::Duration::from_secs(1);
     app.settings.appearance = if dark {
         pkgdeck::settings::Appearance::Dark
     } else {
@@ -258,6 +260,8 @@ fn main() {
                 48_000_000,
             ),
         ];
+        app.rows[1].preview =
+            "Empties these folders:\n~/.cargo/registry/cache\n~/.cargo/registry/src\n~/.cargo/git/checkouts".into();
         offline(app, Page::Clean);
         app.refresh_items();
         app.selected = Some(app.rows[app.items[1].raw].identity());

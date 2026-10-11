@@ -112,7 +112,7 @@ fn panel(app: &mut App, ui: &mut Ui, rect: Rect, row: &Row, narrow: bool) {
                     )
                     .wrap(),
                 );
-                let source = model::source_name(&row.source);
+                let source = model::row_source_name(row);
                 if source != row.title() {
                     ui.label(egui::RichText::new(source).color(palette.muted));
                 }
@@ -138,16 +138,20 @@ fn panel(app: &mut App, ui: &mut Ui, rect: Rect, row: &Row, narrow: bool) {
             });
         });
         ui.add_space(12.0);
+        if row.kind == "cleanup" {
+            let (summary, preview) = match &app.details.cleanup {
+                Some(cleanup) => (cleanup.summary.clone(), cleanup.preview.clone()),
+                None => (row.summary.clone(), row.preview.clone()),
+            };
+            egui::ScrollArea::vertical()
+                .id_salt("panel-text")
+                .auto_shrink([false, false])
+                .show(ui, |ui| cleanup_body(ui, row, &summary, &preview, &palette));
+            return;
+        }
         let text = app.details.panel_text(&app.report);
         let text = if text.is_empty() {
-            match row.kind.as_str() {
-                "cleanup" if row.cleanup_kind == "data" => format!(
-                    "{}\n\n{}\n\nClean all leaves this alone. Clean it on its own.",
-                    row.summary, row.preview
-                ),
-                "cleanup" => format!("{}\n\n{}", row.summary, row.preview),
-                _ => row.summary.clone(),
-            }
+            row.summary.clone()
         } else {
             text
         };
@@ -162,6 +166,54 @@ fn panel(app: &mut App, ui: &mut Ui, rect: Rect, row: &Row, narrow: bool) {
                 );
             });
     });
+}
+
+/// A cleanup task: how much it frees, what it is, and each folder or item
+/// it removes.
+fn cleanup_body(ui: &mut Ui, row: &Row, summary: &str, preview: &str, palette: &Palette) {
+    ui.spacing_mut().item_spacing.y = 8.0;
+    if let Some(bytes) = row.bytes.filter(|&bytes| bytes > 0) {
+        ui.label(
+            egui::RichText::new(format!("Frees about {}", model::size(bytes)))
+                .font(theme::bold(15.0))
+                .color(palette.ink),
+        );
+    }
+    if !summary.is_empty() {
+        ui.add(egui::Label::new(egui::RichText::new(summary).color(palette.ink)).wrap());
+    }
+    if row.cleanup_kind == "data" {
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new("Clean all leaves this alone. Clean it on its own.")
+                    .color(palette.warning),
+            )
+            .wrap(),
+        );
+    }
+    let (note, items) = model::cleanup_preview(preview);
+    if !note.is_empty() {
+        ui.add(egui::Label::new(egui::RichText::new(note).color(palette.muted)).wrap());
+    }
+    if !items.is_empty() {
+        egui::Frame::new()
+            .fill(palette.canvas)
+            .stroke(Stroke::new(1.0, palette.line))
+            .corner_radius(CornerRadius::same(8))
+            .inner_margin(egui::Margin::same(10))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(items.join("\n"))
+                            .font(theme::mono(12.5))
+                            .color(palette.ink),
+                    )
+                    .selectable(true)
+                    .wrap(),
+                );
+            });
+    }
 }
 
 fn paint_card(ui: &Ui, rect: Rect, palette: &Palette) {
@@ -371,7 +423,15 @@ fn app_page(
                 let line = model::source_line(row, variants.len() > 1);
                 ui.add(egui::Label::new(egui::RichText::new(line).color(palette.muted)).truncate());
                 let version = row.installed.clone().filter(|v| !v.is_empty()).or(row.candidate.clone()).unwrap_or_default();
-                if !version.is_empty() {
+                let new = row.candidate.clone().filter(|new| row.has_update() && !new.is_empty() && *new != version);
+                if let Some(new) = new {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(new).font(theme::mono(12.5)).color(palette.accent));
+                        if !version.is_empty() {
+                            ui.label(egui::RichText::new(format!("from {version}")).font(theme::font(12.0)).color(palette.muted));
+                        }
+                    });
+                } else if !version.is_empty() {
                     ui.label(egui::RichText::new(version).font(theme::mono(12.5)).color(palette.muted));
                 }
             });
