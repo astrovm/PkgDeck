@@ -1843,11 +1843,8 @@ mod tests {
             ),
         );
         let plans = backend.cleanup(&cancel).unwrap();
-        assert!(
-            plans[0].preview.ends_with("\nweb\n222222222222"),
-            "{}",
-            plans[0].preview
-        );
+        let preview = &plans[0].preview;
+        assert!(preview.ends_with("\nweb\n222222222222"), "{preview}");
         // Cancelling during an extra task stops them all.
         let mut backend = Container::docker(busy_store());
         backend

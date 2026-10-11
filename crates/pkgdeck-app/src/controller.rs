@@ -11114,12 +11114,10 @@ mod tests {
         controller
             .as_mut()
             .begin_catalog_check(|_| unreachable!("the check is single-flight"));
-        for _ in 0..100 {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !controller.rust().catalog_checked && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(1));
             controller.as_mut().poll();
-            if controller.rust().catalog_checked {
-                break;
-            }
         }
         assert!(controller.rust().catalog_checked);
         let catalog: Value =
@@ -11150,12 +11148,10 @@ mod tests {
         // Would empty the catalog, if it ran.
         controller.as_mut().begin_catalog_check(|_| Vec::new());
         release.send(()).unwrap();
-        for _ in 0..100 {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !controller.rust().catalog_checked && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(1));
             controller.as_mut().poll();
-            if controller.rust().catalog_checked {
-                break;
-            }
         }
         let catalog: Value =
             serde_json::from_str(&controller.source_catalog().to_string()).unwrap();
