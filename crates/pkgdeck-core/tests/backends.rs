@@ -503,6 +503,22 @@ fn apt_cleanup_uses_dry_run_plans_and_fixed_operations() {
         apt.execute(&Operation::Clean(item.id), &cancel, &mut |_| {})
             .unwrap();
     }
+    // Only APT's own tasks run; anything else never reaches apt-get.
+    for (backend, key) in [
+        ("apt", "arbitrary"),
+        ("homebrew", "clean"),
+        ("homebrew", "autoremove"),
+    ] {
+        let id = CleanupId {
+            backend: backend.into(),
+            key: key.into(),
+        };
+        assert!(
+            apt.execute(&Operation::Clean(id), &cancel, &mut |_| {})
+                .is_err(),
+            "{backend}:{key}"
+        );
+    }
 }
 
 #[test]
