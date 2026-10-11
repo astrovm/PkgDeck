@@ -339,7 +339,7 @@ fn settings_switches_change_settings() {
     let mut harness = show(Page::Settings);
     let before = harness.state().1.settings.auto_update;
     harness
-        .get_by_role_and_label(Role::CheckBox, "Install updates automatically")
+        .get_by_role_and_label(Role::CheckBox, "Update apps and packages automatically")
         .click();
     harness.run_steps(3);
     assert_ne!(harness.state().1.settings.auto_update, before);
@@ -505,7 +505,7 @@ fn settings_say_what_automatic_updates_wait_for() {
         assert!(harness.query_by_label(text).is_some(), "{text}");
         // With automatic updates off, nothing waits.
         harness
-            .get_by_role_and_label(Role::CheckBox, "Install updates automatically")
+            .get_by_role_and_label(Role::CheckBox, "Update apps and packages automatically")
             .click();
         harness.run_steps(3);
         assert!(harness.query_by_label(text).is_none(), "{text}");

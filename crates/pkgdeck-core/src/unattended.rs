@@ -155,7 +155,7 @@ pub fn polkit_rule(user: &str, runner: &RunnerMatch) -> Result<String, Execution
         return Err(invalid("unexpected user name"));
     }
     Ok(format!(
-        r#"// Written by PkgDeck: "Allow automatic updates without a password" is on for {user}.
+        r#"// Written by PkgDeck: "Update system packages without a password" is on for {user}.
 // It lets PkgDeck's helper refresh sources and update every system package
 // for {user}, in an active local session, and nothing else. Turn the setting
 // off in PkgDeck to remove this file.

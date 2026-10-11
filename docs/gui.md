@@ -214,9 +214,10 @@ that failed are shown separately.
   default, without hidden folders and, on macOS, without Library. **Add
   folder** adds another one.
 
-### Clean automatically
+### Clean caches automatically
 
-Turn on **Clean automatically** in Settings. It needs **Background checks**.
+Turn on **Clean caches automatically** in Settings. It needs **Background
+checks**.
 
 - At most once a day, after a background check.
 - Only what comes back on its own: download caches, unused images, build
@@ -412,9 +413,9 @@ See [supported install layouts and what removal keeps](cli.md#standalone-cli-too
 is running. Turn them off in Settings.
 
 The first time the window opens, **Set up PkgDeck** offers the rest, all off
-until you turn them on: **Start in background at login**, **Install updates
-automatically**, **Allow automatic updates without a password** and **Clean
-automatically**. Each switch works right away, like in Settings. It shows
+until you turn them on: **Start in background at login**, **Update apps and
+packages automatically**, **Update system packages without a password** and
+**Clean caches automatically**. Each switch works right away, like in Settings. It shows
 once; change them later in Settings.
 
 - The first check runs about 30 seconds after launch, then at most once per
@@ -445,8 +446,8 @@ notification.
 
 ### Automatic updates
 
-Turn on **Install updates automatically**. When a background check finds
-updates, PkgDeck installs them and sends one notification.
+Turn on **Update apps and packages automatically**. When a background check
+finds updates, PkgDeck installs them and sends one notification.
 
 It's off by default.
 
@@ -475,7 +476,8 @@ AppImage or system package), the running copy is still the old one:
 
 #### System packages
 
-System packages need **Allow automatic updates without a password**.
+To update system packages too, turn on **Update system packages without a
+password**.
 
 - It asks for your password once, to turn it on.
 - It only covers automatic updates. Anything you start yourself, **Update
@@ -538,13 +540,14 @@ out of date, and each page refreshes when you open it.
 - **Animations**: turn motion on or off. When the system turns motion off
   (**Reduce motion** on macOS, animations off in GNOME or KDE), it stays off
   and reads **Off in system settings**.
-- **Background checks**, **Check every**, **Install updates automatically**,
-  **Allow updates that remove packages**, **Allow automatic updates without
-  a password** and **Start in background at login**: see
+- **Background checks**, **Check every**, **Update apps and packages
+  automatically**, **Allow updates that remove packages**, **Update system
+  packages without a password** and **Start in background at login**: see
   [Update notifications](#update-notifications).
 - **Sources**: which package managers PkgDeck uses, and **Repositories**.
   See [Sources](#sources).
-- **Clean automatically**: see [Clean automatically](#clean-automatically).
+- **Clean caches automatically**: see
+  [Clean caches automatically](#clean-caches-automatically).
 - **Old projects** and **Look for projects in**: see
   [Clean settings](#clean-settings).
 - **Last check** shows when PkgDeck last checked and what it found.

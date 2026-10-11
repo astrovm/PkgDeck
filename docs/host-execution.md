@@ -103,7 +103,7 @@ runs `/usr/bin/apt-get` through either:
   password-free rule, and never prompts.
 
 PkgDeck never stores passwords. It saves a polkit rule or a sudoers entry
-only when you turn on **Allow automatic updates without a password** for
+only when you turn on **Update system packages without a password** for
 [automatic updates](gui.md#automatic-updates), and removes it when you turn
 that off. Only automatic updates use it; changes you start still ask. On
 macOS the sudoers entry allows exact commands only, with no wildcard and

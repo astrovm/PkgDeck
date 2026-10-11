@@ -315,25 +315,38 @@ fn segmented(ui: &mut Ui, id: Id, labels: &[&str], current: usize) -> Option<usi
 /// background checks.
 pub(super) fn auto_update_row(app: &mut App, ui: &mut Ui) {
     let background = app.settings.background_mode;
-    setting_row(ui, "Install updates automatically", "", SWITCH, |ui| {
-        let mut on = app.settings.auto_update;
-        if switch(ui, &mut on, background, "Install updates automatically").changed() {
-            app.settings.auto_update = on;
-            app.c().set_auto_update(on);
-        }
-    });
+    setting_row(
+        ui,
+        "Update apps and packages automatically",
+        "After each background check",
+        SWITCH,
+        |ui| {
+            let mut on = app.settings.auto_update;
+            if switch(
+                ui,
+                &mut on,
+                background,
+                "Update apps and packages automatically",
+            )
+            .changed()
+            {
+                app.settings.auto_update = on;
+                app.c().set_auto_update(on);
+            }
+        },
+    );
 }
 
 pub(super) fn auto_clean_row(app: &mut App, ui: &mut Ui) {
     let background = app.settings.background_mode;
     setting_row(
         ui,
-        "Clean automatically",
-        "Once a day: caches, unused images and build files of old projects",
+        "Clean caches automatically",
+        "Once a day. Also unused images and build files of old projects",
         SWITCH,
         |ui| {
             let mut on = app.settings.auto_clean;
-            if switch(ui, &mut on, background, "Clean automatically").changed() {
+            if switch(ui, &mut on, background, "Clean caches automatically").changed() {
                 app.settings.auto_clean = on;
                 let at = app.settings.auto_cleaned_at;
                 app.c().set_auto_clean(on, at);
@@ -348,8 +361,12 @@ pub(super) fn password_row(app: &mut App, ui: &mut Ui, enabled: bool) {
     let palette = Palette::current(ui.ctx());
     setting_row(
         ui,
-        "Allow automatic updates without a password",
-        "Changes you start still ask",
+        "Update system packages without a password",
+        if cfg!(target_os = "macos") {
+            "Only automatic updates of MacPorts and macOS"
+        } else {
+            "Only automatic updates of APT, Flatpak and other system sources"
+        },
         SWITCH,
         |ui| {
             let mut on = !app.settings.system_approval.is_empty();
@@ -357,7 +374,7 @@ pub(super) fn password_row(app: &mut App, ui: &mut Ui, enabled: bool) {
                 ui,
                 &mut on,
                 enabled,
-                "Allow automatic updates without a password",
+                "Update system packages without a password",
             )
             .changed()
             {
