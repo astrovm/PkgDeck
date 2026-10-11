@@ -707,6 +707,43 @@ pub fn open_picker(app: &mut App) {
         .collect();
 }
 
+/// Puts the picker's choices to use as soon as one changes.
+fn apply_picker(app: &mut App, page: Page) {
+    if page == Page::Installed && app.duplicates_only != app.ui.picker_duplicates {
+        app.duplicates_only = app.ui.picker_duplicates;
+        app.invalidate();
+    }
+    // Duplicates are found among the loaded rows: only a change of
+    // sources needs a reload.
+    let current: HashSet<String> = app
+        .effective_sources(page)
+        .into_iter()
+        .filter(|id| app.usable(id, page))
+        .collect();
+    if app.ui.picker_draft != current {
+        app.set_page_sources(page, app.ui.picker_draft.clone());
+    }
+}
+
+/// Shows every source again, and every package on Installed.
+pub fn clear_filter(app: &mut App) {
+    let page = app.page;
+    app.ui.picker_duplicates = false;
+    app.ui.picker_draft = app
+        .enabled_sources()
+        .into_iter()
+        .filter(|id| app.usable(id, page))
+        .collect();
+    if page == Page::Installed && app.duplicates_only {
+        app.duplicates_only = false;
+        app.invalidate();
+    }
+    // A choice can name every source, or sources since turned off.
+    if app.page_sources.contains_key(&page) {
+        app.set_page_sources(page, app.ui.picker_draft.clone());
+    }
+}
+
 /// Where a picker line's name starts: after the tick and the mark.
 const PICKER_TEXT_INSET: f32 = 62.0;
 
@@ -782,8 +819,7 @@ pub fn source_picker(app: &mut App, ui: &mut Ui, button: &Response) {
         button.rect.right() - width,
         button.rect.bottom() + 6.0 - (1.0 - shown) * 6.0,
     );
-    let mut apply = false;
-    let mut reset = false;
+    let mut changed = false;
     let area = egui::Area::new(Id::new("source-picker"))
         .order(egui::Order::Foreground)
         .fixed_pos(pos)
@@ -836,6 +872,7 @@ pub fn source_picker(app: &mut App, ui: &mut Ui, button: &Response) {
                             },
                         ) {
                             app.ui.picker_duplicates = !on;
+                            changed = true;
                         }
                         ui.add_space(2.0);
                         ui.separator();
@@ -906,6 +943,7 @@ pub fn source_picker(app: &mut App, ui: &mut Ui, button: &Response) {
                                         } else {
                                             app.ui.picker_draft.insert(id.clone());
                                         }
+                                        changed = true;
                                     }
                                     if !usable {
                                         let reason = if !app.available(&id) {
@@ -943,52 +981,10 @@ pub fn source_picker(app: &mut App, ui: &mut Ui, button: &Response) {
                                 }
                             }
                         });
-                    ui.add_space(8.0);
-                    right(ui, |ui| {
-                        if Button::new(Look::Primary, "Apply")
-                            .small()
-                            .enabled(!app.ui.picker_draft.is_empty())
-                            .show(ui)
-                            .clicked()
-                        {
-                            apply = true;
-                        }
-                        if Button::new(Look::Secondary, "Reset")
-                            .small()
-                            .show(ui)
-                            .clicked()
-                        {
-                            reset = true;
-                        }
-                    });
                 });
         });
-    if reset {
-        app.ui.picker_duplicates = false;
-        let page = app.page;
-        app.ui.picker_draft = app
-            .enabled_sources()
-            .into_iter()
-            .filter(|id| app.usable(id, page))
-            .collect();
-    }
-    if apply {
-        app.ui.picker_open = false;
-        if page == Page::Installed && app.duplicates_only != app.ui.picker_duplicates {
-            app.duplicates_only = app.ui.picker_duplicates;
-            app.invalidate();
-        }
-        // Duplicates are found among the loaded rows: only a change of
-        // sources needs a reload.
-        let draft: HashSet<String> = app.ui.picker_draft.clone();
-        let current: HashSet<String> = app
-            .effective_sources(page)
-            .into_iter()
-            .filter(|id| app.usable(id, page))
-            .collect();
-        if draft != current {
-            app.set_page_sources(page, draft);
-        }
+    if changed {
+        apply_picker(app, page);
     }
     let clicked_outside = ctx.input(|i| i.pointer.any_click())
         && !area
@@ -1116,15 +1112,19 @@ mod tests {
         let mut harness = picker_harness(Page::Installed, true);
         harness.get_by_label("Only duplicates").click();
         harness.run_steps(2);
-        harness.get_by_label("Apply").click();
-        harness.run_steps(2);
         let app = &harness.state().1;
+        // On at once, and the picker stays open for more changes.
         assert!(app.duplicates_only);
-        assert!(!app.ui.picker_open);
+        assert!(app.ui.picker_open);
+        assert!(harness.query_by_label("Apply").is_none());
+        assert!(harness.query_by_label("Reset").is_none());
         // Only the duplicates changed: the sources stay unfiltered, and the
         // loaded rows are filtered without a reload.
         assert!(app.page_sources.is_empty());
         assert!(app.retained.is_none());
+        harness.get_by_label("Only duplicates").click();
+        harness.run_steps(2);
+        assert!(!harness.state().1.duplicates_only);
 
         // Other pages don't offer it, duplicates or not.
         let harness = picker_harness(Page::Updates, true);
@@ -1133,34 +1133,57 @@ mod tests {
     }
 
     #[test]
-    fn picker_applies_a_change_of_sources_and_reset_elsewhere_keeps_duplicates() {
+    fn picker_applies_each_change_of_sources_at_once() {
         use egui_kittest::kittest::Queryable;
         let mut harness = picker_harness(Page::Installed, true);
-        for source in ["flatpak", "dnf"] {
-            harness.get_by_label(model::source_name(source)).click();
-            harness.run_steps(2);
-        }
-        harness.get_by_label("Apply").click();
+        harness.get_by_label(model::source_name("flatpak")).click();
         harness.run_steps(2);
         let app = &harness.state().1;
         assert_eq!(
             app.page_sources.get(&Page::Installed),
-            Some(&HashSet::from(["apt".to_owned()]))
+            Some(&HashSet::from(["apt".to_owned(), "dnf".to_owned()]))
         );
-        assert!(!app.duplicates_only);
+        assert!(app.ui.picker_open);
+        // Flatpak's rows leave now, not when the reload ends.
+        assert!(app.shown_rows().iter().all(|row| row.source != "flatpak"));
+        assert!(!app.shown_rows().is_empty());
 
-        // Reset on another page leaves Installed's duplicates alone.
-        let mut harness = picker_harness(Page::Updates, true);
-        harness.state_mut().1.duplicates_only = true;
-        harness.get_by_label("Reset").click();
+        harness.get_by_label(model::source_name("flatpak")).click();
         harness.run_steps(2);
-        harness.get_by_label("Apply").click();
-        harness.run_steps(2);
-        assert!(harness.state().1.duplicates_only);
+        // Every source again: no filter left.
+        assert!(harness.state().1.page_sources.is_empty());
+        assert!(!harness.state().1.duplicates_only);
     }
 
     #[test]
-    fn picker_keeps_duplicates_on_while_turned_on_and_reset_clears_it() {
+    fn clearing_the_filter_shows_every_source_and_package() {
+        let mut harness = picker_harness(Page::Installed, true);
+        let app = &mut harness.state_mut().1;
+        app.duplicates_only = true;
+        app.set_page_sources(Page::Installed, HashSet::from(["apt".to_owned()]));
+        open_picker(app);
+        assert!(app.ui.picker_duplicates);
+        clear_filter(app);
+        assert!(app.page_sources.is_empty());
+        assert!(!app.duplicates_only);
+        assert!(!app.ui.picker_duplicates);
+        assert_eq!(
+            app.ui.picker_draft,
+            HashSet::from(["apt", "flatpak", "dnf"].map(str::to_owned))
+        );
+
+        // Elsewhere it leaves Installed's duplicates alone.
+        let mut harness = picker_harness(Page::Updates, true);
+        let app = &mut harness.state_mut().1;
+        app.duplicates_only = true;
+        app.set_page_sources(Page::Updates, HashSet::from(["apt".to_owned()]));
+        clear_filter(app);
+        assert!(app.page_sources.is_empty());
+        assert!(app.duplicates_only);
+    }
+
+    #[test]
+    fn picker_keeps_duplicates_on_while_turned_on() {
         use egui_kittest::kittest::Queryable;
         let mut harness = picker_harness(Page::Installed, false);
         harness.state_mut().1.duplicates_only = true;
@@ -1168,11 +1191,7 @@ mod tests {
         harness.state_mut().1.ui.picker_open = true;
         harness.run_steps(2);
         // No duplicates left, but it's on: still there to turn off.
-        harness.get_by_label("Only duplicates");
-        harness.get_by_label("Reset").click();
-        harness.run_steps(2);
-        assert!(!harness.state().1.ui.picker_duplicates);
-        harness.get_by_label("Apply").click();
+        harness.get_by_label("Only duplicates").click();
         harness.run_steps(2);
         assert!(!harness.state().1.duplicates_only);
     }

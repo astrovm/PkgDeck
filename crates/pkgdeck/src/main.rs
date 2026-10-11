@@ -84,6 +84,12 @@ fn parse(args: &[String]) -> app::Launch {
     launch
 }
 
+/// At login or after a restart there's nothing to show: a copy already
+/// running stays as it is.
+fn quiet(launch: &app::Launch) -> bool {
+    launch.background && launch.input.is_empty()
+}
+
 /// The window's first size: 4:3, as tall as before so it still fits a
 /// 1366×768 screen.
 const DEFAULT_SIZE: [f32; 2] = [1040.0, 780.0];
@@ -122,7 +128,7 @@ fn main() {
     let listener = if launch.smoke_test {
         None
     } else {
-        match opening::claim(&socket, &launch.input, pkgdeck::wake) {
+        match opening::claim(&socket, &launch.input, quiet(&launch), pkgdeck::wake) {
             Ok(None) => return,
             Ok(Some(listener)) => Some(listener),
             Err(_) => None,
@@ -147,7 +153,11 @@ fn main() {
     let controller = pkgdeck_app::controller::ffi::create_controller();
     let mut app = App::with_controller(controller, settings, store, platform, launch);
     app.listener = listener;
-    app.sync_tray();
+    // An open window adds the menu bar or tray icon once it shows: making
+    // it first only delays the window.
+    if start_hidden {
+        app.sync_tray();
+    }
     let mut show = !start_hidden;
     loop {
         if show {
@@ -203,6 +213,19 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_background_launch_with_nothing_to_open_is_quiet() {
+        let launch = |args: &[&str]| {
+            let mut args: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
+            args.insert(0, "pkgdeck".into());
+            quiet(&parse(&args))
+        };
+        assert!(launch(&["--background"]));
+        assert!(!launch(&[]));
+        assert!(!launch(&["/tmp/a.flatpakref"]));
+        assert!(!launch(&["--background", "/tmp/a.flatpakref"]));
+    }
 
     #[test]
     fn the_window_opens_at_4_by_3() {

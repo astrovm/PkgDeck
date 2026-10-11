@@ -472,6 +472,40 @@ fn content_ui(app: &mut App, ui: &mut Ui, rect: Rect) {
     });
 }
 
+/// The width of the clear button at the filter's right end.
+const CLEAR_WIDTH: f32 = 34.0;
+
+/// The × at the right end of the filter button `chip`. True when clicked.
+fn clear_filter_button(ui: &mut Ui, chip: Rect) -> bool {
+    let palette = Palette::current(ui.ctx());
+    let rect = Rect::from_min_max(pos2(chip.right() - CLEAR_WIDTH, chip.top()), chip.max);
+    let response = ui
+        .interact(rect, ui.id().with("clear-filter"), Sense::click())
+        .on_hover_cursor(CursorIcon::PointingHand);
+    response
+        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Clear filter"));
+    let hover = ease(
+        ui.ctx(),
+        response.id.with("hover"),
+        response.hovered(),
+        FEEDBACK,
+    );
+    let painter = ui.painter();
+    painter.rect_filled(
+        rect.shrink(5.0),
+        CornerRadius::same(theme::SMALL_RADIUS),
+        alpha(palette.accent, hover * 0.16),
+    );
+    painter.vline(
+        rect.left(),
+        (rect.top() + 9.0)..=(rect.bottom() - 9.0),
+        Stroke::new(1.0, alpha(palette.accent, 0.35 * (1.0 - hover))),
+    );
+    let icon = Rect::from_center_size(rect.center(), Vec2::splat(16.0));
+    theme::paint_icon(painter, icon, "cancel", palette.accent);
+    response.on_hover_text("Clear filter").clicked()
+}
+
 fn header(app: &mut App, ui: &mut Ui) {
     let palette = Palette::current(ui.ctx());
     let width = ui.available_width();
@@ -493,6 +527,8 @@ fn header(app: &mut App, ui: &mut Ui) {
                     (false, true) => "Duplicates".into(),
                     _ => app.source_summary(app.page),
                 };
+                // The clear button sits inside the filter's right end, so
+                // turning a filter on doesn't move the button or its menu.
                 let response = Button::new(
                     if filtered {
                         Look::Soft(Tone::Accent)
@@ -503,8 +539,12 @@ fn header(app: &mut App, ui: &mut Ui) {
                 )
                 .icon("filter")
                 .icon_only(compact)
+                .trailing(if filtered { CLEAR_WIDTH } else { 0.0 })
                 .show(ui);
-                if response.clicked() {
+                let cleared = filtered && clear_filter_button(ui, response.rect);
+                if cleared {
+                    dialogs::clear_filter(app);
+                } else if response.clicked() {
                     app.ui.picker_open = !app.ui.picker_open;
                     if app.ui.picker_open {
                         dialogs::open_picker(app);
@@ -1367,6 +1407,60 @@ mod header_tests {
             label(Page::Updates, true).as_deref(),
             Some(model::source_name("apt"))
         );
+    }
+
+    #[test]
+    fn a_button_keeps_room_for_the_clear_button_beside_its_label() {
+        fn plain(_: &mut App, ui: &mut Ui) {
+            Button::new(Look::Secondary, "Same").show(ui);
+        }
+        fn roomy(_: &mut App, ui: &mut Ui) {
+            Button::new(Look::Secondary, "Same")
+                .trailing(CLEAR_WIDTH)
+                .show(ui);
+        }
+        let width = |paint| {
+            draw(app(Page::Installed, 1), paint)
+                .get_by_label("Same")
+                .rect()
+                .width()
+        };
+        assert!((width(roomy) - width(plain) - CLEAR_WIDTH).abs() < 0.5);
+    }
+
+    #[test]
+    fn a_filtered_page_clears_from_the_filter_s_right_end() {
+        let harness = draw(app(Page::Installed, 1), header);
+        assert!(harness.query_by_label("Clear filter").is_none());
+        let unfiltered = harness.get_by_label("Filter sources").rect();
+
+        let mut filtered = app(Page::Installed, 1);
+        filtered.duplicates_only = true;
+        filtered
+            .page_sources
+            .insert(Page::Installed, HashSet::from(["apt".to_owned()]));
+        let mut harness = draw(filtered, header);
+        let filter = harness
+            .get_by_label(&format!("{}, duplicates", model::source_name("apt")))
+            .rect();
+        let clear = harness.get_by_label("Clear filter").rect();
+        // Inside the filter's right end, which stays where it was: its
+        // menu opens in the same place, filtered or not.
+        assert!(
+            (clear.right() - filter.right()).abs() < 1.0,
+            "{filter:?} {clear:?}"
+        );
+        assert!(clear.left() > filter.left() && clear.height() == filter.height());
+        assert!((filter.right() - unfiltered.right()).abs() < 1.0);
+        harness.get_by_label("Clear filter").click();
+        harness.run_steps(2);
+        let app = &harness.state().1;
+        assert!(app.page_sources.is_empty());
+        assert!(!app.duplicates_only);
+        // Clearing doesn't open the menu.
+        assert!(!app.ui.picker_open);
+        assert!(harness.query_by_label("Clear filter").is_none());
+        harness.get_by_label("Filter sources");
     }
 
     #[test]

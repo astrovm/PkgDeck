@@ -155,6 +155,8 @@ pub struct App {
     post_write_reload: bool,
     close_pending: bool,
     pub force_quit: bool,
+    /// Set while a [`crate::ui::Window`] is up. A copy started in the
+    /// background never had one, so a restart keeps it hidden.
     pub window_visible: bool,
     pub window_request: WindowRequest,
     /// Second launches hand their input here.
@@ -296,7 +298,7 @@ impl App {
             post_write_reload: false,
             close_pending: false,
             force_quit: false,
-            window_visible: true,
+            window_visible: false,
             window_request: WindowRequest::None,
             listener: None,
             ui: crate::ui::State::default(),
@@ -963,6 +965,14 @@ impl App {
             self.page_sources.insert(page, sources);
         }
         self.reload(false, false);
+        // Rows from sources just turned off leave at once instead of when
+        // the reload ends.
+        if page == self.page {
+            let shown = self.effective_sources(page);
+            if let Some(rows) = self.retained.as_mut().filter(|_| !shown.is_empty()) {
+                rows.retain(|row| shown.contains(&row.source));
+            }
+        }
     }
 
     /// "Flatpak", "12 enabled sources", "3 sources".

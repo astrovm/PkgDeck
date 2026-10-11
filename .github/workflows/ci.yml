@@ -14,6 +14,14 @@ on:
 permissions:
   contents: read
 
+# Line tables keep backtraces readable; full debug info made builds, links
+# and caches several times bigger. CI builds once, so incremental data is
+# only extra work.
+env:
+  CARGO_INCREMENTAL: '0'
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+
 # A newer push, to a pull request or main, replaces the run for the older
 # commit. Release tags always finish.
 concurrency:
@@ -118,9 +126,11 @@ jobs:
           fi
 
   test-linux:
-    # One job per architecture runs the whole Linux suite once: the shared
-    # checks, lint, every workspace test (measured for coverage on x86_64),
-    # and the real sudo/polkit authorization tests.
+    # One job per architecture runs the whole Linux suite once between them:
+    # x86_64 measures every workspace test for coverage, the slowest build,
+    # so aarch64 takes lint and the real sudo/polkit authorization tests.
+    # Separate jobs would queue: CI already fills the free plan's 20
+    # concurrent runners.
     name: Test / Linux (${{ matrix.arch }})
     needs: [changes, reviewed, release-proof]
     if: "!cancelled() && (github.event_name != 'push' || github.ref == 'refs/heads/main' || (startsWith(github.ref, 'refs/tags/v') && needs.release-proof.outputs.tested != 'true')) && !inputs.homebrew_only && needs.changes.outputs.builds != 'false'"
@@ -129,8 +139,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { runner: ubuntu-26.04, arch: x86_64, suite: 'checks,lint,coverage', coverage: 'true' }
-          - { runner: ubuntu-26.04-arm, arch: aarch64, suite: 'checks,tests', coverage: 'false' }
+          - { runner: ubuntu-26.04, arch: x86_64, suite: 'checks,coverage', coverage: 'true', authorization: false }
+          - { runner: ubuntu-26.04-arm, arch: aarch64, suite: 'checks,lint,tests', coverage: 'false', authorization: true }
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Check out source
@@ -147,17 +157,24 @@ jobs:
       - name: Set up desktop dependencies
         uses: ./.github/actions/setup-desktop
         with:
-          coverage: ${{ needs.reviewed.outputs.tested != 'true' && matrix.coverage || 'false' }}
+          coverage: ${{ matrix.coverage }}
       - name: Run checks, lint and workspace tests
         if: needs.reviewed.outputs.tested != 'true'
         # The 100% gate applies to all platforms together (Coverage / Combined).
         run: scripts/verify.sh full --only ${{ matrix.suite }}
-      # A verified passing PR needs only build outputs on main to refresh caches.
+      # A verified passing PR needs only build outputs on main to refresh
+      # caches: the same builds a pull request runs, so it compiles only what
+      # changed. Test binaries only list their tests.
       - name: Build workspace to refresh main caches
         if: needs.reviewed.outputs.tested == 'true'
         run: |
           source scripts/dev-env.sh
-          cargo build --workspace --locked
+          if [[ ${{ matrix.coverage }} == true ]]; then
+            cargo llvm-cov --workspace --include-build-script --locked --no-report -- --list
+          else
+            cargo clippy --workspace --all-targets --locked -- -D warnings
+            cargo test --workspace --locked --no-run
+          fi
       - name: Upload coverage report
         if: ${{ matrix.coverage == 'true' && needs.reviewed.outputs.tested != 'true' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -166,12 +183,13 @@ jobs:
           path: coverage/lcov.info
           if-no-files-found: error
       - name: Build authorization probes
+        if: matrix.authorization
         run: |
           cargo build --locked -p pkgdeck-core --example apt-probe
           cargo build --locked -p pkgdeck-core --bin pkgdeck-host-runner
           cargo build --locked -p pkd -p pkgdeck-tools
       - name: Run host authorization tests
-        if: needs.reviewed.outputs.tested != 'true'
+        if: matrix.authorization && needs.reviewed.outputs.tested != 'true'
         run: |
           sudo env \
             GITHUB_ACTIONS="$GITHUB_ACTIONS" \
@@ -343,8 +361,10 @@ jobs:
     # One job per platform and group: separate per-backend jobs spent most of
     # their time queued for runners and setting up. scripts/tests/backends.sh
     # still reports each backend. The macOS managers run in Test / macOS.
+    # On main the native jobs only build, to save the CLI builds both groups
+    # restore: a small cache of their own instead of Test / Linux's.
     name: Test / Backends / ${{ matrix.group }} (${{ matrix.platform }})
-    if: "!cancelled() && (github.event_name != 'push' || (startsWith(github.ref, 'refs/tags/v') && needs.release-proof.outputs.tested != 'true')) && !inputs.homebrew_only && needs.changes.outputs.builds != 'false'"
+    if: "!cancelled() && (github.event_name != 'push' || github.ref == 'refs/heads/main' || (startsWith(github.ref, 'refs/tags/v') && needs.release-proof.outputs.tested != 'true')) && !inputs.homebrew_only && needs.changes.outputs.builds != 'false'"
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -358,25 +378,30 @@ jobs:
     env:
       HOMEBREW_NO_AUTO_UPDATE: '1'
       HOMEBREW_NO_INSTALL_CLEANUP: '1'
+      BUILD_ONLY: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     steps:
       - name: Check out source
+        if: env.BUILD_ONLY != 'true' || matrix.group == 'native'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Pull Docker Hub images through a mirror
+        if: env.BUILD_ONLY != 'true'
         uses: ./.github/actions/registry-mirror
       - name: Install Podman and Snap
-        if: matrix.group == 'native'
+        if: matrix.group == 'native' && env.BUILD_ONLY != 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y podman snapd
           sudo systemctl enable --now snapd.socket
           sudo snap wait system seed.loaded
-      - name: Restore terminal build outputs
+      - name: Cache terminal build outputs
+        if: env.BUILD_ONLY != 'true' || matrix.group == 'native'
         uses: ./.github/actions/rust-cache
         with:
           arch: ${{ matrix.arch }}
-          scope: linux
-          save: 'false'
+          scope: terminal
+          save: ${{ matrix.group == 'native' }}
       - name: Build CLI
+        if: env.BUILD_ONLY != 'true' || matrix.group == 'native'
         run: cargo build --locked -p pkd
       # Alpine uses musl and Void an older glibc, so their tests get a static CLI.
       - name: Build static CLI for musl distributions
@@ -386,6 +411,7 @@ jobs:
           rustup target add ${{ matrix.arch }}-unknown-linux-musl
           cargo build --locked -p pkd --target ${{ matrix.arch }}-unknown-linux-musl
       - name: Run backend lifecycle tests
+        if: env.BUILD_ONLY != 'true'
         run: |
           scripts/tests/backends.sh ${{ matrix.group }} "$PWD/target/debug/pkd" \
             "$PWD/target/${{ matrix.arch }}-unknown-linux-musl/debug/pkd"
@@ -840,7 +866,7 @@ jobs:
     # 10 GB limit then evicts the caches pull requests need. Keep only the
     # newest copy of each cache once this run has saved its own.
     name: Prune superseded caches
-    needs: [test-linux, test-macos, test-podman, package-macos, package-linux-cli, package-bundles]
+    needs: [test-linux, test-macos, test-backends, test-podman, package-macos, package-linux-cli, package-bundles]
     if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 5
@@ -852,8 +878,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
+          # A cache's lockfile hash changes with its dependencies, so copies
+          # group by everything before it; Rust caches of an older layout go.
           gh cache list --ref refs/heads/main --limit 1000 --json id,key,createdAt \
-            --jq 'map(. + {prefix: (.key | sub("-[0-9a-f]{40}$"; ""))}) | group_by(.prefix)[] | sort_by(.createdAt) | .[:-1][] | "\(.id) \(.key)"' |
+            --jq '[(map(. + {prefix: (.key | sub("(-[0-9a-f]{64})?-[0-9a-f]{40}$"; ""))}) | group_by(.prefix)[] | sort_by(.createdAt) | .[:-1][]),
+              (.[] | select((.key | test("^rust-v[0-9]+-")) and (.key | startswith("rust-v4-") | not)))]
+              | unique_by(.id)[] | "\(.id) \(.key)"' |
             while read -r id key; do
               echo "Deleting $key"
               gh cache delete "$id"

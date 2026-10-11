@@ -93,6 +93,8 @@ These controls work on every package page:
   Homebrew waits for a `brew update` that is already running elsewhere.
 - **Filter sources** filters the current page. Each source shows its icon.
   It also lists sources you can't use, with the reason.
+- Each tick in **Filter sources** applies right away.
+- While a filter is on, the **×** at the end of its button clears it.
 - **Reload** gets fresh package data.
 
 Docker and Podman images are shown as separate sources. Each row shows
@@ -383,6 +385,8 @@ is running. Turn them off in Settings.
   tray or menu bar. **Open** brings a new window back.
 - On macOS, Cmd+W closes the window too, and clicking the Dock icon brings
   it back.
+- At login, and when PkgDeck restarts after updating itself with the window
+  closed, the window stays closed.
 - **Quit** in the tray menu, or Ctrl+Q (Cmd+Q on macOS), exits PkgDeck.
 
 You get one notification for each new batch of updates, including on the first

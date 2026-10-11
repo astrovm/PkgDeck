@@ -642,7 +642,7 @@ fn ticks_run_what_is_due() {
     assert!(app.tick(Instant::now()) <= Duration::from_millis(50));
     // Second launches hand their input over.
     let path = std::env::temp_dir().join(format!("pkgdeck-app-{}", std::process::id()));
-    app.listener = crate::opening::claim(&path, "", || {}).unwrap();
+    app.listener = crate::opening::claim(&path, "", false, || {}).unwrap();
     assert!(crate::opening::forward(&path, "/nonexistent/pkgdeck/x.deb"));
     let mut input = None;
     for _ in 0..500 {
@@ -725,9 +725,18 @@ fn opening_text_that_isnt_a_file_answers_at_once() {
 }
 
 #[test]
+fn a_copy_started_in_the_background_stays_hidden() {
+    // No window was ever up: a restart after an update keeps it hidden,
+    // and the tray's toggle shows it.
+    let mut app = app();
+    assert!(!app.window_visible);
+    app.handle(Event::Toggle);
+    assert_eq!(app.window_request, WindowRequest::Show);
+}
+
+#[test]
 fn restarting_without_an_install_stays_open() {
     let mut app = app();
-    app.window_visible = false;
     app.restart();
     assert!(!app.force_quit);
     app.restarted(true);

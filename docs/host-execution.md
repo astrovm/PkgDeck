@@ -173,7 +173,7 @@ cargo run --locked -p pkd -- doctor
 ```
 
 Real authorization tests run in CI on a fresh GitHub-hosted Ubuntu 26.04
-x86_64 runner. They check detection, that PkgDeck refuses to run as root,
+aarch64 runner. They check detection, that PkgDeck refuses to run as root,
 that unauthorized users are denied, lock handling, and installing and
 removing a test APT package through sudo and polkit. Results are verified
 with `dpkg-query`. The runner is discarded afterward. The `apt-probe` test tool

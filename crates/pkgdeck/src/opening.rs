@@ -1,6 +1,8 @@
 //! One PkgDeck per person. A second launch hands what it was asked to open
 //! (a file, a link, or nothing) to the running one over a local socket and
-//! exits; the running one shows its window and opens it.
+//! exits; the running one shows its window and opens it. A background
+//! launch (at login, or a restart after an update) with nothing to open
+//! only checks that one runs, so the running window stays as it is.
 
 use std::{
     io::{Read, Write},
@@ -53,6 +55,12 @@ pub fn forward(path: &Path, input: &str) -> bool {
     stream.write_all(&bytes).is_ok()
 }
 
+/// Whether a PkgDeck listens at `path`. It hears nothing: the listener
+/// drops a connection that ends without a full input.
+pub fn knock(path: &Path) -> bool {
+    UnixStream::connect(path).is_ok()
+}
+
 /// What the running PkgDeck hears: one input per second launch, "" when the
 /// launch only asked to show the window.
 pub struct Listener {
@@ -66,14 +74,21 @@ impl Drop for Listener {
 }
 
 /// Either hand `input` to a running PkgDeck (`Ok(None)`), or become the one
-/// that listens. `wake` runs after each input arrives. Without a socket
+/// that listens. A `quiet` launch hands nothing over, so the running one
+/// isn't shown. `wake` runs after each input arrives. Without a socket
 /// (`Err`) the window still opens, alone.
 pub fn claim(
     path: &Path,
     input: &str,
+    quiet: bool,
     wake: impl Fn() + Send + 'static,
 ) -> Result<Option<Listener>, std::io::Error> {
-    if forward(path, input) {
+    let running = if quiet {
+        knock(path)
+    } else {
+        forward(path, input)
+    };
+    if running {
         return Ok(None);
     }
     let listener = match UnixListener::bind(path) {
@@ -146,12 +161,12 @@ mod tests {
     fn a_second_launch_hands_its_input_over() {
         let path = temp("handover");
         let (wake_send, woken) = mpsc::channel();
-        let listener = claim(&path, "", move || {
+        let listener = claim(&path, "", false, move || {
             let _ = wake_send.send(());
         })
         .unwrap()
         .expect("first launch listens");
-        assert!(claim(&path, "/tmp/Ñandú app.AppImage", || {})
+        assert!(claim(&path, "/tmp/Ñandú app.AppImage", false, || {})
             .unwrap()
             .is_none());
         assert_eq!(
@@ -190,17 +205,40 @@ mod tests {
     }
 
     #[test]
+    fn a_background_launch_leaves_the_running_one_alone() {
+        let path = temp("background");
+        let listener = claim(&path, "", true, || {})
+            .unwrap()
+            .expect("the first background launch listens");
+        assert!(claim(&path, "", true, || {}).unwrap().is_none());
+        // Nothing arrived from it: the next input is the one sent after.
+        assert!(forward(&path, "after"));
+        assert_eq!(
+            listener
+                .inputs
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap(),
+            "after"
+        );
+        drop(listener);
+        // A crashed copy's socket answers no knock.
+        drop(UnixListener::bind(&path).unwrap());
+        assert!(!knock(&path));
+        assert!(claim(&path, "", true, || {}).unwrap().is_some());
+    }
+
+    #[test]
     fn a_stale_socket_is_replaced() {
         let path = temp("stale");
         drop(UnixListener::bind(&path).unwrap());
         assert!(path.exists());
-        let listener = claim(&path, "", || {}).unwrap();
+        let listener = claim(&path, "", false, || {}).unwrap();
         assert!(listener.is_some());
     }
 
     #[test]
     fn a_missing_directory_is_an_error() {
         let path = PathBuf::from("/nonexistent-pkgdeck-dir/socket");
-        assert!(claim(&path, "", || {}).is_err());
+        assert!(claim(&path, "", false, || {}).is_err());
     }
 }
