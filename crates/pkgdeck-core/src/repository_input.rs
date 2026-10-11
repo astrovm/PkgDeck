@@ -650,6 +650,7 @@ mod tests {
         assert!(validate("ymp", "<!DOCTYPE metapackage><metapackage/>").is_err());
         fs::remove_dir_all(base).unwrap();
     }
+    #[cfg(target_os = "linux")]
     #[test]
     fn one_click_file_requires_the_native_opensuse_installer() {
         let source = std::env::temp_dir().join(format!(
@@ -665,6 +666,7 @@ mod tests {
         assert!(source.exists());
         fs::remove_file(source).unwrap();
     }
+    #[cfg(target_os = "linux")]
     #[test]
     fn reviewed_files_reach_their_native_installer_and_report_its_failure() {
         let base = std::env::temp_dir().join(format!("pkgdeck-repo-apply-{}", std::process::id()));

@@ -11,12 +11,13 @@ use std::{
     cell::RefCell,
     ffi::OsString,
     fs,
-    io::{Read, Write},
-    os::unix::process::CommandExt,
+    io::{PipeReader, PipeWriter, Read, Write},
     path::{Path, PathBuf},
-    process::{Child, ChildStdin, ChildStdout, Command, Stdio},
+    process::Command,
     time::{Duration, Instant},
 };
+
+use crate::spawn::{Child, Io, Launch};
 
 // 2: the runner forwards each line of a command's output as it runs.
 const PROTOCOL: u8 = 2;
@@ -491,8 +492,8 @@ fn line(pipe: &mut impl Read) -> Result<Vec<u8>, ExecutionError> {
 pub struct ScopeGuard;
 struct Session {
     child: Child,
-    input: Option<ChildStdin>,
-    output: ChildStdout,
+    input: Option<PipeWriter>,
+    output: PipeReader,
     commands: Vec<Vec<ProtectedCommand>>,
     current: usize,
     next: Vec<usize>,
@@ -647,7 +648,7 @@ fn runner_command(
     authorization: Authorization,
     mode: BatchMode,
     runner: Option<(PathBuf, bool)>,
-) -> Result<Option<Command>, ExecutionError> {
+) -> Result<Option<Launch>, ExecutionError> {
     let Some((path, appimage)) = runner else {
         return Ok(None);
     };
@@ -662,21 +663,27 @@ fn runner_command(
         }
     }
     let mut command = host.command(Path::new(program), &args)?;
-    command.stderr(Stdio::null()).process_group(0);
+    command.stderr(Io::Null).process_group();
     Ok(Some(command))
 }
 /// How long the user has to answer the authorization prompt.
 const AUTHORIZATION_TIMEOUT: Duration = Duration::from_secs(120);
 fn begin_session(
-    command: Command,
+    command: impl Into<Launch>,
     operations: &[Operation],
     commands: Vec<Vec<ProtectedCommand>>,
     cancel: &Cancellation,
 ) -> Result<Option<ScopeGuard>, ExecutionError> {
-    begin_session_within(command, operations, commands, cancel, AUTHORIZATION_TIMEOUT)
+    begin_session_within(
+        command.into(),
+        operations,
+        commands,
+        cancel,
+        AUTHORIZATION_TIMEOUT,
+    )
 }
 fn begin_session_within(
-    mut command: Command,
+    mut command: Launch,
     operations: &[Operation],
     commands: Vec<Vec<ProtectedCommand>>,
     cancel: &Cancellation,
@@ -685,10 +692,7 @@ fn begin_session_within(
     if SESSION.with(|cell| cell.borrow().is_some()) {
         return Err(invalid("nested authorization batch"));
     }
-    command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+    command.stdin(Io::Piped).stdout(Io::Piped).stderr(Io::Null);
     let mut child = command
         .spawn()
         .map_err(|e| ExecutionError::Io(e.to_string()))?;
@@ -1209,7 +1213,8 @@ mod tests {
         .unwrap()
         .unwrap();
         let args: Vec<_> = command
-            .get_args()
+            .args()
+            .into_iter()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect();
         assert_eq!(
@@ -1229,7 +1234,8 @@ mod tests {
         .unwrap()
         .unwrap();
         assert!(command
-            .get_args()
+            .args()
+            .into_iter()
             .map(|arg| arg.to_string_lossy().into_owned())
             .eq([
                 "--disable-internal-agent",
@@ -1807,7 +1813,8 @@ done"#;
                 .spawn()
                 .unwrap();
             child.wait().unwrap();
-            let result = authorization_start_error(child, ExecutionError::Io("closed pipe".into()));
+            let result =
+                authorization_start_error(child.into(), ExecutionError::Io("closed pipe".into()));
             assert!(matches!(result, ExecutionError::AuthorizationCancelled) == cancelled);
         }
         let mut child = Command::new("/bin/sh")
@@ -1817,7 +1824,7 @@ done"#;
             .unwrap();
         child.wait().unwrap();
         assert!(matches!(
-            authorization_start_error(child, ExecutionError::Invalid("synthetic".into())),
+            authorization_start_error(child.into(), ExecutionError::Invalid("synthetic".into())),
             ExecutionError::Invalid(reason) if reason == "synthetic"
         ));
     }
@@ -2313,7 +2320,7 @@ done"#;
         let started = Instant::now();
         assert!(matches!(
             begin_session_within(
-                child,
+                child.into(),
                 &operations,
                 batch_commands(&operations).unwrap(),
                 &Cancellation::default(),
@@ -2377,9 +2384,10 @@ done"#;
                 .unwrap()
                 .is_none()
         );
-        let args = |command: &Command| {
+        let args = |command: &Launch| {
             command
-                .get_args()
+                .args()
+                .into_iter()
                 .map(|arg| arg.to_string_lossy().into_owned())
                 .collect::<Vec<_>>()
         };
@@ -2391,7 +2399,7 @@ done"#;
         )
         .unwrap()
         .unwrap();
-        assert_eq!(command.get_program(), "/usr/bin/pkexec");
+        assert_eq!(command.program(), "/usr/bin/pkexec");
         assert_eq!(
             args(&command),
             [
@@ -2408,7 +2416,7 @@ done"#;
         )
         .unwrap()
         .unwrap();
-        assert_eq!(command.get_program(), "/usr/bin/sudo");
+        assert_eq!(command.program(), "/usr/bin/sudo");
         assert_eq!(
             args(&command),
             ["-n", "--", "/opt/pkgdeck/libexec/pkgdeck-host-runner"]
@@ -2438,6 +2446,7 @@ done"#;
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_found_runner_starts_and_a_missing_one_refuses_unattended_batches() {
         let refresh = [Operation::Refresh {

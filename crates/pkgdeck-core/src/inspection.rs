@@ -928,6 +928,7 @@ mod tests {
             assert!(inspect_with(&host, invalid, &[], &owners, &Cancellation::default()).is_err());
         }
     }
+    #[cfg(target_os = "linux")]
     fn flatpak_host(path: &Path, bridge: &Path) -> Host {
         let mut host = Host::new(
             Runtime::Flatpak,
@@ -936,6 +937,7 @@ mod tests {
         host.set_bridge_for_tests(bridge);
         host
     }
+    #[cfg(target_os = "linux")]
     #[test]
     fn sandbox_paths_map_back_to_the_host() {
         let host = flatpak_host(Path::new("/usr/bin"), Path::new("/usr/bin/true"));
@@ -952,6 +954,7 @@ mod tests {
             Path::new("/usr/bin/x")
         );
     }
+    #[cfg(target_os = "linux")]
     #[test]
     fn unreadable_plain_and_sandbox_local_candidates_keep_their_state() {
         let temp = Temp::new();
@@ -1010,6 +1013,7 @@ mod tests {
             ]
         );
     }
+    #[cfg(target_os = "linux")]
     #[test]
     fn native_owner_databases_are_read_through_the_host() {
         let temp = Temp::new();
@@ -1059,6 +1063,7 @@ mod tests {
             ]
         );
     }
+    #[cfg(target_os = "linux")]
     #[test]
     fn dpkg_leftovers_need_a_bounded_status_and_existing_files() {
         let temp = Temp::new();

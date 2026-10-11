@@ -1,13 +1,14 @@
 //! Bounded process supervision. Writes finish under the native manager's lock.
 use std::io::{self, Read};
 use std::os::fd::AsFd;
-use std::os::unix::process::{CommandExt, ExitStatusExt};
-use std::process::{Command, Stdio};
+use std::os::unix::process::ExitStatusExt;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
 use std::time::{Duration, Instant};
+
+use crate::spawn::{Child, Io, Launch};
 
 /// Receives each line a package manager prints while it runs.
 pub type OutputObserver = Arc<dyn Fn(&str) + Send + Sync>;
@@ -209,7 +210,7 @@ fn drain(
 }
 
 pub(crate) fn run(
-    command: Command,
+    command: impl Into<Launch>,
     limits: Limits,
     cancel: &Cancellation,
     write: bool,
@@ -223,7 +224,7 @@ pub(crate) fn run(
 /// `on_line` as soon as it arrives, so a long command can be followed
 /// (which package Homebrew is upgrading now, for one).
 pub(crate) fn run_observed(
-    mut command: Command,
+    command: impl Into<Launch>,
     limits: Limits,
     cancel: &Cancellation,
     write: bool,
@@ -232,12 +233,16 @@ pub(crate) fn run_observed(
     if cancel.requested() {
         return Err(ExecutionError::Cancelled);
     }
-    let program = command.get_program().to_string_lossy().into_owned();
+    let mut command = command.into();
+    let program = command.program().to_string_lossy().into_owned();
     command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .process_group(0);
+        .stdin(Io::Null)
+        .stdout(Io::Piped)
+        .stderr(Io::Piped)
+        .process_group();
+    if !write {
+        command.retry_lost_start();
+    }
     // A program written just before it runs can briefly report "text file
     // busy" while another thread's fork still holds its write descriptor.
     // Nothing ran yet, so trying again is safe, even for writes.
@@ -311,8 +316,7 @@ pub(crate) fn run_observed(
     if supervise.is_err() && !reaped {
         // The caller gets its answer now; the group is killed and reaped
         // beside it, so a stop never keeps the app busy.
-        let pid = rustix::process::Pid::from_raw(child.id() as i32).expect("live child PID");
-        let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::TERM);
+        let _ = child.signal_group(rustix::process::Signal::TERM);
         std::thread::spawn(move || stop_group(&mut child, stdout, stderr, STOP_GRACE));
     }
     supervise
@@ -322,51 +326,34 @@ pub(crate) fn run_observed(
 const STOP_GRACE: Duration = Duration::from_millis(500);
 
 /// Finishes stopping a child's process group that was sent SIGTERM: SIGKILL
-/// after `grace`. In the Flatpak the child is `flatpak-spawn --host`, which
-/// passes SIGTERM on to the command it started on the host. SIGKILL can't be
-/// passed on, so the host command would keep running with nobody reading
-/// its output, and some (grok) crash when they finally print.
+/// after `grace`, so a program gets to clean up first. In the Flatpak the
+/// group is on the host, and both signals go there through the portal.
 ///
 /// Its output keeps being read and dropped until it exits: a command that
 /// prints while it stops would otherwise die from a broken pipe, which is
 /// how grok crashed.
-fn stop_group(
-    child: &mut std::process::Child,
-    mut stdout: impl Read,
-    mut stderr: impl Read,
-    grace: Duration,
-) {
-    use rustix::process::{kill_process_group, waitid, Pid, Signal, WaitId, WaitIdOptions};
+fn stop_group(child: &mut Child, mut stdout: impl Read, mut stderr: impl Read, grace: Duration) {
     // The child is not reaped until the end, so its process-group ID
     // cannot be reused while it is signalled.
-    let pid = Pid::from_raw(child.id() as i32).expect("live child PID");
-    let exited = || {
-        matches!(
-            waitid(
-                WaitId::Pid(pid),
-                WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
-            ),
-            Ok(Some(_))
-        )
-    };
     let mut drop_output = || {
         let _ = drain(&mut stdout, &mut Vec::new(), 0, &mut false);
         let _ = drain(&mut stderr, &mut Vec::new(), 0, &mut false);
     };
     let deadline = Instant::now() + grace;
-    while !exited() && Instant::now() < deadline {
+    while !child.ended() && Instant::now() < deadline {
         drop_output();
         std::thread::sleep(Duration::from_millis(5));
     }
     // Whatever else is left in the group, such as a child that ignored
     // SIGTERM or the leader's own children.
-    let _ = kill_process_group(pid, Signal::KILL);
+    let _ = child.signal_group(rustix::process::Signal::KILL);
     let _ = child.wait();
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
     fn failed(code: Option<i32>, signal: Option<i32>, stderr: &str) -> Completion {
         Completion {
             code,
@@ -485,8 +472,7 @@ mod tests {
 
     #[test]
     fn a_stopped_read_is_asked_to_exit_before_it_is_killed() {
-        // flatpak-spawn passes SIGTERM on to the host command; SIGKILL
-        // would leave that command running on the host.
+        // A program gets the chance to clean up before it is killed.
         let (dir, _) = stopped_read(
             "terminated",
             // It prints while stopping, as grok did: a closed pipe would
